@@ -386,7 +386,9 @@ mechanism, and it is better than a CI scan because it blocks the push rather
 than failing a build after the secret is already in the history. It is a
 repository setting: nothing in this repository enables it or can show that it
 is enabled, and nobody should claim it ran on a local commit — it runs only on
-push to GitHub. Enabling it is a precondition for making the repository public.
+push to GitHub. The repository is public; whether push protection is enabled is
+visible only in the repository's GitHub settings, and this document does not
+assert either way.
 
 **M2 evaluated a maintained scanner (as M1 deferred) and did not add one.** The
 reasons, so the decision can be checked rather than trusted:

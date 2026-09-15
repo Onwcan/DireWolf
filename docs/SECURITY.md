@@ -84,7 +84,7 @@ Listed here rather than buried, because a security document that only lists stre
 
 **Do not open a public issue for a security report.**
 
-Use GitHub private security advisories on the repository, or email the address in `SECURITY.md` at the repository root once the project is public. We will acknowledge within 3 working days and aim to give an assessment within 10.
+Use GitHub private security advisories on the repository (<https://github.com/Onwcan/DireWolf>), as described in [`SECURITY.md`](../SECURITY.md) at the repository root. We will acknowledge within 3 working days and aim to give an assessment within 10.
 
 ### In scope
 

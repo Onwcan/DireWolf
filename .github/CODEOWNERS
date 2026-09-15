@@ -1,42 +1,43 @@
 # Review routing.
 #
-# NOT YET ACTIVE: the @direwolf-project organisation and its teams do not exist
-# while the repository is private and single-author. GitHub silently ignores an
-# entry naming a team it cannot resolve, so do not read a green PR as evidence
-# that a security reviewer saw it. The rules in CONTRIBUTING.md
-# ("Security-sensitive changes") are the authority; this file mechanises them
-# once the org exists, and creating those teams is a precondition for making
-# the repository public.
+# DireWolf currently has a single maintainer, so every owned path below names
+# @Onwcan. That makes GitHub request the maintainer's review; it does NOT
+# provide independent review. When the maintainer is also the author of a
+# change, CODEOWNERS cannot enforce the "reviewer other than the author" rules
+# in CONTRIBUTING.md ("Security-sensitive changes"), and a green PR is not
+# evidence that a second person reviewed it. Those rules remain the authority.
+# Replace these entries with review teams when the project has more than one
+# maintainer.
 
 # The trusted computing base. Every change here is security-relevant by
 # definition (ADR-0018, ADR-0019).
-/crates/dwkd-authority/   @direwolf-project/security
-/crates/dwkd-broker/      @direwolf-project/security
+/crates/dwkd-authority/   @Onwcan
+/crates/dwkd-broker/      @Onwcan
 
 # The wire format between the cognition plane and the authority plane. A new
 # DWKP operation needs a written argument that it is not a second path from
 # cognition to effect (docs/adr/README.md, rule 5).
-/schemas/                 @direwolf-project/security
+/schemas/                 @Onwcan
 # The crate that defines that wire, and that both daemons link (ADR-0033). Its
 # dependency closure is the authority's from M3.
-/crates/dwk-proto/        @direwolf-project/security
+/crates/dwk-proto/        @Onwcan
 # The generators, and the hand-written Python wire layer they target: a change
 # to either changes what the runtime accepts without touching a schema.
-/tools/protogen/          @direwolf-project/security
-/scripts/gen_proto_python.py @direwolf-project/security
-/runtime/src/direwolf/wire/  @direwolf-project/security
-/tests/protocol/vectors/  @direwolf-project/security
+/tools/protogen/          @Onwcan
+/scripts/gen_proto_python.py @Onwcan
+/runtime/src/direwolf/wire/  @Onwcan
+/tests/protocol/vectors/  @Onwcan
 
 # Architecture decisions are immutable once accepted; a change here is either a
 # new record or a mistake.
-/docs/adr/                @direwolf-project/architecture
+/docs/adr/                @Onwcan
 
 # The boundary rules themselves, and the supply-chain policy.
-/architecture.toml        @direwolf-project/security
-/deny.toml                @direwolf-project/security
-/Cargo.lock               @direwolf-project/security
+/architecture.toml        @Onwcan
+/deny.toml                @Onwcan
+/Cargo.lock               @Onwcan
 
 # CI has no secrets and a read-only token today. Keeping it that way is a
 # review matter, because the first `permissions: write` is the one nobody
 # notices.
-/.github/                 @direwolf-project/security
+/.github/                 @Onwcan

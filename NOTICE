@@ -2,7 +2,7 @@ DireWolf
 Copyright 2026 The DireWolf authors
 
 This product includes software developed by the DireWolf project
-(https://github.com/direwolf-project/direwolf).
+(https://github.com/Onwcan/DireWolf).
 
 Licensed under the Apache License, Version 2.0 (the "License"); you may not use
 this file except in compliance with the License. You may obtain a copy of the
@@ -17,8 +17,29 @@ specific language governing permissions and limitations under the License.
 
 ---
 
-Third-party notices: none. At milestone M1 the Rust workspace has no
-third-party dependencies and neither Python package has a runtime dependency.
-When that changes, attributions required by a dependency's licence belong here,
-and `cargo deny check licenses` is the gate that catches a licence this file
-cannot satisfy.
+Third-party software
+
+This repository does not vendor or redistribute third-party source code.
+Third-party packages are fetched by Cargo and uv from their public registries,
+pinned in Cargo.lock, fuzz/Cargo.lock and uv.lock, and remain under their own
+licences. No third-party attribution notice is therefore required in this file
+at present.
+
+As of milestone M2:
+
+- The binaries built from this workspace (`direwolf`, `dwkd-authority`,
+  `dwkd-broker`) link no third-party crate.
+- The `dwk-proto` library, and the `protogen` build tool that links it, depend
+  on `unicode-normalization` (MIT OR Apache-2.0), `tinyvec`
+  (Zlib OR Apache-2.0 OR MIT) and `tinyvec_macros` (MIT OR Apache-2.0 OR Zlib).
+  `dwk-proto` is not yet linked into any shipped binary.
+- Development, test and fuzzing tools only: `proptest`, `serde_json` and their
+  dependencies (Rust dev-dependencies), `libfuzzer-sys` (fuzz/), and the Python
+  development environment in uv.lock. The `direwolf` Python package declares no
+  runtime dependency.
+
+If a distributed artifact comes to include third-party code, the conditions of
+the licence chosen for each included package (for example, reproducing its
+copyright and permission notice) must be met for that artifact, and any
+required notices belong here. `cargo deny check licenses` restricts dependencies
+to the licence allowlist in deny.toml; it does not produce notices.
