@@ -1,0 +1,646 @@
+{
+ "description": "Inputs both implementations must reject with the same `code`, and the same `violation` and `path` where given. Each vector has exactly one fault. `path` is compared for schema, version and operation errors; lexical errors are compared by code only. `input_hex` is used where the fault is not representable as text.",
+ "vectors": [
+  {
+   "name": "invalid utf-8: lone continuation byte",
+   "family": "dwkp",
+   "input_hex": "7b2276223a312c2264657461696c223a2280227d",
+   "code": "PROTOCOL_INVALID_UTF8"
+  },
+  {
+   "name": "invalid utf-8: overlong encoding of '/'",
+   "family": "dwkp",
+   "input_hex": "7b2276223a312c2264657461696c223a22c0af227d",
+   "code": "PROTOCOL_INVALID_UTF8"
+  },
+  {
+   "name": "invalid utf-8: encoded surrogate",
+   "family": "dwkp",
+   "input_hex": "7b2276223a312c2264657461696c223a22eda080227d",
+   "code": "PROTOCOL_INVALID_UTF8"
+  },
+  {
+   "name": "invalid utf-8: truncated sequence",
+   "family": "dwkp",
+   "input_hex": "7b2276223a312c2264657461696c223a22e282227d",
+   "code": "PROTOCOL_INVALID_UTF8"
+  },
+  {
+   "name": "invalid utf-8: beyond U+10FFFF",
+   "family": "dwkp",
+   "input_hex": "7b2276223a312c2264657461696c223a22f4908080227d",
+   "code": "PROTOCOL_INVALID_UTF8"
+  },
+  {
+   "name": "byte order mark",
+   "family": "dwkp",
+   "input_hex": "efbbbf7b227061796c6f6164223a7b7d2c2273657373696f6e5f6964223a227365735f30314d3234424238473245383756315a505a5851374453435657222c2265706f6368223a34372c22736368656d61223a2264697265776f6c662e686561727462656174222c2274797065223a2272657175657374222c226964223a226d73675f30314d3234424238473045383754564a58394758323438414444222c227473223a22323032362d30392d31325430393a31343a32322e3438315a222c22736368656d615f76657273696f6e223a312c2276223a317d",
+   "code": "PROTOCOL_INVALID_JSON"
+  },
+  {
+   "name": "empty body",
+   "family": "dwkp",
+   "input": "",
+   "code": "PROTOCOL_INVALID_JSON"
+  },
+  {
+   "name": "whitespace only",
+   "family": "dwkp",
+   "input": " \n\t ",
+   "code": "PROTOCOL_INVALID_JSON"
+  },
+  {
+   "name": "trailing comma",
+   "family": "dwkp",
+   "input": "{\"payload\":{},\"session_id\":\"ses_01M24BB8G2E87V1ZPZXQ7DSCVW\",\"epoch\":47,\"schema\":\"direwolf.heartbeat\",\"type\":\"request\",\"id\":\"msg_01M24BB8G0E87TVJX9GX248ADD\",\"ts\":\"2026-09-12T09:14:22.481Z\",\"schema_version\":1,\"v\":1,}",
+   "code": "PROTOCOL_INVALID_JSON"
+  },
+  {
+   "name": "trailing data after the value",
+   "family": "dwkp",
+   "input": "{\"payload\":{},\"session_id\":\"ses_01M24BB8G2E87V1ZPZXQ7DSCVW\",\"epoch\":47,\"schema\":\"direwolf.heartbeat\",\"type\":\"request\",\"id\":\"msg_01M24BB8G0E87TVJX9GX248ADD\",\"ts\":\"2026-09-12T09:14:22.481Z\",\"schema_version\":1,\"v\":1} {}",
+   "code": "PROTOCOL_INVALID_JSON"
+  },
+  {
+   "name": "NaN literal",
+   "family": "dwkp",
+   "input": "{\"v\":NaN}",
+   "code": "PROTOCOL_INVALID_JSON"
+  },
+  {
+   "name": "Infinity literal",
+   "family": "dwkp",
+   "input": "{\"v\":-Infinity}",
+   "code": "PROTOCOL_INVALID_JSON"
+  },
+  {
+   "name": "single-quoted string",
+   "family": "dwkp",
+   "input": "{'v':1}",
+   "code": "PROTOCOL_INVALID_JSON"
+  },
+  {
+   "name": "comment",
+   "family": "dwkp",
+   "input": "{\"v\":1 /* one */}",
+   "code": "PROTOCOL_INVALID_JSON"
+  },
+  {
+   "name": "leading zero",
+   "family": "dwkp",
+   "input": "{\"v\":01}",
+   "code": "PROTOCOL_INVALID_JSON"
+  },
+  {
+   "name": "raw control character in a string",
+   "family": "dwkp",
+   "input": "{\"detail\":\"a\u0001b\"}",
+   "code": "PROTOCOL_INVALID_JSON"
+  },
+  {
+   "name": "lone high surrogate escape",
+   "family": "dwkp",
+   "input": "{\"detail\":\"\\ud800\"}",
+   "code": "PROTOCOL_INVALID_JSON"
+  },
+  {
+   "name": "lone low surrogate escape",
+   "family": "dwkp",
+   "input": "{\"detail\":\"\\udc00\"}",
+   "code": "PROTOCOL_INVALID_JSON"
+  },
+  {
+   "name": "reversed surrogate pair",
+   "family": "dwkp",
+   "input": "{\"detail\":\"\\udc00\\ud800\"}",
+   "code": "PROTOCOL_INVALID_JSON"
+  },
+  {
+   "name": "invalid escape",
+   "family": "dwkp",
+   "input": "{\"detail\":\"\\x41\"}",
+   "code": "PROTOCOL_INVALID_JSON"
+  },
+  {
+   "name": "unterminated string",
+   "family": "dwkp",
+   "input": "{\"v\":1,\"detail\":\"abc",
+   "code": "PROTOCOL_INVALID_JSON"
+  },
+  {
+   "name": "duplicate key: two schemas",
+   "family": "dwkp",
+   "input": "{\"payload\":{},\"session_id\":\"ses_01M24BB8G2E87V1ZPZXQ7DSCVW\",\"epoch\":47,\"schema\":\"direwolf.heartbeat\",\"type\":\"request\",\"id\":\"msg_01M24BB8G0E87TVJX9GX248ADD\",\"ts\":\"2026-09-12T09:14:22.481Z\",\"schema_version\":1,\"v\":1,\"schema\":\"direwolf.lease.release\"}",
+   "code": "PROTOCOL_DUPLICATE_KEY"
+  },
+  {
+   "name": "duplicate key: nested in the payload",
+   "family": "dwkp",
+   "input": "{\"payload\":{\"min_version\":1,\"max_version\":9,\"max_version\":1},\"schema\":\"direwolf.handshake\",\"type\":\"request\",\"id\":\"msg_01M24BB8G0E87TVJX9GX248ADD\",\"ts\":\"2026-09-12T09:14:22.481Z\",\"schema_version\":1,\"v\":1}",
+   "code": "PROTOCOL_DUPLICATE_KEY"
+  },
+  {
+   "name": "duplicate key: identical escaped and unescaped spellings",
+   "family": "dwkp",
+   "input": "{\"v\":1,\"\\u0076\":2}",
+   "code": "PROTOCOL_DUPLICATE_KEY"
+  },
+  {
+   "name": "duplicate key in an otherwise valid DWCP message",
+   "family": "dwcp",
+   "input": "{\"v\":1,\"v\":1}",
+   "code": "PROTOCOL_DUPLICATE_KEY"
+  },
+  {
+   "name": "duplicate key in an event record",
+   "family": "event",
+   "input": "{\"schema\":\"a\",\"schema\":\"b\"}",
+   "code": "PROTOCOL_DUPLICATE_KEY"
+  },
+  {
+   "name": "normalisation collision: precomposed then decomposed",
+   "family": "dwkp",
+   "input": "{\"v\":1,\"payload\":{\"caf\u00e9\":1,\"cafe\u0301\":2}}",
+   "code": "PROTOCOL_NORMALIZATION_COLLISION"
+  },
+  {
+   "name": "normalisation collision: decomposed then precomposed, escaped",
+   "family": "dwkp",
+   "input": "{\"cafe\\u0301\":1,\"caf\\u00e9\":2}",
+   "code": "PROTOCOL_NORMALIZATION_COLLISION"
+  },
+  {
+   "name": "normalisation collision: KELVIN SIGN vs K",
+   "family": "dwkp",
+   "input": "{\"K\":1,\"\\u212a\":2}",
+   "code": "PROTOCOL_NORMALIZATION_COLLISION"
+  },
+  {
+   "name": "normalisation collision in DWCP",
+   "family": "dwcp",
+   "input": "{\"caf\u00e9\":1,\"cafe\u0301\":2}",
+   "code": "PROTOCOL_NORMALIZATION_COLLISION"
+  },
+  {
+   "name": "depth 32 arrays reaches the schema",
+   "family": "dwkp",
+   "input": "[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]",
+   "code": "PROTOCOL_SCHEMA_VIOLATION",
+   "violation": "WRONG_TYPE",
+   "path": ""
+  },
+  {
+   "name": "depth 33 arrays",
+   "family": "dwkp",
+   "input": "[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]",
+   "code": "PROTOCOL_MAX_DEPTH_EXCEEDED"
+  },
+  {
+   "name": "depth 33 objects",
+   "family": "dwkp",
+   "input": "{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":0}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}",
+   "code": "PROTOCOL_MAX_DEPTH_EXCEEDED"
+  },
+  {
+   "name": "depth 33 alternating",
+   "family": "dwkp",
+   "input": "{\"a\":[{\"a\":[{\"a\":[{\"a\":[{\"a\":[{\"a\":[{\"a\":[{\"a\":[{\"a\":[{\"a\":[{\"a\":[{\"a\":[{\"a\":[{\"a\":[{\"a\":[{\"a\":[{\"a\":[0]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}",
+   "code": "PROTOCOL_MAX_DEPTH_EXCEEDED"
+  },
+  {
+   "name": "depth bomb, unterminated",
+   "family": "dwkp",
+   "input": "[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[",
+   "code": "PROTOCOL_MAX_DEPTH_EXCEEDED"
+  },
+  {
+   "name": "depth 33 in DWCP",
+   "family": "dwcp",
+   "input": "[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]",
+   "code": "PROTOCOL_MAX_DEPTH_EXCEEDED"
+  },
+  {
+   "name": "fraction in DWKP",
+   "family": "dwkp",
+   "input": "{\"payload\":{},\"session_id\":\"ses_01M24BB8G2E87V1ZPZXQ7DSCVW\",\"epoch\":47,\"schema\":\"direwolf.heartbeat\",\"type\":\"request\",\"id\":\"msg_01M24BB8G0E87TVJX9GX248ADD\",\"ts\":\"2026-09-12T09:14:22.481Z\",\"schema_version\":1,\"v\":1.0}",
+   "code": "PROTOCOL_NUMBER_OUT_OF_DOMAIN"
+  },
+  {
+   "name": "exponent in DWKP",
+   "family": "dwkp",
+   "input": "{\"payload\":{},\"session_id\":\"ses_01M24BB8G2E87V1ZPZXQ7DSCVW\",\"epoch\":4.7e1,\"schema\":\"direwolf.heartbeat\",\"type\":\"request\",\"id\":\"msg_01M24BB8G0E87TVJX9GX248ADD\",\"ts\":\"2026-09-12T09:14:22.481Z\",\"schema_version\":1,\"v\":1}",
+   "code": "PROTOCOL_NUMBER_OUT_OF_DOMAIN"
+  },
+  {
+   "name": "integer 2^53 in DWKP",
+   "family": "dwkp",
+   "input": "{\"payload\":{},\"session_id\":\"ses_01M24BB8G2E87V1ZPZXQ7DSCVW\",\"epoch\":9007199254740992,\"schema\":\"direwolf.heartbeat\",\"type\":\"request\",\"id\":\"msg_01M24BB8G0E87TVJX9GX248ADD\",\"ts\":\"2026-09-12T09:14:22.481Z\",\"schema_version\":1,\"v\":1}",
+   "code": "PROTOCOL_NUMBER_OUT_OF_DOMAIN"
+  },
+  {
+   "name": "integer -2^53 in DWKP",
+   "family": "dwkp",
+   "input": "{\"v\":-9007199254740992}",
+   "code": "PROTOCOL_NUMBER_OUT_OF_DOMAIN"
+  },
+  {
+   "name": "integer beyond 64 bits in DWKP",
+   "family": "dwkp",
+   "input": "{\"v\":123456789012345678901234567890}",
+   "code": "PROTOCOL_NUMBER_OUT_OF_DOMAIN"
+  },
+  {
+   "name": "non-finite number in DWCP",
+   "family": "dwcp",
+   "input": "{\"v\":1e400}",
+   "code": "PROTOCOL_NUMBER_OUT_OF_DOMAIN"
+  },
+  {
+   "name": "top level is not an object",
+   "family": "dwkp",
+   "input": "[1]",
+   "code": "PROTOCOL_SCHEMA_VIOLATION",
+   "violation": "WRONG_TYPE",
+   "path": ""
+  },
+  {
+   "name": "missing v",
+   "family": "dwkp",
+   "input": "{\"payload\":{},\"session_id\":\"ses_01M24BB8G2E87V1ZPZXQ7DSCVW\",\"epoch\":47,\"schema\":\"direwolf.heartbeat\",\"type\":\"request\",\"id\":\"msg_01M24BB8G0E87TVJX9GX248ADD\",\"ts\":\"2026-09-12T09:14:22.481Z\",\"schema_version\":1}",
+   "code": "PROTOCOL_SCHEMA_VIOLATION",
+   "violation": "MISSING_FIELD",
+   "path": "/v"
+  },
+  {
+   "name": "v is a string",
+   "family": "dwkp",
+   "input": "{\"payload\":{},\"session_id\":\"ses_01M24BB8G2E87V1ZPZXQ7DSCVW\",\"epoch\":47,\"schema\":\"direwolf.heartbeat\",\"type\":\"request\",\"id\":\"msg_01M24BB8G0E87TVJX9GX248ADD\",\"ts\":\"2026-09-12T09:14:22.481Z\",\"schema_version\":1,\"v\":\"1\"}",
+   "code": "PROTOCOL_SCHEMA_VIOLATION",
+   "violation": "WRONG_TYPE",
+   "path": "/v"
+  },
+  {
+   "name": "v is null",
+   "family": "dwkp",
+   "input": "{\"payload\":{},\"session_id\":\"ses_01M24BB8G2E87V1ZPZXQ7DSCVW\",\"epoch\":47,\"schema\":\"direwolf.heartbeat\",\"type\":\"request\",\"id\":\"msg_01M24BB8G0E87TVJX9GX248ADD\",\"ts\":\"2026-09-12T09:14:22.481Z\",\"schema_version\":1,\"v\":null}",
+   "code": "PROTOCOL_SCHEMA_VIOLATION",
+   "violation": "NULL_NOT_ALLOWED",
+   "path": "/v"
+  },
+  {
+   "name": "v is zero",
+   "family": "dwkp",
+   "input": "{\"payload\":{},\"session_id\":\"ses_01M24BB8G2E87V1ZPZXQ7DSCVW\",\"epoch\":47,\"schema\":\"direwolf.heartbeat\",\"type\":\"request\",\"id\":\"msg_01M24BB8G0E87TVJX9GX248ADD\",\"ts\":\"2026-09-12T09:14:22.481Z\",\"schema_version\":1,\"v\":0}",
+   "code": "PROTOCOL_SCHEMA_VIOLATION",
+   "violation": "OUT_OF_RANGE",
+   "path": "/v"
+  },
+  {
+   "name": "unsupported newer envelope version",
+   "family": "dwkp",
+   "input": "{\"payload\":{},\"session_id\":\"ses_01M24BB8G2E87V1ZPZXQ7DSCVW\",\"epoch\":47,\"schema\":\"direwolf.heartbeat\",\"type\":\"request\",\"id\":\"msg_01M24BB8G0E87TVJX9GX248ADD\",\"ts\":\"2026-09-12T09:14:22.481Z\",\"schema_version\":1,\"v\":2}",
+   "code": "PROTOCOL_VERSION_UNSUPPORTED",
+   "violation": "OUT_OF_RANGE",
+   "path": "/v"
+  },
+  {
+   "name": "unsupported newer envelope version wins over its unknown fields",
+   "family": "dwkp",
+   "input": "{\"payload\":{},\"session_id\":\"ses_01M24BB8G2E87V1ZPZXQ7DSCVW\",\"epoch\":47,\"schema\":\"direwolf.heartbeat\",\"type\":\"request\",\"id\":\"msg_01M24BB8G0E87TVJX9GX248ADD\",\"ts\":\"2026-09-12T09:14:22.481Z\",\"schema_version\":1,\"v\":9,\"capability_token\":\"forged\"}",
+   "code": "PROTOCOL_VERSION_UNSUPPORTED",
+   "violation": "OUT_OF_RANGE",
+   "path": "/v"
+  },
+  {
+   "name": "unknown message type",
+   "family": "dwkp",
+   "input": "{\"payload\":{},\"session_id\":\"ses_01M24BB8G2E87V1ZPZXQ7DSCVW\",\"epoch\":47,\"schema\":\"direwolf.heartbeat\",\"type\":\"command\",\"id\":\"msg_01M24BB8G0E87TVJX9GX248ADD\",\"ts\":\"2026-09-12T09:14:22.481Z\",\"schema_version\":1,\"v\":1}",
+   "code": "PROTOCOL_SCHEMA_VIOLATION",
+   "violation": "UNKNOWN_VARIANT",
+   "path": "/type"
+  },
+  {
+   "name": "malformed schema name",
+   "family": "dwkp",
+   "input": "{\"payload\":{},\"session_id\":\"ses_01M24BB8G2E87V1ZPZXQ7DSCVW\",\"epoch\":47,\"schema\":\"Direwolf.Heartbeat\",\"type\":\"request\",\"id\":\"msg_01M24BB8G0E87TVJX9GX248ADD\",\"ts\":\"2026-09-12T09:14:22.481Z\",\"schema_version\":1,\"v\":1}",
+   "code": "PROTOCOL_SCHEMA_VIOLATION",
+   "violation": "INVALID_FORMAT",
+   "path": "/schema"
+  },
+  {
+   "name": "reserved operation is not on the wire",
+   "family": "dwkp",
+   "input": "{\"payload\":{},\"session_id\":\"ses_01M24BB8G2E87V1ZPZXQ7DSCVW\",\"epoch\":47,\"schema\":\"direwolf.tool.invoke\",\"type\":\"request\",\"id\":\"msg_01M24BB8G0E87TVJX9GX248ADD\",\"ts\":\"2026-09-12T09:14:22.481Z\",\"schema_version\":1,\"v\":1}",
+   "code": "PROTOCOL_UNKNOWN_OPERATION",
+   "path": "/schema"
+  },
+  {
+   "name": "generic relay operation does not exist",
+   "family": "dwkp",
+   "input": "{\"payload\":{},\"session_id\":\"ses_01M24BB8G2E87V1ZPZXQ7DSCVW\",\"epoch\":47,\"schema\":\"direwolf.exec.raw\",\"type\":\"request\",\"id\":\"msg_01M24BB8G0E87TVJX9GX248ADD\",\"ts\":\"2026-09-12T09:14:22.481Z\",\"schema_version\":1,\"v\":1}",
+   "code": "PROTOCOL_UNKNOWN_OPERATION",
+   "path": "/schema"
+  },
+  {
+   "name": "known schema with the wrong message type",
+   "family": "dwkp",
+   "input": "{\"payload\":{},\"session_id\":\"ses_01M24BB8G2E87V1ZPZXQ7DSCVW\",\"epoch\":47,\"schema\":\"direwolf.heartbeat\",\"type\":\"response\",\"id\":\"msg_01M24BB8G0E87TVJX9GX248ADD\",\"ts\":\"2026-09-12T09:14:22.481Z\",\"schema_version\":1,\"v\":1}",
+   "code": "PROTOCOL_UNKNOWN_OPERATION",
+   "path": "/schema"
+  },
+  {
+   "name": "unsupported schema_version",
+   "family": "dwkp",
+   "input": "{\"payload\":{},\"session_id\":\"ses_01M24BB8G2E87V1ZPZXQ7DSCVW\",\"epoch\":47,\"schema\":\"direwolf.heartbeat\",\"type\":\"request\",\"id\":\"msg_01M24BB8G0E87TVJX9GX248ADD\",\"ts\":\"2026-09-12T09:14:22.481Z\",\"schema_version\":2,\"v\":1}",
+   "code": "PROTOCOL_VERSION_UNSUPPORTED",
+   "violation": "OUT_OF_RANGE",
+   "path": "/schema_version"
+  },
+  {
+   "name": "unknown envelope field",
+   "family": "dwkp",
+   "input": "{\"payload\":{},\"session_id\":\"ses_01M24BB8G2E87V1ZPZXQ7DSCVW\",\"epoch\":47,\"schema\":\"direwolf.heartbeat\",\"type\":\"request\",\"id\":\"msg_01M24BB8G0E87TVJX9GX248ADD\",\"ts\":\"2026-09-12T09:14:22.481Z\",\"schema_version\":1,\"v\":1,\"admin\":true}",
+   "code": "PROTOCOL_SCHEMA_VIOLATION",
+   "violation": "UNKNOWN_FIELD",
+   "path": "/admin"
+  },
+  {
+   "name": "runtime asserting a policy input in the payload",
+   "family": "dwkp",
+   "input": "{\"payload\":{\"taint_level\":\"NONE\"},\"session_id\":\"ses_01M24BB8G2E87V1ZPZXQ7DSCVW\",\"epoch\":47,\"schema\":\"direwolf.heartbeat\",\"type\":\"request\",\"id\":\"msg_01M24BB8G0E87TVJX9GX248ADD\",\"ts\":\"2026-09-12T09:14:22.481Z\",\"schema_version\":1,\"v\":1}",
+   "code": "PROTOCOL_SCHEMA_VIOLATION",
+   "violation": "UNKNOWN_FIELD",
+   "path": "/payload/taint_level"
+  },
+  {
+   "name": "runtime proposing its own epoch",
+   "family": "dwkp",
+   "input": "{\"payload\":{\"epoch\":99},\"session_id\":\"ses_01M24BB8G2E87V1ZPZXQ7DSCVW\",\"schema\":\"direwolf.lease.acquire\",\"type\":\"request\",\"id\":\"msg_01M24BB8G0E87TVJX9GX248ADD\",\"ts\":\"2026-09-12T09:14:22.481Z\",\"schema_version\":1,\"v\":1}",
+   "code": "PROTOCOL_SCHEMA_VIOLATION",
+   "violation": "UNKNOWN_FIELD",
+   "path": "/payload/epoch"
+  },
+  {
+   "name": "the same unknown field that DWCP preserves",
+   "family": "dwkp",
+   "input": "{\"payload\":{\"x_future\":{\"retry_after_ms\":1500}},\"session_id\":\"ses_01M24BB8G2E87V1ZPZXQ7DSCVW\",\"epoch\":47,\"schema\":\"direwolf.heartbeat\",\"type\":\"request\",\"id\":\"msg_01M24BB8G0E87TVJX9GX248ADD\",\"ts\":\"2026-09-12T09:14:22.481Z\",\"schema_version\":1,\"v\":1}",
+   "code": "PROTOCOL_SCHEMA_VIOLATION",
+   "violation": "UNKNOWN_FIELD",
+   "path": "/payload/x_future"
+  },
+  {
+   "name": "missing id",
+   "family": "dwkp",
+   "input": "{\"payload\":{},\"session_id\":\"ses_01M24BB8G2E87V1ZPZXQ7DSCVW\",\"epoch\":47,\"schema\":\"direwolf.heartbeat\",\"type\":\"request\",\"ts\":\"2026-09-12T09:14:22.481Z\",\"schema_version\":1,\"v\":1}",
+   "code": "PROTOCOL_SCHEMA_VIOLATION",
+   "violation": "MISSING_FIELD",
+   "path": "/id"
+  },
+  {
+   "name": "event id on a request",
+   "family": "dwkp",
+   "input": "{\"payload\":{},\"session_id\":\"ses_01M24BB8G2E87V1ZPZXQ7DSCVW\",\"epoch\":47,\"schema\":\"direwolf.heartbeat\",\"type\":\"request\",\"id\":\"evt_01M24BB8G4EKX8P1DMZ95GB82V\",\"ts\":\"2026-09-12T09:14:22.481Z\",\"schema_version\":1,\"v\":1}",
+   "code": "PROTOCOL_SCHEMA_VIOLATION",
+   "violation": "INVALID_FORMAT",
+   "path": "/id"
+  },
+  {
+   "name": "UUIDv4 where UUIDv7 is required",
+   "family": "dwkp",
+   "input": "{\"payload\":{},\"session_id\":\"ses_01M24BB8G2E87V1ZPZXQ7DSCVW\",\"epoch\":47,\"schema\":\"direwolf.heartbeat\",\"type\":\"request\",\"id\":\"msg_01M24BB8G08008000000000022\",\"ts\":\"2026-09-12T09:14:22.481Z\",\"schema_version\":1,\"v\":1}",
+   "code": "PROTOCOL_SCHEMA_VIOLATION",
+   "violation": "INVALID_FORMAT",
+   "path": "/id"
+  },
+  {
+   "name": "lowercase identifier alias",
+   "family": "dwkp",
+   "input": "{\"payload\":{},\"session_id\":\"ses_01M24BB8G2E87V1ZPZXQ7DSCVW\",\"epoch\":47,\"schema\":\"direwolf.heartbeat\",\"type\":\"request\",\"id\":\"msg_01m24bb8g0e87tvjx9gx248add\",\"ts\":\"2026-09-12T09:14:22.481Z\",\"schema_version\":1,\"v\":1}",
+   "code": "PROTOCOL_SCHEMA_VIOLATION",
+   "violation": "INVALID_FORMAT",
+   "path": "/id"
+  },
+  {
+   "name": "timestamp without milliseconds",
+   "family": "dwkp",
+   "input": "{\"payload\":{},\"session_id\":\"ses_01M24BB8G2E87V1ZPZXQ7DSCVW\",\"epoch\":47,\"schema\":\"direwolf.heartbeat\",\"type\":\"request\",\"id\":\"msg_01M24BB8G0E87TVJX9GX248ADD\",\"ts\":\"2026-09-12T09:14:22Z\",\"schema_version\":1,\"v\":1}",
+   "code": "PROTOCOL_SCHEMA_VIOLATION",
+   "violation": "INVALID_FORMAT",
+   "path": "/ts"
+  },
+  {
+   "name": "timestamp on a day that does not exist",
+   "family": "dwkp",
+   "input": "{\"payload\":{},\"session_id\":\"ses_01M24BB8G2E87V1ZPZXQ7DSCVW\",\"epoch\":47,\"schema\":\"direwolf.heartbeat\",\"type\":\"request\",\"id\":\"msg_01M24BB8G0E87TVJX9GX248ADD\",\"ts\":\"2026-02-30T09:14:22.481Z\",\"schema_version\":1,\"v\":1}",
+   "code": "PROTOCOL_SCHEMA_VIOLATION",
+   "violation": "INVALID_FORMAT",
+   "path": "/ts"
+  },
+  {
+   "name": "timestamp with a trailing newline",
+   "family": "dwkp",
+   "input": "{\"payload\":{},\"session_id\":\"ses_01M24BB8G2E87V1ZPZXQ7DSCVW\",\"epoch\":47,\"schema\":\"direwolf.heartbeat\",\"type\":\"request\",\"id\":\"msg_01M24BB8G0E87TVJX9GX248ADD\",\"ts\":\"2026-09-12T09:14:22.481Z\\n\",\"schema_version\":1,\"v\":1}",
+   "code": "PROTOCOL_SCHEMA_VIOLATION",
+   "violation": "TOO_LONG",
+   "path": "/ts"
+  },
+  {
+   "name": "idempotency key where the operation forbids one",
+   "family": "dwkp",
+   "input": "{\"payload\":{},\"session_id\":\"ses_01M24BB8G2E87V1ZPZXQ7DSCVW\",\"epoch\":47,\"schema\":\"direwolf.heartbeat\",\"type\":\"request\",\"id\":\"msg_01M24BB8G0E87TVJX9GX248ADD\",\"ts\":\"2026-09-12T09:14:22.481Z\",\"schema_version\":1,\"v\":1,\"idempotency_key\":\"k1\"}",
+   "code": "PROTOCOL_SCHEMA_VIOLATION",
+   "violation": "FORBIDDEN_FIELD",
+   "path": "/idempotency_key"
+  },
+  {
+   "name": "heartbeat without an epoch",
+   "family": "dwkp",
+   "input": "{\"payload\":{},\"session_id\":\"ses_01M24BB8G2E87V1ZPZXQ7DSCVW\",\"schema\":\"direwolf.heartbeat\",\"type\":\"request\",\"id\":\"msg_01M24BB8G0E87TVJX9GX248ADD\",\"ts\":\"2026-09-12T09:14:22.481Z\",\"schema_version\":1,\"v\":1}",
+   "code": "PROTOCOL_SCHEMA_VIOLATION",
+   "violation": "MISSING_FIELD",
+   "path": "/epoch"
+  },
+  {
+   "name": "epoch zero",
+   "family": "dwkp",
+   "input": "{\"payload\":{},\"session_id\":\"ses_01M24BB8G2E87V1ZPZXQ7DSCVW\",\"epoch\":0,\"schema\":\"direwolf.heartbeat\",\"type\":\"request\",\"id\":\"msg_01M24BB8G0E87TVJX9GX248ADD\",\"ts\":\"2026-09-12T09:14:22.481Z\",\"schema_version\":1,\"v\":1}",
+   "code": "PROTOCOL_SCHEMA_VIOLATION",
+   "violation": "OUT_OF_RANGE",
+   "path": "/epoch"
+  },
+  {
+   "name": "negative epoch",
+   "family": "dwkp",
+   "input": "{\"payload\":{},\"session_id\":\"ses_01M24BB8G2E87V1ZPZXQ7DSCVW\",\"epoch\":-1,\"schema\":\"direwolf.heartbeat\",\"type\":\"request\",\"id\":\"msg_01M24BB8G0E87TVJX9GX248ADD\",\"ts\":\"2026-09-12T09:14:22.481Z\",\"schema_version\":1,\"v\":1}",
+   "code": "PROTOCOL_SCHEMA_VIOLATION",
+   "violation": "OUT_OF_RANGE",
+   "path": "/epoch"
+  },
+  {
+   "name": "epoch on lease acquire, where the kernel assigns it",
+   "family": "dwkp",
+   "input": "{\"payload\":{},\"session_id\":\"ses_01M24BB8G2E87V1ZPZXQ7DSCVW\",\"epoch\":5,\"schema\":\"direwolf.lease.acquire\",\"type\":\"request\",\"id\":\"msg_01M24BB8G0E87TVJX9GX248ADD\",\"ts\":\"2026-09-12T09:14:22.481Z\",\"schema_version\":1,\"v\":1}",
+   "code": "PROTOCOL_SCHEMA_VIOLATION",
+   "violation": "FORBIDDEN_FIELD",
+   "path": "/epoch"
+  },
+  {
+   "name": "session on a handshake",
+   "family": "dwkp",
+   "input": "{\"payload\":{\"min_version\":1,\"max_version\":1},\"session_id\":\"ses_01M24BB8G2E87V1ZPZXQ7DSCVW\",\"schema\":\"direwolf.handshake\",\"type\":\"request\",\"id\":\"msg_01M24BB8G0E87TVJX9GX248ADD\",\"ts\":\"2026-09-12T09:14:22.481Z\",\"schema_version\":1,\"v\":1}",
+   "code": "PROTOCOL_SCHEMA_VIOLATION",
+   "violation": "FORBIDDEN_FIELD",
+   "path": "/session_id"
+  },
+  {
+   "name": "response without causation",
+   "family": "dwkp",
+   "input": "{\"payload\":{},\"schema\":\"direwolf.ack\",\"type\":\"response\",\"id\":\"msg_01M24BB8G0E87TVJX9GX248ADD\",\"ts\":\"2026-09-12T09:14:22.481Z\",\"schema_version\":1,\"v\":1}",
+   "code": "PROTOCOL_SCHEMA_VIOLATION",
+   "violation": "MISSING_FIELD",
+   "path": "/causation_id"
+  },
+  {
+   "name": "missing payload",
+   "family": "dwkp",
+   "input": "{\"session_id\":\"ses_01M24BB8G2E87V1ZPZXQ7DSCVW\",\"epoch\":47,\"schema\":\"direwolf.heartbeat\",\"type\":\"request\",\"id\":\"msg_01M24BB8G0E87TVJX9GX248ADD\",\"ts\":\"2026-09-12T09:14:22.481Z\",\"schema_version\":1,\"v\":1}",
+   "code": "PROTOCOL_SCHEMA_VIOLATION",
+   "violation": "MISSING_FIELD",
+   "path": "/payload"
+  },
+  {
+   "name": "payload is an array",
+   "family": "dwkp",
+   "input": "{\"payload\":[],\"session_id\":\"ses_01M24BB8G2E87V1ZPZXQ7DSCVW\",\"epoch\":47,\"schema\":\"direwolf.heartbeat\",\"type\":\"request\",\"id\":\"msg_01M24BB8G0E87TVJX9GX248ADD\",\"ts\":\"2026-09-12T09:14:22.481Z\",\"schema_version\":1,\"v\":1}",
+   "code": "PROTOCOL_SCHEMA_VIOLATION",
+   "violation": "WRONG_TYPE",
+   "path": "/payload"
+  },
+  {
+   "name": "payload is null",
+   "family": "dwkp",
+   "input": "{\"payload\":null,\"session_id\":\"ses_01M24BB8G2E87V1ZPZXQ7DSCVW\",\"epoch\":47,\"schema\":\"direwolf.heartbeat\",\"type\":\"request\",\"id\":\"msg_01M24BB8G0E87TVJX9GX248ADD\",\"ts\":\"2026-09-12T09:14:22.481Z\",\"schema_version\":1,\"v\":1}",
+   "code": "PROTOCOL_SCHEMA_VIOLATION",
+   "violation": "NULL_NOT_ALLOWED",
+   "path": "/payload"
+  },
+  {
+   "name": "handshake range inverted",
+   "family": "dwkp",
+   "input": "{\"payload\":{\"min_version\":3,\"max_version\":2},\"schema\":\"direwolf.handshake\",\"type\":\"request\",\"id\":\"msg_01M24BB8G0E87TVJX9GX248ADD\",\"ts\":\"2026-09-12T09:14:22.481Z\",\"schema_version\":1,\"v\":1}",
+   "code": "PROTOCOL_SCHEMA_VIOLATION",
+   "violation": "INCONSISTENT",
+   "path": "/payload/max_version"
+  },
+  {
+   "name": "handshake missing a bound",
+   "family": "dwkp",
+   "input": "{\"payload\":{\"min_version\":1},\"schema\":\"direwolf.handshake\",\"type\":\"request\",\"id\":\"msg_01M24BB8G0E87TVJX9GX248ADD\",\"ts\":\"2026-09-12T09:14:22.481Z\",\"schema_version\":1,\"v\":1}",
+   "code": "PROTOCOL_SCHEMA_VIOLATION",
+   "violation": "MISSING_FIELD",
+   "path": "/payload/max_version"
+  },
+  {
+   "name": "handshake bound is a string",
+   "family": "dwkp",
+   "input": "{\"payload\":{\"min_version\":\"1\",\"max_version\":1},\"schema\":\"direwolf.handshake\",\"type\":\"request\",\"id\":\"msg_01M24BB8G0E87TVJX9GX248ADD\",\"ts\":\"2026-09-12T09:14:22.481Z\",\"schema_version\":1,\"v\":1}",
+   "code": "PROTOCOL_SCHEMA_VIOLATION",
+   "violation": "WRONG_TYPE",
+   "path": "/payload/min_version"
+  },
+  {
+   "name": "handshake bound is zero",
+   "family": "dwkp",
+   "input": "{\"payload\":{\"min_version\":0,\"max_version\":1},\"schema\":\"direwolf.handshake\",\"type\":\"request\",\"id\":\"msg_01M24BB8G0E87TVJX9GX248ADD\",\"ts\":\"2026-09-12T09:14:22.481Z\",\"schema_version\":1,\"v\":1}",
+   "code": "PROTOCOL_SCHEMA_VIOLATION",
+   "violation": "OUT_OF_RANGE",
+   "path": "/payload/min_version"
+  },
+  {
+   "name": "unknown protocol error code",
+   "family": "dwkp",
+   "input": "{\"payload\":{\"code\":\"PROTOCOL_OOPS\",\"detail\":\"x\"},\"schema\":\"direwolf.protocol.error\",\"type\":\"response\",\"id\":\"msg_01M24BB8G0E87TVJX9GX248ADD\",\"ts\":\"2026-09-12T09:14:22.481Z\",\"schema_version\":1,\"v\":1}",
+   "code": "PROTOCOL_SCHEMA_VIOLATION",
+   "violation": "UNKNOWN_VARIANT",
+   "path": "/payload/code"
+  },
+  {
+   "name": "optional field sent as null",
+   "family": "dwkp",
+   "input": "{\"payload\":{\"code\":\"PROTOCOL_INVALID_JSON\",\"detail\":\"x\",\"path\":null},\"schema\":\"direwolf.protocol.error\",\"type\":\"response\",\"id\":\"msg_01M24BB8G0E87TVJX9GX248ADD\",\"ts\":\"2026-09-12T09:14:22.481Z\",\"schema_version\":1,\"v\":1}",
+   "code": "PROTOCOL_SCHEMA_VIOLATION",
+   "violation": "NULL_NOT_ALLOWED",
+   "path": "/payload/path"
+  },
+  {
+   "name": "detail one character too long",
+   "family": "dwkp",
+   "input": "{\"payload\":{\"code\":\"PROTOCOL_INVALID_JSON\",\"detail\":\"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\"},\"schema\":\"direwolf.protocol.error\",\"type\":\"response\",\"id\":\"msg_01M24BB8G0E87TVJX9GX248ADD\",\"ts\":\"2026-09-12T09:14:22.481Z\",\"schema_version\":1,\"v\":1}",
+   "code": "PROTOCOL_SCHEMA_VIOLATION",
+   "violation": "TOO_LONG",
+   "path": "/payload/detail"
+  },
+  {
+   "name": "detail at the limit counted in scalar values, not bytes",
+   "family": "dwkp",
+   "input": "{\"payload\":{\"code\":\"PROTOCOL_INVALID_JSON\",\"detail\":\"\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\\ud83d\\ude00\",\"supported\":{\"min\":2,\"max\":1}},\"schema\":\"direwolf.protocol.error\",\"type\":\"response\",\"id\":\"msg_01M24BB8G0E87TVJX9GX248ADD\",\"ts\":\"2026-09-12T09:14:22.481Z\",\"schema_version\":1,\"v\":1}",
+   "code": "PROTOCOL_SCHEMA_VIOLATION",
+   "violation": "INCONSISTENT",
+   "path": "/payload/supported/max"
+  },
+  {
+   "name": "lease grant with a string epoch",
+   "family": "dwkp",
+   "input": "{\"payload\":{\"session_id\":\"ses_01M24BB8G2E87V1ZPZXQ7DSCVW\",\"epoch\":\"48\"},\"causation_id\":\"msg_01M24BB8G1FQR94D2PF2XVQDV4\",\"schema\":\"direwolf.lease.grant\",\"type\":\"response\",\"id\":\"msg_01M24BB8G0E87TVJX9GX248ADD\",\"ts\":\"2026-09-12T09:14:22.481Z\",\"schema_version\":1,\"v\":1}",
+   "code": "PROTOCOL_SCHEMA_VIOLATION",
+   "violation": "WRONG_TYPE",
+   "path": "/payload/epoch"
+  },
+  {
+   "name": "DWCP unsupported envelope version",
+   "family": "dwcp",
+   "input": "{\"v\":2,\"id\":\"msg_01M24BB8G0E87TVJX9GX248ADD\",\"type\":\"response\",\"schema\":\"direwolf.error\",\"schema_version\":1,\"ts\":\"2026-09-12T09:14:22.481Z\",\"payload\":{\"code\":\"RATE_LIMITED\",\"detail\":\"slow down\",\"retryable\":true}}",
+   "code": "PROTOCOL_VERSION_UNSUPPORTED",
+   "violation": "OUT_OF_RANGE",
+   "path": "/v"
+  },
+  {
+   "name": "DWCP known field with the wrong type",
+   "family": "dwcp",
+   "input": "{\"v\":1,\"id\":\"msg_01M24BB8G0E87TVJX9GX248ADD\",\"type\":\"response\",\"schema\":\"direwolf.error\",\"schema_version\":1,\"ts\":\"2026-09-12T09:14:22.481Z\",\"payload\":{\"code\":\"RATE_LIMITED\",\"detail\":\"d\",\"retryable\":\"yes\"}}",
+   "code": "PROTOCOL_SCHEMA_VIOLATION",
+   "violation": "WRONG_TYPE",
+   "path": "/payload/retryable"
+  },
+  {
+   "name": "DWCP known field with a bad format",
+   "family": "dwcp",
+   "input": "{\"v\":1,\"id\":\"msg_01M24BB8G0E87TVJX9GX248ADD\",\"type\":\"response\",\"schema\":\"direwolf.error\",\"schema_version\":1,\"ts\":\"2026-09-12T09:14:22.481Z\",\"payload\":{\"code\":\"rate_limited\",\"detail\":\"d\",\"retryable\":true}}",
+   "code": "PROTOCOL_SCHEMA_VIOLATION",
+   "violation": "INVALID_FORMAT",
+   "path": "/payload/code"
+  },
+  {
+   "name": "DWCP forbidden envelope field on a known message",
+   "family": "dwcp",
+   "input": "{\"v\":1,\"id\":\"msg_01M24BB8G0E87TVJX9GX248ADD\",\"type\":\"response\",\"schema\":\"direwolf.error\",\"schema_version\":1,\"ts\":\"2026-09-12T09:14:22.481Z\",\"payload\":{\"code\":\"RATE_LIMITED\",\"detail\":\"slow down\",\"retryable\":true},\"epoch\":3,\"session_id\":\"ses_01M24BB8G2E87V1ZPZXQ7DSCVW\"}",
+   "code": "PROTOCOL_SCHEMA_VIOLATION",
+   "violation": "FORBIDDEN_FIELD",
+   "path": "/epoch"
+  },
+  {
+   "name": "event record is an array",
+   "family": "event",
+   "input": "[]",
+   "code": "PROTOCOL_SCHEMA_VIOLATION",
+   "violation": "WRONG_TYPE",
+   "path": ""
+  },
+  {
+   "name": "event record is not UTF-8",
+   "family": "event",
+   "input_hex": "7b22736368656d61223a22ff227d",
+   "code": "PROTOCOL_INVALID_UTF8"
+  }
+ ]
+}

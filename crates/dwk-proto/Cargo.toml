@@ -1,0 +1,23 @@
+[package]
+name = "dwk-proto"
+description = "DireWolf wire protocol: framing, strict JSON, canonical JSON, envelopes and message types. No behaviour."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+# TCB-destined: from M3 this crate is linked into dwkd-authority, so its
+# dependency closure is the authority's. See ADR-0033 and architecture.toml.
+[dependencies]
+unicode-normalization = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+# Differential oracle only: the strict lexer is checked against it.
+serde_json = { workspace = true }

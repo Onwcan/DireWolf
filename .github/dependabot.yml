@@ -1,0 +1,35 @@
+# Dependency updates arrive as reviewable pull requests, never as implicit
+# updates (docs/PLUGINS.md §7: "an update is an operator action").
+#
+# Weekly, grouped, and capped: a flood of individual bumps gets rubber-stamped,
+# which is the failure mode this is meant to prevent.
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      rust-dependencies:
+        patterns: ["*"]
+    labels: ["dependencies", "rust"]
+    # A bump to a dependency of dwkd-authority is a TCB change: it needs a
+    # reviewer other than the author and a note on ADR-0019. CODEOWNERS routes
+    # it; this comment is here so the reason travels with the config.
+
+  - package-ecosystem: uv
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      python-dependencies:
+        patterns: ["*"]
+    labels: ["dependencies", "python"]
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    labels: ["dependencies", "ci"]

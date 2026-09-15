@@ -1,0 +1,6 @@
+target/
+artifacts/
+coverage/
+# `make fuzz` seeds corpus/<target>/ from tests/protocol/vectors/ and libFuzzer
+# grows it during a run. None of it is tracked: the vectors are the seeds.
+corpus/

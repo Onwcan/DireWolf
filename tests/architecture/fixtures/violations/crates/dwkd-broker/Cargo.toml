@@ -1,0 +1,8 @@
+# FIXTURE: the broker must not link authority's decision code (RS002).
+[package]
+name = "dwkd-broker"
+version = "0.0.0"
+
+[dependencies]
+dwkd-authority = { path = "../dwkd-authority" }
+dwk-common = { path = "../dwk-common" }

@@ -1,0 +1,5 @@
+# FIXTURE: a crate directory that is not a workspace member (RS000). Built,
+# linted and audited by nothing.
+[package]
+name = "dwk-orphan"
+version = "0.0.0"

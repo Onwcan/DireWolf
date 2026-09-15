@@ -1,0 +1,41 @@
+# Normalise line endings in the repository to LF for every text file.
+# Rationale: the repository is developed on Linux, macOS and Windows/WSL2, and
+# shell scripts, git hooks and Rust/Python sources must not acquire CRLF on a
+# Windows checkout.  See CONTRIBUTING.md "Line endings".
+* text=auto eol=lf
+
+*.rs      text eol=lf diff=rust
+*.py      text eol=lf diff=python
+*.toml    text eol=lf
+*.yml     text eol=lf
+*.yaml    text eol=lf
+*.json    text eol=lf
+*.md      text eol=lf
+*.sh      text eol=lf
+Makefile  text eol=lf
+.editorconfig text eol=lf
+
+# Lockfiles are generated; keep them out of diffs and out of merge conflicts
+# that a human should not resolve by hand.  Regenerate instead.
+Cargo.lock -diff linguist-generated=true
+uv.lock    -diff linguist-generated=true
+fuzz/Cargo.lock -diff linguist-generated=true
+
+# Generated protocol files (ADR-0033). Regenerate with `make schema`; CI's
+# `make schema-check` rejects a hand edit.  schemas/ and docs/DWKP_OPERATIONS.md
+# are deliberately NOT marked generated: they are what a protocol change
+# reviewer reads (CONTRIBUTING.md "Changing the protocol").  The Python bindings
+# are a mechanical function of them and are collapsed in review.
+runtime/src/direwolf/proto/** linguist-generated=true
+# V8 oracle output: 8,915 number serialisations (tests/protocol/oracle/).
+tests/protocol/vectors/numbers.json -diff linguist-generated=true
+# The shared golden vectors ARE reviewed by hand; every change is a contract change.
+tests/protocol/vectors/valid.json   text eol=lf
+tests/protocol/vectors/invalid.json text eol=lf
+*.mjs     text eol=lf
+
+# Binaries
+*.png  binary
+*.jpg  binary
+*.ico  binary
+*.pdf  binary

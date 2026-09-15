@@ -1,0 +1,99 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/direwolf-cli",
+    "crates/dwk-proto",
+    "crates/dwkd-authority",
+    "crates/dwkd-broker",
+    "tools/protogen",
+]
+
+# ---------------------------------------------------------------------------
+# Shared package metadata.  `version` is synchronised from the repository-root
+# VERSION file by `dwcheck version --write`; do not edit it by hand.
+# ---------------------------------------------------------------------------
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.98"
+license = "Apache-2.0"
+repository = "https://github.com/direwolf-project/direwolf"
+authors = ["The DireWolf authors"]
+
+# ---------------------------------------------------------------------------
+# Workspace dependency table.
+#
+# DEPENDENCY POLICY (see CONTRIBUTING.md "Adding a dependency"):
+#   * Every third-party dependency is declared here once and inherited by
+#     member crates with `dep = { workspace = true }`.  A crate may not declare
+#     a third-party dependency directly; `dwcheck deps` rejects that.
+#   * `dwkd-authority` is the trusted computing base.  Its dependency set is a
+#     load-bearing claim of ADR-0019, so anything added to it needs a note on
+#     that ADR and a second reviewer.  The allowlist lives in architecture.toml.
+#
+# M1 added no third-party Rust dependencies.  M2 adds the first, below: one
+# crate (and its two small dependencies) reachable from the TCB through
+# dwk-proto, and two dev-only test crates.  Each is justified in ADR-0033; the
+# inventory is in CONTRIBUTING.md "Adding a dependency".
+# ---------------------------------------------------------------------------
+[workspace.dependencies]
+# --- in-tree ---------------------------------------------------------------
+dwk-proto = { path = "crates/dwk-proto" }
+
+# --- reachable from the TCB (dwk-proto -> dwkd-authority from M3) -----------
+# Every entry here and everything it pulls in must be in architecture.toml
+# [authority].allowed_third_party and justified in ADR-0033.
+unicode-normalization = { version = "0.1.25", default-features = false, features = ["std"] }
+
+# --- dev-only: tests, property tests, differential oracles ------------------
+# Never linked into a shipped binary. dwcheck excludes dev-only edges from the
+# TCB closure and a fixture proves it does not exclude normal ones.
+proptest = { version = "1.11", default-features = false, features = ["std"] }
+serde_json = { version = "1.0.151", default-features = false, features = ["std"] }
+
+# ---------------------------------------------------------------------------
+# Lints, applied to every member crate via `[lints] workspace = true`.
+#
+# `unsafe_code = "forbid"` is workspace-wide and M1 contains no exception.
+# The policy for future exceptions is in CONTRIBUTING.md "Unsafe Rust"; an
+# exception is a crate-level decision recorded in an ADR, never a file-level
+# `#[allow]`.
+# ---------------------------------------------------------------------------
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+missing_debug_implementations = "warn"
+unused_crate_dependencies = "warn"
+unreachable_pub = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+# Security-relevant footguns, denied everywhere rather than merely warned.
+unwrap_used = "warn"
+expect_used = "warn"
+panic = "warn"
+indexing_slicing = "warn"
+integer_division = "warn"
+as_conversions = "warn"
+mem_forget = "deny"
+todo = "warn"
+unimplemented = "warn"
+dbg_macro = "warn"
+
+[profile.release]
+# A small, auditable binary is part of the product claim.  One codegen unit
+# removes one source of build-to-build variation (parallel codegen
+# partitioning).  That is NOT a reproducible build: embedded paths, the host
+# toolchain installation and the linker can still change the output, and no
+# one has verified that two builds of the same commit are bit-identical.
+# Reproducible release artifacts are deferred release engineering (ROADMAP M1
+# "Deferred"); do not describe a checksum as a function of the source alone.
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
+
+[profile.dev]
+# Keep the edit/build/test loop fast; the workspace is tiny.
+debug = 1

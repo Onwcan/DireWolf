@@ -1,0 +1,287 @@
+# ===========================================================================
+# DireWolf architecture boundary rules, as data.
+#
+# `dwcheck` reads this file and enforces it.  Rules live here rather than in
+# the checker's source so that a reviewer can read the boundaries without
+# reading Python, and so that the same rules can be pointed at a fixture tree
+# in a negative test (`tests/architecture/`).
+#
+# ---------------------------------------------------------------------------
+# WHAT THESE RULES ARE
+#
+# Development hygiene.  They stop the architecture eroding through ordinary
+# development: an import added in a hurry, a provider name leaking out of the
+# adapter layer, a crate quietly depending on the one it must not.
+#
+# WHAT THESE RULES ARE NOT
+#
+# A security boundary.  Every one of them is a *static* check over source text.
+# A prompt-injected `exec()` inside the runtime can call `__import__("socket")`
+# and no rule here will ever run.  The actual controls are the OS process and
+# privilege boundary between the runtime and `dwkd-authority`, the absence of a
+# network route on the runtime identity, and the absence of any credential in
+# the runtime's address space.  See docs/ARCHITECTURE.md §6 and docs/SECURITY.md.
+#
+# Do not cite a passing `dwcheck` run as evidence of containment.
+# ===========================================================================
+
+schema_version = 1
+
+# ---------------------------------------------------------------------------
+# Version: one source of truth.
+# `dwcheck version --check` asserts these agree with VERSION; `--write`
+# updates them from it.
+# ---------------------------------------------------------------------------
+[version]
+source = "VERSION"
+
+[[version.mirrors]]
+path = "Cargo.toml"
+kind = "toml"
+section = "workspace.package"
+pattern = '(?m)^(?P<prefix>version = ")(?P<version>[^"]+)(?P<suffix>")$'
+
+[[version.mirrors]]
+path = "runtime/pyproject.toml"
+kind = "toml"
+section = "project"
+pattern = '(?m)^(?P<prefix>version = ")(?P<version>[^"]+)(?P<suffix>")$'
+
+[[version.mirrors]]
+path = "tools/dwcheck/pyproject.toml"
+kind = "toml"
+section = "project"
+pattern = '(?m)^(?P<prefix>version = ")(?P<version>[^"]+)(?P<suffix>")$'
+
+# The runtime carries its version as a literal rather than reading installed
+# distribution metadata: importlib.metadata transitively imports `email`, which
+# imports `socket`.  See runtime/src/direwolf/_version.py.
+[[version.mirrors]]
+path = "runtime/src/direwolf/_version.py"
+kind = "regex"
+section = ""
+pattern = '(?m)^(?P<prefix>__version__ = ")(?P<version>[^"]+)(?P<suffix>")$'
+
+[[version.mirrors]]
+path = "tools/dwcheck/src/dwcheck/__init__.py"
+kind = "regex"
+section = ""
+pattern = '(?m)^(?P<prefix>__version__ = ")(?P<version>[^"]+)(?P<suffix>")$'
+
+# ===========================================================================
+# Python import rules
+# ===========================================================================
+
+[[python_rules]]
+id = "PY001-runtime-has-no-ambient-effects"
+paths = ["runtime/src"]
+# `direwolf.kernelclient` is the ONE module permitted to open the kernel
+# socket -- that is its entire job (docs/ARCHITECTURE.md §6).  It does not
+# exist yet; the exemption is written now so the rule does not have to be
+# rewritten under time pressure at M9.
+exempt_paths = ["runtime/src/direwolf/kernelclient"]
+banned_modules = [
+    "socket", "ssl", "selectors",
+    "http.client", "urllib.request", "urllib.error", "ftplib", "smtplib",
+    "requests", "httpx", "aiohttp", "urllib3", "websockets",
+    "subprocess", "multiprocessing", "pty",
+    "ctypes", "cffi", "mmap", "resource", "pwd", "grp",
+]
+banned_attributes = [
+    "os.system", "os.popen", "os.fork", "os.forkpty",
+    "os.execv", "os.execve", "os.execvp", "os.spawnv", "os.spawnl",
+    "os.setuid", "os.setgid",
+]
+reason = """
+The cognition plane holds no network route, no execution path and no
+credential.  A dependency or import that assumes otherwise is a design error
+surfacing early.  `kernelclient` is exempt because DWKP over a Unix socket is
+the single sanctioned path from cognition to effect (ADR-0000).
+"""
+
+[[python_rules]]
+id = "PY002-no-agent-framework-imports"
+paths = ["runtime/src", "tools", "tests", "evals"]
+# The fixtures under tests/architecture/ are deliberately invalid: they exist to
+# be rejected by these rules when the checker is pointed at them, which is how
+# we prove the gate works (tests/architecture/README.md).
+exempt_paths = ["tests/architecture/fixtures"]
+banned_modules = [
+    "langchain", "langchain_core", "langchain_community", "langgraph",
+    "llama_index", "agents", "openai_agents", "crewai", "autogen",
+    "semantic_kernel", "haystack", "dspy", "smolagents", "pydantic_ai",
+]
+banned_attributes = []
+reason = """
+DireWolf is a runtime you run agents on, not a framework you write agents in,
+and it is explicitly not a consumer of another autonomous-agent framework
+(docs/ARCHITECTURE.md §2, non-goals).  Such a framework under the core loop
+would own the loop, the tool-call path and the control flow -- exactly the
+structure this architecture exists to replace.  Interoperating with one at the
+edges is a different question and is not what this rule forbids.
+"""
+
+# ===========================================================================
+# Text rules -- names that must not appear outside their owning directory.
+# ===========================================================================
+
+[[text_rules]]
+id = "TX001-provider-names-confined"
+paths = ["runtime/src"]
+exempt_paths = ["runtime/src/direwolf/providers"]
+suffixes = [".py"]
+patterns = [
+    '(?i)\banthropic\b',
+    '(?i)\bopenai\b',
+    '(?i)\bgpt-[0-9]',
+    '(?i)\bclaude-[0-9]',
+    '(?i)\bgemini\b',
+    '(?i)\bbedrock\b',
+    '(?i)\bollama\b',
+    '(?i)\bmistral\b',
+    '(?i)\bcohere\b',
+]
+reason = """
+Goal G3, model agnosticism: swapping providers changes configuration, not core
+code.  The stated measure is that a search for a provider name returns nothing
+outside the adapter package (docs/ARCHITECTURE.md §1).  Checked as text rather
+than as imports because the leak that matters is usually a string literal or a
+branch on a model name, not an import.
+"""
+
+[[text_rules]]
+id = "TX002-proto-has-no-ambient-effects"
+paths = ["crates/dwk-proto/src"]
+exempt_paths = []
+suffixes = [".rs"]
+# Lines starting with `//` are skipped so the crate can document what it must
+# not do. A multi-line `use std::{ ... }` evades the brace pattern; this is a
+# tripwire for the ordinary mistake, not a proof (see the header of this file).
+patterns = [
+    '^(?!\s*//).*\bstd\s*::\s*(fs|net|process|env|os)\b',
+    '^(?!\s*//).*\bstd\s*::\s*\{[^}]*\b(fs|net|process|env|os)\b',
+    '^(?!\s*//).*\bunsafe\b',
+    '^(?!\s*//).*\b(allow|expect)\s*\(\s*unsafe_code\b',
+]
+reason = """
+dwk-proto is wire types and value objects (ADR-0033).  From M3 it is linked into
+dwkd-authority, and both daemons link it, so an effect here is an effect in the
+trusted computing base and on both sides of the ADR-0018 split.  Decoding a
+message must not be able to touch a file, a socket, a process or the
+environment.  `unsafe_code` is also forbidden workspace-wide; the pattern keeps
+an `#[allow]` from quietly reintroducing it in the one crate both daemons share.
+"""
+
+# ===========================================================================
+# Documentation
+# ===========================================================================
+
+[docs]
+# Relative links and ADR citations are checked in every Markdown file except
+# these. The fixture tree contains deliberately broken links.
+exempt_paths = ["tests/architecture/fixtures"]
+
+# ===========================================================================
+# Declared-dependency rules (Python manifests)
+#
+# Banned *Rust* crates live in deny.toml, which is the tool that reads Cargo
+# metadata; duplicating them here would create two places to update.
+# ===========================================================================
+
+[[dependency_rules]]
+id = "DEP001-no-agent-framework-dependency"
+manifests = ["pyproject.toml", "runtime/pyproject.toml", "tools/dwcheck/pyproject.toml"]
+banned = [
+    "langchain", "langchain-core", "langchain-community", "langgraph",
+    "llama-index", "openai-agents", "crewai", "pyautogen", "autogen-agentchat",
+    "semantic-kernel", "haystack-ai", "dspy-ai", "smolagents", "pydantic-ai",
+]
+reason = "As PY002, but caught at the manifest so it never reaches a lockfile."
+
+[[dependency_rules]]
+id = "DEP002-runtime-has-no-transport-dependency"
+manifests = ["runtime/pyproject.toml"]
+banned = ["requests", "httpx", "aiohttp", "urllib3", "websockets", "grpcio", "boto3"]
+reason = """
+The runtime cannot reach the network.  A transport dependency in its manifest
+means someone is designing a second path from cognition to effect; that
+requires an ADR addressing ADR-0000, not a dependency bump.
+"""
+
+# ===========================================================================
+# Rust crate rules
+# ===========================================================================
+
+[crates]
+manifest = "Cargo.toml"
+directory = "crates"
+# Every third-party dependency is declared once in [workspace.dependencies] and
+# inherited.  A crate declaring a version directly bypasses the single place a
+# reviewer looks to see what is in the tree.
+require_workspace_dependencies = true
+# No workspace crate may depend on these, whatever it is called.  The named
+# rules below cover the crates that exist today; this covers the one somebody
+# adds later to "share a little code between authority and broker", which is
+# how the boundary in ADR-0018 would actually be lost.
+undependable = ["dwkd-authority", "dwkd-broker"]
+# The in-tree crates both daemons may link (RS008), each of which must link no
+# other in-tree crate (RS009).  The wire contract is the one sanctioned case:
+# authority and broker must agree on DWKP.  Adding a name here is an
+# architecture decision that needs an ADR, not a manifest edit.
+shared = ["dwk-proto"]
+
+[[crate_rules]]
+id = "RS001-authority-depends-on-nothing-in-tree"
+crate = "dwkd-authority"
+forbidden_dependencies = ["dwkd-broker", "direwolf-cli", "direwolf"]
+reason = """
+Authority decides; the broker executes (ADR-0018).  A dependency edge from
+authority to the broker would put the broker's dependency tree -- a container
+client, an HTTP/TLS stack, content parsers -- inside the address space holding
+the MAC key and the secrets, which is precisely what the split exists to
+prevent.
+"""
+
+[[crate_rules]]
+id = "RS002-broker-cannot-reach-authority-internals"
+crate = "dwkd-broker"
+forbidden_dependencies = ["dwkd-authority", "direwolf-cli"]
+reason = """
+The broker must not be able to decide anything: no policy evaluation, no
+capability minting, no approval matching.  Linking authority's code into the
+broker would make those reachable by construction.  The broker receives a
+per-invocation authorisation and performs exactly that.
+"""
+
+[[crate_rules]]
+id = "RS003-cli-holds-no-authority"
+crate = "direwolf-cli"
+forbidden_dependencies = ["dwkd-authority", "dwkd-broker"]
+reason = """
+The CLI is presentation.  It supervises and talks to daemons over their
+protocols; it does not link them.  Linking would put authority code in a
+process a user launches directly, with that user's privileges.
+"""
+
+# The TCB's dependency set is a load-bearing claim of ADR-0019.  It was empty
+# at M1.  M2 adds `dwk-proto`, which dwkd-authority links from M3, so its
+# linked closure is checked as the authority's now, before the edge exists:
+# RS004 checks its manifest, RS006 its transitive closure from Cargo.lock.
+# Dev-dependencies (proptest, serde_json) are excluded because they are never
+# linked; tools/dwcheck/tests prove a normal dependency is not excluded.
+#
+# Adding an entry requires a note on ADR-0019 and a reviewer other than the
+# author.  Current entries and their justification: ADR-0033.
+[authority]
+crates = ["dwkd-authority", "dwk-proto"]
+allowed_third_party = [
+    # Unicode NFC, for rejecting keys that collide under normalisation.
+    # Tables and algorithms only: no I/O, no build script.  Not unsafe-free:
+    # a handful of `char::from_u32_unchecked` calls in Hangul arithmetic,
+    # reviewed in ADR-0033.
+    "unicode-normalization",
+    # unicode-normalization's small-vector dependency (forbid(unsafe_code)),
+    # and its macro-only helper crate (forbid(unsafe_code), no_std).
+    "tinyvec",
+    "tinyvec_macros",
+]

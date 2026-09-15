@@ -1,0 +1,15 @@
+# Product and protocol names that clippy::doc_markdown would otherwise demand
+# be backticked. `".."` extends clippy's default list rather than replacing it.
+doc-valid-idents = [
+    "DireWolf",
+    "DWKP",
+    "DWCP",
+    "DWWP",
+    "WSL2",
+    "SQLite",
+    "UUIDv7",
+    "MACed",
+    "MACs",
+    "I-JSON",
+    "..",
+]

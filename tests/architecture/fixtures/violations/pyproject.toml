@@ -1,0 +1,3 @@
+# FIXTURE: workspace root.
+[dependency-groups]
+dev = ["langgraph>=0.2"]

@@ -1,0 +1,67 @@
+# ---- Build output -------------------------------------------------------
+/target/
+**/*.rs.bk
+*.pdb
+
+# ---- Python -------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+dist/
+build/
+
+# ---- Local developer state (NEVER commit) -------------------------------
+# DireWolf's own runtime state lives outside the repository by default, but a
+# developer override can place it here.  These paths hold credentials, audit
+# records and agent-visible data; see docs/SECRETS.md and docs/STORAGE.md.
+.direwolf/
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+audit.log
+kernel.sock
+/secrets/
+*.pem
+*.key
+*.p12
+*.pfx
+.env
+.env.*
+!.env.example
+
+# ---- Editors / OS -------------------------------------------------------
+.idea/
+.vscode/*
+!.vscode/extensions.json
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+Desktop.ini
+.vs/
+
+# ---- Logs, coverage and profiling output --------------------------------
+*.log
+lcov.info
+*.profraw
+*.profdata
+
+# ---- AI coding assistants -----------------------------------------------
+# Local session state, plans and transcripts. Never project configuration.
+.claude/
+.cursor/
+.codex/
+.aider*
+
+# ---- Tool scratch -------------------------------------------------------
+# Fuzzing output (corpus, artifacts, coverage) is ignored in fuzz/.gitignore.
+/.scratch/

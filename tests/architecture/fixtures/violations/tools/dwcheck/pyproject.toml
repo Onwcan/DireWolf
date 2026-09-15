@@ -1,0 +1,6 @@
+# FIXTURE: clean manifest; named by DEP001 so it must exist.
+[project]
+name = "dwcheck"
+version = "0.0.0"
+requires-python = ">=3.12"
+dependencies = []

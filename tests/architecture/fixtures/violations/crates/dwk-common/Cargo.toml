@@ -1,0 +1,6 @@
+# FIXTURE: "just a few helpers" that both daemons link (RS008). It depends on
+# neither daemon, so RS007 does not see it -- which is exactly the gap RS008
+# closes. Only [crates].shared may be linked by both.
+[package]
+name = "dwk-common"
+version = "0.0.0"

@@ -1,0 +1,26 @@
+# FIXTURE: deliberately invalid. `dwkd-authority` reaches `hyper` through an
+# innocuous-looking intermediate, which is how a TCB dependency claim is broken
+# in practice: nobody adds an HTTP stack on purpose.
+version = 4
+
+[[package]]
+name = "dwkd-authority"
+version = "0.0.0"
+dependencies = ["telemetry-helper"]
+
+[[package]]
+name = "telemetry-helper"
+version = "0.3.1"
+dependencies = ["hyper"]
+
+[[package]]
+name = "hyper"
+version = "1.5.0"
+
+[[package]]
+name = "dwkd-broker"
+version = "0.0.0"
+
+[[package]]
+name = "direwolf-cli"
+version = "0.0.0"

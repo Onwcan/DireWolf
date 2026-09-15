@@ -1,0 +1,12 @@
+#!/bin/sh
+# DireWolf pre-commit hook - OPTIONAL, installed by `make hooks`.
+#
+# Fast checks only: formatting and the architecture boundary rules. Types,
+# tests and the dependency audit belong to `make check` and CI, because a hook
+# that takes thirty seconds is a hook people start bypassing with --no-verify,
+# and a bypassed hook protects nothing.
+#
+# Remove with: rm .git/hooks/pre-commit
+set -e
+python scripts/dw.py fmt-check
+python scripts/dw.py arch

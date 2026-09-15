@@ -1,0 +1,22 @@
+[package]
+name = "dwkd-broker"
+description = "DireWolf execution broker: does. Filesystem, exec, sandbox, egress. Holds no long-lived key."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "dwkd-broker"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+# This crate is expected to carry the large dependencies the authority plane
+# must not: a container client, an HTTP/TLS stack, content parsers.  That is
+# the point of the split (ADR-0018).  It may not depend on `dwkd-authority`,
+# and `dwcheck deps` enforces that.
+[dependencies]

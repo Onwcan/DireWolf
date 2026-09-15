@@ -1,0 +1,64 @@
+# Coverage-guided fuzzing for the hostile-input surface of dwk-proto.
+#
+# Not a workspace member: libFuzzer needs a nightly toolchain and a C++
+# compiler, and neither belongs in the default build. Run with cargo-fuzz:
+#
+#     make fuzz                       # every target, short run
+#     cargo +nightly fuzz run dwkp_decode -- -max_total_time=3600
+#
+# The target bodies live in crates/dwk-proto/tests/fuzz_targets/mod.rs and are
+# shared with the stable smoke harness, so both engines check the same
+# invariants.
+[package]
+name = "dwk-proto-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+license = "Apache-2.0"
+
+[package.metadata]
+cargo-fuzz = true
+
+[workspace]
+
+[dependencies]
+libfuzzer-sys = { version = "0.4.13", default-features = false }
+dwk-proto = { path = "../crates/dwk-proto" }
+
+[features]
+# Linking libFuzzer compiles its C++ sources. The default is what cargo-fuzz
+# needs; `--no-default-features` type-checks the targets on stable Rust with no
+# C++ toolchain, which is what the PR gate does.
+default = ["link_libfuzzer"]
+link_libfuzzer = ["libfuzzer-sys/link_libfuzzer"]
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "frame_decoder"
+path = "fuzz_targets/frame_decoder.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "dwkp_decode"
+path = "fuzz_targets/dwkp_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "canonical_roundtrip"
+path = "fuzz_targets/canonical_roundtrip.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "envelope_version"
+path = "fuzz_targets/envelope_version.rs"
+test = false
+doc = false
+bench = false

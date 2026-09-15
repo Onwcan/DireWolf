@@ -1,0 +1,140 @@
+{
+ "description": "Messages both implementations must accept. For dwkp and dwcp, decoding `input` and re-encoding must produce exactly `canonical`; for dwkp, framing it must produce exactly `frame_hex`. For event records, the bytes read must be the bytes re-emitted, and `expect` names the interpretation. `canonical` and `frame_hex` are computed by tests/protocol/oracle/fill_canonical.mjs, independently of both implementations.",
+ "vectors": [
+  {
+   "name": "dwkp handshake",
+   "family": "dwkp",
+   "input": "{\n  \"payload\": {\n    \"min_version\": 1,\n    \"max_version\": 1\n  },\n  \"correlation_id\": \"run_01M24BB8G3E0A851TRWE3M8FZF\",\n  \"schema\": \"direwolf.handshake\",\n  \"type\": \"request\",\n  \"id\": \"msg_01M24BB8G0E87TVJX9GX248ADD\",\n  \"ts\": \"2026-09-12T09:14:22.481Z\",\n  \"schema_version\": 1,\n  \"v\": 1\n}",
+   "canonical": "{\"correlation_id\":\"run_01M24BB8G3E0A851TRWE3M8FZF\",\"id\":\"msg_01M24BB8G0E87TVJX9GX248ADD\",\"payload\":{\"max_version\":1,\"min_version\":1},\"schema\":\"direwolf.handshake\",\"schema_version\":1,\"ts\":\"2026-09-12T09:14:22.481Z\",\"type\":\"request\",\"v\":1}",
+   "frame_hex": "000000ed017b22636f7272656c6174696f6e5f6964223a2272756e5f30314d3234424238473345304138353154525745334d38465a46222c226964223a226d73675f30314d3234424238473045383754564a58394758323438414444222c227061796c6f6164223a7b226d61785f76657273696f6e223a312c226d696e5f76657273696f6e223a317d2c22736368656d61223a2264697265776f6c662e68616e647368616b65222c22736368656d615f76657273696f6e223a312c227473223a22323032362d30392d31325430393a31343a32322e3438315a222c2274797065223a2272657175657374222c2276223a317d"
+  },
+  {
+   "name": "dwkp handshake offering a wider range",
+   "family": "dwkp",
+   "input": "{\n  \"payload\": {\n    \"max_version\": 7,\n    \"min_version\": 1\n  },\n  \"schema\": \"direwolf.handshake\",\n  \"type\": \"request\",\n  \"id\": \"msg_01M24BB8G0E87TVJX9GX248ADD\",\n  \"ts\": \"2026-09-12T09:14:22.481Z\",\n  \"schema_version\": 1,\n  \"v\": 1\n}",
+   "canonical": "{\"id\":\"msg_01M24BB8G0E87TVJX9GX248ADD\",\"payload\":{\"max_version\":7,\"min_version\":1},\"schema\":\"direwolf.handshake\",\"schema_version\":1,\"ts\":\"2026-09-12T09:14:22.481Z\",\"type\":\"request\",\"v\":1}",
+   "frame_hex": "000000bb017b226964223a226d73675f30314d3234424238473045383754564a58394758323438414444222c227061796c6f6164223a7b226d61785f76657273696f6e223a372c226d696e5f76657273696f6e223a317d2c22736368656d61223a2264697265776f6c662e68616e647368616b65222c22736368656d615f76657273696f6e223a312c227473223a22323032362d30392d31325430393a31343a32322e3438315a222c2274797065223a2272657175657374222c2276223a317d"
+  },
+  {
+   "name": "dwkp handshake accepted",
+   "family": "dwkp",
+   "input": "{\n  \"payload\": {\n    \"version\": 1\n  },\n  \"causation_id\": \"msg_01M24BB8G1FQR94D2PF2XVQDV4\",\n  \"schema\": \"direwolf.handshake.accepted\",\n  \"type\": \"response\",\n  \"id\": \"msg_01M24BB8G0E87TVJX9GX248ADD\",\n  \"ts\": \"2026-09-12T09:14:22.481Z\",\n  \"schema_version\": 1,\n  \"v\": 1\n}",
+   "canonical": "{\"causation_id\":\"msg_01M24BB8G1FQR94D2PF2XVQDV4\",\"id\":\"msg_01M24BB8G0E87TVJX9GX248ADD\",\"payload\":{\"version\":1},\"schema\":\"direwolf.handshake.accepted\",\"schema_version\":1,\"ts\":\"2026-09-12T09:14:22.481Z\",\"type\":\"response\",\"v\":1}",
+   "frame_hex": "000000e1017b22636175736174696f6e5f6964223a226d73675f30314d3234424238473146515239344432504632585651445634222c226964223a226d73675f30314d3234424238473045383754564a58394758323438414444222c227061796c6f6164223a7b2276657273696f6e223a317d2c22736368656d61223a2264697265776f6c662e68616e647368616b652e6163636570746564222c22736368656d615f76657273696f6e223a312c227473223a22323032362d30392d31325430393a31343a32322e3438315a222c2274797065223a22726573706f6e7365222c2276223a317d"
+  },
+  {
+   "name": "dwkp heartbeat",
+   "family": "dwkp",
+   "input": "{\n  \"payload\": {},\n  \"session_id\": \"ses_01M24BB8G2E87V1ZPZXQ7DSCVW\",\n  \"epoch\": 47,\n  \"schema\": \"direwolf.heartbeat\",\n  \"type\": \"request\",\n  \"id\": \"msg_01M24BB8G0E87TVJX9GX248ADD\",\n  \"ts\": \"2026-09-12T09:14:22.481Z\",\n  \"schema_version\": 1,\n  \"v\": 1\n}",
+   "canonical": "{\"epoch\":47,\"id\":\"msg_01M24BB8G0E87TVJX9GX248ADD\",\"payload\":{},\"schema\":\"direwolf.heartbeat\",\"schema_version\":1,\"session_id\":\"ses_01M24BB8G2E87V1ZPZXQ7DSCVW\",\"ts\":\"2026-09-12T09:14:22.481Z\",\"type\":\"request\",\"v\":1}",
+   "frame_hex": "000000d5017b2265706f6368223a34372c226964223a226d73675f30314d3234424238473045383754564a58394758323438414444222c227061796c6f6164223a7b7d2c22736368656d61223a2264697265776f6c662e686561727462656174222c22736368656d615f76657273696f6e223a312c2273657373696f6e5f6964223a227365735f30314d3234424238473245383756315a505a5851374453435657222c227473223a22323032362d30392d31325430393a31343a32322e3438315a222c2274797065223a2272657175657374222c2276223a317d"
+  },
+  {
+   "name": "dwkp lease acquire",
+   "family": "dwkp",
+   "input": "{\n  \"payload\": {},\n  \"session_id\": \"ses_01M24BB8G2E87V1ZPZXQ7DSCVW\",\n  \"schema\": \"direwolf.lease.acquire\",\n  \"type\": \"request\",\n  \"id\": \"msg_01M24BB8G0E87TVJX9GX248ADD\",\n  \"ts\": \"2026-09-12T09:14:22.481Z\",\n  \"schema_version\": 1,\n  \"v\": 1\n}",
+   "canonical": "{\"id\":\"msg_01M24BB8G0E87TVJX9GX248ADD\",\"payload\":{},\"schema\":\"direwolf.lease.acquire\",\"schema_version\":1,\"session_id\":\"ses_01M24BB8G2E87V1ZPZXQ7DSCVW\",\"ts\":\"2026-09-12T09:14:22.481Z\",\"type\":\"request\",\"v\":1}",
+   "frame_hex": "000000ce017b226964223a226d73675f30314d3234424238473045383754564a58394758323438414444222c227061796c6f6164223a7b7d2c22736368656d61223a2264697265776f6c662e6c656173652e61637175697265222c22736368656d615f76657273696f6e223a312c2273657373696f6e5f6964223a227365735f30314d3234424238473245383756315a505a5851374453435657222c227473223a22323032362d30392d31325430393a31343a32322e3438315a222c2274797065223a2272657175657374222c2276223a317d"
+  },
+  {
+   "name": "dwkp lease grant",
+   "family": "dwkp",
+   "input": "{\n  \"payload\": {\n    \"epoch\": 48,\n    \"session_id\": \"ses_01M24BB8G2E87V1ZPZXQ7DSCVW\"\n  },\n  \"causation_id\": \"msg_01M24BB8G1FQR94D2PF2XVQDV4\",\n  \"schema\": \"direwolf.lease.grant\",\n  \"type\": \"response\",\n  \"id\": \"msg_01M24BB8G0E87TVJX9GX248ADD\",\n  \"ts\": \"2026-09-12T09:14:22.481Z\",\n  \"schema_version\": 1,\n  \"v\": 1\n}",
+   "canonical": "{\"causation_id\":\"msg_01M24BB8G1FQR94D2PF2XVQDV4\",\"id\":\"msg_01M24BB8G0E87TVJX9GX248ADD\",\"payload\":{\"epoch\":48,\"session_id\":\"ses_01M24BB8G2E87V1ZPZXQ7DSCVW\"},\"schema\":\"direwolf.lease.grant\",\"schema_version\":1,\"ts\":\"2026-09-12T09:14:22.481Z\",\"type\":\"response\",\"v\":1}",
+   "frame_hex": "00000107017b22636175736174696f6e5f6964223a226d73675f30314d3234424238473146515239344432504632585651445634222c226964223a226d73675f30314d3234424238473045383754564a58394758323438414444222c227061796c6f6164223a7b2265706f6368223a34382c2273657373696f6e5f6964223a227365735f30314d3234424238473245383756315a505a5851374453435657227d2c22736368656d61223a2264697265776f6c662e6c656173652e6772616e74222c22736368656d615f76657273696f6e223a312c227473223a22323032362d30392d31325430393a31343a32322e3438315a222c2274797065223a22726573706f6e7365222c2276223a317d"
+  },
+  {
+   "name": "dwkp lease release",
+   "family": "dwkp",
+   "input": "{\n  \"payload\": {},\n  \"session_id\": \"ses_01M24BB8G2E87V1ZPZXQ7DSCVW\",\n  \"epoch\": 48,\n  \"correlation_id\": \"run_01M24BB8G3E0A851TRWE3M8FZF\",\n  \"schema\": \"direwolf.lease.release\",\n  \"type\": \"request\",\n  \"id\": \"msg_01M24BB8G0E87TVJX9GX248ADD\",\n  \"ts\": \"2026-09-12T09:14:22.481Z\",\n  \"schema_version\": 1,\n  \"v\": 1\n}",
+   "canonical": "{\"correlation_id\":\"run_01M24BB8G3E0A851TRWE3M8FZF\",\"epoch\":48,\"id\":\"msg_01M24BB8G0E87TVJX9GX248ADD\",\"payload\":{},\"schema\":\"direwolf.lease.release\",\"schema_version\":1,\"session_id\":\"ses_01M24BB8G2E87V1ZPZXQ7DSCVW\",\"ts\":\"2026-09-12T09:14:22.481Z\",\"type\":\"request\",\"v\":1}",
+   "frame_hex": "0000010b017b22636f7272656c6174696f6e5f6964223a2272756e5f30314d3234424238473345304138353154525745334d38465a46222c2265706f6368223a34382c226964223a226d73675f30314d3234424238473045383754564a58394758323438414444222c227061796c6f6164223a7b7d2c22736368656d61223a2264697265776f6c662e6c656173652e72656c65617365222c22736368656d615f76657273696f6e223a312c2273657373696f6e5f6964223a227365735f30314d3234424238473245383756315a505a5851374453435657222c227473223a22323032362d30392d31325430393a31343a32322e3438315a222c2274797065223a2272657175657374222c2276223a317d"
+  },
+  {
+   "name": "dwkp ack",
+   "family": "dwkp",
+   "input": "{\n  \"payload\": {},\n  \"causation_id\": \"msg_01M24BB8G1FQR94D2PF2XVQDV4\",\n  \"schema\": \"direwolf.ack\",\n  \"type\": \"response\",\n  \"id\": \"msg_01M24BB8G0E87TVJX9GX248ADD\",\n  \"ts\": \"2026-09-12T09:14:22.481Z\",\n  \"schema_version\": 1,\n  \"v\": 1\n}",
+   "canonical": "{\"causation_id\":\"msg_01M24BB8G1FQR94D2PF2XVQDV4\",\"id\":\"msg_01M24BB8G0E87TVJX9GX248ADD\",\"payload\":{},\"schema\":\"direwolf.ack\",\"schema_version\":1,\"ts\":\"2026-09-12T09:14:22.481Z\",\"type\":\"response\",\"v\":1}",
+   "frame_hex": "000000c7017b22636175736174696f6e5f6964223a226d73675f30314d3234424238473146515239344432504632585651445634222c226964223a226d73675f30314d3234424238473045383754564a58394758323438414444222c227061796c6f6164223a7b7d2c22736368656d61223a2264697265776f6c662e61636b222c22736368656d615f76657273696f6e223a312c227473223a22323032362d30392d31325430393a31343a32322e3438315a222c2274797065223a22726573706f6e7365222c2276223a317d"
+  },
+  {
+   "name": "dwkp epoch at the safe-integer maximum",
+   "family": "dwkp",
+   "input": "{\n  \"payload\": {},\n  \"session_id\": \"ses_01M24BB8G2E87V1ZPZXQ7DSCVW\",\n  \"epoch\": 9007199254740991,\n  \"schema\": \"direwolf.heartbeat\",\n  \"type\": \"request\",\n  \"id\": \"msg_01M24BB8G0E87TVJX9GX248ADD\",\n  \"ts\": \"2026-09-12T09:14:22.481Z\",\n  \"schema_version\": 1,\n  \"v\": 1\n}",
+   "canonical": "{\"epoch\":9007199254740991,\"id\":\"msg_01M24BB8G0E87TVJX9GX248ADD\",\"payload\":{},\"schema\":\"direwolf.heartbeat\",\"schema_version\":1,\"session_id\":\"ses_01M24BB8G2E87V1ZPZXQ7DSCVW\",\"ts\":\"2026-09-12T09:14:22.481Z\",\"type\":\"request\",\"v\":1}",
+   "frame_hex": "000000e3017b2265706f6368223a393030373139393235343734303939312c226964223a226d73675f30314d3234424238473045383754564a58394758323438414444222c227061796c6f6164223a7b7d2c22736368656d61223a2264697265776f6c662e686561727462656174222c22736368656d615f76657273696f6e223a312c2273657373696f6e5f6964223a227365735f30314d3234424238473245383756315a505a5851374453435657222c227473223a22323032362d30392d31325430393a31343a32322e3438315a222c2274797065223a2272657175657374222c2276223a317d"
+  },
+  {
+   "name": "dwkp protocol error, full",
+   "family": "dwkp",
+   "input": "{\n  \"payload\": {\n    \"code\": \"PROTOCOL_VERSION_UNSUPPORTED\",\n    \"violation\": \"OUT_OF_RANGE\",\n    \"path\": \"/v\",\n    \"detail\": \"envelope version 2 is not supported\",\n    \"supported\": {\n      \"min\": 1,\n      \"max\": 1\n    }\n  },\n  \"causation_id\": \"msg_01M24BB8G1FQR94D2PF2XVQDV4\",\n  \"schema\": \"direwolf.protocol.error\",\n  \"type\": \"response\",\n  \"id\": \"msg_01M24BB8G0E87TVJX9GX248ADD\",\n  \"ts\": \"2026-09-12T09:14:22.481Z\",\n  \"schema_version\": 1,\n  \"v\": 1\n}",
+   "canonical": "{\"causation_id\":\"msg_01M24BB8G1FQR94D2PF2XVQDV4\",\"id\":\"msg_01M24BB8G0E87TVJX9GX248ADD\",\"payload\":{\"code\":\"PROTOCOL_VERSION_UNSUPPORTED\",\"detail\":\"envelope version 2 is not supported\",\"path\":\"/v\",\"supported\":{\"max\":1,\"min\":1},\"violation\":\"OUT_OF_RANGE\"},\"schema\":\"direwolf.protocol.error\",\"schema_version\":1,\"ts\":\"2026-09-12T09:14:22.481Z\",\"type\":\"response\",\"v\":1}",
+   "frame_hex": "0000016b017b22636175736174696f6e5f6964223a226d73675f30314d3234424238473146515239344432504632585651445634222c226964223a226d73675f30314d3234424238473045383754564a58394758323438414444222c227061796c6f6164223a7b22636f6465223a2250524f544f434f4c5f56455253494f4e5f554e535550504f52544544222c2264657461696c223a22656e76656c6f70652076657273696f6e2032206973206e6f7420737570706f72746564222c2270617468223a222f76222c22737570706f72746564223a7b226d6178223a312c226d696e223a317d2c2276696f6c6174696f6e223a224f55545f4f465f52414e4745227d2c22736368656d61223a2264697265776f6c662e70726f746f636f6c2e6572726f72222c22736368656d615f76657273696f6e223a312c227473223a22323032362d30392d31325430393a31343a32322e3438315a222c2274797065223a22726573706f6e7365222c2276223a317d"
+  },
+  {
+   "name": "dwkp protocol error answering unparseable bytes",
+   "family": "dwkp",
+   "input": "{\n  \"payload\": {\n    \"code\": \"PROTOCOL_INVALID_JSON\",\n    \"detail\": \"trailing data after the JSON value\"\n  },\n  \"schema\": \"direwolf.protocol.error\",\n  \"type\": \"response\",\n  \"id\": \"msg_01M24BB8G0E87TVJX9GX248ADD\",\n  \"ts\": \"2026-09-12T09:14:22.481Z\",\n  \"schema_version\": 1,\n  \"v\": 1\n}",
+   "canonical": "{\"id\":\"msg_01M24BB8G0E87TVJX9GX248ADD\",\"payload\":{\"code\":\"PROTOCOL_INVALID_JSON\",\"detail\":\"trailing data after the JSON value\"},\"schema\":\"direwolf.protocol.error\",\"schema_version\":1,\"ts\":\"2026-09-12T09:14:22.481Z\",\"type\":\"response\",\"v\":1}",
+   "frame_hex": "000000ee017b226964223a226d73675f30314d3234424238473045383754564a58394758323438414444222c227061796c6f6164223a7b22636f6465223a2250524f544f434f4c5f494e56414c49445f4a534f4e222c2264657461696c223a22747261696c696e67206461746120616674657220746865204a534f4e2076616c7565227d2c22736368656d61223a2264697265776f6c662e70726f746f636f6c2e6572726f72222c22736368656d615f76657273696f6e223a312c227473223a22323032362d30392d31325430393a31343a32322e3438315a222c2274797065223a22726573706f6e7365222c2276223a317d"
+  },
+  {
+   "name": "dwkp string escaping in a free-text field",
+   "family": "dwkp",
+   "input": "{\n  \"payload\": {\n    \"code\": \"PROTOCOL_SCHEMA_VIOLATION\",\n    \"violation\": \"UNKNOWN_FIELD\",\n    \"path\": \"/payload/x\",\n    \"detail\": \"tab\\tnewline\\nquote\\\"backslash\\\\unit-separator\\u001fdel\\u007fe-acute\\u00e9euro\\u20acline-separator\\u2028emoji\\ud83d\\ude00\"\n  },\n  \"schema\": \"direwolf.protocol.error\",\n  \"type\": \"response\",\n  \"id\": \"msg_01M24BB8G0E87TVJX9GX248ADD\",\n  \"ts\": \"2026-09-12T09:14:22.481Z\",\n  \"schema_version\": 1,\n  \"v\": 1\n}",
+   "canonical": "{\"id\":\"msg_01M24BB8G0E87TVJX9GX248ADD\",\"payload\":{\"code\":\"PROTOCOL_SCHEMA_VIOLATION\",\"detail\":\"tab\\tnewline\\nquote\\\"backslash\\\\unit-separator\\u001fdel\u007fe-acute\u00e9euro\u20acline-separator\u2028emoji\ud83d\ude00\",\"path\":\"/payload/x\",\"violation\":\"UNKNOWN_FIELD\"},\"schema\":\"direwolf.protocol.error\",\"schema_version\":1,\"ts\":\"2026-09-12T09:14:22.481Z\",\"type\":\"response\",\"v\":1}",
+   "frame_hex": "00000162017b226964223a226d73675f30314d3234424238473045383754564a58394758323438414444222c227061796c6f6164223a7b22636f6465223a2250524f544f434f4c5f534348454d415f56494f4c4154494f4e222c2264657461696c223a227461625c746e65776c696e655c6e71756f74655c226261636b736c6173685c5c756e69742d736570617261746f725c753030316664656c7f652d6163757465c3a96575726fe282ac6c696e652d736570617261746f72e280a8656d6f6a69f09f9880222c2270617468223a222f7061796c6f61642f78222c2276696f6c6174696f6e223a22554e4b4e4f574e5f4649454c44227d2c22736368656d61223a2264697265776f6c662e70726f746f636f6c2e6572726f72222c22736368656d615f76657273696f6e223a312c227473223a22323032362d30392d31325430393a31343a32322e3438315a222c2274797065223a22726573706f6e7365222c2276223a317d"
+  },
+  {
+   "name": "dwcp error with preserved extensions",
+   "family": "dwcp",
+   "input": "{\n  \"v\": 1,\n  \"id\": \"msg_01M24BB8G0E87TVJX9GX248ADD\",\n  \"type\": \"response\",\n  \"schema\": \"direwolf.error\",\n  \"schema_version\": 1,\n  \"ts\": \"2026-09-12T09:14:22.481Z\",\n  \"x_future_envelope\": {\n    \"trace\": [\n      1,\n      2.5,\n      \"z\"\n    ]\n  },\n  \"payload\": {\n    \"code\": \"RATE_LIMITED\",\n    \"detail\": \"slow down\",\n    \"retryable\": true,\n    \"x_future\": {\n      \"retry_after_ms\": 1500,\n      \"ratio\": 0.25,\n      \"note\": \"added by a newer gateway\"\n    }\n  }\n}",
+   "expect": "error",
+   "canonical": "{\"id\":\"msg_01M24BB8G0E87TVJX9GX248ADD\",\"payload\":{\"code\":\"RATE_LIMITED\",\"detail\":\"slow down\",\"retryable\":true,\"x_future\":{\"note\":\"added by a newer gateway\",\"ratio\":0.25,\"retry_after_ms\":1500}},\"schema\":\"direwolf.error\",\"schema_version\":1,\"ts\":\"2026-09-12T09:14:22.481Z\",\"type\":\"response\",\"v\":1,\"x_future_envelope\":{\"trace\":[1,2.5,\"z\"]}}"
+  },
+  {
+   "name": "dwcp unknown message is retained",
+   "family": "dwcp",
+   "input": "{\n  \"v\": 1,\n  \"id\": \"evt_01M24BB8G4EKX8P1DMZ95GB82V\",\n  \"type\": \"event\",\n  \"schema\": \"direwolf.session.created\",\n  \"schema_version\": 3,\n  \"ts\": \"2026-09-12T09:14:22.481Z\",\n  \"session_id\": \"ses_01M24BB8G2E87V1ZPZXQ7DSCVW\",\n  \"payload\": {\n    \"title\": \"new session\",\n    \"labels\": [\n      \"a\",\n      \"b\"\n    ],\n    \"score\": 1e-07\n  }\n}",
+   "expect": "unknown",
+   "canonical": "{\"id\":\"evt_01M24BB8G4EKX8P1DMZ95GB82V\",\"payload\":{\"labels\":[\"a\",\"b\"],\"score\":1e-7,\"title\":\"new session\"},\"schema\":\"direwolf.session.created\",\"schema_version\":3,\"session_id\":\"ses_01M24BB8G2E87V1ZPZXQ7DSCVW\",\"ts\":\"2026-09-12T09:14:22.481Z\",\"type\":\"event\",\"v\":1}"
+  },
+  {
+   "name": "dwcp known schema at an unknown schema_version is retained",
+   "family": "dwcp",
+   "input": "{\n  \"v\": 1,\n  \"id\": \"msg_01M24BB8G0E87TVJX9GX248ADD\",\n  \"type\": \"response\",\n  \"schema\": \"direwolf.error\",\n  \"schema_version\": 2,\n  \"ts\": \"2026-09-12T09:14:22.481Z\",\n  \"payload\": {\n    \"code\": \"X\",\n    \"detail\": \"d\",\n    \"retryable\": false,\n    \"severity\": \"high\"\n  }\n}",
+   "expect": "unknown",
+   "canonical": "{\"id\":\"msg_01M24BB8G0E87TVJX9GX248ADD\",\"payload\":{\"code\":\"X\",\"detail\":\"d\",\"retryable\":false,\"severity\":\"high\"},\"schema\":\"direwolf.error\",\"schema_version\":2,\"ts\":\"2026-09-12T09:14:22.481Z\",\"type\":\"response\",\"v\":1}"
+  },
+  {
+   "name": "event lease_acquired",
+   "family": "event",
+   "input": "{\n \"v\": 1,\n \"id\": \"evt_01M24BB8G4EKX8P1DMZ95GB82V\",\n \"type\": \"event\",\n \"schema\": \"direwolf.session.lease_acquired\",\n \"schema_version\": 1,\n \"ts\": \"2026-09-12T09:14:22.481Z\",\n \"session_id\": \"ses_01M24BB8G2E87V1ZPZXQ7DSCVW\",\n \"payload\": {\n  \"epoch\": 48\n }\n}\n",
+   "expect": "known"
+  },
+  {
+   "name": "event known schema with a field added by a newer writer",
+   "family": "event",
+   "input": "{\n \"v\": 1,\n \"id\": \"evt_01M24BB8G5ETABTMPD9QRN98H3\",\n \"type\": \"event\",\n \"schema\": \"direwolf.session.lease_acquired\",\n \"schema_version\": 1,\n \"ts\": \"2026-09-12T09:14:22.481Z\",\n \"session_id\": \"ses_01M24BB8G2E87V1ZPZXQ7DSCVW\",\n \"payload\": {\n  \"epoch\": 48,\n  \"acquired_by\": \"runtime-2\",\n  \"weight\": 0.1\n },\n \"seq\": 12\n}\n",
+   "expect": "known"
+  },
+  {
+   "name": "event unknown schema",
+   "family": "event",
+   "input": "{\n \"v\": 1,\n \"id\": \"evt_01M24BB8G4EKX8P1DMZ95GB82V\",\n \"type\": \"event\",\n \"schema\": \"direwolf.memory.promoted\",\n \"schema_version\": 1,\n \"ts\": \"2026-09-12T09:14:22.481Z\",\n \"run_id\": \"run_01M24BB8G3E0A851TRWE3M8FZF\",\n \"payload\": {\n  \"memory_id\": \"mem_01M24BB8G3E0A851TRWE3M8FZF\",\n  \"confidence\": 0.95\n }\n}\n",
+   "expect": "unknown"
+  },
+  {
+   "name": "event from a future envelope version",
+   "family": "event",
+   "input": "{\n \"v\": 2,\n \"event_id\": \"evt_01M24BB8G4EKX8P1DMZ95GB82V\",\n \"kind\": \"event\",\n \"schema\": \"direwolf.session.lease_acquired\",\n \"payload\": {\n  \"epoch\": 1\n }\n}\n",
+   "expect": "unknown"
+  },
+  {
+   "name": "event known schema failing validation is retained, not repaired",
+   "family": "event",
+   "input": "{\n \"v\": 1,\n \"id\": \"evt_01M24BB8G4EKX8P1DMZ95GB82V\",\n \"type\": \"event\",\n \"schema\": \"direwolf.session.lease_acquired\",\n \"schema_version\": 1,\n \"ts\": \"2026-09-12T09:14:22.481Z\",\n \"session_id\": \"ses_01M24BB8G2E87V1ZPZXQ7DSCVW\",\n \"payload\": {\n  \"epoch\": 0\n }\n}\n",
+   "expect": "invalid"
+  }
+ ]
+}

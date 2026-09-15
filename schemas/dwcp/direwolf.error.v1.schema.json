@@ -1,0 +1,140 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:direwolf:schema:dwcp:direwolf.error:1",
+  "title": "direwolf.error v1",
+  "description": "A request failed or the gateway reports a problem.",
+  "type": "object",
+  "properties": {
+    "v": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1,
+      "x-direwolf-type": "Version"
+    },
+    "id": {
+      "type": "string",
+      "minLength": 30,
+      "maxLength": 30,
+      "pattern": "^msg_[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+      "x-direwolf-type": "MessageId",
+      "x-direwolf-format": "uuid7-id",
+      "x-direwolf-id-prefix": "msg"
+    },
+    "type": {
+      "const": "response",
+      "x-direwolf-type": "MessageType"
+    },
+    "schema": {
+      "const": "direwolf.error",
+      "x-direwolf-type": "SchemaName"
+    },
+    "schema_version": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1,
+      "x-direwolf-type": "Version"
+    },
+    "ts": {
+      "type": "string",
+      "maxLength": 24,
+      "x-direwolf-type": "Timestamp",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$",
+      "x-direwolf-format": "rfc3339-utc-millis"
+    },
+    "correlation_id": {
+      "type": "string",
+      "maxLength": 35,
+      "pattern": "^[a-z]{2,8}_[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+      "x-direwolf-type": "AnyId",
+      "x-direwolf-format": "uuid7-id"
+    },
+    "causation_id": {
+      "type": "string",
+      "maxLength": 35,
+      "pattern": "^[a-z]{2,8}_[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+      "x-direwolf-type": "AnyId",
+      "x-direwolf-format": "uuid7-id"
+    },
+    "session_id": {
+      "type": "string",
+      "minLength": 30,
+      "maxLength": 30,
+      "pattern": "^ses_[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+      "x-direwolf-type": "SessionId",
+      "x-direwolf-format": "uuid7-id",
+      "x-direwolf-id-prefix": "ses"
+    },
+    "run_id": {
+      "type": "string",
+      "minLength": 30,
+      "maxLength": 30,
+      "pattern": "^run_[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+      "x-direwolf-type": "RunId",
+      "x-direwolf-format": "uuid7-id",
+      "x-direwolf-id-prefix": "run"
+    },
+    "payload": {
+      "$ref": "#/$defs/ClientError"
+    }
+  },
+  "required": ["v", "id", "type", "schema", "schema_version", "ts", "payload"],
+  "not": {
+    "anyOf": [
+      {
+        "required": ["epoch"]
+      },
+      {
+        "required": ["idempotency_key"]
+      }
+    ]
+  },
+  "x-direwolf-family": "dwcp",
+  "x-direwolf-message-type": "response",
+  "x-direwolf-schema": "direwolf.error",
+  "x-direwolf-schema-versions": {
+    "min": 1,
+    "max": 1
+  },
+  "x-direwolf-envelope-versions": {
+    "min": 1,
+    "max": 1
+  },
+  "x-direwolf-envelope": {
+    "correlation_id": "optional",
+    "causation_id": "optional",
+    "session_id": "optional",
+    "run_id": "optional",
+    "epoch": "forbidden",
+    "idempotency_key": "forbidden"
+  },
+  "x-direwolf-id-prefix": "msg",
+  "x-direwolf-unknown-fields": "preserve",
+  "x-direwolf-payload": "ClientError",
+  "$defs": {
+    "ClientError": {
+      "type": "object",
+      "description": "A request failed, or the gateway is reporting a problem.",
+      "properties": {
+        "code": {
+          "type": "string",
+          "maxLength": 64,
+          "x-direwolf-type": "ClientErrorCode",
+          "pattern": "^[A-Z][A-Z0-9_]{0,63}$",
+          "description": "An open-ended error code; clients must accept codes newer than they are."
+        },
+        "detail": {
+          "type": "string",
+          "maxLength": 512,
+          "x-direwolf-type": "Detail",
+          "description": "Human-readable explanation."
+        },
+        "retryable": {
+          "type": "boolean",
+          "description": "Whether retrying the same request may succeed."
+        }
+      },
+      "required": ["code", "detail", "retryable"],
+      "x-direwolf-unknown-fields": "preserve"
+    }
+  }
+}

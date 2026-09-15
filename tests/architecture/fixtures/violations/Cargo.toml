@@ -1,0 +1,14 @@
+# FIXTURE: deliberately invalid. See tests/architecture/README.md.
+[workspace]
+resolver = "3"
+members = [
+  "crates/direwolf-cli",
+  "crates/dwkd-authority",
+  "crates/dwkd-broker",
+  "crates/dwk-bridge",
+  "crates/dwk-common",
+  "crates/dwk-proto",
+]
+
+[workspace.package]
+version = "0.0.0"

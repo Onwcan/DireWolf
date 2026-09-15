@@ -1,0 +1,24 @@
+[package]
+name = "dwkd-authority"
+description = "DireWolf authority daemon: decides. Policy, capabilities, approvals, budgets, secrets, audit."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "dwkd-authority"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+# DEPENDENCY POLICY: this crate is the trusted computing base.  Its dependency
+# set is a load-bearing claim of ADR-0019 ("a genuinely small, enforceable
+# dependency set - now true, post-split: no HTTP client, no TLS stack, no
+# container client, no content parsers").  Additions require a note on ADR-0019
+# and a reviewer other than the author, and must appear in the
+# `authority_allowlist` in architecture.toml.
+[dependencies]

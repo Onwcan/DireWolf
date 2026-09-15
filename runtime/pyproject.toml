@@ -1,0 +1,42 @@
+# ---------------------------------------------------------------------------
+# direwolf - the cognition runtime.
+#
+# This package holds the agent loop, context engine, memory, providers and the
+# kernel client.  None of it exists yet: the loop is M9, context is M11,
+# providers are M7, and the kernel client cannot exist before the protocol
+# (M2).  At M1 the package exists so that the Python half of the repository is
+# a real package that lints, type-checks, tests and imports - not so that it
+# can pretend to have subsystems.
+#
+# TRUST: this package is UNTRUSTED.  It holds no credentials, no network route,
+# no filesystem handles and no ability to execute anything.  Every side effect
+# is requested from dwkd-authority over DWKP.  See docs/ARCHITECTURE.md §5.
+# ---------------------------------------------------------------------------
+[project]
+name = "direwolf"
+version = "0.0.0"
+description = "DireWolf cognition runtime - proposes; holds no authority"
+readme = "../README.md"
+requires-python = ">=3.12"
+license = "Apache-2.0"
+authors = [{ name = "The DireWolf authors" }]
+classifiers = [
+    "Development Status :: 1 - Planning",
+    "Programming Language :: Python :: 3.12",
+]
+
+# DEPENDENCY POLICY: the cognition runtime may not depend on any autonomous
+# agent framework (LangChain, LangGraph, the OpenAI Agents SDK or equivalents);
+# DireWolf's loop is the product, not a consumer of someone else's.  It may not
+# depend on an HTTP client, a process launcher or a socket library: it has no
+# network route and no exec path by construction, and a dependency that assumes
+# otherwise is a design error surfacing early.  `dwcheck deps` enforces both.
+dependencies = []
+
+[build-system]
+requires = ["uv_build>=0.8,<0.14"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "direwolf"
+module-root = "src"

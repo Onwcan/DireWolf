@@ -1,0 +1,11 @@
+# FIXTURE: authority must not depend on the broker (RS001), and must not carry
+# a third-party dependency outside the allowlist (RS004). It shares dwk-common
+# with the broker (RS008).
+[package]
+name = "dwkd-authority"
+version = "0.0.0"
+
+[dependencies]
+dwkd-broker = { path = "../dwkd-broker" }
+hyper = { workspace = true }
+dwk-common = { path = "../dwk-common" }

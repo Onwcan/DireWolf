@@ -1,0 +1,35 @@
+# ---------------------------------------------------------------------------
+# dwcheck - the DireWolf architecture-boundary checker.
+#
+# WHY THIS EXISTS AS A PACKAGE rather than a loose script: it is itself a
+# quality gate, so it is linted, type-checked and unit-tested like anything
+# else, and it must be importable by the negative tests in tests/architecture/.
+#
+# WHY IT IS CUSTOM rather than import-linter: the rules it enforces span three
+# manifest formats and two languages; it must run over source trees that are
+# not importable (the deliberately-invalid fixtures); and it must support
+# per-directory exemptions such as "only direwolf.kernelclient may import
+# socket".  See ADR-0031.
+#
+# It has, and will keep, zero third-party dependencies: tomllib, ast and re
+# are in the standard library and this tool runs in CI on every commit.
+# ---------------------------------------------------------------------------
+[project]
+name = "dwcheck"
+version = "0.0.0"
+description = "DireWolf architecture boundary checks"
+requires-python = ">=3.12"
+license = "Apache-2.0"
+authors = [{ name = "The DireWolf authors" }]
+dependencies = []
+
+[project.scripts]
+dwcheck = "dwcheck.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.8,<0.14"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "dwcheck"
+module-root = "src"

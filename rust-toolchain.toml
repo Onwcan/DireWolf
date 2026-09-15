@@ -1,0 +1,10 @@
+# Pinned, not floating: every contributor and CI job compiles with the same
+# compiler, and a toolchain bump is a reviewable commit.  A pinned toolchain is
+# one precondition of a reproducible build, not a proof of one; bit-for-bit
+# reproducibility has not been verified (see Cargo.toml [profile.release]).
+# Bumping: change `channel`, run `make check`, and note anything that changed
+# in the PR description.
+[toolchain]
+channel = "1.98.1"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

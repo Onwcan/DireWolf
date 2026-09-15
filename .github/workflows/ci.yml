@@ -1,0 +1,157 @@
+name: CI
+
+# Every job is one `make` target. CI runs exactly what a contributor runs, so a
+# green CI means those commands passed, not that a parallel CI-only script did.
+#
+# SECURITY POSTURE OF THIS FILE (see CONTRIBUTING.md "CI security"):
+#   * Least privilege: read-only token, workflow-wide. No job requests write.
+#   * No secrets are available to any job, so a pull request from a fork cannot
+#     exfiltrate one.
+#   * `pull_request`, not `pull_request_target`: fork code never runs with the
+#     base repository's token.
+#   * Exactly two third-party-hosted actions are used, both GitHub's own, both
+#     pinned by commit SHA. Nothing is installed by piping a URL into a shell.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  format:
+    name: format (make fmt-check)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.0.1
+      - uses: ./.github/actions/setup
+      - run: make fmt-check
+
+  lint:
+    name: lint (make lint)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.0.1
+      - uses: ./.github/actions/setup
+      - run: make lint
+
+  typecheck:
+    name: types (make typecheck)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.0.1
+      - uses: ./.github/actions/setup
+        with:
+          rust: "false"
+      - run: make typecheck
+
+  architecture:
+    name: boundaries (make arch)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.0.1
+      - uses: ./.github/actions/setup
+        with:
+          rust: "false"
+      - run: make arch
+      # The gate is not "a checker is configured" but "the checker rejects a
+      # known violation". The proof runs here, against the deliberately-invalid
+      # fixture tree, and fails the job if the checker ever accepts it.
+      - name: The checker must reject the violation fixture
+        run: |
+          set +e
+          uv run --frozen python -m dwcheck \
+            --root tests/architecture/fixtures/violations \
+            --rules architecture.toml all
+          status=$?
+          set -e
+          if [ "$status" -eq 0 ]; then
+            echo "::error::dwcheck accepted the deliberately-invalid fixture tree"
+            exit 1
+          fi
+          echo "dwcheck rejected the fixture tree as expected (exit $status)"
+
+  schema:
+    name: generated protocol files (make schema-check)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.0.1
+      - uses: ./.github/actions/setup
+      # schemas/, docs/DWKP_OPERATIONS.md and runtime/src/direwolf/proto/ are
+      # generated (ADR-0033). A hand edit, or a Rust change committed without
+      # `make schema`, fails here rather than surfacing as a parity bug.
+      - run: make schema-check
+
+  test:
+    name: tests (make test)
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Linux is the primary target. Windows is here because the CLI has
+        # platform-specific code paths and native Windows is a documented
+        # reduced-assurance target that must still build. macOS is here because
+        # it is a supported development platform.
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.0.1
+      - uses: ./.github/actions/setup
+      - run: python scripts/dw.py test
+
+  supply-chain:
+    name: dependencies (make security)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.0.1
+      - uses: ./.github/actions/setup
+      - name: Cache cargo-deny
+        id: cache-deny
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.cargo/bin/cargo-deny
+          key: cargo-deny-0.20.2-${{ runner.os }}
+      - name: Install cargo-deny
+        if: steps.cache-deny.outputs.cache-hit != 'true'
+        # Pinned and --locked: a supply-chain tool installed from a floating
+        # version is a supply-chain risk of its own.
+        run: cargo install cargo-deny --version 0.20.2 --locked
+      - run: make security
+
+  build:
+    name: release build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.0.1
+      - uses: ./.github/actions/setup
+      # The release profile enables LTO, one codegen unit and panic=abort; it
+      # can fail where a debug build does not, and a release-only failure
+      # discovered at release time is a bad day.
+      - run: cargo build --workspace --release
+      - run: ./target/release/direwolf --version
+
+  # A single required check for branch protection, so adding a job later does
+  # not silently become optional.
+  ci:
+    name: CI
+    runs-on: ubuntu-latest
+    needs: [format, lint, typecheck, architecture, schema, test, supply-chain, build]
+    if: always()
+    steps:
+      - name: Fail if any job did not succeed
+        run: |
+          if echo '${{ toJSON(needs) }}' | grep -q '"result": *"\(failure\|cancelled\)"'; then
+            echo "::error::one or more CI jobs failed"
+            exit 1
+          fi
+          echo "all CI jobs succeeded"

@@ -1,0 +1,12 @@
+# FIXTURE: a detached crate (its own empty [workspace] keeps it out of the real
+# one) carrying the same clippy lint level as the workspace, so a test can prove
+# that `cargo clippy -- -D warnings` turns a clippy::all warning into a failure.
+[package]
+name = "dw-clippy-fixture"
+version = "0.0.0"
+edition = "2024"
+
+[workspace]
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }

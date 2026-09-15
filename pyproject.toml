@@ -1,0 +1,120 @@
+# ---------------------------------------------------------------------------
+# Workspace root.
+#
+# This file declares no package of its own: it is a `uv` workspace root that
+# holds the shared tool configuration for every Python package in the
+# repository.  The packages themselves are:
+#
+#   runtime/        direwolf        - the cognition runtime (Python 3.12+)
+#   tools/dwcheck/  dwcheck         - the architecture-boundary checker
+#
+# Adding a third Python package requires a concrete reason and a note in
+# CONTRIBUTING.md.  Package count is a cost, not a feature.
+# ---------------------------------------------------------------------------
+
+[tool.uv.workspace]
+members = ["runtime", "tools/dwcheck"]
+
+[tool.uv]
+# Every workspace member is installed in editable mode into one shared .venv.
+default-groups = ["dev"]
+
+[tool.uv.sources]
+direwolf = { workspace = true }
+dwcheck = { workspace = true }
+
+# Development tooling.  These are the ONLY Python dependencies in the
+# repository at M1; neither `direwolf` nor `dwcheck` has a runtime dependency.
+# Versions are floors, pinned exactly by uv.lock.
+[dependency-groups]
+dev = [
+    "direwolf",
+    "dwcheck",
+    "ruff>=0.14",
+    "mypy>=1.18",
+    "pytest>=8.4",
+    "pip-audit>=2.9",
+]
+
+# ---------------------------------------------------------------------------
+# Ruff - lint and format.  One tool for both; black/isort/flake8 would be three
+# tools producing the same signal.
+# ---------------------------------------------------------------------------
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["runtime/src", "tools/dwcheck/src"]
+extend-exclude = [
+    # Deliberately-invalid code. These files exist to be rejected by the
+    # architecture checks; linting them would be checking the wrong thing.
+    "tests/architecture/fixtures",
+    # Ruff formats Python code blocks inside Markdown. The architecture package
+    # uses illustrative, hand-aligned pseudo-Python that is not meant to parse;
+    # reformatting it would damage the documents to satisfy a code formatter.
+    "**/*.md",
+]
+
+[tool.ruff.lint]
+select = [
+    "E", "W",    # pycodestyle
+    "F",         # pyflakes
+    "I",         # isort
+    "N",         # pep8-naming
+    "UP",        # pyupgrade
+    "B",         # bugbear
+    "C4",        # comprehensions
+    "SIM",       # simplify
+    "PTH",       # use pathlib
+    "RET",       # return hygiene
+    "ARG",       # unused arguments
+    "PIE",
+    "RUF",
+    "S",         # flake8-bandit
+    "ANN",       # require annotations (mypy --strict needs them anyway)
+]
+ignore = [
+    # `subprocess` with a fixed argv is how a build tool invokes cargo and
+    # ruff. The security control for *agent* execution is the exec broker in
+    # dwkd-broker, not a lint on our own developer tooling; flagging it here
+    # would train contributors to ignore S-rules.
+    "S603", "S607",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"**/tests/**" = ["S101"]     # assert is how a test asserts
+"tests/**" = ["S101"]
+# Generated from schemas/. Long lines carry schema patterns verbatim; wrapping
+# them would make the generated code diverge from the schema text a reviewer
+# compares it with.
+"runtime/src/direwolf/proto/**" = ["E501"]
+
+[tool.ruff.format]
+docstring-code-format = true
+# Generated bindings are laid out by their generator and checked for drift
+# against it. Reformatting them here would make `ruff format` and the drift
+# check fight over the same bytes.
+exclude = ["runtime/src/direwolf/proto/**"]
+
+# ---------------------------------------------------------------------------
+# mypy - static typing.  `strict` from the first commit: relaxing later is a
+# decision someone has to make, ratcheting later never happens.
+# ---------------------------------------------------------------------------
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_unreachable = true
+warn_unused_configs = true
+enable_error_code = ["ignore-without-code", "redundant-expr", "truthy-bool"]
+exclude = ["^tests/architecture/fixtures/"]
+
+# ---------------------------------------------------------------------------
+# pytest
+# ---------------------------------------------------------------------------
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["runtime/tests", "tools/dwcheck/tests", "tests"]
+addopts = "-ra --strict-markers --strict-config --ignore=tests/architecture/fixtures"
+norecursedirs = ["tests/architecture/fixtures", ".venv", "target"]
+markers = [
+    "slow: invokes a compiler or a package manager; excluded from the fast loop",
+]

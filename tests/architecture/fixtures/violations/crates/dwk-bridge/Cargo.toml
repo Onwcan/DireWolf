@@ -1,0 +1,10 @@
+# FIXTURE: the crate somebody adds at M3 to "share a little code between
+# authority and broker" (RS007). It breaks no named direction rule, because no
+# named rule is about it.
+[package]
+name = "dwk-bridge"
+version = "0.0.0"
+
+[dependencies]
+dwkd-authority = { path = "../dwkd-authority" }
+dwkd-broker = { path = "../dwkd-broker" }

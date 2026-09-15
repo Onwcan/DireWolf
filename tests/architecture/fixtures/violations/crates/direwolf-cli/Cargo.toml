@@ -1,0 +1,9 @@
+# FIXTURE: the CLI must hold no authority (RS003), and every third-party crate
+# must be inherited from [workspace.dependencies] (RS005) rather than pinned here.
+[package]
+name = "direwolf-cli"
+version = "0.0.0"
+
+[dependencies]
+dwkd-authority = { path = "../dwkd-authority" }
+serde = "1.0"

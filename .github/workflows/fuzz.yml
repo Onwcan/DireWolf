@@ -1,0 +1,77 @@
+name: Fuzz
+
+# Fuzzing of dwk-proto's hostile-input surface: framing, the strict lexer,
+# canonical JSON and envelope/version handling.
+#
+# Two engines, reported separately and never conflated:
+#   * `make fuzz-smoke` -- stable Rust, a deterministic mutation loop. NOT
+#     coverage-guided. Also type-checks the cargo-fuzz targets.
+#   * `make fuzz`       -- libFuzzer through cargo-fuzz, coverage-guided, on a
+#     date-pinned nightly (scripts/dw.py FUZZ_NIGHTLY).
+#
+# SECURITY POSTURE: read-only token; no secrets, so the scheduled run cannot
+# fail for want of one and a fork's pull request cannot reach one; actions
+# pinned by commit SHA; tools installed pinned and --locked, never piped from a
+# URL. Crash inputs are printed to the job log by libFuzzer; nothing is uploaded.
+
+on:
+  schedule:
+    # Weekly, Monday 03:17 UTC. Off the hour so it does not queue behind
+    # everyone else's cron.
+    - cron: "17 3 * * 1"
+  workflow_dispatch:
+    inputs:
+      seconds:
+        description: Seconds per target for the coverage-guided run
+        required: false
+        default: "900"
+  pull_request:
+    # A short run on changes that can affect what the fuzzers exercise.
+    paths:
+      - "crates/dwk-proto/**"
+      - "fuzz/**"
+      - "tests/protocol/vectors/**"
+      - ".github/workflows/fuzz.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fuzz-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  smoke:
+    name: stable mutation fuzzing (make fuzz-smoke)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.0.1
+      - uses: ./.github/actions/setup
+      - name: make fuzz-smoke
+        env:
+          # 60 s per target on pull requests; 10 minutes on the schedule.
+          DWK_FUZZ_SECONDS: ${{ github.event_name == 'pull_request' && '60' || '600' }}
+        run: make fuzz-smoke
+
+  libfuzzer:
+    name: coverage-guided (make fuzz)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.0.1
+      - uses: ./.github/actions/setup
+      - name: Install the pinned nightly and cargo-fuzz
+        # Versions match scripts/dw.py; test_dev_surface.py asserts they agree.
+        run: |
+          rustup toolchain install nightly-2026-09-01 --profile minimal
+          cargo install cargo-fuzz --version 0.13.2 --locked
+      - name: make fuzz
+        env:
+          # Passed as data through the environment, never interpolated into the
+          # script; scripts/dw.py rejects anything but a positive integer.
+          DW_FUZZ_SECONDS: ${{ github.event_name == 'pull_request' && '30' || inputs.seconds || '900' }}
+        run: make fuzz
