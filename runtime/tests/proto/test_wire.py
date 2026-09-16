@@ -22,7 +22,6 @@ from direwolf.wire.errors import (
     MAX_DEPTH,
     MAX_DEPTH_EXCEEDED,
     MAX_FRAME_BODY,
-    NORMALIZATION_COLLISION,
     NUMBER_OUT_OF_DOMAIN,
     SCHEMA_VIOLATION,
     SUPPORTED_ENVELOPE,
@@ -170,10 +169,13 @@ def test_keys_are_checked_before_a_dict_can_collapse_them() -> None:
     assert _code(parse, b'{"a":{"b":[{"c":1,"c":2}]}}', SAFE_INTEGER) == DUPLICATE_KEY
     escaped_v = '{"v":1,"' + BACKSLASH + 'u0076":2}'
     assert _code(parse, escaped_v.encode(), SAFE_INTEGER) == DUPLICATE_KEY
+    # Keys equal only under Unicode NFC are two members, not a duplicate: no
+    # reader normalises, so the decision cannot depend on which Unicode version
+    # the host library ships (ADR-0034).
     collision = json.dumps({"caf" + chr(0xE9): 1, "cafe" + chr(0x301): 2}, ensure_ascii=False)
-    assert _code(parse, collision.encode(), SAFE_INTEGER) == NORMALIZATION_COLLISION
+    assert len(parse(collision.encode(), SAFE_INTEGER)) == 2  # type: ignore[arg-type]
     kelvin = json.dumps({"K": 1, chr(0x212A): 2})
-    assert _code(parse, kelvin.encode(), SAFE_INTEGER) == NORMALIZATION_COLLISION
+    assert len(parse(kelvin.encode(), SAFE_INTEGER)) == 2  # type: ignore[arg-type]
     assert parse(b'[{"a":1},{"a":2}]', SAFE_INTEGER) == [{"a": 1}, {"a": 2}]
 
 

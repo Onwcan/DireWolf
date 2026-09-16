@@ -46,8 +46,3 @@ Cost unchanged: two toolchains, schema-driven codegen against drift, a higher ba
 
 Rust build times or contributor scarcity measurably slow kernel security fixes (median time-to-merge for kernel security fixes > 2 weeks over a quarter). Or: if `dwkd-broker` proves to be mostly container-API glue, move it to Go and keep Rust for authority only.
 
-## Notes
-
-Appended notes record reviews this ADR requires. They do not change the decision above.
-
-- **2026-09-15 · M2 · first additions to the authority dependency set.** `dwk-proto`, which `dwkd-authority` links from M3, adds `unicode-normalization` 0.1.25, `tinyvec` 1.13.2 and `tinyvec_macros` 0.1.1 to the authority closure — no HTTP, TLS, container or content-parsing crate. Per-dependency review (why, responsibility, `unsafe`, parser surface, licence): [ADR-0033](0033-protocol-source-of-truth-and-tcb-dependencies.md) §4. Allowlisted in `architecture.toml` `[authority]` and enforced over the transitive closure by `dwcheck` RS004/RS006. The DWKP JSON parser referred to in (d) is in-tree rather than a library; ADR-0033 §3 records why and what it is tested against.

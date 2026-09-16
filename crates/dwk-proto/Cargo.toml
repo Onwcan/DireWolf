@@ -13,9 +13,10 @@ publish = false
 workspace = true
 
 # TCB-destined: from M3 this crate is linked into dwkd-authority, so its
-# dependency closure is the authority's. See ADR-0033 and architecture.toml.
+# dependency closure is the authority's. It is empty, and that is the strongest
+# form of the ADR-0019 claim: no protocol decision consults a Unicode database
+# or any other third-party table (ADR-0033, ADR-0034, architecture.toml).
 [dependencies]
-unicode-normalization = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }

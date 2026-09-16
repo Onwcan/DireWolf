@@ -135,6 +135,19 @@
    "family": "event",
    "input": "{\n \"v\": 1,\n \"id\": \"evt_01M24BB8G4EKX8P1DMZ95GB82V\",\n \"type\": \"event\",\n \"schema\": \"direwolf.session.lease_acquired\",\n \"schema_version\": 1,\n \"ts\": \"2026-09-12T09:14:22.481Z\",\n \"session_id\": \"ses_01M24BB8G2E87V1ZPZXQ7DSCVW\",\n \"payload\": {\n  \"epoch\": 0\n }\n}\n",
    "expect": "invalid"
+  },
+  {
+   "name": "DWCP preserves two keys that are equal only under NFC",
+   "family": "dwcp",
+   "expect": "error",
+   "input": "{\"v\":1,\"id\":\"msg_01M24BB8G0E87TVJX9GX248ADD\",\"type\":\"response\",\"schema\":\"direwolf.error\",\"schema_version\":1,\"ts\":\"2026-09-12T09:14:22.481Z\",\"causation_id\":\"msg_01M24BB8G1FQR94D2PF2XVQDV4\",\"payload\":{\"code\":\"RATE_LIMITED\",\"detail\":\"slow down\",\"retryable\":true,\"caf\u00e9\":1,\"cafe\u0301\":2}}",
+   "canonical": "{\"causation_id\":\"msg_01M24BB8G1FQR94D2PF2XVQDV4\",\"id\":\"msg_01M24BB8G0E87TVJX9GX248ADD\",\"payload\":{\"cafe\u0301\":2,\"caf\u00e9\":1,\"code\":\"RATE_LIMITED\",\"detail\":\"slow down\",\"retryable\":true},\"schema\":\"direwolf.error\",\"schema_version\":1,\"ts\":\"2026-09-12T09:14:22.481Z\",\"type\":\"response\",\"v\":1}"
+  },
+  {
+   "name": "an event record with NFC-colliding keys is retained verbatim",
+   "family": "event",
+   "expect": "known",
+   "input": "{\"v\":1,\"id\":\"evt_01M24BB8G4EKX8P1DMZ95GB82V\",\"type\":\"event\",\"schema\":\"direwolf.session.lease_acquired\",\"schema_version\":1,\"ts\":\"2026-09-12T09:14:22.481Z\",\"session_id\":\"ses_01M24BB8G2E87V1ZPZXQ7DSCVW\",\"payload\":{\"epoch\":48,\"caf\u00e9\":1,\"cafe\u0301\":2}}"
   }
  ]
 }

@@ -1,0 +1,90 @@
+{
+ "baseline_version": 1,
+ "note": "Expected outcomes, reviewed by a human. `make eval-check` fails on a regression against this file. Never regenerated automatically in CI.",
+ "evals": {
+  "harness-selftest/checkpoints": {
+   "status": "pass",
+   "min_score": 1.0
+  },
+  "harness-selftest/crash": {
+   "status": "pass",
+   "min_score": 1.0
+  },
+  "harness-selftest/pause-resume": {
+   "status": "pass",
+   "min_score": 1.0
+  },
+  "harness-selftest/replay-determinism": {
+   "status": "pass",
+   "min_score": 1.0
+  },
+  "harness-selftest/replay-integrity": {
+   "status": "pass",
+   "min_score": 1.0
+  },
+  "harness-selftest/test-environment": {
+   "status": "pass",
+   "min_score": 1.0
+  },
+  "harness-selftest/timeout": {
+   "status": "pass",
+   "min_score": 1.0
+  },
+  "pending-kernel/approval-binding-drift": {
+   "status": "pending",
+   "pending_reason": "requires M6: there is no approval registry and no binding hash."
+  },
+  "pending-kernel/capability-attenuation": {
+   "status": "pending",
+   "pending_reason": "requires M3: there is no capability lattice."
+  },
+  "pending-kernel/epoch-fencing": {
+   "status": "pending",
+   "pending_reason": "requires M3: the kernel owns the epoch counter; M2 defines only the field."
+  },
+  "pending-kernel/hostile-dwkp-client": {
+   "status": "pending",
+   "pending_reason": "requires M3: there is no authority process to lie to."
+  },
+  "pending-kernel/model-egress-privacy": {
+   "status": "pending",
+   "pending_reason": "requires M7: there is no provider path, and evals make no live model call."
+  },
+  "pending-kernel/path-traversal": {
+   "status": "pending",
+   "pending_reason": "requires M4: there is no filesystem broker and no canonicaliser."
+  },
+  "pending-kernel/peer-credential-check": {
+   "status": "pending",
+   "pending_reason": "requires M3: there is no socket, and no peer to check."
+  },
+  "pending-kernel/policy-denies-by-default": {
+   "status": "pending",
+   "pending_reason": "requires M3: there is no policy engine."
+  },
+  "pending-kernel/sandbox-egress": {
+   "status": "pending",
+   "pending_reason": "requires M5: there is no sandbox and no egress proxy."
+  },
+  "protocol-compat/canonical-determinism": {
+   "status": "pass",
+   "min_score": 1.0
+  },
+  "protocol-compat/three-rules": {
+   "status": "pass",
+   "min_score": 1.0
+  },
+  "protocol-security/framing": {
+   "status": "pass",
+   "min_score": 1.0
+  },
+  "protocol-security/invalid-vectors": {
+   "status": "pass",
+   "min_score": 1.0
+  },
+  "protocol-security/reserved-operations": {
+   "status": "pass",
+   "min_score": 1.0
+  }
+ }
+}

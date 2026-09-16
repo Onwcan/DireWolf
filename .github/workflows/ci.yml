@@ -61,10 +61,41 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.0.1
+        with:
+          # Full history, deliberately, and only in this job. `dwcheck adr`
+          # anchors each accepted ADR to the revision in which it became
+          # Accepted; with the default shallow checkout that revision is
+          # truncated away, and the check refuses to run rather than compare
+          # against a stand-in. Every other job keeps the default depth.
+          fetch-depth: 0
       - uses: ./.github/actions/setup
         with:
           rust: "false"
       - run: make arch
+      # `make arch` above anchors to HEAD, which proves the working tree matches
+      # what was committed. The gate is here: the anchor is the merge base with
+      # the target branch, which is outside the pull request and which branch
+      # protection keeps that way. docs/adr/accepted.sha256 cannot substitute --
+      # a change that edits an accepted ADR can update that file in the same
+      # commit, which is precisely the case this step catches.
+      - name: Accepted ADRs must match the history that accepted them
+        env:
+          # Through the environment, not string interpolation: a branch name is
+          # attacker-controlled on a fork pull request.
+          BASE_REF: ${{ github.base_ref }}
+          BEFORE: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          if [ -n "${BASE_REF:-}" ]; then
+            git fetch --no-tags --quiet origin "+refs/heads/${BASE_REF}:refs/remotes/origin/${BASE_REF}"
+            base="$(git merge-base "origin/${BASE_REF}" HEAD)"
+          elif [ -n "${BEFORE:-}" ] && [ "${BEFORE}" != "0000000000000000000000000000000000000000" ]; then
+            base="${BEFORE}"
+          else
+            base="HEAD"
+          fi
+          echo "anchoring accepted ADRs to ${base}"
+          uv run --frozen python -m dwcheck --adr-base "${base}" --require-adr-history adr
       # The gate is not "a checker is configured" but "the checker rejects a
       # known violation". The proof runs here, against the deliberately-invalid
       # fixture tree, and fails the job if the checker ever accepts it.
@@ -92,6 +123,26 @@ jobs:
       # generated (ADR-0033). A hand edit, or a Rust change committed without
       # `make schema`, fails here rather than surfacing as a parity bug.
       - run: make schema-check
+
+  evals:
+    name: evals (make eval-check)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.0.1
+      - uses: ./.github/actions/setup
+      # The deterministic subset: no secrets, no model call, no network. It
+      # compares against evals/baselines/main.json and fails on a regression;
+      # nothing here rewrites that file. Pending suites are reported as pending,
+      # which is neither a pass nor a skip.
+      - run: make eval-check
+      - name: Keep the machine-readable results when the gate fails
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: eval-results
+          path: target/evals/results.jsonl
+          if-no-files-found: ignore
+          retention-days: 7
 
   test:
     name: tests (make test)
@@ -145,7 +196,7 @@ jobs:
   ci:
     name: CI
     runs-on: ubuntu-latest
-    needs: [format, lint, typecheck, architecture, schema, test, supply-chain, build]
+    needs: [format, lint, typecheck, architecture, schema, evals, test, supply-chain, build]
     if: always()
     steps:
       - name: Fail if any job did not succeed

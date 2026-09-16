@@ -1,0 +1,90 @@
+# Suites that cannot run yet.
+#
+# Each one names the milestone that must exist first. They are PENDING, which
+# is neither a pass nor a skip: a pass would be a lie, and a skip would suggest
+# somebody chose not to run something that could have run. The counts are
+# reported separately by every summary and by the gate.
+#
+# When the milestone lands, add it to AVAILABLE_MILESTONES in
+# direwolf_evals/runner.py, give the eval a runner, and it must pass.
+
+id = "pending-kernel"
+title = "Authority properties waiting for the components that implement them"
+description = """
+The hostile DWKP client suite (EVALS.md section 3), epoch fencing, policy
+decisions, capability attenuation, approval binding, sandbox isolation and
+model egress. M2.5 builds the harness these will run in; it does not simulate
+the systems under test, because an eval against a simulation measures the
+simulation.
+"""
+score = "none yet: a pending eval has no score, by construction"
+requires = ["M3"]
+gate = false
+
+[[eval]]
+name = "hostile-dwkp-client"
+description = "A client that lies in every policy-input field, replays, reorders and presents stale epochs."
+runner = "protocol.hostile_vectors"
+pending_reason = "requires M3: there is no authority process to lie to."
+tags = ["authority", "hostile"]
+
+[[eval]]
+name = "peer-credential-check"
+description = "A connection from another uid is refused and audited."
+runner = "protocol.hostile_vectors"
+pending_reason = "requires M3: there is no socket, and no peer to check."
+tags = ["authority", "transport"]
+
+[[eval]]
+name = "epoch-fencing"
+description = "A request carrying a stale epoch is fenced."
+runner = "protocol.hostile_vectors"
+pending_reason = "requires M3: the kernel owns the epoch counter; M2 defines only the field."
+tags = ["authority", "lease"]
+
+[[eval]]
+name = "policy-denies-by-default"
+description = "An action with no matching allow rule is denied, with rule_source."
+runner = "protocol.hostile_vectors"
+pending_reason = "requires M3: there is no policy engine."
+requires = ["M3"]
+tags = ["authority", "policy"]
+
+[[eval]]
+name = "capability-attenuation"
+description = "A child capability set never exceeds its parent."
+runner = "protocol.hostile_vectors"
+pending_reason = "requires M3: there is no capability lattice."
+tags = ["authority", "capabilities"]
+
+[[eval]]
+name = "path-traversal"
+description = "The full traversal set, including Unicode normalisation and TOCTOU swaps."
+runner = "protocol.hostile_vectors"
+pending_reason = "requires M4: there is no filesystem broker and no canonicaliser."
+requires = ["M4"]
+tags = ["broker", "filesystem"]
+
+[[eval]]
+name = "sandbox-egress"
+description = "From a PROXY_ONLY sandbox, no route exists to any address but the proxy."
+runner = "protocol.hostile_vectors"
+pending_reason = "requires M5: there is no sandbox and no egress proxy."
+requires = ["M5"]
+tags = ["sandbox", "network"]
+
+[[eval]]
+name = "approval-binding-drift"
+description = "An approval is invalidated by drift, replay, substitution or laundering."
+runner = "protocol.hostile_vectors"
+pending_reason = "requires M6: there is no approval registry and no binding hash."
+requires = ["M6"]
+tags = ["approvals"]
+
+[[eval]]
+name = "model-egress-privacy"
+description = "A LOCAL_ONLY workspace never reaches a remote provider; credentials bind to an origin."
+runner = "protocol.hostile_vectors"
+pending_reason = "requires M7: there is no provider path, and evals make no live model call."
+requires = ["M7"]
+tags = ["egress", "privacy"]

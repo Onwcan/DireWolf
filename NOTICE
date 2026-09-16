@@ -25,18 +25,15 @@ pinned in Cargo.lock, fuzz/Cargo.lock and uv.lock, and remain under their own
 licences. No third-party attribution notice is therefore required in this file
 at present.
 
-As of milestone M2:
+As of the M2 closeout:
 
 - The binaries built from this workspace (`direwolf`, `dwkd-authority`,
-  `dwkd-broker`) link no third-party crate.
-- The `dwk-proto` library, and the `protogen` build tool that links it, depend
-  on `unicode-normalization` (MIT OR Apache-2.0), `tinyvec`
-  (Zlib OR Apache-2.0 OR MIT) and `tinyvec_macros` (MIT OR Apache-2.0 OR Zlib).
-  `dwk-proto` is not yet linked into any shipped binary.
+  `dwkd-broker`) link no third-party crate, and neither does the `dwk-proto`
+  library they will link from M3.
 - Development, test and fuzzing tools only: `proptest`, `serde_json` and their
-  dependencies (Rust dev-dependencies), `libfuzzer-sys` (fuzz/), and the Python
-  development environment in uv.lock. The `direwolf` Python package declares no
-  runtime dependency.
+  dependencies (Rust dev-dependencies), `libfuzzer-sys` and its build
+  dependencies (fuzz/), and the Python development environment in uv.lock. The
+  `direwolf` Python package declares no runtime dependency.
 
 If a distributed artifact comes to include third-party code, the conditions of
 the licence chosen for each included package (for example, reproducing its

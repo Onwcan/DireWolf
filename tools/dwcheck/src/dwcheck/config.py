@@ -13,6 +13,8 @@ from pathlib import Path
 from typing import Any
 
 __all__ = [
+    "AdrException",
+    "AdrSettings",
     "ArchitectureConfig",
     "ConfigError",
     "CrateRule",
@@ -69,6 +71,28 @@ class CrateRule:
 
 
 @dataclass(frozen=True, slots=True)
+class AdrException:
+    """One authorised departure from an ADR's accepted content in history.
+
+    ``sha256`` pins the content the exception authorises, so the override covers
+    exactly one correction rather than making the file mutable from then on.
+    """
+
+    file: str
+    sha256: str
+    reason: str
+
+
+@dataclass(frozen=True, slots=True)
+class AdrSettings:
+    """Where the ADRs live, where their digests are recorded, and the overrides."""
+
+    directory: str
+    manifest: str
+    history_exceptions: tuple[AdrException, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
 class CratesSettings:
     manifest: str
     directory: str
@@ -101,6 +125,7 @@ class ArchitectureConfig:
     authority_crates: tuple[str, ...]
     authority_allowed_third_party: tuple[str, ...]
     docs_exempt_paths: tuple[str, ...]
+    adr: AdrSettings = field(default=AdrSettings("docs/adr", "docs/adr/accepted.sha256"))
     rules_file: Path = field(default=Path("architecture.toml"))
 
 
@@ -128,6 +153,7 @@ def load(root: Path, rules_file: Path | None = None) -> ArchitectureConfig:
     version_tbl = _table(raw, "version", path)
     crates_tbl = _table(raw, "crates", path)
     docs_tbl = _table(raw, "docs", path)
+    adr_tbl = _table(raw, "adr", path)
     authority_tbl = _table(raw, "authority", path)
 
     return ArchitectureConfig(
@@ -195,6 +221,18 @@ def load(root: Path, rules_file: Path | None = None) -> ArchitectureConfig:
         authority_crates=_strs(authority_tbl, "crates", path),
         authority_allowed_third_party=_strs(authority_tbl, "allowed_third_party", path),
         docs_exempt_paths=_strs(docs_tbl, "exempt_paths", path),
+        adr=AdrSettings(
+            directory=_str(adr_tbl, "directory", path),
+            manifest=_str(adr_tbl, "manifest", path),
+            history_exceptions=tuple(
+                AdrException(
+                    file=_str(e, "file", path),
+                    sha256=_sha256(e, "sha256", path),
+                    reason=_str(e, "reason", path),
+                )
+                for e in _tables(adr_tbl, "history_exceptions", path)
+            ),
+        ),
     )
 
 
@@ -228,6 +266,15 @@ def _choice(d: dict[str, Any], key: str, allowed: tuple[str, ...], path: Path) -
     value = _str(d, key, path)
     if value not in allowed:
         raise ConfigError(f"{path}: {key!r} must be one of {allowed}, got {value!r}")
+    return value
+
+
+def _sha256(d: dict[str, Any], key: str, path: Path) -> str:
+    """A digest that is not a digest would make an override match nothing, and a
+    silently-inert override is worse than none: it reads as authorised."""
+    value = _str(d, key, path).strip().lower()
+    if len(value) != 64 or any(c not in "0123456789abcdef" for c in value):
+        raise ConfigError(f"{path}: {key!r} must be a 64-character hex sha256, got {value!r}")
     return value
 
 

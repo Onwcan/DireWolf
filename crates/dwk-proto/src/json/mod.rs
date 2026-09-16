@@ -2,8 +2,8 @@
 //!
 //! These three are the whole of the crate's JSON handling. There is no
 //! general-purpose serializer and no "lenient" parse mode: every profile
-//! enforces UTF-8, RFC 8259 grammar, the depth limit and key uniqueness under
-//! NFC. Profiles differ only in which numbers they admit.
+//! enforces UTF-8, RFC 8259 grammar, the depth limit and byte-wise key
+//! uniqueness. Profiles differ only in which numbers they admit.
 
 pub mod jcs;
 pub mod lex;

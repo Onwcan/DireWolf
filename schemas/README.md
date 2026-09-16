@@ -57,7 +57,7 @@ tested there, not by JSON Schema ([ADR-0032](../docs/adr/0032-wire-contract-fram
 - frame length (1 B – 1 MiB) and content type;
 - well-formed UTF-8, strict RFC 8259 grammar, no lone surrogate escapes;
 - nesting depth ≤ 32;
-- duplicate keys, and keys that collide under Unicode NFC;
+- duplicate keys (compared as text: no normalisation, ADR-0034);
 - the DWKP integer-only number domain;
 - RFC 8785 canonical encoding.
 

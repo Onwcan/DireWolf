@@ -1,0 +1,40 @@
+# Hostile protocol input, decided by the real decoder.
+#
+# WHAT THIS SUITE MEASURES: that malformed, oversized, truncated, ambiguous or
+# reserved DWKP is structurally rejected. WHAT IT DOES NOT: anything about
+# authority. There is no kernel yet, so nothing here is evidence that a
+# well-formed request would be authorised — those suites are pending and listed
+# by `python -m direwolf_evals inventory`.
+
+id = "protocol-security"
+title = "Hostile DWKP input is structurally rejected"
+description = """
+The M2 decoder, fed the shared adversarial vectors and constructed frame-level
+attacks. Each eval reports the fraction decided exactly as the contract
+specifies; anything below 1.0 means the wire contract and the implementation
+disagree.
+"""
+score = "rejection rate: the fraction of hostile inputs refused with exactly the specified error"
+requires = ["M2"]
+gate = true
+
+[[eval]]
+name = "invalid-vectors"
+description = "Every shared invalid vector is rejected with its code, violation and path."
+runner = "protocol.hostile_vectors"
+fixture = "tests/protocol/vectors/invalid.json"
+scorer = "rejection_rate"
+tags = ["protocol", "hostile", "vectors"]
+
+[[eval]]
+name = "framing"
+description = "Sizes, truncation, unknown content type, concatenation, and a poisoned decoder."
+runner = "protocol.framing"
+scorer = "rejection_rate"
+tags = ["protocol", "hostile", "framing"]
+
+[[eval]]
+name = "reserved-operations"
+description = "Every reserved operation name, and three invented ones, are unknown operations."
+runner = "protocol.reserved_operations"
+tags = ["protocol", "hostile", "operations"]

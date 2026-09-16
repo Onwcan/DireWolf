@@ -6,7 +6,7 @@
 //! be logged and skipped, not treated as fatal.
 //!
 //! What is *not* relaxed: lexical strictness (UTF-8, grammar, depth, duplicate
-//! and NFC-colliding keys), envelope version support, and validation of every
+//! keys), envelope version support, and validation of every
 //! field this version does declare. Forward compatibility means tolerating what
 //! a newer peer adds, not accepting what no peer could mean.
 //!

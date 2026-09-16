@@ -2,8 +2,8 @@
 //!
 //! # Why this exists instead of `serde_json`
 //!
-//! Duplicate-key and normalisation-collision checks must observe the **lexical**
-//! object, before any map has collapsed two members into one. A general-purpose
+//! Duplicate-key checks must observe the **lexical** object, before any map has
+//! collapsed two members into one. A general-purpose
 //! deserializer can be driven to expose that, but using `serde_json` merely as a
 //! tokenizer would put it and its locked dependencies — ~66 k source lines, ~430
 //! of them containing `unsafe` (byte scanning, number formatting) — into the
@@ -23,9 +23,10 @@
 //! 3. No container opens beyond [`MAX_DEPTH`] (`PROTOCOL_MAX_DEPTH_EXCEEDED`),
 //!    checked **before** the container is descended into.
 //! 4. No object has two members whose keys are byte-identical
-//!    (`PROTOCOL_DUPLICATE_KEY`) or equal after Unicode NFC
-//!    (`PROTOCOL_NORMALIZATION_COLLISION`), checked when the second key is read
-//!    and **before** its value is parsed.
+//!    (`PROTOCOL_DUPLICATE_KEY`), checked when the second key is read and
+//!    **before** its value is parsed. Keys are compared as bytes; normalisation
+//!    is not consulted, and DWKP's rejection of any undeclared member is what
+//!    makes a normalisation collision unrepresentable there (ADR-0034).
 //! 5. Numbers are inside the profile's domain (`PROTOCOL_NUMBER_OUT_OF_DOMAIN`).
 //!
 //! Recursion depth is bounded by [`MAX_DEPTH`], so the lexer cannot exhaust the
@@ -35,7 +36,7 @@
 use std::collections::HashMap;
 
 use crate::error::{ErrorCode, ProtocolError, quote_key};
-use crate::json::value::{Number, Object, Value, nfc};
+use crate::json::value::{Number, Object, Value};
 use crate::limits::{MAX_DEPTH, MAX_SAFE_INTEGER};
 
 /// Which numbers a profile admits.
@@ -204,7 +205,9 @@ impl Parser<'_> {
         let depth = self.enter(depth)?;
         self.bump(); // '{'
         let mut members: Vec<(String, Value)> = Vec::new();
-        // NFC form of each key -> index of the member that introduced it.
+        // Each key -> the index of the member that introduced it. Keys are
+        // compared by bytes: no Unicode database is consulted anywhere in a
+        // protocol decision (ADR-0034).
         let mut seen: HashMap<String, usize> = HashMap::new();
         self.skip_ws();
         if self.peek() == Some(b'}') {
@@ -218,28 +221,15 @@ impl Parser<'_> {
             }
             let key_offset = self.pos;
             let key = self.string()?;
-            let normalized = nfc(&key);
-            if let Some(&index) = seen.get(&normalized) {
-                let existing = members.get(index).map_or("", |(k, _)| k.as_str());
+            if seen.contains_key(&key) {
                 self.path.push(Segment::Key(key.clone()));
-                let err = if existing == key {
-                    self.error(
-                        ErrorCode::DuplicateKey,
-                        format!("duplicate key {}", quote_key(&key)),
-                    )
-                } else {
-                    self.error(
-                        ErrorCode::NormalizationCollision,
-                        format!(
-                            "key {} collides with {} under Unicode NFC",
-                            quote_key(&key),
-                            quote_key(existing)
-                        ),
-                    )
-                };
+                let err = self.error(
+                    ErrorCode::DuplicateKey,
+                    format!("duplicate key {}", quote_key(&key)),
+                );
                 return Err(err.at_offset(key_offset));
             }
-            seen.insert(normalized, members.len());
+            seen.insert(key.clone(), members.len());
             self.skip_ws();
             self.expect(b':', "expected ':' after an object key")?;
             self.skip_ws();

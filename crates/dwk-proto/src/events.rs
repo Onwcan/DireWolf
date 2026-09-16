@@ -7,7 +7,7 @@
 //! bytes rather than a replacement for them.
 //!
 //! [`EventRecord::read`] fails only when the bytes are not a record at all:
-//! oversized, not UTF-8, not grammatical JSON, a duplicate or NFC-colliding
+//! oversized, not UTF-8, not grammatical JSON, a duplicate
 //! key, too deep, or not an object. Those are corruption, and M8 quarantines
 //! them. Every other outcome — a known event, an unknown schema, an unknown
 //! schema version, an unsupported envelope version, even a known event whose

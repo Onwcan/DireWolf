@@ -185,6 +185,89 @@ fn preservation_never_relaxes_lexical_strictness() {
 }
 
 #[test]
+fn a_normalisation_collision_is_an_unknown_field_in_dwkp_and_kept_by_dwcp() {
+    // ADR-0034. The two keys below are equal under Unicode NFC and differ as
+    // text. No reader normalises, so the outcome is the same whatever Unicode
+    // version the host library ships -- which is the property that failed
+    // before, because Rust ships 17.0 and CPython 3.12 ships 15.0.
+    let pre = char::from_u32(0xE9).unwrap();
+    let dec = format!("e{}", char::from_u32(0x301).unwrap());
+    let colliding = format!(r#""caf{pre}":1,"caf{dec}":2"#);
+
+    // DWKP: neither name is declared, so the first is already an unknown field.
+    let dwkp_doc = format!(
+        r#"{{"v":1,"id":"{MSG}","type":"request","schema":"direwolf.heartbeat","schema_version":1,
+            "ts":"{TS}","session_id":"{SES}","epoch":47,"payload":{{{colliding}}}}}"#
+    );
+    let err = dwkp::decode_body(dwkp_doc.as_bytes()).unwrap_err();
+    assert_eq!(err.code, ErrorCode::SchemaViolation);
+    assert_eq!(err.violation, Some(Violation::UnknownField));
+    assert_eq!(err.path, format!("/payload/caf{pre}"));
+
+    // DWCP: both members are preserved, and re-emission keeps both.
+    let dwcp_doc = format!(
+        r#"{{"v":1,"id":"{MSG}","type":"response","schema":"direwolf.error","schema_version":1,
+            "ts":"{TS}","causation_id":"{CAUSE}",
+            "payload":{{"code":"E","detail":"d","retryable":false,{colliding}}}}}"#
+    );
+    let message = dwcp::decode(dwcp_doc.as_bytes()).expect("DWCP preserves both members");
+    let reemitted = message.to_canonical_bytes().unwrap();
+    let Value::Object(envelope) = json::parse(&reemitted, ParseOptions::ijson()).unwrap() else {
+        panic!("a message is an object")
+    };
+    let Some(Value::Object(payload)) = envelope.get("payload") else {
+        panic!("payload is an object")
+    };
+    let number = |n: i64| Value::Number(json::Number::from_i64(n).unwrap());
+    assert_eq!(payload.get(&format!("caf{pre}")), Some(&number(1)));
+    assert_eq!(payload.get(&format!("caf{dec}")), Some(&number(2)));
+
+    // Event records keep the bytes regardless.
+    let event = format!(
+        r#"{{"v":1,"id":"{EVT}","type":"event","schema":"direwolf.session.lease_acquired",
+            "schema_version":1,"ts":"{TS}","session_id":"{SES}","payload":{{"epoch":48,{colliding}}}}}"#
+    );
+    let record = EventRecord::read(event.as_bytes()).expect("a record");
+    assert_eq!(record.raw(), event.as_bytes());
+}
+
+#[test]
+fn every_name_dwkp_interprets_is_ascii() {
+    // The reason the test above can hold without a Unicode database: a key that
+    // is not byte-equal to a declared name cannot be made equal to one by
+    // normalisation, because every declared name is ASCII. If a future message
+    // declares a non-ASCII field, this fails and ADR-0034 must be revisited.
+    for spec in dwk_proto::dwkp::registry::MESSAGES {
+        assert!(spec.schema.is_ascii(), "schema {}", spec.schema);
+    }
+    for key in dwk_proto::envelope::ENVELOPE_KEYS {
+        assert!(key.is_ascii(), "envelope key {key}");
+    }
+    for (path, schema) in dwk_proto::schema::emit::all() {
+        let names = schema_property_names(&schema);
+        for name in names {
+            assert!(name.is_ascii(), "{path} declares a non-ASCII name: {name}");
+        }
+    }
+}
+
+/// Every `properties` key in an emitted schema, at any depth.
+fn schema_property_names(value: &Value) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Value::Object(object) = value {
+        for (key, child) in object.iter() {
+            if key == "properties"
+                && let Value::Object(properties) = child
+            {
+                out.extend(properties.iter().map(|(name, _)| name.to_owned()));
+            }
+            out.extend(schema_property_names(child));
+        }
+    }
+    out
+}
+
+#[test]
 fn a_response_with_a_version_this_build_lacks_is_unsupported_in_every_family() {
     let doc = format!(
         r#"{{"v":2,"id":"{MSG}","type":"response","schema":"direwolf.ack","schema_version":1,"ts":"{TS}","causation_id":"{CAUSE}","payload":{{}}}}"#

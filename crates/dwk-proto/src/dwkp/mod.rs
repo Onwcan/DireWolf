@@ -5,7 +5,7 @@
 //! (ADR-0023). Decoding a DWKP frame body, in order:
 //!
 //! 1. [`crate::json::parse`] with the DWKP profile: UTF-8, RFC 8259 grammar,
-//!    depth ≤ 32, no duplicate or NFC-colliding keys, safe integers only.
+//!    depth ≤ 32, no duplicate keys, safe integers only.
 //! 2. [`crate::envelope::read_preamble`]: `v` supported, then `type`, `schema`,
 //!    `schema_version`.
 //! 3. Registry lookup of `(type, schema)`. Unregistered — including every

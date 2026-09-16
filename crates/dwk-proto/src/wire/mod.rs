@@ -27,8 +27,7 @@ pub mod id;
 pub mod macros;
 pub mod scalar;
 
-use crate::error::{ErrorCode, ProtocolError, Violation, quote_key};
-use crate::json::value::nfc;
+use crate::error::{ProtocolError, Violation, quote_key};
 use crate::json::{Number, Object, Value};
 use crate::schema::Defs;
 
@@ -142,23 +141,9 @@ pub fn partition_members(
             known.push((key, value));
             continue;
         }
-        let normalized = nfc(&key);
-        if let Some(field) = declared.iter().find(|d| nfc(d) == normalized) {
-            let pointer = format!(
-                "{}/{}",
-                cx.pointer(),
-                key.replace('~', "~0").replace('/', "~1")
-            );
-            return Err(ProtocolError::new(
-                ErrorCode::NormalizationCollision,
-                format!(
-                    "key {} differs from declared field {} only by Unicode normalisation",
-                    quote_key(&key),
-                    quote_key(field)
-                ),
-            )
-            .with_path(&pointer));
-        }
+        // Every declared name is ASCII (asserted by a test), so a key that is
+        // not byte-equal to one cannot be made equal to one by normalisation:
+        // an undeclared member is simply undeclared (ADR-0034).
         match unknown {
             UnknownFields::Reject => {
                 let pointer = format!(

@@ -12,7 +12,6 @@ from __future__ import annotations
 import json
 import random
 import struct
-import unicodedata
 from collections.abc import Callable
 from typing import Final
 
@@ -90,10 +89,9 @@ def _json(rng: random.Random, depth: int = 0, *, floats: bool = True) -> JsonVal
     seen: set[str] = set()
     for _ in range(rng.randrange(0, 5)):
         key = _text(rng, 6)
-        folded = unicodedata.normalize("NFC", key)
-        if folded in seen:  # collisions are a separate property (test_wire.py)
+        if key in seen:  # a duplicate is a separate property (test_wire.py)
             continue
-        seen.add(folded)
+        seen.add(key)
         out[key] = _json(rng, depth + 1, floats=floats)
     return out
 

@@ -14,7 +14,7 @@ DW := $(PY) scripts/dw.py
 
 .DEFAULT_GOAL := help
 .PHONY: help dev check test lint fmt fmt-check typecheck arch schema schema-check \
-        fuzz-smoke fuzz security docs preflight tools hooks clean
+        eval eval-check eval-one fuzz-smoke fuzz security docs preflight tools hooks clean
 
 help:            ## List available commands
 	@$(DW) --list
@@ -48,6 +48,15 @@ schema:          ## Regenerate schemas/ from dwk-proto and Python bindings from 
 
 schema-check:    ## Fail if generated schemas, docs or Python bindings are stale
 	@$(DW) schema-check
+
+eval:            ## Run every evaluation suite (deterministic; no model calls)
+	@$(DW) eval
+
+eval-check:      ## The eval merge gate: deterministic subset vs the baseline
+	@$(DW) eval-check
+
+eval-one:        ## Re-run one eval: make eval-one ID=<eval id> [SEED=<n>]
+	@$(DW) eval-one
 
 fuzz-smoke:      ## Stable mutation fuzzing of dwk-proto (not coverage-guided)
 	@$(DW) fuzz-smoke

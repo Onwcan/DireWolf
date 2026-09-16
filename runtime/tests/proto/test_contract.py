@@ -7,12 +7,12 @@ instead of a latent parity bug.
 
 from __future__ import annotations
 
+import ast
 import copy
 import importlib.util
 import json
 import subprocess
 import sys
-import unicodedata
 from pathlib import Path
 from types import ModuleType
 from typing import Any
@@ -22,6 +22,7 @@ import pytest
 from direwolf import proto
 from direwolf.proto import dwcp, dwkp, events, operations
 from direwolf.wire import envelope, errors
+from direwolf.wire.errors import SCHEMA_VIOLATION, UNKNOWN_FIELD, ProtocolError
 
 ROOT = Path(__file__).resolve().parents[3]
 SCHEMAS = ROOT / "schemas"
@@ -169,16 +170,91 @@ def test_the_generator_refuses_a_schema_keyword_it_does_not_implement(
         gen.struct_of("Handshake", struct_level)
 
 
-# ---- Unicode ---------------------------------------------------------------------------
+# ---- Unicode independence (ADR-0034) ---------------------------------------------------
 
 
-def test_unicode_database_versions_are_pinned() -> None:
-    """Rust (unicode-normalization 0.1.25) normalises with Unicode 17.0.0; this
-    interpreter with its own database. For keys built only from characters
-    assigned by Unicode 15.0 the NFC results are identical (normalisation
-    stability). Keys using later characters can collide in Rust and not here --
-    see ADR-0032. DWKP accept/reject parity is unaffected because every
-    declared DWKP key is ASCII. ``crates/dwk-proto/tests/lexer.rs`` pins the
-    Rust side; a change to either pin must revisit the ADR.
+def test_no_protocol_decision_consults_a_unicode_database() -> None:
+    """The wire layer must not import ``unicodedata``.
+
+    Rust and Python ship different Unicode database versions -- 17.0.0 in
+    `unicode-normalization`, 15.0.0 in CPython 3.12 -- so any decision that
+    normalises can differ between the two implementations of the same protocol.
+    ADR-0034 removes the dependence instead of pinning it: keys are compared as
+    text, and DWKP's rejection of every undeclared member carries the property
+    that NFC comparison used to.
     """
-    assert unicodedata.unidata_version == "15.0.0"
+    offenders = []
+    for module in sorted(Path("runtime/src/direwolf/wire").glob("*.py")):
+        source = module.read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        for node in ast.walk(tree):
+            names = []
+            if isinstance(node, ast.Import):
+                names = [a.name for a in node.names]
+            elif isinstance(node, ast.ImportFrom):
+                names = [node.module or ""]
+            if any(n.split(".")[0] == "unicodedata" for n in names):
+                offenders.append(module.name)
+    assert offenders == [], f"the wire layer normalises Unicode in {offenders}"
+
+
+def test_every_name_dwkp_interprets_is_ascii() -> None:
+    """Why the rule above is safe: a key that is not equal to a declared name
+    cannot be made equal to one by normalisation, because every declared name is
+    ASCII. A non-ASCII DWKP field would reopen ADR-0034."""
+    names = set(envelope.ENVELOPE_KEYS)
+    for path in sorted(SCHEMAS.rglob("*.schema.json")):
+        doc = json.loads(path.read_text(encoding="utf-8"))
+        stack = [doc]
+        while stack:
+            node = stack.pop()
+            if isinstance(node, dict):
+                names.update(node.get("properties", {}))
+                stack.extend(v for v in node.values() if isinstance(v, dict | list))
+            elif isinstance(node, list):
+                stack.extend(v for v in node if isinstance(v, dict | list))
+    assert names, "no declared names found"
+    assert all(n.isascii() for n in names), sorted(n for n in names if not n.isascii())
+
+
+def test_colliding_keys_are_rejected_by_dwkp_and_preserved_by_dwcp() -> None:
+    """The cross-language invariant: same bytes, same protocol version, same
+    accept/reject decision -- and, when accepted, the same preservation. The
+    Rust suite asserts the identical cases in ``tests/compatibility.rs``."""
+    colliding = {"caf" + chr(0xE9): 1, "cafe" + chr(0x301): 2}
+    msg = "msg_01M24BB8G0E87TVJX9GX248ADD"
+    ses = "ses_01M24BB8G2E87V1ZPZXQ7DSCVW"
+    ts = "2026-09-12T09:14:22.481Z"
+
+    request = {
+        "v": 1,
+        "id": msg,
+        "type": "request",
+        "schema": "direwolf.heartbeat",
+        "schema_version": 1,
+        "ts": ts,
+        "session_id": ses,
+        "epoch": 47,
+        "payload": dict(colliding),
+    }
+    with pytest.raises(ProtocolError) as caught:
+        dwkp.decode_body(json.dumps(request, ensure_ascii=False).encode())
+    assert caught.value.code == SCHEMA_VIOLATION
+    assert caught.value.violation == UNKNOWN_FIELD
+    assert caught.value.path == "/payload/caf" + chr(0xE9)
+
+    response = {
+        "v": 1,
+        "id": msg,
+        "type": "response",
+        "schema": "direwolf.error",
+        "schema_version": 1,
+        "ts": ts,
+        "causation_id": msg,
+        "payload": {"code": "E", "detail": "d", "retryable": False, **colliding},
+    }
+    kept = dwcp.decode(json.dumps(response, ensure_ascii=False).encode())
+    assert isinstance(kept.body, dwcp.ClientError)
+    assert kept.body.extensions == colliding
+    reemitted = json.loads(dwcp.encode(kept))
+    assert {k: reemitted["payload"][k] for k in colliding} == colliding

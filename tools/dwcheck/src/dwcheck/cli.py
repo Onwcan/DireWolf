@@ -8,6 +8,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from dwcheck import Finding, Report
+from dwcheck.checks_adr import check_adr, check_adr_history, record_adr
 from dwcheck.checks_links import check_links
 from dwcheck.checks_manifests import (
     check_crates,
@@ -47,11 +48,35 @@ def main(argv: Sequence[str] | None = None) -> int:
         default=None,
         help="rules file (default: <root>/architecture.toml)",
     )
+    parser.add_argument(
+        "--adr-base",
+        default="HEAD",
+        metavar="REV",
+        help=(
+            "revision that accepted ADRs are anchored to (default: HEAD). "
+            "In CI this is the merge base with the target branch, which the "
+            "proposed change cannot rewrite."
+        ),
+    )
+    parser.add_argument(
+        "--require-adr-history",
+        action="store_true",
+        help=(
+            "fail if Git history cannot be read, instead of falling back to the "
+            "digest manifest alone. CI uses this; a release tarball cannot."
+        ),
+    )
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("all", help="run every check")
     sub.add_parser("imports", help="Python import and provider-name rules")
     sub.add_parser("deps", help="declared dependencies and the Rust crate graph")
     sub.add_parser("links", help="relative markdown links and ADR references")
+    adr_parser = sub.add_parser("adr", help="accepted ADRs are unchanged since they were accepted")
+    adr_parser.add_argument(
+        "--record",
+        action="store_true",
+        help="rewrite the ADR digest manifest instead of checking it",
+    )
     version_parser = sub.add_parser("version", help="one version, one source of truth")
     version_parser.add_argument(
         "--write",
@@ -68,6 +93,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"dwcheck: {exc}", file=sys.stderr)
         return 2
 
+    if args.command == "adr" and args.record:
+        try:
+            manifest = record_adr(config)
+        except OSError as exc:
+            print(f"dwcheck: {exc}", file=sys.stderr)
+            return 2
+        print(f"recorded {manifest.relative_to(root).as_posix()}")
+        return 0
+
     if args.command == "version" and args.write:
         try:
             changed = write_version(config)
@@ -82,7 +116,14 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     report = Report()
     for name in _selected(str(args.command)):
-        report.extend(_run(name, config))
+        report.extend(
+            _run(
+                name,
+                config,
+                adr_base=str(args.adr_base),
+                require_history=bool(args.require_adr_history),
+            )
+        )
 
     if report.ok:
         print(f"dwcheck: ok ({', '.join(_selected(str(args.command)))})")
@@ -99,11 +140,17 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 def _selected(command: str) -> list[str]:
     if command == "all":
-        return ["imports", "deps", "links", "version"]
+        return ["imports", "deps", "links", "adr", "version"]
     return [command]
 
 
-def _run(name: str, config: ArchitectureConfig) -> list[Finding]:
+def _run(
+    name: str,
+    config: ArchitectureConfig,
+    *,
+    adr_base: str = "HEAD",
+    require_history: bool = False,
+) -> list[Finding]:
     if name == "imports":
         return check_python_imports(config) + check_text(config)
     if name == "deps":
@@ -114,6 +161,12 @@ def _run(name: str, config: ArchitectureConfig) -> list[Finding]:
         )
     if name == "links":
         return check_links(config.root, config.docs_exempt_paths)
+    if name == "adr":
+        # Two layers, deliberately: the manifest is an offline tripwire, and
+        # the history anchor is the control. See checks_adr.py.
+        return check_adr(config) + check_adr_history(
+            config, adr_base, require_history=require_history
+        )
     if name == "version":
         return check_version(config)
     raise ValueError(f"unknown check: {name}")

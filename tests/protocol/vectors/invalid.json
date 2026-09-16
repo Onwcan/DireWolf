@@ -158,30 +158,6 @@
    "code": "PROTOCOL_DUPLICATE_KEY"
   },
   {
-   "name": "normalisation collision: precomposed then decomposed",
-   "family": "dwkp",
-   "input": "{\"v\":1,\"payload\":{\"caf\u00e9\":1,\"cafe\u0301\":2}}",
-   "code": "PROTOCOL_NORMALIZATION_COLLISION"
-  },
-  {
-   "name": "normalisation collision: decomposed then precomposed, escaped",
-   "family": "dwkp",
-   "input": "{\"cafe\\u0301\":1,\"caf\\u00e9\":2}",
-   "code": "PROTOCOL_NORMALIZATION_COLLISION"
-  },
-  {
-   "name": "normalisation collision: KELVIN SIGN vs K",
-   "family": "dwkp",
-   "input": "{\"K\":1,\"\\u212a\":2}",
-   "code": "PROTOCOL_NORMALIZATION_COLLISION"
-  },
-  {
-   "name": "normalisation collision in DWCP",
-   "family": "dwcp",
-   "input": "{\"caf\u00e9\":1,\"cafe\u0301\":2}",
-   "code": "PROTOCOL_NORMALIZATION_COLLISION"
-  },
-  {
    "name": "depth 32 arrays reaches the schema",
    "family": "dwkp",
    "input": "[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]",
@@ -641,6 +617,14 @@
    "family": "event",
    "input_hex": "7b22736368656d61223a22ff227d",
    "code": "PROTOCOL_INVALID_UTF8"
+  },
+  {
+   "name": "keys equal only under NFC are undeclared fields in DWKP",
+   "family": "dwkp",
+   "input": "{\"v\":1,\"id\":\"msg_01M24BB8G0E87TVJX9GX248ADD\",\"type\":\"request\",\"schema\":\"direwolf.heartbeat\",\"schema_version\":1,\"ts\":\"2026-09-12T09:14:22.481Z\",\"session_id\":\"ses_01M24BB8G2E87V1ZPZXQ7DSCVW\",\"epoch\":47,\"payload\":{\"caf\u00e9\":1,\"cafe\u0301\":2}}",
+   "code": "PROTOCOL_SCHEMA_VIOLATION",
+   "violation": "UNKNOWN_FIELD",
+   "path": "/payload/caf\u00e9"
   }
  ]
 }

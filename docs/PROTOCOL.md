@@ -83,7 +83,7 @@ Parser rules shared by every family, in the order they are checked ([ADR-0032](a
 | Grammar | Exactly one RFC 8259 value; no byte-order mark, no comments, trailing commas, `NaN`, raw control characters, lone surrogate escapes | `PROTOCOL_INVALID_JSON` |
 | Nesting | Depth ≤ **32**, checked before descending | `PROTOCOL_MAX_DEPTH_EXCEEDED` |
 | Duplicate keys | Rejected **lexically**, when the second key is read and before its value is parsed | `PROTOCOL_DUPLICATE_KEY` |
-| Unicode | Two keys equal under **NFC** are rejected; keys are never rewritten, values never normalised | `PROTOCOL_NORMALIZATION_COLLISION` |
+| Unicode | **No decision consults a Unicode database.** Keys are compared as text and never normalised, so two keys equal only under NFC are two members. On DWKP the second is an undeclared member and the message is refused; DWCP and event records preserve both ([ADR-0034](adr/0034-protocol-depends-on-no-unicode-database.md)) | — |
 | Numbers | DWKP: integers only, \|n\| ≤ 2^53−1, no fraction or exponent. DWCP/events: any finite I-JSON number | `PROTOCOL_NUMBER_OUT_OF_DOMAIN` |
 | Shape | Unknown field (DWKP), missing, forbidden, wrong type, `null`, out of range, too long, bad format, unknown enum variant, inconsistent fields | `PROTOCOL_SCHEMA_VIOLATION` + violation + JSON Pointer |
 | Versions | Unsupported `v` or `schema_version` is never read as a supported one | `PROTOCOL_VERSION_UNSUPPORTED` + supported range |
@@ -278,6 +278,6 @@ Design properties. At M2 only the parser row is implemented; the rest need the t
 | Zombie runtime cannot act | Epoch fencing |
 | Replay of a side-effecting request | Idempotency key + kernel-side dedupe window |
 | Gateway compromise | Gateway holds no authority; approvals relayed, not generated |
-| Parser exploitation | Rust parser, `#![forbid(unsafe_code)]`, 1 MiB frame cap, depth 32, lexical duplicate and NFC-collision rejection; fuzzed with libFuzzer weekly and on protocol pull requests, plus a stable mutation harness in every test run (M2) |
+| Parser exploitation | Rust parser, `#![forbid(unsafe_code)]` and no third-party dependency, 1 MiB frame cap, depth 32, lexical duplicate-key rejection; fuzzed with libFuzzer weekly and on protocol pull requests, plus a stable mutation harness in every test run (M2) |
 | Resource exhaustion | Bounded in-flight, rate limits, write timeouts |
 | Downgrade attack | Version negotiation picks the highest mutual version; minimums are configurable and enforced |

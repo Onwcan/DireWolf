@@ -7,13 +7,14 @@
 #
 #   runtime/        direwolf        - the cognition runtime (Python 3.12+)
 #   tools/dwcheck/  dwcheck         - the architecture-boundary checker
+#   evals/          direwolf-evals  - the evaluation harness (M2.5)
 #
 # Adding a third Python package requires a concrete reason and a note in
 # CONTRIBUTING.md.  Package count is a cost, not a feature.
 # ---------------------------------------------------------------------------
 
 [tool.uv.workspace]
-members = ["runtime", "tools/dwcheck"]
+members = ["runtime", "tools/dwcheck", "evals"]
 
 [tool.uv]
 # Every workspace member is installed in editable mode into one shared .venv.
@@ -22,6 +23,7 @@ default-groups = ["dev"]
 [tool.uv.sources]
 direwolf = { workspace = true }
 dwcheck = { workspace = true }
+direwolf-evals = { workspace = true }
 
 # Development tooling.  These are the ONLY Python dependencies in the
 # repository at M1; neither `direwolf` nor `dwcheck` has a runtime dependency.
@@ -30,6 +32,7 @@ dwcheck = { workspace = true }
 dev = [
     "direwolf",
     "dwcheck",
+    "direwolf-evals",
     "ruff>=0.14",
     "mypy>=1.18",
     "pytest>=8.4",
@@ -43,7 +46,7 @@ dev = [
 [tool.ruff]
 line-length = 100
 target-version = "py312"
-src = ["runtime/src", "tools/dwcheck/src"]
+src = ["runtime/src", "tools/dwcheck/src", "evals/src"]
 extend-exclude = [
     # Deliberately-invalid code. These files exist to be rejected by the
     # architecture checks; linting them would be checking the wrong thing.
@@ -87,6 +90,12 @@ ignore = [
 # them would make the generated code diverge from the schema text a reviewer
 # compares it with.
 "runtime/src/direwolf/proto/**" = ["E501"]
+# Fixture and vector data is JSON: dynamically typed at the boundary by
+# definition. These three modules are where that boundary is crossed, and they
+# check the shape they need rather than pretending the type system knew it.
+"evals/src/direwolf_evals/fixtures.py" = ["ANN401"]
+"evals/src/direwolf_evals/runners/protocol.py" = ["ANN401"]
+"evals/src/direwolf_evals/runners/replay.py" = ["ANN401"]
 
 [tool.ruff.format]
 docstring-code-format = true
@@ -112,7 +121,7 @@ exclude = ["^tests/architecture/fixtures/"]
 # ---------------------------------------------------------------------------
 [tool.pytest.ini_options]
 minversion = "8.0"
-testpaths = ["runtime/tests", "tools/dwcheck/tests", "tests"]
+testpaths = ["runtime/tests", "tools/dwcheck/tests", "tests", "evals/tests"]
 addopts = "-ra --strict-markers --strict-config --ignore=tests/architecture/fixtures"
 norecursedirs = ["tests/architecture/fixtures", ".venv", "target"]
 markers = [

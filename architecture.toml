@@ -121,6 +121,21 @@ structure this architecture exists to replace.  Interoperating with one at the
 edges is a different question and is not what this rule forbids.
 """
 
+[[python_rules]]
+id = "PY003-product-code-does-not-import-the-eval-harness"
+paths = ["runtime/src", "tools/dwcheck/src", "gateway"]
+exempt_paths = []
+banned_modules = ["direwolf_evals"]
+banned_attributes = []
+reason = """
+`direwolf_evals` is test infrastructure.  It holds a deliberately simple
+execution-environment double and a process-control harness that can spawn a
+child, and both exist to measure DireWolf -- not to be part of it.  A product
+module that imported them would turn a test convenience into a second path from
+cognition to effect, which is the failure this architecture exists to prevent
+(ADR-0000).  The eval package may import the runtime; never the reverse.
+"""
+
 # ===========================================================================
 # Text rules -- names that must not appear outside their owning directory.
 # ===========================================================================
@@ -180,6 +195,41 @@ an `#[allow]` from quietly reintroducing it in the one crate both daemons share.
 # Relative links and ADR citations are checked in every Markdown file except
 # these. The fixture tree contains deliberately broken links.
 exempt_paths = ["tests/architecture/fixtures"]
+
+# ---------------------------------------------------------------------------
+# Accepted ADRs are immutable (docs/adr/README.md).  The rule was broken once by
+# an appended note that no gate caught, so `dwcheck adr` enforces it twice:
+#
+#   * against Git history -- the revision in which each ADR became Accepted.
+#     This is the trust anchor.  A change cannot move it, because it is not in
+#     the change; in CI the base is the merge base with the target branch.
+#   * against `manifest`, a digest file.  This is a tripwire for accidental
+#     drift, and the half that still works with no history (a release tarball).
+#     It is NOT an immutability control: it lives in the same mutable tree as
+#     the ADRs, so one change can edit an ADR and re-run `--record` together.
+#
+# Adding an ADR means running `dwcheck adr --record` in the same commit.
+# ---------------------------------------------------------------------------
+[adr]
+directory = "docs/adr"
+manifest = "docs/adr/accepted.sha256"
+
+# Authorised departures from the accepted content in history.  Each one pins the
+# single content it authorises, so it corrects one record rather than making a
+# file mutable; an entry that matches nothing is itself a violation (ADR006).
+# Adding one of these says, in words, that ADR immutability is being overridden
+# -- which is the point.  Re-running `--record` does not say that.
+[[adr.history_exceptions]]
+file = "0019-language-rationale-v2.md"
+sha256 = "7dd806047bdb4fcfb4883d5835f44dc0e9a03bd0eac314c032db6003a3a25882"
+reason = """
+M2 appended a dated Notes section to this accepted ADR, in violation of rule 1
+and rule 3 of docs/adr/README.md, and the public repository's history was
+bootstrapped from a tree that already contained it.  The M2 closeout restored
+the accepted content; this entry authorises exactly that restoration and nothing
+else.  The dependency review the note carried lives in ADR-0033 section 4, and
+what became of it in ADR-0034.
+"""
 
 # ===========================================================================
 # Declared-dependency rules (Python manifests)
@@ -263,25 +313,21 @@ protocols; it does not link them.  Linking would put authority code in a
 process a user launches directly, with that user's privileges.
 """
 
-# The TCB's dependency set is a load-bearing claim of ADR-0019.  It was empty
-# at M1.  M2 adds `dwk-proto`, which dwkd-authority links from M3, so its
-# linked closure is checked as the authority's now, before the edge exists:
-# RS004 checks its manifest, RS006 its transitive closure from Cargo.lock.
-# Dev-dependencies (proptest, serde_json) are excluded because they are never
-# linked; tools/dwcheck/tests prove a normal dependency is not excluded.
+# The TCB's dependency set is a load-bearing claim of ADR-0019, and it is
+# EMPTY.  `dwk-proto`, which dwkd-authority links from M3, is checked as the
+# authority's now, before the edge exists: RS004 checks its manifest, RS006 its
+# transitive closure from Cargo.lock.  Dev-dependencies (proptest, serde_json)
+# are excluded because they are never linked; tools/dwcheck/tests prove a normal
+# dependency is not excluded.
 #
-# Adding an entry requires a note on ADR-0019 and a reviewer other than the
-# author.  Current entries and their justification: ADR-0033.
+# M2 briefly added unicode-normalization here, for NFC comparison of object
+# keys.  ADR-0034 removed the need: DWKP rejects every undeclared member and
+# every declared name is ASCII, so a normalisation collision is unrepresentable
+# without consulting a Unicode database -- which also removed a cross-language
+# divergence, because Rust and Python ship different database versions.
+#
+# Adding an entry requires a new ADR amending ADR-0019 (never an edit to it)
+# and a reviewer other than the author.
 [authority]
 crates = ["dwkd-authority", "dwk-proto"]
-allowed_third_party = [
-    # Unicode NFC, for rejecting keys that collide under normalisation.
-    # Tables and algorithms only: no I/O, no build script.  Not unsafe-free:
-    # a handful of `char::from_u32_unchecked` calls in Hangul arithmetic,
-    # reviewed in ADR-0033.
-    "unicode-normalization",
-    # unicode-normalization's small-vector dependency (forbid(unsafe_code)),
-    # and its macro-only helper crate (forbid(unsafe_code), no_std).
-    "tinyvec",
-    "tinyvec_macros",
-]
+allowed_third_party = []

@@ -1,0 +1,88 @@
+# cargo-deny policy for the FUZZ WORKSPACE ONLY.
+#
+# `fuzz/` is its own Cargo workspace with its own lockfile, so the root
+# deny.toml does not see it. Its dependencies are still supply-chain inputs —
+# they are compiled and executed on developer machines and on CI runners — so
+# they are audited, with this file, by `make security`:
+#
+#     cargo deny --manifest-path fuzz/Cargo.toml --config fuzz/deny.toml check
+#
+# The distinction this file exists to keep explicit (ADR-0019, ADR-0033):
+#
+#   product dependency   linked into a shipped binary          — none today
+#   TCB dependency       reachable from dwkd-authority         — none today
+#   dev dependency       compiled for `cargo test`             — root deny.toml
+#   fuzz-only dependency compiled only for `make fuzz`         — HERE
+#
+# Fuzz-only crates are NOT in architecture.toml's authority allowlist and must
+# never be added to it: nothing here may become reachable from a shipped
+# binary. `dwcheck` enforces that separately, by reading the root manifests.
+
+[graph]
+all-features = true
+
+[output]
+feature-depth = 1
+
+# ---------------------------------------------------------------------------
+# Advisories. Same standard as the product tree: a vulnerable or unmaintained
+# crate is a finding here too, because this code runs on our machines.
+# ---------------------------------------------------------------------------
+[advisories]
+db-urls = ["https://github.com/rustsec/advisory-db"]
+ignore = []
+yanked = "deny"
+unmaintained = "workspace"
+
+# ---------------------------------------------------------------------------
+# Licences.
+#
+# This list is the root allowlist plus NCSA, which libFuzzer itself carries:
+# `libfuzzer-sys` vendors the upstream LLVM libFuzzer sources and is offered
+# under "MIT OR Apache-2.0 OR NCSA". Nothing under this policy is shipped, so
+# the obligations are those of a development tool, not of a distributed
+# artifact — and that is exactly why it is a separate file from the root one.
+# ---------------------------------------------------------------------------
+[licenses]
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "MIT",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "NCSA",
+    "Unicode-3.0",
+    "Zlib",
+    "CC0-1.0",
+]
+confidence-threshold = 0.93
+exceptions = []
+
+# ---------------------------------------------------------------------------
+# Bans
+# ---------------------------------------------------------------------------
+[bans]
+multiple-versions = "deny"
+wildcards = "deny"
+# `dwk-proto` is inherited by path from the parent workspace, and both crates
+# are `publish = false`.
+allow-wildcard-paths = true
+skip = []
+skip-tree = []
+deny = [
+    # A fuzz target that reached the network would be fuzzing someone else's
+    # service, not our parser.
+    { crate = "reqwest", reason = "fuzz targets take bytes, not sockets" },
+    { crate = "hyper", reason = "fuzz targets take bytes, not sockets" },
+    { crate = "tokio", reason = "the targets are synchronous by design" },
+]
+
+# ---------------------------------------------------------------------------
+# Sources
+# ---------------------------------------------------------------------------
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

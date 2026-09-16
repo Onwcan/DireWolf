@@ -7,12 +7,16 @@ it switched off, and the false negative that makes it decorative.
 
 from __future__ import annotations
 
+import shutil
+import subprocess
 import textwrap
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
 from dwcheck import Finding, Report
+from dwcheck.checks_adr import _digest, _load_manifest, check_adr, check_adr_history, record_adr
 from dwcheck.checks_links import check_links
 from dwcheck.checks_manifests import (
     check_crates,
@@ -20,7 +24,7 @@ from dwcheck.checks_manifests import (
     check_python_dependencies,
 )
 from dwcheck.checks_python import check_python_imports, check_text
-from dwcheck.config import ArchitectureConfig, ConfigError, load
+from dwcheck.config import AdrException, ArchitectureConfig, ConfigError, load
 
 RULES = Path(__file__).resolve().parents[3] / "architecture.toml"
 
@@ -139,7 +143,7 @@ version = "0.0.0"
 [[package]]
 name = "dwk-proto"
 version = "0.0.0"
-dependencies = ["serde_json", "unicode-normalization"]
+dependencies = ["serde_json"]
 [[package]]
 name = "serde_json"
 version = "1.0.0"
@@ -147,27 +151,24 @@ dependencies = ["itoa"]
 [[package]]
 name = "itoa"
 version = "1.0.0"
-[[package]]
-name = "unicode-normalization"
-version = "0.1.25"
-dependencies = ["tinyvec"]
-[[package]]
-name = "tinyvec"
-version = "1.0.0"
-dependencies = ["tinyvec_macros"]
-[[package]]
-name = "tinyvec_macros"
-version = "0.1.0"
 """
 
 
 def _proto_tree(root: Path, section: str) -> ArchitectureConfig:
-    """dwk-proto links unicode-normalization and declares serde_json in ``section``."""
-    extra = "" if section == "dependencies" else f"\n[{section}]\n"
-    manifest = (
-        '[package]\nname = "dwk-proto"\n\n[dependencies]\n'
-        "unicode-normalization = { workspace = true }\n"
-        f"{extra}serde_json = {{ workspace = true }}\n"
+    """dwk-proto declares serde_json in ``section`` and nothing else.
+
+    The authority allowlist is empty (ADR-0034), so any linked third-party
+    crate is a finding and any dev-only one is not.
+    """
+    manifest = NEWLINE.join(
+        [
+            "[package]",
+            'name = "dwk-proto"',
+            "",
+            f"[{section}]",
+            "serde_json = { workspace = true }",
+            "",
+        ]
     )
     _tree(
         root,
@@ -275,6 +276,84 @@ def test_proto_source_rule_fires(tmp_path: Path, line: str) -> None:
     assert [f.rule for f in check_text(_config(tmp_path))] == ["TX002-proto-has-no-ambient-effects"]
 
 
+# --- accepted ADRs are immutable -------------------------------------------
+
+NEWLINE = chr(10)
+CRLF = chr(13) + chr(10)
+
+
+def _adr_tree(root: Path, body: str, *, status: str = "Accepted") -> ArchitectureConfig:
+    text = NEWLINE.join(
+        [
+            "# ADR-0001: a decision",
+            "",
+            f"**Status:** {status} · **Date:** 2026-01-01",
+            "",
+            body,
+            "",
+        ]
+    )
+    _tree(root, {"docs/adr/0001-a-decision.md": text})
+    return _config(root)
+
+
+def test_recording_then_checking_passes(tmp_path: Path) -> None:
+    config = _adr_tree(tmp_path, "The original text.")
+    record_adr(config)
+    assert check_adr(config) == []
+
+
+def test_an_edited_accepted_adr_is_detected(tmp_path: Path) -> None:
+    config = _adr_tree(tmp_path, "The original text.")
+    record_adr(config)
+    adr = tmp_path / "docs/adr/0001-a-decision.md"
+    appended = NEWLINE.join(["", "## Notes", "", "Appended later.", ""])
+    adr.write_text(adr.read_text(encoding="utf-8") + appended, encoding="utf-8")
+    findings = check_adr(config)
+    assert [f.rule for f in findings] == ["ADR001-accepted-adr-modified"]
+
+
+def test_a_superseded_adr_is_immutable_too(tmp_path: Path) -> None:
+    """Superseded records carry the emphasis markers the real ones use, and they
+    are history: editing one rewrites what a reader is told was tried."""
+    config = _adr_tree(tmp_path, "Old text.", status="**Superseded by [ADR-0019](0019-x.md)**")
+    record_adr(config)
+    assert len(_load_manifest(tmp_path / "docs/adr/accepted.sha256")) == 1
+    adr = tmp_path / "docs/adr/0001-a-decision.md"
+    adr.write_text(
+        adr.read_text(encoding="utf-8").replace("Old text.", "New text."), encoding="utf-8"
+    )
+    assert [f.rule for f in check_adr(config)] == ["ADR001-accepted-adr-modified"]
+
+
+def test_a_proposed_adr_may_still_change(tmp_path: Path) -> None:
+    """Immutability starts at acceptance, not at creation."""
+    config = _adr_tree(tmp_path, "Draft.", status="Proposed")
+    record_adr(config)
+    adr = tmp_path / "docs/adr/0001-a-decision.md"
+    adr.write_text(
+        adr.read_text(encoding="utf-8").replace("Draft.", "Second draft."), encoding="utf-8"
+    )
+    assert check_adr(config) == []
+
+
+def test_line_endings_do_not_change_a_digest(tmp_path: Path) -> None:
+    """A Windows checkout and a Linux one must agree; .gitattributes says LF,
+    and a checkout that ignores it must not fail the gate."""
+    config = _adr_tree(tmp_path, "Text.")
+    adr = tmp_path / "docs/adr/0001-a-decision.md"
+    lf = adr.read_bytes().replace(CRLF.encode(), NEWLINE.encode())
+    adr.write_bytes(lf)
+    record_adr(config)
+    adr.write_bytes(lf.replace(NEWLINE.encode(), CRLF.encode()))
+    assert check_adr(config) == []
+
+
+def test_a_missing_manifest_is_a_finding_not_a_pass(tmp_path: Path) -> None:
+    config = _adr_tree(tmp_path, "Text.")
+    assert [f.rule for f in check_adr(config)] == ["ADR002-adr-not-recorded"]
+
+
 # --- links -----------------------------------------------------------------
 
 
@@ -365,3 +444,217 @@ def test_an_empty_report_is_ok_and_renders_nothing() -> None:
     report = Report()
     assert report.ok
     assert report.render() == ""
+
+
+# --- the ADR history anchor -------------------------------------------------
+#
+# The manifest above is a tripwire: whoever edits an accepted ADR can also run
+# `dwcheck adr --record`, and the pair passes. These tests are about the anchor
+# that the change cannot move -- the revision in which the ADR became Accepted.
+
+HAS_GIT = shutil.which("git") is not None
+needs_git = pytest.mark.skipif(not HAS_GIT, reason="the history anchor needs git")
+
+
+def _git(root: Path, *args: str) -> None:
+    subprocess.run(
+        ["git", "-C", str(root), *args],
+        check=True,
+        capture_output=True,
+    )
+
+
+def _repo(root: Path) -> None:
+    _git(root, "init", "-q", "-b", "main")
+    _git(root, "config", "user.email", "test@example.invalid")
+    _git(root, "config", "user.name", "dwcheck tests")
+    _git(root, "config", "commit.gpgsign", "false")
+
+
+def _commit(root: Path, message: str) -> None:
+    _git(root, "add", "-A")
+    _git(root, "commit", "-q", "-m", message)
+
+
+def _adr_text(body: str, *, status: str = "Accepted", title: str = "ADR-0001: a decision") -> str:
+    return NEWLINE.join(
+        [f"# {title}", "", f"**Status:** {status} · **Date:** 2026-01-01", "", body, ""]
+    )
+
+
+def _history_config(
+    root: Path, history_exceptions: tuple[AdrException, ...] = ()
+) -> ArchitectureConfig:
+    """The real rules, with this repository's own exceptions replaced.
+
+    ``architecture.toml`` carries a live ``[[adr.history_exceptions]]`` entry;
+    left in, it would authorise nothing in a fixture tree and every test here
+    would trip ADR006 on it.
+    """
+    config = _config(root)
+    return replace(config, adr=replace(config.adr, history_exceptions=history_exceptions))
+
+
+def _accepted_repo(tmp_path: Path, body: str = "The original text.") -> ArchitectureConfig:
+    _repo(tmp_path)
+    _tree(tmp_path, {"docs/adr/0001-a-decision.md": _adr_text(body)})
+    config = _history_config(tmp_path)
+    record_adr(config)
+    _commit(tmp_path, "accept ADR-0001")
+    return config
+
+
+@needs_git
+def test_editing_an_accepted_adr_and_its_manifest_together_is_still_caught(tmp_path: Path) -> None:
+    """The attack the digest manifest cannot see.
+
+    A contributor edits an accepted ADR *and* re-records its digest in the same
+    change. Every file in the tree is then self-consistent and the tripwire is
+    silent, so the gate has to be anchored somewhere the change does not reach.
+    It is: the commit in which the ADR became Accepted.
+    """
+    config = _accepted_repo(tmp_path)
+    adr = tmp_path / "docs/adr/0001-a-decision.md"
+    adr.write_text(
+        adr.read_text(encoding="utf-8").replace("The original text.", "A different decision."),
+        encoding="utf-8",
+    )
+    record_adr(config)  # <- the step that defeats the tripwire
+
+    assert check_adr(config) == [], "precondition: the manifest is self-consistent again"
+    assert [f.rule for f in check_adr_history(config)] == [
+        "ADR004-accepted-adr-altered-since-acceptance"
+    ]
+
+
+@needs_git
+def test_an_unchanged_accepted_adr_passes(tmp_path: Path) -> None:
+    config = _accepted_repo(tmp_path)
+    assert check_adr_history(config) == []
+
+
+@needs_git
+def test_adding_a_new_adr_is_allowed(tmp_path: Path) -> None:
+    """Immutability is about the record, not about the directory."""
+    config = _accepted_repo(tmp_path)
+    _tree(
+        tmp_path,
+        {"docs/adr/0002-another.md": _adr_text("New decision.", title="ADR-0002: another")},
+    )
+    record_adr(config)
+    assert check_adr_history(config) == []
+    assert check_adr(config) == []
+
+
+@needs_git
+def test_superseding_marks_the_status_line_and_is_allowed(tmp_path: Path) -> None:
+    """A superseding ADR has to be able to banner-mark what it supersedes, so
+    the status line is writable. The decision below it is not."""
+    config = _accepted_repo(tmp_path)
+    adr = tmp_path / "docs/adr/0001-a-decision.md"
+    adr.write_text(
+        adr.read_text(encoding="utf-8").replace(
+            "**Status:** Accepted", "**Status:** **Superseded by [ADR-0002](0002-another.md)**"
+        ),
+        encoding="utf-8",
+    )
+    record_adr(config)
+    assert check_adr_history(config) == []
+
+
+@needs_git
+def test_an_accepted_adr_cannot_be_unaccepted(tmp_path: Path) -> None:
+    config = _accepted_repo(tmp_path)
+    adr = tmp_path / "docs/adr/0001-a-decision.md"
+    adr.write_text(
+        adr.read_text(encoding="utf-8").replace("**Status:** Accepted", "**Status:** Proposed"),
+        encoding="utf-8",
+    )
+    record_adr(config)
+    assert [f.rule for f in check_adr_history(config)] == ["ADR005-accepted-adr-withdrawn"]
+
+
+@needs_git
+def test_an_accepted_adr_cannot_be_deleted(tmp_path: Path) -> None:
+    config = _accepted_repo(tmp_path)
+    (tmp_path / "docs/adr/0001-a-decision.md").unlink()
+    record_adr(config)
+    assert [f.rule for f in check_adr_history(config)] == ["ADR005-accepted-adr-withdrawn"]
+
+
+@needs_git
+def test_an_exception_authorises_exactly_one_content(tmp_path: Path) -> None:
+    """The escape hatch corrects one record. It does not make the file mutable:
+    a second edit needs a second, equally visible, authorisation."""
+    _accepted_repo(tmp_path)
+    adr = tmp_path / "docs/adr/0001-a-decision.md"
+    adr.write_text(
+        adr.read_text(encoding="utf-8").replace("The original text.", "The corrected text."),
+        encoding="utf-8",
+    )
+    allowed = _history_config(
+        tmp_path,
+        history_exceptions=(AdrException("0001-a-decision.md", _digest(adr), "reviewed"),),
+    )
+    assert check_adr_history(allowed) == []
+
+    adr.write_text(
+        adr.read_text(encoding="utf-8").replace("The corrected text.", "Something else again."),
+        encoding="utf-8",
+    )
+    assert [f.rule for f in check_adr_history(allowed)] == [
+        "ADR004-accepted-adr-altered-since-acceptance"
+    ]
+
+
+@needs_git
+def test_an_exception_that_authorises_nothing_is_a_finding(tmp_path: Path) -> None:
+    """An override nobody removed reads as "this was reviewed" for ever."""
+    config = _accepted_repo(tmp_path)
+    stale = _history_config(
+        tmp_path,
+        history_exceptions=(AdrException("0001-a-decision.md", "0" * 64, "obsolete"),),
+    )
+    assert check_adr(config) == []
+    assert [f.rule for f in check_adr_history(stale)] == ["ADR006-stale-adr-history-exception"]
+
+
+@needs_git
+def test_an_adr_accepted_later_is_anchored_to_that_revision_not_its_draft(tmp_path: Path) -> None:
+    """Immutability starts at acceptance, so the draft's text is not the anchor."""
+    _repo(tmp_path)
+    _tree(tmp_path, {"docs/adr/0001-a-decision.md": _adr_text("Draft.", status="Proposed")})
+    _commit(tmp_path, "propose ADR-0001")
+
+    adr = tmp_path / "docs/adr/0001-a-decision.md"
+    adr.write_text(_adr_text("The decision, as accepted."), encoding="utf-8")
+    config = _history_config(tmp_path)
+    record_adr(config)
+    _commit(tmp_path, "accept ADR-0001")
+    assert check_adr_history(config) == []
+
+    adr.write_text(_adr_text("Rewritten after the fact."), encoding="utf-8")
+    record_adr(config)
+    assert [f.rule for f in check_adr_history(config)] == [
+        "ADR004-accepted-adr-altered-since-acceptance"
+    ]
+
+
+def test_no_history_is_a_finding_only_when_the_caller_requires_one(tmp_path: Path) -> None:
+    """A release tarball has no history and must still be checkable; CI has one
+    and must not quietly fall back to the tripwire alone."""
+    _tree(tmp_path, {"docs/adr/0001-a-decision.md": _adr_text("Text.")})
+    config = _history_config(tmp_path)
+    assert check_adr_history(config, require_history=False) == []
+    assert [f.rule for f in check_adr_history(config, require_history=True)] == [
+        "ADR007-adr-history-unavailable"
+    ]
+
+
+@needs_git
+def test_a_base_revision_cannot_smuggle_a_git_option(tmp_path: Path) -> None:
+    """`--adr-base` reaches git as an argument; it must never reach it as a flag."""
+    config = _accepted_repo(tmp_path)
+    assert [f.rule for f in check_adr_history(config, "--upload-pack=touched")] == [
+        "ADR007-adr-history-unavailable"
+    ]

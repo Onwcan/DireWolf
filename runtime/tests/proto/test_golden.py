@@ -16,7 +16,7 @@ import pytest
 from direwolf.proto import dwcp, dwkp, events
 from direwolf.wire import frame
 from direwolf.wire.envelope import InvalidEvent, KnownEvent, UnknownEvent
-from direwolf.wire.errors import DUPLICATE_KEY, NORMALIZATION_COLLISION, ProtocolError
+from direwolf.wire.errors import DUPLICATE_KEY, ProtocolError
 from direwolf.wire.strict_json import IJSON, SAFE_INTEGER, parse
 
 VECTORS = Path(__file__).resolve().parents[3] / "tests" / "protocol" / "vectors"
@@ -88,7 +88,7 @@ def test_the_vector_files_are_substantial() -> None:
 
 @pytest.mark.parametrize(
     "vector",
-    [v for v in INVALID if v["code"] in (DUPLICATE_KEY, NORMALIZATION_COLLISION)],
+    [v for v in INVALID if v["code"] == DUPLICATE_KEY],
     ids=lambda v: v["name"],
 )
 def test_key_ambiguity_is_rejected_by_the_reader_itself(vector: dict[str, Any]) -> None:

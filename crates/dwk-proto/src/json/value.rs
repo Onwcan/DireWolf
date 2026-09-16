@@ -2,17 +2,15 @@
 //!
 //! Deliberately small. Two properties matter:
 //!
-//! * **Objects preserve member order and can never hold colliding keys.** The
+//! * **Objects preserve member order and can never hold a duplicate key.** The
 //!   only ways to build an [`Object`] — the strict lexer and [`Object::insert`]
-//!   — both reject a key that duplicates, or is NFC-equal to, an existing key.
-//!   There is no "last key wins" anywhere in this crate.
+//!   — both reject a key byte-identical to one already present. There is no
+//!   "last key wins" anywhere in this crate.
 //! * **Numbers have one representation per value.** An integral value within
 //!   ±(2^53 − 1) is always [`Number::Int`], however it was written (`1`, `1.0`,
 //!   `1e0`, `-0`); everything else finite is [`Number::Float`]. Structural
 //!   equality therefore coincides with numeric equality for I-JSON values, and
 //!   canonicalisation cannot depend on how the sender spelled a number.
-
-use unicode_normalization::UnicodeNormalization;
 
 use crate::error::{ErrorCode, ProtocolError, quote_key};
 use crate::limits::MAX_SAFE_INTEGER;
@@ -88,7 +86,7 @@ impl Number {
     }
 }
 
-/// A JSON object whose keys are pairwise distinct under Unicode NFC.
+/// A JSON object whose keys are pairwise distinct.
 ///
 /// Member order is kept for diagnostics and for faithful re-emission of
 /// non-canonical documents, but it is **not part of the value**: two objects
@@ -115,29 +113,17 @@ impl Object {
         }
     }
 
-    /// Append a member, rejecting a key that is byte-identical or NFC-equal to
-    /// one already present.
+    /// Append a member, rejecting a key byte-identical to one already present.
     ///
     /// Quadratic in the number of members. That is deliberate at the value
     /// layer, which only encoders use for small, known key sets; the lexer,
     /// which sees attacker-chosen objects, uses a hash index instead.
     pub fn insert(&mut self, key: String, value: Value) -> Result<(), ProtocolError> {
-        let normalized = nfc(&key);
         for (existing, _) in &self.members {
             if existing == &key {
                 return Err(ProtocolError::new(
                     ErrorCode::DuplicateKey,
                     format!("duplicate key {}", quote_key(&key)),
-                ));
-            }
-            if nfc(existing) == normalized {
-                return Err(ProtocolError::new(
-                    ErrorCode::NormalizationCollision,
-                    format!(
-                        "key {} collides with {} under Unicode NFC",
-                        quote_key(&key),
-                        quote_key(existing)
-                    ),
                 ));
             }
         }
@@ -182,16 +168,6 @@ impl Object {
 
     pub(crate) const fn from_members_unchecked(members: Vec<(String, Value)>) -> Self {
         Self { members }
-    }
-}
-
-/// Unicode Normalization Form C.
-#[must_use]
-pub fn nfc(s: &str) -> String {
-    if unicode_normalization::is_nfc(s) {
-        s.to_owned()
-    } else {
-        s.nfc().collect()
     }
 }
 

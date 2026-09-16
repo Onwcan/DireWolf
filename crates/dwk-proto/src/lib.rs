@@ -25,7 +25,7 @@
 //!
 //! A message that decodes successfully under the DWKP profile is **structurally
 //! unambiguous**: well-framed, valid UTF-8, grammatical JSON with no duplicate
-//! or Unicode-normalisation-colliding keys, within the depth and number limits,
+//! keys, within the depth and number limits,
 //! with no unknown fields, a known operation, a supported version, and every
 //! value inside its declared bounds.
 //!

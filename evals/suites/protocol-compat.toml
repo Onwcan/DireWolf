@@ -1,0 +1,27 @@
+# The per-family compatibility rules, measured separately (ADR-0023 forbids one
+# blanket assertion), plus canonical-encoding stability.
+
+id = "protocol-compat"
+title = "Compatibility and canonical encoding hold per family"
+description = """
+DWKP rejects what it does not declare; DWCP preserves it; the event log keeps
+the bytes. Canonical encoding is checked against the independent V8-derived
+oracle rather than against either implementation.
+"""
+score = "the fraction of named properties that hold (never averaged with other suites)"
+requires = ["M2"]
+gate = true
+
+[[eval]]
+name = "three-rules"
+description = "DWKP rejects, DWCP preserves, the event log retains — as three separate properties."
+runner = "protocol.compatibility"
+tags = ["protocol", "compatibility"]
+
+[[eval]]
+name = "canonical-determinism"
+description = "Valid vectors canonicalise to the oracle's bytes and survive a re-encode."
+runner = "protocol.canonical_determinism"
+fixture = "tests/protocol/vectors/valid.json"
+scorer = "stability_rate"
+tags = ["protocol", "canonical"]

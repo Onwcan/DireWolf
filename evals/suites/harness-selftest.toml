@@ -1,0 +1,66 @@
+# The harness measuring itself.
+#
+# These evals exist because measurement equipment that has never been tested is
+# not evidence. They drive a deterministic dummy child process; no DireWolf
+# component is involved, and none is simulated.
+
+id = "harness-selftest"
+title = "The evaluation harness does what it claims"
+description = """
+Checkpoint observation, pause and resume, timeout detection, crash reporting,
+the test-only execution environment, and replay determinism. From M3 the same
+runners will observe real processes; nothing here implements authority
+semantics, and nothing may.
+"""
+score = "binary per property: the mechanism works or it does not"
+requires = ["M2.5"]
+gate = true
+
+[[eval]]
+name = "checkpoints"
+description = "Named checkpoints arrive in order and the child exits cleanly."
+runner = "harness.checkpoint"
+timeout_s = 20.0
+tags = ["harness", "fault-injection"]
+
+[[eval]]
+name = "pause-resume"
+description = "A child blocked at a checkpoint stays blocked until released."
+runner = "harness.pause_resume"
+timeout_s = 20.0
+tags = ["harness", "fault-injection"]
+
+[[eval]]
+name = "timeout"
+description = "A hung child is detected within its budget and terminated."
+runner = "harness.timeout"
+timeout_s = 20.0
+tags = ["harness", "fault-injection"]
+
+[[eval]]
+name = "crash"
+description = "An unexpected exit keeps its code and the output produced before it."
+runner = "harness.crash"
+timeout_s = 20.0
+tags = ["harness", "fault-injection"]
+
+[[eval]]
+name = "test-environment"
+description = "The test-only environment double reports each outcome class distinctly."
+runner = "harness.test_environment"
+tags = ["harness", "double"]
+
+[[eval]]
+name = "replay-determinism"
+description = "Replaying a recorded exchange twice produces identical bytes."
+runner = "replay.deterministic"
+fixture = "replay/lease-dialogue.json"
+scorer = "determinism_rate"
+tags = ["harness", "replay"]
+
+[[eval]]
+name = "replay-integrity"
+description = "Each recorded case still hashes to the digest the fixture records."
+runner = "replay.fixture_integrity"
+fixture = "replay/lease-dialogue.json"
+tags = ["harness", "replay", "provenance"]

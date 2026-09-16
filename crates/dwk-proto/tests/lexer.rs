@@ -94,38 +94,56 @@ fn the_same_key_in_sibling_objects_is_not_a_duplicate() {
 }
 
 #[test]
-fn normalisation_collisions_are_reported_distinctly_from_duplicates() {
+fn keys_that_collide_only_under_normalisation_are_distinct_members() {
+    // The lexer compares keys as text and consults no Unicode database, so
+    // these are two members, not a duplicate (ADR-0034). DWKP still refuses the
+    // document, because neither name is declared — see
+    // `compatibility.rs::a_normalisation_collision_is_an_unknown_field_in_dwkp`.
     let pre = char::from_u32(0xE9).unwrap();
     let dec = format!("e{}", char::from_u32(0x301).unwrap());
     let doc = format!("{{\"caf{pre}\":1,\"caf{dec}\":2}}");
-    assert_eq!(
-        dwkp(doc.as_bytes()).unwrap_err().code,
-        ErrorCode::NormalizationCollision
-    );
-    // One spelling alone is accepted: the rule is about ambiguity, not about
-    // forcing NFC on the sender.
+    let value = dwkp(doc.as_bytes()).expect("two distinct keys");
+    let Value::Object(object) = value else {
+        panic!("expected an object")
+    };
+    assert_eq!(object.len(), 2);
+    // One spelling alone is accepted too: nothing forces NFC on a sender.
     assert!(dwkp(format!("{{\"caf{dec}\":1}}").as_bytes()).is_ok());
 }
 
 #[test]
-fn a_singleton_decomposition_collides_with_its_target() {
-    // U+212A KELVIN SIGN normalises to U+004B LATIN CAPITAL LETTER K.
+fn a_singleton_decomposition_is_not_a_duplicate_of_its_target() {
+    // U+212A KELVIN SIGN normalises to U+004B, but the reader never normalises,
+    // so the decision does not depend on which Unicode version it was built
+    // against. Both languages read two members here.
     let kelvin = char::from_u32(0x212A).unwrap();
     let doc = format!("{{\"K\":1,\"{kelvin}\":2}}");
-    assert_eq!(
-        dwkp(doc.as_bytes()).unwrap_err().code,
-        ErrorCode::NormalizationCollision
-    );
+    let value = dwkp(doc.as_bytes()).expect("two distinct keys");
+    let Value::Object(object) = value else {
+        panic!("expected an object")
+    };
+    assert_eq!(object.len(), 2);
 }
 
 #[test]
-fn the_unicode_database_version_is_pinned() {
-    // Key-collision detection depends on this table. The Python reader uses
-    // its interpreter's database (15.0.0 on 3.12); results agree for keys made
-    // of characters assigned by 15.0, and ADR-0032 records the remaining gap.
-    // Moving this pin (or Python's, in runtime/tests/proto/test_contract.py)
-    // means revisiting that ADR.
-    assert_eq!(unicode_normalization::UNICODE_VERSION, (17, 0, 0));
+fn no_protocol_decision_consults_a_unicode_database() {
+    // The property ADR-0034 rests on: the crate links nothing that carries
+    // Unicode tables, so a decision cannot depend on a table version. This is
+    // asserted structurally, from the manifest, because the absence of a
+    // dependency is not otherwise visible from a test.
+    let manifest = include_str!("../Cargo.toml");
+    let deps = manifest
+        .split("[dependencies]")
+        .nth(1)
+        .expect("a dependencies section")
+        .split("[dev-dependencies]")
+        .next()
+        .expect("a dev-dependencies section after it");
+    assert!(
+        deps.lines()
+            .all(|l| l.trim().is_empty() || l.trim_start().starts_with('#')),
+        "dwk-proto has gained a dependency: {deps}"
+    );
 }
 
 #[test]

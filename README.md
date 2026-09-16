@@ -22,7 +22,7 @@ compromised host.
 
 ---
 
-## Status: M2 — protocol and schemas
+## Status: M2.5 — protocol, schemas and the evaluation harness
 
 **None of the above is implemented yet.** This repository contains the Phase 0
 architecture package, the M1 foundation (the monorepo layout, the Rust and
@@ -30,25 +30,31 @@ Python workspaces, the quality gates, the architecture boundary checks and CI)
 and the M2 wire contract:
 
 - `crates/dwk-proto` — bounded framing, a strict JSON reader (UTF-8, depth 32,
-  lexical duplicate-key and Unicode-collision rejection, an integer-only DWKP
-  number domain), RFC 8785 canonical JSON, the common envelope, version
+  lexical duplicate-key rejection, an integer-only DWKP number domain, and no
+  dependence on any Unicode database), RFC 8785 canonical JSON, the envelope, version
   negotiation, and the DWKP/DWCP/event message types;
 - JSON Schema generated from those types into [`schemas/`](schemas/), and
   Python bindings generated from the schemas, with CI failing on drift;
-- shared golden vectors run by both languages, and fuzz targets.
+- shared golden vectors run by both languages, and fuzz targets;
+- `evals/` — the evaluation harness (M2.5): deterministic suites, structured
+  results, a reviewed baseline, hostile-protocol suites over the real decoder,
+  replayable fixtures with no model call anywhere, and a fault-injection
+  harness. Properties that need the kernel are **pending**, which is counted
+  apart from passing.
 
-What M2 establishes is that **malformed DWKP is rejected structurally**. It does
-not establish that any request is authorised: there is no kernel, no transport,
-no policy and no capability check yet. See [docs/PROTOCOL.md](docs/PROTOCOL.md)
-and [ADR-0032](docs/adr/0032-wire-contract-framing-strict-json-and-jcs.md).
+What M2 establishes is that **malformed DWKP is rejected structurally**, and
+what M2.5 adds is the machinery to *measure* claims like that. Neither
+establishes that any request is authorised: there is no kernel, no transport,
+no policy and no capability check yet. See [docs/PROTOCOL.md](docs/PROTOCOL.md),
+[ADR-0032](docs/adr/0032-wire-contract-framing-strict-json-and-jcs.md) and
+[evals/README.md](evals/README.md).
 
 The daemons build and refuse to run. `direwolf` supports `--version` and
 `doctor`, and nothing else, because a command that exists but cannot work
 invites callers, scripts and documentation to form around a shape nobody has
 designed yet.
 
-The evaluation harness is **M2.5**. The policy engine and capability broker
-arrive at **M3**, the filesystem, exec and secret brokers at **M4**, the sandbox
+The policy engine and capability broker arrive at **M3**, the filesystem, exec and secret brokers at **M4**, the sandbox
 at **M5**. See
 [docs/ROADMAP.md](docs/ROADMAP.md).
 
@@ -120,7 +126,7 @@ toolchain), Python 3.12+, `uv`, and git. Nothing else.
 **Review**
 [PHASE0_REVIEW](docs/PHASE0_REVIEW.md) — 62 findings from three independent adversarial review tracks, with dispositions.
 
-**Decisions**: [docs/adr/](docs/adr/) — 34 architecture decision records, three of them superseded and kept as history. Start with [ADR-0000](docs/adr/0000-authority-plane-separation.md), then [ADR-0018](docs/adr/0018-authority-broker-split.md); everything else is downstream. The [index](docs/adr/README.md) says which are current.
+**Decisions**: [docs/adr/](docs/adr/) — 35 architecture decision records, three of them superseded and kept as history. Start with [ADR-0000](docs/adr/0000-authority-plane-separation.md), then [ADR-0018](docs/adr/0018-authority-broker-split.md); everything else is downstream. The [index](docs/adr/README.md) says which are current.
 
 ---
 

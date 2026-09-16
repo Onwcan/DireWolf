@@ -20,6 +20,7 @@ from pathlib import Path
 
 import pytest
 
+from dwcheck.checks_adr import _accepted_content, _immutable_adrs, check_adr, check_adr_history
 from dwcheck.checks_links import check_links
 from dwcheck.checks_manifests import (
     check_crates,
@@ -44,6 +45,7 @@ def _all_findings(config: ArchitectureConfig) -> list[str]:
         *check_crates(config),
         *check_lockfile_closure(config),
         *check_links(config.root, config.docs_exempt_paths),
+        *check_adr(config),
         *check_version(config),
     ]
     return [f.rule for f in findings]
@@ -96,6 +98,9 @@ def test_each_declared_rule_rejects_its_violation(rule_id: str, violation_rules:
         "RS007-authority-plane-is-undependable",  # a new crate bridging the two daemons
         "RS008-shared-crate-allowlist",  # a helper crate both daemons link
         "RS009-shared-crate-is-a-leaf",  # the shared wire crate linking in-tree code
+        "ADR001-accepted-adr-modified",  # an accepted ADR edited after acceptance
+        "ADR002-adr-not-recorded",  # an accepted ADR no digest covers
+        "ADR003-recorded-adr-missing",  # a digest for an ADR that is gone
         "DOC001-broken-relative-link",
         "DOC002-missing-adr",
         "VER003-version-drift",
@@ -135,6 +140,15 @@ def test_authority_cannot_depend_on_the_broker(violation_rules: list[str]) -> No
 def test_cognition_cannot_reach_for_sockets_or_exec(violation_rules: list[str]) -> None:
     """ADR-0000: there is exactly one path from cognition to effect."""
     assert "PY001-runtime-has-no-ambient-effects" in violation_rules
+
+
+def test_the_eval_harness_cannot_be_imported_by_product_code(
+    violation_rules: list[str],
+) -> None:
+    """M2.5 adds a test-only execution-environment double and a process-control
+    harness. Either one imported from the runtime would be a second path from
+    cognition to effect wearing test-infrastructure clothes."""
+    assert "PY003-product-code-does-not-import-the-eval-harness" in violation_rules
 
 
 def test_an_agent_framework_is_rejected_in_both_forms(violation_rules: list[str]) -> None:
@@ -184,6 +198,51 @@ def test_proto_findings_name_only_what_is_linked() -> None:
     assert [f.line for f in text] == [4], "the doc comment naming std::net is not a finding"
 
 
+def test_an_edit_to_an_accepted_adr_is_detected(violation_rules: list[str]) -> None:
+    """ADRs are the record of what was decided and why. An appended note changes
+    that record; it happened once, during M2, to ADR-0019, and no gate caught
+    it. The digest manifest is the tripwire for that; the gate is the history
+    anchor, which `tools/dwcheck/tests/test_checks.py` covers, because proving
+    it needs a repository with a history rather than a fixture directory."""
+    assert "ADR001-accepted-adr-modified" in violation_rules
+
+
+def test_every_accepted_adr_in_this_repository_matches_its_recorded_digest() -> None:
+    """The positive case: this repository's own ADRs are unmodified."""
+    assert check_adr(load(REPO_ROOT, RULES)) == []
+
+
+def test_every_accepted_adr_matches_the_revision_that_accepted_it() -> None:
+    """The control, on this repository. Skipped where the history is not there
+    to check -- a shallow CI checkout, or an unpacked release -- because a
+    weaker anchor reported as a pass is the failure this whole check removes.
+    The `architecture` CI job checks out at full depth and passes
+    `--require-adr-history`, so the skip cannot hide a regression there."""
+    findings = check_adr_history(load(REPO_ROOT, RULES), require_history=True)
+    if [f.rule for f in findings] == ["ADR007-adr-history-unavailable"]:
+        pytest.skip(findings[0].message)
+    assert findings == []
+
+
+def test_the_history_anchor_actually_covers_this_repositorys_adrs() -> None:
+    """A check that anchors nothing passes, which is the shape every other test
+    here would still be happy with: repoint `[adr].directory` at an empty path
+    and ADR001-ADR007 all go quiet. So assert that history really did produce
+    anchors, and that they are ADRs from this repository."""
+    config = load(REPO_ROOT, RULES)
+    assert config.adr.directory == "docs/adr"
+    anchored, where = _accepted_content(REPO_ROOT, "HEAD", config.adr.directory)
+    if not where:
+        pytest.skip("no ADR history here (shallow checkout or unpacked release)")
+
+    on_disk = {path.name for path in _immutable_adrs(config)}
+    assert set(anchored) <= on_disk, sorted(set(anchored) - on_disk)
+    assert len(anchored) >= 30, (
+        f"only {len(anchored)} accepted ADRs are anchored to a revision; "
+        f"{len(on_disk)} are accepted on disk"
+    )
+
+
 def test_the_required_boundary_rules_are_all_declared() -> None:
     """Deleting a rule from architecture.toml would otherwise reduce coverage
     silently: every *declared* rule is tested, so a rule that is gone is a rule
@@ -195,6 +254,7 @@ def test_the_required_boundary_rules_are_all_declared() -> None:
     required = {
         "PY001-runtime-has-no-ambient-effects",
         "PY002-no-agent-framework-imports",
+        "PY003-product-code-does-not-import-the-eval-harness",
         "TX001-provider-names-confined",
         "TX002-proto-has-no-ambient-effects",
         "DEP001-no-agent-framework-dependency",
@@ -237,32 +297,32 @@ def test_unsupported_schema_version_is_an_error(tmp_path: Path) -> None:
     assert main(["--root", str(REPO_ROOT), "--rules", str(rules), "all"]) == 2
 
 
-def test_the_tcb_destined_closure_is_exactly_the_reviewed_set() -> None:
-    """ADR-0019 as amended by ADR-0033: dwkd-authority links nothing third-party
-    today, and dwk-proto -- which it links from M3 -- links exactly
-    unicode-normalization and its two small dependencies.
+def test_the_tcb_destined_closure_is_empty() -> None:
+    """ADR-0019, as amended by ADR-0033 and ADR-0034: dwkd-authority links
+    nothing third-party, and neither does dwk-proto, which it links from M3.
 
-    RS006 already fails on an unlisted crate. This pins the set from the other
-    side, so that *removing* an allowlist entry or silently growing it in the
-    same commit is also visible. Update it together with ADR-0033.
+    RS006 fails on a crate outside the allowlist. This pins the claim from the
+    other side: if a linked dependency appears, this test names it, and the
+    commit that adds it must also add the ADR that justifies it.
     """
     lock = tomllib.loads((REPO_ROOT / "Cargo.lock").read_text(encoding="utf-8"))
     edges = {
         str(p["name"]): [str(d).split(" ", 1)[0] for d in p.get("dependencies", [])]
         for p in lock.get("package", [])
     }
-    dev_only = {"proptest", "serde_json"}
-    seen: set[str] = set()
-    stack = ["dwkd-authority", *(d for d in edges["dwk-proto"] if d not in dev_only)]
-    while stack:
-        name = stack.pop()
-        if name not in seen:
-            seen.add(name)
-            stack.extend(edges.get(name, []))
-    assert sorted(seen) == [
-        "dwkd-authority",
-        "tinyvec",
-        "tinyvec_macros",
-        "unicode-normalization",
-    ]
-    assert edges["dwkd-authority"] == [], "dwkd-authority gains its first dependency at M3"
+    manifests = {
+        "dwkd-authority": REPO_ROOT / "crates/dwkd-authority/Cargo.toml",
+        "dwk-proto": REPO_ROOT / "crates/dwk-proto/Cargo.toml",
+    }
+    linked: set[str] = set()
+    for crate, manifest in manifests.items():
+        declared = tomllib.loads(manifest.read_text(encoding="utf-8"))
+        for section in ("dependencies", "build-dependencies"):
+            stack = list(declared.get(section, {}))
+            while stack:
+                name = stack.pop()
+                if name not in linked:
+                    linked.add(name)
+                    stack.extend(edges.get(name, []))
+        assert crate in edges, f"{crate} is missing from Cargo.lock"
+    assert linked == set(), f"the TCB-destined closure is no longer empty: {sorted(linked)}"

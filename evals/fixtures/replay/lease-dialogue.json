@@ -1,0 +1,84 @@
+{
+ "provenance": {
+  "class": "recorded-response",
+  "recorded_by": "authored by hand for M2.5, not captured from a provider",
+  "why": "A replay fixture for the harness to be deterministic against. It is not a ModelProvider, not transport, and not evidence about any model's behaviour: the real recorded-response corpus arrives with M7, when there is a provider path to record from.",
+  "licence": "Apache-2.0, same as the repository"
+ },
+ "description": "A three-turn dialogue shaped like a future model-driven eval: an input, a recorded response, a structured tool-call-shaped field, and the metadata a scorer would read. Each case carries the digest of its canonical rendering.",
+ "cases": [
+  {
+   "id": "lease-acquire",
+   "input": {
+    "role": "runtime",
+    "intent": "acquire a session lease",
+    "context": [
+     "the runtime has just started",
+     "no lease is held"
+    ]
+   },
+   "response": {
+    "text": "Requesting a session lease before doing anything else.",
+    "structured": {
+     "operation": "AcquireLease",
+     "schema": "direwolf.lease.acquire",
+     "envelope": {
+      "session_id": "ses_01M24BB8G2E87V1ZPZXQ7DSCVW"
+     }
+    }
+   },
+   "metadata": {
+    "turn": 1,
+    "expect_operation": "AcquireLease"
+   },
+   "digest": "sha256:49eb6a594aaa9fd37353150d2e058508d4c1e597482de4c7a6150a3bade36167"
+  },
+  {
+   "id": "heartbeat-after-grant",
+   "input": {
+    "role": "runtime",
+    "intent": "keep the lease alive",
+    "context": [
+     "epoch 47 was granted",
+     "no work is in flight"
+    ]
+   },
+   "response": {
+    "text": "Sending a heartbeat carrying the granted epoch.",
+    "structured": {
+     "operation": "Heartbeat",
+     "schema": "direwolf.heartbeat",
+     "envelope": {
+      "epoch": 47
+     }
+    }
+   },
+   "metadata": {
+    "turn": 2,
+    "expect_operation": "Heartbeat"
+   },
+   "digest": "sha256:65eb16cbc21cd9a721fc553d84e9e1f6ca96147d08af6d6d9e571ffad2333d84"
+  },
+  {
+   "id": "refuses-unreserved-operation",
+   "input": {
+    "role": "runtime",
+    "intent": "invoke a tool",
+    "context": [
+     "no tool operation exists on the wire yet"
+    ]
+   },
+   "response": {
+    "text": "There is no tool operation in this protocol version; nothing to send.",
+    "structured": {
+     "operation": null
+    }
+   },
+   "metadata": {
+    "turn": 3,
+    "expect_operation": null
+   },
+   "digest": "sha256:26bcbfe4b6b0cd6faf8b9bde85fac17b4c9945abda7bee053a5eb8e4c8d76247"
+  }
+ ]
+}

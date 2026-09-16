@@ -8,7 +8,6 @@ need to.
 from __future__ import annotations
 
 import re
-import unicodedata
 from collections.abc import Callable
 from typing import Final
 
@@ -16,7 +15,6 @@ from direwolf.wire.errors import (
     INCONSISTENT,
     INVALID_FORMAT,
     MISSING_FIELD,
-    NORMALIZATION_COLLISION,
     NULL_NOT_ALLOWED,
     OUT_OF_RANGE,
     TOO_LONG,
@@ -83,22 +81,17 @@ def partition(
     """Split members into declared and undeclared, applying the policy.
 
     Undeclared members are examined before any declared field is interpreted,
-    exactly as ``dwk-proto`` does.
+    exactly as ``dwk-proto`` does. Names are compared as text: every declared
+    name is ASCII (a test asserts it), so a key that is not equal to one cannot
+    be made equal to one by Unicode normalisation, and no normalisation is
+    performed anywhere (ADR-0034).
     """
     known: dict[str, JsonValue] = {}
     extensions: dict[str, JsonValue] = {}
-    normalized_declared = {unicodedata.normalize("NFC", d): d for d in declared}
     for key, value in obj.items():
         if key in declared:
             known[key] = value
             continue
-        field = normalized_declared.get(unicodedata.normalize("NFC", key))
-        if field is not None:
-            raise ProtocolError(
-                NORMALIZATION_COLLISION,
-                f"key {key[:64]!r} differs from declared field {field!r} only by normalisation",
-                path=cx.child(key),
-            )
         if not preserve:
             raise schema_violation(UNKNOWN_FIELD, cx.child(key), f"unknown field {key[:64]!r}")
         extensions[key] = value

@@ -35,8 +35,6 @@ pub enum ErrorCode {
     InvalidJson,
     /// An object contains the same key twice, byte for byte.
     DuplicateKey,
-    /// An object contains two distinct keys that are equal after Unicode NFC.
-    NormalizationCollision,
     /// Nesting exceeds [`crate::limits::MAX_DEPTH`].
     MaxDepthExceeded,
     /// A number is outside the family's admitted domain (for DWKP: a fraction,
@@ -52,7 +50,7 @@ pub enum ErrorCode {
 
 impl ErrorCode {
     /// Every code, in declaration order. Used for schema emission and tests.
-    pub const ALL: [Self; 13] = [
+    pub const ALL: [Self; 12] = [
         Self::FrameEmpty,
         Self::FrameTooLarge,
         Self::FrameTruncated,
@@ -60,7 +58,6 @@ impl ErrorCode {
         Self::InvalidUtf8,
         Self::InvalidJson,
         Self::DuplicateKey,
-        Self::NormalizationCollision,
         Self::MaxDepthExceeded,
         Self::NumberOutOfDomain,
         Self::VersionUnsupported,
@@ -79,7 +76,6 @@ impl ErrorCode {
             Self::InvalidUtf8 => "PROTOCOL_INVALID_UTF8",
             Self::InvalidJson => "PROTOCOL_INVALID_JSON",
             Self::DuplicateKey => "PROTOCOL_DUPLICATE_KEY",
-            Self::NormalizationCollision => "PROTOCOL_NORMALIZATION_COLLISION",
             Self::MaxDepthExceeded => "PROTOCOL_MAX_DEPTH_EXCEEDED",
             Self::NumberOutOfDomain => "PROTOCOL_NUMBER_OUT_OF_DOMAIN",
             Self::VersionUnsupported => "PROTOCOL_VERSION_UNSUPPORTED",

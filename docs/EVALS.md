@@ -2,6 +2,12 @@
 
 Evals are a first-class subsystem, not a test folder. The security suite is a merge gate.
 
+> **Architecture, not implementation.** This document states what the harness is
+> for. What exists today — the package layout, the suite format, the result
+> schema, the baseline rules and which suites are still pending — is
+> [evals/README.md](../evals/README.md), built at M2.5. Where the two differ,
+> the implementation document describes reality and this one describes intent.
+
 ---
 
 ## 1. Structure

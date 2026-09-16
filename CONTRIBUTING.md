@@ -59,6 +59,9 @@ Windows does and does not give you.
 | `make typecheck` | `mypy --strict` |
 | `make test` | `cargo test --workspace`, `pytest` |
 | `make arch` | Architecture boundary checks |
+| `make eval` | Run every evaluation suite (deterministic, offline) |
+| `make eval-check` | The eval merge gate: the deterministic subset against the baseline (part of `make check`) |
+| `make eval-one` | Re-run one eval: `make eval-one ID=protocol-security/framing` |
 | `make schema` | Regenerate `schemas/`, `docs/DWKP_OPERATIONS.md` and the Python bindings from `dwk-proto` |
 | `make schema-check` | Fail if any of those is stale or hand-edited (part of `make check`) |
 | `make fuzz-smoke` | Type-check the cargo-fuzz targets; stable mutation fuzzing (`DWK_FUZZ_SECONDS`) |
@@ -84,6 +87,7 @@ One question decides it:
 | It reasons, plans or shapes data | `runtime/` | Python |
 | It is the command-line surface | `crates/direwolf-cli/` | Rust |
 | It is the *shape* of a message on the wire, and nothing else | `crates/dwk-proto/` | Rust (Python generated) |
+| It *measures* DireWolf rather than being part of it | `evals/` | Python (test infrastructure) |
 
 Rust holds authority. Python holds intelligence.
 ([ADR-0019](docs/adr/0019-language-rationale-v2.md).) There is no fourth
@@ -112,6 +116,10 @@ In short:
 - `dwk-proto` is the only in-tree crate both daemons may link, and it links no
   in-tree crate itself. Its source names no `std::fs`, `std::net`,
   `std::process`, `std::env`, `std::os` or `unsafe`.
+- No product module imports `direwolf_evals`. The eval harness may import the
+  runtime; never the reverse. It holds a test-only execution-environment double
+  and a process-control harness, and either one inside the runtime would be a
+  second path to effect wearing test-infrastructure clothes.
 
 > ### These checks are not a security boundary
 >
@@ -134,7 +142,8 @@ State the purpose in the pull request. Then, by destination:
 **`dwkd-authority`** — this is the trusted computing base, and its small
 dependency set is a load-bearing claim of
 [ADR-0019](docs/adr/0019-language-rationale-v2.md), not an aspiration. You need
-a note on that ADR, a reviewer other than yourself, and an entry in
+a **new ADR amending** it (never an edit to ADR-0019, which is accepted and
+therefore immutable), a reviewer other than yourself, and an entry in
 `[authority].allowed_third_party` in `architecture.toml`. The check covers the
 whole transitive closure: a harmless-looking crate that pulls in an HTTP stack
 breaks the claim exactly as thoroughly as adding the HTTP stack.
@@ -143,15 +152,17 @@ breaks the claim exactly as thoroughly as adding the HTTP stack.
 M3, and `dwcheck` already checks it as TCB. Dev-dependencies are not linked and
 not counted, but they are still audited by `cargo deny`.
 
-*The dependency inventory, as of M2.* **TCB (through `dwk-proto`):**
-`unicode-normalization` 0.1.25, `tinyvec` 1.13.2, `tinyvec_macros` 0.1.1 —
-reviewed one by one in [ADR-0033](docs/adr/0033-protocol-source-of-truth-and-tcb-dependencies.md) §4.
-`dwkd-authority` itself still has none. **Dev-only:** `proptest` 1.11 (property
-tests) and `serde_json` 1.0.151 (differential oracle for the strict lexer), with
-their transitive dependencies. **Fuzzing, outside the workspace:**
-`libfuzzer-sys` 0.4.13 in `fuzz/`. **Python:** none added; the protocol layer is
-standard library only. Keep the TCB list short; it is a claim, and dependency
-count is not the goal — a small trusted surface is.
+*The dependency inventory.* **TCB (`dwkd-authority` and `dwk-proto`): none.**
+M2 briefly added `unicode-normalization` and its two dependencies for NFC key
+comparison; [ADR-0034](docs/adr/0034-protocol-depends-on-no-unicode-database.md)
+removed the need and the crates, so the closure is empty again. **Dev-only:**
+`proptest` (property tests) and `serde_json` (differential oracle for the strict
+lexer), with their transitive dependencies; audited by the root `deny.toml`,
+never linked. **Fuzz-only, outside the workspace:** `libfuzzer-sys` and its
+build dependencies in `fuzz/`, audited by `fuzz/deny.toml` — a separate policy
+so a fuzzing crate can never be mistaken for a product one. **Python:** none;
+the protocol layer is standard library only. Keep the TCB list short: it is a
+claim, and dependency count is not the goal — a small trusted surface is.
 
 **`dwkd-broker`** — this crate is *expected* to carry the large dependencies
 authority must not: a container client, an HTTP/TLS stack, content parsers.
@@ -197,10 +208,10 @@ Do not open a public issue for a vulnerability. See [SECURITY.md](SECURITY.md).
 ## Unsafe Rust
 
 The workspace sets `unsafe_code = "forbid"` and **no workspace crate contains
-`unsafe`** — `dwk-proto` included. The third-party `unicode-normalization`
-crate in its closure does contain a few reviewed `unsafe` lines
-([ADR-0033](docs/adr/0033-protocol-source-of-truth-and-tcb-dependencies.md) §4);
-"forbid" is a property of our code, not of the closure.
+`unsafe`** — `dwk-proto` included. Its dependency closure is empty
+([ADR-0034](docs/adr/0034-protocol-depends-on-no-unicode-database.md)), so
+today "forbid" happens to describe the whole of what the authority plane links;
+that is a fact about this moment, not a guarantee about future dependencies.
 
 That is not a promise it never will. `dwkd-broker` will eventually need
 `openat2` with `RESOLVE_*` flags, `fexecve` and rlimits, and some of that is
@@ -219,6 +230,33 @@ unreachable from safe Rust. When it happens:
 A test asserts the workspace-level `forbid` and that no `unsafe` has appeared;
 when the first legitimate exception lands, that test is updated in the same
 commit as the ADR.
+
+## Adding an eval
+
+`evals/` measures DireWolf's claims and implements none of them.
+[evals/README.md](evals/README.md) is the working guide; the short version:
+
+```bash
+make eval                                    # every suite
+make eval-check                              # the gate: subset vs baseline
+make eval-one ID=protocol-security/framing   # reproduce one
+```
+
+- A suite is a TOML file in `evals/suites/`, and it must say what its **score
+  means**. There is no single DireWolf score, and unlike properties are never
+  averaged: a security regression must not be payable by an unrelated
+  improvement.
+- A suite may only name a runner **registered in Python**
+  (`evals/src/direwolf_evals/runners/__init__.py`). Suite files and fixtures
+  are data; a fixture that could choose code would be a second execution path.
+- An eval whose subject does not exist yet declares `pending_reason` and the
+  milestone it `requires`. **Pending is not a pass**, and neither is skipped;
+  the gate counts them separately, and
+  `python -m direwolf_evals inventory` lists which security properties are
+  measurable today and which are waiting for M3 and later.
+- Changing what is expected means editing `evals/baselines/main.json`
+  deliberately (`python -m direwolf_evals baseline`) and putting the diff in
+  the pull request. Nothing rewrites it automatically, least of all CI.
 
 ## Changing the protocol
 
@@ -241,8 +279,8 @@ crates/dwk-proto  ──tools/protogen──▶  schemas/ + docs/DWKP_OPERATIONS
 - The Python generator understands a closed set of JSON Schema keywords and
   stops on anything else. If you need a new one, extend the generator on
   purpose, with a test that the Python side enforces it.
-- Parser rules — UTF-8, grammar, depth 32, lexical duplicate keys, NFC
-  collisions, number domains, framing — live in the lexers, not in JSON Schema.
+- Parser rules — UTF-8, grammar, depth 32, lexical duplicate keys, number
+  domains, framing — live in the lexers, not in JSON Schema.
   A change to one lexer needs the same change in the other and a vector in
   `tests/protocol/vectors/` that both test suites run.
 - Canonical bytes in the vectors come from V8
@@ -314,6 +352,39 @@ interface, documentation, or tests.
 The template and the full rules are in [docs/adr/README.md](docs/adr/README.md).
 Number the new record after the highest existing one and add it to the index
 and the dependency graph in the same commit.
+
+Accepted records are immutable, and `dwcheck adr` enforces that in two layers
+that are not equally strong:
+
+- **The trust anchor is Git history.** Each ADR is compared against the content
+  it had in the revision where it became Accepted. That revision is not part of
+  your change, so nothing you edit can move it. Locally the anchor is `HEAD`,
+  which catches the edit before you commit; in CI it is the merge base with the
+  target branch.
+- **`docs/adr/accepted.sha256` is a tripwire, not a control.** It catches
+  accidental drift and it works with no history at all, but it sits in the same
+  working tree as the ADRs: a change that edits an accepted ADR can re-record
+  the digest in the same commit, and the pair is self-consistent. Do not read a
+  passing digest check as proof that a record is unchanged.
+
+When you add an ADR, run
+
+```bash
+uv run --frozen python -m dwcheck adr --record
+```
+
+in the same commit. When you are tempted to append a note to an accepted ADR
+instead, write the new ADR — that temptation is exactly what broke the rule in
+M2.
+
+Supersede through a **new superseding ADR** plus the index in
+[docs/adr/README.md](docs/adr/README.md). The one part of an accepted record
+that stays writable is its `**Status:**` line, so the superseding ADR can
+banner-mark it; the decision, context and consequences below it are anchored.
+Correcting an accepted record anyway needs an `[[adr.history_exceptions]]` entry
+in `architecture.toml` naming the file, the exact content it authorises and the
+reason — a line in the diff that says in words that immutability is being
+overridden, which is the point of it.
 
 ## Proposing an architecture change
 

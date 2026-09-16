@@ -7,9 +7,11 @@ rule enforced through the scanner's hooks or around it:
 * grammar is RFC 8259; ``NaN`` and ``Infinity`` are refused;
 * nesting deeper than 32 is refused **before** parsing, by a scan that ignores
   brackets inside strings, so no deep structure is ever built;
-* an object with two byte-identical keys, or two keys equal under Unicode NFC,
-  is refused while its members are still a list -- ``object_pairs_hook`` sees
-  them before any dict collapses them;
+* an object with two byte-identical keys is refused while its members are still
+  a list -- ``object_pairs_hook`` sees them before any dict collapses them.
+  Keys are compared as text, never normalised: no protocol decision consults a
+  Unicode database, so this reader and the Rust one cannot disagree because
+  their host libraries ship different Unicode versions (ADR-0034);
 * numbers are restricted per profile, and each value has one representation:
   an integral value within +/-(2**53 - 1) is always an ``int``;
 * lone surrogate escapes, which ``json`` accepts and Rust rejects, are refused.
@@ -25,7 +27,6 @@ from __future__ import annotations
 
 import json
 import math
-import unicodedata
 from typing import Final
 
 from direwolf.wire.errors import (
@@ -35,7 +36,6 @@ from direwolf.wire.errors import (
     MAX_DEPTH,
     MAX_DEPTH_EXCEEDED,
     MAX_SAFE_INTEGER,
-    NORMALIZATION_COLLISION,
     NUMBER_OUT_OF_DOMAIN,
     ProtocolError,
 )
@@ -105,23 +105,12 @@ def _check_depth(text: str) -> None:
 
 
 def _object(pairs: list[tuple[str, JsonValue]]) -> dict[str, JsonValue]:
-    seen: dict[str, str] = {}
     out: dict[str, JsonValue] = {}
     for key, value in pairs:
         if not _is_scalar_text(key):
             raise ProtocolError(INVALID_JSON, "lone surrogate escape in an object key")
-        normalized = (
-            key if unicodedata.is_normalized("NFC", key) else unicodedata.normalize("NFC", key)
-        )
-        previous = seen.get(normalized)
-        if previous is not None:
-            if previous == key:
-                raise ProtocolError(DUPLICATE_KEY, f"duplicate key {key[:64]!r}")
-            raise ProtocolError(
-                NORMALIZATION_COLLISION,
-                f"key {key[:64]!r} collides with {previous[:64]!r} under Unicode NFC",
-            )
-        seen[normalized] = key
+        if key in out:
+            raise ProtocolError(DUPLICATE_KEY, f"duplicate key {key[:64]!r}")
         out[key] = value
     return out
 

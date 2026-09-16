@@ -9,12 +9,14 @@ resolution-markers = [
 [manifest]
 members = [
     "direwolf",
+    "direwolf-evals",
     "dwcheck",
 ]
 
 [manifest.dependency-groups]
 dev = [
     { name = "direwolf", editable = "runtime" },
+    { name = "direwolf-evals", editable = "evals" },
     { name = "dwcheck", editable = "tools/dwcheck" },
     { name = "mypy", specifier = ">=1.18" },
     { name = "pip-audit", specifier = ">=2.9" },
@@ -291,6 +293,17 @@ wheels = [
 name = "direwolf"
 version = "0.0.0"
 source = { editable = "runtime" }
+
+[[package]]
+name = "direwolf-evals"
+version = "0.0.0"
+source = { editable = "evals" }
+dependencies = [
+    { name = "direwolf" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "direwolf", editable = "runtime" }]
 
 [[package]]
 name = "dwcheck"

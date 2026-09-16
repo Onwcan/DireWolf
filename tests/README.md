@@ -12,11 +12,11 @@ Where a test goes is decided by *what it needs*, not by what it is about.
 | `tools/dwcheck/tests/` | Unit tests for the boundary checker itself | the package importable |
 | `tests/architecture/` | Repository-level checks: the boundary rules and the quality gates | the tools installed |
 | `tests/integration/` | Cross-process tests: runtime ↔ authority ↔ broker | **M3+**; does not exist yet |
-| `evals/` | The evaluation harness and its suites, including the security suite | **M2.5**; does not exist yet |
+| `evals/` | The evaluation harness, its suites, fixtures and baseline | the harness installed (`make eval`) |
 
-The last two rows are deliberately absent rather than empty. An empty directory
-with a placeholder file is a promise nobody has to keep; a row in this table is
-a decision about where the work will go when there is work.
+`tests/integration/` is deliberately absent rather than empty. An empty
+directory with a placeholder file is a promise nobody has to keep; a row in this
+table is a decision about where the work will go when there is work.
 
 ## What each level is for
 
@@ -96,13 +96,23 @@ DWK_FUZZ_SECONDS=60 make fuzz-smoke
 invoke a compiler or a package manager; they still run by default, because a
 gate that is routinely skipped is not a gate.
 
-## What arrives later
+## The evaluation harness
 
-**M2.5 — the evaluation harness.** `evals/` gets the runner, fixture repos,
-recorded-response replay, the mock `ExecutionEnvironment`, scoring, statistics
-and the fault-injection harness ([EVALS.md](../docs/EVALS.md)). The security
-suite becomes a merge gate. It exists as its own milestone because a merge gate
-with no builder is not a gate.
+`evals/` is the M2.5 harness: deterministic discovery, structured results, a
+reviewed baseline, replayable fixtures, the hostile-protocol suites and a
+fault-injection harness proved against a dummy process
+([evals/README.md](../evals/README.md), [EVALS.md](../docs/EVALS.md)).
+
+It is a *measuring* tool, so it lives beside the tests rather than in them:
+`make eval-check` is part of `make check` and of CI, and `evals/tests/` holds
+the tests **of the harness itself** — including the one that feeds it a known
+bad result and asserts that the gate goes red.
+
+Suites whose subject does not exist yet (everything needing the kernel, the
+brokers, the sandbox, approvals or model egress) are **pending**, which is
+counted apart from passing and from skipping.
+
+## What arrives later
 
 **M3.5 — the vertical slice.** One tool end to end, with published latency and
 approval-frequency measurements. Its tests belong in `tests/integration/`.

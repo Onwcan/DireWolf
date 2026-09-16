@@ -188,7 +188,16 @@ def task_lint() -> None:
 
 def task_typecheck() -> None:
     """mypy --strict over every Python package."""
-    uvrun("mypy", "runtime/src", "tools/dwcheck/src", "runtime/tests", "tests", "scripts")
+    uvrun(
+        "mypy",
+        "runtime/src",
+        "tools/dwcheck/src",
+        "evals/src",
+        "runtime/tests",
+        "evals/tests",
+        "tests",
+        "scripts",
+    )
 
 
 def task_test() -> None:
@@ -213,6 +222,28 @@ def task_schema_check() -> None:
     """Fail if schemas/, the operation inventory or the Python bindings are stale."""
     run("cargo", "run", "--quiet", "--locked", "-p", "protogen", "--", "check")
     run(_uv_bin(), "run", "--frozen", "python", "scripts/gen_proto_python.py", "--check")
+
+
+def task_eval() -> None:
+    """Run every evaluation suite and write JSONL results."""
+    uvrun("direwolf_evals", "run")
+
+
+def task_eval_check() -> None:
+    """The eval merge gate: the deterministic subset, compared with the baseline."""
+    uvrun("direwolf_evals", "check")
+
+
+def task_eval_one() -> None:
+    """Re-run one eval by id, at its seed. ID=<eval id> [SEED=<n>]."""
+    eval_id = os.environ.get("ID")
+    if not eval_id:
+        raise TaskError("set ID=<eval id>, e.g. `make eval-one ID=protocol-security/framing`")
+    seed = os.environ.get("SEED")
+    args = ["run", "--eval", eval_id, "--verbose"]
+    if seed:
+        args += ["--seed", seed]
+    uvrun("direwolf_evals", *args)
 
 
 def task_fuzz_smoke() -> None:
@@ -284,10 +315,20 @@ def task_security() -> None:
     if shutil.which("cargo-deny") is None:
         failures.append("cargo-deny is not installed; run `make tools`. The Rust half did not run.")
     else:
-        try:
-            run("cargo", "deny", "--all-features", "check")
-        except TaskError as exc:
-            failures.append(str(exc))
+        for manifest, config in (
+            (None, None),
+            # The fuzz workspace has its own lockfile, so the root policy does
+            # not see it, and its own policy, so fuzz-only crates never leak
+            # into the product allowlist (fuzz/deny.toml explains the split).
+            ("fuzz/Cargo.toml", "fuzz/deny.toml"),
+        ):
+            command = ["cargo", "deny", "--all-features"]
+            if manifest is not None:
+                command += ["--manifest-path", manifest, "--config", config or ""]
+            try:
+                run(*command, "check")
+            except TaskError as exc:
+                failures.append(str(exc))
 
     try:
         requirements = ROOT / "target" / "requirements-audit.txt"
@@ -313,7 +354,16 @@ def task_security() -> None:
 
 def task_check() -> None:
     """Everything CI runs, in the order that fails fastest."""
-    for name in ("fmt-check", "lint", "typecheck", "arch", "schema-check", "test", "security"):
+    for name in (
+        "fmt-check",
+        "lint",
+        "typecheck",
+        "arch",
+        "schema-check",
+        "test",
+        "eval-check",
+        "security",
+    ):
         print(f"\n{BOLD}=== {name} ==={OFF}")
         TASKS[name]()
     print(f"\n{GREEN}All checks passed.{OFF}")
@@ -356,6 +406,9 @@ TASKS = {
     "typecheck": task_typecheck,
     "test": task_test,
     "arch": task_arch,
+    "eval": task_eval,
+    "eval-check": task_eval_check,
+    "eval-one": task_eval_one,
     "schema": task_schema,
     "schema-check": task_schema_check,
     "fuzz-smoke": task_fuzz_smoke,

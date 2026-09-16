@@ -28,12 +28,13 @@ authors = ["The DireWolf authors"]
 #     member crates with `dep = { workspace = true }`.  A crate may not declare
 #     a third-party dependency directly; `dwcheck deps` rejects that.
 #   * `dwkd-authority` is the trusted computing base.  Its dependency set is a
-#     load-bearing claim of ADR-0019, so anything added to it needs a note on
-#     that ADR and a second reviewer.  The allowlist lives in architecture.toml.
+#     load-bearing claim of ADR-0019, so anything added to it needs a new ADR
+#     amending that one (never an edit to it) and a second reviewer.  The
+#     allowlist lives in architecture.toml.
 #
-# M1 added no third-party Rust dependencies.  M2 adds the first, below: one
-# crate (and its two small dependencies) reachable from the TCB through
-# dwk-proto, and two dev-only test crates.  Each is justified in ADR-0033; the
+# No crate reachable from a shipped binary or from dwk-proto is third-party:
+# the TCB-destined closure is empty (ADR-0034).  The only third-party crates in
+# the tree are dev-only test crates, below, and the fuzz workspace's own; the
 # inventory is in CONTRIBUTING.md "Adding a dependency".
 # ---------------------------------------------------------------------------
 [workspace.dependencies]
@@ -41,9 +42,10 @@ authors = ["The DireWolf authors"]
 dwk-proto = { path = "crates/dwk-proto" }
 
 # --- reachable from the TCB (dwk-proto -> dwkd-authority from M3) -----------
-# Every entry here and everything it pulls in must be in architecture.toml
-# [authority].allowed_third_party and justified in ADR-0033.
-unicode-normalization = { version = "0.1.25", default-features = false, features = ["std"] }
+# Empty. Anything added here is inside the trusted computing base from M3, so it
+# needs an entry in architecture.toml [authority].allowed_third_party and a new
+# ADR amending ADR-0019 (ADR-0033 is the current record; ADR-0034 removed the
+# last entry by removing the protocol's dependence on a Unicode database).
 
 # --- dev-only: tests, property tests, differential oracles ------------------
 # Never linked into a shipped binary. dwcheck excludes dev-only edges from the

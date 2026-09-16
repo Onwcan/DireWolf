@@ -1,0 +1,40 @@
+# ---------------------------------------------------------------------------
+# direwolf-evals - the evaluation harness.
+#
+# M2.5.  This package measures DireWolf's claims; it does not implement any of
+# them.  It holds no authority, makes no model call, opens no socket, and is
+# never imported by the runtime or by any daemon (`dwcheck` enforces the last
+# one).  Its only privileged-looking capability is spawning a deterministic
+# dummy child process, which exists so the fault-injection harness can be
+# proved against something before there is a kernel to instrument.
+#
+# TRUST: test infrastructure.  It reads fixtures as DATA - never as code - and
+# nothing in it may become a second path from cognition to effect.
+# ---------------------------------------------------------------------------
+[project]
+name = "direwolf-evals"
+version = "0.0.0"
+description = "DireWolf evaluation harness - measures claims; implements none of them"
+readme = "README.md"
+requires-python = ">=3.12"
+license = "Apache-2.0"
+authors = [{ name = "The DireWolf authors" }]
+classifiers = [
+    "Development Status :: 1 - Planning",
+    "Programming Language :: Python :: 3.12",
+]
+
+# DEPENDENCY POLICY: the harness is standard library only.  A statistics or
+# data-frame stack would be a reproducibility liability for the two numbers
+# M2.5 actually needs (a pass rate and a Wilson interval), and a YAML or
+# plugin loader would turn fixtures into code.  Adding a dependency here needs
+# the justification in CONTRIBUTING.md "Adding a dependency".
+dependencies = ["direwolf"]
+
+[build-system]
+requires = ["uv_build>=0.8,<0.14"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "direwolf_evals"
+module-root = "src"

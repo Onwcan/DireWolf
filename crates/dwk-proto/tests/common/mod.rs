@@ -9,7 +9,6 @@
 // Acknowledge dev-dependencies so `unused_crate_dependencies` stays meaningful.
 use dwk_proto as _;
 use proptest as _;
-use unicode_normalization as _;
 
 use std::path::PathBuf;
 
