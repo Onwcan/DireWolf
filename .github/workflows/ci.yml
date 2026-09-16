@@ -34,7 +34,7 @@ jobs:
     name: format (make fmt-check)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v5.0.1
       - uses: ./.github/actions/setup
       - run: make fmt-check
 
@@ -42,7 +42,7 @@ jobs:
     name: lint (make lint)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v5.0.1
       - uses: ./.github/actions/setup
       - run: make lint
 
@@ -50,7 +50,7 @@ jobs:
     name: types (make typecheck)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v5.0.1
       - uses: ./.github/actions/setup
         with:
           rust: "false"
@@ -60,7 +60,7 @@ jobs:
     name: boundaries (make arch)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v5.0.1
         with:
           # Full history, deliberately, and only in this job. `dwcheck adr`
           # anchors each accepted ADR to the revision in which it became
@@ -117,7 +117,7 @@ jobs:
     name: generated protocol files (make schema-check)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v5.0.1
       - uses: ./.github/actions/setup
       # schemas/, docs/DWKP_OPERATIONS.md and runtime/src/direwolf/proto/ are
       # generated (ADR-0033). A hand edit, or a Rust change committed without
@@ -128,7 +128,7 @@ jobs:
     name: evals (make eval-check)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v5.0.1
       - uses: ./.github/actions/setup
       # The deterministic subset: no secrets, no model call, no network. It
       # compares against evals/baselines/main.json and fails on a regression;
@@ -156,7 +156,7 @@ jobs:
         # it is a supported development platform.
         os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v5.0.1
       - uses: ./.github/actions/setup
       - run: python scripts/dw.py test
 
@@ -164,7 +164,7 @@ jobs:
     name: dependencies (make security)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v5.0.1
       - uses: ./.github/actions/setup
       - name: Cache cargo-deny
         id: cache-deny
@@ -183,7 +183,7 @@ jobs:
     name: release build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v5.0.1
       - uses: ./.github/actions/setup
       # The release profile enables LTO, one codegen unit and panic=abort; it
       # can fail where a debug build does not, and a release-only failure
