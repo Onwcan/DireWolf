@@ -50,8 +50,9 @@ The example shows a future message (`direwolf.tool.invoke` is reserved, not defi
 | `ts` | `YYYY-MM-DDTHH:MM:SS.mmmZ`, calendar-valid | **Advisory.** Never an input to ordering or authority |
 | `correlation_id`, `causation_id` | any 2–8 letter prefix + UUIDv7 | |
 | `session_id`, `run_id` | `ses_` / `run_` + UUIDv7 | Claims; compared with kernel state from M3 |
+| bounded arrays | JSON array with a `maxItems` its type fixes | Length checked before any item is decoded; `null` is never an item |
 | `epoch` | integer 1 – 2^53−1; requires `session_id` | A claim, fenced against the kernel's value (§3) |
-| `idempotency_key` | `[A-Za-z0-9][A-Za-z0-9._:-]{0,127}` | |
+| `idempotency_key` | `[A-Za-z0-9][A-Za-z0-9._:-]{0,127}` | Required on `AdmitRun`, forbidden elsewhere. Names an *attempt*, not a run |
 | `payload` | object | Typed per `schema` |
 
 Each message declares every optional envelope field as required, optional or **forbidden**; a forbidden field present is `FORBIDDEN_FIELD`. `null` is never a value — an optional field is omitted.
@@ -59,7 +60,21 @@ Each message declares every optional envelope field as required, optional or **f
 - `schema` is a namespaced string; `schema_version` is an integer that bumps only on breaking payload changes.
 - `correlation_id` groups everything belonging to one logical operation; `causation_id` points at the direct cause. Together they reconstruct the full tree of "what led to this."
 - `epoch` is the session lease epoch — see §3.
-- `idempotency_key` is **mandatory** on any request with a side effect.
+- `idempotency_key` is **mandatory on any request that mutates authority state
+  or causes an effect**, and forbidden on every other operation. An earlier
+  draft of this rule said "any request with a side effect", which names the
+  wrong property: `AdmitRun` causes no effect outside the kernel and still mints
+  authority, so a retry of it that is not deduplicated produces a second
+  admitted run. As of M3a `AdmitRun` is the one operation that carries a key,
+  and it **requires** one — an optional key is a safe path the careless caller
+  does not take. The kernel deduplicates on
+  `(authenticated peer identity, session_id, idempotency_key)`, binds the key to
+  the canonical request with `id`, `ts`, `correlation_id` and `causation_id`
+  removed, returns the recorded answer on a match and **refuses** on a mismatch;
+  epoch fencing is checked first, so a key is never a way past the fence
+  ([ADR-0036](adr/0036-m3-authority-operations-and-the-capability-wire-form.md)
+  §8). `ReleaseRun` needs no key because it is idempotent by shape, and
+  `QueryAuthority` needs none because it is pure.
 
 ### Compatibility rules — **per protocol, not blanket**
 
@@ -89,7 +104,7 @@ Parser rules shared by every family, in the order they are checked ([ADR-0032](a
 | Versions | Unsupported `v` or `schema_version` is never read as a supported one | `PROTOCOL_VERSION_UNSUPPORTED` + supported range |
 | Operation | A DWKP message name this build does not define, including every reserved operation | `PROTOCOL_UNKNOWN_OPERATION` |
 
-A protocol error is **not a policy denial**: `direwolf.protocol.error` says nothing was evaluated because nothing well-formed arrived. JSON Schema describes shapes; it does not enforce the lexical rules in this table, which are parser checks with their own tests.
+A protocol error is **not a policy denial** and **not an authority refusal**: `direwolf.protocol.error` says nothing was evaluated because nothing well-formed arrived (§2.1). JSON Schema describes shapes; it does not enforce the lexical rules in this table, which are parser checks with their own tests.
 
 Common to all: new fields are optional with a documented default; removing or retyping requires a `schema_version` bump; `v` is the envelope version, and a receiver that cannot handle it responds `PROTOCOL_VERSION_UNSUPPORTED` naming the range it supports — a clean actionable failure rather than a parse error; the handshake negotiates the highest mutually supported version.
 
@@ -111,8 +126,9 @@ Unix domain socket at `$DIREWOLF_HOME/kernel.sock`, mode 0600, owned by the kern
 
 The authoritative inventory — initiator, receiver, owning milestone, whether the operation can cause an effect, and the second-path argument for each — is generated from `dwk-proto` into **[DWKP_OPERATIONS.md](DWKP_OPERATIONS.md)**. As of M2:
 
-- **Defined on the wire:** `Handshake` → `HandshakeAccepted`, `Heartbeat` → `Ack`, `AcquireLease` → `LeaseGrant{session_id, epoch}`, `ReleaseLease` → `Ack`; any of them may be answered with `direwolf.protocol.error`. Their *semantics* (epoch assignment, fencing, lease expiry) are M3/M8; M2 defines only their shape.
-- **Reserved:** every other operation below. A reserved operation has no message name, no schema and no decoder; a message naming one is `PROTOCOL_UNKNOWN_OPERATION`. `QueryInvocationStatus` ([RELIABILITY.md](RELIABILITY.md)) is reserved too.
+- **Defined by M2:** `Handshake` → `HandshakeAccepted`, `Heartbeat` → `Ack`, `AcquireLease` → `LeaseGrant{session_id, epoch}`, `ReleaseLease` → `Ack`; any of them may be answered with `direwolf.protocol.error`. Their *semantics* (epoch assignment, fencing, lease expiry) are M3/M8; M2 defined only their shape, and M3 did not change it.
+- **Defined by M3a:** `AdmitRun` → `RunGrant`, `ReleaseRun` → `Ack`, `QueryAuthority` → `EffectiveAuthority` ([ADR-0036](adr/0036-m3-authority-operations-and-the-capability-wire-form.md)), and `AuthorityRefusal` as an alternative answer to any of those plus `Heartbeat`, `AcquireLease` and `ReleaseLease` (§2.1). These carry the authority vocabulary — capabilities, grants, profiles, policy revisions and decisions. `AdmitRun` is the only one that carries an `idempotency_key`, and carries it mandatorily, because it is the only one whose retry would otherwise mint a second grant (§1). A decision's `effect` is `ALLOW` or `DENY`: policy's own function is three-valued ([ADR-0006](adr/0006-policy-and-capability-boundary.md)) and M3c computes all three, but an authority with no approval registry cannot obtain an approval and therefore refuses, which is the direction [APPROVALS.md](APPROVALS.md) already fixes for a run with no human present. `REQUIRE_APPROVAL` reaches the wire at M6, with a `schema_version` bump, rather than sitting here as a value nothing can satisfy and every client has to guess a behaviour for. As above, a defined wire form is a shape and not an implementation: the daemon that answers them is M3b–e.
+- **Reserved:** every other operation below, including `ToolInvoke`. A reserved operation has no message name, no schema and no decoder; a message naming one is `PROTOCOL_UNKNOWN_OPERATION`. `QueryInvocationStatus` ([RELIABILITY.md](RELIABILITY.md)) is reserved too. `ToolInvoke` stays reserved through M3 because its request must name a tool from the canonical inventory with arguments the kernel canonicalises, and neither the tool nor the canonicaliser exists before M4; the alternatives were an opaque argument map or a duplicate of `QueryAuthority`, and both fail the protocol change review.
 - **Not encoded in M2:** the approval binding (its eleven fields are fixed by [ADR-0021](adr/0021-approval-binding-v2.md); M6 encodes them), capability tokens, budget leases and denials.
 
 The design list, unchanged from Phase 0.1:
@@ -149,6 +165,62 @@ Two of these exist specifically to avoid creating a second path to effect:
 
 There is **no** operation that returns a secret value, widens a capability, creates an approval, writes a policy rule, writes the audit log, sets a policy input, or relays an opaque frame to anything. Those absences are the design; each is a deliberate hole in the API surface.
 
+### 2.1 Three answers, because there are three remedies
+
+A caller has to be able to tell apart three failures that look alike and are
+repaired differently. Collapsing any two of them leaves a client guessing, and
+the cost of guessing wrong is a retry loop against an answer that will never
+change.
+
+| Answer | What happened | Remedy |
+|---|---|---|
+| `direwolf.protocol.error` | The bytes did not form a valid message. **Nothing was evaluated.** | Fix the message. |
+| `direwolf.authority.refused` | The message was valid; the authority's own state does not permit the operation to be attempted. **No policy ran, no capability was consulted.** | Re-acquire the lease, admit the run, or stop retrying. |
+| `direwolf.authority.effective` with `effect: DENY` | Both gates of [ADR-0006](adr/0006-policy-and-capability-boundary.md) ran against real state and refused. | Ask for less, or change policy. |
+
+**A protocol error is never used for a well-formed request.** It asserts that
+nothing well-formed arrived, and for a message that decoded there is no offending
+member to point a JSON Pointer at — a caller told "malformed" would go and repair
+a message that was already correct.
+
+```
+direwolf.authority.refused (AuthorityRefusal)   response, causation_id required
+  required operation   ACQUIRE_LEASE | RELEASE_LEASE | HEARTBEAT
+                       | ADMIT_RUN | RELEASE_RUN | QUERY_AUTHORITY
+  required reason      STALE_EPOCH | LEASE_HELD | IDEMPOTENCY_CONFLICT
+                       | UNKNOWN_AGENT_PROFILE | UNKNOWN_RUN
+```
+
+Both fields are closed, **and so is their combination**: the schema carries the
+permitted pairs and a pair it does not list is rejected by the decoder in both
+languages, so a reason an operation cannot produce stops at the boundary instead
+of being believed downstream.
+
+| | `STALE_EPOCH` | `LEASE_HELD` | `IDEMPOTENCY_CONFLICT` | `UNKNOWN_AGENT_PROFILE` | `UNKNOWN_RUN` |
+|---|:-:|:-:|:-:|:-:|:-:|
+| `ACQUIRE_LEASE` | | ✓ | | | |
+| `RELEASE_LEASE` | ✓ | | | | |
+| `HEARTBEAT` | ✓ | | | | |
+| `ADMIT_RUN` | ✓ | | ✓ | ✓ | |
+| `RELEASE_RUN` | ✓ | | | | |
+| `QUERY_AUTHORITY` | ✓ | | | | ✓ |
+
+`Handshake` cannot be refused: it runs before there is authority state to refuse
+against. `AcquireLease` cannot be fenced, because it is the operation that issues
+the epoch.
+
+**The payload has two fields and no third.** No detail string, no hint, no map,
+and `STALE_EPOCH` does **not** report the kernel's current epoch — that is the
+one value a fenced runtime needs to un-fence itself. "Unknown" answers are
+deliberately indistinguishable from "already released", so a refusal is not a
+probe for which sessions, leases and runs exist. Release operations stay
+idempotent: releasing a run or a lease the kernel no longer records is
+acknowledged, not refused.
+
+The reason set is sized for the operations M3 actually has. Adding one — M11's
+unknown skill is the first known — widens a closed enum, which is breaking, and
+bumps `schema_version` ([ADR-0036](adr/0036-m3-authority-operations-and-the-capability-wire-form.md) §10).
+
 ### The second-path rule
 
 > **Every new DWKP operation must carry a written argument for why it is not a second path from cognition to effect, reviewed by someone other than its author.**
@@ -157,7 +229,7 @@ This rule exists because the failure already happened once, during Phase 0, befo
 
 `CanonicalPreview` has a concrete V1 consumer: `direwolf policy simulate` and the `[w]hy` branch of an approval prompt both need to show what an action *would* resolve to without executing it, and neither may duplicate canonicalisation logic on the untrusted side. It is an authority primitive ([ADR-0029](adr/0029-packaging-runtime-first-decoupled-authority.md)).
 
-### Denial payload
+### Denial payload *(M6; not on the wire yet)*
 
 ```json
 {"schema":"direwolf.tool.denied",
@@ -275,8 +347,9 @@ Design properties. At M2 only the parser row is implemented; the rest need the t
 |---|---|
 | Runtime cannot impersonate the kernel | Kernel owns the socket; runtime connects, never binds |
 | Other local processes cannot impersonate the runtime | Peer credential check on connect |
-| Zombie runtime cannot act | Epoch fencing |
-| Replay of a side-effecting request | Idempotency key + kernel-side dedupe window |
+| Zombie runtime cannot act | Epoch fencing; the `STALE_EPOCH` refusal withholds the current epoch, so being fenced tells a caller nothing it could use to unfence itself |
+| A refusal is not a probe | One `UNKNOWN_RUN` answer for "never existed" and "already released"; no `UNKNOWN_LEASE`; releases stay idempotent |
+| Replay of a request that mints or spends authority | Idempotency key scoped to the authenticated peer and session, bound to the canonical request, + kernel-side dedupe window (M3d) |
 | Gateway compromise | Gateway holds no authority; approvals relayed, not generated |
 | Parser exploitation | Rust parser, `#![forbid(unsafe_code)]` and no third-party dependency, 1 MiB frame cap, depth 32, lexical duplicate-key rejection; fuzzed with libFuzzer weekly and on protocol pull requests, plus a stable mutation harness in every test run (M2) |
 | Resource exhaustion | Bounded in-flight, rate limits, write timeouts |

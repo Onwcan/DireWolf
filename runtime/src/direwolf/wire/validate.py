@@ -8,7 +8,7 @@ need to.
 from __future__ import annotations
 
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import Final
 
 from direwolf.wire.errors import (
@@ -18,6 +18,7 @@ from direwolf.wire.errors import (
     NULL_NOT_ALLOWED,
     OUT_OF_RANGE,
     TOO_LONG,
+    TOO_MANY_ITEMS,
     UNKNOWN_FIELD,
     UNKNOWN_VARIANT,
     WRONG_TYPE,
@@ -173,6 +174,42 @@ def identifier(prefix: str | None) -> Check[str]:
     return check
 
 
+def sequence[T](max_items: int, item: Check[T]) -> Check[list[T]]:
+    """A bounded array, checked the way `BoundedList` checks it in Rust.
+
+    The length is compared **before** any item is decoded, so a message
+    declaring a hundred thousand items costs one comparison rather than a
+    hundred thousand decodes on its way to being rejected.
+
+    An item is never `null`: a shorter array is how an item is omitted, exactly
+    as an absent key is how an optional field is omitted. One value, one
+    encoding.
+    """
+
+    def check(value: JsonValue, cx: Cx) -> list[T]:
+        if not isinstance(value, list):
+            raise cx.violation(WRONG_TYPE, f"expected array, found {type_name(value)}")
+        if len(value) > max_items:
+            raise cx.violation(
+                TOO_MANY_ITEMS, f"expected at most {max_items} items, found {len(value)}"
+            )
+        out: list[T] = []
+        for index, element in enumerate(value):
+            cx.push(str(index))
+            try:
+                if element is None:
+                    raise cx.violation(
+                        NULL_NOT_ALLOWED,
+                        "null is not a value; a shorter array is how an item is omitted",
+                    )
+                out.append(item(element, cx))
+            finally:
+                cx.pop()
+        return out
+
+    return check
+
+
 def enumeration(variants: tuple[str, ...]) -> Check[str]:
     def check(value: JsonValue, cx: Cx) -> str:
         if not isinstance(value, str):
@@ -189,6 +226,29 @@ def ordered(low_name: str, low: int, high_name: str, high: int, cx: Cx) -> None:
     if low > high:
         raise schema_violation(
             INCONSISTENT, cx.child(high_name), f"{low_name} must not exceed {high_name}"
+        )
+
+
+def paired(
+    left_name: str,
+    left: str,
+    right_name: str,
+    right: str,
+    allowed: Mapping[str, tuple[str, ...]],
+    cx: Cx,
+) -> None:
+    """The ``paired(left -> right)`` cross-field check.
+
+    Two closed enums whose combination is also closed. A pair the table does not
+    list is refused here rather than carried inwards, which is what makes "this
+    reason cannot arise from that operation" a property of the wire instead of a
+    convention two implementations are each trusted to keep.
+    """
+    if right not in allowed.get(left, ()):
+        raise schema_violation(
+            INCONSISTENT,
+            cx.child(right_name),
+            f"{left_name} {left} cannot produce {right_name} {right}",
         )
 
 

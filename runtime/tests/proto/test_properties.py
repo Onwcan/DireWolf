@@ -126,6 +126,118 @@ def _version_pair(rng: random.Random) -> tuple[int, int]:
     return min(a, b), max(a, b)
 
 
+def _kebab(rng: random.Random, max_len: int) -> str:
+    """A lowercase name: the shape agent profiles, skills and rule ids take."""
+    rest = "".join(
+        rng.choice("abcdefghijklmnopqrstuvwxyz0123456789-")
+        for _ in range(rng.randrange(0, max_len))
+    )
+    return rng.choice("abcdefghijklmnopqrstuvwxyz") + rest
+
+
+def _capability(rng: random.Random) -> str:
+    """A capability in the grammar of CAPABILITIES.md section 2.
+
+    Generated across the whole lexical space the type admits -- every scope
+    character class, with and without constraints -- because the point of a
+    randomised round trip is to find the spelling nobody wrote a vector for.
+    """
+
+    def snake(max_len: int) -> str:
+        rest = "".join(
+            rng.choice("abcdefghijklmnopqrstuvwxyz0123456789_")
+            for _ in range(rng.randrange(0, max_len))
+        )
+        return rng.choice("abcdefghijklmnopqrstuvwxyz") + rest
+
+    scope_alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._/*:@+~<>-"
+    scope = "".join(rng.choice(scope_alphabet) for _ in range(rng.randrange(1, 40)))
+    capability = f"{snake(15)}.{snake(31)}:{scope}"
+    if rng.random() < 0.4:
+        constraint_alphabet = (
+            "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_=,&.*/-"
+        )
+        constraints = "".join(rng.choice(constraint_alphabet) for _ in range(rng.randrange(1, 30)))
+        capability = f"{capability}?{constraints}"
+    return capability
+
+
+def _revision(rng: random.Random) -> str:
+    return "".join(rng.choice("0123456789abcdef") for _ in range(64))
+
+
+def _rule_source(rng: random.Random) -> str:
+    path = "".join(
+        rng.choice("abcdefghijklmnopqrstuvwxyz0123456789._/-") for _ in range(rng.randrange(1, 30))
+    )
+    return f"{path}:{rng.randrange(1, 10**8)}"
+
+
+def _grants(rng: random.Random) -> list[dwkp.CapabilityGrant]:
+    # Zero is a legitimate length, and the bound is a legitimate length; both
+    # ends of an array field are where an off-by-one lives.
+    count = rng.choice([0, 0, 1, rng.randrange(0, 5), 64])
+    return [
+        dwkp.CapabilityGrant(cap_id=_id(rng, "cap"), capability=_capability(rng))
+        for _ in range(count)
+    ]
+
+
+def _withheld(rng: random.Random) -> list[dwkp.WithheldCapability]:
+    count = rng.choice([0, 0, 1, rng.randrange(0, 5), 64])
+    return [
+        dwkp.WithheldCapability(
+            capability=_capability(rng),
+            reason=rng.choice(
+                [
+                    "NOT_IN_AGENT_PROFILE",
+                    "NOT_IN_SKILL_SET",
+                    "NOT_IN_PARENT_GRANT",
+                    "ABOVE_PROFILE_CEILING",
+                    "DENIED_BY_POLICY",
+                ]
+            ),
+        )
+        for _ in range(count)
+    ]
+
+
+def _decision(rng: random.Random) -> dwkp.AuthorityDecision:
+    return dwkp.AuthorityDecision(
+        effect=rng.choice(["ALLOW", "DENY"]),
+        reason=rng.choice(
+            [
+                "ALLOWED_BY_RULE",
+                "DENIED_BY_RULE",
+                "DEFAULT_DENY",
+                "NO_CAPABILITY",
+                "CAPABILITY_MALFORMED",
+            ]
+        ),
+        capability_result=rng.choice(["SATISFIED", "NOT_SATISFIED"]),
+        policy_result=rng.choice(["SATISFIED", "NOT_SATISFIED"]),
+        rule_id=_kebab(rng, 63),
+        rule_source=_rule_source(rng),
+        required_capability=rng.choice([None, _capability(rng)]),
+    )
+
+
+def _refusal(rng: random.Random) -> dwkp.AuthorityRefusal:
+    """A refusal whose operation and reason are a pair the table permits.
+
+    The table comes from the generated binding rather than a copy here: drawing
+    the two fields independently would generate messages the decoder is right to
+    reject, so the round-trip property would fail for a correct reason -- which
+    is the kind of failure that gets a test weakened instead of fixed. That a
+    *bad* pair is refused is covered by the shared vectors, in both languages.
+    """
+    operation = rng.choice(sorted(dwkp._AUTHORITYREFUSAL_PAIRING))
+    return dwkp.AuthorityRefusal(
+        operation=operation,
+        reason=rng.choice(dwkp._AUTHORITYREFUSAL_PAIRING[operation]),
+    )
+
+
 def _payload(rng: random.Random, schema: str) -> object:
     if schema == "direwolf.handshake":
         lo, hi = _version_pair(rng)
@@ -146,10 +258,42 @@ def _payload(rng: random.Random, schema: str) -> object:
             detail=_text(rng, 80),
             supported=span,
         )
+    if schema == "direwolf.run.admit":
+        return dwkp.AdmitRun(
+            agent_profile=_kebab(rng, 63),
+            skills=[_kebab(rng, 63) for _ in range(rng.choice([0, 0, 1, rng.randrange(0, 4), 32]))],
+            requested_capabilities=[
+                _capability(rng) for _ in range(rng.choice([0, 0, 1, rng.randrange(0, 5), 64]))
+            ],
+        )
+    if schema == "direwolf.run.grant":
+        return dwkp.RunGrant(
+            run_id=_id(rng, "run"),
+            epoch=rng.randint(1, MAX_SAFE_INTEGER),
+            policy_revision=_revision(rng),
+            profile=rng.choice(["SAFE", "BALANCED", "POWER"]),
+            granted=_grants(rng),
+            withheld=_withheld(rng),
+        )
+    if schema == "direwolf.authority.query":
+        return dwkp.AuthorityQuery(proposed=rng.choice([None, _capability(rng)]))
+    if schema == "direwolf.authority.effective":
+        return dwkp.EffectiveAuthority(
+            run_id=_id(rng, "run"),
+            epoch=rng.randint(1, MAX_SAFE_INTEGER),
+            policy_revision=_revision(rng),
+            profile=rng.choice(["SAFE", "BALANCED", "POWER"]),
+            granted=_grants(rng),
+            withheld=_withheld(rng),
+            decision=rng.choice([None, _decision(rng)]),
+        )
+    if schema == "direwolf.authority.refused":
+        return _refusal(rng)
     empty: dict[str, Callable[[], object]] = {
         "direwolf.heartbeat": dwkp.HeartbeatPayload,
         "direwolf.lease.acquire": dwkp.LeaseAcquire,
         "direwolf.lease.release": dwkp.LeaseRelease,
+        "direwolf.run.release": dwkp.ReleaseRun,
         "direwolf.ack": dwkp.Ack,
     }
     return empty[schema]()

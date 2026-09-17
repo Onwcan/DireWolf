@@ -144,6 +144,17 @@ wire_id! {
     RunId, "run"
 }
 
+wire_id! {
+    /// Identifies one capability the kernel granted to one run.
+    ///
+    /// A reference, not a bearer token: the kernel holds the authoritative
+    /// record for every live grant in `kernel.db`, so revocation is a row, not
+    /// an expiry (`CAPABILITIES.md` §4). Presenting this id proves nothing on
+    /// its own -- the kernel checks that the grant exists, belongs to the
+    /// requesting run, and is current at the request's epoch.
+    CapId, "cap"
+}
+
 /// Any DireWolf identifier: a lowercase prefix of two to eight letters and a
 /// UUIDv7 body. Used where the corpus permits any entity to be referenced —
 /// `correlation_id` (`PROTOCOL.md` §1 uses a run id) and `causation_id` (a

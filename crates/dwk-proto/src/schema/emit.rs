@@ -10,8 +10,9 @@
 
 use crate::dwcp;
 use crate::dwkp::messages::{
-    Ack, Handshake, HandshakeAccepted, HeartbeatPayload, LeaseAcquire, LeaseGrant, LeaseRelease,
-    ProtocolErrorPayload,
+    Ack, AdmitRun, AuthorityQuery, AuthorityRefusal, EffectiveAuthority, Handshake,
+    HandshakeAccepted, HeartbeatPayload, LeaseAcquire, LeaseGrant, LeaseRelease,
+    ProtocolErrorPayload, ReleaseRun, RunGrant,
 };
 use crate::dwkp::registry::{self, OPERATIONS};
 use crate::envelope::{EnvelopeRules, MessageType, Presence, field_schema};
@@ -63,6 +64,12 @@ pub fn payload_schema(name: &str, defs: &mut Defs) -> Option<Value> {
         "LeaseAcquire" => LeaseAcquire::schema(defs),
         "LeaseGrant" => LeaseGrant::schema(defs),
         "LeaseRelease" => LeaseRelease::schema(defs),
+        "AdmitRun" => AdmitRun::schema(defs),
+        "RunGrant" => RunGrant::schema(defs),
+        "ReleaseRun" => ReleaseRun::schema(defs),
+        "AuthorityQuery" => AuthorityQuery::schema(defs),
+        "EffectiveAuthority" => EffectiveAuthority::schema(defs),
+        "AuthorityRefusal" => AuthorityRefusal::schema(defs),
         "Ack" => Ack::schema(defs),
         "ProtocolErrorPayload" => ProtocolErrorPayload::schema(defs),
         "ClientError" => dwcp::ClientError::schema(defs),

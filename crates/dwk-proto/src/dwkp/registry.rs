@@ -145,6 +145,34 @@ const REQUEST_SESSION_EPOCH: EnvelopeRules = EnvelopeRules {
     idempotency_key: Presence::Forbidden,
 };
 
+/// The admission request. Like `REQUEST_SESSION_EPOCH`, plus the key that
+/// makes a retry one admission rather than two.
+///
+/// The key is *required*, not optional. An optional key leaves the kernel two
+/// paths -- one deduplicated, one not -- and the undeduplicated path is
+/// precisely the one a retry takes, so the safe behaviour would exist and be
+/// unused. It costs a caller one generated string; it costs the kernel the
+/// difference between one grant and an unbounded number (ADR-0036 section 8).
+const REQUEST_ADMIT: EnvelopeRules = EnvelopeRules {
+    correlation_id: Presence::Optional,
+    causation_id: Presence::Optional,
+    session_id: Presence::Required,
+    run_id: Presence::Forbidden,
+    epoch: Presence::Required,
+    idempotency_key: Presence::Required,
+};
+
+/// A request about an existing run: it names the session it belongs to, the
+/// epoch it is fenced to, and the run itself.
+const REQUEST_RUN: EnvelopeRules = EnvelopeRules {
+    correlation_id: Presence::Optional,
+    causation_id: Presence::Optional,
+    session_id: Presence::Required,
+    run_id: Presence::Required,
+    epoch: Presence::Required,
+    idempotency_key: Presence::Forbidden,
+};
+
 const RESPONSE: EnvelopeRules = EnvelopeRules {
     correlation_id: Presence::Optional,
     causation_id: Presence::Required,
@@ -212,6 +240,54 @@ pub const MESSAGES: &[MessageSpec] = &[
         summary: "Surrender a lease held at the stated epoch.",
     },
     MessageSpec {
+        schema: "direwolf.run.admit",
+        message_type: MessageType::Request,
+        versions: V1,
+        rules: REQUEST_ADMIT,
+        payload: "AdmitRun",
+        summary: "Ask the kernel to admit a run and mint its authority.",
+    },
+    MessageSpec {
+        schema: "direwolf.run.grant",
+        message_type: MessageType::Response,
+        versions: V1,
+        rules: RESPONSE,
+        payload: "RunGrant",
+        summary: "The run, the epoch and the capabilities the kernel minted.",
+    },
+    MessageSpec {
+        schema: "direwolf.run.release",
+        message_type: MessageType::Request,
+        versions: V1,
+        rules: REQUEST_RUN,
+        payload: "ReleaseRun",
+        summary: "End a run's authority.",
+    },
+    MessageSpec {
+        schema: "direwolf.authority.query",
+        message_type: MessageType::Request,
+        versions: V1,
+        rules: REQUEST_RUN,
+        payload: "AuthorityQuery",
+        summary: "Ask what a run may do, and optionally decide one action.",
+    },
+    MessageSpec {
+        schema: "direwolf.authority.effective",
+        message_type: MessageType::Response,
+        versions: V1,
+        rules: RESPONSE,
+        payload: "EffectiveAuthority",
+        summary: "A run's effective authority, and a decision if one was asked for.",
+    },
+    MessageSpec {
+        schema: "direwolf.authority.refused",
+        message_type: MessageType::Response,
+        versions: V1,
+        rules: RESPONSE,
+        payload: "AuthorityRefusal",
+        summary: "The request was well-formed; the authority's state refused it.",
+    },
+    MessageSpec {
         schema: "direwolf.ack",
         message_type: MessageType::Response,
         versions: V1,
@@ -239,6 +315,11 @@ pub fn message(message_type: MessageType, schema: &str) -> Option<&'static Messa
 
 const ERR: &str = "direwolf.protocol.error";
 
+/// The typed authority refusal. Distinct from `ERR`: that one says the message
+/// was not valid, this one says the message was valid and the authority's state
+/// said no (ADR-0036 section 10).
+const REFUSED: &str = "direwolf.authority.refused";
+
 /// The complete DWKP operation inventory.
 pub const OPERATIONS: &[OperationSpec] = &[
     // ---- defined in M2 ----------------------------------------------------
@@ -262,7 +343,7 @@ pub const OPERATIONS: &[OperationSpec] = &[
         layer: Layer::AuthorityPrimitive,
         status: WireStatus::Defined,
         request: Some("direwolf.heartbeat"),
-        responses: &["direwolf.ack", ERR],
+        responses: &["direwolf.ack", REFUSED, ERR],
         initiator: "runtime",
         receiver: "dwkd-authority",
         semantics_owner: "M3 (epoch authority); M8 (lease renewal)",
@@ -270,14 +351,14 @@ pub const OPERATIONS: &[OperationSpec] = &[
         authority_bearing: true,
         carries: "Envelope session_id and epoch only; an empty payload.",
         consumer: "dwkd-authority lease table in kernel.db (M3/M8).",
-        second_path: "It can only extend authority the kernel already granted, by at most one lease TTL, and only while the stated epoch is the kernel's current one; a stale epoch is fenced (PROTOCOL.md section 3). It names no resource and cannot create, widen or transfer authority. The epoch it carries is one the kernel issued, compared against kernel.db, never believed.",
+        second_path: "It can only extend authority the kernel already granted, by at most one lease TTL, and only while the stated epoch is the kernel's current one; a stale epoch is fenced (PROTOCOL.md section 3). It names no resource and cannot create, widen or transfer authority. The epoch it carries is one the kernel issued, compared against kernel.db, never believed; an epoch that is not current is refused with STALE_EPOCH rather than silently renewing nothing.",
     },
     OperationSpec {
         name: "AcquireLease",
         layer: Layer::AuthorityPrimitive,
         status: WireStatus::Defined,
         request: Some("direwolf.lease.acquire"),
-        responses: &["direwolf.lease.grant", ERR],
+        responses: &["direwolf.lease.grant", REFUSED, ERR],
         initiator: "runtime",
         receiver: "dwkd-authority",
         semantics_owner: "M3 (epoch authority); M8 (session leases)",
@@ -285,14 +366,14 @@ pub const OPERATIONS: &[OperationSpec] = &[
         authority_bearing: true,
         carries: "Envelope session_id; an empty payload. The response carries the kernel-assigned epoch.",
         consumer: "dwkd-authority lease table in kernel.db (M3/M8).",
-        second_path: "The sender cannot propose an epoch; the kernel assigns it. A lease confers the right to write one session and nothing more: capabilities come only from AdmitRun, so holding a lease authorises no effect. Its only external consequence is fencing other writers of the same session, which is its purpose. M3 adds the policy denial for a session the caller may not lease; a protocol error is not that denial.",
+        second_path: "The sender cannot propose an epoch; the kernel assigns it. A lease confers the right to write one session and nothing more: capabilities come only from AdmitRun, so holding a lease authorises no effect. Its only external consequence is fencing other writers of the same session, which is its purpose. Exactly one process wins the conditional acquire (ADR-0011 point 2); the others are refused with LEASE_HELD on direwolf.authority.refused, which is why that refusal exists. It is the one operation that cannot be fenced, because it is the operation that issues the epoch.",
     },
     OperationSpec {
         name: "ReleaseLease",
         layer: Layer::AuthorityPrimitive,
         status: WireStatus::Defined,
         request: Some("direwolf.lease.release"),
-        responses: &["direwolf.ack", ERR],
+        responses: &["direwolf.ack", REFUSED, ERR],
         initiator: "runtime",
         receiver: "dwkd-authority",
         semantics_owner: "M3; M8",
@@ -300,38 +381,38 @@ pub const OPERATIONS: &[OperationSpec] = &[
         authority_bearing: true,
         carries: "Envelope session_id and epoch; an empty payload.",
         consumer: "dwkd-authority lease table in kernel.db (M3/M8).",
-        second_path: "It can only surrender authority, never gain it, and only for a lease held at the stated current epoch. It names nothing but the session.",
+        second_path: "It can only surrender authority, never gain it, and only for a lease held at the stated current epoch; a stale epoch is refused with STALE_EPOCH. It names nothing but the session. Releasing a lease the kernel no longer records is acknowledged rather than refused, for the same reason ReleaseRun is: a retry must not be distinguishable from success, and there is no UNKNOWN_LEASE reason because inventing one would turn a harmless retry into an error and make the refusal a probe for which sessions exist.",
     },
     // ---- reserved: authority primitives -----------------------------------
     OperationSpec {
         name: "AdmitRun",
         layer: Layer::AuthorityPrimitive,
-        status: WireStatus::Reserved,
-        request: None,
-        responses: &[],
+        status: WireStatus::Defined,
+        request: Some("direwolf.run.admit"),
+        responses: &["direwolf.run.grant", REFUSED, ERR],
         initiator: "runtime",
         receiver: "dwkd-authority",
         semantics_owner: "M3",
         effect_bearing: false,
         authority_bearing: true,
-        carries: "Agent profile and requested skills; response RunGrant{run_id, capability_tokens[], budget_lease, epoch}.",
-        consumer: "Capability Broker and Budget Ledger (M3, M6).",
-        second_path: "When defined: the grant is minted kernel-side from agent profile, kernel-verified skills, parent grant and profile ceiling; nothing the runtime asserts is a term in that expression (ADR-0028, invariant I9). Payload deferred to M3 because the capability token format does not exist yet.",
+        carries: "Agent profile name, requested skills and requested capabilities, under a mandatory envelope idempotency_key; response RunGrant{run_id, epoch, policy_revision, profile, granted[], withheld[]}.",
+        consumer: "Capability Broker (M3); the Budget Ledger will amend the grant at M6.",
+        second_path: "The grant is minted kernel-side by intersecting the agent profile, the kernel-verified skills, the parent grant and the profile ceiling; nothing the runtime asserts is a term in that expression (ADR-0028, invariant I9). requested_capabilities is a request and not an assertion -- asking for more yields less, never more, and the difference is returned as withheld[] so the agent can say what it lacks. There is no mode, workspace-sensitivity, taint or privacy-class field: each would be the runtime supplying a policy input. The run id, the epoch and every cap_id are assigned by the kernel. It is the one operation that carries an idempotency_key, and carries it mandatorily: admission mints authority, so a lost response followed by a retry must resolve to the same grant rather than a second one. The key names an admission attempt and not a run, and is scoped kernel-side to (authenticated peer, session_id), so it cannot be guessed across subjects; the same key with a different canonical request is refused with IDEMPOTENCY_CONFLICT, and an agent profile the kernel does not hold with UNKNOWN_AGENT_PROFILE -- both on direwolf.authority.refused, because the message was well-formed and a protocol error would be a lie. Epoch fencing is checked before the key is looked at, so presenting a key is never a way past the fence (ADR-0036 sections 8 and 10).",
     },
     OperationSpec {
         name: "ReleaseRun",
         layer: Layer::AuthorityPrimitive,
-        status: WireStatus::Reserved,
-        request: None,
-        responses: &[],
+        status: WireStatus::Defined,
+        request: Some("direwolf.run.release"),
+        responses: &["direwolf.ack", REFUSED, ERR],
         initiator: "runtime",
         receiver: "dwkd-authority",
         semantics_owner: "M3",
         effect_bearing: false,
         authority_bearing: true,
-        carries: "run_id; response Ack.",
+        carries: "Envelope session_id, run_id and epoch; an empty payload. Response Ack.",
         consumer: "Capability Broker (M3).",
-        second_path: "When defined: can only end authority, never extend it.",
+        second_path: "It can only end authority, never extend it, and only for a run the caller holds at the stated current epoch. The payload is empty by design: a field here would be a way to say something about a run while ending it. Releasing an already-released run is acknowledged rather than refused, so a retry cannot be distinguished from success and cannot resurrect anything -- idempotent by shape, which is why it carries no idempotency_key and why UNKNOWN_RUN is not one of its refusals. The only way it can be refused is STALE_EPOCH, because ending a run at an epoch you no longer hold is an act by a fenced caller.",
     },
     OperationSpec {
         name: "ToolInvoke",
@@ -344,9 +425,9 @@ pub const OPERATIONS: &[OperationSpec] = &[
         semantics_owner: "M3 (pipeline); M4, M5, M10 (tools)",
         effect_bearing: true,
         authority_bearing: true,
-        carries: "A typed tool invocation and capability token; responses ToolResult, Denial or ApprovalPending.",
+        carries: "A typed tool invocation naming a tool from the canonical inventory, and the cap_id of the grant it exercises; responses ToolResult, Denial or ApprovalPending.",
         consumer: "Canonicaliser, policy, capabilities, approvals, budget, audit; then a per-invocation authorisation to dwkd-broker.",
-        second_path: "This IS the path from cognition to effect; there must be no other. When defined it must name a tool from the canonical inventory with typed arguments the kernel canonicalises itself; it must never accept an opaque command, script or frame.",
+        second_path: "This IS the path from cognition to effect; there must be no other. When defined it must name a tool from the canonical inventory (TOOL_SYSTEM.md section 3) with typed arguments the kernel canonicalises itself; it must never accept an opaque command, script or frame. It stays reserved through M3 because its request cannot be designed before the first tool exists: the only shapes available to M3 are an argument map, which is the opaque payload the second-path rule forbids, or a decision-only form, which is QueryAuthority under another name and fails review question 1. M4 gives it its first wire form alongside the first filesystem tool and the canonicaliser that makes its arguments decidable (ADR-0036).",
     },
     OperationSpec {
         name: "ToolCancel",
@@ -441,17 +522,17 @@ pub const OPERATIONS: &[OperationSpec] = &[
     OperationSpec {
         name: "QueryAuthority",
         layer: Layer::AuthorityPrimitive,
-        status: WireStatus::Reserved,
-        request: None,
-        responses: &[],
+        status: WireStatus::Defined,
+        request: Some("direwolf.authority.query"),
+        responses: &["direwolf.authority.effective", REFUSED, ERR],
         initiator: "runtime, CLI",
         receiver: "dwkd-authority",
         semantics_owner: "M3",
         effect_bearing: false,
         authority_bearing: false,
-        carries: "Run id; response EffectiveAuthority.",
-        consumer: "direwolf run authority.",
-        second_path: "When defined: read-only; reports authority, grants none.",
+        carries: "Envelope session_id, run_id and epoch; an optional proposed capability. Response EffectiveAuthority{granted[], withheld[], profile, policy_revision, epoch} plus a decision when one was proposed.",
+        consumer: "direwolf run authority; the runtime, to learn what it lacks before asking a human.",
+        second_path: "Read-only in both shapes: it reports authority and grants none, names no tool, touches no resource, reserves nothing and produces no side effect. The proposed capability is decided, not performed -- the answer is a decision record, and obtaining an ALLOW from it authorises nothing on its own, because the effect path is ToolInvoke and ToolInvoke checks again. Repeating the same query against the same state returns the same decision, so it needs no idempotency_key: there is nothing for a replay to duplicate. A run the kernel does not hold is refused with UNKNOWN_RUN rather than answered with a denial -- there is no grant, no profile and no policy revision to report, so an EffectiveAuthority could not be filled in, and a DENY would claim an evaluation that never ran.",
     },
     OperationSpec {
         name: "QueryInvocationStatus",

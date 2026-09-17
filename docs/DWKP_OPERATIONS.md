@@ -9,11 +9,11 @@ The authoritative list of every operation the architecture names for the kernel 
 | Operation | Layer | Status | Request | Responses | Initiator → receiver | Semantics owner | Effect | Authority |
 |---|---|---|---|---|---|---|---|---|
 | **Handshake** | protocol-control | defined | `direwolf.handshake` | `direwolf.handshake.accepted`<br>`direwolf.protocol.error` | any DWKP client (runtime, CLI) → dwkd-authority | M3 | no | no |
-| **Heartbeat** | authority-primitive | defined | `direwolf.heartbeat` | `direwolf.ack`<br>`direwolf.protocol.error` | runtime → dwkd-authority | M3 (epoch authority); M8 (lease renewal) | no | yes |
-| **AcquireLease** | authority-primitive | defined | `direwolf.lease.acquire` | `direwolf.lease.grant`<br>`direwolf.protocol.error` | runtime → dwkd-authority | M3 (epoch authority); M8 (session leases) | no | yes |
-| **ReleaseLease** | authority-primitive | defined | `direwolf.lease.release` | `direwolf.ack`<br>`direwolf.protocol.error` | runtime → dwkd-authority | M3; M8 | no | yes |
-| **AdmitRun** | authority-primitive | reserved | — | — | runtime → dwkd-authority | M3 | no | yes |
-| **ReleaseRun** | authority-primitive | reserved | — | — | runtime → dwkd-authority | M3 | no | yes |
+| **Heartbeat** | authority-primitive | defined | `direwolf.heartbeat` | `direwolf.ack`<br>`direwolf.authority.refused`<br>`direwolf.protocol.error` | runtime → dwkd-authority | M3 (epoch authority); M8 (lease renewal) | no | yes |
+| **AcquireLease** | authority-primitive | defined | `direwolf.lease.acquire` | `direwolf.lease.grant`<br>`direwolf.authority.refused`<br>`direwolf.protocol.error` | runtime → dwkd-authority | M3 (epoch authority); M8 (session leases) | no | yes |
+| **ReleaseLease** | authority-primitive | defined | `direwolf.lease.release` | `direwolf.ack`<br>`direwolf.authority.refused`<br>`direwolf.protocol.error` | runtime → dwkd-authority | M3; M8 | no | yes |
+| **AdmitRun** | authority-primitive | defined | `direwolf.run.admit` | `direwolf.run.grant`<br>`direwolf.authority.refused`<br>`direwolf.protocol.error` | runtime → dwkd-authority | M3 | no | yes |
+| **ReleaseRun** | authority-primitive | defined | `direwolf.run.release` | `direwolf.ack`<br>`direwolf.authority.refused`<br>`direwolf.protocol.error` | runtime → dwkd-authority | M3 | no | yes |
 | **ToolInvoke** | authority-primitive | reserved | — | — | runtime → dwkd-authority | M3 (pipeline); M4, M5, M10 (tools) | yes | yes |
 | **ToolCancel** | authority-primitive | reserved | — | — | runtime → dwkd-authority | M9 | no | no |
 | **ModelCall** | authority-primitive | reserved | — | — | runtime → dwkd-authority | M7 | yes | yes |
@@ -21,7 +21,7 @@ The authoritative list of every operation the architecture names for the kernel 
 | **CreateArtifact** | authority-primitive | reserved | — | — | runtime → dwkd-authority | M12 | yes | no |
 | **ReadArtifact** | authority-primitive | reserved | — | — | runtime → dwkd-authority | M12 | no | no |
 | **QueryBudget** | authority-primitive | reserved | — | — | runtime, CLI → dwkd-authority | M6 | no | no |
-| **QueryAuthority** | authority-primitive | reserved | — | — | runtime, CLI → dwkd-authority | M3 | no | no |
+| **QueryAuthority** | authority-primitive | defined | `direwolf.authority.query` | `direwolf.authority.effective`<br>`direwolf.authority.refused`<br>`direwolf.protocol.error` | runtime, CLI → dwkd-authority | M3 | no | no |
 | **QueryInvocationStatus** | authority-primitive | reserved | — | — | runtime → dwkd-authority | M9 | no | no |
 | **ListVisibleTools** | runtime-convenience | reserved | — | — | runtime → dwkd-authority | M10 | no | no |
 | **SpawnSubagent** | runtime-convenience | reserved | — | — | runtime → dwkd-authority | M14 | no | yes |
@@ -45,7 +45,7 @@ The authoritative list of every operation the architecture names for the kernel 
 - **Consumer:** dwkd-authority lease table in kernel.db (M3/M8).
 - **Can directly cause an effect:** no
 - **Semantics owned by:** M3 (epoch authority); M8 (lease renewal)
-- **Why it is not a second path from cognition to effect:** It can only extend authority the kernel already granted, by at most one lease TTL, and only while the stated epoch is the kernel's current one; a stale epoch is fenced (PROTOCOL.md section 3). It names no resource and cannot create, widen or transfer authority. The epoch it carries is one the kernel issued, compared against kernel.db, never believed.
+- **Why it is not a second path from cognition to effect:** It can only extend authority the kernel already granted, by at most one lease TTL, and only while the stated epoch is the kernel's current one; a stale epoch is fenced (PROTOCOL.md section 3). It names no resource and cannot create, widen or transfer authority. The epoch it carries is one the kernel issued, compared against kernel.db, never believed; an epoch that is not current is refused with STALE_EPOCH rather than silently renewing nothing.
 
 ### AcquireLease
 
@@ -53,7 +53,7 @@ The authoritative list of every operation the architecture names for the kernel 
 - **Consumer:** dwkd-authority lease table in kernel.db (M3/M8).
 - **Can directly cause an effect:** no
 - **Semantics owned by:** M3 (epoch authority); M8 (session leases)
-- **Why it is not a second path from cognition to effect:** The sender cannot propose an epoch; the kernel assigns it. A lease confers the right to write one session and nothing more: capabilities come only from AdmitRun, so holding a lease authorises no effect. Its only external consequence is fencing other writers of the same session, which is its purpose. M3 adds the policy denial for a session the caller may not lease; a protocol error is not that denial.
+- **Why it is not a second path from cognition to effect:** The sender cannot propose an epoch; the kernel assigns it. A lease confers the right to write one session and nothing more: capabilities come only from AdmitRun, so holding a lease authorises no effect. Its only external consequence is fencing other writers of the same session, which is its purpose. Exactly one process wins the conditional acquire (ADR-0011 point 2); the others are refused with LEASE_HELD on direwolf.authority.refused, which is why that refusal exists. It is the one operation that cannot be fenced, because it is the operation that issues the epoch.
 
 ### ReleaseLease
 
@@ -61,33 +61,41 @@ The authoritative list of every operation the architecture names for the kernel 
 - **Consumer:** dwkd-authority lease table in kernel.db (M3/M8).
 - **Can directly cause an effect:** no
 - **Semantics owned by:** M3; M8
-- **Why it is not a second path from cognition to effect:** It can only surrender authority, never gain it, and only for a lease held at the stated current epoch. It names nothing but the session.
-
-## Reserved operations
+- **Why it is not a second path from cognition to effect:** It can only surrender authority, never gain it, and only for a lease held at the stated current epoch; a stale epoch is refused with STALE_EPOCH. It names nothing but the session. Releasing a lease the kernel no longer records is acknowledged rather than refused, for the same reason ReleaseRun is: a retry must not be distinguishable from success, and there is no UNKNOWN_LEASE reason because inventing one would turn a harmless retry into an error and make the refusal a probe for which sessions exist.
 
 ### AdmitRun
 
-- **Carries:** Agent profile and requested skills; response RunGrant{run_id, capability_tokens[], budget_lease, epoch}.
-- **Consumer:** Capability Broker and Budget Ledger (M3, M6).
+- **Carries:** Agent profile name, requested skills and requested capabilities, under a mandatory envelope idempotency_key; response RunGrant{run_id, epoch, policy_revision, profile, granted[], withheld[]}.
+- **Consumer:** Capability Broker (M3); the Budget Ledger will amend the grant at M6.
 - **Can directly cause an effect:** no
 - **Semantics owned by:** M3
-- **Why it is not a second path from cognition to effect:** When defined: the grant is minted kernel-side from agent profile, kernel-verified skills, parent grant and profile ceiling; nothing the runtime asserts is a term in that expression (ADR-0028, invariant I9). Payload deferred to M3 because the capability token format does not exist yet.
+- **Why it is not a second path from cognition to effect:** The grant is minted kernel-side by intersecting the agent profile, the kernel-verified skills, the parent grant and the profile ceiling; nothing the runtime asserts is a term in that expression (ADR-0028, invariant I9). requested_capabilities is a request and not an assertion -- asking for more yields less, never more, and the difference is returned as withheld[] so the agent can say what it lacks. There is no mode, workspace-sensitivity, taint or privacy-class field: each would be the runtime supplying a policy input. The run id, the epoch and every cap_id are assigned by the kernel. It is the one operation that carries an idempotency_key, and carries it mandatorily: admission mints authority, so a lost response followed by a retry must resolve to the same grant rather than a second one. The key names an admission attempt and not a run, and is scoped kernel-side to (authenticated peer, session_id), so it cannot be guessed across subjects; the same key with a different canonical request is refused with IDEMPOTENCY_CONFLICT, and an agent profile the kernel does not hold with UNKNOWN_AGENT_PROFILE -- both on direwolf.authority.refused, because the message was well-formed and a protocol error would be a lie. Epoch fencing is checked before the key is looked at, so presenting a key is never a way past the fence (ADR-0036 sections 8 and 10).
 
 ### ReleaseRun
 
-- **Carries:** run_id; response Ack.
+- **Carries:** Envelope session_id, run_id and epoch; an empty payload. Response Ack.
 - **Consumer:** Capability Broker (M3).
 - **Can directly cause an effect:** no
 - **Semantics owned by:** M3
-- **Why it is not a second path from cognition to effect:** When defined: can only end authority, never extend it.
+- **Why it is not a second path from cognition to effect:** It can only end authority, never extend it, and only for a run the caller holds at the stated current epoch. The payload is empty by design: a field here would be a way to say something about a run while ending it. Releasing an already-released run is acknowledged rather than refused, so a retry cannot be distinguished from success and cannot resurrect anything -- idempotent by shape, which is why it carries no idempotency_key and why UNKNOWN_RUN is not one of its refusals. The only way it can be refused is STALE_EPOCH, because ending a run at an epoch you no longer hold is an act by a fenced caller.
+
+### QueryAuthority
+
+- **Carries:** Envelope session_id, run_id and epoch; an optional proposed capability. Response EffectiveAuthority{granted[], withheld[], profile, policy_revision, epoch} plus a decision when one was proposed.
+- **Consumer:** direwolf run authority; the runtime, to learn what it lacks before asking a human.
+- **Can directly cause an effect:** no
+- **Semantics owned by:** M3
+- **Why it is not a second path from cognition to effect:** Read-only in both shapes: it reports authority and grants none, names no tool, touches no resource, reserves nothing and produces no side effect. The proposed capability is decided, not performed -- the answer is a decision record, and obtaining an ALLOW from it authorises nothing on its own, because the effect path is ToolInvoke and ToolInvoke checks again. Repeating the same query against the same state returns the same decision, so it needs no idempotency_key: there is nothing for a replay to duplicate. A run the kernel does not hold is refused with UNKNOWN_RUN rather than answered with a denial -- there is no grant, no profile and no policy revision to report, so an EffectiveAuthority could not be filled in, and a DENY would claim an evaluation that never ran.
+
+## Reserved operations
 
 ### ToolInvoke
 
-- **Carries:** A typed tool invocation and capability token; responses ToolResult, Denial or ApprovalPending.
+- **Carries:** A typed tool invocation naming a tool from the canonical inventory, and the cap_id of the grant it exercises; responses ToolResult, Denial or ApprovalPending.
 - **Consumer:** Canonicaliser, policy, capabilities, approvals, budget, audit; then a per-invocation authorisation to dwkd-broker.
 - **Can directly cause an effect:** yes
 - **Semantics owned by:** M3 (pipeline); M4, M5, M10 (tools)
-- **Why it is not a second path from cognition to effect:** This IS the path from cognition to effect; there must be no other. When defined it must name a tool from the canonical inventory with typed arguments the kernel canonicalises itself; it must never accept an opaque command, script or frame.
+- **Why it is not a second path from cognition to effect:** This IS the path from cognition to effect; there must be no other. When defined it must name a tool from the canonical inventory (TOOL_SYSTEM.md section 3) with typed arguments the kernel canonicalises itself; it must never accept an opaque command, script or frame. It stays reserved through M3 because its request cannot be designed before the first tool exists: the only shapes available to M3 are an argument map, which is the opaque payload the second-path rule forbids, or a decision-only form, which is QueryAuthority under another name and fails review question 1. M4 gives it its first wire form alongside the first filesystem tool and the canonicaliser that makes its arguments decidable (ADR-0036).
 
 ### ToolCancel
 
@@ -136,14 +144,6 @@ The authoritative list of every operation the architecture names for the kernel 
 - **Can directly cause an effect:** no
 - **Semantics owned by:** M6
 - **Why it is not a second path from cognition to effect:** When defined: read-only.
-
-### QueryAuthority
-
-- **Carries:** Run id; response EffectiveAuthority.
-- **Consumer:** direwolf run authority.
-- **Can directly cause an effect:** no
-- **Semantics owned by:** M3
-- **Why it is not a second path from cognition to effect:** When defined: read-only; reports authority, grants none.
 
 ### QueryInvocationStatus
 

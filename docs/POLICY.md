@@ -32,6 +32,20 @@ struct Decision {
 }
 ```
 
+> **`RequireApproval` is a policy result, not a wire value, until M6.** This
+> enum is the evaluator's, and it keeps all three: a rule that says
+> `effect = "REQUIRE_APPROVAL"` must evaluate to that, or the rule author's
+> intent and the audit record of it are lost. What crosses DWKP is what the
+> *authority decided*, and an authority with no approval registry cannot obtain
+> an approval, so it refuses — the direction [APPROVALS.md](APPROVALS.md)
+> already fixes for a run with no human present. `DecisionEffect` on the wire is
+> therefore `ALLOW | DENY` through M5, with `rule_id` and `rule_source` naming
+> the rule that refused. M6 adds `REQUIRE_APPROVAL` to the wire with a
+> `schema_version` bump, deliberately and as a coordinated release
+> ([ADR-0036](adr/0036-m3-authority-operations-and-the-capability-wire-form.md)
+> §9).
+
+
 `reason` is an enum rather than a string so denials are machine-classifiable in evals and metrics; human-readable text is rendered from it. `Effect` is a Rust enum matched exhaustively everywhere — adding a variant breaks compilation at every site rather than defaulting somewhere.
 
 ### Obligations

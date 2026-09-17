@@ -1,6 +1,12 @@
 # Digests of ADRs whose status is Accepted or Superseded, which are immutable
-# (docs/adr/README.md). Checked by `dwcheck adr`; rewritten by `dwcheck adr --record`,
-# which is a deliberate act that belongs in the same commit as a new ADR.
+# (docs/adr/README.md). Rewritten by `dwcheck adr --record`, which belongs in the
+# same commit as a new ADR.
+#
+# THIS FILE IS A TRIPWIRE, NOT THE TRUST ANCHOR. It lives in the same mutable tree
+# as the ADRs, so one change can edit an accepted ADR and update this file too. The
+# anchor is Git history: `dwcheck adr` also compares each ADR against the revision
+# in which it became Accepted. See tools/dwcheck/src/dwcheck/checks_adr.py.
+#
 # sha256 of the file with CRLF normalised to LF.
 1d47e9472dc3689983f2fe6334419eb9a348174e24307453fa96393ce59c9544  0000-authority-plane-separation.md
 d3590cc7eee78c092f0c7922557cdd32179322652288368d9dcfcdc473404067  0001-language-and-runtime.md
@@ -37,3 +43,5 @@ c3872466600125cbe0335ea85d7be90b650f1ef27f20d22268e14bd40a01557b  0024-sandbox-n
 fe62ff1830e3f472c3a01eb7e13802efc30105c6848476abd657107b7d9e7f14  0032-wire-contract-framing-strict-json-and-jcs.md
 e69f462a0e50dc1a75efd1775776620b77b407ee0995390d9d5c29fcf1d66d9b  0033-protocol-source-of-truth-and-tcb-dependencies.md
 daef9c0dec295ad59b79811194143244273384ff040f2bb7e972c6680c2414cc  0034-protocol-depends-on-no-unicode-database.md
+01d99e88f4aeaca9a65f558c04351b343e79c3d9651d2b95971f92996f1be095  0035-m3-authority-dependency-set.md
+badb6fb3fc2da77fa59af2a5ec6fa84a3e651cb1d9441353b4928bb8eb1a6f09  0036-m3-authority-operations-and-the-capability-wire-form.md

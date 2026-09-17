@@ -57,6 +57,8 @@ FIELD_KEYS = {
     "maxLength",
     "pattern",
     "enum",
+    "items",
+    "maxItems",
     "$ref",
     "x-direwolf-type",
     "x-direwolf-format",
@@ -98,7 +100,14 @@ class Field:
     annotation: str
     check_expr: str
     nested: str | None
+    """The `$defs` struct this field decodes to, if it is one."""
     doc: str
+    item: str | None = None
+    """For an array field, the `$defs` struct its items decode to, if any.
+
+    `nested` and `item` are separate because an array of structs is both: its
+    annotation is `list[X]` and its encoder has to call `X.encode()` per item,
+    while its decoder is a sequence check rather than `X.decode`."""
 
 
 @dataclass
@@ -108,6 +117,7 @@ class Struct:
     preserve: bool
     fields: list[Field] = field(default_factory=list)
     ordered: tuple[str, str] | None = None
+    paired: tuple[str, str, dict[str, tuple[str, ...]]] | None = None
 
 
 def load(path: Path) -> dict[str, Any]:
@@ -165,7 +175,33 @@ def field_of(struct: str, name: str, node: dict[str, Any], required: bool) -> Fi
             None,
             doc,
         )
+    if kind == "array":
+        return array_of(struct, name, node, required, doc)
     raise SchemaError(f"{where}: unsupported field shape {node}")
+
+
+def array_of(struct: str, name: str, node: dict[str, Any], required: bool, doc: str) -> Field:
+    """A bounded array. `maxItems` is mandatory: an unbounded array is an
+    unbounded allocation a client chooses the size of."""
+    where = f"{struct}.{name}"
+    if "maxItems" not in node:
+        raise SchemaError(f"{where}: an array field must declare maxItems")
+    if "items" not in node:
+        raise SchemaError(f"{where}: an array field must declare items")
+    items = node["items"]
+    if not isinstance(items, dict):
+        raise SchemaError(f"{where}: items must be a schema object")
+    inner = field_of(struct, f"{name}[]", items, True)
+    check = f"{inner.nested}.decode" if inner.nested else inner.check_expr
+    return Field(
+        name,
+        required,
+        f"list[{inner.annotation}]",
+        f"validate.sequence({int(node['maxItems'])}, {check})",
+        None,
+        doc,
+        item=inner.nested,
+    )
 
 
 def struct_of(name: str, node: dict[str, Any]) -> Struct:
@@ -183,9 +219,20 @@ def struct_of(name: str, node: dict[str, Any]) -> Struct:
         struct.fields.append(field_of(name, field_name, field_node, field_name in required))
     check = node.get("x-direwolf-check")
     if check is not None:
-        if check.get("kind") != "ordered":
+        # A closed set, on purpose: a cross-field rule the generator does not
+        # understand must stop the build rather than be emitted as a struct
+        # Python does not enforce and Rust does. Extending it is deliberate
+        # (CONTRIBUTING.md, "Generated code").
+        kind = check.get("kind")
+        if kind == "ordered":
+            struct.ordered = (str(check["low"]), str(check["high"]))
+        elif kind == "paired":
+            allowed = {
+                str(key): tuple(str(v) for v in values) for key, values in check["allowed"].items()
+            }
+            struct.paired = (str(check["left"]), str(check["right"]), allowed)
+        else:
             raise SchemaError(f"{name}: unknown x-direwolf-check {check}")
-        struct.ordered = (str(check["low"]), str(check["high"]))
     return struct
 
 
@@ -207,10 +254,19 @@ def render_struct(struct: Struct) -> Iterator[str]:
     upper = struct.name.upper()
     yield ""
     yield ""
+    # An array check may name another struct's `decode`, which is defined later
+    # in the file when the dependency order puts it there, so it is built inside
+    # `decode` rather than hoisted to a module constant.
     for f in struct.fields:
-        if f.nested is None:
+        if f.nested is None and f.item is None:
             yield f"_{upper}_{f.name.upper()} = {f.check_expr}"
-    if any(f.nested is None for f in struct.fields):
+    if struct.paired is not None:
+        left, right, allowed = struct.paired
+        yield f"_{upper}_PAIRING = {{"
+        for key in allowed:
+            yield f"    {key!r}: {allowed[key]!r},"
+        yield "}"
+    if struct.paired is not None or any(f.nested is None and f.item is None for f in struct.fields):
         yield ""
         yield ""
     yield "@dataclass(frozen=True, slots=True, kw_only=True)"
@@ -236,11 +292,21 @@ def render_struct(struct: Struct) -> Iterator[str]:
     yield f"        {known}, {ext} = validate.partition(obj, {declared}, {struct.preserve}, cx)"
     for f in struct.fields:
         take = "take_required" if f.required else "take_optional"
-        check = f"{f.nested}.decode" if f.nested else f"_{upper}_{f.name.upper()}"
+        if f.nested:
+            check = f"{f.nested}.decode"
+        elif f.item is not None:
+            check = f.check_expr
+        else:
+            check = f"_{upper}_{f.name.upper()}"
         yield f"        {f.name}_ = validate.{take}(known, {f.name!r}, cx, {check})"
     if struct.ordered:
         low, high = struct.ordered
         yield f"        validate.ordered({low!r}, {low}_, {high!r}, {high}_, cx)"
+    if struct.paired is not None:
+        left, right, _ = struct.paired
+        yield (
+            f"        validate.paired({left!r}, {left}_, {right!r}, {right}_, _{upper}_PAIRING, cx)"
+        )
     args = [f"{f.name}={f.name}_" for f in struct.fields]
     if struct.preserve:
         args.append("extensions=extensions")
@@ -249,12 +315,26 @@ def render_struct(struct: Struct) -> Iterator[str]:
     yield "    def encode(self) -> dict[str, JsonValue]:"
     yield "        out: dict[str, JsonValue] = {}"
     for f in struct.fields:
-        value = f"self.{f.name}.encode()" if f.nested else f"self.{f.name}"
-        if f.required:
-            yield f"        out[{f.name!r}] = {value}"
-        else:
+        array = f.annotation.startswith("list[")
+        indent = "        " if f.required else "            "
+        if not f.required:
             yield f"        if self.{f.name} is not None:"
-            yield f"            out[{f.name!r}] = {value}"
+        if array:
+            # `list[str]` is not a `list[JsonValue]`: list is invariant. The
+            # annotated local is what gives the comprehension its element type,
+            # and it copies rather than aliasing the caller's list.
+            items = (
+                f"[item.encode() for item in self.{f.name}]"
+                if f.item is not None
+                else f"list(self.{f.name})"
+            )
+            yield f"{indent}{f.name}_out: list[JsonValue] = {items}"
+            value = f"{f.name}_out"
+        elif f.nested:
+            value = f"self.{f.name}.encode()"
+        else:
+            value = f"self.{f.name}"
+        yield f"{indent}out[{f.name!r}] = {value}"
     if struct.preserve:
         yield "        for key, member in self.extensions.items():"
         yield "            out[key] = member"
@@ -343,7 +423,9 @@ def generate_family(family: str, summary: str) -> tuple[str, list[Path]]:
 
 def dependency_order(struct: Struct, structs: dict[str, tuple[str, Struct]]) -> tuple[int, str]:
     """Structs referenced by others first, so annotations read top-down."""
-    referenced = any(f.nested == struct.name for _, s in structs.values() for f in s.fields)
+    referenced = any(
+        struct.name in (f.nested, f.item) for _, s in structs.values() for f in s.fields
+    )
     return (0 if referenced else 1, struct.name)
 
 

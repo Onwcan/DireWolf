@@ -73,6 +73,7 @@ macro_rules! wire_struct {
             $( $(#[doc = $fdoc:literal])* $kind:ident $field:ident: $ty:ty ),* $(,)?
         }
         $( ordered($lo:ident <= $hi:ident) )?
+        $( paired($left:ident -> $right:ident, $table:expr) )?
     ) => {
         $(#[doc = $doc])*
         #[derive(Debug, Clone, PartialEq, Eq)]
@@ -103,6 +104,10 @@ macro_rules! wire_struct {
                 $( $crate::wire::macros::check_ordered(
                     &decoded.$lo, &decoded.$hi, stringify!($lo), stringify!($hi), cx
                 )?; )?
+                $( $crate::wire::macros::check_paired(
+                    decoded.$left.as_str(), decoded.$right.as_str(),
+                    stringify!($left), stringify!($right), $table, cx
+                )?; )?
                 Ok(decoded)
             }
 
@@ -118,6 +123,13 @@ macro_rules! wire_struct {
             #[allow(unused_variables)]
             fn schema(defs: &mut $crate::schema::Defs) -> $crate::json::Value {
                 defs.reference(stringify!($name), |defs| {
+                    let check: Option<$crate::json::Value> = None
+                        $( .or(Some($crate::wire::macros::ordered_schema(
+                            stringify!($lo), stringify!($hi)
+                        ))) )?
+                        $( .or(Some($crate::wire::macros::paired_schema(
+                            stringify!($left), stringify!($right), $table
+                        ))) )?;
                     $crate::wire::macros::struct_schema(
                         concat!($($doc, "\n"),*),
                         vec![$( (
@@ -127,7 +139,7 @@ macro_rules! wire_struct {
                             <$ty as $crate::wire::WireType>::schema(defs),
                         ) ),*],
                         $crate::wire::UnknownFields::Reject,
-                        $crate::wire::macros::ordered_names!($( $lo, $hi )?),
+                        check,
                     )
                 })
             }
@@ -141,6 +153,7 @@ macro_rules! wire_struct {
             $( $(#[doc = $fdoc:literal])* $kind:ident $field:ident: $ty:ty ),* $(,)?
         }
         $( ordered($lo:ident <= $hi:ident) )?
+        $( paired($left:ident -> $right:ident, $table:expr) )?
     ) => {
         $(#[doc = $doc])*
         #[derive(Debug, Clone, PartialEq)]
@@ -174,6 +187,10 @@ macro_rules! wire_struct {
                 $( $crate::wire::macros::check_ordered(
                     &decoded.$lo, &decoded.$hi, stringify!($lo), stringify!($hi), cx
                 )?; )?
+                $( $crate::wire::macros::check_paired(
+                    decoded.$left.as_str(), decoded.$right.as_str(),
+                    stringify!($left), stringify!($right), $table, cx
+                )?; )?
                 Ok(decoded)
             }
 
@@ -192,6 +209,13 @@ macro_rules! wire_struct {
             #[allow(unused_variables)]
             fn schema(defs: &mut $crate::schema::Defs) -> $crate::json::Value {
                 defs.reference(stringify!($name), |defs| {
+                    let check: Option<$crate::json::Value> = None
+                        $( .or(Some($crate::wire::macros::ordered_schema(
+                            stringify!($lo), stringify!($hi)
+                        ))) )?
+                        $( .or(Some($crate::wire::macros::paired_schema(
+                            stringify!($left), stringify!($right), $table
+                        ))) )?;
                     $crate::wire::macros::struct_schema(
                         concat!($($doc, "\n"),*),
                         vec![$( (
@@ -201,7 +225,7 @@ macro_rules! wire_struct {
                             <$ty as $crate::wire::WireType>::schema(defs),
                         ) ),*],
                         $crate::wire::UnknownFields::Preserve,
-                        $crate::wire::macros::ordered_names!($( $lo, $hi )?),
+                        check,
                     )
                 })
             }
@@ -209,17 +233,7 @@ macro_rules! wire_struct {
     };
 }
 
-/// `Some((lo, hi))` field names for an `ordered` check, or `None`.
-macro_rules! ordered_names {
-    () => {
-        None
-    };
-    ($lo:ident, $hi:ident) => {
-        Some((stringify!($lo), stringify!($hi)))
-    };
-}
-
-pub(crate) use {field_put, field_required, field_take, field_type, ordered_names, wire_struct};
+pub(crate) use {field_put, field_required, field_take, field_type, wire_struct};
 
 use crate::error::{ProtocolError, Violation};
 use crate::json::{Object, Value};
@@ -246,13 +260,70 @@ pub fn check_ordered<T: PartialOrd>(
     Err(err)
 }
 
+/// The `paired(left -> right, table)` cross-field check.
+///
+/// Two closed enums whose *combination* is also closed: the table lists, for
+/// each `left` value, the `right` values that can accompany it. A pair the
+/// table does not list is refused at the boundary rather than carried inwards,
+/// which is what makes "this refusal reason cannot arise from that operation"
+/// a wire property instead of a convention.
+pub fn check_paired(
+    left: &str,
+    right: &str,
+    left_name: &str,
+    right_name: &str,
+    table: &[(&str, &[&str])],
+    cx: &mut Cx,
+) -> Result<(), ProtocolError> {
+    const NONE: &[&str] = &[];
+    let permitted = table
+        .iter()
+        .find(|(key, _)| *key == left)
+        .map_or(NONE, |(_, values)| *values);
+    if permitted.contains(&right) {
+        return Ok(());
+    }
+    cx.push(right_name);
+    let err = cx.violation(
+        Violation::Inconsistent,
+        format!("{left_name} {left} cannot produce {right_name} {right}"),
+    );
+    cx.pop();
+    Err(err)
+}
+
+/// The schema annotation for an `ordered` check.
+#[must_use]
+pub fn ordered_schema(low: &str, high: &str) -> Value {
+    obj(vec![
+        ("kind", string("ordered")),
+        ("low", string(low)),
+        ("high", string(high)),
+    ])
+}
+
+/// The schema annotation for a `paired` check.
+#[must_use]
+pub fn paired_schema(left: &str, right: &str, table: &[(&str, &[&str])]) -> Value {
+    let mut allowed = Object::new();
+    for (key, values) in table {
+        let _ = allowed.insert((*key).to_owned(), strings(values));
+    }
+    obj(vec![
+        ("kind", string("paired")),
+        ("left", string(left)),
+        ("right", string(right)),
+        ("allowed", Value::Object(allowed)),
+    ])
+}
+
 /// Assemble an object schema from field descriptions.
 #[must_use]
 pub fn struct_schema(
     doc: &str,
     fields: Vec<(&str, &str, bool, Value)>,
     unknown: UnknownFields,
-    ordered: Option<(&str, &str)>,
+    check: Option<Value>,
 ) -> Value {
     let mut properties = Object::new();
     let mut required = Vec::new();
@@ -278,15 +349,8 @@ pub fn struct_schema(
             members.push(("x-direwolf-unknown-fields", string("preserve")));
         }
     }
-    if let Some((lo, hi)) = ordered {
-        members.push((
-            "x-direwolf-check",
-            obj(vec![
-                ("kind", string("ordered")),
-                ("low", string(lo)),
-                ("high", string(hi)),
-            ]),
-        ));
+    if let Some(check) = check {
+        members.push(("x-direwolf-check", check));
     }
     obj(members)
 }

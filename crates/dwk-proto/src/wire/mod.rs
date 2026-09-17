@@ -24,8 +24,11 @@
 //! vectors assert it.
 
 pub mod id;
+pub mod list;
 pub mod macros;
 pub mod scalar;
+
+pub use list::BoundedList;
 
 use crate::error::{ProtocolError, Violation, quote_key};
 use crate::json::{Number, Object, Value};

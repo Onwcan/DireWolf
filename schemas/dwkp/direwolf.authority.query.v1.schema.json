@@ -1,0 +1,138 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:direwolf:schema:dwkp:direwolf.authority.query:1",
+  "title": "direwolf.authority.query v1",
+  "description": "Ask what a run may do, and optionally decide one action.",
+  "type": "object",
+  "properties": {
+    "v": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1,
+      "x-direwolf-type": "Version"
+    },
+    "id": {
+      "type": "string",
+      "minLength": 30,
+      "maxLength": 30,
+      "pattern": "^msg_[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+      "x-direwolf-type": "MessageId",
+      "x-direwolf-format": "uuid7-id",
+      "x-direwolf-id-prefix": "msg"
+    },
+    "type": {
+      "const": "request",
+      "x-direwolf-type": "MessageType"
+    },
+    "schema": {
+      "const": "direwolf.authority.query",
+      "x-direwolf-type": "SchemaName"
+    },
+    "schema_version": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1,
+      "x-direwolf-type": "Version"
+    },
+    "ts": {
+      "type": "string",
+      "maxLength": 24,
+      "x-direwolf-type": "Timestamp",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$",
+      "x-direwolf-format": "rfc3339-utc-millis"
+    },
+    "correlation_id": {
+      "type": "string",
+      "maxLength": 35,
+      "pattern": "^[a-z]{2,8}_[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+      "x-direwolf-type": "AnyId",
+      "x-direwolf-format": "uuid7-id"
+    },
+    "causation_id": {
+      "type": "string",
+      "maxLength": 35,
+      "pattern": "^[a-z]{2,8}_[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+      "x-direwolf-type": "AnyId",
+      "x-direwolf-format": "uuid7-id"
+    },
+    "session_id": {
+      "type": "string",
+      "minLength": 30,
+      "maxLength": 30,
+      "pattern": "^ses_[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+      "x-direwolf-type": "SessionId",
+      "x-direwolf-format": "uuid7-id",
+      "x-direwolf-id-prefix": "ses"
+    },
+    "run_id": {
+      "type": "string",
+      "minLength": 30,
+      "maxLength": 30,
+      "pattern": "^run_[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+      "x-direwolf-type": "RunId",
+      "x-direwolf-format": "uuid7-id",
+      "x-direwolf-id-prefix": "run"
+    },
+    "epoch": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991,
+      "x-direwolf-type": "Epoch"
+    },
+    "payload": {
+      "$ref": "#/$defs/AuthorityQuery"
+    }
+  },
+  "required": ["v", "id", "type", "schema", "schema_version", "ts", "session_id", "run_id", "epoch", "payload"],
+  "additionalProperties": false,
+  "not": {
+    "anyOf": [
+      {
+        "required": ["idempotency_key"]
+      }
+    ]
+  },
+  "dependentRequired": {
+    "epoch": ["session_id"]
+  },
+  "x-direwolf-family": "dwkp",
+  "x-direwolf-message-type": "request",
+  "x-direwolf-schema": "direwolf.authority.query",
+  "x-direwolf-schema-versions": {
+    "min": 1,
+    "max": 1
+  },
+  "x-direwolf-envelope-versions": {
+    "min": 1,
+    "max": 1
+  },
+  "x-direwolf-envelope": {
+    "correlation_id": "optional",
+    "causation_id": "optional",
+    "session_id": "required",
+    "run_id": "required",
+    "epoch": "required",
+    "idempotency_key": "forbidden"
+  },
+  "x-direwolf-id-prefix": "msg",
+  "x-direwolf-unknown-fields": "reject",
+  "x-direwolf-payload": "AuthorityQuery",
+  "$defs": {
+    "AuthorityQuery": {
+      "type": "object",
+      "description": "Asks what a run may do, and optionally whether one specific action is\npermitted.\n\nRead-only in both shapes. It reports authority and grants none, touches\nno resource, reserves nothing and performs no effect: it is the question\nM3 exists to answer, asked without doing anything about the answer.",
+      "properties": {
+        "proposed": {
+          "type": "string",
+          "maxLength": 512,
+          "x-direwolf-type": "CapabilityText",
+          "pattern": "^[a-z][a-z0-9_]{0,15}\\.[a-z][a-z0-9_]{0,31}:[A-Za-z0-9._/*:@+~<>-]{1,384}(\\?[A-Za-z0-9_=,&.*/-]{1,96})?$",
+          "description": "A proposed action, in the kernel's capability grammar. When present\nthe response carries a `decision` for exactly this action; when\nabsent the response reports effective authority only."
+        }
+      },
+      "required": [],
+      "additionalProperties": false,
+      "x-direwolf-unknown-fields": "reject"
+    }
+  }
+}

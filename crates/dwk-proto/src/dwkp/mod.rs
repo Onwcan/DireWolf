@@ -29,8 +29,9 @@ use crate::json::{self, ParseOptions, Value};
 use crate::version::SUPPORTED_ENVELOPE;
 use crate::wire::{Cx, UnknownFields, WireType};
 use messages::{
-    Ack, Handshake, HandshakeAccepted, HeartbeatPayload, LeaseAcquire, LeaseGrant, LeaseRelease,
-    ProtocolErrorPayload,
+    Ack, AdmitRun, AuthorityQuery, AuthorityRefusal, EffectiveAuthority, Handshake,
+    HandshakeAccepted, HeartbeatPayload, LeaseAcquire, LeaseGrant, LeaseRelease,
+    ProtocolErrorPayload, ReleaseRun, RunGrant,
 };
 
 /// A decoded DWKP message body.
@@ -48,6 +49,18 @@ pub enum DwkpBody {
     LeaseGrant(LeaseGrant),
     /// `direwolf.lease.release`
     LeaseRelease(LeaseRelease),
+    /// `direwolf.run.admit`
+    AdmitRun(AdmitRun),
+    /// `direwolf.run.grant`
+    RunGrant(RunGrant),
+    /// `direwolf.run.release`
+    ReleaseRun(ReleaseRun),
+    /// `direwolf.authority.query`
+    AuthorityQuery(AuthorityQuery),
+    /// `direwolf.authority.effective`
+    EffectiveAuthority(EffectiveAuthority),
+    /// `direwolf.authority.refused`
+    AuthorityRefused(AuthorityRefusal),
     /// `direwolf.ack`
     Ack(Ack),
     /// `direwolf.protocol.error`
@@ -65,6 +78,12 @@ impl DwkpBody {
             Self::LeaseAcquire(_) => (MessageType::Request, "direwolf.lease.acquire"),
             Self::LeaseGrant(_) => (MessageType::Response, "direwolf.lease.grant"),
             Self::LeaseRelease(_) => (MessageType::Request, "direwolf.lease.release"),
+            Self::AdmitRun(_) => (MessageType::Request, "direwolf.run.admit"),
+            Self::RunGrant(_) => (MessageType::Response, "direwolf.run.grant"),
+            Self::ReleaseRun(_) => (MessageType::Request, "direwolf.run.release"),
+            Self::AuthorityQuery(_) => (MessageType::Request, "direwolf.authority.query"),
+            Self::EffectiveAuthority(_) => (MessageType::Response, "direwolf.authority.effective"),
+            Self::AuthorityRefused(_) => (MessageType::Response, "direwolf.authority.refused"),
             Self::Ack(_) => (MessageType::Response, "direwolf.ack"),
             Self::ProtocolError(_) => (MessageType::Response, "direwolf.protocol.error"),
         }
@@ -80,6 +99,14 @@ impl DwkpBody {
             "direwolf.lease.acquire" => Self::LeaseAcquire(WireType::decode(payload, cx)?),
             "direwolf.lease.grant" => Self::LeaseGrant(WireType::decode(payload, cx)?),
             "direwolf.lease.release" => Self::LeaseRelease(WireType::decode(payload, cx)?),
+            "direwolf.run.admit" => Self::AdmitRun(WireType::decode(payload, cx)?),
+            "direwolf.run.grant" => Self::RunGrant(WireType::decode(payload, cx)?),
+            "direwolf.run.release" => Self::ReleaseRun(WireType::decode(payload, cx)?),
+            "direwolf.authority.query" => Self::AuthorityQuery(WireType::decode(payload, cx)?),
+            "direwolf.authority.effective" => {
+                Self::EffectiveAuthority(WireType::decode(payload, cx)?)
+            }
+            "direwolf.authority.refused" => Self::AuthorityRefused(WireType::decode(payload, cx)?),
             "direwolf.ack" => Self::Ack(WireType::decode(payload, cx)?),
             "direwolf.protocol.error" => Self::ProtocolError(WireType::decode(payload, cx)?),
             other => {
@@ -100,6 +127,12 @@ impl DwkpBody {
             Self::LeaseAcquire(p) => p.encode(),
             Self::LeaseGrant(p) => p.encode(),
             Self::LeaseRelease(p) => p.encode(),
+            Self::AdmitRun(p) => p.encode(),
+            Self::RunGrant(p) => p.encode(),
+            Self::ReleaseRun(p) => p.encode(),
+            Self::AuthorityQuery(p) => p.encode(),
+            Self::EffectiveAuthority(p) => p.encode(),
+            Self::AuthorityRefused(p) => p.encode(),
             Self::Ack(p) => p.encode(),
             Self::ProtocolError(p) => p.encode(),
         }

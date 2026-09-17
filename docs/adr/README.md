@@ -2,7 +2,7 @@
 
 Each ADR records one decision, the context that forced it, what it costs, what was rejected, and what would make us revisit it. An ADR without a "Revisit if" is an opinion wearing a costume.
 
-**Accepted ADRs are immutable.** A changed decision produces a *new* ADR that supersedes or amends the old one; the old one stays, banner-marked, as a historical record. Phase 0.1 reconciliation produced twelve such ADRs (0018–0029) after adversarial review invalidated parts of the original set; M1 added 0030 (licence) and 0031 (repository layout and boundary enforcement); M2 added 0032 (the wire contract) and 0033 (protocol source of truth and TCB dependencies); the M2 closeout added 0034, which removed the protocol's dependence on a Unicode database. **Do not cite a superseded ADR as current rationale.**
+**Accepted ADRs are immutable.** A changed decision produces a *new* ADR that supersedes or amends the old one; the old one stays, banner-marked, as a historical record. Phase 0.1 reconciliation produced twelve such ADRs (0018–0029) after adversarial review invalidated parts of the original set; M1 added 0030 (licence) and 0031 (repository layout and boundary enforcement); M2 added 0032 (the wire contract) and 0033 (protocol source of truth and TCB dependencies); the M2 closeout added 0034, which removed the protocol's dependence on a Unicode database; M3a added 0035 (what the authority plane is allowed to link) and 0036 (which DWKP operations M3 owns, and how a capability crosses the wire). **Do not cite a superseded ADR as current rationale.**
 
 ## Index
 
@@ -34,6 +34,8 @@ Each ADR records one decision, the context that forced it, what it costs, what w
 | **[0032](0032-wire-contract-framing-strict-json-and-jcs.md)** | **The wire contract: framing, strict JSON, and RFC 8785 as the one canonical encoding** | amends 0021, 0022, 0023; key rule amended by 0034 |
 | **[0033](0033-protocol-source-of-truth-and-tcb-dependencies.md)** | **Rust → JSON Schema → Python; the dependencies `dwk-proto` brings into the TCB** | amends 0019; §4 superseded by 0034 |
 | **[0034](0034-protocol-depends-on-no-unicode-database.md)** | **No protocol decision consults a Unicode database; DWKP's unknown-field rule carries the property** | amends 0032, 0033; refines 0023 |
+| **[0035](0035-m3-authority-dependency-set.md)** | **The M3 authority dependency set: SQLite, TOML, peer credentials and SHA-256 enter the TCB** | amends 0019, 0033, 0034 |
+| **[0036](0036-m3-authority-operations-and-the-capability-wire-form.md)** | **M3 defines AdmitRun, ReleaseRun and QueryAuthority; ToolInvoke stays reserved until a tool exists** | amends 0032; refines 0006, 0011, 0023, 0028, 0031 |
 
 ### Partially current (the unsuperseded parts still apply)
 
@@ -99,6 +101,14 @@ flowchart TD
   A22 --> A32
   A19 --> A33["0033 proto source of truth + TCB deps"]
   A32 --> A34["0034 no Unicode database"]
+  A19 --> A35["0035 M3 authority dependencies"]
+  A33 --> A35
+  A34 --> A35
+  A9 --> A35
+  A23 --> A36["0036 M3 operations + capability wire form"]
+  A28 --> A36
+  A31 --> A36
+  A32 --> A36
   A33 --> A34
   A23 --> A34
   A32 --> A33
@@ -115,7 +125,7 @@ flowchart TD
 
   classDef cur fill:#1b3a2f,stroke:#4ade80,color:#e6ffef
   classDef sup fill:#3a3a1b,stroke:#a3a34a,color:#fffbe6,stroke-dasharray: 4 3
-  class A0,A18,A19,A20,A21,A22,A23,A24,A25,A26,A27,A28,A29,A30,A31,A32,A33,A34 cur
+  class A0,A18,A19,A20,A21,A22,A23,A24,A25,A26,A27,A28,A29,A30,A31,A32,A33,A34,A35,A36 cur
   class A2s,A7s sup
 ```
 

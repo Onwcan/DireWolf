@@ -22,7 +22,7 @@ compromised host.
 
 ---
 
-## Status: M2.5 — protocol, schemas and the evaluation harness
+## Status: M3a — protocol, schemas, the evaluation harness, and the M3 wire forms
 
 **None of the above is implemented yet.** This repository contains the Phase 0
 architecture package, the M1 foundation (the monorepo layout, the Rust and
@@ -41,11 +41,22 @@ and the M2 wire contract:
   replayable fixtures with no model call anywhere, and a fault-injection
   harness. Properties that need the kernel are **pending**, which is counted
   apart from passing.
+- the M3 authority **wire forms** (M3a): `AdmitRun`, `ReleaseRun` and
+  `QueryAuthority`, with capabilities, grants, policy revisions and decisions as
+  typed, bounded message fields. `ToolInvoke` — the operation that carries every
+  effect — remains reserved until the milestone that builds the first tool
+  ([ADR-0036](docs/adr/0036-m3-authority-operations-and-the-capability-wire-form.md)).
 
 What M2 establishes is that **malformed DWKP is rejected structurally**, and
-what M2.5 adds is the machinery to *measure* claims like that. Neither
-establishes that any request is authorised: there is no kernel, no transport,
-no policy and no capability check yet. See [docs/PROTOCOL.md](docs/PROTOCOL.md),
+what M2.5 adds is the machinery to *measure* claims like that. M3a adds the
+shapes of the messages an authority will exchange, and the architecture
+decisions behind them
+([ADR-0035](docs/adr/0035-m3-authority-dependency-set.md),
+[ADR-0036](docs/adr/0036-m3-authority-operations-and-the-capability-wire-form.md)).
+**None of them establishes that any request is authorised.** There is no
+kernel, no transport, no policy engine, no capability lattice, no `kernel.db`
+and no audit log: a defined wire form is a shape, and a shape decides nothing.
+See [docs/PROTOCOL.md](docs/PROTOCOL.md),
 [ADR-0032](docs/adr/0032-wire-contract-framing-strict-json-and-jcs.md) and
 [evals/README.md](evals/README.md).
 

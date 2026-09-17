@@ -148,6 +148,14 @@ therefore immutable), a reviewer other than yourself, and an entry in
 whole transitive closure: a harmless-looking crate that pulls in an HTTP stack
 breaks the claim exactly as thoroughly as adding the HTTP stack.
 
+[ADR-0035](docs/adr/0035-m3-authority-dependency-set.md) reviews the four the
+authority takes at M3 — `rusqlite` with bundled SQLite, `toml`, `rustix` and
+`sha2` — with their measured transitive closure, their licences, and which of
+them parse untrusted input. Each is added in the milestone that first links it,
+not in advance. That ADR is also the model for the next one: measure the
+closure, name what parses untrusted input, and do not describe a large C
+dependency as small.
+
 **`dwk-proto`** — treat exactly as `dwkd-authority`: it is linked into it from
 M3, and `dwcheck` already checks it as TCB. Dev-dependencies are not linked and
 not counted, but they are still audited by `cargo deny`.
