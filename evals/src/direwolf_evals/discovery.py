@@ -9,12 +9,15 @@ enforced.
 
 from __future__ import annotations
 
+import math
+import re
 import tomllib
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Any, Final
 
 from direwolf_evals.model import DEFAULT_TIMEOUT_S, Eval, Suite
+from direwolf_evals.scoring import is_scorer, scorer_names
 
 __all__ = ["DiscoveryError", "discover", "suite_paths"]
 
@@ -35,6 +38,10 @@ EVAL_KEYS: Final = frozenset(
         "gate",
     }
 )
+
+
+_RESTATES_REQUIREMENT: Final = re.compile(r"^\s*requires\s+M[0-9]", re.IGNORECASE)
+_MILESTONE: Final = re.compile(r"M[0-9]+(?:\.[0-9]+)?")
 
 
 class DiscoveryError(Exception):
@@ -98,28 +105,159 @@ def _eval(
 ) -> Eval:
     _reject_unknown(source, raw, EVAL_KEYS)
     name = _text(source, raw, "name")
-    requires = tuple(sorted(set(suite_requires) | set(_strs(source, raw, "requires"))))
-    pending = raw.get("pending_reason")
-    if pending is not None and not isinstance(pending, str):
-        raise DiscoveryError(f"{source}: {name}: pending_reason must be a string")
-    if pending is not None and not pending.strip():
-        raise DiscoveryError(f"{source}: {name}: pending_reason must say what is missing")
+    requires = _milestones(source, name, set(suite_requires) | set(_strs(source, raw, "requires")))
+    pending = _pending_reason(source, name, raw, requires)
     return Eval(
         id=f"{suite_id}/{name}",
         suite=suite_id,
         name=name,
         description=_text(source, raw, "description"),
-        runner=_text(source, raw, "runner"),
-        scorer=str(raw.get("scorer", "binary")),
-        fixture=str(raw["fixture"]) if raw.get("fixture") is not None else None,
-        seed=int(raw.get("seed", 0)),
-        timeout_s=float(raw.get("timeout_s", DEFAULT_TIMEOUT_S)),
-        runs=int(raw.get("runs", 1)),
+        runner=_runner(source, name, raw, requires),
+        scorer=_scorer(source, name, raw),
+        fixture=_optional_text(source, name, raw, "fixture"),
+        seed=_int(source, name, raw, "seed", 0, minimum=0),
+        timeout_s=_float(source, name, raw, "timeout_s", DEFAULT_TIMEOUT_S),
+        runs=_int(source, name, raw, "runs", 1, minimum=1),
         requires=requires,
         pending_reason=pending,
         tags=_strs(source, raw, "tags"),
-        gate=bool(raw["gate"]) if "gate" in raw else suite_gate,
+        gate=_bool(source, name, raw, "gate", suite_gate),
     )
+
+
+def _milestones(source: str, name: str, values: set[str]) -> tuple[str, ...]:
+    """`requires` decides whether an eval runs, so a typo in it is not cosmetic.
+
+    "m3" or "M 3" would never match an available milestone, and the eval would
+    sit at PENDING for ever with a reason that reads correctly — the same class
+    of silent dormancy the `pending_reason` fix removed, arriving through the
+    other field. Shape is checked here; whether the milestone *exists* is
+    answered by AVAILABLE_MILESTONES at run time.
+    """
+    for value in sorted(values):
+        if not _MILESTONE.fullmatch(value):
+            raise DiscoveryError(
+                f"{source}: {name}: {value!r} is not a milestone; expected a form like "
+                f"'M3' or 'M2.5'"
+            )
+    return tuple(sorted(values))
+
+
+def _optional_text(source: str, name: str, raw: dict[str, Any], key: str) -> str | None:
+    value = raw.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise DiscoveryError(f"{source}: {name}: {key!r} must be a non-empty string")
+    return value
+
+
+def _int(
+    source: str, name: str, raw: dict[str, Any], key: str, default: int, *, minimum: int
+) -> int:
+    """A suite file is data from a contributor, and every malformed value has to
+    be a configuration error with a location — never a ValueError from a bare
+    `int()` that takes the whole run down with it."""
+    value = raw.get(key, default)
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise DiscoveryError(f"{source}: {name}: {key!r} must be an integer, got {value!r}")
+    if value < minimum:
+        raise DiscoveryError(f"{source}: {name}: {key!r} must be at least {minimum}, got {value}")
+    return value
+
+
+def _float(source: str, name: str, raw: dict[str, Any], key: str, default: float) -> float:
+    value = raw.get(key, default)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise DiscoveryError(f"{source}: {name}: {key!r} must be a number, got {value!r}")
+    number = float(value)
+    if not math.isfinite(number) or number <= 0:
+        raise DiscoveryError(
+            f"{source}: {name}: {key!r} must be a positive finite number, got {number!r}"
+        )
+    return number
+
+
+def _bool(source: str, name: str, raw: dict[str, Any], key: str, default: bool) -> bool:
+    """`bool("false")` is True. A gate flag that reads as the opposite of what it
+    says would quietly move an eval in or out of the merge gate."""
+    if key not in raw:
+        return default
+    value = raw[key]
+    if not isinstance(value, bool):
+        raise DiscoveryError(f"{source}: {name}: {key!r} must be true or false, got {value!r}")
+    return value
+
+
+def _runner(source: str, name: str, raw: dict[str, Any], requires: tuple[str, ...]) -> str | None:
+    """The runner, which may be absent only while a milestone is outstanding.
+
+    An eval that needs a component nobody has built has no honest runner to
+    name, and a placeholder pointing at somebody else's runner is worse than
+    nothing: the day the milestone lands it starts reporting a pass for a
+    property it never measured. Absent is allowed; wrong is not. Whether an
+    absent runner is tolerable at *run* time is decided by milestone
+    availability, in `direwolf_evals.runner`, not here.
+    """
+    value = raw.get("runner")
+    if value is None:
+        if not requires:
+            raise DiscoveryError(
+                f"{source}: {name}: 'runner' is required unless the eval declares the "
+                f"milestone it is waiting for in 'requires'"
+            )
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise DiscoveryError(f"{source}: {name}: 'runner' must be a non-empty string")
+    return value
+
+
+def _scorer(source: str, name: str, raw: dict[str, Any]) -> str:
+    """Checked against the closed registry here, before anything runs.
+
+    A typo'd scorer used to survive discovery and raise at scoring time, outside
+    the runner's containment, taking the whole process with it. Rejecting it
+    here means one bad suite file is a configuration error naming the valid
+    options, and no eval runs on a suite that cannot be scored.
+    """
+    value = raw.get("scorer", "binary")
+    if not isinstance(value, str) or not is_scorer(value):
+        raise DiscoveryError(
+            f"{source}: {name}: unknown scorer {value!r}; valid scorers are {scorer_names()}"
+        )
+    return value
+
+
+def _pending_reason(
+    source: str, name: str, raw: dict[str, Any], requires: tuple[str, ...]
+) -> str | None:
+    """The human half of a pending reason. Never a switch that disables an eval.
+
+    The machine half -- "requires M3" -- is generated from `requires` when the
+    result is recorded, so this field must not restate it: a hand-written
+    milestone here could disagree with the real requirement and hide the fact
+    that a security property had been deferred somewhere else.
+    """
+    value = raw.get("pending_reason")
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise DiscoveryError(f"{source}: {name}: pending_reason must be a string")
+    text = value.strip()
+    if not text:
+        raise DiscoveryError(f"{source}: {name}: pending_reason must say what is missing")
+    if not requires:
+        raise DiscoveryError(
+            f"{source}: {name}: pending_reason without 'requires' would explain a state "
+            f"that can never happen; milestone availability is what makes an eval pending"
+        )
+    if _RESTATES_REQUIREMENT.match(text):
+        raise DiscoveryError(
+            f"{source}: {name}: pending_reason must not restate the requirement "
+            f"({text.split(':')[0]!r}); that half is generated from requires={list(requires)}. "
+            f"Give only the detail, e.g. 'there is no authority process to lie to.'"
+        )
+    return text
 
 
 def _reject_unknown(source: str, raw: dict[str, Any], allowed: Iterable[str]) -> None:

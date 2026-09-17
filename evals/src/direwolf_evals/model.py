@@ -9,6 +9,7 @@ on why static rules beat clever ones).
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Final
@@ -64,8 +65,12 @@ class Eval:
     suite: str
     name: str
     description: str
-    runner: str
-    """Key into the runner registry. Never an import path from a file."""
+    runner: str | None
+    """Key into the runner registry. Never an import path from a file.
+
+    ``None`` is allowed only while a required milestone is missing: an eval that
+    cannot run yet has nothing honest to name. Once the milestone arrives, an
+    absent or unknown runner is a configuration ERROR, never a quiet PENDING."""
     scorer: str
     fixture: str | None
     seed: int
@@ -73,15 +78,35 @@ class Eval:
     runs: int
     """How many times to run it. Deterministic evals use 1."""
     requires: tuple[str, ...]
-    """Milestones this eval needs, e.g. ``("M3",)``. Unmet means PENDING."""
+    """Milestones this eval needs, e.g. ``("M3",)``.
+
+    **This, and only this, decides whether the eval is pending.** An eval is
+    PENDING exactly when one of these is not in
+    :data:`direwolf_evals.runner.AVAILABLE_MILESTONES`."""
     pending_reason: str | None
+    """Human detail for *why* the milestone is missing — the clause after the
+    colon in "requires M3: there is no authority process to lie to."
+
+    It is documentation, not a switch. It never makes an eval pending and it
+    never keeps one pending: an eval whose requirements are all available runs,
+    whatever this says. The machine-readable half of the reason is generated
+    from :attr:`requires`, so moving a property from M3 to M9 changes the
+    recorded reason even if nobody edits this sentence."""
     tags: tuple[str, ...]
     gate: bool
     """Part of the deterministic per-pull-request subset."""
 
-    @property
-    def is_pending(self) -> bool:
-        return self.pending_reason is not None
+    def pending_reason_for(self, missing: Sequence[str]) -> str:
+        """The exact reason recorded when ``missing`` milestones block this eval.
+
+        Deterministic, and derived from ``requires`` rather than from prose, so
+        that a baseline can detect a property being deferred to a different
+        milestone. ``missing`` is expected sorted.
+        """
+        requirement = f"requires {', '.join(missing)}"
+        if not self.pending_reason:
+            return f"{requirement}, which this build does not have"
+        return f"{requirement}: {self.pending_reason}"
 
 
 @dataclass(frozen=True, slots=True)

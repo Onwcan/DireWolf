@@ -52,10 +52,24 @@ def test_every_eval_id_is_unique_and_prefixed_by_its_suite() -> None:
 
 
 def test_every_runner_named_by_a_suite_exists() -> None:
-    """A typo in a suite file must fail loudly, not skip quietly."""
+    """A typo in a suite file must fail loudly, not skip quietly.
+
+    An eval may name no runner at all, but only while it is waiting for a
+    milestone: see `test_an_eval_with_no_runner_must_be_waiting_for_something`.
+    """
     for suite in discover(EVALS_ROOT):
         for evaluation in suite.evals:
+            if evaluation.runner is None:
+                continue
             assert evaluation.runner in RUNNERS, f"{evaluation.id}: {evaluation.runner}"
+
+
+def test_an_eval_with_no_runner_must_be_waiting_for_something() -> None:
+    """The only excuse for having no runner is a milestone that does not exist."""
+    for suite in discover(EVALS_ROOT):
+        for evaluation in suite.evals:
+            if evaluation.runner is None:
+                assert evaluation.requires, evaluation.id
 
 
 def test_every_suite_says_what_its_score_means() -> None:

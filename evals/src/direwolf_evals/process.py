@@ -22,6 +22,14 @@ Platform support is reported, not pretended:
 
 Nothing here runs a shell, and no argument comes from a fixture: the child is
 always this package's own module, invoked with ``sys.executable``.
+
+:meth:`Child.close` returns only once the child has been **reaped** — not merely
+signalled. On POSIX a killed process stays in the table as a zombie until its
+parent waits for it, so ``kill()`` without a following ``wait()`` leaks one per
+eval. The sequence is terminate, bounded wait, kill, bounded wait, and only then
+close the pipes and join the reader threads. If even that does not collect the
+child, :class:`CleanupError` is raised: an uncollected process is reported, not
+swallowed.
 """
 
 from __future__ import annotations
@@ -38,10 +46,29 @@ from dataclasses import dataclass, field
 from types import TracebackType
 from typing import Final
 
-__all__ = ["Child", "ChildTimeoutError", "UnsupportedOnPlatformError", "spawn"]
+__all__ = [
+    "Child",
+    "ChildTimeoutError",
+    "CleanupError",
+    "UnsupportedOnPlatformError",
+    "spawn",
+]
 
 MAX_CAPTURED_LINES: Final = 2000
 POSIX: Final = os.name == "posix"
+TERMINATE_GRACE_S: Final = 5.0
+"""How long a child gets to exit on its own after SIGTERM."""
+KILL_GRACE_S: Final = 5.0
+"""How long to wait for the kernel to deliver an uncatchable kill. Bounded so
+a wedged host cannot hang the suite; exceeding it is reported, not ignored."""
+THREAD_JOIN_S: Final = 5.0
+
+# Read once, because these names exist only on POSIX. Guarding the *use* of
+# signal.SIGSTOP with `if POSIX` does not stop a type checker on Windows from
+# reporting the attribute as missing, and `make typecheck` has to work on
+# every platform a contributor develops on.
+_SIGSTOP: Final[int] = getattr(signal, "SIGSTOP", 0)
+_SIGCONT: Final[int] = getattr(signal, "SIGCONT", 0)
 
 
 class ChildTimeoutError(Exception):
@@ -50,6 +77,12 @@ class ChildTimeoutError(Exception):
 
 class UnsupportedOnPlatformError(Exception):
     """The platform cannot do this. Say so; do not emulate it badly."""
+
+
+class CleanupError(Exception):
+    """A child could not be collected. Reported, never quietly accepted:
+    a fault-injection harness that leaks processes corrupts every later
+    measurement on the machine."""
 
 
 @dataclass(slots=True)
@@ -63,6 +96,7 @@ class Child:
     _stderr: list[str] = field(default_factory=list)
     _threads: list[threading.Thread] = field(default_factory=list)
     _paused: bool = False
+    _closed: bool = False
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -78,21 +112,56 @@ class Child:
         self.close()
 
     def close(self) -> None:
-        """Always leave the host as we found it: no orphan, no stuck pipe."""
+        """Leave the host as we found it: no orphan, no zombie, no open pipe.
+
+        Idempotent, and safe at every stage of a child's life — already exited,
+        exits on SIGTERM, ignores SIGTERM, crashed, or never fully started.
+
+        Killing is not collecting. On POSIX the child stays in the process table
+        until the parent waits for it, so every branch here ends in a bounded
+        ``wait``. Only exceptions that are understood are suppressed: an already
+        dead process (``OSError``/``ProcessLookupError``) and an already closed
+        pipe (``ValueError``). Anything else propagates.
+        """
+        if self._closed:
+            return
+        self._closed = True
+
         if self._paused:
+            # A stopped process never sees SIGTERM. Let it run before asking it
+            # to stop, or the terminate below would wait out its whole budget.
             with contextlib.suppress(OSError, ValueError):
                 self.unpause()
+
         if self.process.poll() is None:
             self.terminate()
-            with contextlib.suppress(OSError, ValueError):
-                self.process.wait(timeout=5)
-            if self.process.poll() is None:
-                self.kill()
-        with contextlib.suppress(OSError, ValueError):
-            if self.process.stdin is not None:
-                self.process.stdin.close()
+            self._reap(TERMINATE_GRACE_S)
+        if self.process.poll() is None:
+            self.kill()
+            self._reap(KILL_GRACE_S)
+
+        # The reader threads end at EOF, which the exit above guarantees. Join
+        # them before closing the pipes, so a thread is never reading a file
+        # object that is being closed underneath it.
         for thread in self._threads:
-            thread.join(timeout=2)
+            thread.join(timeout=THREAD_JOIN_S)
+        for pipe in (self.process.stdin, self.process.stdout, self.process.stderr):
+            if pipe is not None:
+                with contextlib.suppress(OSError, ValueError):
+                    pipe.close()
+        self.drain()
+
+        if self.process.poll() is None:
+            raise CleanupError(
+                f"pid {self.process.pid} survived SIGTERM and SIGKILL and was not collected "
+                f"within {TERMINATE_GRACE_S + KILL_GRACE_S}s; it is still on this host"
+            )
+
+    def _reap(self, timeout: float) -> None:
+        """Wait for the child and collect its exit status. Never busy-waits:
+        ``Popen.wait`` blocks in ``waitpid``/``WaitForSingleObject``."""
+        with contextlib.suppress(subprocess.TimeoutExpired, OSError, ValueError):
+            self.process.wait(timeout=timeout)
 
     # -- observation -------------------------------------------------------
 
@@ -156,20 +225,24 @@ class Child:
                 "pausing a running process needs SIGSTOP; Windows has no equivalent "
                 "that does not change what is being measured"
             )
-        self.process.send_signal(signal.SIGSTOP)
+        self.process.send_signal(_SIGSTOP)
         self._paused = True
 
     def unpause(self) -> None:
         if not POSIX:
             raise UnsupportedOnPlatformError("SIGCONT is POSIX-only")
-        self.process.send_signal(signal.SIGCONT)
+        self.process.send_signal(_SIGCONT)
         self._paused = False
 
     def terminate(self) -> None:
+        """Ask the child to stop. Suppressed: the child already exited
+        (``ProcessLookupError``) or the handle is gone (``ValueError``)."""
         with contextlib.suppress(OSError, ValueError):
             self.process.terminate()
 
     def kill(self) -> None:
+        """Stop the child without its cooperation. Same suppressions, same
+        reason — and, as everywhere here, a kill is followed by a wait."""
         with contextlib.suppress(OSError, ValueError):
             self.process.kill()
 

@@ -156,8 +156,13 @@ def _list(evals_root: Path) -> int:
         print(f"{suite.id}{gate} — {suite.title}")
         print(f"    score: {suite.score_meaning}")
         for evaluation in suite.evals:
-            marker = "PENDING" if evaluation.is_pending else evaluation.runner
-            print(f"    {evaluation.id:<46} {marker}")
+            # What it will run, and what is stopping it -- separately, because
+            # conflating them is how a milestone-owned eval stayed dormant.
+            marker = evaluation.runner or "(no runner yet)"
+            waiting = (
+                f"  waiting on {', '.join(evaluation.requires)}" if evaluation.requires else ""
+            )
+            print(f"    {evaluation.id:<46} {marker}{waiting}")
     return 0
 
 

@@ -51,12 +51,17 @@ usage or configuration error.
    never averaged.
 2. Add an `[[eval]]` table: `name`, `description`, `runner`, and optionally
    `fixture`, `scorer`, `seed`, `runs`, `timeout_s`, `requires`, `tags`,
-   `gate`, `pending_reason`. Unknown keys are an error, not a silent no-op.
+   `gate`, `pending_reason`. Unknown keys are an error, not a silent no-op, and
+   so is a malformed value: `seed = "zero"` or `gate = "false"` is a
+   configuration error with a location, never a traceback (and never a `gate`
+   that reads as the opposite of what the file says, which is what
+   `bool("false")` would have given you).
 3. If you need new behaviour, add a function to a module in
    `src/direwolf_evals/runners/` and register it in `runners/__init__.py`.
    **A suite file can only name a registered runner** — it can never point at
    an import path, because a fixture that chooses code is a second execution
-   path.
+   path. The same is true of `scorer`: it must name one of the four in
+   `scoring.SCORERS`, and discovery says so before anything runs.
 4. Run `make eval`, then `make eval-check`. If the expectations changed on
    purpose, run `uv run --frozen python -m direwolf_evals baseline` and put the
    diff in the pull request.
@@ -67,6 +72,43 @@ usage or configuration error.
 Discovery sorts suites by id and evals by id, so the same tree always produces
 the same set, the same order and the same identifiers. Nothing depends on
 filesystem traversal order, import order, the clock or a random value.
+
+## Pending, and how a suite turns on
+
+An eval is PENDING **exactly when one of the milestones in its `requires` is
+not in `AVAILABLE_MILESTONES`** (in `runner.py`). Nothing else makes it pending,
+and nothing else keeps it pending.
+
+In particular `pending_reason` does not. It is the human half of the sentence —
+the clause after the colon in *"requires M3: there is no authority process to
+lie to."* — and it is documentation, not a switch. It used to be read as one:
+an eval that had the field was pending for ever, so adding `"M3"` to
+`AVAILABLE_MILESTONES` would have left every M3 security property dormant while
+the summary still said "pending", which is the exact shape of a gate that never
+fires.
+
+The machine half of the reason is generated from `requires`, so a property
+deferred from M3 to M9 changes the recorded reason even if nobody edits the
+prose — and the baseline notices (see *Baselines*). Writing the milestone into
+`pending_reason` as well is refused: two sources of truth for the same fact are
+how they come to disagree.
+
+Turning a milestone on is therefore:
+
+1. add it to `AVAILABLE_MILESTONES`;
+2. give each eval that was waiting a real runner;
+3. watch it pass.
+
+Step 2 is not optional. An eval whose milestone has arrived and which has **no
+runner, or an unknown one, reports ERROR** and fails the gate. That is
+deliberate: a security property that cannot run once its component exists is a
+configuration defect, and saying "pending" about it would be the original bug
+wearing a different status. For the same reason, none of the evals in
+`suites/pending-kernel.toml` names a placeholder runner — a placeholder would
+start reporting a pass for a property it never measured.
+
+`requires` is checked for shape too: `"m3"` is refused, because a milestone that
+can never match would be permanent dormancy arriving through the other field.
 
 ## Fixtures
 
@@ -100,11 +142,32 @@ Statuses: `pass`, `fail`, `error`, `skip`, `pending`. The gate fails on `fail`
 and `error`; `pending` and `skip` are counted and printed separately, never
 folded into a pass.
 
+**Numbers in a result are machine truth.** A `score` is `None` or a finite
+number in [0, 1]; a metric may be any finite number (a count and a duration are
+legitimate metrics) but never `NaN` or `Infinity`. This is enforced at four
+places, because one layer is an assumption: the scorer, the runner before the
+result is built, `Result.__post_init__`, and `json.dumps(..., allow_nan=False)`
+on the way out.
+
+`NaN` is the one that matters. `float("nan") < 1.0` is `False`, so a NaN score
+compared against a baseline threshold reads as *not below it* — a silent pass
+for a measurement that failed to produce a number. It cannot exist now, and if
+one were smuggled in, the baseline comparison calls it out rather than waving it
+through.
+
 ## Scores and statistics
 
 A scorer turns one outcome into one number in `[0, 1]`: `binary`,
 `rejection_rate`, `determinism_rate`, `stability_rate`. What a number *means*
 is the suite's business, and every suite says so in its own file.
+
+The registry is **closed**, and checked twice. Discovery rejects a suite that
+names a scorer not in it — with the list of valid names — so a typo like
+`rejecton_rate` is a configuration error and no eval on that suite runs. Scoring
+itself then happens *inside* the runner's containment, so a scorer that raises
+anyway is an ERROR for that one eval rather than the end of the process. The
+blast radius of a bad suite file is one eval; the other twenty still run and
+still reach the results file.
 
 For evals with `runs > 1` the summary reports the pass rate with a **Wilson
 score interval** at 95%, stating the count, `n` and the method. There is no
@@ -119,12 +182,21 @@ are fixed in the suite file; `--seed` overrides them for an experiment.
 
 ## Baselines
 
-`baselines/main.json` states the expected status of each eval and any minimum
-score. It is **not** "whatever passed last time": `make eval-check` compares
-against it, and nothing rewrites it automatically — not locally, and
-emphatically not in CI. Regressions (a worse status, a score below the
-threshold, a missing eval) fail. An eval that improved is reported so that the
-baseline can be updated on purpose.
+`baselines/main.json` states the expected status of each eval, any minimum
+score, and — for a pending eval — the reason. It is **not** "whatever passed
+last time": `make eval-check` compares against it, and nothing rewrites it
+automatically, not locally and emphatically not in CI. Regressions (a worse
+status, a score below the threshold, a missing eval) fail. An eval that improved
+is reported so that the baseline can be updated on purpose.
+
+**`pending_reason` is compared**, exactly, on the stripped string. A field that
+is written but never read is decoration, and this one carries the milestone a
+security property is waiting for: expected `"requires M3: …"` against an actual
+`"requires M9: …"` is a property that slid six milestones into the future behind
+an unchanged status, and it fails. A reason that disappeared fails; a reason
+that appeared where the baseline recorded none is reported, so that it is added
+deliberately rather than inherited. A threshold is validated on load as well — a
+`min_score` of `NaN` bounds nothing while looking like a bound.
 
 ## Fault injection
 
@@ -133,6 +205,15 @@ baseline can be updated on purpose.
 pauses it, terminates it and detects hangs. Platform support is reported rather
 than faked: OS-level pause uses `SIGSTOP`/`SIGCONT` and is POSIX-only; on
 Windows that half reports `unsupported` instead of passing.
+
+**`close()` returns only once the child has been reaped.** Killing is not
+collecting: on POSIX a killed process stays in the table until its parent waits
+for it, so `kill()` with no following `wait()` leaks a zombie per eval. The
+sequence is terminate → bounded wait → kill → bounded wait → join the reader
+threads → close the pipes, and a child that survives all of that raises
+`CleanupError` rather than being quietly left behind. `close()` is idempotent
+and correct at every stage of a child's life, including one that never started.
+Correctness comes from `Popen.wait` blocking in the OS, not from polling.
 
 The relationship is one-directional, so M3 can instrument the real daemon
 without this package learning anything about authority:
@@ -164,6 +245,13 @@ become a product path.
   cross-suite aggregate, deliberately: see *Scores and statistics*.
 - **A fixture's digest proves it has not changed, not that it is right.**
   Provenance says where it came from; review says whether it should be trusted.
+- **Pending-reason drift is caught by exact string comparison.** That is a
+  deliberate choice over anything fuzzier — fuzzy matching would hide the drift
+  it exists to catch — but it means rewording a reason is a baseline diff a
+  reviewer has to approve. That is the intended cost.
+- **`CleanupError` reports an uncollectable child; it cannot remove one.** If a
+  process survives SIGTERM and SIGKILL, something outside this harness is wrong
+  with the host, and the harness says so rather than pretending otherwise.
 
 ## What is deliberately not here
 

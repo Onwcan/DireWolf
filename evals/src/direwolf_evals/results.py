@@ -7,11 +7,27 @@ well, streams, and needs no library to read.
 Large data never goes in a result. A runner that wants to show a failing input
 puts a bounded string in ``artifacts``; anything bigger belongs in a file the
 result references.
+
+Numbers here are machine truth, so two invariants hold at construction and are
+checked again on the way out:
+
+* ``score`` is ``None`` or a finite number in [0, 1]. ``NaN`` is not a score --
+  it compares false against every threshold, so a baseline check reads as a
+  pass.
+* every metric is finite. Metrics are *not* confined to [0, 1]; a count or a
+  duration is a legitimate metric. But ``NaN`` and ``Infinity`` have no
+  standards-compliant JSON form, and a results file that no other tool can
+  parse is not a record.
+
+:func:`write_jsonl` passes ``allow_nan=False``, so even a value that reached a
+``Result`` some other way fails loudly instead of producing a file that says
+``NaN``.
 """
 
 from __future__ import annotations
 
 import json
+import math
 import platform
 import sys
 from collections.abc import Iterable, Iterator
@@ -24,6 +40,7 @@ from direwolf_evals.model import Status
 __all__ = [
     "RESULT_VERSION",
     "Result",
+    "ResultError",
     "RunReport",
     "environment",
     "read_jsonl",
@@ -32,6 +49,15 @@ __all__ = [
 
 RESULT_VERSION: Final = 1
 MAX_ARTIFACT_CHARS: Final = 2000
+
+
+class ResultError(ValueError):
+    """A result was built that cannot be a truthful record.
+
+    Raised at construction, so an invalid number never reaches a file, a
+    baseline comparison or a summary. The runner validates earlier and turns
+    the same conditions into an ERROR for one eval; this is the backstop for
+    every other path into a Result."""
 
 
 def environment() -> dict[str, str]:
@@ -65,6 +91,25 @@ class Result:
     fixture: str | None = None
     fixture_digest: str | None = None
     requires: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.score is not None:
+            if isinstance(self.score, bool) or not isinstance(self.score, (int, float)):
+                raise ResultError(f"{self.eval_id}: score {self.score!r} is not a number")
+            if not math.isfinite(self.score):
+                raise ResultError(f"{self.eval_id}: score {self.score!r} is not finite")
+            if not 0.0 <= self.score <= 1.0:
+                raise ResultError(f"{self.eval_id}: score {self.score!r} is outside [0.0, 1.0]")
+        for key in sorted(self.metrics):
+            value = self.metrics[key]
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise ResultError(f"{self.eval_id}: metric {key!r} is {value!r}, not a number")
+            if not math.isfinite(value):
+                raise ResultError(
+                    f"{self.eval_id}: metric {key!r} is {value!r}, which is not finite"
+                )
+        if not math.isfinite(self.duration_ms):
+            raise ResultError(f"{self.eval_id}: duration_ms {self.duration_ms!r} is not finite")
 
     def to_json(self, env: dict[str, str]) -> dict[str, Any]:
         return {
@@ -123,7 +168,10 @@ def write_jsonl(path: Path, results: Iterable[Result], env: dict[str, str] | Non
     env = environment() if env is None else env
     path.parent.mkdir(parents=True, exist_ok=True)
     lines = [
-        json.dumps(result.to_json(env), ensure_ascii=True, sort_keys=True)
+        # allow_nan=False: json.dumps would otherwise emit the JavaScript
+        # literals NaN/Infinity, which are not JSON and which every strict
+        # parser rejects. A result that cannot be read back is not a record.
+        json.dumps(result.to_json(env), ensure_ascii=True, sort_keys=True, allow_nan=False)
         for result in sorted(results, key=lambda r: (r.eval_id, r.run_index))
     ]
     path.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")

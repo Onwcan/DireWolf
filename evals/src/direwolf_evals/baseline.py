@@ -7,11 +7,24 @@ number that quietly moved.
 
 Nothing here writes a baseline during a gate run. `make eval-baseline` writes
 one; a reviewer reads the diff.
+
+A baseline field that is written but never compared is decoration, so
+``pending_reason`` is compared. When the baseline says an eval is PENDING it
+also says *why*, and that sentence carries the milestone the property is waiting
+for. Deferring a security property from M3 to M9 changes it, and a changed
+reason is a regression a reviewer has to approve — otherwise "still pending"
+would cover a property quietly sliding four milestones into the future.
+
+The comparison is exact, on the whitespace-stripped string. Reasons are
+generated deterministically from the eval's ``requires`` plus a fixed sentence
+in the suite file, so they are stable; fuzzy matching would hide exactly the
+drift this exists to catch.
 """
 
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final
@@ -33,6 +46,7 @@ class Expectation:
     status: Status
     min_score: float | None
     pending_reason: str | None
+    """The reason the baseline recorded for a PENDING eval. Compared exactly."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,12 +66,45 @@ class Baseline:
             )
         evals = {}
         for eval_id, entry in sorted(raw.get("evals", {}).items()):
+            try:
+                status = Status(entry["status"])
+            except (KeyError, ValueError) as exc:
+                raise BaselineError(f"{path}: {eval_id}: bad status: {exc}") from exc
             evals[eval_id] = Expectation(
-                status=Status(entry["status"]),
-                min_score=entry.get("min_score"),
-                pending_reason=entry.get("pending_reason"),
+                status=status,
+                min_score=_threshold(path, eval_id, entry.get("min_score")),
+                pending_reason=_reason(path, eval_id, entry.get("pending_reason")),
             )
         return Baseline(evals)
+
+
+def _threshold(path: Path, eval_id: str, value: Any) -> float | None:
+    """A threshold that is not a finite number in [0, 1] is not a threshold.
+
+    ``NaN`` is the dangerous one: ``score < float("nan")`` is False for every
+    score, so a NaN threshold accepts everything while looking like a bound.
+    """
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise BaselineError(f"{path}: {eval_id}: min_score {value!r} is not a number")
+    number = float(value)
+    if not math.isfinite(number):
+        raise BaselineError(
+            f"{path}: {eval_id}: min_score {number!r} is not finite; a non-finite "
+            f"threshold compares false against every score and bounds nothing"
+        )
+    if not 0.0 <= number <= 1.0:
+        raise BaselineError(f"{path}: {eval_id}: min_score {number!r} is outside [0.0, 1.0]")
+    return number
+
+
+def _reason(path: Path, eval_id: str, value: Any) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise BaselineError(f"{path}: {eval_id}: pending_reason {value!r} is not a string")
+    return value.strip()
 
 
 @dataclass(frozen=True, slots=True)
@@ -112,11 +159,20 @@ def compare(
             else:
                 improvements.append(message)
             continue
+        if expectation.status is Status.PENDING:
+            drift = _reason_drift(eval_id, expectation.pending_reason, runs)
+            if drift:
+                regressions.append(drift)
         if expectation.min_score is not None:
             scores = [r.score for r in runs if r.score is not None]
             score = min(scores) if scores else None
             if score is None:
                 regressions.append(f"{eval_id}: expected a score, got none")
+            elif not math.isfinite(score):
+                # Result construction already refuses this. Belt and braces: a
+                # non-finite score must never reach the `<` below, where it
+                # would read as "not below the threshold" and quietly pass.
+                regressions.append(f"{eval_id}: score {score!r} is not a finite number")
             elif score < expectation.min_score:
                 regressions.append(
                     f"{eval_id}: score {score:.4f} is below the baseline "
@@ -139,6 +195,29 @@ def compare(
     )
 
 
+def _reason_drift(eval_id: str, expected: str | None, runs: list[Result]) -> str | None:
+    """Compare the recorded pending reason with the one this run produced.
+
+    Exact, on the stripped string. The reason names the milestone the property
+    is waiting for, so a change here is a security property moving in time —
+    worth a reviewer's attention even though the status is still PENDING.
+    """
+    actual = sorted({r.reason.strip() for r in runs if r.reason.strip()})
+    found = actual[0] if actual else None
+    if expected is None:
+        if found is None:
+            return None
+        return (
+            f"{eval_id}: still pending, but the baseline records no reason and this run "
+            f"gave {found!r}; record it deliberately"
+        )
+    if found is None:
+        return f"{eval_id}: expected pending reason {expected!r}, got none"
+    if found != expected:
+        return f"{eval_id}: pending reason changed from {expected!r} to {found!r}"
+    return None
+
+
 def write(path: Path, results: list[Result]) -> None:
     """Record the current run as the baseline. A deliberate, reviewed act."""
     evals: dict[str, dict[str, Any]] = {}
@@ -148,8 +227,14 @@ def write(path: Path, results: list[Result]) -> None:
         scores = [r.score for r in results if r.eval_id == result.eval_id and r.score is not None]
         if scores:
             entry["min_score"] = min(scores)
-        if result.reason and status is Status.PENDING:
-            entry["pending_reason"] = result.reason
+        if status is Status.PENDING:
+            # Deterministic across the runs of a multi-run eval: the sorted set,
+            # not whichever result the loop happened to end on.
+            reasons = sorted(
+                {r.reason.strip() for r in results if r.eval_id == result.eval_id and r.reason}
+            )
+            if reasons:
+                entry["pending_reason"] = reasons[0]
         evals[result.eval_id] = entry
     document = {
         "baseline_version": BASELINE_VERSION,

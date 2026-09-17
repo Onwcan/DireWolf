@@ -14,6 +14,9 @@ The script is a comma-separated list of steps, passed as one argument:
     sleep:SECONDS     sleep (bounded)
     crash             exit(70), the conventional "software error"
     hang              sleep until killed, so timeout handling can be tested
+    deaf              ignore SIGTERM, then hang: the kill fallback needs a
+                      child that will not go quietly (POSIX; on Windows
+                      terminate() is TerminateProcess and cannot be ignored)
     exit:CODE         exit with CODE
 
 Steps are parsed, never evaluated; unknown steps are an error.
@@ -21,6 +24,7 @@ Steps are parsed, never evaluated; unknown steps are an error.
 
 from __future__ import annotations
 
+import signal
 import sys
 import time
 from typing import Final
@@ -58,6 +62,12 @@ def main(argv: list[str] | None = None) -> int:
         elif verb == "crash":
             _say("CRASHING")
             return CRASH_CODE
+        elif verb == "deaf":
+            if hasattr(signal, "SIGTERM"):
+                signal.signal(signal.SIGTERM, signal.SIG_IGN)
+            _say("CHECKPOINT deaf")
+            while True:
+                time.sleep(0.05)
         elif verb == "hang":
             while True:
                 time.sleep(0.05)

@@ -96,6 +96,9 @@ ignore = [
 "evals/src/direwolf_evals/fixtures.py" = ["ANN401"]
 "evals/src/direwolf_evals/runners/protocol.py" = ["ANN401"]
 "evals/src/direwolf_evals/runners/replay.py" = ["ANN401"]
+# A baseline file is JSON too, and its validators exist precisely to turn
+# `Any` from the file into the narrow types the comparison may rely on.
+"evals/src/direwolf_evals/baseline.py" = ["ANN401"]
 
 [tool.ruff.format]
 docstring-code-format = true

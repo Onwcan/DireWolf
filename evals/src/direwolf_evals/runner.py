@@ -6,10 +6,19 @@ seed alone — the summary prints the command that does it.
 
 Requirements are checked before anything runs: an eval that needs a milestone
 this build does not have is PENDING, and PENDING is not a pass.
+
+**Milestone availability is the only thing that makes an eval pending.** The
+``pending_reason`` in a suite file is the human half of the sentence, not a
+switch: an eval whose requirements are all available runs, whatever that field
+says. The day ``"M3"`` joins :data:`AVAILABLE_MILESTONES`, every suite that was
+waiting for it starts executing, and one that has no runner yet reports ERROR
+rather than staying quietly dormant — a security property that cannot run once
+its milestone exists is a configuration defect, not a pending property.
 """
 
 from __future__ import annotations
 
+import math
 import time
 from collections.abc import Sequence
 from pathlib import Path
@@ -20,16 +29,22 @@ from direwolf_evals.fixtures import FixtureError, load_fixture
 from direwolf_evals.model import Eval, Outcome, Status, Suite
 from direwolf_evals.results import Result, RunReport
 from direwolf_evals.runners import Context, resolve
-from direwolf_evals.scoring import score_outcome
+from direwolf_evals.scoring import ScoringError, score_outcome
 
 __all__ = ["AVAILABLE_MILESTONES", "collect", "run_eval", "run_suites"]
+
+MAX_REASON_CHARS: Final = 1000
+"""An error detail is diagnostics, not a channel. Bounded, like everything else
+that reaches a result file."""
 
 AVAILABLE_MILESTONES: Final[frozenset[str]] = frozenset({"M1", "M2", "M2.5"})
 """What this build has. An eval requiring anything else is pending.
 
 Extending this set is how a future milestone turns its suites on: add "M3"
 here in the commit that makes M3 real, and every suite that has been waiting
-starts running and must pass.
+starts running and must pass. Nothing else gates them — in particular a
+``pending_reason`` left in a suite file does not keep an eval dormant, and an
+eval with no runner reports ERROR once its milestone is here.
 """
 
 
@@ -65,13 +80,51 @@ def run_eval(
     fixture_digest = None
     fixture_name = evaluation.fixture
 
-    if evaluation.is_pending or missing:
-        reason = evaluation.pending_reason or (
-            f"requires {', '.join(missing)}, which this build does not have"
-        )
+    # Requirements, and nothing else, decide pendingness. `pending_reason` only
+    # supplies the detail after the colon; it can neither create this state nor
+    # survive it. See Eval.pending_reason_for.
+    if missing:
         return [
-            _result(suite, evaluation, Status.PENDING, None, 0.0, seed, 0, reason, {}, {}, None)
+            _result(
+                suite,
+                evaluation,
+                Status.PENDING,
+                None,
+                0.0,
+                seed,
+                0,
+                evaluation.pending_reason_for(missing),
+                {},
+                {},
+                None,
+            )
         ]
+
+    # Requirements are met, so this eval is expected to run. A missing runner is
+    # a configuration defect from here on, and is reported loudly: the failure
+    # this guards against is a security property going dormant on the very
+    # commit that made it measurable.
+    if evaluation.runner is None:
+        return [
+            _result(
+                suite,
+                evaluation,
+                Status.ERROR,
+                None,
+                0.0,
+                seed,
+                0,
+                (
+                    f"no runner: every milestone it requires "
+                    f"({', '.join(evaluation.requires) or 'none'}) is available, so this eval "
+                    f"must run. Give it a runner from direwolf_evals.runners.RUNNERS."
+                ),
+                {},
+                {},
+                None,
+            )
+        ]
+    runner_name = evaluation.runner
 
     # A declared fixture is resolved before anything runs, even when the runner
     # would not have read it: otherwise a typo in a fixture path is invisible,
@@ -100,7 +153,7 @@ def run_eval(
     for index in range(max(1, evaluation.runs)):
         started = time.perf_counter()
         try:
-            runner = resolve(evaluation.runner)
+            runner = resolve(runner_name)
             context = Context(
                 evaluation=evaluation,
                 repo_root=repo_root,
@@ -111,12 +164,13 @@ def run_eval(
             outcome = runner(context)
         except FixtureError as exc:
             outcome = Outcome(Status.ERROR, {}, f"fixture: {exc}")
-        except (KeyError, ValueError, OSError, RuntimeError) as exc:
-            outcome = Outcome(Status.ERROR, {}, f"{type(exc).__name__}: {exc}")
+        except Exception as exc:
+            # A runner is code, and code raises things nobody enumerated. The
+            # blast radius of any of them is this eval, never the process: every
+            # other eval still runs and still reaches the results file.
+            outcome = Outcome(Status.ERROR, {}, _bounded(f"{type(exc).__name__}: {exc}"))
         duration_ms = (time.perf_counter() - started) * 1000
-        score = (
-            score_outcome(evaluation.scorer, outcome) if outcome.status != Status.ERROR else None
-        )
+        outcome, score = _score(evaluation, outcome)
         results.append(
             _result(
                 suite,
@@ -155,6 +209,46 @@ def run_suites(
         ):
             report.add(result)
     return report
+
+
+def _score(evaluation: Eval, outcome: Outcome) -> tuple[Outcome, float | None]:
+    """Score an outcome, or turn a scoring fault into an ERROR for this eval.
+
+    Scoring used to happen outside the runner's containment, so an unknown
+    scorer — or a metric that was ``NaN`` — reached the top of the process and
+    ended the whole run. Now it is inside: the eval errors, and the rest of the
+    suite is unaffected.
+
+    Metrics are checked here too. They are *not* confined to [0, 1] (a count or
+    a duration is a legitimate metric) but they must be finite, because a
+    results file is machine truth and there is no standards-compliant JSON for
+    ``NaN`` or ``Infinity``.
+    """
+    if outcome.status is Status.ERROR:
+        return outcome, None
+    for key in sorted(outcome.metrics):
+        value = outcome.metrics[key]
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return _error(outcome, f"metric {key!r} is {value!r}, which is not a number"), None
+        if not math.isfinite(float(value)):
+            return _error(outcome, f"metric {key!r} is {float(value)!r}, which is not finite"), None
+    try:
+        return outcome, score_outcome(evaluation.scorer, outcome)
+    except ScoringError as exc:
+        return _error(outcome, str(exc)), None
+
+
+def _error(outcome: Outcome, reason: str) -> Outcome:
+    """Keep the runner's own reason and say what invalidated it. Metrics are
+    dropped, because the metrics are what could not be trusted."""
+    prefix = f"{outcome.reason} | " if outcome.reason else ""
+    return Outcome(Status.ERROR, {}, _bounded(f"{prefix}{reason}"), dict(outcome.artifacts))
+
+
+def _bounded(reason: str) -> str:
+    if len(reason) <= MAX_REASON_CHARS:
+        return reason
+    return reason[: MAX_REASON_CHARS - 1] + "…"
 
 
 def _digest(repo_root: Path, evals_root: Path, fixture: str) -> str:

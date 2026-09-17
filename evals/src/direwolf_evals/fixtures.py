@@ -66,6 +66,13 @@ def digest_bytes(data: bytes) -> str:
     return "sha256:" + hashlib.sha256(data.replace(b"\r\n", b"\n")).hexdigest()
 
 
+def _reject_constant(name: str) -> float:
+    """Python's JSON reader accepts NaN, Infinity and -Infinity, which are not
+    JSON. A fixture carrying one would flow into a metric and from there into a
+    results file that no strict parser could read."""
+    raise FixtureError(f"{name} is not JSON; a fixture must contain only finite numbers")
+
+
 def load_fixture(root: Path, relative: str) -> Fixture:
     """Load ``relative`` under ``root``, refusing to escape it.
 
@@ -83,7 +90,7 @@ def load_fixture(root: Path, relative: str) -> Fixture:
     if len(raw) > MAX_FIXTURE_BYTES:
         raise FixtureError(f"{relative!r} is {len(raw)} bytes; the limit is {MAX_FIXTURE_BYTES}")
     try:
-        data = json.loads(raw.decode("utf-8"))
+        data = json.loads(raw.decode("utf-8"), parse_constant=_reject_constant)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise FixtureError(f"{relative!r}: {exc}") from exc
 
