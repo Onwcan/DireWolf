@@ -178,6 +178,21 @@ def test_the_wire_contract_crate_cannot_reach_for_effects(violation_rules: list[
     assert "TX002-proto-has-no-ambient-effects" in violation_rules
 
 
+def test_the_capability_core_cannot_reach_for_effects(violation_rules: list[str]) -> None:
+    """The capability core is a pure function of its arguments: parse, compare,
+    narrow. A filesystem read there would be the start of the mistake ADR-0037
+    exists to prevent -- deciding authority from a path by looking at the path,
+    before M4's canonicaliser exists to do it safely. The fixture does exactly
+    that, in four lines."""
+    assert "TX003-capability-core-has-no-ambient-effects" in violation_rules
+
+
+def test_capability_core_findings_skip_the_comment_that_names_the_ban() -> None:
+    """As for TX002: the module must be able to document what it must not do."""
+    findings = [f for f in check_text(load(VIOLATIONS, RULES)) if f.rule.startswith("TX003")]
+    assert [f.line for f in findings] == [4], "the doc comment naming std::fs is not a finding"
+
+
 def test_a_helper_crate_shared_by_both_daemons_is_rejected(violation_rules: list[str]) -> None:
     """RS007 catches a crate that depends on the daemons. It cannot see a crate
     the daemons depend on -- "a few helpers" linked into both -- which is the
@@ -257,6 +272,7 @@ def test_the_required_boundary_rules_are_all_declared() -> None:
         "PY003-product-code-does-not-import-the-eval-harness",
         "TX001-provider-names-confined",
         "TX002-proto-has-no-ambient-effects",
+        "TX003-capability-core-has-no-ambient-effects",
         "DEP001-no-agent-framework-dependency",
         "DEP002-runtime-has-no-transport-dependency",
         "RS001-authority-depends-on-nothing-in-tree",

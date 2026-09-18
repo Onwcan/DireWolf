@@ -2,6 +2,37 @@
 
 **The vocabulary of authority.** [POLICY.md](POLICY.md) is the decision function; [APPROVALS.md](APPROVALS.md) is how a human grants an exception. This document defines what authority *is*.
 
+> **Implementation status (M3b).** §2's verbs, scope families and eight
+> constraints, §3's `⊑` lattice, and §4's `attenuate` are implemented in
+> [`crates/dwkd-authority/src/capability`](../crates/dwkd-authority/src/capability).
+> Parsing, containment, set containment and attenuation are real; a capability
+> that parses is an interpreted **request**, never a grant.
+>
+> **Two families are deliberately incomplete, and it is the important
+> incompleteness.** An `fs` scope's identity is a canonical path and a `process`
+> scope's is `(resolved path, sha256)`. Deriving either from text requires the
+> filesystem, and doing it safely is M4. So a declared capability
+> (`CapabilitySpec`) and an authority-comparable one (`Capability`) are separate
+> types, containment exists only on the second, and the bridge between them
+> refuses for those two families
+> ([ADR-0037](adr/0037-capability-specifications-and-canonical-authority-identities.md)).
+> **Only `crate::resource` may create a canonical identity.** Every constructor
+> is `pub(in crate::resource)`, so the lattice, the parser, M3c's policy engine
+> and M3d's admission can all hold one and none of them can mint one; M4's
+> canonicaliser will be a submodule there, and that is how it inherits the right.
+> The lattice over canonical paths is tested with **synthetic** identities the
+> tests invented, behind `#[cfg(test)]` — which shows the comparison is right and
+> shows nothing about deriving one.
+>
+> M3b adds no third-party dependency and no native code. It does add about 3,300
+> lines of security-critical Rust to `dwkd-authority`, which is the trusted
+> computing base, so the trusted-code surface grew even though the dependency
+> closure did not.
+>
+> Not implemented: minting (§4), tokens and their MAC (§4), effective authority
+> (§5), profile ceilings (§6). Those need the policy engine (M3c) and
+> `kernel.db` (M3d).
+
 ---
 
 ## 1. Why capabilities rather than roles or risk levels
@@ -49,6 +80,20 @@ Constraints are a **closed set of eight**, not an open key/value map:
 | `fanout` | `agent.spawn` | smaller |
 
 A closed enum with eight hand-written containment rules and eight named tests is strictly safer than a general typed lattice defended by property tests — **and it is the version that actually gets the Rust sum-type benefit the language decision was bought for.** An open `HashMap<Key, Value>` is precisely the shape exhaustive matching cannot protect, so the generality was the risk, not the mitigation. Adding a ninth constraint is an ADR note and a new variant; the compiler then finds every site that must handle it.
+
+Three consequences of "closed" that M3b had to decide, recorded because each is
+a real limitation rather than an implementation detail:
+
+- **`no_symlink_targets` has no `false`.** The table defines one direction —
+  `true` narrower than absent — and says nothing about `false`, which would mean
+  the same as absent. One meaning with two spellings gives canonical form two
+  answers, so only `true` parses.
+- **`methods` is a closed set of seven** (`GET`, `HEAD`, `POST`, `PUT`, `PATCH`,
+  `DELETE`, `OPTIONS`). No extension-method syntax is defined, so `PROPFIND`
+  cannot be expressed; adding it is a variant and a note here.
+- **Host labels are lowercase.** DNS is case-insensitive, so folding would be
+  defensible, but a scope with two spellings has two canonical forms.
+  `API.example.com` is refused rather than folded.
 
 Written form:
 
@@ -104,9 +149,17 @@ Getting rule 2 backwards would silently permit escalation, which is precisely th
 | Empty is bottom | `∅ ⊑ A` for all `A` |
 | No synthesis | `∀ c ∉ closure(A) : ¬(c ⊑ A)` — no combination of held capabilities yields an unheld one |
 | Chain monotonicity | For any delegation chain `c₀ … cₙ`, `cₙ ⊑ c₀` |
-| Canonicalisation stability | `canon(canon(p)) == canon(p)`; `canon` of any spelling of the same inode is equal |
+| Canonicalisation stability | Two halves, and only one is M3b's. **Capability text (M3b):** `canon(canon(p)) == canon(p)`, canonical form is deterministic, and equal capabilities render identically. **Resource identity (M4):** `canon` of any spelling of the same inode is equal — this needs the canonicaliser and is **not** measured yet |
 
 **Target:** 10⁶ generated delegation chains with zero escalations, as an evidence claim in [BENCHMARKS.md](BENCHMARKS.md).
+
+**Measured (M3b):** 1,000,000 chains, 4,000,909 attenuation steps, **zero
+escalations**. 425,437 of those steps were deliberate widening attempts, every
+one refused. Run it with `make capability-evidence`; the seed is printed and
+`DW_EVIDENCE_SEED` replays a run. The campaign drives the production API with no
+bypass, and each step's direction is decided by the campaign's own arithmetic
+before the implementation is asked — so a finding is a disagreement with an
+independent expectation rather than with the code itself.
 
 ## 4. Capability tokens
 
@@ -153,6 +206,12 @@ Step 5 is deliberate: an agent requesting more than it can have is not an error 
 ```
 attenuate(token, narrowing) -> Token'
 ```
+
+*(M3b implements this over a `Capability` rather than a token — tokens need
+`kernel.db` and arrive at M3d. `attenuate` builds the candidate and then checks
+it with the same `contains` every caller uses, so the guarantee is structural:
+the branch that returns a value is unreachable unless the parent contains it.)*
+
 Only narrowing operations exist in the API. There is **no widening operation in the kernel's interface at all** — not a privileged one, not an internal one. Widening is expressible only by minting a fresh token from a parent set, which requires going through `mint` and therefore through policy.
 
 ## 5. Effective authority

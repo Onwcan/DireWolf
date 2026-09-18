@@ -8,6 +8,13 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 
+# The pure authority core -- the capability lattice from M3b -- lives in a
+# library so it can be unit- and integration-tested without a daemon. The binary
+# is still the M1 skeleton: a library target is not a running server.
+[lib]
+name = "dwkd_authority"
+path = "src/lib.rs"
+
 [[bin]]
 name = "dwkd-authority"
 path = "src/main.rs"
@@ -22,3 +29,10 @@ workspace = true
 # and a reviewer other than the author, and must appear in the
 # `authority_allowlist` in architecture.toml.
 [dependencies]
+
+# Dev-only. Never linked into the shipped binary, and excluded from the TCB
+# closure `dwcheck` computes; the capability algebra's eight documented
+# properties need generated input, and generating it by hand would be a worse
+# test with the same dependency.
+[dev-dependencies]
+proptest = { workspace = true }

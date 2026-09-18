@@ -14,7 +14,8 @@ DW := $(PY) scripts/dw.py
 
 .DEFAULT_GOAL := help
 .PHONY: help dev check test lint fmt fmt-check typecheck arch schema schema-check \
-        eval eval-check eval-one fuzz-smoke fuzz security docs preflight tools hooks clean
+        eval eval-check eval-one capability-evidence fuzz-smoke fuzz security docs \
+        preflight tools hooks clean
 
 help:            ## List available commands
 	@$(DW) --list
@@ -57,6 +58,9 @@ eval-check:      ## The eval merge gate: deterministic subset vs the baseline
 
 eval-one:        ## Re-run one eval: make eval-one ID=<eval id> [SEED=<n>]
 	@$(DW) eval-one
+
+capability-evidence: ## The 10^6 delegation-chain capability campaign (DW_EVIDENCE_SEED replays)
+	@$(DW) capability-evidence
 
 fuzz-smoke:      ## Stable mutation fuzzing of dwk-proto (not coverage-guided)
 	@$(DW) fuzz-smoke

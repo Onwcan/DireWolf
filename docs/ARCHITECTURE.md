@@ -492,6 +492,12 @@ request  = { principal, agent_id, parent_agent_id, session_id, run_id,
              risk_class, taint_level, budget_snapshot, mode_profile,
              origin (interactive|scheduled|channel|subagent) }
 
+*(M3b note: the capability half of this — the typed vocabulary, `⊑`, set
+containment and attenuation — is implemented in `dwkd-authority`'s capability
+core. The policy half is M3c, and the two gates stay independent: a capability
+answers "is this authority shape contained by that one?", never "should this be
+allowed?".)*
+
 Decision = { effect: ALLOW | DENY | REQUIRE_APPROVAL,
              rule_id, rule_source (file:line), reason,
              required_capability, satisfying_approval_shape,

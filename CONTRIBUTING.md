@@ -62,6 +62,7 @@ Windows does and does not give you.
 | `make eval` | Run every evaluation suite (deterministic, offline) |
 | `make eval-check` | The eval merge gate: the deterministic subset against the baseline (part of `make check`) |
 | `make eval-one` | Re-run one eval: `make eval-one ID=protocol-security/framing` |
+| `make capability-evidence` | The 10⁶ delegation-chain capability campaign ([CAPABILITIES.md](docs/CAPABILITIES.md) §3). Not part of `make check`: it is evidence, produced deliberately, and the fast suite runs a thousand chains to keep it working between runs. `DW_EVIDENCE_SEED` replays a run; `DW_EVIDENCE_CHAINS` shortens one while debugging |
 | `make schema` | Regenerate `schemas/`, `docs/DWKP_OPERATIONS.md` and the Python bindings from `dwk-proto` |
 | `make schema-check` | Fail if any of those is stale or hand-edited (part of `make check`) |
 | `make fuzz-smoke` | Type-check the cargo-fuzz targets; stable mutation fuzzing (`DWK_FUZZ_SECONDS`) |

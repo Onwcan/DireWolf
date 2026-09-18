@@ -187,6 +187,35 @@ environment.  `unsafe_code` is also forbidden workspace-wide; the pattern keeps
 an `#[allow]` from quietly reintroducing it in the one crate both daemons share.
 """
 
+[[text_rules]]
+id = "TX003-capability-core-has-no-ambient-effects"
+paths = ["crates/dwkd-authority/src/capability"]
+exempt_paths = []
+suffixes = [".rs"]
+# As TX002: comment lines are skipped so the module can document what it must
+# not do, and a multi-line `use std::{ ... }` is covered by the brace pattern.
+patterns = [
+    '^(?!\s*//).*\bstd\s*::\s*(fs|net|process|env|os)\b',
+    '^(?!\s*//).*\bstd\s*::\s*\{[^}]*\b(fs|net|process|env|os)\b',
+    '^(?!\s*//).*\bunsafe\b',
+    '^(?!\s*//).*\b(allow|expect)\s*\(\s*unsafe_code\b',
+]
+reason = """
+The capability core answers "is this authority shape contained by that one?".
+It is a pure function of its arguments: parse, compare, narrow.  An effect here
+would be an effect inside the trusted computing base, and a filesystem read in
+particular would be the beginning of the mistake ADR-0037 exists to prevent --
+deciding authority from a path by looking at the path, before M4's canonicaliser
+exists to do it safely.
+
+Deriving a canonical resource identity IS filesystem work, and it belongs in
+M4's resolver, which feeds the result in as a value.  The boundary is therefore
+where the I/O is, not whether there is any.
+
+As with every rule in this file: hygiene, not containment.  A static check over
+source text cannot stop anything at run time.
+"""
+
 # ===========================================================================
 # Documentation
 # ===========================================================================

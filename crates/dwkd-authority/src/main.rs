@@ -27,6 +27,13 @@
 //! the mistake the whole architecture exists to avoid. The DWKP server, the
 //! policy engine and the capability broker arrive at **M3**.
 //!
+//! M3b added the library half (`dwkd_authority::capability`): the typed
+//! capability vocabulary and the `⊑` lattice over it. It is linked here and
+//! **nothing in this binary calls it** — answering a request would need the
+//! socket, the policy engine and `kernel.db`, none of which exist. The help
+//! text reports the vocabulary's size so that "linked, not running" is
+//! something you can see rather than something you have to assume.
+//!
 //! [ADR-0000]: ../../../docs/adr/0000-authority-plane-separation.md
 //! [ADR-0018]: ../../../docs/adr/0018-authority-broker-split.md
 //! [ADR-0019]: ../../../docs/adr/0019-language-rationale-v2.md
@@ -35,6 +42,13 @@
 #![warn(clippy::pedantic)]
 
 use std::process::ExitCode;
+
+use dwkd_authority::capability::Verb;
+
+// Dev-only, and the binary's test target inherits the manifest edge without
+// using it. Acknowledged rather than silenced with an `#[allow]`.
+#[cfg(test)]
+use proptest as _;
 
 const NAME: &str = "dwkd-authority";
 
@@ -70,8 +84,10 @@ fn help() -> String {
          USAGE:\n    \
              {NAME} [-V | --version] [-h | --help]\n\
          \n\
-         STATUS: not implemented; arrives at milestone M3.\n",
-        env!("CARGO_PKG_VERSION")
+         STATUS: not implemented; arrives at milestone M3.\n\
+         The capability vocabulary ({verbs} verbs, M3b) is linked; nothing serves it yet.\n",
+        env!("CARGO_PKG_VERSION"),
+        verbs = Verb::ALL.len()
     )
 }
 

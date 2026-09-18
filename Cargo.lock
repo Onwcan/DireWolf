@@ -35,6 +35,9 @@ dependencies = [
 [[package]]
 name = "dwkd-authority"
 version = "0.0.0"
+dependencies = [
+ "proptest",
+]
 
 [[package]]
 name = "dwkd-broker"

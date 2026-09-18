@@ -22,7 +22,7 @@ compromised host.
 
 ---
 
-## Status: M3a — protocol, schemas, the evaluation harness, and the M3 wire forms
+## Status: M3b — protocol, schemas, the evaluation harness, and the capability core
 
 **None of the above is implemented yet.** This repository contains the Phase 0
 architecture package, the M1 foundation (the monorepo layout, the Rust and
@@ -46,6 +46,16 @@ and the M2 wire contract:
   typed, bounded message fields. `ToolInvoke` — the operation that carries every
   effect — remains reserved until the milestone that builds the first tool
   ([ADR-0036](docs/adr/0036-m3-authority-operations-and-the-capability-wire-form.md)).
+- the **capability core** (M3b): the typed verb, scope and constraint
+  vocabulary, the `⊑` lattice, set containment with no authority synthesis, and
+  attenuation with no widening path — 10⁶ delegation chains, zero escalations.
+  A capability that parses is an interpreted *request*; nothing mints, and
+  `fs`/`process` scopes cannot become authority until M4 can resolve them —
+  their identities can only be *created* by the module that will hold M4's
+  canonicaliser
+  ([ADR-0037](docs/adr/0037-capability-specifications-and-canonical-authority-identities.md)).
+  It adds no dependency and no native code, and it does add security-critical
+  code to the trusted computing base, which is where the authority's code lives.
 
 What M2 establishes is that **malformed DWKP is rejected structurally**, and
 what M2.5 adds is the machinery to *measure* claims like that. M3a adds the

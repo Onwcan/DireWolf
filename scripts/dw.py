@@ -246,6 +246,29 @@ def task_eval_one() -> None:
     uvrun("direwolf_evals", *args)
 
 
+def task_capability_evidence() -> None:
+    """The 10^6 delegation-chain capability evidence campaign (CAPABILITIES.md section 3).
+
+    Not part of `check`: it is evidence, produced deliberately, and a merge gate
+    does not need a million chains to notice a regression -- the fast suite runs
+    a thousand of them. Seed with DW_EVIDENCE_SEED to replay a run, and
+    DW_EVIDENCE_CHAINS to shorten one while debugging.
+    """
+    run(
+        "cargo",
+        "test",
+        "--locked",
+        "--release",
+        "-p",
+        "dwkd-authority",
+        "--test",
+        "evidence",
+        "--",
+        "--ignored",
+        "--nocapture",
+    )
+
+
 def task_fuzz_smoke() -> None:
     """Type-check the cargo-fuzz targets, then stable mutation fuzzing (not coverage-guided)."""
     # The fuzz crate is outside the workspace; building it without libFuzzer
@@ -411,6 +434,7 @@ TASKS = {
     "eval-one": task_eval_one,
     "schema": task_schema,
     "schema-check": task_schema_check,
+    "capability-evidence": task_capability_evidence,
     "fuzz-smoke": task_fuzz_smoke,
     "fuzz": task_fuzz,
     "security": task_security,
