@@ -1,0 +1,203 @@
+# DireWolf policy pack: POWER
+#
+# For an operator who has decided to trust a run further: host execution of
+# pinned binaries, broader egress, fewer prompts.
+#
+# POWER IS STILL POLICY. It is not "checks off". Every hard denial in
+# BALANCED is here unchanged, the taint rule still fires, unattended runs
+# still degrade to DENY, and the default is still DENY. A profile that
+# disabled those would not be a permissive profile; it would be no profile.
+#
+# Standalone rather than `extends = "balanced"`, because POWER permits things
+# BALANCED does not and an extending profile may only add denials (ADR-0038).
+
+schema_version = 1
+
+[meta]
+name = "power"
+
+# ===========================================================================
+# Hard denials. Identical to BALANCED and SAFE, and not negotiable by profile.
+# ===========================================================================
+
+[[rule]]
+id       = "deny-direwolf-self-modification"
+effect   = "DENY"
+reason   = "SELF_MODIFICATION"
+when.verb       = ["fs.write", "fs.delete", "fs.create"]
+when.path_under = ["${DIREWOLF_HOME}", "${DIREWOLF_CONFIG}", "${DIREWOLF_INSTALL}"]
+
+[[rule]]
+id       = "deny-credential-paths"
+effect   = "DENY"
+reason   = "SENSITIVE_PATH"
+when.verb       = ["fs.read", "fs.write", "fs.delete"]
+when.path_under = ["~/.ssh", "~/.aws", "~/.gnupg", "~/.config/gh", "~/.kube",
+                   "/etc/shadow", "/etc/sudoers"]
+
+[[rule]]
+id       = "deny-container-socket"
+effect   = "DENY"
+reason   = "SANDBOX_ESCAPE_VECTOR"
+when.verb       = ["fs.read", "fs.write"]
+when.path_under = ["/var/run/docker.sock", "/run/podman/podman.sock"]
+
+# ===========================================================================
+# Egress. Tainted novel destinations still stop, in every profile.
+# ===========================================================================
+
+[[rule]]
+id     = "approve-egress-when-tainted"
+effect = "REQUIRE_APPROVAL"
+reason = "UNTRUSTED_CONTENT_IN_RUN"
+when.verb              = ["network.http", "network.https", "channel.send"]
+when.taint_level       = ["EXTERNAL_UNTRUSTED"]
+when.destination_novel = true
+approval.scope    = "exact_action"
+approval.ttl      = "10m"
+approval.max_uses = 1
+
+# Private ranges are refused even here. An agent that can reach the loopback
+# and the RFC 1918 space can reach the metadata service, the unauthenticated
+# admin port and the database that trusts its network, and none of those are
+# things a broader profile is meant to mean.
+[[rule]]
+id     = "deny-internal-ranges"
+effect = "DENY"
+reason = "SANDBOX_ESCAPE_VECTOR"
+when.verb  = ["network.http", "network.https", "network.tcp"]
+when.ip_in = ["127.0.0.0/8", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16",
+              "169.254.0.0/16", "0.0.0.0/8",
+              "0000:0000:0000:0000:0000:0000:0000:0001/128",
+              "fc00:0000:0000:0000:0000:0000:0000:0000/7",
+              "fe80:0000:0000:0000:0000:0000:0000:0000/10"]
+
+[[rule]]
+id     = "allow-https-egress"
+effect = "ALLOW"
+when.verb = ["network.https"]
+obligations = ["max_output_bytes=33554432"]
+
+[[rule]]
+id     = "deny-plaintext-http"
+effect = "DENY"
+reason = "PROFILE_CEILING"
+when.verb = ["network.http"]
+
+# ===========================================================================
+# Workspace filesystem. Broader caps, no artifact-capture obligation.
+# ===========================================================================
+
+[[rule]]
+id     = "allow-workspace-read"
+effect = "ALLOW"
+when.verb       = ["fs.read", "fs.list", "fs.stat"]
+when.path_under = "${WORKSPACE}"
+when.max_bytes  = 134_217_728
+
+[[rule]]
+id     = "allow-workspace-write"
+effect = "ALLOW"
+when.verb       = ["fs.write", "fs.create", "fs.delete", "fs.exec_bit"]
+when.path_under = "${WORKSPACE}"
+
+# ===========================================================================
+# Execution.
+# ===========================================================================
+
+[[rule]]
+id     = "allow-sandbox-exec"
+effect = "ALLOW"
+when.verb        = "process.exec"
+when.environment = "sandbox"
+when.argv_safe   = true
+obligations = ["workspace_exec_hygiene", "max_output_bytes=4194304"]
+
+# argv that would be reinterpreted -- a shell, an --exec flag, an element
+# resolving to another executable -- is a prompt even here.
+[[rule]]
+id     = "approve-reinterpreting-argv"
+effect = "REQUIRE_APPROVAL"
+reason = "UNKNOWN_EXECUTABLE"
+when.verb        = "process.exec"
+when.environment = "sandbox"
+when.argv_safe   = false
+approval.scope    = "executable_and_argv"
+approval.ttl      = "1h"
+approval.max_uses = 20
+
+# The opt-in pair. The denial is suppressed by the operator's configuration
+# flag; the allowance below is what actually permits anything, and it is
+# pinned to a full path and a digest rather than to a bare name -- a name
+# would be trusting $PATH on the host.
+#
+# The digests are placeholders for an operator to replace with their own
+# host's, and the rule denies until they do: an identity that matches nothing
+# permits nothing.
+[[rule]]
+id     = "deny-host-exec-unless-opted-in"
+effect = "DENY"
+reason = "HOST_EXECUTION_DISABLED"
+when.verb        = "process.exec"
+when.environment = "host"
+unless.config    = "security.allow_host_execution"
+
+[[rule]]
+id     = "approve-pinned-host-exec"
+effect = "REQUIRE_APPROVAL"
+reason = "UNKNOWN_EXECUTABLE"
+when.verb        = "process.exec"
+when.environment = "host"
+approval.scope    = "executable_and_argv"
+approval.ttl      = "10m"
+approval.max_uses = 5
+
+# ===========================================================================
+# Model calls, memory, subagents.
+# ===========================================================================
+
+[[rule]]
+id     = "allow-model-calls"
+effect = "ALLOW"
+when.verb = ["model.call"]
+
+[[rule]]
+id     = "allow-recall-and-artifacts"
+effect = "ALLOW"
+when.verb = ["memory.read", "memory.propose", "artifact.read", "artifact.create"]
+
+[[rule]]
+id     = "allow-subagents"
+effect = "ALLOW"
+when.verb = ["agent.spawn", "agent.message", "agent.cancel"]
+
+# Promotion outlives the run, so it stops for a human in every profile.
+[[rule]]
+id     = "approve-memory-promotion"
+effect = "REQUIRE_APPROVAL"
+reason = "UNTRUSTED_CONTENT_IN_RUN"
+when.verb = ["memory.promote"]
+approval.scope    = "exact_action"
+approval.ttl      = "10m"
+approval.max_uses = 1
+
+# ===========================================================================
+# Mandatory.
+# ===========================================================================
+
+[[rule]]
+id     = "default"
+effect = "DENY"
+reason = "NO_MATCHING_RULE"
+
+# ===========================================================================
+# Phase 2.
+# ===========================================================================
+
+[[postcondition]]
+id     = "deny-approval-needed-when-unattended"
+effect = "DENY"
+reason = "NO_HUMAN_AVAILABLE"
+when.provisional_effect = ["REQUIRE_APPROVAL"]
+when.origin             = ["scheduled", "channel", "subagent", "api"]
+unless.standing_grant   = true

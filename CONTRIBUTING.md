@@ -157,21 +157,36 @@ not in advance. That ADR is also the model for the next one: measure the
 closure, name what parses untrusted input, and do not describe a large C
 dependency as small.
 
+[ADR-0038](docs/adr/0038-policy-evaluation-phases-and-composition.md) is the
+first to do that for real, and it is worth reading for one detail: the closure
+it records is **one crate smaller** than ADR-0035 predicted, because the policy
+loader walks `toml::de::DeTable` (behind the `parse` feature alone) rather than
+`toml::Value` (which needs `serde` and carries no source spans). Re-measure;
+do not copy the previous ADR's table.
+
 **`dwk-proto`** — treat exactly as `dwkd-authority`: it is linked into it from
 M3, and `dwcheck` already checks it as TCB. Dev-dependencies are not linked and
 not counted, but they are still audited by `cargo deny`.
 
-*The dependency inventory.* **TCB (`dwkd-authority` and `dwk-proto`): none.**
-M2 briefly added `unicode-normalization` and its two dependencies for NFC key
-comparison; [ADR-0034](docs/adr/0034-protocol-depends-on-no-unicode-database.md)
-removed the need and the crates, so the closure is empty again. **Dev-only:**
-`proptest` (property tests) and `serde_json` (differential oracle for the strict
-lexer), with their transitive dependencies; audited by the root `deny.toml`,
-never linked. **Fuzz-only, outside the workspace:** `libfuzzer-sys` and its
-build dependencies in `fuzz/`, audited by `fuzz/deny.toml` — a separate policy
-so a fuzzing crate can never be mistaken for a product one. **Python:** none;
-the protocol layer is standard library only. Keep the TCB list short: it is a
-claim, and dependency count is not the goal — a small trusted surface is.
+*The dependency inventory.* **TCB (`dwkd-authority` and `dwk-proto`): five,
+all of them the policy loader's TOML chain** — `toml`, `toml_parser`,
+`toml_datetime`, `serde_spanned` and `winnow`, pinned exactly, added at M3c
+([ADR-0038](docs/adr/0038-policy-evaluation-phases-and-composition.md)). No
+derive macro, no proc-macro, no native code, no build script that compiles
+anything. Three of them parse the policy text, which is why the loader has fuzz
+targets in `fuzz/` and a stable mutation harness in
+`crates/dwkd-authority/tests/fuzz_smoke.rs`. M2 briefly added
+`unicode-normalization` and its two dependencies for NFC key comparison;
+[ADR-0034](docs/adr/0034-protocol-depends-on-no-unicode-database.md) removed
+the need and the crates, and `dwk-proto`'s own closure is still empty.
+**Dev-only:** `proptest` (property tests) and `serde_json` (differential oracle
+for the strict lexer), with their transitive dependencies; audited by the root
+`deny.toml`, never linked. **Fuzz-only, outside the workspace:**
+`libfuzzer-sys` and its build dependencies in `fuzz/`, audited by
+`fuzz/deny.toml` — a separate policy so a fuzzing crate can never be mistaken
+for a product one. **Python:** none; the protocol layer is standard library
+only. Keep the TCB list short: it is a claim, and dependency count is not the
+goal — a small trusted surface is.
 
 **`dwkd-broker`** — this crate is *expected* to carry the large dependencies
 authority must not: a container client, an HTTP/TLS stack, content parsers.
@@ -217,10 +232,17 @@ Do not open a public issue for a vulnerability. See [SECURITY.md](SECURITY.md).
 ## Unsafe Rust
 
 The workspace sets `unsafe_code = "forbid"` and **no workspace crate contains
-`unsafe`** — `dwk-proto` included. Its dependency closure is empty
-([ADR-0034](docs/adr/0034-protocol-depends-on-no-unicode-database.md)), so
-today "forbid" happens to describe the whole of what the authority plane links;
-that is a fact about this moment, not a guarantee about future dependencies.
+`unsafe`** — `dwk-proto` included, whose own dependency closure is still empty
+([ADR-0034](docs/adr/0034-protocol-depends-on-no-unicode-database.md)).
+
+Since M3c that no longer describes the whole of what the authority plane links:
+the TOML chain is five crates this workspace does not lint. They are pure Rust
+with no `unsafe` of consequence today, and that is a fact about their current
+versions rather than something `forbid` enforces — the lint governs this
+workspace's code, not its dependencies'. When M3d links SQLite's C
+amalgamation the gap stops being theoretical, and
+[ADR-0035](docs/adr/0035-m3-authority-dependency-set.md) says so in as many
+words.
 
 That is not a promise it never will. `dwkd-broker` will eventually need
 `openat2` with `RESOLVE_*` flags, `fexecve` and rlimits, and some of that is

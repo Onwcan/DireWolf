@@ -193,6 +193,24 @@ def test_capability_core_findings_skip_the_comment_that_names_the_ban() -> None:
     assert [f.line for f in findings] == [4], "the doc comment naming std::fs is not a finding"
 
 
+def test_the_policy_core_cannot_read_the_environment(violation_rules: list[str]) -> None:
+    """A policy rule writes `${WORKSPACE}`, which looks like shell and is not:
+    it is a closed symbolic anchor resolved from kernel-owned state. If the
+    engine could ask the process environment what it means, whoever sets the
+    variable would decide which directory every workspace rule governs -- and
+    pinning the workspace root by (dev, ino) at admission exists precisely
+    because the NAME can be made to lie. The fixture asks the environment."""
+    assert "TX004-policy-core-has-no-ambient-effects" in violation_rules
+
+
+def test_policy_core_findings_skip_the_comment_that_names_the_ban() -> None:
+    """As for TX002 and TX003."""
+    findings = [f for f in check_text(load(VIOLATIONS, RULES)) if f.rule.startswith("TX004")]
+    lines = [f.line for f in findings]
+    assert 3 not in lines, "the doc comment naming std::env is not a finding"
+    assert lines, "the fixture must produce at least one TX004 finding"
+
+
 def test_a_helper_crate_shared_by_both_daemons_is_rejected(violation_rules: list[str]) -> None:
     """RS007 catches a crate that depends on the daemons. It cannot see a crate
     the daemons depend on -- "a few helpers" linked into both -- which is the
@@ -273,6 +291,7 @@ def test_the_required_boundary_rules_are_all_declared() -> None:
         "TX001-provider-names-confined",
         "TX002-proto-has-no-ambient-effects",
         "TX003-capability-core-has-no-ambient-effects",
+        "TX004-policy-core-has-no-ambient-effects",
         "DEP001-no-agent-framework-dependency",
         "DEP002-runtime-has-no-transport-dependency",
         "RS001-authority-depends-on-nothing-in-tree",
@@ -313,17 +332,25 @@ def test_unsupported_schema_version_is_an_error(tmp_path: Path) -> None:
     assert main(["--root", str(REPO_ROOT), "--rules", str(rules), "all"]) == 2
 
 
-def test_the_tcb_destined_closure_is_empty() -> None:
-    """ADR-0019, as amended by ADR-0033 and ADR-0034: dwkd-authority links
-    nothing third-party, and neither does dwk-proto, which it links from M3.
+def _tcb_linked_closure() -> set[str]:
+    """Everything third-party reachable from the authority plane, computed from
+    the lockfile independently of `dwcheck`.
 
-    RS006 fails on a crate outside the allowlist. This pins the claim from the
-    other side: if a linked dependency appears, this test names it, and the
-    commit that adds it must also add the ADR that justifies it.
+    Optional edges the workspace does not enable are skipped, using the same
+    reviewed list `dwcheck` uses -- see `[[authority.optional_edges]]` in
+    architecture.toml for why the lockfile over-approximates. Reading the list
+    rather than hard-coding it means a stale entry shows up as a disagreement
+    between this and `cargo tree`, not as a silently wrong assertion.
     """
+    rules = tomllib.loads((REPO_ROOT / "architecture.toml").read_text(encoding="utf-8"))
+    excluded = {(e["parent"], e["child"]) for e in rules["authority"].get("optional_edges", [])}
     lock = tomllib.loads((REPO_ROOT / "Cargo.lock").read_text(encoding="utf-8"))
     edges = {
-        str(p["name"]): [str(d).split(" ", 1)[0] for d in p.get("dependencies", [])]
+        str(p["name"]): [
+            str(d).split(" ", 1)[0]
+            for d in p.get("dependencies", [])
+            if (str(p["name"]), str(d).split(" ", 1)[0]) not in excluded
+        ]
         for p in lock.get("package", [])
     }
     manifests = {
@@ -341,4 +368,52 @@ def test_the_tcb_destined_closure_is_empty() -> None:
                     linked.add(name)
                     stack.extend(edges.get(name, []))
         assert crate in edges, f"{crate} is missing from Cargo.lock"
-    assert linked == set(), f"the TCB-destined closure is no longer empty: {sorted(linked)}"
+    return linked
+
+
+def test_the_tcb_destined_closure_equals_the_reviewed_allowlist() -> None:
+    """ADR-0019, as amended by ADR-0035 and ADR-0038.
+
+    Until M3c this asserted the closure was EMPTY. M3c links a TOML parser, so
+    the claim changes shape -- and it changes to "the closure equals the list
+    somebody reviewed", not to "the authority may use dependencies".
+
+    RS006 already fails on a crate in the closure and not in the allowlist.
+    This pins the other direction: a stale allowlist entry, for a crate no
+    longer linked, is also a finding. An allowlist that drifts away from
+    reality stops being a review and becomes a list.
+    """
+    allowlist = set(
+        tomllib.loads((REPO_ROOT / "architecture.toml").read_text(encoding="utf-8"))["authority"][
+            "allowed_third_party"
+        ]
+    )
+    assert _tcb_linked_closure() == allowlist, (
+        "the authority's linked closure and its reviewed allowlist disagree; "
+        "adding to the closure needs a new ADR amending ADR-0019, and removing "
+        "from it needs the allowlist entry removed in the same commit"
+    )
+
+
+def test_the_tcb_closure_contains_no_proc_macro_or_native_code() -> None:
+    """ADR-0035 section 2 promises the policy parser arrives with "no
+    serde_derive, no syn, no quote, no proc-macro2". ADR-0038 records that the
+    resolver agreed. This is the assertion behind both sentences.
+
+    A derive macro that silently accepts an unknown field is the failure strict
+    configuration exists to prevent, and a build script that compiles C is the
+    thing `#![forbid(unsafe_code)]` cannot reach. Neither is here yet; M3d's
+    SQLite will be, and it will arrive with its own ADR saying so.
+    """
+    forbidden = {
+        "serde",
+        "serde_derive",
+        "syn",
+        "quote",
+        "proc-macro2",
+        "cc",
+        "libc",
+        "libsqlite3-sys",
+    }
+    found = _tcb_linked_closure() & forbidden
+    assert not found, f"the authority's closure gained {sorted(found)}"

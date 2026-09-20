@@ -29,6 +29,10 @@ workspace = true
 # and a reviewer other than the author, and must appear in the
 # `authority_allowlist` in architecture.toml.
 [dependencies]
+# The policy loader's TOML parser (M3c).  Accepted by ADR-0035, measured for
+# real by ADR-0038.  Pinned exactly and with no `serde` feature: see the note
+# in the workspace dependency table.
+toml = { workspace = true }
 
 # Dev-only. Never linked into the shipped binary, and excluded from the TCB
 # closure `dwcheck` computes; the capability algebra's eight documented

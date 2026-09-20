@@ -9,6 +9,7 @@ from pathlib import Path
 
 from dwcheck import Finding, Report
 from dwcheck.checks_adr import check_adr, check_adr_history, record_adr
+from dwcheck.checks_cargo import check_authority_closure_exact
 from dwcheck.checks_links import check_links
 from dwcheck.checks_manifests import (
     check_crates,
@@ -67,7 +68,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         ),
     )
     sub = parser.add_subparsers(dest="command", required=True)
-    sub.add_parser("all", help="run every check")
+    sub.add_parser("all", help="every check that runs offline, with no toolchain")
+    sub.add_parser(
+        "closure",
+        help="the EXACT feature-resolved authority dependency closure (needs cargo)",
+    )
     sub.add_parser("imports", help="Python import and provider-name rules")
     sub.add_parser("deps", help="declared dependencies and the Rust crate graph")
     sub.add_parser("links", help="relative markdown links and ADR references")
@@ -140,6 +145,12 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 def _selected(command: str) -> list[str]:
     if command == "all":
+        # `closure` is deliberately NOT here. Every other check runs with no
+        # toolchain, no network and no registry index, which is why they run on
+        # every contributor's machine; `closure` shells out to cargo. `make
+        # arch` runs both, and `make check` runs `make arch`, so CI gets the
+        # exact gate and an offline `dwcheck all` stays honest about being the
+        # weaker of the two.
         return ["imports", "deps", "links", "adr", "version"]
     return [command]
 
@@ -169,6 +180,8 @@ def _run(
         )
     if name == "version":
         return check_version(config)
+    if name == "closure":
+        return check_authority_closure_exact(config)
     raise ValueError(f"unknown check: {name}")
 
 

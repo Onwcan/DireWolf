@@ -141,8 +141,11 @@ def test_the_fuzz_workflow_uses_the_task_runner_pins() -> None:
     assert re.search(r"run: make fuzz$", text, re.MULTILINE)
     targets = sorted(p.stem for p in (REPO_ROOT / "fuzz" / "fuzz_targets").glob("*.rs"))
     assert targets == sorted(dw.FUZZ_TARGETS)
-    # libFuzzer starts from the shared vectors, not from an empty corpus.
+    # libFuzzer starts from real inputs, not from an empty corpus -- and from
+    # the RIGHT real inputs: DWKP vectors would teach a TOML parser nothing.
     assert len(dw._fuzz_seeds()) > 100
+    assert len(dw._policy_fuzz_seeds()) == 3, "one seed per shipped policy pack"
+    assert set(dw.PROTO_FUZZ_TARGETS).isdisjoint(dw.POLICY_FUZZ_TARGETS)
 
 
 def test_ci_tests_on_every_supported_platform() -> None:

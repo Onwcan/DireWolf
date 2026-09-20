@@ -216,7 +216,7 @@ This is what makes principle 7 true rather than aspirational — `dwkd-authority
 **Authority plane** (`dwkd-authority` + `dwkd-broker`)
 
 - *Request Canonicaliser* — turns a tool invocation into a canonical, resolved, hashable action: paths to inodes, hostnames to IP sets, argv to a normal form.
-- *Policy Engine* — pure function over canonical action + context → decision + explanation.
+- *Policy Engine* — pure function over canonical action + context → decision + explanation. Implemented at M3c in two phases: ordered first-match rules produce a provisional decision, then a small closed set of postconditions may only narrow it ([ADR-0038](adr/0038-policy-evaluation-phases-and-composition.md)). No I/O, no clock, no randomness; it is handed policy *text* rather than a path, so reading the operator's file stays outside it.
 - *Capability Broker* — mints, attenuates and verifies capability tokens; enforces the ⊑ lattice.
 - *Approval Registry* — stores, matches, expires and burns human approvals bound to canonical actions.
 - *Budget Ledger* — hierarchical reservations for time, tokens, money, calls, bytes.

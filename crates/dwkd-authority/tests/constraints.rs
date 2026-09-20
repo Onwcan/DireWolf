@@ -17,6 +17,12 @@
     clippy::indexing_slicing
 )]
 
+// The authority links `toml` for the policy loader. This test binary does not
+// use it, and `unused_crate_dependencies` sees the manifest edge rather than
+// the target that consumes it. Acknowledged rather than silenced with an
+// `#[allow]`, so the lint stays meaningful for the binaries that do use it.
+use toml as _;
+
 mod common;
 
 use common::{agent_spawn, cap, constraints, host, model_call, net_https, proc_exec};

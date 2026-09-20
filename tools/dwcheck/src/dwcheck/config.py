@@ -113,6 +113,34 @@ class VersionMirror:
 
 
 @dataclass(frozen=True, slots=True)
+class OptionalEdge:
+    """A lockfile edge that is optional and that this workspace does not enable.
+
+    `Cargo.lock` pins versions, not feature selections, so it records an
+    optional dependency whether or not any feature turns it on. That makes the
+    lockfile closure an OVER-approximation of what is linked.
+
+    Until M3c the difference did not matter, because the authority's closure
+    was empty. It matters now: `toml` is linked with `features = ["parse"]`,
+    and two of its dependencies declare an optional `serde_core` that nothing
+    here enables. Left alone, RS006 would demand that `serde_core`,
+    `serde_derive`, `syn`, `quote`, `proc-macro2` and `unicode-ident` be listed
+    as authority dependencies -- which would make the allowlist, and every
+    document that quotes it, overstate the trusted computing base by five
+    crates that are not in the binary.
+
+    So each such edge is named here, individually, with the reason it is not
+    enabled. Not a wildcard and not a crate-level exemption: an edge. Adding
+    one says "this dependency exists in the lockfile and is not linked", and a
+    reviewer can check that claim with `cargo tree --edges normal`.
+    """
+
+    parent: str
+    child: str
+    reason: str
+
+
+@dataclass(frozen=True, slots=True)
 class ArchitectureConfig:
     root: Path
     version_source: str
@@ -124,6 +152,7 @@ class ArchitectureConfig:
     crate_rules: tuple[CrateRule, ...]
     authority_crates: tuple[str, ...]
     authority_allowed_third_party: tuple[str, ...]
+    authority_optional_edges: tuple[OptionalEdge, ...]
     docs_exempt_paths: tuple[str, ...]
     adr: AdrSettings = field(default=AdrSettings("docs/adr", "docs/adr/accepted.sha256"))
     rules_file: Path = field(default=Path("architecture.toml"))
@@ -220,6 +249,14 @@ def load(root: Path, rules_file: Path | None = None) -> ArchitectureConfig:
         ),
         authority_crates=_strs(authority_tbl, "crates", path),
         authority_allowed_third_party=_strs(authority_tbl, "allowed_third_party", path),
+        authority_optional_edges=tuple(
+            OptionalEdge(
+                parent=_str(e, "parent", path),
+                child=_str(e, "child", path),
+                reason=_str(e, "reason", path),
+            )
+            for e in _tables(authority_tbl, "optional_edges", path)
+        ),
         docs_exempt_paths=_strs(docs_tbl, "exempt_paths", path),
         adr=AdrSettings(
             directory=_str(adr_tbl, "directory", path),

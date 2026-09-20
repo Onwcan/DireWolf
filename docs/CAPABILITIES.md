@@ -27,11 +27,15 @@
 > M3b adds no third-party dependency and no native code. It does add about 3,300
 > lines of security-critical Rust to `dwkd-authority`, which is the trusted
 > computing base, so the trusted-code surface grew even though the dependency
-> closure did not.
+> closure did not. **M3c is where the closure grew too**: five crates, the
+> policy loader's TOML chain
+> ([ADR-0038](adr/0038-policy-evaluation-phases-and-composition.md)).
 >
 > Not implemented: minting (§4), tokens and their MAC (§4), effective authority
-> (§5), profile ceilings (§6). Those need the policy engine (M3c) and
-> `kernel.db` (M3d).
+> (§5), profile ceilings (§6). Those need `kernel.db` (M3d). The policy engine
+> they were waiting on arrives at M3c, and answers a **different** question —
+> "should this be allowed?" — which is why both gates run and neither
+> substitutes for the other ([ADR-0006](adr/0006-policy-and-capability-boundary.md)).
 
 ---
 

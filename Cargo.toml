@@ -42,10 +42,22 @@ authors = ["The DireWolf authors"]
 dwk-proto = { path = "crates/dwk-proto" }
 
 # --- reachable from the TCB (dwk-proto -> dwkd-authority from M3) -----------
-# Empty. Anything added here is inside the trusted computing base from M3, so it
-# needs an entry in architecture.toml [authority].allowed_third_party and a new
-# ADR amending ADR-0019 (ADR-0033 is the current record; ADR-0034 removed the
-# last entry by removing the protocol's dependence on a Unicode database).
+# Anything here is inside the trusted computing base, so it needs an entry in
+# architecture.toml [authority].allowed_third_party and a new ADR amending
+# ADR-0019.  ADR-0035 accepted this one and ADR-0038 records what M3c actually
+# linked, which is one crate fewer than ADR-0035 measured.
+#
+# Pinned exactly.  A policy parser is the authority's only third-party reader of
+# operator input, and "the patch release the resolver picked" is not a version
+# anyone reviewed; `cargo update` must not move it without a reviewer.
+#
+# No `serde` feature: the loader walks toml::de::DeTable, which carries the byte
+# spans `rule_source` needs and is available behind `parse` alone.  toml::Value
+# would have needed serde_core and would not have carried the spans, so the
+# smaller closure is also the more capable one.  No derive macros anywhere: a
+# derive that silently accepts a field is the failure strict configuration
+# exists to prevent (ADR-0035 section 2).
+toml = { version = "=1.1.6", default-features = false, features = ["parse"] }
 
 # --- dev-only: tests, property tests, differential oracles ------------------
 # Never linked into a shipped binary. dwcheck excludes dev-only edges from the

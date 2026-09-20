@@ -1,0 +1,235 @@
+# DireWolf policy pack: BALANCED
+#
+# The default profile. Workspace work proceeds; anything that reaches outside
+# it, executes something nobody allowlisted, or sends data somewhere new while
+# the run holds content the agent chose to fetch, stops for a human.
+#
+# This file is OPERATOR-OWNED CONFIGURATION. The runtime cannot write it, no
+# agent may propose an edit to it, and no capability is ever minted for the
+# directory it lives in (POLICY.md section 7).
+#
+# ---------------------------------------------------------------------------
+# HOW THIS FILE IS EVALUATED                          (ADR-0038, POLICY.md s4)
+#
+#   Phase 1  [[rule]]           ordered, FIRST MATCH WINS -> provisional
+#   Phase 2  [[postcondition]]  ordered, each may only NARROW that result
+#
+# `default` is mandatory, must be last, must be DENY, and must carry no
+# predicate. Everything that reaches it is refused.
+#
+# A postcondition selects on `when.provisional_effect`, which the evaluator
+# supplies from phase one. It is NOT a field any caller can set: that is the
+# whole reason `would_require_approval` is not a predicate here.
+# ---------------------------------------------------------------------------
+
+schema_version = 1
+
+[meta]
+name = "balanced"
+
+# ===========================================================================
+# Hard denials. These come first because nothing below may override them.
+# ===========================================================================
+
+[[rule]]
+id       = "deny-direwolf-self-modification"
+effect   = "DENY"
+reason   = "SELF_MODIFICATION"
+when.verb       = ["fs.write", "fs.delete", "fs.create"]
+when.path_under = ["${DIREWOLF_HOME}", "${DIREWOLF_CONFIG}", "${DIREWOLF_INSTALL}"]
+
+# A backstop, and deliberately so. The primary control is that fs capabilities
+# are workspace-scoped, which puts these paths out of scope in every profile
+# before policy is consulted at all. Two independent controls, because this is
+# the one an operator would notice missing last.
+[[rule]]
+id       = "deny-credential-paths"
+effect   = "DENY"
+reason   = "SENSITIVE_PATH"
+when.verb       = ["fs.read", "fs.write", "fs.delete"]
+when.path_under = ["~/.ssh", "~/.aws", "~/.gnupg", "~/.config/gh", "~/.kube",
+                   "/etc/shadow", "/etc/sudoers"]
+
+[[rule]]
+id       = "deny-container-socket"
+effect   = "DENY"
+reason   = "SANDBOX_ESCAPE_VECTOR"
+when.verb       = ["fs.read", "fs.write"]
+when.path_under = ["/var/run/docker.sock", "/run/podman/podman.sock"]
+
+# Before the taint rule below, deliberately. A denial that can be reached by
+# approving something is not a denial, and plaintext egress is refused in this
+# profile whatever the run's taint.
+[[rule]]
+id     = "deny-plaintext-http"
+effect = "DENY"
+reason = "PROFILE_CEILING"
+when.verb = ["network.http"]
+
+# ===========================================================================
+# Workspace filesystem.
+# ===========================================================================
+
+[[rule]]
+id     = "allow-workspace-read"
+effect = "ALLOW"
+when.verb       = ["fs.read", "fs.list", "fs.stat"]
+when.path_under = "${WORKSPACE}"
+when.max_bytes  = 10_485_760
+
+[[rule]]
+id     = "allow-workspace-write"
+effect = "ALLOW"
+when.verb       = ["fs.write", "fs.create"]
+when.path_under = "${WORKSPACE}"
+obligations = ["require_artifact_capture"]
+
+# One prompt for a batch of deletes, one binding. PathSet hashes the sorted
+# set of inode identities, so adding a fourth file invalidates it.
+[[rule]]
+id     = "approve-workspace-delete"
+effect = "REQUIRE_APPROVAL"
+reason = "DESTRUCTIVE_IN_WORKSPACE"
+when.verb       = "fs.delete"
+when.path_under = "${WORKSPACE}"
+approval.scope    = "path_set"
+approval.ttl      = "10m"
+approval.max_uses = 1
+
+# ===========================================================================
+# Execution.
+# ===========================================================================
+
+# `argv_safe` is the canonicaliser's classification, not a character scan. It
+# is false for argv that would be REINTERPRETED -- an element naming a shell,
+# an --exec-style flag, an element resolving to another executable -- and true
+# for a commit message containing `$` and `|`, which are ordinary bytes in an
+# array that never reaches a shell.
+#
+# No `network_deny`: package managers need their registries, and egress stays
+# constrained by the host allowlist and the CONNECT proxy.
+[[rule]]
+id     = "allow-known-tools"
+effect = "ALLOW"
+when.verb          = "process.exec"
+when.executable_in = ["git", "python3", "pytest", "ruff", "mypy", "black", "uv", "pip",
+                      "node", "npm", "pnpm", "yarn", "tsc", "eslint", "prettier",
+                      "cargo", "rustc", "go", "make", "rg", "fd", "jq", "sed", "awk",
+                      "grep", "find", "ls", "cat", "head", "tail", "wc", "sort", "diff",
+                      "mkdir", "cp", "mv", "tar", "gzip"]
+when.environment   = "sandbox"
+when.argv_safe     = true
+obligations = ["workspace_exec_hygiene", "max_output_bytes=262144"]
+
+# Scope breadth and use count scale together: a shape-of-action approval that
+# permitted one use would reintroduce the fatigue the broad scope exists to
+# remove (APPROVALS.md section 3).
+[[rule]]
+id     = "approve-novel-exec"
+effect = "REQUIRE_APPROVAL"
+reason = "UNKNOWN_EXECUTABLE"
+when.verb        = "process.exec"
+when.environment = "sandbox"
+approval.scope    = "executable_and_argv"
+approval.ttl      = "1h"
+approval.max_uses = 20
+
+# Opting in removes this denial; it does not grant anything. Host execution
+# still needs a rule that permits it, and `balanced` has none -- see
+# `power.toml`, which pairs this with a pinned allowlist.
+[[rule]]
+id     = "deny-host-exec-unless-opted-in"
+effect = "DENY"
+reason = "HOST_EXECUTION_DISABLED"
+when.verb        = "process.exec"
+when.environment = "host"
+unless.config    = "security.allow_host_execution"
+
+# ===========================================================================
+# Egress.
+# ===========================================================================
+
+# Ordered before the allowlist, so a tainted run reaching a NEW destination is
+# stopped even when the destination is one the profile would otherwise permit.
+[[rule]]
+id     = "approve-egress-when-tainted"
+effect = "REQUIRE_APPROVAL"
+reason = "UNTRUSTED_CONTENT_IN_RUN"
+when.verb              = ["network.http", "network.https", "channel.send"]
+when.taint_level       = ["EXTERNAL_UNTRUSTED"]
+when.destination_novel = true
+approval.scope    = "exact_action"
+approval.ttl      = "10m"
+approval.max_uses = 1
+
+# Wildcards are label-aware: `*.crates.io` covers `static.crates.io` and does
+# not cover `crates.io` itself or `evil-crates.io`, so the apex is listed
+# separately where it is wanted.
+[[rule]]
+id     = "allow-package-registries"
+effect = "ALLOW"
+when.verb         = ["network.https"]
+when.host_matches = ["crates.io", "*.crates.io",
+                     "pypi.org", "*.pypi.org",
+                     "registry.npmjs.org",
+                     "github.com", "*.github.com",
+                     "proxy.golang.org"]
+obligations = ["max_output_bytes=8388608"]
+
+# ===========================================================================
+# Model calls and memory.
+# ===========================================================================
+
+[[rule]]
+id     = "allow-model-calls"
+effect = "ALLOW"
+when.verb = ["model.call"]
+
+[[rule]]
+id     = "allow-memory-read"
+effect = "ALLOW"
+when.verb = ["memory.read", "artifact.read", "artifact.create"]
+
+# Promotion changes what later runs will believe. Trust laundering through
+# summarisation is otherwise invisible (MEMORY.md section 5).
+[[rule]]
+id     = "approve-memory-promotion"
+effect = "REQUIRE_APPROVAL"
+reason = "UNTRUSTED_CONTENT_IN_RUN"
+when.verb = ["memory.promote"]
+approval.scope    = "exact_action"
+approval.ttl      = "10m"
+approval.max_uses = 1
+
+# ===========================================================================
+# Mandatory. Last in the rule array, DENY, and carrying no predicate.
+# Everything that reaches it is refused.
+# ===========================================================================
+
+[[rule]]
+id     = "default"
+effect = "DENY"
+reason = "NO_MATCHING_RULE"
+
+# ===========================================================================
+# Phase 2: postconditions. Each may only narrow.
+#
+# A separate array, so the evaluator's two phases are two things an operator
+# reads rather than an ordering they have to infer.
+# ===========================================================================
+
+# The unattended rule of POLICY.md section 3, in the phase where it is
+# answerable. `when.provisional_effect` is the fact that section called
+# `would_require_approval`; it comes from phase one, and there is no field on
+# any request or context that could state it.
+#
+# Every origin but `interactive` is unattended. POLICY.md's example names only
+# `scheduled`; the others are included because an approval prompt nobody is
+# watching is not an approval, it is a timeout or a reflexive click.
+[[postcondition]]
+id     = "deny-approval-needed-when-unattended"
+effect = "DENY"
+reason = "NO_HUMAN_AVAILABLE"
+when.provisional_effect = ["REQUIRE_APPROVAL"]
+when.origin             = ["scheduled", "channel", "subagent", "api"]
+unless.standing_grant   = true

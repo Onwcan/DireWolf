@@ -48,6 +48,12 @@ struct Decision {
 
 `reason` is an enum rather than a string so denials are machine-classifiable in evals and metrics; human-readable text is rendered from it. `Effect` is a Rust enum matched exhaustively everywhere — adding a variant breaks compilation at every site rather than defaulting somewhere.
 
+The implemented `Decision` also carries the **primary rule** and the
+**postconditions that fired**, which is what §5's two-rule display is rendered
+from, and — on a refusal caused by an input that was not fully canonicalised —
+a typed value naming what was missing. All of it is typed; none of it is a map
+or a string.
+
 ### Obligations
 
 An `ALLOW` may carry requirements the kernel then enforces:
@@ -70,6 +76,21 @@ Obligations let policy say "yes, but under these conditions" without inventing n
 ## 3. Rule format
 
 TOML. Ordered. First match wins. A `[[rule]]` with `id = "default"` is mandatory and must be last; loading fails otherwise.
+
+**Two phases** ([ADR-0038](adr/0038-policy-evaluation-phases-and-composition.md)):
+
+```text
+Phase 1   [[rule]]           ordered, first match wins   ->  provisional decision
+Phase 2   [[postcondition]]  ordered, each may only NARROW that decision
+```
+
+Phase two exists because §5's `explain` output shows two rules contributing to
+one decision, the second conditioned on whether the first required approval —
+which a single-phase first-match loop cannot produce. It is a separate array
+rather than an ordering convention, so the two phases are something an operator
+reads rather than infers. A `[[rule]]` may not write `provisional_effect`; a
+`[[postcondition]]` may not carry `obligations` or an `approval` table.
+Both are load errors.
 
 ```toml
 schema_version = 1
@@ -174,23 +195,42 @@ when.taint_level = ["EXTERNAL_UNTRUSTED"]
 when.destination_novel = true
 approval.scope = "exact_action"
 
-# ---------------------------------------------------------------- unattended
-
-[[rule]]
-id     = "deny-approval-needed-when-unattended"
-effect = "DENY"
-reason = "NO_HUMAN_AVAILABLE"
-when.origin            = "scheduled"
-when.would_require_approval = true
-unless.standing_grant  = true
-
 # ---------------------------------------------------------------- mandatory
 
 [[rule]]
 id     = "default"
 effect = "DENY"
 reason = "NO_MATCHING_RULE"
+
+# ------------------------------------------------- phase 2: postconditions
+
+[[postcondition]]
+id     = "deny-approval-needed-when-unattended"
+effect = "DENY"
+reason = "NO_HUMAN_AVAILABLE"
+when.provisional_effect = ["REQUIRE_APPROVAL"]
+when.origin             = ["scheduled", "channel", "subagent", "api"]
+unless.standing_grant   = true
 ```
+
+> **`would_require_approval` is not a field, and that is deliberate.** An
+> earlier draft of this document wrote the rule above as a `[[rule]]` with
+> `when.would_require_approval = true`. Read as a phase-one predicate it is
+> circular — the answer depends on the evaluation it is part of — and placed
+> after `approve-novel-exec` in a first-match list it is unreachable. Read as a
+> field somebody *supplies*, it is worse: a runtime that says `false` has
+> turned off every unattended denial, which is
+> [ADR-0028](adr/0028-policy-input-ownership.md)'s finding C1 in a new field.
+>
+> So the fact is `when.provisional_effect`, which the evaluator fills in from
+> its own phase-one result. No request carries it, no context holds it, and no
+> constructor accepts it. `when.would_require_approval` is an unknown member in
+> both tables and fails at load.
+>
+> Every origin but `interactive` is unattended here, where the example above
+> named only `scheduled`: a subagent run has a human somewhere above it but not
+> one watching *this* run, and an approval prompt nobody sees is a timeout or a
+> reflexive click rather than a decision.
 
 ### The predicate grammar — deliberately small
 
@@ -207,8 +247,27 @@ Fields are a **fixed, typed set** populated by the canonicaliser. A rule cannot 
 | `lt` / `lte` / `gt` / `gte` | numeric | comparison |
 | `argv_safe` | argv | canonicaliser-computed. **Not** "contains no metacharacters" — `argv` is an array and never reaches a shell, so `$` and `|` in a commit message are ordinary bytes. It is false only for argv that would be *reinterpreted*: an element naming a shell (`sh -c`, `bash -c`), `--exec`-style flags on allowlisted tools, or an element that resolves to another executable |
 | `glob` | pattern fields | trailing-wildcard glob only |
-| `unless.config` | config key | negation on a kernel config flag |
-| `unless.standing_grant` | — | negation on an existing standing grant |
+| `unless.config` | config key | negation on a kernel config flag, from a closed key set |
+| `unless.standing_grant` | — | negation on an existing standing grant. **Never satisfiable before M6**: the state type has one inhabitant, so there is no value a caller can construct that claims a grant exists |
+| `provisional_effect` | phase-2 only | which phase-one results this postcondition applies to. Supplied by the evaluator, never by a caller |
+
+`ip_in` compares **one** address, not a set. A set admits no single fail-closed
+reading — "every member in range" is fail-closed for an `ALLOW` and fail-open
+for a `DENY`, and "any member" is the reverse — so the canonical action names a
+single `destination_ip` and the ambiguity is removed from the *action* rather
+than from the predicate. A network rule evaluated against an action with no
+destination address is refused with `UNRESOLVED_CANONICAL_INPUT` rather than
+read as "did not match".
+
+> **This removes a policy-evaluation ambiguity. It is not DNS-rebinding
+> resistance.** M3c performs no resolution and opens no connection, so nothing
+> here establishes that the address policy judged is the address the broker
+> connects to. That invariant — *IP evaluated by policy == IP used for the
+> authorised connection*, with no re-resolution in between, and a fresh
+> decision on any reconnect — belongs to M4's network canonicalisation and the
+> broker's execution path
+> ([ADR-0038](adr/0038-policy-evaluation-phases-and-composition.md) §7,
+> [NETWORK_SECURITY.md](NETWORK_SECURITY.md) §1).
 
 #### How path matching actually works
 
@@ -223,6 +282,46 @@ What actually happens, and is sound:
 The identity check is real and lives in the canonicaliser; the policy engine stays a pure function over already-resolved values. Both properties survive — the earlier phrasing collapsed the two layers and got both slightly wrong.
 
 Rule-side paths outside the workspace (`~/.ssh`, `/var/run/docker.sock`) match on the canonicalised candidate string, and are written as **deny** rules, so a path that does not yet exist and therefore cannot be resolved still matches — the fail-closed direction.
+
+#### Scalar and list are two grammars, not one with a shorthand
+
+The first two rows above are the *same predicate written two ways*, and the
+loader keeps them apart. `when.verb = "fs.read"` compiles to an equality and
+`when.verb = ["fs.read"]` to a membership; they decide identically for one
+candidate, and they are not the same compiled value
+([ADR-0038](adr/0038-policy-evaluation-phases-and-composition.md)).
+
+That distinction is not pedantry about representation. A loader that read a
+scalar as a one-element list would be *coercing*, and a strict loader with one
+permitted coercion is a strict loader that has to argue about which coercions
+are safe. Refusing all of them is a rule; refusing most of them is a habit.
+
+Which shape a field takes:
+
+| field | scalar | list | representation | semantics |
+|---|:--:|:--:|---|---|
+| `when.verb` | ✓ | ✓ | `MatchValue<Verb>` | equality / membership |
+| `when.path_under` | ✓ | ✓ | `MatchValue<RulePath>` | containment under the one, or under any |
+| `when.executable_in` | ✓ | ✓ | `MatchValue<ExecutableSpec>` | is the one, or is any |
+| `when.host_matches` | ✓ | ✓ | `MatchValue<HostPattern>` | label-aware match by the one, or any |
+| `when.ip_in` | ✓ | ✓ | `MatchValue<Cidr>` | in the one range, or any |
+| `when.environment` | ✓ | ✓ | `MatchValue<Environment>` | equality / membership |
+| `when.origin` | ✓ | ✓ | `MatchValue<Origin>` | equality / membership |
+| `when.taint_level` | ✓ | ✓ | `MatchValue<TaintLevel>` | equality / membership |
+| `when.privacy_class` | ✓ | ✓ | `MatchValue<PrivacyClass>` | equality / membership |
+| `when.provisional_effect` | ✓ | ✓ | `MatchValue<Effect>` | equality / membership (phase 2 only) |
+| `when.max_bytes` | ✓ | ✗ | `u64` | the action moves no more than this |
+| `when.argv_safe` | ✓ | ✗ | `ArgvSafety` | the canonicaliser's classification equals this |
+| `when.destination_novel` | ✓ | ✗ | `Novelty` | the run has, or has not, been here |
+| `unless.config` | ✓ | ✗ | `ConfigKey` | this kernel flag is set |
+| `unless.standing_grant` | ✓ | ✗ | `bool` | a grant covers this (never, before M6) |
+| `obligations` | ✗ | ✓ | `Obligations` | the conditions a permission carries |
+
+The three scalar-only `when` fields are not membership tests: a numeric bound
+and two canonicaliser-derived classifications. `max_bytes = [1, 2]` names no
+bound, so it is a type error rather than a set. `obligations` is the mirror
+case — an output set rather than a match, so the scalar spelling documented for
+`eq` does not apply to it and `obligations = "network_deny"` is refused.
 
 There are **no** boolean combinators beyond implicit AND within a rule, implicit OR within a list, and `unless`. There is no user-defined function, no regex against arbitrary input, no arithmetic, no iteration. A rule file is not a program.
 
@@ -242,17 +341,45 @@ Until then, the constraint is a feature: **a policy you cannot read is a policy 
 ## 4. Evaluation
 
 ```
-evaluate(request) -> Decision
-  1. validate request is fully canonicalised          (assert; uncanonicalised input is a bug)
-  2. for each rule in order:
-       if matches(rule.when, request) and not matches(rule.unless, request):
-           return Decision::from(rule)
-  3. unreachable — `default` is mandatory
+evaluate(action, context) -> Decision
+  PHASE 1 -- ordered primary rules, first match wins
+  1. for each [[rule]] in source order:
+       if a predicate needs a canonical value the input lacks:
+           return DENY / UNRESOLVED_CANONICAL_INPUT naming the rule and the value
+       if matches(rule.when) and not matches(rule.unless):
+           provisional = Decision::from(rule);  break
+     (the mandatory `default` makes this total)
+
+  PHASE 2 -- ordered postconditions, each may only narrow
+  2. for each [[postcondition]] in source order:
+       if provisional.effect in postcondition.when.provisional_effect
+          and matches(postcondition.when) and not matches(postcondition.unless):
+              provisional.effect = meet(provisional.effect, postcondition.effect)
+  3. return provisional
 ```
+
+`meet` is the more restrictive of the two under `DENY ⊑ REQUIRE_APPROVAL ⊑
+ALLOW`. Phase two therefore cannot widen, *whatever a postcondition says* —
+and the loader independently refuses a postcondition whose effect is not `⊑`
+every provisional effect it selects, so the property is checked twice by two
+different mechanisms.
+
+Step 1's first clause is this document's own "assert; uncanonicalised input is
+a bug", fail-closed. An unresolved `${WORKSPACE}` or an unpinned address is a
+**denial naming the rule and the missing value**, never a predicate that
+quietly reads as false — a deny rule that stops denying because its anchor is
+missing is the strict loader's failure mode arriving one layer later.
 
 Pure function. No IO, no clock, no randomness. **Time is supplied by the kernel as an input** — never by the runtime, since `not_after` comparisons would otherwise be runtime-controlled. This makes it trivially testable, replayable and fuzzable, and it means a policy decision can be recomputed months later from the audit record to verify it.
 
 **Performance target:** p99 < 200 µs for 300 rules. Linear scan is fine at this scale; we will not build an index until measurement demands it.
+
+**Measured** at M3c, release build, 300 generated rules plus a postcondition,
+200 000 samples per workload after 20 000 warm-up iterations, evaluation only
+— parsing, composition and I/O excluded: **worst p99 3.6 µs**, p50 1.7 µs.
+Roughly fifty times inside the target. Reproduce with `make policy-benchmark`,
+which prints the full distribution and refuses to report a verdict from a debug
+build.
 
 **Capability check is separate and always runs.** Policy `ALLOW` is necessary, not sufficient: the request must *also* be covered by a held capability token. An `ALLOW` for an action the run has no capability for is still denied, with reason `NO_CAPABILITY`. These are two independent gates and neither substitutes for the other.
 
@@ -284,6 +411,12 @@ Three properties this display guarantees: the rendering comes from kernel state 
 
 ## 6. Dry run and simulation
 
+> **Status.** The two commands below are the shape the CLI will take; neither
+> exists yet, because both need a running authority. What M3c ships is the
+> engine under them and the fixture suites that exercise it — in
+> `crates/dwkd-authority/src/policy/fixtures.rs`, run by `cargo test` and by
+> `make check`.
+
 ```console
 $ direwolf policy test --profile balanced --fixtures policy/tests/
   142 cases, 142 passed
@@ -301,7 +434,13 @@ Rule files ship with a fixture suite; CI fails if a shipped profile's fixtures f
 
 ## 7. Rule authorship rules
 
-- **Policy files are human-authored.** An agent may never write, propose-and-auto-apply, or edit a policy file. `fs.write` capabilities are never minted for the policy directory, and rule 1 of every shipped profile denies it explicitly.
-- Policy files are hashed at load; the hash is recorded in the audit chain, so "which policy was in force" is answerable for any historical decision.
-- Shipped profiles (`safe`, `balanced`, `power`) are signed. Local overrides are permitted and are recorded as local.
-- A profile may only *narrow* the profile it `extends`. Attempting to widen fails at load time with an error naming both rules.
+- **Policy files are human-authored.** An agent may never write, propose-and-auto-apply, or edit a policy file. `fs.write` capabilities are never minted for the policy directory, and rule 1 of every shipped profile denies it explicitly. There is no DWKP message that uploads, selects or edits policy, and the policy engine itself opens nothing: `load` takes text, and the authority layer that owns the directory reads the file.
+- Policy files **will be** hashed at load, with the hash recorded in the audit chain, so "which policy was in force" is answerable for any historical decision. The hash, the persisted revision and the audit chain are all M3d; M3c compiles deterministically — the same bytes give the same policy, and a CRLF checkout gives the same rule lines as an LF one — so that there is something stable for M3d to hash.
+- Shipped profiles (`safe`, `balanced`, `power`) **will be** signed. They are not yet: no signing key, verifier or signature exists in the current build, and the profiles are compiled in with `include_str!`, which resists an edit on disk and nothing else. Local overrides are permitted and are recorded as local.
+- A profile may only *narrow* the profile it `extends`. Attempting to widen fails at load time.
+
+  **The V1 subset that makes that decidable** ([ADR-0038](adr/0038-policy-evaluation-phases-and-composition.md)): *an extending profile may only add `DENY` rules.* Rules compose by concatenation, the child's first, so for any action first-match returns either a child rule — whose effect is the bottom of the lattice and therefore `⊑` anything the parent could have returned — or the parent's own result unchanged. `composed(a) ⊑ parent(a)` for every `a`, in two lines, rather than a fixture suite that would say nothing about the hundred-and-first case.
+
+  A child may not redeclare `default` (the root of the chain owns it), may not reuse a parent's rule id, and cannot remove or reorder a parent's rules because there is no syntax for either. Chains are bounded at depth 4 and cycles are refused. The caller supplies the profile set; nothing searches a directory for a parent by name.
+
+  The cost, stated plainly: a child cannot *add* a permission, even one its parent would have permitted anyway. That is why the three shipped packs are standalone rather than a chain — they permit different sets, not a few denials more.

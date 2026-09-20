@@ -239,6 +239,13 @@ def check_lockfile_closure(config: ArchitectureConfig) -> list[Finding]:
     with no toolchain, no network and no registry index -- which means it runs
     on every contributor's machine and in every CI job, not only where a
     supply-chain tool happens to be installed.
+
+    The cost of reading the lockfile is that it pins versions, not feature
+    selections, so it records optional dependencies nothing enables. Those
+    edges are named one at a time in `[[authority.optional_edges]]`, each with
+    a reason -- see `OptionalEdge`. Without that, the allowlist would have to
+    claim five crates are in the trusted computing base that are not in the
+    binary.
     """
     lock_path = config.root / "Cargo.lock"
     if not lock_path.is_file():
@@ -280,6 +287,16 @@ def check_lockfile_closure(config: ArchitectureConfig) -> list[Finding]:
     for name, dev_only in _dev_only_dependencies(config).items():
         if name in edges:
             edges[name] = [d for d in edges[name] if d not in dev_only]
+
+    # Optional edges this workspace does not enable. Each one is reviewed and
+    # named in architecture.toml; an optional dependency that is NOT named
+    # there is still counted, so a new one cannot arrive unnoticed.
+    excluded = {(e.parent, e.child) for e in config.authority_optional_edges}
+    if excluded:
+        edges = {
+            parent: [child for child in children if (parent, child) not in excluded]
+            for parent, children in edges.items()
+        }
 
     allowed = set(config.authority_allowed_third_party)
     findings: list[Finding] = []

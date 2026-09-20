@@ -199,6 +199,118 @@ def test_the_same_crate_as_a_normal_dependency_is_inside_it(tmp_path: Path) -> N
     assert closure == {"serde_json", "itoa"}
 
 
+_OPTIONAL_LOCK = """
+version = 4
+[[package]]
+name = "dwkd-authority"
+version = "0.0.0"
+dependencies = ["toml"]
+[[package]]
+name = "dwkd-broker"
+version = "0.0.0"
+[[package]]
+name = "dwk-proto"
+version = "0.0.0"
+[[package]]
+name = "toml"
+version = "1.1.6"
+dependencies = ["serde_spanned", "toml_datetime", "toml_parser", "winnow"]
+[[package]]
+name = "serde_spanned"
+version = "1.1.1"
+dependencies = ["serde_core"]
+[[package]]
+name = "toml_datetime"
+version = "1.1.1"
+dependencies = ["serde_core", "chrono"]
+[[package]]
+name = "toml_parser"
+version = "1.1.3"
+dependencies = ["winnow"]
+[[package]]
+name = "winnow"
+version = "1.0.4"
+[[package]]
+name = "serde_core"
+version = "1.0.229"
+dependencies = ["serde_derive"]
+[[package]]
+name = "serde_derive"
+version = "1.0.229"
+dependencies = ["syn"]
+[[package]]
+name = "syn"
+version = "3.0.5"
+[[package]]
+name = "chrono"
+version = "0.4.0"
+"""
+
+
+def _optional_edge_tree(root: Path) -> ArchitectureConfig:
+    """dwkd-authority links `toml`, whose lock entry records optional edges."""
+    _tree(
+        root,
+        {
+            "Cargo.toml": _WORKSPACE,
+            "Cargo.lock": _OPTIONAL_LOCK,
+            **_DAEMONS,
+            "crates/dwkd-authority/Cargo.toml": NEWLINE.join(
+                [
+                    "[package]",
+                    'name = "dwkd-authority"',
+                    "",
+                    "[dependencies]",
+                    "toml = { workspace = true }",
+                    "",
+                ]
+            ),
+            "crates/dwk-proto/Cargo.toml": NEWLINE.join(["[package]", 'name = "dwk-proto"', ""]),
+        },
+    )
+    return _config(root)
+
+
+def test_a_reviewed_optional_edge_is_excluded_from_the_tcb_closure(tmp_path: Path) -> None:
+    """Cargo.lock pins versions, not feature selections, so it records an
+    optional dependency whether or not anything enables it.
+
+    `serde_spanned -> serde_core` and `toml_datetime -> serde_core` are named
+    in `[[authority.optional_edges]]` because the policy loader uses toml's
+    `parse` feature and not its `serde` one. Without the exclusion the
+    allowlist would have to claim serde_core, serde_derive and syn are in the
+    trusted computing base, which `cargo tree --edges normal` says they are
+    not.
+    """
+    findings = check_lockfile_closure(_optional_edge_tree(tmp_path))
+    named = {f.message.split("`")[1] for f in findings}
+    assert "serde_core" not in named, "a reviewed optional edge must not be followed"
+    assert "serde_derive" not in named
+    assert "syn" not in named
+
+
+def test_an_unreviewed_optional_edge_is_still_a_finding(tmp_path: Path) -> None:
+    """The exclusion is per EDGE, not per crate and not a wildcard.
+
+    `toml_datetime -> chrono` is exactly as optional as the two edges beside
+    it and is not named in architecture.toml, so it is still counted. That is
+    what stops a feature change from quietly enlarging the TCB.
+    """
+    findings = check_lockfile_closure(_optional_edge_tree(tmp_path))
+    named = {f.message.split("`")[1] for f in findings}
+    assert "chrono" in named, "an optional edge nobody reviewed must still count"
+
+
+def test_the_reviewed_edges_match_the_crates_they_name(tmp_path: Path) -> None:
+    """An exclusion for an edge that does not exist is a stale exclusion, and a
+    stale exclusion is a review nobody can check."""
+    config = _config(tmp_path)
+    assert config.authority_optional_edges, "the repository declares some"
+    for edge in config.authority_optional_edges:
+        assert edge.parent and edge.child
+        assert edge.reason.strip(), f"{edge.parent} -> {edge.child} must say why"
+
+
 def test_a_build_dependency_is_inside_it(tmp_path: Path) -> None:
     """A build script runs on the build machine and can write the crate's code."""
     config = _proto_tree(tmp_path, "build-dependencies")

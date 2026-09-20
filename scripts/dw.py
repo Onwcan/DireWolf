@@ -44,7 +44,12 @@ CARGO_TOOLS = {
 
 # The four cargo-fuzz targets in fuzz/. Their bodies are shared with the stable
 # harness in crates/dwk-proto/tests/fuzz_smoke.rs.
-FUZZ_TARGETS = ("frame_decoder", "dwkp_decode", "canonical_roundtrip", "envelope_version")
+# The coverage-guided targets, grouped by the surface they attack, because the
+# two surfaces take different seeds: DWKP vectors are the wrong corpus for a
+# TOML parser and vice versa.
+PROTO_FUZZ_TARGETS = ("frame_decoder", "dwkp_decode", "canonical_roundtrip", "envelope_version")
+POLICY_FUZZ_TARGETS = ("policy_loader", "policy_evaluate")
+FUZZ_TARGETS = PROTO_FUZZ_TARGETS + POLICY_FUZZ_TARGETS
 # libFuzzer needs nightly. Pinned by date so a fuzz run is repeatable and a bump
 # is a reviewed change, exactly like rust-toolchain.toml.
 FUZZ_NIGHTLY = "nightly-2026-09-01"
@@ -207,8 +212,22 @@ def task_test() -> None:
 
 
 def task_arch() -> None:
-    """Architecture boundary checks. Hygiene, not containment."""
+    """Architecture boundary checks. Hygiene, not containment.
+
+    Two passes, because they are two different strengths of claim.
+
+    `all` is every offline check: it reads source text and manifests, needs no
+    toolchain, and its authority-closure rule (RS006) reads Cargo.lock -- which
+    pins versions, not feature selections, and therefore OVER-approximates.
+
+    `closure` is the exact one. It asks Cargo for the resolved graph and works
+    out which optional dependencies a feature actually turns on, so the trusted
+    computing base inventory describes what the binary links rather than what
+    the lockfile mentions. It needs cargo, which is why it is separate -- and
+    it runs here, inside `make check`, rather than being left to a reviewer.
+    """
     uvrun("dwcheck", "--root", str(ROOT), "all")
+    uvrun("dwcheck", "--root", str(ROOT), "closure")
 
 
 def task_schema() -> None:
@@ -282,22 +301,57 @@ def task_fuzz_smoke() -> None:
         "--no-default-features",
         "--bins",
     )
+    # Two hostile-input surfaces, reported separately: the DWKP decoder, which
+    # reads frames from the least trusted process in the system, and the M3c
+    # policy loader, which reads operator TOML through the first third-party
+    # parser the authority links.
+    for crate in ("dwk-proto", "dwkd-authority"):
+        run(
+            "cargo",
+            "test",
+            "--release",
+            "--locked",
+            "-p",
+            crate,
+            "--test",
+            "fuzz_smoke",
+            "--",
+            "--nocapture",
+        )
+
+
+def task_policy_benchmark() -> None:
+    """The 300-rule policy evaluation benchmark (ROADMAP M3: p99 < 200us).
+
+    Not part of `check`: it is evidence, produced deliberately, and a timing
+    threshold on a shared CI runner is a flaky gate rather than a security
+    control. Release mode, because a debug build measures the borrow checker
+    rather than the evaluator -- the harness says so and declines to report a
+    verdict from one.
+
+    Evaluation only: the policy is compiled before the clock starts, and load
+    time is reported separately rather than mixed into the p99.
+    """
     run(
         "cargo",
         "test",
-        "--release",
         "--locked",
+        "--release",
         "-p",
-        "dwk-proto",
-        "--test",
-        "fuzz_smoke",
+        "dwkd-authority",
+        "--lib",
+        "policy::benchmark",
         "--",
+        "--ignored",
         "--nocapture",
     )
 
 
 def task_fuzz() -> None:
-    """Coverage-guided libFuzzer run of every dwk-proto target (nightly, cargo-fuzz)."""
+    """Coverage-guided libFuzzer run of every target (nightly, cargo-fuzz).
+
+    Two surfaces: the DWKP decoder and the M3c policy loader.
+    """
     seconds = os.environ.get("DW_FUZZ_SECONDS", "60")
     if not seconds.isdigit() or int(seconds) < 1:
         raise TaskError("DW_FUZZ_SECONDS must be a positive whole number of seconds")
@@ -308,8 +362,12 @@ def task_fuzz() -> None:
             f"  cargo install cargo-fuzz --version {CARGO_FUZZ_VERSION} --locked\n"
             "libFuzzer also needs a C++ compiler. `make fuzz-smoke` runs on stable without one."
         )
-    seeds = _fuzz_seeds()
+    by_surface = {
+        **{t: _fuzz_seeds() for t in PROTO_FUZZ_TARGETS},
+        **{t: _policy_fuzz_seeds() for t in POLICY_FUZZ_TARGETS},
+    }
     for target in FUZZ_TARGETS:
+        seeds = by_surface[target]
         corpus = ROOT / "fuzz" / "corpus" / target
         corpus.mkdir(parents=True, exist_ok=True)
         for seed in seeds:
@@ -435,6 +493,7 @@ TASKS = {
     "schema": task_schema,
     "schema-check": task_schema_check,
     "capability-evidence": task_capability_evidence,
+    "policy-benchmark": task_policy_benchmark,
     "fuzz-smoke": task_fuzz_smoke,
     "fuzz": task_fuzz,
     "security": task_security,
@@ -461,6 +520,16 @@ def _fuzz_seeds() -> list[bytes]:
             if "frame_hex" in vector:
                 seeds.append(bytes.fromhex(vector["frame_hex"]))
     return seeds
+
+
+def _policy_fuzz_seeds() -> list[bytes]:
+    """The three shipped policy packs, as fuzzing seeds.
+
+    A TOML parser started from an empty corpus spends its budget rediscovering
+    that `[` opens a table. Started from `balanced.toml` it spends it on the
+    schema walker, which is the part this repository wrote.
+    """
+    return [path.read_bytes() for path in sorted((ROOT / "policy").glob("*.toml"))]
 
 
 def _version_of(tool: str) -> str:

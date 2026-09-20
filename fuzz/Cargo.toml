@@ -1,4 +1,14 @@
-# Coverage-guided fuzzing for the hostile-input surface of dwk-proto.
+# Coverage-guided fuzzing for DireWolf's hostile-input surfaces.
+#
+# Two of them now: `dwk-proto`'s decoder, which reads frames from the least
+# trusted process in the system, and the M3c policy loader, which reads
+# operator TOML through the first third-party parser the authority links
+# (ADR-0035, ADR-0038).  The second is not attacker-chosen input, and is
+# fuzzed anyway: it is a parser in the process that holds the capability key.
+#
+# This crate is deliberately OUTSIDE the workspace, so the `undependable`
+# rule in architecture.toml (RS007) does not apply to it -- nothing shipped
+# links an authority-plane crate, and a fuzz harness is not shipped.
 #
 # Not a workspace member: libFuzzer needs a nightly toolchain and a C++
 # compiler, and neither belongs in the default build. Run with cargo-fuzz:
@@ -24,6 +34,7 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = { version = "0.4.13", default-features = false }
 dwk-proto = { path = "../crates/dwk-proto" }
+dwkd-authority = { path = "../crates/dwkd-authority" }
 
 [features]
 # Linking libFuzzer compiles its C++ sources. The default is what cargo-fuzz
@@ -59,6 +70,20 @@ bench = false
 [[bin]]
 name = "envelope_version"
 path = "fuzz_targets/envelope_version.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "policy_loader"
+path = "fuzz_targets/policy_loader.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "policy_evaluate"
+path = "fuzz_targets/policy_evaluate.rs"
 test = false
 doc = false
 bench = false

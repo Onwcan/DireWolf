@@ -1,0 +1,136 @@
+# DireWolf policy pack: SAFE
+#
+# The profile for a run you have not decided to trust yet: read the workspace,
+# think, report. No writes, no execution, no egress, no memory promotion.
+#
+# SAFE IS A POLICY PACK AND A CAPABILITY CEILING, NOT A PROMPT.
+# Nothing in this profile depends on a model choosing to comply, and nothing
+# in the runtime can select it -- the profile in force is kernel and operator
+# state (POLICY.md section 7, ARCHITECTURE.md section 3).
+#
+# Standalone rather than `extends = "balanced"`, and deliberately: an
+# extending profile may only ADD denials (ADR-0038), and SAFE differs from
+# BALANCED by permitting less in nearly every family, which is a different set
+# of allowances rather than a few extra refusals.
+#
+# See `balanced.toml` for how the two evaluation phases work.
+
+schema_version = 1
+
+[meta]
+name = "safe"
+
+# ===========================================================================
+# Hard denials, identical to BALANCED. A tighter profile does not get to be
+# vaguer about the paths nothing may touch.
+# ===========================================================================
+
+[[rule]]
+id       = "deny-direwolf-self-modification"
+effect   = "DENY"
+reason   = "SELF_MODIFICATION"
+when.verb       = ["fs.write", "fs.delete", "fs.create"]
+when.path_under = ["${DIREWOLF_HOME}", "${DIREWOLF_CONFIG}", "${DIREWOLF_INSTALL}"]
+
+[[rule]]
+id       = "deny-credential-paths"
+effect   = "DENY"
+reason   = "SENSITIVE_PATH"
+when.verb       = ["fs.read", "fs.write", "fs.delete"]
+when.path_under = ["~/.ssh", "~/.aws", "~/.gnupg", "~/.config/gh", "~/.kube",
+                   "/etc/shadow", "/etc/sudoers"]
+
+[[rule]]
+id       = "deny-container-socket"
+effect   = "DENY"
+reason   = "SANDBOX_ESCAPE_VECTOR"
+when.verb       = ["fs.read", "fs.write"]
+when.path_under = ["/var/run/docker.sock", "/run/podman/podman.sock"]
+
+# ===========================================================================
+# What SAFE refuses outright, with a reason an operator can act on.
+#
+# Each of these could be left to the default rule, and each is written out
+# instead: `PROFILE_CEILING` at a named line tells an operator that SAFE is
+# what stopped them and that a different profile would not, which
+# `NO_MATCHING_RULE` does not.
+# ===========================================================================
+
+[[rule]]
+id     = "deny-all-egress"
+effect = "DENY"
+reason = "PROFILE_CEILING"
+when.verb = ["network.http", "network.https", "network.tcp", "network.dns",
+             "channel.send", "browser.use", "browser.download", "browser.upload",
+             "browser.credential_entry", "mcp.use"]
+
+[[rule]]
+id     = "deny-all-execution"
+effect = "DENY"
+reason = "PROFILE_CEILING"
+when.verb = ["process.exec", "process.signal", "process.inspect"]
+
+[[rule]]
+id     = "deny-workspace-mutation"
+effect = "DENY"
+reason = "PROFILE_CEILING"
+when.verb = ["fs.write", "fs.create", "fs.delete", "fs.exec_bit"]
+
+[[rule]]
+id     = "deny-durable-memory-change"
+effect = "DENY"
+reason = "PROFILE_CEILING"
+when.verb = ["memory.promote", "memory.propose",
+             "scheduler.create", "scheduler.modify", "scheduler.delete",
+             "agent.spawn", "secret.use", "artifact.export"]
+
+# ===========================================================================
+# What SAFE permits. Reading, and reasoning about what was read.
+# ===========================================================================
+
+[[rule]]
+id     = "allow-workspace-read"
+effect = "ALLOW"
+when.verb       = ["fs.read", "fs.list", "fs.stat"]
+when.path_under = "${WORKSPACE}"
+when.max_bytes  = 4_194_304
+obligations = ["read_only_workspace"]
+
+# Content the agent chose to fetch cannot reach a model that may retain it.
+# SAFE denies egress outright, so the taint that matters here is what earlier
+# runs left in the workspace.
+[[rule]]
+id     = "allow-model-calls"
+effect = "ALLOW"
+when.verb          = ["model.call"]
+when.privacy_class = ["LOCAL_ONLY", "VENDOR_OK"]
+
+[[rule]]
+id     = "allow-read-only-recall"
+effect = "ALLOW"
+when.verb = ["memory.read", "artifact.read", "artifact.create"]
+
+# ===========================================================================
+# Mandatory.
+# ===========================================================================
+
+[[rule]]
+id     = "default"
+effect = "DENY"
+reason = "NO_MATCHING_RULE"
+
+# ===========================================================================
+# Phase 2.
+# ===========================================================================
+
+# SAFE issues no REQUIRE_APPROVAL of its own, so this postcondition is
+# currently unreachable in this profile. It is here anyway: an operator who
+# adds an approving rule should not have to remember that the unattended
+# degradation was a thing other profiles had.
+[[postcondition]]
+id     = "deny-approval-needed-when-unattended"
+effect = "DENY"
+reason = "NO_HUMAN_AVAILABLE"
+when.provisional_effect = ["REQUIRE_APPROVAL"]
+when.origin             = ["scheduled", "channel", "subagent", "api"]
+unless.standing_grant   = true

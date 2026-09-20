@@ -2,7 +2,7 @@
 
 Each ADR records one decision, the context that forced it, what it costs, what was rejected, and what would make us revisit it. An ADR without a "Revisit if" is an opinion wearing a costume.
 
-**Accepted ADRs are immutable.** A changed decision produces a *new* ADR that supersedes or amends the old one; the old one stays, banner-marked, as a historical record. Phase 0.1 reconciliation produced twelve such ADRs (0018–0029) after adversarial review invalidated parts of the original set; M1 added 0030 (licence) and 0031 (repository layout and boundary enforcement); M2 added 0032 (the wire contract) and 0033 (protocol source of truth and TCB dependencies); the M2 closeout added 0034, which removed the protocol's dependence on a Unicode database; M3a added 0035 (what the authority plane is allowed to link) and 0036 (which DWKP operations M3 owns, and how a capability crosses the wire); M3b added 0037, which separates a capability as *declared* from a capability that authority is *compared with*. **Do not cite a superseded ADR as current rationale.**
+**Accepted ADRs are immutable.** A changed decision produces a *new* ADR that supersedes or amends the old one; the old one stays, banner-marked, as a historical record. Phase 0.1 reconciliation produced twelve such ADRs (0018–0029) after adversarial review invalidated parts of the original set; M1 added 0030 (licence) and 0031 (repository layout and boundary enforcement); M2 added 0032 (the wire contract) and 0033 (protocol source of truth and TCB dependencies); the M2 closeout added 0034, which removed the protocol's dependence on a Unicode database; M3a added 0035 (what the authority plane is allowed to link) and 0036 (which DWKP operations M3 owns, and how a capability crosses the wire); M3b added 0037, which separates a capability as *declared* from a capability that authority is *compared with*; M3c added 0038, which gives policy an explicit second evaluation phase, restricts `extends` to a composition that cannot widen, and takes `would_require_approval` out of the caller's hands. **Do not cite a superseded ADR as current rationale.**
 
 ## Index
 
@@ -37,6 +37,7 @@ Each ADR records one decision, the context that forced it, what it costs, what w
 | **[0035](0035-m3-authority-dependency-set.md)** | **The M3 authority dependency set: SQLite, TOML, peer credentials and SHA-256 enter the TCB** | amends 0019, 0033, 0034 |
 | **[0036](0036-m3-authority-operations-and-the-capability-wire-form.md)** | **M3 defines AdmitRun, ReleaseRun and QueryAuthority; ToolInvoke stays reserved until a tool exists** | amends 0032; refines 0006, 0011, 0023, 0028, 0031 |
 | **[0037](0037-capability-specifications-and-canonical-authority-identities.md)** | **A declared capability and an authority-comparable capability are different types** | refines 0006, 0036 |
+| **[0038](0038-policy-evaluation-phases-and-composition.md)** | **Policy evaluates in two phases, composes only by narrowing, and derives `would_require_approval` itself** | refines 0006, 0028, 0035 |
 
 ### Partially current (the unsuperseded parts still apply)
 

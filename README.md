@@ -22,7 +22,7 @@ compromised host.
 
 ---
 
-## Status: M3b — protocol, schemas, the evaluation harness, and the capability core
+## Status: M3c — protocol, schemas, the evaluation harness, the capability core, and the policy engine
 
 **None of the above is implemented yet.** This repository contains the Phase 0
 architecture package, the M1 foundation (the monorepo layout, the Rust and
@@ -56,6 +56,31 @@ and the M2 wire contract:
   ([ADR-0037](docs/adr/0037-capability-specifications-and-canonical-authority-identities.md)).
   It adds no dependency and no native code, and it does add security-critical
   code to the trusted computing base, which is where the authority's code lives.
+- the **policy engine** (M3c): the deterministic decision function. A strict
+  bounded TOML loader where an unknown member is an error rather than an absent
+  predicate and nothing is ever coerced; a closed typed predicate vocabulary
+  with no map, no regex and no DSL; ordered first-match evaluation with a
+  mandatory denying default, followed by a second phase of postconditions that
+  can only *narrow* the result; `safe`, `balanced` and `power` as real files
+  under [`policy/`](policy/), each with fixture suites that check both the
+  denial and the legitimate neighbour it must not deny; `extends` restricted to
+  a composition that cannot widen, proved rather than sampled; and the M3
+  performance target measured at a p99 of **3.6 µs against 200 µs** at 300
+  rules ([ADR-0038](docs/adr/0038-policy-evaluation-phases-and-composition.md),
+  `make policy-benchmark`).
+
+  Two things it deliberately does not do. `would_require_approval` is **not** a
+  field any caller can set — it is the evaluator's own provisional result, and
+  a runtime that could state it would have turned off every unattended denial.
+  And policy answers only *"should this be allowed?"*; whether the run holds
+  the capability is the other gate, and neither substitutes for the other
+  ([ADR-0006](docs/adr/0006-policy-and-capability-boundary.md)).
+
+  This is the milestone where the authority's third-party dependency closure
+  stops being empty: **five crates**, the TOML parser chain, pinned exactly,
+  with no derive macro, no proc-macro and no native code. Three of them parse
+  the policy text, so the loader is fuzzed — coverage-guided in
+  [`fuzz/`](fuzz/) and on stable in every `cargo test`.
 
 What M2 establishes is that **malformed DWKP is rejected structurally**, and
 what M2.5 adds is the machinery to *measure* claims like that. M3a adds the
@@ -63,9 +88,14 @@ shapes of the messages an authority will exchange, and the architecture
 decisions behind them
 ([ADR-0035](docs/adr/0035-m3-authority-dependency-set.md),
 [ADR-0036](docs/adr/0036-m3-authority-operations-and-the-capability-wire-form.md)).
-**None of them establishes that any request is authorised.** There is no
-kernel, no transport, no policy engine, no capability lattice, no `kernel.db`
-and no audit log: a defined wire form is a shape, and a shape decides nothing.
+**None of them establishes that any request is authorised.** M3b and M3c add
+the two gates' *logic* — the lattice that answers "is this within the authority
+held?" and the engine that answers "should this be allowed?" — and neither is
+wired to anything: there is still no kernel process serving requests, no
+transport, no `kernel.db`, no audit log, no approval registry, and nothing that
+can turn a path on disk into the canonical identity an `fs` rule compares
+against. A decision function nothing calls decides nothing, and a defined wire
+form is a shape.
 See [docs/PROTOCOL.md](docs/PROTOCOL.md),
 [ADR-0032](docs/adr/0032-wire-contract-framing-strict-json-and-jcs.md) and
 [evals/README.md](evals/README.md).
@@ -75,12 +105,13 @@ The daemons build and refuse to run. `direwolf` supports `--version` and
 invites callers, scripts and documentation to form around a shape nobody has
 designed yet.
 
-The policy engine and capability broker arrive at **M3**, the filesystem, exec and secret brokers at **M4**, the sandbox
-at **M5**. See
+The capability broker, `kernel.db` and the authority server arrive at **M3d**
+and **M3e**, the filesystem, exec and secret brokers at **M4**, the sandbox
+at **M5**, and approvals at **M6**. See
 [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ```bash
-git clone <url> direwolf && cd direwolf
+git clone https://github.com/Onwcan/DireWolf.git direwolf && cd direwolf
 make dev          # verify toolchain, sync, build, check   (idempotent)
 make check        # every gate CI runs
 make help         # everything else

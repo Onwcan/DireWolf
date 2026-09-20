@@ -216,6 +216,46 @@ As with every rule in this file: hygiene, not containment.  A static check over
 source text cannot stop anything at run time.
 """
 
+[[text_rules]]
+id = "TX004-policy-core-has-no-ambient-effects"
+paths = ["crates/dwkd-authority/src/policy"]
+exempt_paths = []
+suffixes = [".rs"]
+# As TX002 and TX003: comment lines are skipped so the module can document what
+# it must not do, and a multi-line `use std::{ ... }` is covered by the brace
+# pattern.
+patterns = [
+    '^(?!\s*//).*\bstd\s*::\s*(fs|net|process|env|os)\b',
+    '^(?!\s*//).*\bstd\s*::\s*\{[^}]*\b(fs|net|process|env|os)\b',
+    '^(?!\s*//).*\bunsafe\b',
+    '^(?!\s*//).*\b(allow|expect)\s*\(\s*unsafe_code\b',
+]
+reason = """
+The policy engine is a pure function of its arguments (POLICY.md section 4):
+canonical action, typed context, compiled policy, out comes a decision.  No IO,
+no clock, no randomness.  Each of the banned modules would break a different
+part of that.
+
+`std::env` is the one worth naming.  Policy rules write `${WORKSPACE}` and
+`~/.ssh`, which LOOK like shell, and are not: they are closed symbolic anchors
+resolved from kernel-owned state.  If the policy engine could ask the process
+environment what `${WORKSPACE}` means, then whoever sets that variable decides
+which directory the workspace rules govern -- and the whole point of pinning
+the workspace root by (dev, ino) at admission is that the NAME can be made to
+lie.
+
+`std::net` is banned even though `ip_in` compares addresses, which is why
+`IpAddress` holds octets rather than std::net::IpAddr: the rule needs no
+exception, and an import list with no networking module in it is easier to
+check than an argument about which networking types are inert.
+
+Reading the operator's policy FILE is not inside the policy core.  `load` takes
+text; the authority layer that owns the policy directory opens it.  The
+boundary is where the IO is.
+
+As with every rule in this file: hygiene, not containment.
+"""
+
 # ===========================================================================
 # Documentation
 # ===========================================================================
@@ -342,12 +382,53 @@ protocols; it does not link them.  Linking would put authority code in a
 process a user launches directly, with that user's privileges.
 """
 
-# The TCB's dependency set is a load-bearing claim of ADR-0019, and it is
-# EMPTY.  `dwk-proto`, which dwkd-authority links from M3, is checked as the
-# authority's now, before the edge exists: RS004 checks its manifest, RS006 its
-# transitive closure from Cargo.lock.  Dev-dependencies (proptest, serde_json)
-# are excluded because they are never linked; tools/dwcheck/tests prove a normal
-# dependency is not excluded.
+# The TCB's dependency set is a load-bearing claim of ADR-0019, and as of M3c
+# it is NO LONGER EMPTY.  Dev-dependencies (proptest, serde_json) are excluded
+# because they are never linked; tools/dwcheck/tests prove a normal dependency
+# is not excluded.
+#
+# The rule has NOT become "the authority may use dependencies".  It has become
+# "the closure must equal the list below, which somebody reviewed".
+#
+# TWO GATES, OF DIFFERENT STRENGTH.  Do not conflate them.
+#
+#   RS004  manifest allowlist.          Offline.
+#   RS006  OFFLINE CONSERVATIVE closure, from Cargo.lock.  Runs with no
+#          toolchain, no network and no registry index, which is why it runs
+#          on every contributor's machine.  A lockfile pins VERSIONS, not
+#          FEATURE SELECTIONS, so it lists optional dependencies nothing
+#          activates -- it OVER-approximates, and the `optional_edges` below
+#          are what keep it usable.  It is a tripwire.  It is NOT evidence of
+#          what the binary links.
+#   RS010  EXACT FEATURE-RESOLVED closure, from `cargo metadata --locked`,
+#   RS011  with activation computed per package from its own activated
+#   RS012  features.  This is the one that describes the artifact.  It needs
+#   RS013  cargo, so it is `dwcheck closure` rather than `dwcheck all`, and
+#          `make arch` -- inside `make check` -- runs both.
+#
+# RS010 fails on a crate that is linked and not reviewed; RS011 on a reviewed
+# crate that is no longer linked, because an inventory that only ever grows
+# stops being a review; RS012 on an `optional_edges` entry whose edge has
+# become ACTIVE; RS013 on one that names no edge at all.
+#
+# WHAT IS HERE AND WHY
+#
+#   toml            the M3c policy loader's parser.  ADR-0035 accepted it;
+#   toml_parser     ADR-0038 records what the resolver actually produced, which
+#   toml_datetime   is one crate FEWER than ADR-0035 measured: the loader walks
+#   serde_spanned   toml::de::DeTable, available behind the `parse` feature
+#   winnow          alone, so `serde_core` never enters.  No serde_derive, no
+#                   syn, no quote, no proc-macro2, no native code, no build
+#                   script that compiles anything.
+#
+# Three of these parse the policy text itself -- toml, toml_parser, winnow --
+# and that is the concentration of risk this entry creates.  `fuzz/` has
+# coverage-guided targets for the loader, and
+# crates/dwkd-authority/tests/fuzz_smoke.rs runs the same invariants on stable.
+#
+# NOT here, and deliberately: rusqlite, libsqlite3-sys, rustix, linux-raw-sys,
+# sha2 and the rest of ADR-0035's set.  Each enters in the milestone that first
+# LINKS it (M3d, M3e), not in the one that decided it could.
 #
 # M2 briefly added unicode-normalization here, for NFC comparison of object
 # keys.  ADR-0034 removed the need: DWKP rejects every undeclared member and
@@ -359,4 +440,68 @@ process a user launches directly, with that user's privileges.
 # and a reviewer other than the author.
 [authority]
 crates = ["dwkd-authority", "dwk-proto"]
-allowed_third_party = []
+allowed_third_party = [
+    "toml",
+    "toml_parser",
+    "toml_datetime",
+    "serde_spanned",
+    "winnow",
+]
+
+# ---------------------------------------------------------------------------
+# Optional lockfile edges this workspace does not enable.
+#
+# These exclusions apply to the OFFLINE CONSERVATIVE gate (RS006) ONLY.  They
+# exist because Cargo.lock records an optional dependency whether or not
+# anything turns it on: `toml` is linked with features = ["parse"], and two of
+# its dependencies declare an optional `serde_core` behind their own `serde`
+# feature.  Following those two edges reaches serde_core -> serde_derive ->
+# proc-macro2, quote, syn, unicode-ident -- six crates that are in the
+# lockfile, are NOT in the binary, and would make this allowlist and every
+# document quoting it overstate the trusted computing base.
+#
+# AN ENTRY HERE IS NOT A PROMISE.  It is a claim that RS012 checks against the
+# feature-resolved graph on every `make check`, and the claim expires the
+# moment the edge becomes active:
+#
+#   * edge inactive  -> RS006 skips it, RS012 is satisfied, gate green
+#   * edge ACTIVE    -> RS012 FAILS naming the expired entry, and RS010 fails
+#                       naming every crate the activation dragged in
+#   * edge absent    -> RS013 fails; an exclusion that applies to nothing
+#                       cannot be reviewed
+#
+# So a future change that enables toml's `serde` feature turns CI red without
+# anyone touching this file.  That is verified, not asserted:
+# tools/dwcheck/tests/test_closure.py flips the feature in a synthetic graph
+# and asserts the findings, and the same flip was performed against a real
+# checkout during the M3c closeout.
+#
+# Ground truth, for a reviewer who wants to check by hand:
+#
+#     cargo tree -p dwkd-authority --edges normal        # five crates
+#     CARGO_TARGET_DIR=$(mktemp -d) cargo build -p dwkd-authority --lib --release
+#     ls "$CARGO_TARGET_DIR"/release/deps/*.rlib         # five, no serde_core
+#
+# These are EDGES, not crate exemptions.  An optional dependency not named
+# here is still counted by RS006, so a new one cannot arrive unnoticed.
+# ---------------------------------------------------------------------------
+
+[[authority.optional_edges]]
+parent = "serde_spanned"
+child = "serde_core"
+reason = """
+serde_spanned declares serde_core behind its own `serde` feature.  The policy
+loader walks toml::de::DeTable, which is gated on toml's `parse` feature alone
+and needs only the Spanned type, so DireWolf does not enable toml's `serde`
+feature and this edge is never taken.  ADR-0038 records the measurement.
+"""
+
+[[authority.optional_edges]]
+parent = "toml_datetime"
+child = "serde_core"
+reason = """
+As serde_spanned: toml_datetime's serde_core dependency is behind its `serde`
+feature, which toml enables only when its own `serde` feature is on.  It is
+not.  DireWolf never reads a TOML datetime anyway -- the policy schema has no
+datetime-valued field, and one appearing in a rule is a type mismatch.
+"""

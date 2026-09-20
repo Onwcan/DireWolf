@@ -45,6 +45,13 @@ use std::process::ExitCode;
 
 use dwkd_authority::capability::Verb;
 
+// The policy loader's parser is a dependency of the LIBRARY. The binary
+// inherits the manifest edge without using it -- there is no DWKP server yet,
+// so nothing here reads a policy file. Acknowledged rather than silenced with
+// an `#[allow]`, so the day this binary does load policy the acknowledgement
+// becomes a real `use` instead.
+use toml as _;
+
 // Dev-only, and the binary's test target inherits the manifest edge without
 // using it. Acknowledged rather than silenced with an `#[allow]`.
 #[cfg(test)]

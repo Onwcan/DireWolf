@@ -37,6 +37,7 @@
 #![warn(clippy::pedantic)]
 
 pub mod capability;
+pub mod policy;
 pub mod resource;
 
 // `proptest` is a dev-dependency used by the integration tests in `tests/`, not
