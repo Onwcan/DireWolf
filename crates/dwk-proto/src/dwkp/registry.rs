@@ -118,6 +118,12 @@ pub struct MessageSpec {
 
 const V1: VersionRange = VersionRange { min: 1, max: 1 };
 
+/// Messages whose payload changed incompatibly in ADR-0040. DWKP's two peers
+/// ship together (ADR-0023) and no DWKP version has been released, so a bumped
+/// message supports exactly its new version: a version-1 instance is
+/// `PROTOCOL_VERSION_UNSUPPORTED`, never decoded under rules it predates.
+const V2: VersionRange = VersionRange { min: 2, max: 2 };
+
 const REQUEST_NO_SESSION: EnvelopeRules = EnvelopeRules {
     correlation_id: Presence::Optional,
     causation_id: Presence::Optional,
@@ -250,7 +256,7 @@ pub const MESSAGES: &[MessageSpec] = &[
     MessageSpec {
         schema: "direwolf.run.grant",
         message_type: MessageType::Response,
-        versions: V1,
+        versions: V2,
         rules: RESPONSE,
         payload: "RunGrant",
         summary: "The run, the epoch and the capabilities the kernel minted.",
@@ -274,7 +280,7 @@ pub const MESSAGES: &[MessageSpec] = &[
     MessageSpec {
         schema: "direwolf.authority.effective",
         message_type: MessageType::Response,
-        versions: V1,
+        versions: V2,
         rules: RESPONSE,
         payload: "EffectiveAuthority",
         summary: "A run's effective authority, and a decision if one was asked for.",
@@ -282,7 +288,7 @@ pub const MESSAGES: &[MessageSpec] = &[
     MessageSpec {
         schema: "direwolf.authority.refused",
         message_type: MessageType::Response,
-        versions: V1,
+        versions: V2,
         rules: RESPONSE,
         payload: "AuthorityRefusal",
         summary: "The request was well-formed; the authority's state refused it.",
@@ -397,7 +403,7 @@ pub const OPERATIONS: &[OperationSpec] = &[
         authority_bearing: true,
         carries: "Agent profile name, requested skills and requested capabilities, under a mandatory envelope idempotency_key; response RunGrant{run_id, epoch, policy_revision, profile, granted[], withheld[]}.",
         consumer: "Capability Broker (M3); the Budget Ledger will amend the grant at M6.",
-        second_path: "The grant is minted kernel-side by intersecting the agent profile, the kernel-verified skills, the parent grant and the profile ceiling; nothing the runtime asserts is a term in that expression (ADR-0028, invariant I9). requested_capabilities is a request and not an assertion -- asking for more yields less, never more, and the difference is returned as withheld[] so the agent can say what it lacks. There is no mode, workspace-sensitivity, taint or privacy-class field: each would be the runtime supplying a policy input. The run id, the epoch and every cap_id are assigned by the kernel. It is the one operation that carries an idempotency_key, and carries it mandatorily: admission mints authority, so a lost response followed by a retry must resolve to the same grant rather than a second one. The key names an admission attempt and not a run, and is scoped kernel-side to (authenticated peer, session_id), so it cannot be guessed across subjects; the same key with a different canonical request is refused with IDEMPOTENCY_CONFLICT, and an agent profile the kernel does not hold with UNKNOWN_AGENT_PROFILE -- both on direwolf.authority.refused, because the message was well-formed and a protocol error would be a lie. Epoch fencing is checked before the key is looked at, so presenting a key is never a way past the fence (ADR-0036 sections 8 and 10).",
+        second_path: "The grant is minted kernel-side by intersecting the agent profile, the kernel-verified skills, the parent grant and the profile ceiling; nothing the runtime asserts is a term in that expression (ADR-0028, invariant I9). requested_capabilities is a request and not an assertion -- asking for more yields less, never more, and the difference is returned as withheld[] so the agent can say what it lacks. There is no mode, workspace-sensitivity, taint or privacy-class field: each would be the runtime supplying a policy input. The run id, the epoch and every cap_id are assigned by the kernel. It is the one operation that carries an idempotency_key, and carries it mandatorily: admission mints authority, so one key can never produce a second admission. The key names an admission attempt and not a run, and is scoped kernel-side to (authenticated peer, session_id), so it cannot be guessed across subjects. A retry of the same canonical request (the epoch is not part of it) receives the recorded grant while the run it admitted is active under the caller's current lease; once that run has ended -- released, or reaped by a lease rotation, expiry or authority restart -- the key is refused with ADMISSION_ENDED for ever, because returning a grant for a run that no longer exists would be a success that authorises nothing. The same key with a different canonical request is refused with IDEMPOTENCY_CONFLICT, and an agent profile the kernel does not hold with UNKNOWN_AGENT_PROFILE -- all on direwolf.authority.refused, because the message was well-formed and a protocol error would be a lie. Epoch fencing is checked before the key is looked at, so presenting a key is never a way past the fence (ADR-0036 sections 8 and 10, as amended by ADR-0040).",
     },
     OperationSpec {
         name: "ReleaseRun",
@@ -530,9 +536,9 @@ pub const OPERATIONS: &[OperationSpec] = &[
         semantics_owner: "M3",
         effect_bearing: false,
         authority_bearing: false,
-        carries: "Envelope session_id, run_id and epoch; an optional proposed capability. Response EffectiveAuthority{granted[], withheld[], profile, policy_revision, epoch} plus a decision when one was proposed.",
+        carries: "Envelope session_id, run_id and epoch; an optional proposed capability. Response EffectiveAuthority{granted[], withheld[], profile, policy_revision, epoch}, plus a decision for a proposal the authority can express as a complete canonical action; any other proposal is refused with NO_CANONICAL_ACTION, which through M3e is every proposal.",
         consumer: "direwolf run authority; the runtime, to learn what it lacks before asking a human.",
-        second_path: "Read-only in both shapes: it reports authority and grants none, names no tool, touches no resource, reserves nothing and produces no side effect. The proposed capability is decided, not performed -- the answer is a decision record, and obtaining an ALLOW from it authorises nothing on its own, because the effect path is ToolInvoke and ToolInvoke checks again. Repeating the same query against the same state returns the same decision, so it needs no idempotency_key: there is nothing for a replay to duplicate. A run the kernel does not hold is refused with UNKNOWN_RUN rather than answered with a denial -- there is no grant, no profile and no policy revision to report, so an EffectiveAuthority could not be filled in, and a DENY would claim an evaluation that never ran.",
+        second_path: "Read-only in both shapes: it reports authority and grants none, names no tool, touches no resource, reserves nothing and produces no side effect. A proposal is decided only when the authority can construct the complete canonical action policy decides on, and is never performed -- the answer is a decision record, and obtaining an ALLOW from it authorises nothing on its own, because the effect path is ToolInvoke and ToolInvoke checks again. Capability text alone does not determine where an action runs, the address it reaches or the resource it names, so until M4's canonicaliser exists every proposal is refused with NO_CANONICAL_ACTION rather than decided on facts the kernel would have to invent, and no policy rule is attributed to an evaluation that did not run (ADR-0040). Repeating the same query against the same state returns the same decision, so it needs no idempotency_key: there is nothing for a replay to duplicate. A run the kernel does not hold is refused with UNKNOWN_RUN rather than answered with a denial -- there is no grant, no profile and no policy revision to report, so an EffectiveAuthority could not be filled in, and a DENY would claim an evaluation that never ran.",
     },
     OperationSpec {
         name: "QueryInvocationStatus",

@@ -31,11 +31,33 @@
 > policy loader's TOML chain
 > ([ADR-0038](adr/0038-policy-evaluation-phases-and-composition.md)).
 >
-> Not implemented: minting (§4), tokens and their MAC (§4), effective authority
-> (§5), profile ceilings (§6). Those need `kernel.db` (M3d). The policy engine
-> they were waiting on arrives at M3c, and answers a **different** question —
-> "should this be allowed?" — which is why both gates run and neither
-> substitutes for the other ([ADR-0006](adr/0006-policy-and-capability-boundary.md)).
+> **M3d mints** ([ADR-0039](adr/0039-durable-authority-state.md) §9). At
+> `AdmitRun` each requested capability is granted exactly as requested —
+> canonicalised, never widened, never narrowed into something nobody asked
+> for — or withheld with the first term that refused it: the agent profile's
+> declared set, then **every** active skill's (a profile's baseline skills are
+> always active; an unknown or quarantined skill contributes the empty set),
+> then the mode ceiling. "Covers" means one declared member contains the
+> request whole. Each grant is a durable `kernel.db` row with a kernel-assigned
+> `cap_id`, and §5's effective authority is read back from those rows.
+> Where M3d departs from §4 and §5, it says so:
+>
+> - **No tokens and no MAC.** A grant is a kernel record named by an id; the
+>   record *is* the authority, which is §4's own primary control. A `cap_id`
+>   proves nothing by itself.
+> - **No policy preflight** (§4 step 7). `AdmitRun` carries no action for policy
+>   to decide, and inventing one would be deciding something nobody asked to
+>   do. Policy decides a *complete canonical action*, where both gates run
+>   and neither substitutes for the other
+>   ([ADR-0006](adr/0006-policy-and-capability-boundary.md)) — and until
+>   M4's canonicaliser can build one, `QueryAuthority` refuses a proposed
+>   action rather than decide it ([ADR-0040](adr/0040-m3d-reconciliation-admission-across-tenures-and-undecidable-proposals.md)).
+> - **No parent term and no workspace-scope term.** Every M3 admission is a
+>   root (subagents are M14), and an `fs` or `process` request is withheld
+>   as `UNRESOLVED_RESOURCE` until M4 can identify its resource — a reason
+>   that claims nothing about any declaration (ADR-0040).
+> - **The mode ceiling is operator configuration**, a capability list recorded
+>   with each activation; §6's per-mode table is not shipped as data.
 
 ---
 
@@ -211,8 +233,9 @@ Step 5 is deliberate: an agent requesting more than it can have is not an error 
 attenuate(token, narrowing) -> Token'
 ```
 
-*(M3b implements this over a `Capability` rather than a token — tokens need
-`kernel.db` and arrive at M3d. `attenuate` builds the candidate and then checks
+*(M3b implements this over a `Capability` rather than a token, and M3d mints
+durable grants rather than MAC'd tokens (see the status note at the top).
+`attenuate` builds the candidate and then checks
 it with the same `contains` every caller uses, so the guarantee is structural:
 the branch that returns a value is unreachable unless the parent contains it.)*
 

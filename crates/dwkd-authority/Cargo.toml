@@ -7,10 +7,14 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
+# The trusted computing base is never published. Also what lets it inherit the
+# in-tree `dwk-proto` by path without a version (deny.toml, `wildcards`).
+publish = false
 
-# The pure authority core -- the capability lattice from M3b -- lives in a
-# library so it can be unit- and integration-tested without a daemon. The binary
-# is still the M1 skeleton: a library target is not a running server.
+# The authority's logic -- the capability lattice (M3b), the policy engine (M3c)
+# and the durable state (M3d) -- lives in a library so it can be unit- and
+# integration-tested without a daemon. The binary serves nothing until M3e: a
+# library target is not a running server.
 [lib]
 name = "dwkd_authority"
 path = "src/lib.rs"
@@ -26,13 +30,26 @@ workspace = true
 # set is a load-bearing claim of ADR-0019 ("a genuinely small, enforceable
 # dependency set - now true, post-split: no HTTP client, no TLS stack, no
 # container client, no content parsers").  Additions require a note on ADR-0019
-# and a reviewer other than the author, and must appear in the
-# `authority_allowlist` in architecture.toml.
+# and a reviewer other than the author, and must appear in
+# `[authority].allowed_third_party` in architecture.toml (or, for a crate that
+# only executes during the build, `[authority].allowed_build_third_party`).
 [dependencies]
+# The wire contract (M3d is its first authority-side consumer). In-tree, and
+# its own closure is empty (ADR-0034): AdmitRun's idempotency digest is the RFC
+# 8785 encoding of the *decoded* request, and the one implementation of both
+# lives there.
+dwk-proto = { workspace = true }
+
 # The policy loader's TOML parser (M3c).  Accepted by ADR-0035, measured for
 # real by ADR-0038.  Pinned exactly and with no `serde` feature: see the note
 # in the workspace dependency table.
 toml = { workspace = true }
+
+# kernel.db (M3d): rusqlite with the bundled SQLite amalgamation, and SHA-256
+# for the audit chain. Accepted by ADR-0035; the measured closure, native code
+# included, is ADR-0039's. Only `crate::state` may use either (TX005).
+rusqlite = { workspace = true }
+sha2 = { workspace = true }
 
 # Dev-only. Never linked into the shipped binary, and excluded from the TCB
 # closure `dwcheck` computes; the capability algebra's eight documented

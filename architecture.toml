@@ -256,6 +256,62 @@ boundary is where the IO is.
 As with every rule in this file: hygiene, not containment.
 """
 
+[[text_rules]]
+id = "TX005-the-pure-cores-never-touch-the-store"
+paths = [
+    "crates/dwkd-authority/src/capability",
+    "crates/dwkd-authority/src/policy",
+    "crates/dwkd-authority/src/resource",
+]
+exempt_paths = []
+suffixes = [".rs"]
+# As TX002-TX004: comment lines are skipped so a module can say what it must not
+# do.
+patterns = [
+    '^(?!\s*//).*\brusqlite\b',
+    '^(?!\s*//).*\bcrate\s*::\s*state\b',
+]
+reason = """
+M3d gives the authority a database; it does not give the capability lattice,
+the policy engine or the resource boundary one. Those three are pure functions
+of their arguments -- which is what makes them fuzzable, property-testable and
+replayable from an audit record -- and the state layer calls them, never the
+other way round. A policy rule that could query kernel.db would be a policy
+input nobody derived; a capability comparison that consulted a table would be
+authority decided somewhere the lattice cannot see.
+
+Hygiene, not containment. It catches the import; it cannot stop a determined
+path through an argument.
+"""
+
+[[text_rules]]
+id = "TX006-state-sql-is-static-and-the-state-layer-has-no-ambient-effects"
+paths = ["crates/dwkd-authority/src/state"]
+exempt_paths = []
+suffixes = [".rs"]
+patterns = [
+    # SQL text built by formatting: every value must be a bound parameter, and
+    # no table, column, pragma or clause may come from a value.
+    '^(?!\s*//).*\bformat!\s*\(\s*r?#?"[^"]*\b(SELECT|INSERT|UPDATE|DELETE|REPLACE|CREATE|DROP|ALTER|PRAGMA|ATTACH|WHERE|ORDER BY)\b',
+    # The state layer reads its configuration from typed values handed to it,
+    # opens only its own files, and talks to no one.
+    '^(?!\s*//).*\bstd\s*::\s*(net|process|env)\b',
+    '^(?!\s*//).*\bstd\s*::\s*\{[^}]*\b(net|process|env)\b',
+    '^(?!\s*//).*\bunsafe\b',
+    '^(?!\s*//).*\b(allow|expect)\s*\(\s*unsafe_code\b',
+]
+reason = """
+ADR-0035: "SQL is structured by the authority only. No query text, table name
+or column name comes from a client; every value is a bound parameter." The
+state layer's SQL is static text; this rule is the tripwire for the ordinary
+way that erodes -- a `format!` that splices a value into a statement.
+
+A regex cannot prove SQL is static: a string assembled across lines, or by
+`concat!`, or passed through a helper, evades it. The actual property rests on
+the code having no such helper, and on tests that store SQL-shaped values as
+data. Hygiene, not containment.
+"""
+
 # ===========================================================================
 # Documentation
 # ===========================================================================
@@ -382,53 +438,67 @@ protocols; it does not link them.  Linking would put authority code in a
 process a user launches directly, with that user's privileges.
 """
 
-# The TCB's dependency set is a load-bearing claim of ADR-0019, and as of M3c
-# it is NO LONGER EMPTY.  Dev-dependencies (proptest, serde_json) are excluded
-# because they are never linked; tools/dwcheck/tests prove a normal dependency
-# is not excluded.
+# The TCB's dependency set is a load-bearing claim of ADR-0019. As of M3c it
+# was no longer empty; as of M3d it includes SQLite's C. Dev-dependencies
+# (proptest, serde_json) are excluded because they are never linked;
+# tools/dwcheck/tests prove a normal dependency is not excluded.
 #
 # The rule has NOT become "the authority may use dependencies".  It has become
-# "the closure must equal the list below, which somebody reviewed".
+# "the closure must equal the lists below, which somebody reviewed".
 #
-# TWO GATES, OF DIFFERENT STRENGTH.  Do not conflate them.
+# THREE GATES, OF DIFFERENT STRENGTH.  Do not conflate them.
 #
 #   RS004  manifest allowlist.          Offline.
 #   RS006  OFFLINE CONSERVATIVE closure, from Cargo.lock.  Runs with no
 #          toolchain, no network and no registry index, which is why it runs
 #          on every contributor's machine.  A lockfile pins VERSIONS, not
-#          FEATURE SELECTIONS, so it lists optional dependencies nothing
-#          activates -- it OVER-approximates, and the `optional_edges` below
-#          are what keep it usable.  It is a tripwire.  It is NOT evidence of
-#          what the binary links.
+#          FEATURE SELECTIONS or dependency KINDS, so it lists optional
+#          dependencies nothing activates and cannot tell a build tool from a
+#          linked crate: it accepts a crate reviewed in EITHER list below.  It
+#          is a tripwire.  It is NOT evidence of what the binary links.
 #   RS010  EXACT FEATURE-RESOLVED closure, from `cargo metadata --locked`,
-#   RS011  with activation computed per package from its own activated
-#   RS012  features.  This is the one that describes the artifact.  It needs
-#   RS013  cargo, so it is `dwcheck closure` rather than `dwcheck all`, and
-#          `make arch` -- inside `make check` -- runs both.
+#   RS011  with activation computed per package, per dependency DECLARATION
+#   RS012  (kind and target), from each package's own activated features.
+#   RS013  This is the one that describes the artifact.  It needs cargo, so it
+#   RS014  is `dwcheck closure` rather than `dwcheck all`, and `make arch` --
+#   RS015  inside `make check` -- runs both.
 #
 # RS010 fails on a crate that is linked and not reviewed; RS011 on a reviewed
 # crate that is no longer linked, because an inventory that only ever grows
 # stops being a review; RS012 on an `optional_edges` entry whose edge has
-# become ACTIVE; RS013 on one that names no edge at all.
+# become ACTIVE; RS013 on one that names no edge at all; RS014 on a build-only
+# crate that is not reviewed; RS015 on a build list entry that is not a
+# build-only dependency.  `dwcheck closure --report` prints what was measured.
 #
-# WHAT IS HERE AND WHY
+# WHAT IS LINKED, AND WHY  (measured, ADR-0038 for M3c, ADR-0039 for M3d)
 #
-#   toml            the M3c policy loader's parser.  ADR-0035 accepted it;
-#   toml_parser     ADR-0038 records what the resolver actually produced, which
-#   toml_datetime   is one crate FEWER than ADR-0035 measured: the loader walks
-#   serde_spanned   toml::de::DeTable, available behind the `parse` feature
-#   winnow          alone, so `serde_core` never enters.  No serde_derive, no
-#                   syn, no quote, no proc-macro2, no native code, no build
-#                   script that compiles anything.
+#   toml, toml_parser,      the M3c policy loader.  Three of these parse the
+#   toml_datetime,          policy text -- toml, toml_parser, winnow -- and
+#   serde_spanned, winnow   `fuzz/` targets them.
 #
-# Three of these parse the policy text itself -- toml, toml_parser, winnow --
-# and that is the concentration of risk this entry creates.  `fuzz/` has
-# coverage-guided targets for the loader, and
-# crates/dwkd-authority/tests/fuzz_smoke.rs runs the same invariants on stable.
+#   rusqlite                kernel.db (M3d).  default-features = false,
+#   libsqlite3-sys          features = ["bundled"]: SQLite 3.53.2's
+#   bitflags                amalgamation, 269,376 lines of C compiled INTO the
+#   fallible-iterator       authority.  `forbid(unsafe_code)` governs
+#   fallible-streaming-     DireWolf's Rust and does not reach it.
+#     iterator              libsqlite3-sys parses the database file, which is
+#   smallvec                the concentration of risk this entry creates.
 #
-# NOT here, and deliberately: rusqlite, libsqlite3-sys, rustix, linux-raw-sys,
-# sha2 and the rest of ADR-0035's set.  Each enters in the milestone that first
-# LINKS it (M3d, M3e), not in the one that decided it could.
+#   sha2, digest,           the audit chain and every content-derived identity
+#   block-buffer,           (M3d).  RustCrypto, pure Rust, no default features.
+#   crypto-common,
+#   hybrid-array, typenum,
+#   cpufeatures, cfg-if
+#
+#   libc                    TARGET-CONDITIONAL: cpufeatures depends on it for
+#                           aarch64 (Linux, Android, Apple) and loongarch64
+#                           only, where it detects CPU features.  The exact
+#                           gate takes the union over every target Cargo
+#                           resolved, because the allowlist must hold on each
+#                           supported one; it is not linked on x86_64.
+#
+# NOT here, and deliberately: rustix and linux-raw-sys.  They enter with peer
+# credentials in M3e, the milestone that first LINKS them.
 #
 # M2 briefly added unicode-normalization here, for NFC comparison of object
 # keys.  ADR-0034 removed the need: DWKP rejects every undeclared member and
@@ -441,11 +511,57 @@ process a user launches directly, with that user's privileges.
 [authority]
 crates = ["dwkd-authority", "dwk-proto"]
 allowed_third_party = [
+    # M3c: the policy loader.
     "toml",
     "toml_parser",
     "toml_datetime",
     "serde_spanned",
     "winnow",
+    # M3d: kernel.db -- rusqlite and the bundled SQLite C.
+    "rusqlite",
+    "libsqlite3-sys",
+    "bitflags",
+    "fallible-iterator",
+    "fallible-streaming-iterator",
+    "smallvec",
+    # M3d: SHA-256.
+    "sha2",
+    "digest",
+    "block-buffer",
+    "crypto-common",
+    "hybrid-array",
+    "typenum",
+    "cpufeatures",
+    "cfg-if",
+    # Target-conditional, via cpufeatures on aarch64 and loongarch64.
+    "libc",
+]
+
+# Crates that are NOT linked into the authority and DO execute while it is
+# built.  Reviewed separately so that neither list lies: a build tool listed as
+# linked would overstate the binary, and an unlisted one would hide code that
+# runs with the builder's privileges.
+#
+#   cc                 compiles the SQLite amalgamation (libsqlite3-sys's
+#   find-msvc-tools    build script); `cc` locates MSVC on Windows through
+#   shlex              find-msvc-tools and splits CFLAGS with shlex.
+#
+#   pkg-config, vcpkg  libsqlite3-sys's `min_sqlite_version_3_34_1` default
+#                      feature pulls them in.  With `bundled` the build script
+#                      takes the bundled path and does not consult either, but
+#                      they are compiled and linked INTO the build script, so
+#                      they are listed.  Removing them would need
+#                      libsqlite3-sys's default features off, which rusqlite
+#                      does not expose; ADR-0039 records this.
+#
+# Also executing at build time, and already counted above because they are
+# linked: the build scripts of libsqlite3-sys (drives the C compiler) and libc.
+allowed_build_third_party = [
+    "cc",
+    "find-msvc-tools",
+    "shlex",
+    "pkg-config",
+    "vcpkg",
 ]
 
 # ---------------------------------------------------------------------------

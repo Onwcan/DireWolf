@@ -14,7 +14,8 @@ DW := $(PY) scripts/dw.py
 
 .DEFAULT_GOAL := help
 .PHONY: help dev check test lint fmt fmt-check typecheck arch schema schema-check \
-        eval eval-check eval-one capability-evidence policy-benchmark fuzz-smoke \
+        eval eval-check eval-one capability-evidence policy-benchmark \
+        authority-state-evidence authority-write-probe fuzz-smoke \
         fuzz security docs \
         preflight tools hooks clean
 
@@ -65,6 +66,12 @@ capability-evidence: ## The 10^6 delegation-chain capability campaign (DW_EVIDEN
 
 policy-benchmark: ## The 300-rule policy evaluation benchmark (release; p99 < 200us)
 	@$(DW) policy-benchmark
+
+authority-state-evidence: ## M3d real-file state evidence: crash windows, audit, contention, latency
+	@$(DW) authority-state-evidence
+
+authority-write-probe: ## Attempt runtime writes to authority state as DW_PROBE_AS (two identities)
+	@$(DW) authority-write-probe
 
 fuzz-smoke:      ## Stable mutation fuzzing of dwk-proto (not coverage-guided)
 	@$(DW) fuzz-smoke

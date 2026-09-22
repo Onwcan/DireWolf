@@ -12,13 +12,16 @@
 //! after reading a hostile page or `origin = interactive` for an unattended
 //! job. So they live in `kernel.db` and are derived kernel-side.
 //!
-//! **M3c has no `kernel.db`.** What it has is this type, which is deliberately
-//! *not* reachable from the wire: no DWKP message carries these fields, there
-//! is no constructor from runtime JSON, and there is no generic map
-//! constructor at all. Tests build one directly; M3d will build one from
-//! kernel-owned state. Until M3d, these values are typed and trusted **by
-//! construction rather than by verification**, and saying otherwise would be
-//! claiming a control that does not exist yet.
+//! **This module has no `kernel.db`, and never will.** What it has is this
+//! type, which is deliberately *not* reachable from the wire: no DWKP message
+//! carries these fields, there is no constructor from runtime JSON, and there
+//! is no generic map constructor at all. Tests build one directly. For a live
+//! decision, `crate::state` builds one — in one place — from the run's
+//! kernel-owned row (M3d, ADR-0039 §10). Where a value's real producer does
+//! not exist yet (origin other than `api`, a rise in taint), that row holds
+//! the restrictive derivation, so those values are kernel-owned but not yet
+//! end-to-end proven, and saying otherwise would be claiming a control that
+//! does not exist yet.
 //!
 //! # Two things a caller may never state
 //!
@@ -270,8 +273,8 @@ impl ConfigFlags {
 /// `std::env`, expands a word, looks up a home directory or consults a shell.
 /// The policy engine must not be able to ask the process environment what
 /// `${WORKSPACE}` means, because the process environment is not the thing that
-/// pinned the workspace root — [`PathAnchors`] is, and M3d fills it from
-/// kernel-owned state.
+/// pinned the workspace root — [`PathAnchors`] is, and M4's canonicaliser
+/// fills it from kernel-owned state (M3d leaves every anchor unresolved).
 ///
 /// [`POLICY.md`]: ../../../../../docs/POLICY.md
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]

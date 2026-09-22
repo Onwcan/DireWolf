@@ -145,8 +145,11 @@ dependency set is a load-bearing claim of
 [ADR-0019](docs/adr/0019-language-rationale-v2.md), not an aspiration. You need
 a **new ADR amending** it (never an edit to ADR-0019, which is accepted and
 therefore immutable), a reviewer other than yourself, and an entry in
-`[authority].allowed_third_party` in `architecture.toml`. The check covers the
-whole transitive closure: a harmless-looking crate that pulls in an HTTP stack
+`[authority].allowed_third_party` in `architecture.toml` — or, for a crate that
+only *executes while the authority is built* and is never linked (a C compiler
+driver, a build script's helper), in `[authority].allowed_build_third_party`.
+The two lists are reviewed separately and must not be mixed to silence the
+gate. The check covers the whole transitive closure: a harmless-looking crate that pulls in an HTTP stack
 breaks the claim exactly as thoroughly as adding the HTTP stack.
 
 [ADR-0035](docs/adr/0035-m3-authority-dependency-set.md) reviews the four the
@@ -164,18 +167,39 @@ loader walks `toml::de::DeTable` (behind the `parse` feature alone) rather than
 `toml::Value` (which needs `serde` and carries no source spans). Re-measure;
 do not copy the previous ADR's table.
 
+[ADR-0039](docs/adr/0039-durable-authority-state.md) is the second, and the
+reason re-measuring matters: measuring SQLite's closure found that the
+exact-closure checker had been judging optionality **by crate name**, so a
+crate declared once as optional and once as required (`rusqlite` declares
+`libsqlite3-sys` that way) silently dropped out of the linked set — with all of
+SQLite's C. It found that ADR-0035's amalgamation figures were the SQLCipher
+copy's, and that five crates execute during the build without being linked.
+`python -m dwcheck closure --report` prints the linked set, the build-only set,
+the crates with build scripts and the crates that link native code; read it
+before and after any dependency change.
+
 **`dwk-proto`** — treat exactly as `dwkd-authority`: it is linked into it from
 M3, and `dwcheck` already checks it as TCB. Dev-dependencies are not linked and
 not counted, but they are still audited by `cargo deny`.
 
-*The dependency inventory.* **TCB (`dwkd-authority` and `dwk-proto`): five,
-all of them the policy loader's TOML chain** — `toml`, `toml_parser`,
+*The dependency inventory.* **TCB (`dwkd-authority` and `dwk-proto`): twenty
+linked crates.** The policy loader's TOML chain — `toml`, `toml_parser`,
 `toml_datetime`, `serde_spanned` and `winnow`, pinned exactly, added at M3c
-([ADR-0038](docs/adr/0038-policy-evaluation-phases-and-composition.md)). No
-derive macro, no proc-macro, no native code, no build script that compiles
-anything. Three of them parse the policy text, which is why the loader has fuzz
-targets in `fuzz/` and a stable mutation harness in
-`crates/dwkd-authority/tests/fuzz_smoke.rs`. M2 briefly added
+([ADR-0038](docs/adr/0038-policy-evaluation-phases-and-composition.md)); three
+of them parse the policy text, which is why the loader has fuzz targets in
+`fuzz/` and a stable mutation harness in
+`crates/dwkd-authority/tests/fuzz_smoke.rs`. And, since M3d
+([ADR-0039](docs/adr/0039-durable-authority-state.md)), `kernel.db` and the
+audit hash: `rusqlite` and `libsqlite3-sys` (the bundled **SQLite 3.53.2 C
+amalgamation**, compiled into the authority) with `bitflags`,
+`fallible-iterator`, `fallible-streaming-iterator` and `smallvec`; `sha2` with
+`digest`, `block-buffer`, `crypto-common`, `hybrid-array`, `typenum`,
+`cpufeatures` and `cfg-if`; and `libc`, which `cpufeatures` links on aarch64
+and loongarch64 only. No derive macro and no proc-macro. **Build-only, never
+linked, reviewed in their own list:** `cc`, `find-msvc-tools` and `shlex`
+(which compile the amalgamation), and `pkg-config` and `vcpkg` (a default
+feature of `libsqlite3-sys` that `rusqlite` does not let a dependent disable;
+the bundled build consults neither). M2 briefly added
 `unicode-normalization` and its two dependencies for NFC key comparison;
 [ADR-0034](docs/adr/0034-protocol-depends-on-no-unicode-database.md) removed
 the need and the crates, and `dwk-proto`'s own closure is still empty.
@@ -235,14 +259,14 @@ The workspace sets `unsafe_code = "forbid"` and **no workspace crate contains
 `unsafe`** — `dwk-proto` included, whose own dependency closure is still empty
 ([ADR-0034](docs/adr/0034-protocol-depends-on-no-unicode-database.md)).
 
-Since M3c that no longer describes the whole of what the authority plane links:
-the TOML chain is five crates this workspace does not lint. They are pure Rust
-with no `unsafe` of consequence today, and that is a fact about their current
-versions rather than something `forbid` enforces — the lint governs this
-workspace's code, not its dependencies'. When M3d links SQLite's C
-amalgamation the gap stops being theoretical, and
-[ADR-0035](docs/adr/0035-m3-authority-dependency-set.md) says so in as many
-words.
+That no longer describes the whole of what the authority plane links, and
+since M3d the gap is not theoretical. The lint governs this workspace's code,
+not its dependencies': the authority links twenty crates this workspace does
+not lint, and one of them, `libsqlite3-sys`, compiles **SQLite's C
+amalgamation — 269,376 lines — into the authority process**
+([ADR-0039](docs/adr/0039-durable-authority-state.md) §15). "DireWolf's Rust
+contains no `unsafe`" is true. "The authority contains no unsafe or native
+code" is false, and nothing in this repository may say it.
 
 That is not a promise it never will. `dwkd-broker` will eventually need
 `openat2` with `RESOLVE_*` flags, `fexecve` and rlimits, and some of that is

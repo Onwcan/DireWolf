@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:direwolf:schema:dwkp:direwolf.authority.refused:1",
-  "title": "direwolf.authority.refused v1",
+  "$id": "urn:direwolf:schema:dwkp:direwolf.authority.refused:2",
+  "title": "direwolf.authority.refused v2",
   "description": "The request was well-formed; the authority's state refused it.",
   "type": "object",
   "properties": {
@@ -30,8 +30,8 @@
     },
     "schema_version": {
       "type": "integer",
-      "minimum": 1,
-      "maximum": 1,
+      "minimum": 2,
+      "maximum": 2,
       "x-direwolf-type": "Version"
     },
     "ts": {
@@ -81,8 +81,8 @@
   "x-direwolf-message-type": "response",
   "x-direwolf-schema": "direwolf.authority.refused",
   "x-direwolf-schema-versions": {
-    "min": 1,
-    "max": 1
+    "min": 2,
+    "max": 2
   },
   "x-direwolf-envelope-versions": {
     "min": 1,
@@ -112,7 +112,7 @@
         },
         "reason": {
           "type": "string",
-          "enum": ["STALE_EPOCH", "LEASE_HELD", "IDEMPOTENCY_CONFLICT", "UNKNOWN_AGENT_PROFILE", "UNKNOWN_RUN"],
+          "enum": ["STALE_EPOCH", "LEASE_HELD", "IDEMPOTENCY_CONFLICT", "ADMISSION_ENDED", "UNKNOWN_AGENT_PROFILE", "UNKNOWN_RUN", "NO_CANONICAL_ACTION"],
           "x-direwolf-type": "RefusalReason",
           "description": "Why. Closed, and narrower still per operation."
         }
@@ -128,9 +128,9 @@
           "ACQUIRE_LEASE": ["LEASE_HELD"],
           "RELEASE_LEASE": ["STALE_EPOCH"],
           "HEARTBEAT": ["STALE_EPOCH"],
-          "ADMIT_RUN": ["STALE_EPOCH", "IDEMPOTENCY_CONFLICT", "UNKNOWN_AGENT_PROFILE"],
+          "ADMIT_RUN": ["STALE_EPOCH", "IDEMPOTENCY_CONFLICT", "ADMISSION_ENDED", "UNKNOWN_AGENT_PROFILE"],
           "RELEASE_RUN": ["STALE_EPOCH"],
-          "QUERY_AUTHORITY": ["STALE_EPOCH", "UNKNOWN_RUN"]
+          "QUERY_AUTHORITY": ["STALE_EPOCH", "UNKNOWN_RUN", "NO_CANONICAL_ACTION"]
         }
       }
     }

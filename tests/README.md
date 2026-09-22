@@ -11,6 +11,7 @@ Where a test goes is decided by *what it needs*, not by what it is about.
 | `fuzz/` | cargo-fuzz targets; bodies shared with `crates/dwk-proto/tests/fuzz_smoke.rs` | nightly, cargo-fuzz, a C++ compiler |
 | `tools/dwcheck/tests/` | Unit tests for the boundary checker itself | the package importable |
 | `tests/architecture/` | Repository-level checks: the boundary rules and the quality gates | the tools installed |
+| `tests/authority/` | Deployment verification run **as a different operating-system user**: `runtime_write_probe.py` attempts the runtime's forbidden writes to authority state (`make authority-write-probe`) | a second identity; otherwise it reports NOT EXERCISED and fails |
 | `tests/integration/` | Cross-process tests: runtime ↔ authority ↔ broker | **M3+**; does not exist yet |
 | `evals/` | The evaluation harness, its suites, fixtures and baseline | the harness installed (`make eval`) |
 
@@ -42,6 +43,23 @@ byte, so they are driven by shared data rather than written twice:
 **Rust integration tests** run the real binary. `crates/direwolf-cli/tests/cli.rs`
 asserts the exit codes and output a user actually sees, which is the contract a
 unit test cannot check.
+
+**Authority state tests (M3d)** — `crates/dwkd-authority/tests/state_*.rs` —
+drive the real store: real directories, real SQLite files, real `audit.log`s,
+and DWKP requests passed through `dwk_proto`'s real decoder. Nothing is mocked.
+Where a test tampers with a file or reads a row the API does not expose, it
+opens its own `rusqlite` connection, as an attacker with file access would.
+`state_crash.rs` covers every crash window both in process (a crash hook that
+stops the authority at a named point) and by killing a child process, then
+restarts on the files left behind. `state_wire.rs` sends every response the
+state layer produces back through the encoder and decoder, and
+`state_restart.rs` kills a real authority after committing an admission whose
+response was never delivered, restarts it, and proves the same key can never
+admit a second run (ADR-0040).
+`make authority-state-evidence` runs the suites, a diagnostic latency run and
+the closure report together; `state_probe.rs` holds the two `#[ignore]`d
+fixtures that need something `cargo test` cannot provide — a second user, and
+a quiet machine.
 
 **`tests/architecture/`** is the unusual one, and it is the point of M1. It
 contains two things:

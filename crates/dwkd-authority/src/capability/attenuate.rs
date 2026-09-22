@@ -19,7 +19,8 @@
 //! returns it cannot be reached otherwise.
 //!
 //! Fresh authority is not made here. It is minted from a profile, the active
-//! skills, the parent run and the ceiling — and that needs M3c and M3d.
+//! skills, the parent run and the ceiling, at admission, by `crate::state`
+//! (M3d) — which calls this module's containment and never the reverse.
 //!
 //! [`CAPABILITIES.md`]: ../../../../../docs/CAPABILITIES.md
 

@@ -18,6 +18,24 @@ Three protocols, three different jobs and three different threat models. Conflat
 > table, no dedupe window. Those are M3 and later, and nothing below that
 > depends on them is implemented. Decoding a message successfully means it is
 > well-formed; it does not mean it is authorised.
+>
+> **Implementation status (M3d).** The *semantics* behind the defined
+> authority operations now exist in `dwkd-authority`'s state layer, over
+> `kernel.db` ([ADR-0039](adr/0039-durable-authority-state.md),
+> [ADR-0040](adr/0040-m3d-reconciliation-admission-across-tenures-and-undecidable-proposals.md)): epoch assignment and fencing, lease expiry, restart
+> invalidation, and durable `AdmitRun` idempotency — a key never admits
+> twice, a retry within the admitting tenure gets the recorded grant, and a
+> retry after the run has ended is `ADMISSION_ENDED`. `QueryAuthority`
+> reports effective authority; a `proposed` action is refused with
+> `NO_CANONICAL_ACTION` until M4 can build the complete canonical action
+> policy decides on, so no decision is made on facts the kernel would have to
+> invent and no rule is attributed to an evaluation that did not run. An
+> in-process dispatch answers each decoded request with exactly the response
+> body M3e will send, and a test sends every one of them — including every
+> refusal pair the decoder accepts — back through the real encoder and
+> decoder. Every M3 request now has a truthful wire answer. **There is still
+> no transport and no peer-credential check** (M3e); the caller's identity is
+> asserted, not authenticated.
 
 ---
 
@@ -127,7 +145,7 @@ Unix domain socket at `$DIREWOLF_HOME/kernel.sock`, mode 0600, owned by the kern
 The authoritative inventory — initiator, receiver, owning milestone, whether the operation can cause an effect, and the second-path argument for each — is generated from `dwk-proto` into **[DWKP_OPERATIONS.md](DWKP_OPERATIONS.md)**. As of M2:
 
 - **Defined by M2:** `Handshake` → `HandshakeAccepted`, `Heartbeat` → `Ack`, `AcquireLease` → `LeaseGrant{session_id, epoch}`, `ReleaseLease` → `Ack`; any of them may be answered with `direwolf.protocol.error`. Their *semantics* (epoch assignment, fencing, lease expiry) are M3/M8; M2 defined only their shape, and M3 did not change it.
-- **Defined by M3a:** `AdmitRun` → `RunGrant`, `ReleaseRun` → `Ack`, `QueryAuthority` → `EffectiveAuthority` ([ADR-0036](adr/0036-m3-authority-operations-and-the-capability-wire-form.md)), and `AuthorityRefusal` as an alternative answer to any of those plus `Heartbeat`, `AcquireLease` and `ReleaseLease` (§2.1). These carry the authority vocabulary — capabilities, grants, profiles, policy revisions and decisions. `AdmitRun` is the only one that carries an `idempotency_key`, and carries it mandatorily, because it is the only one whose retry would otherwise mint a second grant (§1). A decision's `effect` is `ALLOW` or `DENY`: policy's own function is three-valued ([ADR-0006](adr/0006-policy-and-capability-boundary.md)) and M3c computes all three, but an authority with no approval registry cannot obtain an approval and therefore refuses, which is the direction [APPROVALS.md](APPROVALS.md) already fixes for a run with no human present. `REQUIRE_APPROVAL` reaches the wire at M6, with a `schema_version` bump, rather than sitting here as a value nothing can satisfy and every client has to guess a behaviour for. As above, a defined wire form is a shape and not an implementation: the daemon that answers them is M3b–e.
+- **Defined by M3a:** `AdmitRun` → `RunGrant`, `ReleaseRun` → `Ack`, `QueryAuthority` → `EffectiveAuthority` ([ADR-0036](adr/0036-m3-authority-operations-and-the-capability-wire-form.md)), and `AuthorityRefusal` as an alternative answer to any of those plus `Heartbeat`, `AcquireLease` and `ReleaseLease` (§2.1). These carry the authority vocabulary — capabilities, grants, profiles, policy revisions and decisions. `AdmitRun` is the only one that carries an `idempotency_key`, and carries it mandatorily, because it is the only one whose retry would otherwise mint a second grant (§1). A decision's `effect` is `ALLOW` or `DENY`: policy's own function is three-valued ([ADR-0006](adr/0006-policy-and-capability-boundary.md)) and M3c computes all three, but an authority with no approval registry cannot obtain an approval and therefore refuses, which is the direction [APPROVALS.md](APPROVALS.md) already fixes for a run with no human present. `REQUIRE_APPROVAL` reaches the wire at M6, with a `schema_version` bump, rather than sitting here as a value nothing can satisfy and every client has to guess a behaviour for. As above, a defined wire form is a shape and not an implementation: the state that answers them is M3d's, and the daemon that serves them is M3e's.
 - **Reserved:** every other operation below, including `ToolInvoke`. A reserved operation has no message name, no schema and no decoder; a message naming one is `PROTOCOL_UNKNOWN_OPERATION`. `QueryInvocationStatus` ([RELIABILITY.md](RELIABILITY.md)) is reserved too. `ToolInvoke` stays reserved through M3 because its request must name a tool from the canonical inventory with arguments the kernel canonicalises, and neither the tool nor the canonicaliser exists before M4; the alternatives were an opaque argument map or a duplicate of `QueryAuthority`, and both fail the protocol change review.
 - **Not encoded in M2:** the approval binding (its eleven fields are fixed by [ADR-0021](adr/0021-approval-binding-v2.md); M6 encodes them), capability tokens, budget leases and denials.
 
@@ -188,7 +206,9 @@ direwolf.authority.refused (AuthorityRefusal)   response, causation_id required
   required operation   ACQUIRE_LEASE | RELEASE_LEASE | HEARTBEAT
                        | ADMIT_RUN | RELEASE_RUN | QUERY_AUTHORITY
   required reason      STALE_EPOCH | LEASE_HELD | IDEMPOTENCY_CONFLICT
-                       | UNKNOWN_AGENT_PROFILE | UNKNOWN_RUN
+                       | ADMISSION_ENDED | UNKNOWN_AGENT_PROFILE | UNKNOWN_RUN
+                       | NO_CANONICAL_ACTION
+  schema_version 2 only (ADR-0040)
 ```
 
 Both fields are closed, **and so is their combination**: the schema carries the
@@ -196,14 +216,24 @@ permitted pairs and a pair it does not list is rejected by the decoder in both
 languages, so a reason an operation cannot produce stops at the boundary instead
 of being believed downstream.
 
-| | `STALE_EPOCH` | `LEASE_HELD` | `IDEMPOTENCY_CONFLICT` | `UNKNOWN_AGENT_PROFILE` | `UNKNOWN_RUN` |
-|---|:-:|:-:|:-:|:-:|:-:|
-| `ACQUIRE_LEASE` | | ✓ | | | |
-| `RELEASE_LEASE` | ✓ | | | | |
-| `HEARTBEAT` | ✓ | | | | |
-| `ADMIT_RUN` | ✓ | | ✓ | ✓ | |
-| `RELEASE_RUN` | ✓ | | | | |
-| `QUERY_AUTHORITY` | ✓ | | | | ✓ |
+| | `STALE_EPOCH` | `LEASE_HELD` | `IDEMPOTENCY_CONFLICT` | `ADMISSION_ENDED` | `UNKNOWN_AGENT_PROFILE` | `UNKNOWN_RUN` | `NO_CANONICAL_ACTION` |
+|---|:-:|:-:|:-:|:-:|:-:|:-:|:-:|
+| `ACQUIRE_LEASE` | | ✓ | | | | | |
+| `RELEASE_LEASE` | ✓ | | | | | | |
+| `HEARTBEAT` | ✓ | | | | | | |
+| `ADMIT_RUN` | ✓ | | ✓ | ✓ | ✓ | | |
+| `RELEASE_RUN` | ✓ | | | | | | |
+| `QUERY_AUTHORITY` | ✓ | | | | | ✓ | ✓ |
+
+`ADMISSION_ENDED` means the key's admission exists and its run has ended —
+released, or reaped when the lease it was admitted under ended: the key never
+admits again, and the remedy is a new admission under a new key. It is not
+`IDEMPOTENCY_CONFLICT`, which means the caller sent a different request under
+the key. `NO_CANONICAL_ACTION` means a `proposed` capability does not
+determine the complete canonical action policy decides on — outside the
+vocabulary, an `fs` or `process` resource M4 has not identified, or facts the
+request cannot carry — so nothing was evaluated
+([ADR-0040](adr/0040-m3d-reconciliation-admission-across-tenures-and-undecidable-proposals.md)).
 
 `Handshake` cannot be refused: it runs before there is authority state to refuse
 against. `AcquireLease` cannot be fenced, because it is the operation that issues
@@ -217,9 +247,14 @@ probe for which sessions, leases and runs exist. Release operations stay
 idempotent: releasing a run or a lease the kernel no longer records is
 acknowledged, not refused.
 
-The reason set is sized for the operations M3 actually has. Adding one — M11's
-unknown skill is the first known — widens a closed enum, which is breaking, and
-bumps `schema_version` ([ADR-0036](adr/0036-m3-authority-operations-and-the-capability-wire-form.md) §10).
+The reason set is sized for the operations M3 actually has. Adding one widens
+a closed enum, which is breaking, and bumps `schema_version`
+([ADR-0036](adr/0036-m3-authority-operations-and-the-capability-wire-form.md) §10).
+ADR-0040 did exactly that for `ADMISSION_ENDED` and `NO_CANONICAL_ACTION`:
+`direwolf.authority.refused`, `direwolf.authority.effective` and
+`direwolf.run.grant` are at version 2, and — because DWKP's peers ship together
+and no version has been released — support version 2 only. M11's unknown skill
+is the next one known to be coming.
 
 ### The second-path rule
 
@@ -349,7 +384,7 @@ Design properties. At M2 only the parser row is implemented; the rest need the t
 | Other local processes cannot impersonate the runtime | Peer credential check on connect |
 | Zombie runtime cannot act | Epoch fencing; the `STALE_EPOCH` refusal withholds the current epoch, so being fenced tells a caller nothing it could use to unfence itself |
 | A refusal is not a probe | One `UNKNOWN_RUN` answer for "never existed" and "already released"; no `UNKNOWN_LEASE`; releases stay idempotent |
-| Replay of a request that mints or spends authority | Idempotency key scoped to the authenticated peer and session, bound to the canonical request, + kernel-side dedupe window (M3d) |
+| Replay of a request that mints or spends authority | Idempotency key scoped to the authenticated peer and session, bound to the canonical request (not the epoch), checked only after the epoch fence, and recorded in `kernel.db` for the life of the store — no finite dedupe window, because a window reopens duplicate admission for any retry slower than it. A retry receives the recorded grant only while its run is active under the caller's lease; after that it is `ADMISSION_ENDED`, never a second admission and never a replay of ended authority ([ADR-0039](adr/0039-durable-authority-state.md) §8, [ADR-0040](adr/0040-m3d-reconciliation-admission-across-tenures-and-undecidable-proposals.md)) |
 | Gateway compromise | Gateway holds no authority; approvals relayed, not generated |
 | Parser exploitation | Rust parser, `#![forbid(unsafe_code)]` and no third-party dependency, 1 MiB frame cap, depth 32, lexical duplicate-key rejection; fuzzed with libFuzzer weekly and on protocol pull requests, plus a stable mutation harness in every test run (M2) |
 | Resource exhaustion | Bounded in-flight, rate limits, write timeouts |

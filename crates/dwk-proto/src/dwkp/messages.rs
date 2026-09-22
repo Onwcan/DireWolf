@@ -193,9 +193,13 @@ wire_struct! {
     /// no resource, reserves nothing and performs no effect: it is the question
     /// M3 exists to answer, asked without doing anything about the answer.
     AuthorityQuery: reject {
-        /// A proposed action, in the kernel's capability grammar. When present
-        /// the response carries a `decision` for exactly this action; when
-        /// absent the response reports effective authority only.
+        /// A proposed action, in the kernel's capability grammar. When absent
+        /// the response reports effective authority only. When present, the
+        /// response is a `decision` for exactly this action **only if** the
+        /// authority can construct the complete canonical action it names;
+        /// otherwise it is `direwolf.authority.refused` with
+        /// `NO_CANONICAL_ACTION`. Through M3e that is every proposal, because
+        /// capability text alone never determines one (ADR-0040).
         optional proposed: CapabilityText,
     }
 }
@@ -216,13 +220,17 @@ wire_struct! {
         /// Whether policy permits it (ADR-0006 gate two). Both gates always
         /// run: an ALLOW needs both, and neither substitutes for the other.
         required policy_result: GateResult,
-        /// The id of the rule that decided.
+        /// The id of the rule that produced the effect: the matched rule, the
+        /// narrowing postcondition, or the policy's own mandatory `default`
+        /// rule when nothing matched before it. Never a stand-in for a rule
+        /// that did not run (ADR-0040).
         required rule_id: RuleId,
         /// Where that rule is written: file and line.
         required rule_source: RuleSource,
-        /// The capability the action needed, when the kernel could name one.
-        /// Absent when the proposal was not in the kernel's vocabulary at all.
-        optional required_capability: CapabilityText,
+        /// The capability the action needed. Always present: a decision is
+        /// only ever made about a canonical action, and every canonical action
+        /// requires one (ADR-0040; optional in version 1).
+        required required_capability: CapabilityText,
     }
 }
 
@@ -242,9 +250,11 @@ wire_struct! {
         /// What it asked for and did not get.
         required withheld: WithheldSet,
         /// The decision for the `proposed` action, present exactly when the
-        /// query carried one. The kernel guarantees the correspondence; a
-        /// reader that asked and received none must treat the answer as
-        /// unusable rather than as an allow.
+        /// query carried one the authority could decide. A proposal it cannot
+        /// decide is refused instead (`NO_CANONICAL_ACTION`), so an
+        /// `EffectiveAuthority` answering a proposal always carries its
+        /// decision. A reader that asked and received none must treat the
+        /// answer as unusable rather than as an allow.
         optional decision: AuthorityDecision,
     }
 }
@@ -260,14 +270,18 @@ wire_struct! {
 ///   `AcquireLease` carries none, so it cannot be fenced; it is the operation
 ///   that *issues* the epoch.
 /// * `LEASE_HELD` only where a lease is acquired (ADR-0011 point 2).
-/// * `IDEMPOTENCY_CONFLICT` and `UNKNOWN_AGENT_PROFILE` only on `AdmitRun`,
-///   the only operation with a key and the only one naming a profile.
+/// * `IDEMPOTENCY_CONFLICT`, `ADMISSION_ENDED` and `UNKNOWN_AGENT_PROFILE` only
+///   on `AdmitRun`, the only operation with a key and the only one naming a
+///   profile.
 /// * `UNKNOWN_RUN` only on `QueryAuthority`, never on `ReleaseRun`, which is
 ///   idempotent by shape: releasing a run the kernel does not hold is
 ///   acknowledged, because a retry must not be distinguishable from success.
+/// * `NO_CANONICAL_ACTION` only on `QueryAuthority`, the only operation that
+///   carries a proposed action (ADR-0040).
 ///
 /// A future milestone adding a reason adds it here and bumps
-/// `direwolf.authority.refused`'s `schema_version`.
+/// `direwolf.authority.refused`'s `schema_version`. ADR-0040 did: the table is
+/// version 2's.
 pub const REFUSALS: &[(&str, &[&str])] = &[
     ("ACQUIRE_LEASE", &["LEASE_HELD"]),
     ("RELEASE_LEASE", &["STALE_EPOCH"]),
@@ -277,11 +291,15 @@ pub const REFUSALS: &[(&str, &[&str])] = &[
         &[
             "STALE_EPOCH",
             "IDEMPOTENCY_CONFLICT",
+            "ADMISSION_ENDED",
             "UNKNOWN_AGENT_PROFILE",
         ],
     ),
     ("RELEASE_RUN", &["STALE_EPOCH"]),
-    ("QUERY_AUTHORITY", &["STALE_EPOCH", "UNKNOWN_RUN"]),
+    (
+        "QUERY_AUTHORITY",
+        &["STALE_EPOCH", "UNKNOWN_RUN", "NO_CANONICAL_ACTION"],
+    ),
 ];
 
 wire_struct! {

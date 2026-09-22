@@ -100,8 +100,9 @@ pub(crate) fn on_host(capability: Capability) -> CanonicalAction {
 /// The anchors the shipped profiles name, resolved to synthetic roots.
 ///
 /// `${WORKSPACE}` is `/workspace`, `~` is `/home/agent`, and DireWolf's own
-/// three are under `/opt/direwolf`. Invented, and standing in for what M3d
-/// will pin from kernel-owned state.
+/// three are under `/opt/direwolf`. Invented, and standing in for what M4's
+/// canonicaliser will pin from kernel-owned state; M3d leaves every anchor
+/// unresolved.
 pub(crate) fn anchors() -> PathAnchors {
     let build = |components: &[&str]| match synthetic::path(components) {
         Some(path) => path,

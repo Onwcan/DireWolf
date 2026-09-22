@@ -298,7 +298,17 @@ def check_lockfile_closure(config: ArchitectureConfig) -> list[Finding]:
             for parent, children in edges.items()
         }
 
-    allowed = set(config.authority_allowed_third_party)
+    # The lockfile does not say which edges are build-only either, so this
+    # conservative gate accepts a crate reviewed in EITHER list. Which list is
+    # right is the exact gate's question (RS010/RS014 against the resolved
+    # graph); this one only asks that nothing in the closure went unreviewed.
+    # In-tree authority crates (`dwk-proto`) are part of the TCB by name, not
+    # third-party dependencies of it.
+    allowed = (
+        set(config.authority_allowed_third_party)
+        | set(config.authority_allowed_build_third_party)
+        | set(config.authority_crates)
+    )
     findings: list[Finding] = []
     for crate in config.authority_crates:
         if crate not in edges:

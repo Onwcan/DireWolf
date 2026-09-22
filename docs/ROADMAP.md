@@ -75,13 +75,27 @@ M0 architecture ─ M1 foundation ─ M2 protocol+schemas
 
 ### M3 · Kernel core: policy, capabilities, audit
 **Deps:** M2. **The most important milestone in the project.**
-**Decomposed** into M3a (architecture decisions and wire forms — [ADR-0035](adr/0035-m3-authority-dependency-set.md), [ADR-0036](adr/0036-m3-authority-operations-and-the-capability-wire-form.md); `AdmitRun` carries a mandatory idempotency key, a wire decision is `ALLOW` or `DENY` until M6 can honour a third, and an authority-state refusal is a typed message distinct from both a protocol error and a policy denial), M3b (capabilities and attenuation — the typed vocabulary, the `⊑` lattice, attenuation with no widening path, and the declared-vs-canonical resource split of [ADR-0037](adr/0037-capability-specifications-and-canonical-authority-identities.md)), M3c (the policy engine -- two evaluation phases rather than one, a strict bounded TOML loader, closed typed predicates, reasons and obligations, `extends` restricted to a composition that cannot widen, three shipped packs with adversarial fixture suites, and the 300-rule target measured at a p99 of 3.6 us; [ADR-0038](adr/0038-policy-evaluation-phases-and-composition.md)), M3d (`kernel.db`, epochs, leases, admission, audit) and M3e (the real UDS authority server, peer credentials and hostile real-process evals). Each stage is verifiable on its own; the acceptance criteria below are the milestone's, not any one stage's.
+**Decomposed** into M3a (architecture decisions and wire forms — [ADR-0035](adr/0035-m3-authority-dependency-set.md), [ADR-0036](adr/0036-m3-authority-operations-and-the-capability-wire-form.md); `AdmitRun` carries a mandatory idempotency key, a wire decision is `ALLOW` or `DENY` until M6 can honour a third, and an authority-state refusal is a typed message distinct from both a protocol error and a policy denial), M3b (capabilities and attenuation — the typed vocabulary, the `⊑` lattice, attenuation with no widening path, and the declared-vs-canonical resource split of [ADR-0037](adr/0037-capability-specifications-and-canonical-authority-identities.md)), M3c (the policy engine -- two evaluation phases rather than one, a strict bounded TOML loader, closed typed predicates, reasons and obligations, `extends` restricted to a composition that cannot widen, three shipped packs with adversarial fixture suites, and the 300-rule target measured at a p99 of 3.6 us; [ADR-0038](adr/0038-policy-evaluation-phases-and-composition.md)), M3d (durable authority state -- `kernel.db` in a private state directory, epochs fenced across restarts, leases held by a connection rather than a uid, `AdmitRun` idempotency recorded forever and checked after the fence -- replayed while the run is live, `ADMISSION_ENDED` once it has ended ([ADR-0040](adr/0040-m3d-reconciliation-admission-across-tenures-and-undecidable-proposals.md)) -- kernel-owned policy inputs and a stored, content-derived policy revision, and a hash-chained `audit.log` written through a transactional outbox with a recovery rule for every crash window; [ADR-0039](adr/0039-durable-authority-state.md)) and M3e (the real UDS authority server, peer credentials and hostile real-process evals). Each stage is verifiable on its own; the acceptance criteria below are the milestone's, not any one stage's.
 
 M3c is also where the authority's third-party dependency closure stops being
 empty: five crates, all of them the TOML parser chain, pinned exactly and with
-no proc-macro and no native code. The rest of
-[ADR-0035](adr/0035-m3-authority-dependency-set.md)'s set -- SQLite above all
--- enters in the milestone that first links it.
+no proc-macro and no native code. M3d adds SQLite and SHA-256: fifteen more
+linked crates, among them the 269,376-line SQLite C amalgamation, and five
+build-only crates reviewed in a list of their own. `rustix`, the last of
+[ADR-0035](adr/0035-m3-authority-dependency-set.md)'s set, enters with M3e's
+peer credentials.
+
+M3d's acceptance evidence is `make authority-state-evidence` (real files:
+store refusal and quarantine, fencing, admission, both gates, the audit chain
+and its verifier, crash windows A--G in process and in a killed child, and
+contention) and `make authority-write-probe`, which attempts the runtime's
+forbidden writes as a second operating-system user and reports NOT EXERCISED
+rather than passing where no second user exists. What M3d does **not** deliver
+is a decision about a proposed action over DWKP -- `QueryAuthority` refuses one
+with `NO_CANONICAL_ACTION` until M4 can build the complete canonical action
+policy decides on -- nor anything reachable from outside the process: the authority is not served,
+no peer is authenticated, and the M3 acceptance line "runtime user cannot write
+`kernel.db`" is met only where the probe has been run with two identities.
 **Deliverables:** capability grammar + ⊑ lattice + attenuation; policy engine + TOML rule loader + explanation; three shipped profiles with fixture suites; hash-chained audit; **`dwkd-authority`** DWKP server with peer credential verification and **strict schema rejection** ([ADR-0023](adr/0023-dwkp-strict-schema.md)); epoch fencing (kernel is the epoch authority); `kernel.db` holding **every policy input** ([ADR-0028](adr/0028-policy-input-ownership.md)); the `dwkd-authority`/`dwkd-broker` split and the per-invocation authorisation format ([ADR-0018](adr/0018-authority-broker-split.md)).
 **Acceptance:** policy p99 < 200 µs at 300 rules; every decision carries `rule_source`; audit chain verifies; runtime user cannot write `kernel.db` (verified by attempting it).
 **Tests:** property tests for all eight lattice properties ([CAPABILITIES.md](CAPABILITIES.md) §3); 10⁶ generated delegation chains, zero escalations; policy fixtures including negative cases.

@@ -28,6 +28,17 @@ It is not sufficient for capability *tokens* to be unforgeable. Every field the 
 | Artifact `trust` / `provenance` | Taint derivation; memory promotion | The kernel created the artifact |
 | Memory item `trust` / `provenance` | The promotion gate | Recorded when the kernel admitted the write |
 
+**What exists as of M3d** ([ADR-0039](adr/0039-durable-authority-state.md) §10). Each admitted run has a `run_policy_input` row, and a live decision builds its policy context from that row and nothing else; no DWKP message has a field for any of these, and the decoder refuses each one as an unknown member. Where the producer the table names does not exist yet, the kernel derives the **restrictive** value and says so:
+
+| Field | Stored as | Derived today | Real producer |
+|---|---|---|---|
+| `taint_level` | `run_policy_input.taint`, a trigger forbids it falling | `none` at admission; raised only through one audited, monotonic kernel interface | tool results (M4), artifacts (M12), memory (M13) — nothing calls the interface yet |
+| `origin` | `run_policy_input.origin`, fixed by trigger | `api` for every run: unattended, because no attended channel exists | gateway, scheduler, M6's approval channel |
+| `privacy_class` | `run_policy_input.privacy`, fixed by trigger | the stricter of the agent profile's default and the workspace's ceiling; no kernel-recorded workspace reads as `LOCAL_ONLY` | operator records exist; runtime-path workspace binding is M4/M8 |
+| `workspace.sensitivity` | `workspace`, `session_workspace`; only ever made stricter | operator configuration | exists (operator, in process) |
+| Active skill set + trust levels | `run_skill` | the profile's baseline skills plus any named; unknown or quarantined contributes nothing | registry records: operator; verification: M11a |
+| Artifact / memory `trust`, `provenance` | not stored yet | — | M12, M13 |
+
 `runtime.db` keeps its own copies of these for local querying and display. **They are caches.** Where they disagree with `kernel.db`, the kernel's value is authoritative, the runtime's row is repaired, and the divergence is audited — a runtime whose cached taint differs from the kernel's is either buggy or compromised, and both are worth an alert.
 
 Memory and artifact *content* stays in `runtime.db` (it is large, and the kernel has no reason to hold it). Only the fields that gate a decision move.

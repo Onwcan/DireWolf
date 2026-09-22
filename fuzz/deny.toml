@@ -65,8 +65,8 @@ exceptions = []
 [bans]
 multiple-versions = "deny"
 wildcards = "deny"
-# `dwk-proto` is inherited by path from the parent workspace, and both crates
-# are `publish = false`.
+# `dwk-proto` and `dwkd-authority` are inherited by path from the parent
+# workspace, and every crate involved is `publish = false`.
 allow-wildcard-paths = true
 skip = []
 skip-tree = []

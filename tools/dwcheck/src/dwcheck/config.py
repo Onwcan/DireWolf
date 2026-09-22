@@ -152,6 +152,8 @@ class ArchitectureConfig:
     crate_rules: tuple[CrateRule, ...]
     authority_crates: tuple[str, ...]
     authority_allowed_third_party: tuple[str, ...]
+    authority_allowed_build_third_party: tuple[str, ...]
+    """Crates that execute while the authority is built and are not linked."""
     authority_optional_edges: tuple[OptionalEdge, ...]
     docs_exempt_paths: tuple[str, ...]
     adr: AdrSettings = field(default=AdrSettings("docs/adr", "docs/adr/accepted.sha256"))
@@ -249,6 +251,7 @@ def load(root: Path, rules_file: Path | None = None) -> ArchitectureConfig:
         ),
         authority_crates=_strs(authority_tbl, "crates", path),
         authority_allowed_third_party=_strs(authority_tbl, "allowed_third_party", path),
+        authority_allowed_build_third_party=_strs(authority_tbl, "allowed_build_third_party", path),
         authority_optional_edges=tuple(
             OptionalEdge(
                 parent=_str(e, "parent", path),

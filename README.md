@@ -22,7 +22,7 @@ compromised host.
 
 ---
 
-## Status: M3c — protocol, schemas, the evaluation harness, the capability core, and the policy engine
+## Status: M3d — protocol, schemas, the evaluation harness, the capability core, the policy engine, and durable authority state
 
 **None of the above is implemented yet.** This repository contains the Phase 0
 architecture package, the M1 foundation (the monorepo layout, the Rust and
@@ -81,6 +81,35 @@ and the M2 wire contract:
   with no derive macro, no proc-macro and no native code. Three of them parse
   the policy text, so the loader is fuzzed — coverage-guided in
   [`fuzz/`](fuzz/) and on stable in every `cargo test`.
+- **durable authority state** (M3d): `kernel.db`, in a private directory of
+  its own, behind the operations M3a defined. Epochs are issued, fenced and
+  never reused across restarts; a lease belongs to one connection, not to
+  every process with the same uid; `AdmitRun` checks the fence before its
+  idempotency key and records every admission forever, so a key never admits
+  a second run — a retry while the run is live gets the recorded grant, and a
+  retry after its lease has ended (a restart included) is told the admission
+  has ended, never handed dead authority; every policy input the kernel
+  decides on is a kernel row, and no DWKP message can carry one; the policy
+  revision is the hash of the stored policy text; and every
+  authority-changing operation writes a hash-chained `audit.log` record that
+  is `fsync`ed **before** the answer is returned, with a recovery rule for
+  every crash window between the two files
+  ([ADR-0039](docs/adr/0039-durable-authority-state.md),
+  [ADR-0040](docs/adr/0040-m3d-reconciliation-admission-across-tenures-and-undecidable-proposals.md),
+  `make authority-state-evidence`).
+
+  `QueryAuthority` reports a run's effective authority. It does **not** yet
+  decide a proposed action: capability text alone does not say where an
+  action runs, what it reaches or which file it names, and deciding without
+  those facts would be deciding on facts the kernel invented. Until M4's
+  canonicaliser can supply them, a proposal is refused with
+  `NO_CANONICAL_ACTION`, and no policy rule is named for an evaluation that
+  did not happen.
+
+  It links **SQLite** — 269,376 lines of C compiled into the authority — and
+  SHA-256, fifteen new crates in all. DireWolf's own Rust still contains no
+  `unsafe`; the authority as a whole now contains native code, and the
+  closure gate reports it as such.
 
 What M2 establishes is that **malformed DWKP is rejected structurally**, and
 what M2.5 adds is the machinery to *measure* claims like that. M3a adds the
@@ -90,24 +119,26 @@ decisions behind them
 [ADR-0036](docs/adr/0036-m3-authority-operations-and-the-capability-wire-form.md)).
 **None of them establishes that any request is authorised.** M3b and M3c add
 the two gates' *logic* — the lattice that answers "is this within the authority
-held?" and the engine that answers "should this be allowed?" — and neither is
-wired to anything: there is still no kernel process serving requests, no
-transport, no `kernel.db`, no audit log, no approval registry, and nothing that
-can turn a path on disk into the canonical identity an `fs` rule compares
-against. A decision function nothing calls decides nothing, and a defined wire
-form is a shape.
+held?" and the engine that answers "should this be allowed?" — and M3d the
+state they decide against. None of it is reachable from outside the process:
+there is still no kernel process serving requests, no transport, no peer
+authentication (M3d's callers *assert* who they are), no approval registry,
+and nothing that can turn a path on disk into the canonical identity an `fs`
+rule compares against. An authority nothing can call authorises nothing, and a
+defined wire form is a shape.
 See [docs/PROTOCOL.md](docs/PROTOCOL.md),
 [ADR-0032](docs/adr/0032-wire-contract-framing-strict-json-and-jcs.md) and
 [evals/README.md](evals/README.md).
 
-The daemons build and refuse to run. `direwolf` supports `--version` and
+The daemons build and refuse to serve. `dwkd-authority verify-audit <dir>`
+checks an audit chain, read-only; `direwolf` supports `--version` and
 `doctor`, and nothing else, because a command that exists but cannot work
 invites callers, scripts and documentation to form around a shape nobody has
 designed yet.
 
-The capability broker, `kernel.db` and the authority server arrive at **M3d**
-and **M3e**, the filesystem, exec and secret brokers at **M4**, the sandbox
-at **M5**, and approvals at **M6**. See
+The authority server and peer-credential authentication arrive at **M3e**,
+the filesystem, exec and secret brokers at **M4**, the sandbox at **M5**, and
+approvals at **M6**. See
 [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ```bash

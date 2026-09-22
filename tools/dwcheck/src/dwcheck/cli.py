@@ -9,7 +9,11 @@ from pathlib import Path
 
 from dwcheck import Finding, Report
 from dwcheck.checks_adr import check_adr, check_adr_history, record_adr
-from dwcheck.checks_cargo import check_authority_closure_exact
+from dwcheck.checks_cargo import (
+    CargoUnavailableError,
+    check_authority_closure_exact,
+    render_closure,
+)
 from dwcheck.checks_links import check_links
 from dwcheck.checks_manifests import (
     check_crates,
@@ -69,9 +73,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("all", help="every check that runs offline, with no toolchain")
-    sub.add_parser(
+    closure_parser = sub.add_parser(
         "closure",
         help="the EXACT feature-resolved authority dependency closure (needs cargo)",
+    )
+    closure_parser.add_argument(
+        "--report",
+        action="store_true",
+        help="print the measured closure (runtime, build-only, build scripts, native) first",
     )
     sub.add_parser("imports", help="Python import and provider-name rules")
     sub.add_parser("deps", help="declared dependencies and the Rust crate graph")
@@ -118,6 +127,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         if not changed:
             print("all versions already match VERSION")
         return 0
+
+    if args.command == "closure" and args.report:
+        try:
+            print(render_closure(config))
+        except CargoUnavailableError as exc:
+            print(f"dwcheck: {exc}", file=sys.stderr)
+            return 2
 
     report = Report()
     for name in _selected(str(args.command)):

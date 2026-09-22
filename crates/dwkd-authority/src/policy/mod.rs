@@ -45,9 +45,10 @@
 //!
 //! # What is not here
 //!
-//! No `kernel.db` (M3d), no approval registry, binding or standing grant (M6),
-//! no socket or peer identity (M3e), no resource canonicalisation (M4), and no
-//! execution of anything. An [`Obligation`] this module returns is data; the
+//! No `kernel.db` — the durable state is `crate::state`'s (M3d), which calls
+//! this module and is never called by it — no approval registry, binding or
+//! standing grant (M6), no socket or peer identity (M3e), no resource
+//! canonicalisation (M4), and no execution of anything. An [`Obligation`] this module returns is data; the
 //! thing that enforces it does not exist yet, and [`obligation`] says so.
 //!
 //! [`POLICY.md`]: ../../../../../docs/POLICY.md

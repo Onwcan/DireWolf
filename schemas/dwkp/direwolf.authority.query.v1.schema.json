@@ -127,7 +127,7 @@
           "maxLength": 512,
           "x-direwolf-type": "CapabilityText",
           "pattern": "^[a-z][a-z0-9_]{0,15}\\.[a-z][a-z0-9_]{0,31}:[A-Za-z0-9._/*:@+~<>-]{1,384}(\\?[A-Za-z0-9_=,&.*/-]{1,96})?$",
-          "description": "A proposed action, in the kernel's capability grammar. When present\nthe response carries a `decision` for exactly this action; when\nabsent the response reports effective authority only."
+          "description": "A proposed action, in the kernel's capability grammar. When absent\nthe response reports effective authority only. When present, the\nresponse is a `decision` for exactly this action **only if** the\nauthority can construct the complete canonical action it names;\notherwise it is `direwolf.authority.refused` with\n`NO_CANONICAL_ACTION`. Through M3e that is every proposal, because\ncapability text alone never determines one (ADR-0040)."
         }
       },
       "required": [],

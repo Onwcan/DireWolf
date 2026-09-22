@@ -347,6 +347,110 @@ def task_policy_benchmark() -> None:
     )
 
 
+STATE_SUITES = (
+    "state_store",
+    "state_lease",
+    "state_admission",
+    "state_query",
+    "state_audit",
+    "state_crash",
+    "state_concurrency",
+    "state_hostile",
+    "state_wire",
+    "state_restart",
+)
+
+
+def task_authority_state_evidence() -> None:
+    """M3d's durable-state evidence, on real files (ADR-0039).
+
+    Every state suite -- store creation and refusal, SQLite corruption
+    quarantine, leases and epoch fencing, admission and idempotency, both
+    gates, the audit chain and its verifier, crash windows A-G in process and
+    in a killed child process, and many-connection contention -- then the
+    diagnostic latency of each audited operation, then the measured authority
+    closure. Exits non-zero on any invariant failure. Not part of `check`
+    only because the latency figures are evidence, not a gate: the suites
+    themselves run in `cargo test` like everything else.
+    """
+    suites: list[str] = []
+    for suite in STATE_SUITES:
+        suites += ["--test", suite]
+    run("cargo", "test", "--locked", "-p", "dwkd-authority", *suites)
+    run(
+        "cargo",
+        "test",
+        "--locked",
+        "--release",
+        "-p",
+        "dwkd-authority",
+        "--test",
+        "state_probe",
+        "state_operation_latency",
+        "--",
+        "--ignored",
+        "--nocapture",
+    )
+    uvrun("dwcheck", "closure", "--report")
+
+
+def task_authority_write_probe() -> None:
+    """Attempt the runtime's forbidden writes as a SECOND operating-system user.
+
+    Creates an authority state directory as the current user, then runs
+    `tests/authority/runtime_write_probe.py` as the user named by
+    DW_PROBE_AS through `sudo -n -u`. Every write must be refused.
+
+    Needs two real identities. When DW_PROBE_AS is unset, or sudo cannot switch
+    to it without a password, the probe is NOT EXERCISED and this task fails --
+    it never reports a pass it did not earn. Mode bits alone are not the claim
+    (ADR-0035): the claim is that the write was attempted and refused.
+    """
+    user = os.environ.get("DW_PROBE_AS")
+    if not user:
+        raise TaskError(
+            "NOT EXERCISED: set DW_PROBE_AS to the runtime's user (e.g. `nobody`) and run "
+            "where `sudo -n -u $DW_PROBE_AS` works"
+        )
+    import tempfile
+
+    parent = Path(tempfile.mkdtemp(prefix="dw-probe-"))
+    parent.chmod(0o755)  # the probe user may reach the state directory, not enter it
+    state = parent / "state"
+    env = {**os.environ, "DW_PROBE_STATE_DIR": str(state)}
+    command = [
+        "cargo",
+        "test",
+        "--locked",
+        "-p",
+        "dwkd-authority",
+        "--test",
+        "state_probe",
+        "create_probe_state",
+        "--",
+        "--ignored",
+        "--nocapture",
+    ]
+    print(f"{DIM}$ DW_PROBE_STATE_DIR={state} {' '.join(command)}{OFF}", flush=True)
+    if subprocess.run(command, cwd=str(ROOT), env=env, check=False).returncode != 0:
+        raise TaskError("the probe state could not be created")
+    probe = ROOT / "tests" / "authority" / "runtime_write_probe.py"
+    staged = parent / "runtime_write_probe.py"
+    shutil.copyfile(probe, staged)
+    staged.chmod(0o644)
+    result = subprocess.run(
+        ["sudo", "-n", "-u", user, sys.executable, str(staged), str(state)],
+        check=False,
+    )
+    if result.returncode == 0:
+        return
+    if result.returncode == 1:
+        raise TaskError(f"the runtime user {user!r} could write authority state")
+    raise TaskError(
+        f"NOT EXERCISED (exit {result.returncode}): the probe could not run as {user!r}"
+    )
+
+
 def task_fuzz() -> None:
     """Coverage-guided libFuzzer run of every target (nightly, cargo-fuzz).
 
@@ -494,6 +598,8 @@ TASKS = {
     "schema-check": task_schema_check,
     "capability-evidence": task_capability_evidence,
     "policy-benchmark": task_policy_benchmark,
+    "authority-state-evidence": task_authority_state_evidence,
+    "authority-write-probe": task_authority_write_probe,
     "fuzz-smoke": task_fuzz_smoke,
     "fuzz": task_fuzz,
     "security": task_security,

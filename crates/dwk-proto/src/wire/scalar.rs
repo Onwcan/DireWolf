@@ -483,10 +483,13 @@ wire_enum! {
         DefaultDeny = "DEFAULT_DENY",
         /// Policy permitted it; no held capability covers it (ADR-0006).
         NoCapability = "NO_CAPABILITY",
-        /// The proposed capability is lexically valid but names a verb, scope
-        /// type or constraint the kernel's vocabulary does not contain. The
-        /// gates ran; nothing covered it.
-        CapabilityMalformed = "CAPABILITY_MALFORMED",
+        // CAPABILITY_MALFORMED used to be here, attributed to the policy's
+        // `default` rule because the wire requires a rule. No rule had run: a
+        // capability outside the kernel's vocabulary is a reason no evaluation
+        // could happen, the same argument that moved RUN_NOT_ADMITTED out. It
+        // is `RefusalReason::NoCanonicalAction` on
+        // `direwolf.authority.refused` (ADR-0040 part 2).
+        //
         // No APPROVAL_REQUIRED either, and for the same reason: routing the
         // removed effect back through the reason field would be the approval
         // semantics again, spelled differently. A rule whose effect is
@@ -569,6 +572,17 @@ wire_enum! {
         /// reinterpreted for a second admission, and the first admission is
         /// never amended by the second request's contents (ADR-0036 §8 case 4).
         IdempotencyConflict = "IDEMPOTENCY_CONFLICT",
+        /// The idempotency key has a record under this caller's scope for the
+        /// same canonical request, and the run it admitted has ended —
+        /// released, or reaped because the lease it was admitted under ended
+        /// (a rotation, an expiry, an authority restart). The key is spent: it
+        /// never admits again, and the ended run never becomes active again.
+        /// The remedy is a new admission under a new key (ADR-0040 part 1).
+        ///
+        /// Distinct from `IDEMPOTENCY_CONFLICT`, which means the caller sent a
+        /// *different* request under the key. Checked after the fence and after
+        /// the conflict check.
+        AdmissionEnded = "ADMISSION_ENDED",
         /// The agent profile named by `AdmitRun` is not one the kernel holds.
         /// A denial rather than a protocol error: the name is well-formed, and
         /// which names exist is authority state, not wire syntax.
@@ -578,6 +592,15 @@ wire_enum! {
         /// run exists because it was admitted, and separating the two would
         /// turn the refusal into a probe for which run ids are real.
         UnknownRun = "UNKNOWN_RUN",
+        /// `QueryAuthority` carried a `proposed` capability from which the
+        /// authority cannot construct the complete canonical action policy
+        /// decides on: the capability is outside the kernel's vocabulary, it
+        /// names a resource whose canonical identity cannot be derived, or the
+        /// action depends on facts the request cannot carry (where it would
+        /// run, the address it would reach). Nothing was evaluated and no rule
+        /// is attributed. Through M3e this is the answer to every `proposed`
+        /// (ADR-0040 part 2).
+        NoCanonicalAction = "NO_CANONICAL_ACTION",
     }
 }
 
@@ -599,6 +622,12 @@ wire_enum! {
         AboveProfileCeiling = "ABOVE_PROFILE_CEILING",
         /// Refused by the policy preflight at minting time.
         DeniedByPolicy = "DENIED_BY_POLICY",
+        /// Names an `fs` or `process` resource whose canonical identity the
+        /// authority could not derive — before M4 always, and after M4 for a
+        /// path that does not resolve or an executable that cannot be
+        /// identified. Not a claim about any declaration: no term of the
+        /// minting expression was consulted (ADR-0040 part 2).
+        UnresolvedResource = "UNRESOLVED_RESOURCE",
     }
 }
 

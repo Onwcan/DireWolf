@@ -197,7 +197,7 @@ fn tool_invoke_is_still_reserved_after_m3() {
 
 fn refusal(operation: &str, reason: &str) -> String {
     format!(
-        r#"{{"v":1,"id":"msg_01M24BB8G0E87TVJX9GX248ADD","type":"response","schema":"direwolf.authority.refused","schema_version":1,"ts":"2026-09-12T09:14:22.481Z","causation_id":"msg_01M24BB8G1FQR94D2PF2XVQDV4","payload":{{"operation":"{operation}","reason":"{reason}"}}}}"#
+        r#"{{"v":1,"id":"msg_01M24BB8G0E87TVJX9GX248ADD","type":"response","schema":"direwolf.authority.refused","schema_version":2,"ts":"2026-09-12T09:14:22.481Z","causation_id":"msg_01M24BB8G1FQR94D2PF2XVQDV4","payload":{{"operation":"{operation}","reason":"{reason}"}}}}"#
     )
 }
 
@@ -231,6 +231,13 @@ fn a_refusal_reason_its_operation_cannot_produce_is_refused() {
         ("RELEASE_RUN", "UNKNOWN_RUN"),
         ("HEARTBEAT", "UNKNOWN_AGENT_PROFILE"),
         ("QUERY_AUTHORITY", "LEASE_HELD"),
+        // ADR-0040's two reasons are as closed as the rest: an ended admission
+        // is only ever an AdmitRun answer, and an undecidable proposal only a
+        // QueryAuthority one.
+        ("RELEASE_RUN", "ADMISSION_ENDED"),
+        ("QUERY_AUTHORITY", "ADMISSION_ENDED"),
+        ("ADMIT_RUN", "NO_CANONICAL_ACTION"),
+        ("HEARTBEAT", "NO_CANONICAL_ACTION"),
     ] {
         let err = dwkp::decode_body(refusal(operation, reason).as_bytes()).unwrap_err();
         assert_eq!(err.code, ErrorCode::SchemaViolation, "{operation}/{reason}");
@@ -257,7 +264,10 @@ fn every_pair_the_table_permits_decodes() {
             pairs += 1;
         }
     }
-    assert_eq!(pairs, 9, "the M3 refusal matrix has nine pairs");
+    assert_eq!(
+        pairs, 11,
+        "the M3 refusal matrix has eleven pairs (ADR-0040)"
+    );
 }
 
 #[test]
@@ -277,7 +287,7 @@ fn the_refusal_carries_nothing_but_the_operation_and_the_reason() {
     let schemas = dwk_proto::schema::emit::all();
     let (_, schema) = schemas
         .iter()
-        .find(|(path, _)| path.ends_with("direwolf.authority.refused.v1.schema.json"))
+        .find(|(path, _)| path.ends_with("direwolf.authority.refused.v2.schema.json"))
         .expect("the refusal schema is emitted");
     let text = dwk_proto::json::to_canonical_string(schema);
     assert!(text.contains(r#""required":["operation","reason"]"#));
@@ -298,7 +308,7 @@ fn a_run_that_holds_no_admission_is_a_refusal_and_not_a_denial() {
     // in at all. It is a refusal now, and the decision enum must not take it
     // back.
     let decision = format!(
-        r#"{{"v":1,"id":"msg_01M24BB8G0E87TVJX9GX248ADD","type":"response","schema":"direwolf.authority.effective","schema_version":1,"ts":"2026-09-12T09:14:22.481Z","causation_id":"msg_01M24BB8G1FQR94D2PF2XVQDV4","payload":{{"run_id":"run_01M24BB8G3E0A851TRWE3M8FZF","epoch":1,"policy_revision":"{rev}","profile":"SAFE","granted":[],"withheld":[],"decision":{{"effect":"DENY","reason":"RUN_NOT_ADMITTED","capability_result":"NOT_SATISFIED","policy_result":"NOT_SATISFIED","rule_id":"default","rule_source":"policy/balanced.toml:1"}}}}}}"#,
+        r#"{{"v":1,"id":"msg_01M24BB8G0E87TVJX9GX248ADD","type":"response","schema":"direwolf.authority.effective","schema_version":2,"ts":"2026-09-12T09:14:22.481Z","causation_id":"msg_01M24BB8G1FQR94D2PF2XVQDV4","payload":{{"run_id":"run_01M24BB8G3E0A851TRWE3M8FZF","epoch":1,"policy_revision":"{rev}","profile":"SAFE","granted":[],"withheld":[],"decision":{{"effect":"DENY","reason":"RUN_NOT_ADMITTED","capability_result":"NOT_SATISFIED","policy_result":"NOT_SATISFIED","rule_id":"default","rule_source":"policy/balanced.toml:1","required_capability":"model.call:*"}}}}}}"#,
         rev = "9f".repeat(32)
     );
     let err = dwkp::decode_body(decision.as_bytes()).unwrap_err();
@@ -396,7 +406,7 @@ fn the_authority_decision_has_no_approval_effect_before_approvals_exist() {
     // (ADR-0036 section 9).
     let decision = |effect: &str, reason: &str| {
         format!(
-            r#"{{"v":1,"id":"msg_01M24BB8G0E87TVJX9GX248ADD","type":"response","schema":"direwolf.authority.effective","schema_version":1,"ts":"2026-09-12T09:14:22.481Z","causation_id":"msg_01M24BB8G0E87TVJX9GX248ADD","payload":{{"run_id":"run_01M24BB8G3E0A851TRWE3M8FZF","epoch":1,"policy_revision":"{rev}","profile":"SAFE","granted":[],"withheld":[],"decision":{{"effect":"{effect}","reason":"{reason}","capability_result":"SATISFIED","policy_result":"NOT_SATISFIED","rule_id":"approve-external-write","rule_source":"policy/balanced.toml:111"}}}}}}"#,
+            r#"{{"v":1,"id":"msg_01M24BB8G0E87TVJX9GX248ADD","type":"response","schema":"direwolf.authority.effective","schema_version":2,"ts":"2026-09-12T09:14:22.481Z","causation_id":"msg_01M24BB8G0E87TVJX9GX248ADD","payload":{{"run_id":"run_01M24BB8G3E0A851TRWE3M8FZF","epoch":1,"policy_revision":"{rev}","profile":"SAFE","granted":[],"withheld":[],"decision":{{"effect":"{effect}","reason":"{reason}","capability_result":"SATISFIED","policy_result":"NOT_SATISFIED","rule_id":"approve-external-write","rule_source":"policy/balanced.toml:111","required_capability":"network.https:example.com"}}}}}}"#,
             rev = "9f".repeat(32)
         )
     };
@@ -423,7 +433,7 @@ fn the_authority_decision_has_no_approval_effect_before_approvals_exist() {
     let text = dwk_proto::json::to_canonical_string(
         &dwk_proto::schema::emit::all()
             .into_iter()
-            .find(|(path, _)| path.ends_with("direwolf.authority.effective.v1.schema.json"))
+            .find(|(path, _)| path.ends_with("direwolf.authority.effective.v2.schema.json"))
             .map(|(_, schema)| schema)
             .expect("the effective-authority schema is emitted"),
     );
@@ -431,6 +441,86 @@ fn the_authority_decision_has_no_approval_effect_before_approvals_exist() {
         assert!(
             !text.contains(absent),
             "the decision schema still advertises {absent}"
+        );
+    }
+}
+
+#[test]
+fn a_decision_names_a_capability_and_never_a_malformed_one() {
+    // ADR-0040: CAPABILITY_MALFORMED was attributed to the policy's `default`
+    // rule because the wire required a rule, and no rule had run. A proposal
+    // outside the vocabulary is now a refusal, so the decision enum must not
+    // take the value back, and a decision is only ever about a canonical
+    // action, so it always names the capability it required.
+    let decision = |reason: &str, required: &str| {
+        format!(
+            r#"{{"v":1,"id":"msg_01M24BB8G0E87TVJX9GX248ADD","type":"response","schema":"direwolf.authority.effective","schema_version":2,"ts":"2026-09-12T09:14:22.481Z","causation_id":"msg_01M24BB8G0E87TVJX9GX248ADD","payload":{{"run_id":"run_01M24BB8G3E0A851TRWE3M8FZF","epoch":1,"policy_revision":"{rev}","profile":"SAFE","granted":[],"withheld":[],"decision":{{"effect":"DENY","reason":"{reason}","capability_result":"NOT_SATISFIED","policy_result":"NOT_SATISFIED","rule_id":"default","rule_source":"policy/balanced.toml:1"{required}}}}}}}"#,
+            rev = "9f".repeat(32)
+        )
+    };
+    let with_capability = r#","required_capability":"model.call:*""#;
+    assert!(dwkp::decode_body(decision("DEFAULT_DENY", with_capability).as_bytes()).is_ok());
+
+    let err = dwkp::decode_body(decision("CAPABILITY_MALFORMED", with_capability).as_bytes())
+        .unwrap_err();
+    assert_eq!(err.violation, Some(Violation::UnknownVariant));
+    assert_eq!(err.path, "/payload/decision/reason");
+
+    let err = dwkp::decode_body(decision("DEFAULT_DENY", "").as_bytes()).unwrap_err();
+    assert_eq!(err.violation, Some(Violation::MissingField));
+    assert_eq!(err.path, "/payload/decision/required_capability");
+
+    assert!(
+        dwkp::decode_body(refusal("QUERY_AUTHORITY", "NO_CANONICAL_ACTION").as_bytes()).is_ok()
+    );
+}
+
+#[test]
+fn the_three_changed_responses_are_version_two_only() {
+    // ADR-0040 changed three response payloads incompatibly. DWKP's peers ship
+    // together (ADR-0023), so each supports exactly its new version: a
+    // version-1 instance is refused as unsupported, naming the range, rather
+    // than decoded under rules it predates.
+    for schema in [
+        "direwolf.run.grant",
+        "direwolf.authority.effective",
+        "direwolf.authority.refused",
+    ] {
+        let spec = MESSAGES
+            .iter()
+            .find(|m| m.schema == schema)
+            .expect("the message is registered");
+        assert_eq!((spec.versions.min, spec.versions.max), (2, 2), "{schema}");
+    }
+    let v1 = refusal("ADMIT_RUN", "STALE_EPOCH")
+        .replace(r#""schema_version":2"#, r#""schema_version":1"#);
+    let err = dwkp::decode_body(v1.as_bytes()).unwrap_err();
+    assert_eq!(err.code, ErrorCode::VersionUnsupported);
+    assert_eq!(err.path, "/schema_version");
+
+    let emitted: Vec<String> = dwk_proto::schema::emit::all()
+        .into_iter()
+        .map(|(path, _)| path)
+        .collect();
+    for schema in [
+        "direwolf.run.grant",
+        "direwolf.authority.effective",
+        "direwolf.authority.refused",
+    ] {
+        assert!(
+            emitted.contains(&format!("dwkp/{schema}.v2.schema.json")),
+            "{schema}"
+        );
+        assert!(
+            !emitted.contains(&format!("dwkp/{schema}.v1.schema.json")),
+            "{schema}"
+        );
+    }
+    // The requests did not change shape, and stay at version 1.
+    for schema in ["direwolf.run.admit", "direwolf.authority.query"] {
+        assert!(
+            emitted.contains(&format!("dwkp/{schema}.v1.schema.json")),
+            "{schema}"
         );
     }
 }

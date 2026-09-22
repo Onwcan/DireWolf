@@ -195,6 +195,7 @@ def _withheld(rng: random.Random) -> list[dwkp.WithheldCapability]:
                     "NOT_IN_PARENT_GRANT",
                     "ABOVE_PROFILE_CEILING",
                     "DENIED_BY_POLICY",
+                    "UNRESOLVED_RESOURCE",
                 ]
             ),
         )
@@ -211,14 +212,15 @@ def _decision(rng: random.Random) -> dwkp.AuthorityDecision:
                 "DENIED_BY_RULE",
                 "DEFAULT_DENY",
                 "NO_CAPABILITY",
-                "CAPABILITY_MALFORMED",
             ]
         ),
         capability_result=rng.choice(["SATISFIED", "NOT_SATISFIED"]),
         policy_result=rng.choice(["SATISFIED", "NOT_SATISFIED"]),
         rule_id=_kebab(rng, 63),
         rule_source=_rule_source(rng),
-        required_capability=rng.choice([None, _capability(rng)]),
+        # Required since ADR-0040: a decision is only ever about a canonical
+        # action, and every canonical action requires a capability.
+        required_capability=_capability(rng),
     )
 
 
@@ -322,7 +324,9 @@ def _message(rng: random.Random) -> DwkpMessage:
         id=_id(rng, "msg"),
         type=message_type,
         schema=schema,
-        schema_version=1,
+        # Any version the registry supports: ADR-0040 moved three responses to
+        # version 2 only, and a generator pinned to 1 would test a retired shape.
+        schema_version=rng.randint(spec.versions.min, spec.versions.max),
         ts=_timestamp(rng),
         **fields,  # type: ignore[arg-type]
     )

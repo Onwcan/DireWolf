@@ -59,6 +59,23 @@ dwk-proto = { path = "crates/dwk-proto" }
 # exists to prevent (ADR-0035 section 2).
 toml = { version = "=1.1.6", default-features = false, features = ["parse"] }
 
+# kernel.db (M3d). `bundled` compiles SQLite's C amalgamation into the
+# authority: the largest trusted-code addition in the project, accepted by
+# ADR-0035 because an authority whose durability depends on whichever SQLite
+# the host ships is not one anyone can make claims about. ADR-0039 records the
+# measured closure, which includes build-only crates that EXECUTE while the TCB
+# is built and are reviewed in their own allowlist.
+#
+# Pinned exactly for the same reason as `toml`. No default features: the
+# defaults turn on a prepared-statement cache (`hashlink`) and a WebAssembly
+# backend, and the authority needs neither.
+rusqlite = { version = "=0.40.2", default-features = false, features = ["bundled"] }
+
+# The audit hash chain and every content-derived identity (policy revision,
+# AdmitRun request digest). RustCrypto's implementation, pure Rust, no
+# default features: no `alloc` convenience API and no OID tables.
+sha2 = { version = "=0.11.0", default-features = false }
+
 # --- dev-only: tests, property tests, differential oracles ------------------
 # Never linked into a shipped binary. dwcheck excludes dev-only edges from the
 # TCB closure and a fixture proves it does not exclude normal ones.

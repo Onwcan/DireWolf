@@ -36,6 +36,36 @@ What metadata *does* give, and what this module uses, is
 in this resolution -- plus `packages[].features`, the feature table. Expanding
 one through the other yields the set of `dep:NAME` activations, and an optional
 dependency is active exactly when its activation appears there.
+
+# Optionality belongs to a DECLARATION, not to a name (M3d)
+
+A package may declare the same dependency more than once: `rusqlite` declares
+`libsqlite3-sys` as *optional* for `wasm32-unknown-unknown` and as *required*
+for every other target. M3c's first version decided optionality by name, so the
+optional wasm declaration hid the required one, the edge was dropped, and
+`libsqlite3-sys` -- 269,376 lines of C -- vanished from the linked closure. A
+gate that loses the largest crate in the TCB is the fail-open this module
+exists to prevent, and it was found by measuring rather than by review.
+
+So an edge is now judged per `dep_kinds` entry, against the declaration with
+the same package, kind and target: active if that declaration is required, or
+optional and activated. An edge whose declaration cannot be found is treated as
+ACTIVE -- an unexplained edge is counted, never dropped.
+
+Target conditions are not evaluated. The closure is the UNION over every target
+Cargo resolved, which over-approximates for any one platform (`libc` enters
+through `cpufeatures` on aarch64 and loongarch64 only) and never
+under-approximates for a supported one. An allowlist that must hold on Linux,
+macOS and Windows alike has to be the union.
+
+# Build-only crates are reviewed too
+
+Crates reachable only through build edges are not in the binary, but they
+EXECUTE while the TCB is built: `cc` drives the C compiler over the SQLite
+amalgamation. They are reviewed in their own allowlist
+(`[authority].allowed_build_third_party`, RS014/RS015) and never mixed into the
+runtime list -- listing a build tool as linked would overstate the binary, and
+leaving it unlisted would hide code that runs with the builder's privileges.
 """
 
 from __future__ import annotations
@@ -61,6 +91,7 @@ __all__ = [
     "ExactClosure",
     "check_authority_closure_exact",
     "closure_from_metadata",
+    "render_closure",
     "resolve_exact_closure",
 ]
 
@@ -70,6 +101,13 @@ _REASON = (
     "selections, so it lists optional dependencies nothing activates. This gate "
     "computes activation from Cargo's resolved graph, so an allowlist cannot drift "
     "away from reality and an exclusion cannot outlive the fact that justified it."
+)
+
+_BUILD_REASON = (
+    "Build-only dependencies are not linked into the authority, but they execute on the "
+    "machine that builds it -- `cc` compiles the bundled SQLite amalgamation. They are "
+    "reviewed in their own list so that 'runs during the build' is visible without "
+    "overstating what the binary contains."
 )
 
 
@@ -98,6 +136,12 @@ class ExactClosure:
     active_optional: frozenset[tuple[str, str]]
     #: Optional edges present in the package graph but NOT activated.
     inactive_optional: frozenset[tuple[str, str]]
+    #: Crates in either closure with a build script (a `custom-build` target):
+    #: code that runs on the build machine, whatever the crate links.
+    build_scripts: frozenset[str] = frozenset()
+    #: Linked crates declaring `links` -- a native library. SQLite's C lives
+    #: behind one of these, and `forbid(unsafe_code)` does not reach it.
+    native: frozenset[str] = frozenset()
 
 
 def _cargo_metadata(root: Path) -> Metadata:
@@ -189,7 +233,8 @@ def closure_from_metadata(metadata: Metadata, authority_crates: Iterable[str]) -
     Separated from the subprocess so the activation rules can be tested
     exhaustively offline, against graphs that would be tedious to produce by
     building real crates -- a weak feature reference, a legacy implicit one, a
-    dev-only edge, an activation arriving through a transitive dependency.
+    dev-only edge, an activation arriving through a transitive dependency, and
+    one dependency declared twice with different optionality per target.
     """
     packages = {p["id"]: p for p in metadata.get("packages", [])}
     nodes = {n["id"]: n for n in metadata.get("resolve", {}).get("nodes", [])}
@@ -199,33 +244,55 @@ def closure_from_metadata(metadata: Metadata, authority_crates: Iterable[str]) -
         package = packages.get(package_id)
         return str(package["name"]) if package else package_id
 
-    # Which optional dependencies each package actually turns on.
+    # Which optional dependencies each package actually turns on, and every
+    # declaration it makes: (package name, feature key, kind, target, optional).
     activated: dict[str, set[str]] = {}
-    optional_of: dict[str, set[str]] = {}
+    declarations: dict[str, list[tuple[str, str, str | None, str | None, bool]]] = {}
     for package_id, package in packages.items():
         table = {k: list(v) for k, v in (package.get("features") or {}).items()}
         node = nodes.get(package_id, {})
         activated[package_id] = _activated_dep_names(table, node.get("features") or [])
-        optional_of[package_id] = {
-            str(d.get("rename") or d["name"])
+        declarations[package_id] = [
+            (
+                str(d["name"]),
+                str(d.get("rename") or d["name"]),
+                d.get("kind"),
+                d.get("target"),
+                bool(d.get("optional")),
+            )
             for d in package.get("dependencies", [])
-            if d.get("optional")
-        }
+        ]
+
+    def declaration_active(
+        package_id: str, child: str, kind: str | None, target: str | None
+    ) -> bool:
+        """Whether the declaration behind one `dep_kinds` entry is in force.
+
+        Unknown means active: an edge the resolver reports and the manifest does
+        not explain is counted, never dropped.
+        """
+        matching = [
+            (key, optional)
+            for name, key, dkind, dtarget, optional in declarations.get(package_id, [])
+            if name == child and dkind == kind and dtarget == target
+        ]
+        if not matching:
+            return True
+        return any(
+            not optional or key in activated.get(package_id, set()) for key, optional in matching
+        )
 
     def edges(package_id: str, kinds: set[str | None]) -> list[str]:
         """Activated dependency edges of the requested kinds."""
         out: list[str] = []
         for dep in nodes.get(package_id, {}).get("deps", []):
             child = name_of(dep["pkg"])
-            wanted = any(k.get("kind") in kinds for k in dep.get("dep_kinds", []))
-            if not wanted:
-                continue
-            # An optional dependency is an edge only when a feature turns it on.
-            if child in optional_of.get(package_id, set()) and child not in activated.get(
-                package_id, set()
+            if any(
+                entry.get("kind") in kinds
+                and declaration_active(package_id, child, entry.get("kind"), entry.get("target"))
+                for entry in dep.get("dep_kinds", [])
             ):
-                continue
-            out.append(dep["pkg"])
+                out.append(dep["pkg"])
         return out
 
     def closure(roots: list[str], kinds: set[str | None]) -> set[str]:
@@ -250,22 +317,42 @@ def closure_from_metadata(metadata: Metadata, authority_crates: Iterable[str]) -
     linked = {name_of(i) for i in linked_ids} - in_tree
     build_only = {name_of(i) for i in build_ids} - in_tree - linked
 
-    # Every optional edge in the package graph, split by whether it fired.
+    def has_build_script(package_id: str) -> bool:
+        return any(
+            "custom-build" in target.get("kind", [])
+            for target in packages.get(package_id, {}).get("targets", [])
+        )
+
+    build_scripts = {name_of(i) for i in linked_ids | build_ids if has_build_script(i)} - in_tree
+    native = {name_of(i) for i in linked_ids if packages.get(i, {}).get("links")} - in_tree
+
+    # Every (parent, child) pair with an optional declaration, split by
+    # whether the EDGE is in force -- by that declaration being activated, or by
+    # any other declaration of the same child being required. `rusqlite` ->
+    # `libsqlite3-sys` is optional for wasm and required everywhere else, so it
+    # is active: an exclusion naming it would claim an edge the binary takes.
     active: set[tuple[str, str]] = set()
     inactive: set[tuple[str, str]] = set()
     for package_id, package in packages.items():
         parent = str(package["name"])
-        for child in sorted(optional_of.get(package_id, set())):
-            if child in activated.get(package_id, set()):
-                active.add((parent, child))
-            else:
-                inactive.add((parent, child))
+        by_child: dict[str, list[tuple[str, bool]]] = {}
+        for name, key, _kind, _target, optional in declarations.get(package_id, []):
+            by_child.setdefault(name, []).append((key, optional))
+        for child, entries in by_child.items():
+            if not any(optional for _, optional in entries):
+                continue
+            in_force = any(
+                not optional or key in activated.get(package_id, set()) for key, optional in entries
+            )
+            (active if in_force else inactive).add((parent, child))
 
     return ExactClosure(
         linked=frozenset(linked),
         build_only=frozenset(build_only),
         active_optional=frozenset(active),
         inactive_optional=frozenset(inactive),
+        build_scripts=frozenset(build_scripts),
+        native=frozenset(native),
     )
 
 
@@ -329,6 +416,39 @@ def check_authority_closure_exact(config: ArchitectureConfig) -> list[Finding]:
             )
         )
 
+    allowed_build = set(config.authority_allowed_build_third_party)
+    for crate in sorted(exact.build_only - allowed_build):
+        findings.append(
+            Finding(
+                path="architecture.toml",
+                line=0,
+                rule="RS014-authority-build-closure-exact",
+                message=(
+                    f"`{crate}` EXECUTES while the authority is built (a build-only "
+                    f"dependency) but is not in [authority].allowed_build_third_party"
+                ),
+                reason=_BUILD_REASON,
+            )
+        )
+    for crate in sorted(allowed_build - exact.build_only):
+        where = (
+            "it is LINKED, so it belongs in allowed_third_party"
+            if crate in exact.linked
+            else "remove it"
+        )
+        findings.append(
+            Finding(
+                path="architecture.toml",
+                line=0,
+                rule="RS015-authority-build-allowlist-stale",
+                message=(
+                    f"`{crate}` is in [authority].allowed_build_third_party but is not a "
+                    f"build-only dependency of the authority; {where}"
+                ),
+                reason=_BUILD_REASON,
+            )
+        )
+
     declared = {(e.parent, e.child) for e in config.authority_optional_edges}
     for parent, child in sorted(declared & exact.active_optional):
         findings.append(
@@ -359,3 +479,27 @@ def check_authority_closure_exact(config: ArchitectureConfig) -> list[Finding]:
             )
         )
     return findings
+
+
+def render_closure(config: ArchitectureConfig) -> str:
+    """The measured closure, for an evidence report.
+
+    # Errors
+
+    :class:`CargoUnavailableError` when Cargo cannot produce a graph.
+    """
+    exact = resolve_exact_closure(config)
+
+    def line(label: str, crates: frozenset[str]) -> str:
+        return f"{label:<28}{len(crates):>3}  {', '.join(sorted(crates)) or '-'}"
+
+    edges = frozenset(f"{parent}->{child}" for parent, child in exact.inactive_optional)
+    return "\n".join(
+        [
+            line("linked (runtime)", exact.linked),
+            line("build-only (executes)", exact.build_only),
+            line("with a build script", exact.build_scripts),
+            line("native (`links`)", exact.native),
+            line("optional edges, inactive", edges),
+        ]
+    )

@@ -260,14 +260,17 @@ destination address is refused with `UNRESOLVED_CANONICAL_INPUT` rather than
 read as "did not match".
 
 > **This removes a policy-evaluation ambiguity. It is not DNS-rebinding
-> resistance.** M3c performs no resolution and opens no connection, so nothing
-> here establishes that the address policy judged is the address the broker
+> resistance.** Neither M3c nor M3d performs resolution or opens a connection,
+> so nothing here establishes that the address policy judged is the address the broker
 > connects to. That invariant — *IP evaluated by policy == IP used for the
 > authorised connection*, with no re-resolution in between, and a fresh
 > decision on any reconnect — belongs to M4's network canonicalisation and the
 > broker's execution path
 > ([ADR-0038](adr/0038-policy-evaluation-phases-and-composition.md) §7,
-> [NETWORK_SECURITY.md](NETWORK_SECURITY.md) §1).
+> [NETWORK_SECURITY.md](NETWORK_SECURITY.md) §1). What M3d adds is the
+> evidence M4 will need: a decision about an action carrying a destination
+> address records that address in its audit record
+> ([ADR-0039](adr/0039-durable-authority-state.md) §12). It binds nothing.
 
 #### How path matching actually works
 
@@ -412,8 +415,15 @@ Three properties this display guarantees: the rendering comes from kernel state 
 ## 6. Dry run and simulation
 
 > **Status.** The two commands below are the shape the CLI will take; neither
-> exists yet, because both need a running authority. What M3c ships is the
-> engine under them and the fixture suites that exercise it — in
+> exists yet, because both need a running authority that a CLI can reach (M3e
+> and M17), and because deciding an action needs the complete canonical
+> action M4's canonicaliser builds: until then `QueryAuthority` refuses a
+> proposed action rather than decide it on invented facts
+> ([ADR-0040](adr/0040-m3d-reconciliation-admission-across-tenures-and-undecidable-proposals.md)). What exists is the engine under them (M3c), the
+> durable record of every decision the authority makes about a complete
+> canonical action (M3d's `authority.decision` audit records, each naming the
+> rule that produced the effect, its source and the policy revision), and the
+> fixture suites that exercise the engine — in
 > `crates/dwkd-authority/src/policy/fixtures.rs`, run by `cargo test` and by
 > `make check`.
 
@@ -435,7 +445,7 @@ Rule files ship with a fixture suite; CI fails if a shipped profile's fixtures f
 ## 7. Rule authorship rules
 
 - **Policy files are human-authored.** An agent may never write, propose-and-auto-apply, or edit a policy file. `fs.write` capabilities are never minted for the policy directory, and rule 1 of every shipped profile denies it explicitly. There is no DWKP message that uploads, selects or edits policy, and the policy engine itself opens nothing: `load` takes text, and the authority layer that owns the directory reads the file.
-- Policy files **will be** hashed at load, with the hash recorded in the audit chain, so "which policy was in force" is answerable for any historical decision. The hash, the persisted revision and the audit chain are all M3d; M3c compiles deterministically — the same bytes give the same policy, and a CRLF checkout gives the same rule lines as an LF one — so that there is something stable for M3d to hash.
+- Policy files are hashed at load, and the hash is recorded, so "which policy was in force" is answerable for any historical decision. The **policy revision** is a domain-separated SHA-256 over the policy schema version, the selected profile, and each source's logical name and exact bytes in composition order — nothing about where the files were, when they were installed or what their mtime is ([ADR-0039](adr/0039-durable-authority-state.md) §11). The exact source set is stored in `kernel.db` beside the revision, every authority start recomputes every stored revision from its stored sources and refuses the store on a mismatch, and the installation, each activation and every decision are audit records. A policy that does not load stops the authority from starting: there is no fallback to a shipped pack, a stored revision or a default, and no reload while it runs. M3c's deterministic compilation — the same bytes give the same policy, and a CRLF checkout gives the same rule lines as an LF one — is what makes the revision stable.
 - Shipped profiles (`safe`, `balanced`, `power`) **will be** signed. They are not yet: no signing key, verifier or signature exists in the current build, and the profiles are compiled in with `include_str!`, which resists an edit on disk and nothing else. Local overrides are permitted and are recorded as local.
 - A profile may only *narrow* the profile it `extends`. Attempting to widen fails at load time.
 

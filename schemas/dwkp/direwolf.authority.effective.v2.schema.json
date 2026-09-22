@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:direwolf:schema:dwkp:direwolf.run.grant:1",
-  "title": "direwolf.run.grant v1",
-  "description": "The run, the epoch and the capabilities the kernel minted.",
+  "$id": "urn:direwolf:schema:dwkp:direwolf.authority.effective:2",
+  "title": "direwolf.authority.effective v2",
+  "description": "A run's effective authority, and a decision if one was asked for.",
   "type": "object",
   "properties": {
     "v": {
@@ -25,13 +25,13 @@
       "x-direwolf-type": "MessageType"
     },
     "schema": {
-      "const": "direwolf.run.grant",
+      "const": "direwolf.authority.effective",
       "x-direwolf-type": "SchemaName"
     },
     "schema_version": {
       "type": "integer",
-      "minimum": 1,
-      "maximum": 1,
+      "minimum": 2,
+      "maximum": 2,
       "x-direwolf-type": "Version"
     },
     "ts": {
@@ -56,7 +56,7 @@
       "x-direwolf-format": "uuid7-id"
     },
     "payload": {
-      "$ref": "#/$defs/RunGrant"
+      "$ref": "#/$defs/EffectiveAuthority"
     }
   },
   "required": ["v", "id", "type", "schema", "schema_version", "ts", "causation_id", "payload"],
@@ -79,10 +79,10 @@
   },
   "x-direwolf-family": "dwkp",
   "x-direwolf-message-type": "response",
-  "x-direwolf-schema": "direwolf.run.grant",
+  "x-direwolf-schema": "direwolf.authority.effective",
   "x-direwolf-schema-versions": {
-    "min": 1,
-    "max": 1
+    "min": 2,
+    "max": 2
   },
   "x-direwolf-envelope-versions": {
     "min": 1,
@@ -98,8 +98,62 @@
   },
   "x-direwolf-id-prefix": "msg",
   "x-direwolf-unknown-fields": "reject",
-  "x-direwolf-payload": "RunGrant",
+  "x-direwolf-payload": "EffectiveAuthority",
   "$defs": {
+    "AuthorityDecision": {
+      "type": "object",
+      "description": "One authority decision, with everything needed to explain it.\n\nNever a bare boolean. POLICY.md §1.5 requires the matched rule, its\nsource and the capability that was required, because a denial nobody can\ndebug is a denial someone will route around.",
+      "properties": {
+        "effect": {
+          "type": "string",
+          "enum": ["ALLOW", "DENY"],
+          "x-direwolf-type": "DecisionEffect",
+          "description": "What was decided."
+        },
+        "reason": {
+          "type": "string",
+          "enum": ["ALLOWED_BY_RULE", "DENIED_BY_RULE", "DEFAULT_DENY", "NO_CAPABILITY"],
+          "x-direwolf-type": "DecisionReason",
+          "description": "Why, as a classifiable code rather than prose."
+        },
+        "capability_result": {
+          "type": "string",
+          "enum": ["SATISFIED", "NOT_SATISFIED"],
+          "x-direwolf-type": "GateResult",
+          "description": "Whether a held capability covers the action (ADR-0006 gate one)."
+        },
+        "policy_result": {
+          "type": "string",
+          "enum": ["SATISFIED", "NOT_SATISFIED"],
+          "x-direwolf-type": "GateResult",
+          "description": "Whether policy permits it (ADR-0006 gate two). Both gates always\nrun: an ALLOW needs both, and neither substitutes for the other."
+        },
+        "rule_id": {
+          "type": "string",
+          "maxLength": 64,
+          "x-direwolf-type": "RuleId",
+          "pattern": "^[a-z][a-z0-9-]{0,63}$",
+          "description": "The id of the rule that produced the effect: the matched rule, the\nnarrowing postcondition, or the policy's own mandatory `default`\nrule when nothing matched before it. Never a stand-in for a rule\nthat did not run (ADR-0040)."
+        },
+        "rule_source": {
+          "type": "string",
+          "maxLength": 256,
+          "x-direwolf-type": "RuleSource",
+          "pattern": "^[A-Za-z0-9._/-]{1,240}:[0-9]{1,8}$",
+          "description": "Where that rule is written: file and line."
+        },
+        "required_capability": {
+          "type": "string",
+          "maxLength": 512,
+          "x-direwolf-type": "CapabilityText",
+          "pattern": "^[a-z][a-z0-9_]{0,15}\\.[a-z][a-z0-9_]{0,31}:[A-Za-z0-9._/*:@+~<>-]{1,384}(\\?[A-Za-z0-9_=,&.*/-]{1,96})?$",
+          "description": "The capability the action needed. Always present: a decision is\nonly ever made about a canonical action, and every canonical action\nrequires one (ADR-0040; optional in version 1)."
+        }
+      },
+      "required": ["effect", "reason", "capability_result", "policy_result", "rule_id", "rule_source", "required_capability"],
+      "additionalProperties": false,
+      "x-direwolf-unknown-fields": "reject"
+    },
     "CapabilityGrant": {
       "type": "object",
       "description": "One capability the kernel granted, and the id it minted for it.",
@@ -126,9 +180,9 @@
       "additionalProperties": false,
       "x-direwolf-unknown-fields": "reject"
     },
-    "RunGrant": {
+    "EffectiveAuthority": {
       "type": "object",
-      "description": "The authority the kernel minted for a run.\n\nEverything here is kernel-assigned. The run id, the epoch and every\n`cap_id` are the kernel's; the runtime cannot propose any of them.",
+      "description": "What a run may do, as the kernel currently records it.",
       "properties": {
         "run_id": {
           "type": "string",
@@ -138,21 +192,21 @@
           "x-direwolf-type": "RunId",
           "x-direwolf-format": "uuid7-id",
           "x-direwolf-id-prefix": "run",
-          "description": "The run the kernel admitted."
+          "description": "The run this describes."
         },
         "epoch": {
           "type": "integer",
           "minimum": 1,
           "maximum": 9007199254740991,
           "x-direwolf-type": "Epoch",
-          "description": "The epoch this grant is fenced to. A request carrying an older one\nis rejected (`PROTOCOL.md` §3)."
+          "description": "The epoch the answer is current at. An answer is about a moment."
         },
         "policy_revision": {
           "type": "string",
           "maxLength": 64,
           "x-direwolf-type": "PolicyRevision",
           "pattern": "^[0-9a-f]{64}$",
-          "description": "Which policy was in force when the grant was minted."
+          "description": "Which policy produced it."
         },
         "profile": {
           "type": "string",
@@ -176,7 +230,11 @@
           },
           "maxItems": 64,
           "x-direwolf-type": "BoundedList",
-          "description": "What it asked for and did not get, so it can say so coherently."
+          "description": "What it asked for and did not get."
+        },
+        "decision": {
+          "$ref": "#/$defs/AuthorityDecision",
+          "description": "The decision for the `proposed` action, present exactly when the\nquery carried one the authority could decide. A proposal it cannot\ndecide is refused instead (`NO_CANONICAL_ACTION`), so an\n`EffectiveAuthority` answering a proposal always carries its\ndecision. A reader that asked and received none must treat the\nanswer as unusable rather than as an allow."
         }
       },
       "required": ["run_id", "epoch", "policy_revision", "profile", "granted", "withheld"],
@@ -196,7 +254,7 @@
         },
         "reason": {
           "type": "string",
-          "enum": ["NOT_IN_AGENT_PROFILE", "NOT_IN_SKILL_SET", "NOT_IN_PARENT_GRANT", "ABOVE_PROFILE_CEILING", "DENIED_BY_POLICY"],
+          "enum": ["NOT_IN_AGENT_PROFILE", "NOT_IN_SKILL_SET", "NOT_IN_PARENT_GRANT", "ABOVE_PROFILE_CEILING", "DENIED_BY_POLICY", "UNRESOLVED_RESOURCE"],
           "x-direwolf-type": "WithheldReason",
           "description": "Which intersection removed it."
         }

@@ -217,12 +217,12 @@ This is what makes principle 7 true rather than aspirational — `dwkd-authority
 
 - *Request Canonicaliser* — turns a tool invocation into a canonical, resolved, hashable action: paths to inodes, hostnames to IP sets, argv to a normal form.
 - *Policy Engine* — pure function over canonical action + context → decision + explanation. Implemented at M3c in two phases: ordered first-match rules produce a provisional decision, then a small closed set of postconditions may only narrow it ([ADR-0038](adr/0038-policy-evaluation-phases-and-composition.md)). No I/O, no clock, no randomness; it is handed policy *text* rather than a path, so reading the operator's file stays outside it.
-- *Capability Broker* — mints, attenuates and verifies capability tokens; enforces the ⊑ lattice.
+- *Capability Broker* — mints, attenuates and verifies capability tokens; enforces the ⊑ lattice. The lattice is M3b's; minting at admission, recorded durably with a kernel-assigned `cap_id` per grant, is M3d's ([ADR-0039](adr/0039-durable-authority-state.md)).
 - *Approval Registry* — stores, matches, expires and burns human approvals bound to canonical actions.
 - *Budget Ledger* — hierarchical reservations for time, tokens, money, calls, bytes.
 - *Secret Broker* — resolves credential handles and injects values at the last possible moment.
 - *Provenance Tracker* — derives and owns `taint_level`, artifact trust labels and memory provenance. The kernel sees **every** byte crossing TB1→TB2 (it performs every tool call and creates every artifact), so it has strictly more information than the Context Engine does, and unlike the Context Engine it cannot be asked to lie.
-- *Audit Log* — append-only, hash-chained security record. Written by authority only; the broker returns outcomes and never writes it.
+- *Audit Log* — append-only, hash-chained security record. Written by authority only; the broker returns outcomes and never writes it. Implemented at M3d as `audit.log` beside `kernel.db` in the authority's private state directory, written through a transactional outbox so that a record is `fsync`ed before the authority it describes is returned ([ADR-0039](adr/0039-durable-authority-state.md) §13).
 
 **Broker plane** (`dwkd-broker` — executes, decides nothing)
 
@@ -492,11 +492,19 @@ request  = { principal, agent_id, parent_agent_id, session_id, run_id,
              risk_class, taint_level, budget_snapshot, mode_profile,
              origin (interactive|scheduled|channel|subagent) }
 
-*(M3b note: the capability half of this — the typed vocabulary, `⊑`, set
-containment and attenuation — is implemented in `dwkd-authority`'s capability
-core. The policy half is M3c, and the two gates stay independent: a capability
-answers "is this authority shape contained by that one?", never "should this be
-allowed?".)*
+*(Implementation note: the capability half of this — the typed vocabulary, `⊑`,
+set containment and attenuation — is `dwkd-authority`'s capability core (M3b);
+the policy half is its policy engine (M3c); and since M3d both are evaluated,
+independently, against a run's durable record: the grant minted at admission
+and the policy inputs the kernel derived and stored for it. The two gates stay
+independent: a capability answers "is this authority shape contained by that
+one?", never "should this be allowed?". Of the request fields above, M3d
+supplies `session_id`, `run_id`, `workspace_id`, `taint_level`, `mode_profile`
+and `origin` from kernel rows; the resolved paths, hosts and IPs are M4's
+canonicaliser, and `budget_snapshot` is M6's. Because those are missing, M3d
+decides only complete canonical actions supplied in process; a proposal over
+DWKP is refused with `NO_CANONICAL_ACTION` rather than decided on invented
+facts ([ADR-0040](adr/0040-m3d-reconciliation-admission-across-tenures-and-undecidable-proposals.md)).)*
 
 Decision = { effect: ALLOW | DENY | REQUIRE_APPROVAL,
              rule_id, rule_source (file:line), reason,

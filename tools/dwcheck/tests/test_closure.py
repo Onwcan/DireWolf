@@ -154,9 +154,10 @@ def _config(
     *,
     crates: tuple[str, ...] = ("dwkd-authority",),
     allowed: tuple[str, ...] = (),
+    build: tuple[str, ...] = (),
     edges: tuple[OptionalEdge, ...] = (),
 ) -> ArchitectureConfig:
-    """The repository's real config with the three authority fields replaced.
+    """The repository's real config with the four authority fields replaced.
 
     Explicit rather than `**overrides`, so the fields a test varies are the
     fields the signature names -- and so mypy checks them.
@@ -165,6 +166,7 @@ def _config(
         load(REPO_ROOT, RULES),
         authority_crates=crates,
         authority_allowed_third_party=allowed,
+        authority_allowed_build_third_party=build,
         authority_optional_edges=edges,
     )
 
@@ -403,6 +405,126 @@ def test_a_build_dependency_is_reported_apart_from_what_is_linked() -> None:
     exact = closure_from_metadata(metadata, ["dwkd-authority"])
     assert exact.linked == {"toml"}
     assert exact.build_only == {"cc"}
+
+
+# --- H: one dependency, declared twice (M3d) --------------------------------
+
+
+def _rusqlite_like(*, wasm_feature_on: bool = False) -> Doc:
+    """`rusqlite`'s real shape: `libsqlite3-sys` declared OPTIONAL for wasm and
+    REQUIRED for every other target, and a build-only `cc` beneath it."""
+    wasm = 'cfg(all(target_family = "wasm", target_os = "unknown"))'
+    native = f"cfg(not({wasm[4:-1]}))"
+    rusqlite = {
+        "id": "rusqlite@0.0.0",
+        "name": "rusqlite",
+        "source": "registry+https://github.com/rust-lang/crates.io-index",
+        "features": {"libsqlite3-sys": ["dep:libsqlite3-sys"], "bundled": []},
+        "dependencies": [
+            {"name": "libsqlite3-sys", "optional": True, "kind": None, "target": wasm},
+            {"name": "libsqlite3-sys", "optional": False, "kind": None, "target": native},
+        ],
+    }
+    sys_crate = _package(
+        "libsqlite3-sys", deps=[("cc", True, "build")], features={"bundled": ["dep:cc"]}
+    )
+    sys_crate["links"] = "sqlite3"
+    sys_crate["targets"] = [{"kind": ["lib"]}, {"kind": ["custom-build"]}]
+    return _metadata(
+        packages=[
+            _package("dwkd-authority", deps=[("rusqlite", False, None)], third_party=False),
+            rusqlite,
+            sys_crate,
+            _package("cc"),
+        ],
+        nodes=[
+            _node("dwkd-authority", deps=[("rusqlite", None)]),
+            {
+                "id": "rusqlite@0.0.0",
+                "features": ["bundled"] + (["libsqlite3-sys"] if wasm_feature_on else []),
+                "deps": [
+                    {
+                        "pkg": "libsqlite3-sys@0.0.0",
+                        "dep_kinds": [
+                            {"kind": None, "target": native},
+                            {"kind": None, "target": wasm},
+                        ],
+                    }
+                ],
+            },
+            _node("libsqlite3-sys", deps=[("cc", "build")], features=["bundled"]),
+            _node("cc"),
+        ],
+    )
+
+
+def test_a_dependency_required_on_one_target_is_linked_whatever_its_optional_twin_says() -> None:
+    """The M3c fail-open this closeout found by measurement.
+
+    Optionality was decided by NAME, so `rusqlite`'s optional wasm declaration
+    hid the required one and `libsqlite3-sys` -- the SQLite C -- fell out of the
+    linked closure. Judged per declaration, it is linked.
+    """
+    exact = closure_from_metadata(_rusqlite_like(), ["dwkd-authority"])
+    assert exact.linked == {"rusqlite", "libsqlite3-sys"}
+    assert exact.build_only == {"cc"}
+    assert exact.native == {"libsqlite3-sys"}
+    assert exact.build_scripts == {"libsqlite3-sys"}
+
+
+def test_an_edge_in_force_by_any_declaration_cannot_be_excluded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An exclusion naming `rusqlite -> libsqlite3-sys` would claim an edge the
+    binary takes. It must expire (RS012), not be honoured."""
+    import dwcheck.checks_cargo as mod
+
+    exact = closure_from_metadata(_rusqlite_like(), ["dwkd-authority"])
+    assert ("rusqlite", "libsqlite3-sys") in exact.active_optional
+    assert ("rusqlite", "libsqlite3-sys") not in exact.inactive_optional
+
+    monkeypatch.setattr(mod, "_cargo_metadata", lambda _root: _rusqlite_like())
+    config = _config(
+        allowed=("rusqlite", "libsqlite3-sys"),
+        build=("cc",),
+        edges=(OptionalEdge("rusqlite", "libsqlite3-sys", "wasm only"),),
+    )
+    assert [f.rule for f in check_authority_closure_exact(config)] == ["RS012-optional-edge-active"]
+
+
+def test_a_build_only_crate_must_be_reviewed_in_its_own_list(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """RS014, RS015, and the rule against mixing the lists."""
+    import dwcheck.checks_cargo as mod
+
+    monkeypatch.setattr(mod, "_cargo_metadata", lambda _root: _rusqlite_like())
+    runtime = ("rusqlite", "libsqlite3-sys")
+
+    assert check_authority_closure_exact(_config(allowed=runtime, build=("cc",))) == []
+
+    unreviewed = check_authority_closure_exact(_config(allowed=runtime))
+    assert [f.rule for f in unreviewed] == ["RS014-authority-build-closure-exact"]
+    assert "`cc`" in unreviewed[0].message
+
+    stale = check_authority_closure_exact(_config(allowed=runtime, build=("cc", "bindgen")))
+    assert [f.rule for f in stale] == ["RS015-authority-build-allowlist-stale"]
+
+    # A build tool listed as linked overstates the binary: RS011 (stale runtime
+    # entry) and RS014 (the build tool is still unreviewed as a build tool).
+    mixed = check_authority_closure_exact(_config(allowed=(*runtime, "cc")))
+    assert {f.rule for f in mixed} == {
+        "RS011-authority-allowlist-stale",
+        "RS014-authority-build-closure-exact",
+    }
+
+    # A linked crate listed as build-only is named for where it belongs.
+    misfiled = check_authority_closure_exact(
+        _config(allowed=("rusqlite",), build=("cc", "libsqlite3-sys"))
+    )
+    rules = {f.rule for f in misfiled}
+    assert "RS010-authority-closure-exact" in rules
+    assert any("belongs in allowed_third_party" in f.message for f in misfiled)
 
 
 # --- the gate refuses to pass when it cannot run ---------------------------

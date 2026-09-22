@@ -22,7 +22,8 @@ use super::limits;
 /// `${DIREWOLF_CONFIG}`, `${DIREWOLF_INSTALL}` and `~/.ssh`. They look like
 /// shell, and they are not: [`PathAnchor`] is a closed enum, an unrecognised
 /// `${...}` is a load error, and what each anchor *means* comes from
-/// [`PathAnchors`] — kernel-owned state that M3d fills — rather than from
+/// [`PathAnchors`] — kernel-owned state that M4's canonicaliser fills (M3d
+/// leaves every anchor unresolved) — rather than from
 /// `std::env`. There is no interpolation, no word expansion, no home-directory
 /// lookup and no fallback to a variable of the same name.
 ///

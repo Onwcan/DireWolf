@@ -67,7 +67,8 @@ wildcards = "deny"
 # In-tree crates are inherited as `{ path = "crates/..." }` with no version:
 # their version is the workspace version, synchronised from VERSION.  This
 # permits a version-less `path` dependency only where the depending crate is
-# `publish = false` (cargo-deny's rule): today dwk-proto and protogen.  A
+# `publish = false` (cargo-deny's rule): today dwk-proto, protogen and, since
+# M3d made it depend on dwk-proto, dwkd-authority.  A
 # version-less registry or git dependency is still a wildcard and still denied.
 allow-wildcard-paths = true
 skip = []

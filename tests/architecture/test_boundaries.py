@@ -211,6 +211,25 @@ def test_policy_core_findings_skip_the_comment_that_names_the_ban() -> None:
     assert lines, "the fixture must produce at least one TX004 finding"
 
 
+def test_the_pure_cores_cannot_reach_the_store(violation_rules: list[str]) -> None:
+    """M3d's storage stays in the state layer. The fixture's policy module
+    imports rusqlite and calls into crate::state."""
+    assert "TX005-the-pure-cores-never-touch-the-store" in violation_rules
+    findings = [f for f in check_text(load(VIOLATIONS, RULES)) if f.rule.startswith("TX005")]
+    lines = sorted(f.line for f in findings)
+    assert lines == [4, 9], "the import and the call; never the doc comment naming them"
+
+
+def test_the_state_layer_builds_no_sql_from_values(violation_rules: list[str]) -> None:
+    """ADR-0035: every value is a bound parameter. The fixture splices a table
+    name into a statement and asks for its own process id."""
+    rule = "TX006-state-sql-is-static-and-the-state-layer-has-no-ambient-effects"
+    assert rule in violation_rules
+    findings = [f for f in check_text(load(VIOLATIONS, RULES)) if f.rule == rule]
+    lines = sorted(f.line for f in findings)
+    assert lines == [6, 11], "the format! and std::process; never the doc comment"
+
+
 def test_a_helper_crate_shared_by_both_daemons_is_rejected(violation_rules: list[str]) -> None:
     """RS007 catches a crate that depends on the daemons. It cannot see a crate
     the daemons depend on -- "a few helpers" linked into both -- which is the
@@ -292,6 +311,8 @@ def test_the_required_boundary_rules_are_all_declared() -> None:
         "TX002-proto-has-no-ambient-effects",
         "TX003-capability-core-has-no-ambient-effects",
         "TX004-policy-core-has-no-ambient-effects",
+        "TX005-the-pure-cores-never-touch-the-store",
+        "TX006-state-sql-is-static-and-the-state-layer-has-no-ambient-effects",
         "DEP001-no-agent-framework-dependency",
         "DEP002-runtime-has-no-transport-dependency",
         "RS001-authority-depends-on-nothing-in-tree",
@@ -341,6 +362,16 @@ def _tcb_linked_closure() -> set[str]:
     architecture.toml for why the lockfile over-approximates. Reading the list
     rather than hard-coding it means a stale entry shows up as a disagreement
     between this and `cargo tree`, not as a silently wrong assertion.
+
+    The two in-tree authority crates are expanded from their OWN manifests'
+    normal and build sections, never from their lock entries: a lock entry
+    lists dev-dependencies too, and since M3d links `dwk-proto` into the
+    authority, following its lock entry would walk into `serde_json` and the
+    derive stack, which test `dwk-proto` and are never linked.
+
+    A lockfile does not record dependency kinds, so the result is the runtime
+    closure AND the build-only closure together (M3d's `cc` and friends).
+    Separating them is the exact gate's job, from the resolved graph.
     """
     rules = tomllib.loads((REPO_ROOT / "architecture.toml").read_text(encoding="utf-8"))
     excluded = {(e["parent"], e["child"]) for e in rules["authority"].get("optional_edges", [])}
@@ -361,7 +392,7 @@ def _tcb_linked_closure() -> set[str]:
     for crate, manifest in manifests.items():
         declared = tomllib.loads(manifest.read_text(encoding="utf-8"))
         for section in ("dependencies", "build-dependencies"):
-            stack = list(declared.get(section, {}))
+            stack = [name for name in declared.get(section, {}) if name not in manifests]
             while stack:
                 name = stack.pop()
                 if name not in linked:
@@ -383,11 +414,13 @@ def test_the_tcb_destined_closure_equals_the_reviewed_allowlist() -> None:
     longer linked, is also a finding. An allowlist that drifts away from
     reality stops being a review and becomes a list.
     """
-    allowlist = set(
-        tomllib.loads((REPO_ROOT / "architecture.toml").read_text(encoding="utf-8"))["authority"][
-            "allowed_third_party"
-        ]
-    )
+    authority = tomllib.loads((REPO_ROOT / "architecture.toml").read_text(encoding="utf-8"))[
+        "authority"
+    ]
+    runtime = set(authority["allowed_third_party"])
+    build = set(authority["allowed_build_third_party"])
+    assert not runtime & build, "a crate is either linked or build-only, never both"
+    allowlist = runtime | build
     assert _tcb_linked_closure() == allowlist, (
         "the authority's linked closure and its reviewed allowlist disagree; "
         "adding to the closure needs a new ADR amending ADR-0019, and removing "
@@ -395,25 +428,40 @@ def test_the_tcb_destined_closure_equals_the_reviewed_allowlist() -> None:
     )
 
 
-def test_the_tcb_closure_contains_no_proc_macro_or_native_code() -> None:
+def test_the_tcb_closure_has_no_proc_macro_and_only_the_reviewed_native_code() -> None:
     """ADR-0035 section 2 promises the policy parser arrives with "no
     serde_derive, no syn, no quote, no proc-macro2". ADR-0038 records that the
-    resolver agreed. This is the assertion behind both sentences.
+    resolver agreed, and M3d keeps it: the storage and hashing crates bring no
+    derive macro either.
 
-    A derive macro that silently accepts an unknown field is the failure strict
-    configuration exists to prevent, and a build script that compiles C is the
-    thing `#![forbid(unsafe_code)]` cannot reach. Neither is here yet; M3d's
-    SQLite will be, and it will arrive with its own ADR saying so.
+    Native code is a different sentence now. Until M3c this asserted there was
+    NONE, and said M3d's SQLite would arrive "with its own ADR saying so". It
+    has (ADR-0039): the bundled amalgamation behind `libsqlite3-sys`, compiled
+    by `cc`, and `libc` where `cpufeatures` needs it. The assertion is that the
+    native and build-executing set is EXACTLY that -- a second C library, or a
+    second tool that runs a compiler, is a new decision and fails here until one
+    is recorded. `#![forbid(unsafe_code)]` reaches none of it.
     """
-    forbidden = {
-        "serde",
-        "serde_derive",
-        "syn",
-        "quote",
-        "proc-macro2",
+    closure = _tcb_linked_closure()
+    proc_macro = {"serde", "serde_derive", "syn", "quote", "proc-macro2"}
+    gained = sorted(closure & proc_macro)
+    assert not gained, f"the authority's closure gained {gained}"
+    native_or_compiler = {
         "cc",
         "libc",
         "libsqlite3-sys",
+        "openssl-sys",
+        "bindgen",
+        "cmake",
+        "pkg-config",
+        "vcpkg",
+        "rustix",
+        "linux-raw-sys",
     }
-    found = _tcb_linked_closure() & forbidden
-    assert not found, f"the authority's closure gained {sorted(found)}"
+    assert closure & native_or_compiler == {
+        "cc",
+        "libc",
+        "libsqlite3-sys",
+        "pkg-config",
+        "vcpkg",
+    }, sorted(closure & native_or_compiler)
