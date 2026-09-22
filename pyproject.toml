@@ -33,7 +33,7 @@ dev = [
     "direwolf",
     "dwcheck",
     "direwolf-evals",
-    "ruff>=0.14",
+    "ruff>=0.16.8",
     "mypy>=1.18",
     "pytest>=8.4",
     "pip-audit>=2.9",
