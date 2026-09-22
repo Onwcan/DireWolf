@@ -50,6 +50,10 @@ pub mod policy;
 pub mod resource;
 pub mod state;
 
+// Real-file scratch directories for unit tests, kept outside `state/` (TX006).
+#[cfg(test)]
+mod scratch;
+
 // `proptest` is a dev-dependency used by the integration tests in `tests/`, not
 // by the library. `unused_crate_dependencies` sees the manifest edge and not
 // the test crates that consume it, so it is acknowledged here rather than

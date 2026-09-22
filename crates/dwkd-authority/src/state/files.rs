@@ -22,6 +22,27 @@
 //! ownership or ACL check is performed: native Windows is a documented
 //! reduced-assurance target (ADR-0029), and emulating Unix ownership there
 //! would be a check that proves nothing. Symlinks are refused everywhere.
+//!
+//! # The directory itself is never followed; its ancestors are resolved once
+//!
+//! The state directory and every state file must be real: a symlink in the
+//! *final* component is refused, as it always was. An *ancestor* is a
+//! different matter. On macOS `std::env::temp_dir()` is under `/var`, which is
+//! a symlink to `/private/var`, and an operator may well configure a path
+//! through a link they own. SQLite's `SQLITE_OPEN_NOFOLLOW` — which `db` keeps
+//! on — refuses a database path with a symlink in **any** component
+//! (`SQLITE_CANTOPEN_SYMLINK`), so such a path could never be opened.
+//!
+//! [`resolve_directory`] therefore checks the configured final component
+//! without following it, resolves the ancestors to a canonical absolute path,
+//! and on Unix proves by `(device, inode)` that the resolved path names the
+//! **same directory** that was checked, failing closed otherwise. Every state
+//! path — every SQLite open, `Authority::handle`'s reopen, the read-only
+//! verifier, the lock, the audit log and the quarantine marker — is built
+//! from that one resolved directory. There is no second, unresolved path to
+//! fall back to. Native Windows keeps the configured path: its SQLite VFS does
+//! not walk path components for links, and a verbatim `\\?\` path would change
+//! behaviour there for no gain.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::Write as _;
@@ -101,6 +122,78 @@ pub(super) fn prepare_directory(dir: &Path) -> Result<(), StartError> {
             Ok(())
         }
         Err(error) => Err(io("inspecting the state directory", &error)),
+    }
+}
+
+/// The one path the authority uses for its state directory.
+///
+/// The configured final component is inspected **without following it**: a
+/// symlink there is refused, whatever it points at. Then, on Unix, the
+/// ancestors are resolved and the result is proven to be the same directory
+/// object — see the module documentation. Read-only: it creates nothing, so
+/// the verifier can use it too.
+///
+/// # Errors
+///
+/// [`StartError::Permissions`] for a symlinked state directory or one that
+/// changed identity while it was being resolved; [`StartError::Layout`] for
+/// one that is not a directory; [`StartError::Io`] otherwise.
+pub(super) fn resolve_directory(dir: &Path) -> Result<PathBuf, StartError> {
+    let configured =
+        fs::symlink_metadata(dir).map_err(|e| io("inspecting the state directory", &e))?;
+    if configured.file_type().is_symlink() {
+        return Err(StartError::Permissions(format!(
+            "{} is a symlink; the state directory must be a real directory",
+            dir.display()
+        )));
+    }
+    if !configured.is_dir() {
+        return Err(StartError::Layout(format!(
+            "{} is not a directory",
+            dir.display()
+        )));
+    }
+    resolve_ancestors(dir, &configured)
+}
+
+#[cfg(unix)]
+fn resolve_ancestors(dir: &Path, configured: &fs::Metadata) -> Result<PathBuf, StartError> {
+    let resolved =
+        fs::canonicalize(dir).map_err(|e| io("resolving the state directory's ancestors", &e))?;
+    confirm_same_directory(dir, configured, &resolved)?;
+    Ok(resolved)
+}
+
+#[cfg(not(unix))]
+fn resolve_ancestors(dir: &Path, _configured: &fs::Metadata) -> Result<PathBuf, StartError> {
+    Ok(dir.to_path_buf())
+}
+
+/// Fail closed unless `resolved` names, without following anything, the very
+/// directory `configured` was read from. A swap of the final component between
+/// the check and the resolution — or a resolution that lands anywhere else —
+/// changes the `(device, inode)` pair, and is refused rather than trusted.
+#[cfg(unix)]
+fn confirm_same_directory(
+    dir: &Path,
+    configured: &fs::Metadata,
+    resolved: &Path,
+) -> Result<(), StartError> {
+    use std::os::unix::fs::MetadataExt as _;
+    let target = fs::symlink_metadata(resolved)
+        .map_err(|e| io("inspecting the resolved state directory", &e))?;
+    let same = !target.file_type().is_symlink()
+        && target.is_dir()
+        && (target.dev(), target.ino()) == (configured.dev(), configured.ino());
+    if same {
+        Ok(())
+    } else {
+        Err(StartError::Permissions(format!(
+            "{} resolved to {}, which is not the directory that was checked; refusing a state \
+             directory whose identity changed while it was being resolved",
+            dir.display(),
+            resolved.display()
+        )))
     }
 }
 
@@ -326,4 +419,76 @@ fn effective_uid(dir: &Path) -> Result<u32, StartError> {
     Err(StartError::Io(
         "could not create a uid probe in the state directory".to_owned(),
     ))
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use std::fmt::Debug;
+
+    use super::{confirm_same_directory, resolve_directory};
+    use crate::scratch::Scratch;
+    use crate::state::error::StartError;
+
+    fn must<T, E: Debug>(result: Result<T, E>, what: &str) -> T {
+        match result {
+            Ok(value) => value,
+            Err(error) => unreachable!("{what}: {error:?}"),
+        }
+    }
+
+    #[test]
+    fn a_resolution_that_lands_on_another_directory_is_refused() {
+        // Deterministic form of "the object changed while it was resolved": the
+        // metadata checked belongs to one directory, the resolved path names
+        // another.
+        let scratch = Scratch::new("identity");
+        let checked = scratch.path().join("checked");
+        let other = scratch.path().join("other");
+        must(std::fs::create_dir(&checked), "checked directory");
+        must(std::fs::create_dir(&other), "other directory");
+        let meta = must(std::fs::symlink_metadata(&checked), "metadata");
+        assert!(confirm_same_directory(&checked, &meta, &checked).is_ok());
+        assert!(matches!(
+            confirm_same_directory(&checked, &meta, &other),
+            Err(StartError::Permissions(_))
+        ));
+        // A resolved path that is itself a link is refused too, even when it
+        // points at the checked directory.
+        let link = scratch.path().join("link");
+        must(std::os::unix::fs::symlink(&checked, &link), "symlink");
+        assert!(matches!(
+            confirm_same_directory(&checked, &meta, &link),
+            Err(StartError::Permissions(_))
+        ));
+    }
+
+    #[test]
+    fn only_ancestors_are_resolved() {
+        let scratch = Scratch::new("resolve");
+        let real = scratch.path().join("real");
+        must(
+            std::fs::create_dir_all(real.join("state")),
+            "state directory",
+        );
+        let alias = scratch.path().join("alias");
+        must(
+            std::os::unix::fs::symlink(&real, &alias),
+            "ancestor symlink",
+        );
+        let resolved = must(resolve_directory(&alias.join("state")), "resolution");
+        assert_eq!(
+            resolved,
+            must(std::fs::canonicalize(real.join("state")), "canonical")
+        );
+        // The final component is never followed.
+        assert!(matches!(
+            resolve_directory(&alias),
+            Err(StartError::Permissions(_))
+        ));
+        must(std::fs::File::create(real.join("file")), "a file");
+        assert!(matches!(
+            resolve_directory(&alias.join("file")),
+            Err(StartError::Layout(_))
+        ));
+    }
 }

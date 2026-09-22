@@ -890,7 +890,11 @@ fn compare(path: &Path, chain: &StoreChain<'_>) -> Result<Compared, StoreAuditFa
 ///
 /// The first disagreement.
 pub fn verify_audit_against_store(state_dir: &Path) -> Result<StoreComparison, StoreAuditFault> {
-    let paths = super::files::StatePaths::new(state_dir);
+    // The same resolution the authority uses: a symlinked state directory is
+    // refused, and SQLite is handed a path with no symlink in any component.
+    let resolved = super::files::resolve_directory(state_dir)
+        .map_err(|e| StoreAuditFault::Store(e.to_string()))?;
+    let paths = super::files::StatePaths::new(&resolved);
     let conn =
         super::db::open_read_only(&paths.db).map_err(|e| StoreAuditFault::Store(e.to_string()))?;
     let chain = StoreChain::read(&conn).map_err(|e| StoreAuditFault::Store(e.to_string()))?;

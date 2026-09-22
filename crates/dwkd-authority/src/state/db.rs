@@ -29,7 +29,13 @@
 //!
 //! The file is opened without `SQLITE_OPEN_URI`, so no query parameter in a
 //! path can change how it is opened, and with `SQLITE_OPEN_NOFOLLOW`, so a
-//! `kernel.db` that is a symlink is refused rather than followed.
+//! `kernel.db` that is a symlink is refused rather than followed. SQLite
+//! applies that to **every** component of the path, not only the last: a
+//! symlinked ancestor is `SQLITE_CANTOPEN_SYMLINK` too. The flag stays on, and
+//! the path it receives is always built from the state directory as
+//! `files::resolve_directory` resolved it — ancestors resolved, the directory
+//! itself never followed — so a legitimate path such as macOS's
+//! `/var -> /private/var` opens, and a link anywhere in it later does not.
 //!
 //! [ADR-0009]: ../../../../../docs/adr/0009-storage-strategy.md
 //! [`STORAGE.md`]: ../../../../../docs/STORAGE.md
@@ -242,4 +248,70 @@ pub(super) fn settings(conn: &Connection) -> rusqlite::Result<StorageSettings> {
         wal_autocheckpoint: int("wal_autocheckpoint")?,
         auto_vacuum: int("auto_vacuum")?,
     })
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use std::fmt::Debug;
+    use std::path::Path;
+
+    use super::{open, open_read_only};
+    use crate::scratch::Scratch;
+
+    fn must<T, E: Debug>(result: Result<T, E>, what: &str) -> T {
+        match result {
+            Ok(value) => value,
+            Err(error) => unreachable!("{what}: {error:?}"),
+        }
+    }
+
+    fn extended_code(path: &Path, read_only: bool) -> Option<i32> {
+        let result = if read_only {
+            open_read_only(path)
+        } else {
+            open(path)
+        };
+        result.err()?.sqlite_error().map(|e| e.extended_code)
+    }
+
+    /// Why the state directory is resolved before SQLite sees it: with
+    /// `SQLITE_OPEN_NOFOLLOW`, SQLite refuses a path with a symlink in ANY
+    /// component — an ancestor included, as `/var -> /private/var` is on
+    /// macOS — not only a symlinked database file. Both flags stay on; the
+    /// fix is to pass a symlink-free path, which opens.
+    #[test]
+    fn nofollow_refuses_a_symlink_in_any_component_and_a_resolved_path_opens() {
+        let scratch = Scratch::new("nofollow");
+        let real = scratch.path().join("real");
+        must(std::fs::create_dir(&real), "real directory");
+        must(
+            std::fs::File::create(real.join("kernel.db")),
+            "database file",
+        );
+        let alias = scratch.path().join("alias");
+        must(
+            std::os::unix::fs::symlink(&real, &alias),
+            "ancestor symlink",
+        );
+
+        for read_only in [false, true] {
+            assert_eq!(
+                extended_code(&alias.join("kernel.db"), read_only),
+                Some(rusqlite::ffi::SQLITE_CANTOPEN_SYMLINK),
+                "an ancestor symlink is refused (read_only: {read_only})"
+            );
+        }
+        let canonical = must(std::fs::canonicalize(&real), "canonical directory");
+        let resolved = canonical.join("kernel.db");
+        assert!(open(&resolved).is_ok());
+        assert!(open_read_only(&resolved).is_ok());
+
+        // And a symlinked database file is refused as it always was.
+        let link = canonical.join("link.db");
+        must(std::os::unix::fs::symlink(&resolved, &link), "file symlink");
+        assert_eq!(
+            extended_code(&link, false),
+            Some(rusqlite::ffi::SQLITE_CANTOPEN_SYMLINK)
+        );
+    }
 }

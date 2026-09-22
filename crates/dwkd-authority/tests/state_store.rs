@@ -542,9 +542,14 @@ mod unix {
     use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
     use std::sync::Arc;
 
-    use dwkd_authority::state::{ManualClock, StartError};
+    use dwkd_authority::state::{
+        AUDIT_LOG, KERNEL_DB, ManualClock, Reply, StartError, verify_audit_against_store,
+        verify_audit_log,
+    };
 
-    use super::state_support::{Harness, START_MS, TempDir, balanced, session, start};
+    use super::state_support::{
+        Harness, START_MS, TempDir, balanced, install_fixtures, session, start, subject,
+    };
 
     fn mode(path: &std::path::Path) -> u32 {
         std::fs::symlink_metadata(path)
@@ -621,6 +626,131 @@ mod unix {
         let clock = Arc::new(ManualClock::new(START_MS));
         assert!(matches!(
             start(&link, &balanced(), &clock, None),
+            Err(StartError::Permissions(_))
+        ));
+    }
+
+    /// The macOS failure, without depending on Apple's `/var -> /private/var`:
+    /// an ANCESTOR of the state directory is a symlink, the state directory
+    /// itself is real. SQLite's `SQLITE_OPEN_NOFOLLOW` refuses any path with a
+    /// symlink in any component, so the authority must hand it the resolved
+    /// path -- and must still refuse a state directory that is itself a link.
+    #[test]
+    fn an_ancestor_symlink_is_resolved_and_the_store_works_through_it() {
+        let dir = TempDir::new("ancestor");
+        let real_parent = dir.path().join("real_parent");
+        std::fs::create_dir_all(real_parent.join("target")).unwrap();
+        let alias = dir.path().join("alias");
+        std::os::unix::fs::symlink(&real_parent, &alias).unwrap();
+        let configured = alias.join("target").join("state");
+        let real_state = std::fs::canonicalize(real_parent.join("target"))
+            .unwrap()
+            .join("state");
+        let clock = Arc::new(ManualClock::new(START_MS));
+
+        let (mut authority, report) = start(&configured, &balanced(), &clock, None)
+            .expect("a fresh store starts through an ancestor symlink");
+        assert!(report.created);
+        // One authoritative identity: the resolved, symlink-free directory.
+        assert_eq!(authority.state_dir(), real_state);
+        assert!(
+            !std::fs::symlink_metadata(&real_state)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        // WAL and FULL took effect, on files in the intended real directory.
+        let settings = authority.storage_settings().unwrap();
+        assert!(settings.journal_mode.eq_ignore_ascii_case("wal"));
+        assert_eq!(settings.synchronous, 2);
+        for file in [KERNEL_DB, AUDIT_LOG] {
+            let meta = std::fs::symlink_metadata(real_state.join(file)).unwrap();
+            assert!(meta.is_file(), "{file}");
+            assert_eq!(meta.permissions().mode() & 0o777, 0o600, "{file}");
+        }
+        install_fixtures(&mut authority);
+
+        // A second handle reopens kernel.db, through the resolved path.
+        let mut handle = authority.handle().expect("a handle reopens the store");
+        let caller = handle.connect(subject(1000));
+        let Reply::Done(_) = handle.acquire_lease(&caller, &session(1)).unwrap() else {
+            panic!("leased through the second handle")
+        };
+        drop(handle);
+        drop(authority);
+
+        // A restart through the same configured path.
+        let (authority, report) =
+            start(&configured, &balanced(), &clock, None).expect("a restart through the alias");
+        assert!(!report.created);
+        assert_eq!(report.leases_invalidated, 1);
+        assert_eq!(authority.state_dir(), real_state);
+        drop(authority);
+
+        // Read-only verification, through the configured path and the real one.
+        for path in [&configured, &real_state] {
+            verify_audit_against_store(path).expect("the store verifies");
+            verify_audit_log(&path.join(AUDIT_LOG)).expect("the chain verifies");
+        }
+    }
+
+    /// Resolving ancestors must not turn a symlinked state directory into an
+    /// accepted one, even when it points at a valid, private store.
+    #[test]
+    fn a_final_symlink_to_a_valid_store_is_still_refused() {
+        let mut h = Harness::new("final-link");
+        h.stop();
+        let link = h.dir.path().join("link");
+        std::os::unix::fs::symlink(h.state(), &link).unwrap();
+        let clock = Arc::new(ManualClock::new(START_MS));
+        assert!(matches!(
+            start(&link, &balanced(), &clock, None),
+            Err(StartError::Permissions(_))
+        ));
+        // The read-only verifier refuses it too, rather than following it.
+        assert!(verify_audit_against_store(&link).is_err());
+        // The real directory is untouched and still starts.
+        assert!(h.try_restart().is_ok());
+    }
+
+    /// After resolution, the authority's path has no symlink in it. One swapped
+    /// in later — the state directory renamed away and a link left in its
+    /// place — is refused by the next SQLite open, not followed.
+    #[test]
+    fn a_symlink_swapped_in_after_resolution_is_refused_by_the_next_open() {
+        let mut h = Harness::new("swap-after");
+        let resolved = h.authority().state_dir().to_path_buf();
+        let moved = h.dir.path().join("moved");
+        std::fs::rename(&resolved, &moved).unwrap();
+        std::os::unix::fs::symlink(&moved, &resolved).unwrap();
+        assert!(h.authority().handle().is_err());
+    }
+
+    #[test]
+    fn a_symlinked_audit_log_is_refused_rather_than_followed() {
+        let mut h = Harness::new("symlink-audit");
+        h.stop();
+        let audit = h.state().join(AUDIT_LOG);
+        let elsewhere = h.dir.path().join("elsewhere.log");
+        std::fs::rename(&audit, &elsewhere).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, &audit).unwrap();
+        assert!(matches!(h.try_restart(), Err(StartError::Permissions(_))));
+    }
+
+    #[test]
+    fn a_state_directory_under_an_ancestor_symlink_is_still_checked_for_privacy() {
+        // Resolution changes which path is opened, not what is required of the
+        // directory: a group-readable one is refused through an alias too.
+        let dir = TempDir::new("ancestor-mode");
+        let real = dir.path().join("real");
+        std::fs::create_dir_all(real.join("state")).unwrap();
+        std::fs::set_permissions(real.join("state"), std::fs::Permissions::from_mode(0o750))
+            .unwrap();
+        let alias = dir.path().join("alias");
+        std::os::unix::fs::symlink(&real, &alias).unwrap();
+        let clock = Arc::new(ManualClock::new(START_MS));
+        assert!(matches!(
+            start(&alias.join("state"), &balanced(), &clock, None),
             Err(StartError::Permissions(_))
         ));
     }

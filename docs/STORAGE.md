@@ -35,8 +35,13 @@ can replace it by renaming another file over it without ever writing it. The
 authority refuses a state directory or state file that is a symlink, carries
 any group or other permission bit, or (on Unix) is owned by another uid, and
 it never creates a store around a missing piece — `kernel.db` gone beside a
-surviving `audit.log`, or the reverse, is refused, not "started fresh". M3d's
-authority takes the state directory as a parameter; where it sits under
+surviving `audit.log`, or the reverse, is refused, not "started fresh". An
+*ancestor* of the state directory may be a symlink — on macOS the temporary
+directory lives under `/var`, which is one — so on Unix the authority resolves
+the ancestors once, proves by `(device, inode)` that the result is the very
+directory it checked, and builds every state path from that resolved directory.
+SQLite's `SQLITE_OPEN_NOFOLLOW` stays on and refuses a symlink in any component
+of what it is given. M3d's authority takes the state directory as a parameter; where it sits under
 `$DIREWOLF_HOME` is fixed when the daemon is served (M3e) and packaged. Mode
 bits are not the claim: `make authority-write-probe` attempts the writes as
 the runtime user and reports NOT EXERCISED where no second user exists.

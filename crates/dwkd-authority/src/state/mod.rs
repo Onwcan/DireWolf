@@ -438,9 +438,17 @@ impl Authority {
             ));
         }
 
+        // The configured directory is created if missing and checked as
+        // configured; then its ancestors are resolved, once, and every state
+        // path below -- every SQLite open included -- is built from the
+        // resolved directory, which is checked again. `NOFOLLOW` refuses a
+        // path with a symlink in any component, and the state directory
+        // itself is never followed (`files::resolve_directory`).
         files::prepare_directory(dir)?;
         files::check_directory(dir)?;
-        let paths = StatePaths::new(dir);
+        let resolved = files::resolve_directory(dir)?;
+        files::check_directory(&resolved)?;
+        let paths = StatePaths::new(&resolved);
         let lock = files::lock(&paths)?;
         if let Some(marker) = files::quarantine_marker(&paths) {
             return Err(StartError::Quarantined(marker.trim().to_owned()));
@@ -616,7 +624,9 @@ impl Authority {
         )
     }
 
-    /// The state directory.
+    /// The state directory, as the authority uses it: on Unix, the configured
+    /// directory with its ancestors resolved — the one path every state file
+    /// operation and every SQLite open is built from.
     #[must_use]
     pub fn state_dir(&self) -> &Path {
         &self.shared.paths.dir
