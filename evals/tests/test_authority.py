@@ -8,6 +8,7 @@ exercised" into a pass nor accept evidence that no real server produced.
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -244,11 +245,60 @@ def test_what_this_machine_cannot_exercise_is_computed_from_declarations() -> No
 
 
 def _line(case: str, layer: str = "decoder", server: str | None = None) -> str:
-    server_field = f',"server":"{server}"' if server is not None else ""
-    return (
-        f'DWKP-EVIDENCE {{"suite":"hostile","case":"{case}","layer":"{layer}",'
-        f'"contained":true,"audited":true{server_field}}}'
+    """One synthetic evidence line, serialized by `json` -- never by hand.
+
+    A server path is interpolated from `tmp_path`, which on Windows is full of
+    backslashes: pasted raw into a JSON string, `C:\\Users` is an invalid
+    escape, and the strict parser rightly calls the line unreadable. Compact
+    separators keep the text the tests edit (`"contained":true`) spelled as
+    the Rust emitters spell it.
+    """
+    payload: dict[str, object] = {
+        "suite": "hostile",
+        "case": case,
+        "layer": layer,
+        "contained": True,
+        "audited": True,
+    }
+    if server is not None:
+        payload["server"] = server
+    return authority.PREFIX + json.dumps(payload, separators=(",", ":"))
+
+
+@pytest.mark.parametrize(
+    "server",
+    [
+        r"C:\Users\runneradmin\AppData\Local\Temp\dwkd-authority",
+        '/srv/a "quoted"\\ \t name/dwkd-authority',
+    ],
+    ids=["windows-path", "json-sensitive"],
+)
+def test_synthetic_evidence_round_trips_any_server_path(server: str) -> None:
+    """On every platform: a Windows path, or quotes, backslashes and a tab,
+    survive the helper and the REAL parser exactly."""
+    parsed = authority.parse_evidence(_line("depth-bomb", server=server))
+    assert len(parsed) == 1
+    assert parsed[0].server == server
+    assert parsed[0].case == "depth-bomb"
+    assert parsed[0].contained is True and parsed[0].audited is True
+
+
+def test_hand_built_evidence_with_a_raw_windows_path_stays_unreadable() -> None:
+    """The negative control, and the strictness this fix must not buy off:
+    the line the old helper produced on Windows is malformed JSON, and the
+    runner reports it as unreadable evidence -- an ERROR, never a verdict."""
+    server = r"C:\Users\runneradmin\AppData\Local\Temp\dwkd-authority"
+    malformed = (
+        f'{authority.PREFIX}{{"suite":"hostile","case":"x","layer":"decoder",'
+        f'"contained":true,"audited":true,"server":"{server}"}}'
     )
+    with pytest.raises(ValueError, match=r"Invalid \\escape"):
+        authority.parse_evidence(malformed)
+    judged = authority._transport(
+        authority._Cargo(0, malformed), authority.HOSTILE_CASES, {"hostile"}
+    )
+    assert judged.status is Status.ERROR
+    assert judged.reason.startswith("unreadable evidence")
 
 
 def test_evidence_interleaved_after_a_test_name_is_still_read() -> None:
