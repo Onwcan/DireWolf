@@ -71,37 +71,42 @@ INVENTORY: Final[tuple[SecurityProperty, ...]] = (
         "harness-selftest",
         "Against the dummy child; real processes are instrumented from M3.",
     ),
-    # --- pending: the mechanism does not exist yet -------------------------
+    # --- measurable now: M3 shipped the authority (M3e, ADR-0041) -----------
     SecurityProperty(
         "Peer identity on the kernel socket",
         "M3",
-        None,
-        "Needs dwkd-authority and a real transport (SO_PEERCRED).",
+        "authority-security",
+        "A real second uid against the real server (SO_PEERCRED): Linux, and only "
+        "where a second identity exists; CI's eval gate provides one.",
     ),
     SecurityProperty(
         "The authority process boundary holds under a hostile client",
         "M3",
-        None,
-        "Needs the authority server; the hostile DWKP client suite is EVALS.md section 3.",
+        "authority-security",
+        "The real dwkd-authority process, attacked over its socket; every case "
+        "contained, and audited where it is security-significant.",
     ),
     SecurityProperty(
         "Lease epoch fencing rejects a stale epoch",
         "M3",
-        None,
-        "M2 defines the fields; the kernel owns the counter.",
+        "authority-security",
+        "Stale epochs and holders, a restart and a poisoned store, through the real process.",
     ),
     SecurityProperty(
         "Policy decisions are explainable and deny by default",
         "M3",
-        None,
-        "Needs the policy engine and rule packs.",
+        "authority-security",
+        "Each shipped pack's default rule, with its rule_source, through the real "
+        "engine -- in process until M4 can build a canonical action.",
     ),
     SecurityProperty(
         "Capability attenuation never widens authority",
         "M3",
-        None,
-        "Needs the capability lattice.",
+        "authority-security",
+        "Generated delegation chains over the real lattice; the 10^6 campaign is "
+        "`make capability-evidence`.",
     ),
+    # --- pending: the mechanism does not exist yet -------------------------
     SecurityProperty(
         "Filesystem canonicalisation resists traversal and TOCTOU",
         "M4",

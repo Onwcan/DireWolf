@@ -95,6 +95,13 @@ class Eval:
     tags: tuple[str, ...]
     gate: bool
     """Part of the deterministic per-pull-request subset."""
+    platforms: tuple[str, ...] = ()
+    """Where the property can be measured at all (``linux``, ``macos``,
+    ``windows``); empty for everywhere. On any other platform the eval is
+    *not exercised* -- SKIP, never a pass. See :mod:`direwolf_evals.preconditions`."""
+    needs: tuple[str, ...] = ()
+    """What the machine must provide (``second-identity``). Unmet, the eval is
+    *not exercised*. See :mod:`direwolf_evals.preconditions`."""
 
     def pending_reason_for(self, missing: Sequence[str]) -> str:
         """The exact reason recorded when ``missing`` milestones block this eval.

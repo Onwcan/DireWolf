@@ -13,8 +13,8 @@ publish = false
 
 # The authority's logic -- the capability lattice (M3b), the policy engine (M3c)
 # and the durable state (M3d) -- lives in a library so it can be unit- and
-# integration-tested without a daemon. The binary serves nothing until M3e: a
-# library target is not a running server.
+# integration-tested without a daemon. The binary is the daemon: `serve` (M3e)
+# is the DWKP server, and the real-process tests spawn it.
 [lib]
 name = "dwkd_authority"
 path = "src/lib.rs"
@@ -50,6 +50,14 @@ toml = { workspace = true }
 # included, is ADR-0039's. Only `crate::state` may use either (TX005).
 rusqlite = { workspace = true }
 sha2 = { workspace = true }
+
+# Peer credentials for the DWKP server (M3e): `SO_PEERCRED` through a
+# maintained safe wrapper, so the crate keeps `forbid(unsafe_code)`. Linux only,
+# because Linux is the one platform where the authority claims peer
+# authentication (ADR-0035, ADR-0041); elsewhere the server refuses to start
+# and nothing here is linked. Only `crate::server::peer` may use it (TX008).
+[target.'cfg(target_os = "linux")'.dependencies]
+rustix = { workspace = true }
 
 # Dev-only. Never linked into the shipped binary, and excluded from the TCB
 # closure `dwcheck` computes; the capability algebra's eight documented

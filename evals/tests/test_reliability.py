@@ -41,6 +41,7 @@ from direwolf_evals.runners import RUNNERS
 from direwolf_evals.scoring import ScoringError, score_outcome
 
 EVALS_ROOT = Path(__file__).resolve().parents[1]
+FAST_SUITES = ("harness-selftest", "pending-kernel", "protocol-compat", "protocol-security")
 REPO_ROOT = EVALS_ROOT.parent
 
 
@@ -168,7 +169,7 @@ def test_the_pending_reason_carries_the_milestone_from_requires_not_from_prose()
 
 
 def test_pending_never_counts_as_a_pass() -> None:
-    report = run_suites(REPO_ROOT, EVALS_ROOT)
+    report = run_suites(REPO_ROOT, EVALS_ROOT, suites=FAST_SUITES)
     counts = report.counts()
     assert counts["pending"] > 0
     assert not report.failed
@@ -178,38 +179,36 @@ def test_pending_never_counts_as_a_pass() -> None:
             assert result.reason.startswith("requires ")
 
 
-def test_the_real_pending_suite_will_activate_when_m3_arrives() -> None:
-    """The transition strategy, checked against the file that has to survive it.
-
-    Every eval in `pending-kernel` that waits only for M3 must have nothing else
-    holding it back, so that adding "M3" to AVAILABLE_MILESTONES really does
-    make it run. None of them may name a placeholder runner: on that commit a
-    placeholder would start reporting a pass for a property it never measured.
-    """
-    with_m3 = frozenset({*AVAILABLE_MILESTONES, "M3"})
-    kernel = [e for _, e in collect(EVALS_ROOT) if e.suite == "pending-kernel"]
-    assert kernel, "the pending suite should exist"
-
-    activating = [e for e in kernel if not set(e.requires) - with_m3]
-    assert {e.name for e in activating} == {
+def test_m3_is_available_and_its_evals_are_real_gating_runners() -> None:
+    """M3 is here (M3e): the five properties that waited for it now run, in a
+    gated suite, each through a registered runner that measures the product.
+    What is still pending waits for a later milestone and nothing else."""
+    assert "M3" in AVAILABLE_MILESTONES
+    authority = {e.name: e for _, e in collect(EVALS_ROOT) if e.suite == "authority-security"}
+    assert set(authority) == {
         "hostile-dwkp-client",
         "peer-credential-check",
         "epoch-fencing",
         "policy-denies-by-default",
         "capability-attenuation",
     }
-    for evaluation in activating:
-        assert evaluation.runner is None or evaluation.runner in RUNNERS
+    for evaluation in authority.values():
+        assert evaluation.runner in RUNNERS, evaluation.id
+        assert evaluation.gate, f"{evaluation.id} must be a merge gate"
+        assert evaluation.requires == ("M3",)
+    for name in ("hostile-dwkp-client", "peer-credential-check", "epoch-fencing"):
+        assert authority[name].platforms == ("linux",), "the server exists only on Linux"
+    assert authority["peer-credential-check"].needs == ("second-identity",)
 
-    later = [e for e in kernel if set(e.requires) - with_m3]
-    assert {e.name for e in later} == {
+    kernel = [e for _, e in collect(EVALS_ROOT) if e.suite == "pending-kernel"]
+    assert {e.name for e in kernel} == {
         "path-traversal",
         "sandbox-egress",
         "approval-binding-drift",
         "model-egress-privacy",
     }
-    for evaluation in later:
-        assert sorted(set(evaluation.requires) - with_m3) == list(evaluation.requires)
+    for evaluation in kernel:
+        assert set(evaluation.requires) - AVAILABLE_MILESTONES == set(evaluation.requires)
 
 
 def test_a_pending_reason_that_restates_its_requirement_is_refused(tmp_path: Path) -> None:
@@ -432,7 +431,7 @@ def test_a_result_refuses_a_non_finite_metric() -> None:
 
 
 def test_written_results_are_standards_compliant_json(tmp_path: Path) -> None:
-    report = run_suites(REPO_ROOT, EVALS_ROOT)
+    report = run_suites(REPO_ROOT, EVALS_ROOT, suites=FAST_SUITES)
     path = tmp_path / "results.jsonl"
     write_jsonl(path, report.results)
     text = path.read_text(encoding="utf-8")
@@ -515,7 +514,7 @@ def test_a_nan_score_against_a_full_threshold_is_never_a_pass(tmp_path: Path) ->
 
 
 def test_the_repository_results_contain_no_non_finite_number() -> None:
-    report = run_suites(REPO_ROOT, EVALS_ROOT)
+    report = run_suites(REPO_ROOT, EVALS_ROOT, suites=FAST_SUITES)
     for result in report.results:
         assert result.score is None or math.isfinite(result.score)
         for value in result.metrics.values():
@@ -647,7 +646,7 @@ def test_the_repository_baseline_records_a_reason_for_every_pending_eval() -> No
 
 
 def test_a_written_baseline_round_trips_its_pending_reasons(tmp_path: Path) -> None:
-    report = run_suites(REPO_ROOT, EVALS_ROOT)
+    report = run_suites(REPO_ROOT, EVALS_ROOT, suites=FAST_SUITES)
     path = tmp_path / "b.json"
     baseline_module.write(path, report.results)
     comparison = baseline_module.compare(baseline_module.Baseline.load(path), report.results)

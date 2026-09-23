@@ -415,8 +415,9 @@ Three properties this display guarantees: the rendering comes from kernel state 
 ## 6. Dry run and simulation
 
 > **Status.** The two commands below are the shape the CLI will take; neither
-> exists yet, because both need a running authority that a CLI can reach (M3e
-> and M17), and because deciding an action needs the complete canonical
+> exists yet, because both need a CLI that reaches the running authority
+> (M17; the authority serves DWKP since M3e), and because deciding an action
+> needs the complete canonical
 > action M4's canonicaliser builds: until then `QueryAuthority` refuses a
 > proposed action rather than decide it on invented facts
 > ([ADR-0040](adr/0040-m3d-reconciliation-admission-across-tenures-and-undecidable-proposals.md)). What exists is the engine under them (M3c), the

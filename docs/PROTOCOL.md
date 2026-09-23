@@ -14,10 +14,8 @@ Three protocols, three different jobs and three different threat models. Conflat
 > the strict JSON profile, RFC 8785, the error model and version negotiation.
 > Message shapes are generated from Rust into [`schemas/`](../schemas) and into
 > the Python runtime ([ADR-0033](adr/0033-protocol-source-of-truth-and-tcb-dependencies.md)).
-> **No transport exists yet**: no socket, no peer-credential check, no epoch
-> table, no dedupe window. Those are M3 and later, and nothing below that
-> depends on them is implemented. Decoding a message successfully means it is
-> well-formed; it does not mean it is authorised.
+> Decoding a message successfully means it is well-formed; it does not mean it
+> is authorised.
 >
 > **Implementation status (M3d).** The *semantics* behind the defined
 > authority operations now exist in `dwkd-authority`'s state layer, over
@@ -33,9 +31,19 @@ Three protocols, three different jobs and three different threat models. Conflat
 > in-process dispatch answers each decoded request with exactly the response
 > body M3e will send, and a test sends every one of them — including every
 > refusal pair the decoder accepts — back through the real encoder and
-> decoder. Every M3 request now has a truthful wire answer. **There is still
-> no transport and no peer-credential check** (M3e); the caller's identity is
-> asserted, not authenticated.
+> decoder. Every M3 request now has a truthful wire answer.
+>
+> **Implementation status (M3e).** `dwkd-authority serve` serves DWKP on a
+> Unix-domain socket ([ADR-0041](adr/0041-m3e-authenticated-dwkp-transport.md)). **Linux only.** Before a byte
+> is read, the kernel reports the peer's uid (`SO_PEERCRED`) and the
+> operator's explicit uid list admits it or the connection is closed
+> unanswered and audited. Each accepted connection gets one fresh lease
+> holder; the handshake must come first; every frame goes through
+> `dwk-proto`'s production decoder; every request goes to the M3d dispatcher
+> unchanged. The subject is the kernel's, never a field — no DWKP message
+> carries one. There is **no** TCP, HTTP or other transport, and on macOS and
+> native Windows `serve` refuses to start rather than guess an identity. The
+> wire did not change: M3e added no message, field or version.
 
 ---
 
@@ -134,11 +142,13 @@ Common to all: new fields are optional with a documented default; removing or re
 
 ### Transport
 
-Unix domain socket at `$DIREWOLF_HOME/kernel.sock`, mode 0600, owned by the kernel user, runtime user in the owning group. On Windows, a named pipe with an explicit DACL. *(M3.)*
+A Unix-domain stream socket, and nothing else — no TCP or loopback fallback ([ADR-0041](adr/0041-m3e-authenticated-dwkp-transport.md)). The operator names its absolute path (`dwkd-authority serve --socket`); packaging fixes a default at M17. Its parent, the **IPC directory**, is owned by the authority's uid and not writable by group or other, and every ancestor is owned by root or the authority and not group/other-writable unless sticky — so the runtime cannot remove, replace or shadow the socket to impersonate the authority to a later client. The socket is `0666`: its mode is **not** the access control, the kernel-reported uid is. An operator who wants the filesystem to narrow who can even connect pre-creates the IPC directory `0710` with the runtime's group. A stale socket is removed at startup only if it is provably this authority's own dead one. On native Windows there is **no** server: no named pipe, no DACL design, and nothing faked; WSL2 is the supported path.
 
 **Framing (implemented, M2):** a 4-byte big-endian body length, a 1-byte content type (`0x01` = UTF-8 JSON, the only one defined), then the body. Body length 1 B – 1 MiB. The limit is enforced from the 5-byte header before any body byte is buffered; any framing error poisons the decoder and is connection-fatal, because a length-prefixed stream has no safe resynchronisation point. Encoders emit RFC 8785 canonical JSON; decoders do not require it (§7).
 
-**Peer verification on connect:** `SO_PEERCRED` (Linux) / `LOCAL_PEERCRED` (macOS) / `GetNamedPipeClientProcessId` (Windows) confirms the connecting process runs as the expected uid. A connection from any other user is refused and audited. This is what stops another local process from impersonating the runtime.
+**Peer verification on connect (implemented, M3e, Linux):** `SO_PEERCRED`, through `rustix`'s safe wrapper, reports the connecting process's effective uid; the operator's closed `--allow-uid` list decides whether that uid may speak DWKP, with no wildcard and no exception for root. A connection from any other uid is closed **before a byte is read** — unanswered, so it learns nothing — and audited (`transport.peer_refused`, with the kernel's uid and pid). This is what stops another local process from impersonating the runtime, and it is proven with a real second OS user in CI. macOS (`LOCAL_PEERCRED`) has no safe API this build can use and native Windows has no design, so neither serves ([ADR-0041](adr/0041-m3e-authenticated-dwkp-transport.md) §13).
+
+**The connection protocol (implemented, M3e).** One accepted connection is one fresh lease holder, minted once and never shared; the first message must be `Handshake` — anything else, a second handshake, or a response sent to the authority closes the connection unanswered (no wire code says "out of order" truthfully); one request is in flight at a time, answered in order; every protocol error is answered with `direwolf.protocol.error` and closes the connection; an authority refusal does not. Disconnecting ends nothing in the state machine — the lease stays until release, expiry or restart. The full close/continue matrix is [ADR-0041](adr/0041-m3e-authenticated-dwkp-transport.md) §8.
 
 ### Operations
 
@@ -279,7 +289,7 @@ Denials are deliberately informative. An agent that knows *why* it was denied an
 
 ### Backpressure and limits
 
-Bounded in-flight requests per run (default 16); the kernel returns `BUSY` rather than queueing without limit. Per-run request rate limits. A runtime that stops reading responses gets its connection closed after a write timeout — a slow reader must not be able to exhaust kernel memory.
+*(As implemented at M3e — [ADR-0041](adr/0041-m3e-authenticated-dwkp-transport.md) §9.)* One request in flight per connection and at most 32 connections; an allowed peer over the limit is refused before a byte is read and audited. A handshake must complete within 5 s, a frame within 5 s of its first byte, and a connection may be silent between frames for a lease lifetime plus 5 s. A response write that does not complete in 5 s closes the connection — a slow reader cannot exhaust the authority or block another connection. Every authority decision is made by one worker thread over a bounded queue, so no two requests contend inside SQLite. There is no `BUSY` answer on the M3 wire; per-run rate limits are not implemented.
 
 ## 3. Epoch fencing
 
@@ -376,16 +386,17 @@ The framing layer carries a content-type byte, so MessagePack or CBOR can be neg
 
 ## 8. Security properties
 
-Design properties. At M2 only the parser row is implemented; the rest need the transport and the kernel (M3 onward).
+Design properties. As of M3e the rows about the kernel's identity of the runtime, impersonation of the kernel, zombie runtimes, refusal probes, replay, parsing and resource exhaustion are implemented and exercised against the real process; the gateway row is M13's and the downgrade floor is enforced with one supported version.
 
 | Property | Mechanism |
 |---|---|
-| Runtime cannot impersonate the kernel | Kernel owns the socket; runtime connects, never binds |
-| Other local processes cannot impersonate the runtime | Peer credential check on connect |
+| Runtime cannot impersonate the kernel | Kernel owns the socket and its directory; runtime connects, never binds, and cannot remove, replace or shadow the name (M3e, tested with a real second uid) |
+| Other local processes cannot impersonate the runtime | Kernel peer credentials checked against the operator's uid list before a byte is read (M3e, Linux) |
+| The runtime cannot choose its identity | The subject is the kernel-reported uid; the lease holder is minted per connection; no DWKP field carries either (M3e) |
 | Zombie runtime cannot act | Epoch fencing; the `STALE_EPOCH` refusal withholds the current epoch, so being fenced tells a caller nothing it could use to unfence itself |
 | A refusal is not a probe | One `UNKNOWN_RUN` answer for "never existed" and "already released"; no `UNKNOWN_LEASE`; releases stay idempotent |
 | Replay of a request that mints or spends authority | Idempotency key scoped to the authenticated peer and session, bound to the canonical request (not the epoch), checked only after the epoch fence, and recorded in `kernel.db` for the life of the store — no finite dedupe window, because a window reopens duplicate admission for any retry slower than it. A retry receives the recorded grant only while its run is active under the caller's lease; after that it is `ADMISSION_ENDED`, never a second admission and never a replay of ended authority ([ADR-0039](adr/0039-durable-authority-state.md) §8, [ADR-0040](adr/0040-m3d-reconciliation-admission-across-tenures-and-undecidable-proposals.md)) |
 | Gateway compromise | Gateway holds no authority; approvals relayed, not generated |
 | Parser exploitation | Rust parser, `#![forbid(unsafe_code)]` and no third-party dependency, 1 MiB frame cap, depth 32, lexical duplicate-key rejection; fuzzed with libFuzzer weekly and on protocol pull requests, plus a stable mutation harness in every test run (M2) |
-| Resource exhaustion | Bounded in-flight, rate limits, write timeouts |
+| Resource exhaustion | One request in flight per connection, 32 connections, handshake/frame/idle/write deadlines, a rate-limited audit (M3e); per-run rate limits are future work |
 | Downgrade attack | Version negotiation picks the highest mutual version; minimums are configurable and enforced |

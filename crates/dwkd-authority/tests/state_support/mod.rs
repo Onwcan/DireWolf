@@ -2,8 +2,8 @@
 //!
 //! Everything here drives the **real** store: real directories, real SQLite
 //! files, real `audit.log`s, and DWKP requests written as JSON text and passed
-//! through `dwk_proto`'s real decoder — the same bytes-to-message path M3e will
-//! use. Nothing is mocked. Where a test needs to tamper with a file or read a
+//! through `dwk_proto`'s real decoder — the same bytes-to-message path the M3e
+//! server uses. Nothing is mocked. Where a test needs to tamper with a file or read a
 //! row the public API does not expose, it opens its own `rusqlite` connection
 //! on the file, exactly as an attacker with file access would.
 

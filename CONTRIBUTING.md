@@ -182,8 +182,13 @@ before and after any dependency change.
 M3, and `dwcheck` already checks it as TCB. Dev-dependencies are not linked and
 not counted, but they are still audited by `cargo deny`.
 
-*The dependency inventory.* **TCB (`dwkd-authority` and `dwk-proto`): twenty
-linked crates.** The policy loader's TOML chain — `toml`, `toml_parser`,
+*The dependency inventory.* **TCB (`dwkd-authority` and `dwk-proto`): twenty-five
+crates in the exact gate's union**, twenty-two linked on Linux x86_64. Since M3e
+([ADR-0041](docs/adr/0041-m3e-authenticated-dwkp-transport.md)), `rustix` and `linux-raw-sys` for peer
+credentials, declared for Linux only and usable in `server/peer.rs` alone
+(TX008); `errno`, which rustix's libc backend links on Linux targets without a
+raw-syscall backend; and `windows-sys` and `windows-link`, which the union
+must name although no supported build links them. The policy loader's TOML chain — `toml`, `toml_parser`,
 `toml_datetime`, `serde_spanned` and `winnow`, pinned exactly, added at M3c
 ([ADR-0038](docs/adr/0038-policy-evaluation-phases-and-composition.md)); three
 of them parse the policy text, which is why the loader has fuzz targets in
@@ -547,6 +552,18 @@ are installed pinned and `--locked`.
 
 Keeping it that way is a review matter: the first `permissions: write` is the
 one nobody notices. A change under `.github/` is a security-sensitive change.
+
+**Evidence CI alone can produce.** The cross-uid property of M3e (ADR-0041) —
+a real second operating-system user is refused on the uid the kernel reports —
+needs two identities, which a one-user workstation does not have; locally it is
+NOT EXERCISED, and M3 is complete only when CI has run it. So CI's wiring is
+part of the claim, and `tests/architecture/test_ci_authority_gate.py` holds it:
+the `authority-transport` job runs on Linux, unconditionally, with
+`DW_PEER_AS=nobody` (proven a second, non-root uid by number before anything
+runs); it selects the `#[ignore]`d cross-uid tests by name and fails unless
+both ran and reported every case; the eval gate there and in `evals` is strict;
+nothing around it may `continue-on-error` or `|| true`; and the `CI` aggregate
+needs every job and accepts only `success` — a *skipped* job is red.
 
 ## Commits and pull requests
 

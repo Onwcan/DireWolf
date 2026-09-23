@@ -110,6 +110,24 @@ and the M2 wire contract:
   SHA-256, fifteen new crates in all. DireWolf's own Rust still contains no
   `unsafe`; the authority as a whole now contains native code, and the
   closure gate reports it as such.
+- the **authority process boundary** (M3e): `dwkd-authority serve` is a real
+  DWKP server on a **Unix-domain socket** (no TCP, no HTTP, no fallback). Before
+  it reads a single byte of a connection, the **kernel** reports the peer's uid
+  (`SO_PEERCRED`) and the operator's explicit uid list admits it — or the
+  connection is closed unanswered and audited. Each accepted connection gets
+  **one fresh lease holder**, so two connections from one uid are one subject
+  and two writers-in-waiting, and a reconnect inherits nothing. The handshake
+  must come first; every frame goes through the same strict decoder the
+  protocol tests fuzz; every request goes to the M3d state machine unchanged.
+  The socket's name is protected too: the runtime cannot remove or replace it
+  to impersonate the authority. A hostile client suite, a real second OS user
+  and a killed-and-restarted authority are run against the **real binary**,
+  and they are the M3 merge gate
+  ([ADR-0041](docs/adr/0041-m3e-authenticated-dwkp-transport.md), `make authority-transport-evidence`).
+  **Linux only**: on macOS and native Windows `serve` refuses to start rather
+  than guess who is on the other end. It adds `rustix` (and, on Linux,
+  `linux-raw-sys`) for the one syscall the standard library does not expose;
+  DireWolf's Rust still contains no `unsafe`.
 
 What M2 establishes is that **malformed DWKP is rejected structurally**, and
 what M2.5 adds is the machinery to *measure* claims like that. M3a adds the
@@ -119,27 +137,27 @@ decisions behind them
 [ADR-0036](docs/adr/0036-m3-authority-operations-and-the-capability-wire-form.md)).
 **None of them establishes that any request is authorised.** M3b and M3c add
 the two gates' *logic* — the lattice that answers "is this within the authority
-held?" and the engine that answers "should this be allowed?" — and M3d the
-state they decide against. None of it is reachable from outside the process:
-there is still no kernel process serving requests, no transport, no peer
-authentication (M3d's callers *assert* who they are), no approval registry,
-and nothing that can turn a path on disk into the canonical identity an `fs`
-rule compares against. An authority nothing can call authorises nothing, and a
-defined wire form is a shape.
+held?" and the engine that answers "should this be allowed?" — M3d the state
+they decide against, and M3e the process boundary in front of it: a runtime
+can now reach the authority, and cannot choose who it is when it does. What M3
+still does **not** provide is anything that acts: no canonical filesystem
+resource, no `ToolInvoke`, no execution, no broker effect, no sandbox, no
+approvals, no model provider (and so no Ollama). `QueryAuthority` reports
+authority and refuses to decide a proposed action until M4 can canonicalise
+one. An authority that can only be asked authorises no effect.
 See [docs/PROTOCOL.md](docs/PROTOCOL.md),
 [ADR-0032](docs/adr/0032-wire-contract-framing-strict-json-and-jcs.md) and
 [evals/README.md](evals/README.md).
 
-The daemons build and refuse to serve. `dwkd-authority verify-audit <dir>`
-checks an audit chain, read-only; `direwolf` supports `--version` and
-`doctor`, and nothing else, because a command that exists but cannot work
-invites callers, scripts and documentation to form around a shape nobody has
-designed yet.
+`dwkd-authority serve` serves DWKP (Linux); `dwkd-authority verify-audit
+<dir>` checks an audit chain, read-only, everywhere; `dwkd-broker` builds and
+refuses to serve; `direwolf` supports `--version` and `doctor`, and nothing
+else, because a command that exists but cannot work invites callers, scripts
+and documentation to form around a shape nobody has designed yet.
 
-The authority server and peer-credential authentication arrive at **M3e**,
-the filesystem, exec and secret brokers at **M4**, the sandbox at **M5**, and
-approvals at **M6**. See
-[docs/ROADMAP.md](docs/ROADMAP.md).
+The filesystem, exec and secret brokers arrive at **M4**, the sandbox at
+**M5**, approvals at **M6**, and model providers — Ollama among them — at
+**M7**. See [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ```bash
 git clone https://github.com/Onwcan/DireWolf.git direwolf && cd direwolf

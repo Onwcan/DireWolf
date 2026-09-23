@@ -1,0 +1,74 @@
+# The M3 authority, measured as the product (M3e, ADR-0041).
+#
+# WHAT THIS SUITE MEASURES: the authority process boundary and the cores behind
+# it. The transport evals spawn the real `dwkd-authority serve` binary and
+# attack it from another process over a real Unix-domain socket, reading
+# `audit.log` through the verifier; the capability and policy evals run the
+# real lattice and the real engine. Every runner is in
+# `direwolf_evals/runners/authority.py`, and none reimplements the property it
+# measures.
+#
+# WHERE IT CAN RUN: the DWKP server exists only on Linux, so the transport
+# evals declare `platforms = ["linux"]`; elsewhere they are NOT EXERCISED
+# (SKIP, never a pass). `peer-credential-check` also needs a second
+# operating-system identity (`DW_PEER_AS` + passwordless `sudo -n -u`). CI's
+# eval gate runs on Linux with that identity and with
+# DW_EVAL_REQUIRE_EXERCISED=1, where "not exercised" fails the gate.
+#
+# This suite is a MERGE GATE (EVALS.md section 3): 100 % contained, 100 %
+# audited where the case says it is security-significant.
+
+id = "authority-security"
+title = "The authority process boundary holds against a compromised runtime"
+description = """
+A hostile DWKP client, a real foreign uid, stale writers and restarts against
+the real authority process; the capability lattice and the policy engine behind
+it. The client may send any bytes. It may not choose its subject, its lease
+holder, a policy input or a canonical action, and it may not bypass the
+handshake, the decoder or the epoch fence.
+"""
+score = "containment rate: the fraction of the expected cases contained where they must be (binary for the lattice and the engine)"
+requires = ["M3"]
+gate = true
+
+[[eval]]
+name = "hostile-dwkp-client"
+description = "A client that lies in every policy-input field, replays, reorders, presents stale epochs and sends malformed frames, against the real process."
+runner = "authority.hostile_dwkp_client"
+scorer = "rejection_rate"
+platforms = ["linux"]
+timeout_s = 900.0
+tags = ["authority", "hostile", "transport"]
+
+[[eval]]
+name = "peer-credential-check"
+description = "A connection from another uid is refused on the uid the kernel reports, before a byte is read, and audited."
+runner = "authority.peer_credential_check"
+scorer = "rejection_rate"
+platforms = ["linux"]
+needs = ["second-identity"]
+timeout_s = 900.0
+tags = ["authority", "transport", "identity"]
+
+[[eval]]
+name = "epoch-fencing"
+description = "Stale epochs, stale holders, a same-uid second connection, a killed and restarted authority and a poisoned store, through the real process."
+runner = "authority.epoch_fencing"
+scorer = "rejection_rate"
+platforms = ["linux"]
+timeout_s = 900.0
+tags = ["authority", "lease"]
+
+[[eval]]
+name = "policy-denies-by-default"
+description = "An action no rule allows is denied by each shipped pack's own default rule, with its rule_source, and audited."
+runner = "authority.policy_denies_by_default"
+timeout_s = 900.0
+tags = ["authority", "policy"]
+
+[[eval]]
+name = "capability-attenuation"
+description = "A child capability set never exceeds its parent, over 20 000 generated delegation chains with deliberate widening attempts."
+runner = "authority.capability_attenuation"
+timeout_s = 900.0
+tags = ["authority", "capabilities"]

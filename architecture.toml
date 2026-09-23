@@ -312,6 +312,105 @@ the code having no such helper, and on tests that store SQL-shaped values as
 data. Hygiene, not containment.
 """
 
+[[text_rules]]
+id = "TX007-the-transport-is-an-adapter"
+paths = ["crates/dwkd-authority/src/server"]
+exempt_paths = []
+suffixes = [".rs"]
+# As TX002-TX006: comment lines are skipped so a module can say what it must
+# not do.
+patterns = [
+    # A local Unix-domain socket is the whole transport. No TCP, no UDP, no
+    # address resolution: `std::os::unix::net` is the one networking module.
+    '^(?!\s*//).*\bstd\s*::\s*net\b',
+    '^(?!\s*//).*\bstd\s*::\s*\{[^}]*\bnet\b',
+    '^(?!\s*//).*\b(TcpListener|TcpStream|UdpSocket|ToSocketAddrs|SocketAddr)\b',
+    # No async runtime, HTTP or TLS stack behind it.
+    '^(?!\s*//).*\b(tokio|mio|hyper|reqwest|rustls|native_tls|openssl|async_std|smol|futures)\b',
+    # It calls the state layer; it does not reach past it into the cores, the
+    # store or the hash.
+    '^(?!\s*//).*\bcrate\s*::\s*(policy|capability|resource)\b',
+    '^(?!\s*//).*\b(rusqlite|sha2)\b',
+    # It never reads the claims a request makes about authority state: the
+    # session, run, epoch and idempotency key are the state layer's to judge.
+    '^(?!\s*//).*\.\s*(epoch|session_id|run_id|idempotency_key)\b',
+    '^(?!\s*//).*\bunsafe\b',
+    '^(?!\s*//).*\b(allow|expect)\s*\(\s*unsafe_code\b',
+]
+reason = """
+M3e's DWKP server is an adapter: bytes in, a decoded request to
+`Authority::dispatch`, the response out (ADR-0041). The ways that goes wrong are
+all visible in its imports -- a TCP listener "for convenience", an async stack,
+a direct call into the policy engine or the capability core, a peek at the
+request's epoch to "short-circuit" a stale one -- and each would make the
+transport a second authority engine or a second network surface. Epoch
+comparison, idempotency, minting and policy belong to `crate::state`, which the
+server calls and never duplicates.
+
+Hygiene, not containment. It catches the import and the field access; the
+real-process suites and the hostile-client evaluation are the evidence.
+"""
+
+[[text_rules]]
+id = "TX008-peer-credentials-are-read-in-one-place"
+paths = ["crates/dwkd-authority/src"]
+exempt_paths = ["crates/dwkd-authority/src/server/peer.rs"]
+suffixes = [".rs"]
+# The binary's `use rustix as _;` acknowledges the manifest edge for
+# `unused_crate_dependencies` and uses nothing; it is not a finding.
+patterns = [
+    '^(?!\s*//)(?!\s*use\s+rustix\s+as\s+_\s*;).*\brustix\b',
+]
+reason = """
+rustix entered the authority for one call: the kernel's peer credentials on an
+accepted socket (ADR-0035 section 3, ADR-0041). Everything else it can do --
+processes, files, memory maps, signals -- is a surface the authority has no
+reviewed use for, and a second use of it anywhere is a new decision, not a
+convenience. `server/peer.rs` is the one module that may name it.
+"""
+
+[[text_rules]]
+id = "TX009-one-authority-server"
+paths = [
+    "crates/dwkd-authority/src",
+    "crates/dwkd-broker/src",
+    "crates/direwolf-cli/src",
+    "crates/dwk-proto/src",
+]
+exempt_paths = ["crates/dwkd-authority/src/server"]
+suffixes = [".rs"]
+patterns = [
+    '^(?!\s*//).*\b(UnixListener|TcpListener)\b',
+]
+reason = """
+There is one place that listens for the runtime: the authority's DWKP server,
+behind the peer-credential gate and the strict decoder. A listener anywhere
+else -- a "debug" socket in the authority, a broker socket the runtime could
+reach (ADR-0018: runtime to authority, never to the broker), a CLI helper
+daemon -- would be a second door with none of that in front of it. M4 designs
+the private authority-to-broker hop; it does not arrive by accident.
+"""
+
+[[text_rules]]
+id = "TX010-the-authority-executes-nothing"
+paths = ["crates/dwkd-authority/src"]
+exempt_paths = []
+suffixes = [".rs"]
+patterns = [
+    '^(?!\s*//).*\bCommand\s*::\s*new\b',
+    '^(?!\s*//).*\bstd\s*::\s*process\s*::\s*(Command|Stdio)\b',
+    '^(?!\s*//).*"(sudo|su|runuser|doas|pkexec|setpriv)"',
+]
+reason = """
+The authority decides; it executes nothing (ADR-0018). In M3 it does not even
+spawn a helper: the cross-uid evidence runs a client as another user from the
+TEST HARNESS, through `sudo -n -u`, and the authority never switches users,
+never runs a shell and never starts a process. M4's broker is where execution
+lives, behind a per-invocation authorisation.
+
+Hygiene, not containment.
+"""
+
 # ===========================================================================
 # Documentation
 # ===========================================================================
@@ -497,8 +596,27 @@ process a user launches directly, with that user's privileges.
 #                           resolved, because the allowlist must hold on each
 #                           supported one; it is not linked on x86_64.
 #
-# NOT here, and deliberately: rustix and linux-raw-sys.  They enter with peer
-# credentials in M3e, the milestone that first LINKS them.
+#   rustix, linux-raw-sys   peer credentials for the DWKP server (M3e,
+#                           ADR-0041): SO_PEERCRED through a maintained safe
+#                           wrapper, so the workspace keeps forbid(unsafe_code).
+#                           The authority declares rustix for
+#                           target_os = "linux" ONLY; on Linux x86_64 and
+#                           aarch64 it makes raw syscalls through linux-raw-sys
+#                           (Rust bindings, no C, no libc).  Only
+#                           `server/peer.rs` may use it (TX008).
+#
+#   errno                   TARGET-CONDITIONAL: rustix's libc backend, which it
+#                           uses on Linux targets without a raw-syscall backend
+#                           (powerpc64le, s390x).  Not linked on x86_64 or
+#                           aarch64.  Measured per target for ADR-0041.
+#
+#   windows-sys,            IN THE UNION ONLY: rustix and errno declare them for
+#   windows-link            cfg(windows), and this gate does not evaluate
+#                           target conditions.  The authority depends on rustix
+#                           for Linux only, so on Windows neither is built; they
+#                           are listed because an allowlist that must hold on
+#                           every target Cargo resolved has to name them, not
+#                           because any supported build links them.
 #
 # M2 briefly added unicode-normalization here, for NFC comparison of object
 # keys.  ADR-0034 removed the need: DWKP rejects every undeclared member and
@@ -535,6 +653,14 @@ allowed_third_party = [
     "cfg-if",
     # Target-conditional, via cpufeatures on aarch64 and loongarch64.
     "libc",
+    # M3e: peer credentials (Linux only; ADR-0041).
+    "rustix",
+    "linux-raw-sys",
+    # Target-conditional, via rustix's libc backend on powerpc64le and s390x.
+    "errno",
+    # In the union only: rustix/errno for cfg(windows), never built there.
+    "windows-sys",
+    "windows-link",
 ]
 
 # Crates that are NOT linked into the authority and DO execute while it is
@@ -555,7 +681,9 @@ allowed_third_party = [
 #                      does not expose; ADR-0039 records this.
 #
 # Also executing at build time, and already counted above because they are
-# linked: the build scripts of libsqlite3-sys (drives the C compiler) and libc.
+# linked: the build scripts of libsqlite3-sys (drives the C compiler), libc and
+# rustix (which probes the compiler for its backend and emits cfgs; it compiles
+# no C).
 allowed_build_third_party = [
     "cc",
     "find-msvc-tools",

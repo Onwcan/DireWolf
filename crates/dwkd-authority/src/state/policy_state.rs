@@ -95,6 +95,80 @@ impl PolicySet {
                 }],
             })
     }
+
+    /// The operator's own policy files, composed as `profile`.
+    ///
+    /// Each file is read whole, as text, and named by its file name — the
+    /// logical name decisions cite (`balanced.toml`), never its path, so moving
+    /// the files does not change the revision. A file is refused **before it
+    /// is read** if it is larger than the loader's own bound, so an oversized
+    /// file costs one `stat`, not its size in memory. Nothing is loaded or
+    /// composed here: [`Authority::start`](super::Authority::start) does that,
+    /// and refuses to start if it fails. There is no fallback to a shipped
+    /// pack.
+    ///
+    /// # Errors
+    ///
+    /// A bounded description of the first file that could not be used: too
+    /// many files, no files, a name that is not UTF-8, a file that is not a
+    /// regular file, too large, unreadable, or not UTF-8.
+    pub fn from_files(profile: &str, files: &[std::path::PathBuf]) -> Result<Self, String> {
+        if files.is_empty() {
+            return Err("at least one policy file is required".to_owned());
+        }
+        if files.len() > MAX_POLICY_SOURCES {
+            return Err(format!(
+                "{} policy files exceed the bound of {MAX_POLICY_SOURCES}",
+                files.len()
+            ));
+        }
+        let mut sources = Vec::with_capacity(files.len());
+        for path in files {
+            let shown = path.display();
+            let name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .ok_or_else(|| format!("{shown}: a policy file needs a UTF-8 file name"))?
+                .to_owned();
+            // Checked before opening, so a FIFO or a device is refused rather
+            // than blocked on; then again on the open handle, so the file that
+            // was checked is the file that is read.
+            let regular = |meta: &std::fs::Metadata| meta.is_file();
+            let meta = std::fs::metadata(path).map_err(|e| format!("{shown}: {e}"))?;
+            if !regular(&meta) {
+                return Err(format!("{shown}: not a regular file"));
+            }
+            let file = std::fs::File::open(path).map_err(|e| format!("{shown}: {e}"))?;
+            let meta = file.metadata().map_err(|e| format!("{shown}: {e}"))?;
+            let bound = u64::try_from(policy::limits::MAX_SOURCE_BYTES).unwrap_or(u64::MAX);
+            if !regular(&meta) {
+                return Err(format!("{shown}: not a regular file"));
+            }
+            if meta.len() > bound {
+                return Err(format!(
+                    "{shown}: {} bytes exceed the policy source bound of {bound}",
+                    meta.len()
+                ));
+            }
+            let mut bytes = Vec::new();
+            std::io::Read::read_to_end(
+                &mut std::io::Read::take(file, bound.saturating_add(1)),
+                &mut bytes,
+            )
+            .map_err(|e| format!("{shown}: {e}"))?;
+            if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > bound {
+                return Err(format!(
+                    "{shown}: grew past the policy source bound while read"
+                ));
+            }
+            let text = String::from_utf8(bytes).map_err(|_| format!("{shown}: not UTF-8"))?;
+            sources.push(PolicySource { name, text });
+        }
+        Ok(Self {
+            profile: profile.to_owned(),
+            sources,
+        })
+    }
 }
 
 /// A policy that loaded, composed and has a revision — not yet stored.

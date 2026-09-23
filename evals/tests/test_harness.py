@@ -27,6 +27,9 @@ from direwolf_evals.scoring import score_outcome
 from direwolf_evals.statistics import wilson_interval
 
 EVALS_ROOT = Path(__file__).resolve().parents[1]
+# Every suite but the M3 authority suite, which builds and launches the real
+# authority: these tests check the harness, and `make eval` measures the product.
+FAST_SUITES = ("harness-selftest", "pending-kernel", "protocol-compat", "protocol-security")
 REPO_ROOT = EVALS_ROOT.parent
 
 
@@ -111,7 +114,7 @@ def test_suite_files_are_data_not_code() -> None:
 
 
 def test_pending_evals_are_pending_not_passing() -> None:
-    report = run_suites(REPO_ROOT, EVALS_ROOT)
+    report = run_suites(REPO_ROOT, EVALS_ROOT, suites=FAST_SUITES)
     pending = [r for r in report.results if r.status is Status.PENDING]
     assert pending, "the pending suite should be discovered"
     for result in pending:
@@ -122,14 +125,14 @@ def test_pending_evals_are_pending_not_passing() -> None:
 
 def test_an_eval_requiring_a_future_milestone_is_pending() -> None:
     """The mechanism that turns suites on: a milestone this build lacks."""
-    assert "M3" not in AVAILABLE_MILESTONES
-    suite, evaluation = next((s, e) for s, e in collect(EVALS_ROOT) if "M3" in e.requires)
+    assert "M4" not in AVAILABLE_MILESTONES
+    suite, evaluation = next((s, e) for s, e in collect(EVALS_ROOT) if "M4" in e.requires)
     results = run_eval(suite, evaluation, repo_root=REPO_ROOT, evals_root=EVALS_ROOT)
     assert [r.status for r in results] == [Status.PENDING]
 
 
 def test_the_counts_keep_pending_apart_from_passing() -> None:
-    report = run_suites(REPO_ROOT, EVALS_ROOT)
+    report = run_suites(REPO_ROOT, EVALS_ROOT, suites=FAST_SUITES)
     counts = report.counts()
     assert counts["pending"] > 0
     assert (
@@ -233,7 +236,7 @@ def test_a_missing_eval_is_a_regression(tmp_path: Path) -> None:
 
 def test_the_repository_baseline_matches_a_real_run() -> None:
     """The committed baseline describes this repository, not an aspiration."""
-    report = run_suites(REPO_ROOT, EVALS_ROOT)
+    report = run_suites(REPO_ROOT, EVALS_ROOT, suites=FAST_SUITES)
     known = {evaluation.id for _, evaluation in collect(EVALS_ROOT)}
     comparison = baseline_module.compare(
         baseline_module.Baseline.load(EVALS_ROOT / "baselines" / "main.json"),
@@ -278,7 +281,7 @@ def test_two_runs_agree_on_everything_except_timing() -> None:
     on: the same tree gives the same ids, statuses, scores, seeds and metrics."""
 
     def snapshot() -> list[tuple[str, Status, float | None, int, dict[str, float]]]:
-        report = run_suites(REPO_ROOT, EVALS_ROOT)
+        report = run_suites(REPO_ROOT, EVALS_ROOT, suites=FAST_SUITES)
         return [(r.eval_id, r.status, r.score, r.seed, r.metrics) for r in report.ordered]
 
     assert snapshot() == snapshot()

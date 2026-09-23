@@ -167,10 +167,18 @@ def test_pending_properties_have_no_suite_and_available_ones_do() -> None:
 
 
 def test_the_inventory_is_honest_about_what_m2_5_proves() -> None:
-    """No entry may claim an authority property is measurable today."""
+    """No M2 or M2.5 entry may claim an authority property: those milestones
+    built the wire and the harness, not the authority. The authority's
+    properties became measurable with M3, and are credited to it."""
     words = ("policy", "capabilit", "approval", "sandbox", "secret", "egress", "peer")
     for item in available():
-        assert not any(w in item.property.lower() for w in words), item.property
+        if item.milestone in ("M1", "M2", "M2.5"):
+            assert not any(w in item.property.lower() for w in words), item.property
+    authority = {item.property for item in available() if item.suite == "authority-security"}
+    assert len(authority) == 5, "the five M3 properties are measured by the authority suite"
+    for item in available():
+        if item.suite == "authority-security":
+            assert item.milestone == "M3"
 
 
 def test_python_version_supports_the_harness() -> None:

@@ -16,6 +16,8 @@
 )]
 
 use proptest as _;
+#[cfg(target_os = "linux")]
+use rustix as _;
 use sha2 as _;
 use toml as _;
 
@@ -74,6 +76,9 @@ reason = "NO_MATCHING_RULE"
 
 /// The shipped `balanced` pack, as the harness installs it.
 const BALANCED: &str = include_str!("../../../policy/balanced.toml");
+/// The other two shipped packs, for the default-deny evidence.
+const SAFE: &str = include_str!("../../../policy/safe.toml");
+const POWER: &str = include_str!("../../../policy/power.toml");
 
 struct Run {
     caller: CallerContext,
@@ -646,4 +651,58 @@ fn the_same_question_against_the_same_state_gets_the_same_answer() {
         audit_records(&h.state(), AuditEvent::AuthorityDecision.as_str()).len(),
         18
     );
+}
+
+// ---- evaluation evidence ----------------------------------------------------
+
+/// Evidence for the M3 evaluation `authority-security/policy-denies-by-default`.
+///
+/// For each shipped pack, an action none of its rules mentions is denied by the
+/// pack's own mandatory `default` rule, with both gates reported, the rule's
+/// source line, and an `authority.decision` record. The action differs per pack
+/// because each pack mentions different verbs: `safe` names every scheduler
+/// verb, `power` every agent verb. In process, through the real authority and
+/// engine: over DWKP a proposal is refused with `NO_CANONICAL_ACTION` until M4
+/// can build the complete canonical action policy decides on (ADR-0040), so
+/// there is no truthful wire path yet, and the evaluation says so.
+#[test]
+#[ignore = "evaluation evidence; run by the M3 eval runner (make eval)"]
+fn policy_denies_by_default_evidence() {
+    for (pack, text, capability, gate) in [
+        (
+            "safe",
+            SAFE,
+            "agent.cancel:researcher",
+            GateResult::NotSatisfied,
+        ),
+        (
+            "balanced",
+            BALANCED,
+            "scheduler.create:*",
+            GateResult::Satisfied,
+        ),
+        ("power", POWER, "scheduler.create:*", GateResult::Satisfied),
+    ] {
+        let mut h = Harness::with_config(
+            &format!("eval-default-{pack}"),
+            config(dwkd_authority::state::PolicySet::shipped(pack).unwrap()),
+        );
+        let run = admit(&mut h, &[capability]);
+        let d = decide(&mut h, &run, &action(capability));
+        assert_decision(
+            &d,
+            DecisionEffect::Deny,
+            DecisionReason::DefaultDeny,
+            gate,
+            GateResult::NotSatisfied,
+            "default",
+        );
+        assert_written_at(text, d.rule_source.as_str(), "default");
+        let decisions = audit_records(&h.state(), "authority.decision");
+        assert_eq!(decisions.len(), 1, "the decision is on the record");
+        println!(
+            "DWKP-EVIDENCE {{\"suite\":\"policy\",\"case\":\"default-deny-{pack}\",\"layer\":\"capability-policy\",\"contained\":true,\"audited\":true,\"rule_source\":\"{}\"}}",
+            d.rule_source.as_str()
+        );
+    }
 }

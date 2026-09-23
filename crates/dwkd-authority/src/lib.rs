@@ -1,8 +1,10 @@
 //! `dwkd-authority` — the authority plane's library half.
 //!
-//! The binary ([`main.rs`](../main.rs)) serves nothing yet: there is no DWKP
-//! server and no peer authentication until M3e. Its one working command,
-//! `verify-audit`, is a read-only check of an audit chain.
+//! The binary ([`main.rs`](../main.rs)) runs [`server`]: `dwkd-authority serve`
+//! is the DWKP server on a Unix-domain socket, Linux only, admitting a peer
+//! only after the kernel has reported its uid and the operator's peer policy
+//! has named it. Its other command, `verify-audit`, is a read-only check of an
+//! audit chain and runs everywhere.
 //!
 //! # What is here
 //!
@@ -22,11 +24,17 @@
 //! ([ADR-0039]). It calls the two pure cores; they never call it, and neither
 //! links `rusqlite` (TX005).
 //!
+//! [`server`] (M3e): the process boundary. It derives the subject from the
+//! kernel (`SO_PEERCRED`), mints one lease holder per accepted connection,
+//! requires a handshake before anything else, decodes every frame with
+//! `dwk-proto`'s strict decoder, and hands each request to [`state`] unchanged
+//! ([ADR-0041]). It decides nothing about authority itself.
+//!
 //! # What is not here
 //!
-//! No socket or peer identity (M3e): [`state`]'s callers assert who they are,
-//! and in this build only tests call it. No brokered effect (M4+), no
-//! approvals (M6).
+//! No brokered effect (M4+), no canonical filesystem resource (M4), no
+//! `ToolInvoke` or `CanonicalPreview` (reserved until M4), no approvals (M6),
+//! no model provider (M7).
 //!
 //! Above all, this crate resolves no resource. `fs` and `process` scopes name
 //! resources whose authority identity is an inode and an executable hash;
@@ -41,6 +49,7 @@
 //! submodule there, and that is how it inherits the right.
 //!
 //! [ADR-0039]: ../../../docs/adr/0039-durable-authority-state.md
+//! [ADR-0041]: ../../../docs/adr/0041-m3e-authenticated-dwkp-transport.md
 
 // Pedantic lints on the security crates, per docs/LANGUAGE_SELECTION.md §7.
 #![warn(clippy::pedantic)]
@@ -48,6 +57,7 @@
 pub mod capability;
 pub mod policy;
 pub mod resource;
+pub mod server;
 pub mod state;
 
 // Real-file scratch directories for unit tests, kept outside `state/` (TX006).

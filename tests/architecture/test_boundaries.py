@@ -230,6 +230,42 @@ def test_the_state_layer_builds_no_sql_from_values(violation_rules: list[str]) -
     assert lines == [6, 11], "the format! and std::process; never the doc comment"
 
 
+def test_the_transport_cannot_become_a_second_authority_engine(
+    violation_rules: list[str],
+) -> None:
+    """TX007 (M3e): a TCP fallback, a call into the policy core and a peek at a
+    request's epoch are each a finding in the server module -- and the comment
+    that names them is not."""
+    rule = "TX007-the-transport-is-an-adapter"
+    assert rule in violation_rules
+    findings = [f for f in check_text(load(VIOLATIONS, RULES)) if f.rule == rule]
+    texts = " ".join(f.message for f in findings)
+    assert "TcpListener" in texts and "crate::policy" in texts and "epoch" in texts
+    assert all("FIXTURE" not in f.message for f in findings), "a comment line was a finding"
+
+
+def test_peer_credentials_are_read_in_one_module(violation_rules: list[str]) -> None:
+    """TX008: rustix outside `server/peer.rs` is a finding; the binary's
+    `use rustix as _;` acknowledgement is not."""
+    rule = "TX008-peer-credentials-are-read-in-one-place"
+    assert rule in violation_rules
+    findings = [f for f in check_text(load(VIOLATIONS, RULES)) if f.rule == rule]
+    assert findings and all("as _" not in f.message for f in findings)
+
+
+def test_a_second_listener_is_rejected(violation_rules: list[str]) -> None:
+    """TX009: the broker, or anything but the authority's server, listening."""
+    assert "TX009-one-authority-server" in violation_rules
+
+
+def test_the_authority_starts_no_process(violation_rules: list[str]) -> None:
+    """TX010: no `Command`, and no user switching, anywhere in the authority."""
+    rule = "TX010-the-authority-executes-nothing"
+    assert rule in violation_rules
+    findings = [f for f in check_text(load(VIOLATIONS, RULES)) if f.rule == rule]
+    assert all("FIXTURE" not in f.message for f in findings)
+
+
 def test_a_helper_crate_shared_by_both_daemons_is_rejected(violation_rules: list[str]) -> None:
     """RS007 catches a crate that depends on the daemons. It cannot see a crate
     the daemons depend on -- "a few helpers" linked into both -- which is the
@@ -313,6 +349,10 @@ def test_the_required_boundary_rules_are_all_declared() -> None:
         "TX004-policy-core-has-no-ambient-effects",
         "TX005-the-pure-cores-never-touch-the-store",
         "TX006-state-sql-is-static-and-the-state-layer-has-no-ambient-effects",
+        "TX007-the-transport-is-an-adapter",
+        "TX008-peer-credentials-are-read-in-one-place",
+        "TX009-one-authority-server",
+        "TX010-the-authority-executes-nothing",
         "DEP001-no-agent-framework-dependency",
         "DEP002-runtime-has-no-transport-dependency",
         "RS001-authority-depends-on-nothing-in-tree",
@@ -391,13 +431,19 @@ def _tcb_linked_closure() -> set[str]:
     linked: set[str] = set()
     for crate, manifest in manifests.items():
         declared = tomllib.loads(manifest.read_text(encoding="utf-8"))
-        for section in ("dependencies", "build-dependencies"):
-            stack = [name for name in declared.get(section, {}) if name not in manifests]
-            while stack:
-                name = stack.pop()
-                if name not in linked:
-                    linked.add(name)
-                    stack.extend(edges.get(name, []))
+        # Target-specific tables count: `[target.'cfg(...)'.dependencies]` is
+        # how M3e declares rustix, and a closure that skipped them would miss
+        # the peer-credential syscall layer entirely -- a fail-open found by
+        # this very test when rustix arrived.
+        tables = [declared, *declared.get("target", {}).values()]
+        for table in tables:
+            for section in ("dependencies", "build-dependencies"):
+                stack = [name for name in table.get(section, {}) if name not in manifests]
+                while stack:
+                    name = stack.pop()
+                    if name not in linked:
+                        linked.add(name)
+                        stack.extend(edges.get(name, []))
         assert crate in edges, f"{crate} is missing from Cargo.lock"
     return linked
 
@@ -437,10 +483,13 @@ def test_the_tcb_closure_has_no_proc_macro_and_only_the_reviewed_native_code() -
     Native code is a different sentence now. Until M3c this asserted there was
     NONE, and said M3d's SQLite would arrive "with its own ADR saying so". It
     has (ADR-0039): the bundled amalgamation behind `libsqlite3-sys`, compiled
-    by `cc`, and `libc` where `cpufeatures` needs it. The assertion is that the
-    native and build-executing set is EXACTLY that -- a second C library, or a
-    second tool that runs a compiler, is a new decision and fails here until one
-    is recorded. `#![forbid(unsafe_code)]` reaches none of it.
+    by `cc`, and `libc` where `cpufeatures` needs it. M3e adds the syscall layer
+    for peer credentials (ADR-0041): `rustix`, and `linux-raw-sys` beneath it --
+    Rust, no C, but the layer that talks to the kernel directly. The assertion
+    is that the native, syscall and build-executing set is EXACTLY that -- a
+    second C library, a second syscall wrapper, or a second tool that runs a
+    compiler, is a new decision and fails here until one is recorded.
+    `#![forbid(unsafe_code)]` reaches none of it.
     """
     closure = _tcb_linked_closure()
     proc_macro = {"serde", "serde_derive", "syn", "quote", "proc-macro2"}
@@ -464,4 +513,6 @@ def test_the_tcb_closure_has_no_proc_macro_and_only_the_reviewed_native_code() -
         "libsqlite3-sys",
         "pkg-config",
         "vcpkg",
+        "rustix",
+        "linux-raw-sys",
     }, sorted(closure & native_or_compiler)

@@ -21,52 +21,18 @@
 id = "pending-kernel"
 title = "Authority properties waiting for the components that implement them"
 description = """
-The hostile DWKP client suite (EVALS.md section 3), epoch fencing, policy
-decisions, capability attenuation, approval binding, sandbox isolation and
-model egress. M2.5 builds the harness these will run in; it does not simulate
-the systems under test, because an eval against a simulation measures the
-simulation.
+Filesystem canonicalisation, sandbox isolation, approval binding and model
+egress. The M3 properties that used to wait here -- the hostile DWKP client,
+peer credentials, epoch fencing, default-deny policy and capability
+attenuation -- run now, in `authority-security`. M2.5 built the harness these
+will run in; it does not simulate the systems under test, because an eval
+against a simulation measures the simulation.
 """
 score = "none yet: a pending eval has no score, by construction"
 # Per-eval, not suite-wide: each property waits for exactly one milestone, and
 # a suite-level floor would make an M7 property claim to be waiting for M3 too.
 requires = []
 gate = false
-
-[[eval]]
-name = "hostile-dwkp-client"
-description = "A client that lies in every policy-input field, replays, reorders and presents stale epochs."
-requires = ["M3"]
-pending_reason = "there is no authority process to lie to."
-tags = ["authority", "hostile"]
-
-[[eval]]
-name = "peer-credential-check"
-description = "A connection from another uid is refused and audited."
-requires = ["M3"]
-pending_reason = "there is no socket, and no peer to check."
-tags = ["authority", "transport"]
-
-[[eval]]
-name = "epoch-fencing"
-description = "A request carrying a stale epoch is fenced."
-requires = ["M3"]
-pending_reason = "the kernel owns the epoch counter; M2 defines only the field."
-tags = ["authority", "lease"]
-
-[[eval]]
-name = "policy-denies-by-default"
-description = "An action with no matching allow rule is denied, with rule_source."
-requires = ["M3"]
-pending_reason = "there is no policy engine."
-tags = ["authority", "policy"]
-
-[[eval]]
-name = "capability-attenuation"
-description = "A child capability set never exceeds its parent."
-requires = ["M3"]
-pending_reason = "there is no capability lattice."
-tags = ["authority", "capabilities"]
 
 [[eval]]
 name = "path-traversal"

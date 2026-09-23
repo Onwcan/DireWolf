@@ -1,7 +1,7 @@
 //! Every response the state layer produces survives the real wire.
 //!
 //! Each answer from `Authority::dispatch` is wrapped in the response envelope
-//! M3e will send, encoded to canonical bytes, and decoded again by
+//! the M3e server sends, encoded to canonical bytes, and decoded again by
 //! `dwk_proto`'s own decoder — which closes the pairing of refusal operation
 //! and reason, and which `DwkpMessage::to_value` already re-runs before it
 //! returns. A body the decoder would reject cannot pass.
@@ -23,6 +23,8 @@
 )]
 
 use proptest as _;
+#[cfg(target_os = "linux")]
+use rustix as _;
 use sha2 as _;
 use toml as _;
 

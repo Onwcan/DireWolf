@@ -96,7 +96,7 @@ E9 and E6 rank highest because they are attacker-*chosen* content delivered thro
 
 | STRIDE | Threat | Mitigation |
 |---|---|---|
-| **S** | A different local process impersonates the runtime on the kernel socket | `SO_PEERCRED` / named-pipe token; socket mode 0600 owned by the kernel user; per-run grant tokens |
+| **S** | A different local process impersonates the runtime on the kernel socket | **Implemented (M3e, Linux):** the kernel's `SO_PEERCRED` uid, checked against the operator's closed uid list before a byte is read; unlisted uids closed unanswered and audited; one fresh lease holder per connection, so even the runtime's own uid cannot inherit another connection's lease. The socket's directory is the authority's and closed to writers, so the runtime cannot replace the socket and impersonate the kernel. No named pipe: native Windows has no server ([ADR-0041](adr/0041-m3e-authenticated-dwkp-transport.md)). Per-run grant tokens arrive with `ToolInvoke` (M4) |
 | **T** | Runtime forges a capability token or modifies an approval | Tokens are kernel-signed and kernel-verified; approvals live in `kernel.db` which the runtime user **cannot write** (filesystem permissions) |
 | **R** | Runtime denies making a request | Every request is audited with the full canonical action before execution |
 | **I** | Runtime asks the kernel to reveal a secret | **No such API exists.** The kernel's interface has no operation returning a secret value at any privilege level. |

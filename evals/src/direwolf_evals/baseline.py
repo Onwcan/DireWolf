@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import json
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Final
 
@@ -115,6 +115,10 @@ class Comparison:
     missing: list[str]
     unexpected: list[str]
     improvements: list[str]
+    not_exercised: list[str] = field(default_factory=list)
+    """Evals expected to pass that this machine could not exercise, by their
+    own declared preconditions. Never a pass; listed so nobody reads the
+    green as covering them. Only a lenient comparison produces these."""
 
     @property
     def ok(self) -> bool:
@@ -128,6 +132,7 @@ def compare(
     baseline: Baseline,
     results: list[Result],
     known_ids: set[str] | None = None,
+    unexercised: frozenset[str] = frozenset(),
 ) -> Comparison:
     """Compare one run against the recorded expectations.
 
@@ -136,6 +141,12 @@ def compare(
     that no longer exists anywhere is a deletion, and deleting an eval must not
     be a way to make the gate green. An eval that exists but was out of scope
     for this run is simply not compared.
+
+    ``unexercised`` names evals this machine cannot exercise by their declared
+    preconditions (``direwolf_evals.preconditions``). A SKIP from one of them,
+    where the baseline expects more, is listed as *not exercised* instead of
+    as a regression. Pass nothing -- the default -- for the strict gate CI runs,
+    where not exercising a gating property is a failure.
     """
     by_id: dict[str, list[Result]] = {}
     for result in results:
@@ -143,6 +154,7 @@ def compare(
 
     regressions: list[str] = []
     improvements: list[str] = []
+    not_exercised: list[str] = []
     absent = set(baseline.evals) - set(by_id)
     missing = sorted(absent if known_ids is None else absent - known_ids)
     unexpected = sorted(set(by_id) - set(baseline.evals))
@@ -152,6 +164,9 @@ def compare(
         if runs is None:
             continue
         worst = _worst(runs)
+        if worst is Status.SKIP and eval_id in unexercised and worst is not expectation.status:
+            not_exercised.append(f"{eval_id}{_why(runs)}")
+            continue
         if worst is not expectation.status:
             message = f"{eval_id}: expected {expectation.status}, got {worst}{_why(runs)}"
             if _rank(worst) > _rank(expectation.status):
@@ -192,6 +207,7 @@ def compare(
         missing=[f"{e}: in the baseline but no longer exists" for e in missing],
         unexpected=[f"{e}: not in the baseline" for e in unexpected],
         improvements=improvements,
+        not_exercised=not_exercised,
     )
 
 
@@ -258,6 +274,10 @@ def render(comparison: Comparison) -> str:
         ("regressions", comparison.regressions),
         ("missing from this run", comparison.missing),
         ("changed for the better, baseline not updated", comparison.improvements),
+        (
+            "NOT EXERCISED on this machine (not a pass; CI's gate requires them)",
+            comparison.not_exercised,
+        ),
     ):
         if entries:
             lines.append(f"{title}:")

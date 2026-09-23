@@ -16,12 +16,14 @@
 //! # What this module is not
 //!
 //! It listens on nothing, authenticates nobody, executes nothing, resolves no
-//! filesystem resource and grants no approval. M3e binds these operations to a
-//! real socket and a real peer; M4 supplies canonical resources; M6 approvals.
-//! A caller of this module is trusted in-process code, and the identities it
-//! passes in ([`AuthenticatedSubject`], and a [`LeaseHolder`] it obtained from
-//! [`Authority::connect`]) are assertions it makes, not facts this module
-//! checked.
+//! filesystem resource and grants no approval. `crate::server` (M3e) binds these
+//! operations to a real socket and a kernel-identified peer; M4 supplies
+//! canonical resources; M6 approvals. A caller of this module is trusted
+//! in-process code, and the identities it passes in ([`AuthenticatedSubject`],
+//! and a [`LeaseHolder`] it obtained from [`Authority::connect`]) are
+//! assertions it makes, not facts this module checked: in the server, the
+//! subject is the uid the kernel reported for the socket, and the holder is
+//! minted once per accepted connection.
 //!
 //! # The files
 //!
@@ -68,6 +70,7 @@ mod lease;
 mod policy_state;
 mod query;
 mod schema;
+mod transport;
 pub mod wire;
 
 use core::fmt;
@@ -81,12 +84,16 @@ use dwk_proto::wire::id::{CapId, RunId, SessionId};
 use dwk_proto::wire::scalar::{Epoch, RefusalReason, RefusedOperation};
 use rusqlite::{Connection, OptionalExtension as _, TransactionBehavior};
 
-use crate::policy::{ConfigFlags, PolicyContext, TaintLevel};
+use crate::policy::{PolicyContext, TaintLevel};
 
+/// The operator configuration flags a [`StartupConfig`] carries, re-exported so
+/// the state API is self-contained for its callers (the DWKP server).
+pub use crate::policy::ConfigFlags;
 pub use admission::{Admission, Grant, Withheld, WithheldCause, request_digest};
 pub use audit::{
-    AUDIT_FORMAT_VERSION, AuditEvent, AuditLogFault, AuditLogSummary, MAX_RECORD_BYTES,
-    RecordFault, StoreAuditFault, StoreComparison, verify_audit_against_store, verify_audit_log,
+    AUDIT_FORMAT_VERSION, AuditEvent, AuditLogFault, AuditLogSummary, AuditRecord,
+    MAX_RECORD_BYTES, RecordFault, StoreAuditFault, StoreComparison, read_audit_log,
+    verify_audit_against_store, verify_audit_log,
 };
 pub use clock::{Clock, ManualClock, SystemClock};
 pub use config::{
@@ -103,6 +110,7 @@ pub use identity::{AuthenticatedSubject, CallerContext, LeaseHolder};
 pub use lease::{DEFAULT_LEASE_TTL_MS, MAX_EPOCH, MAX_LEASE_TTL_MS, MIN_LEASE_TTL_MS};
 pub use policy_state::{MAX_CEILING_CAPABILITIES, MAX_POLICY_SOURCES, PolicySet, PolicySource};
 pub use query::{AuthorityAnswer, DecisionRecord, Proposal, TaintCause, Undecidable};
+pub use transport::{TransportClass, TransportEvent, Violation};
 pub use wire::WireGap;
 
 use audit::{AuditWriter, Fields, FlushFailure};
@@ -608,9 +616,9 @@ impl Authority {
     /// A caller context for one new connection by `subject`: a fresh
     /// [`LeaseHolder`], never equal to any other, bound to this incarnation.
     ///
-    /// M3e calls this once per accepted socket, with the subject it derived
-    /// from the peer's credentials. **M3d performs no authentication**: the
-    /// subject is whatever the caller asserts.
+    /// The DWKP server (M3e) calls this exactly once per accepted socket, with
+    /// the subject the kernel reported for it. **This module performs no
+    /// authentication**: the subject is whatever the caller asserts.
     #[must_use]
     pub fn connect(&self, subject: AuthenticatedSubject) -> CallerContext {
         let connection = self
@@ -824,7 +832,8 @@ impl Authority {
         self.transact(|work| query::policy_context(work, run.as_str(), active))
     }
 
-    /// Answer one decoded DWKP request with the response body M3e would send.
+    /// Answer one decoded DWKP request with the response body the M3e server
+    /// sends.
     ///
     /// Total over the six authority requests: every answer has a truthful wire
     /// form (ADR-0040). A proposal is refused with `NO_CANONICAL_ACTION`
@@ -908,6 +917,24 @@ impl Authority {
             }
             _ => Err(AuthorityError::NotAnAuthorityRequest),
         }
+    }
+
+    /// Record a security-significant transport event (M3e): a refused peer,
+    /// a refused connection, a protocol violation, or a count of records the
+    /// server's rate limit withheld.
+    ///
+    /// The DWKP server's one audit entry point. It takes a closed
+    /// [`TransportEvent`], never text or bytes, so nothing a peer sends can
+    /// choose a field; no DWKP operation reaches it. The record is durable
+    /// before this returns, like every other.
+    ///
+    /// # Errors
+    ///
+    /// [`AuthorityError`] when the record could not be made durable; a failed
+    /// append or `fsync` poisons the store, as for any operation.
+    pub fn record_transport_event(&mut self, event: &TransportEvent) -> Result<(), AuthorityError> {
+        let (kind, fields) = event.record();
+        self.transact(|work| work.audit(kind, fields))
     }
 
     /// The operator's configuration API. **In-process only**: no DWKP

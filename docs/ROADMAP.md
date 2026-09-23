@@ -75,15 +75,18 @@ M0 architecture ─ M1 foundation ─ M2 protocol+schemas
 
 ### M3 · Kernel core: policy, capabilities, audit
 **Deps:** M2. **The most important milestone in the project.**
-**Decomposed** into M3a (architecture decisions and wire forms — [ADR-0035](adr/0035-m3-authority-dependency-set.md), [ADR-0036](adr/0036-m3-authority-operations-and-the-capability-wire-form.md); `AdmitRun` carries a mandatory idempotency key, a wire decision is `ALLOW` or `DENY` until M6 can honour a third, and an authority-state refusal is a typed message distinct from both a protocol error and a policy denial), M3b (capabilities and attenuation — the typed vocabulary, the `⊑` lattice, attenuation with no widening path, and the declared-vs-canonical resource split of [ADR-0037](adr/0037-capability-specifications-and-canonical-authority-identities.md)), M3c (the policy engine -- two evaluation phases rather than one, a strict bounded TOML loader, closed typed predicates, reasons and obligations, `extends` restricted to a composition that cannot widen, three shipped packs with adversarial fixture suites, and the 300-rule target measured at a p99 of 3.6 us; [ADR-0038](adr/0038-policy-evaluation-phases-and-composition.md)), M3d (durable authority state -- `kernel.db` in a private state directory, epochs fenced across restarts, leases held by a connection rather than a uid, `AdmitRun` idempotency recorded forever and checked after the fence -- replayed while the run is live, `ADMISSION_ENDED` once it has ended ([ADR-0040](adr/0040-m3d-reconciliation-admission-across-tenures-and-undecidable-proposals.md)) -- kernel-owned policy inputs and a stored, content-derived policy revision, and a hash-chained `audit.log` written through a transactional outbox with a recovery rule for every crash window; [ADR-0039](adr/0039-durable-authority-state.md)) and M3e (the real UDS authority server, peer credentials and hostile real-process evals). Each stage is verifiable on its own; the acceptance criteria below are the milestone's, not any one stage's.
+**Decomposed** into M3a (architecture decisions and wire forms — [ADR-0035](adr/0035-m3-authority-dependency-set.md), [ADR-0036](adr/0036-m3-authority-operations-and-the-capability-wire-form.md); `AdmitRun` carries a mandatory idempotency key, a wire decision is `ALLOW` or `DENY` until M6 can honour a third, and an authority-state refusal is a typed message distinct from both a protocol error and a policy denial), M3b (capabilities and attenuation — the typed vocabulary, the `⊑` lattice, attenuation with no widening path, and the declared-vs-canonical resource split of [ADR-0037](adr/0037-capability-specifications-and-canonical-authority-identities.md)), M3c (the policy engine -- two evaluation phases rather than one, a strict bounded TOML loader, closed typed predicates, reasons and obligations, `extends` restricted to a composition that cannot widen, three shipped packs with adversarial fixture suites, and the 300-rule target measured at a p99 of 3.6 us; [ADR-0038](adr/0038-policy-evaluation-phases-and-composition.md)), M3d (durable authority state -- `kernel.db` in a private state directory, epochs fenced across restarts, leases held by a connection rather than a uid, `AdmitRun` idempotency recorded forever and checked after the fence -- replayed while the run is live, `ADMISSION_ENDED` once it has ended ([ADR-0040](adr/0040-m3d-reconciliation-admission-across-tenures-and-undecidable-proposals.md)) -- kernel-owned policy inputs and a stored, content-derived policy revision, and a hash-chained `audit.log` written through a transactional outbox with a recovery rule for every crash window; [ADR-0039](adr/0039-durable-authority-state.md)) and M3e (the real authority process boundary -- a Unix-domain DWKP server whose peers the kernel identifies before a byte is read, one fresh lease holder per connection, a handshake-first strict transport delegating every request to M3d, and hostile real-process evaluations as the M3 merge gate; [ADR-0041](adr/0041-m3e-authenticated-dwkp-transport.md)). Each stage is verifiable on its own; the acceptance criteria below are the milestone's, not any one stage's.
 
 M3c is also where the authority's third-party dependency closure stops being
 empty: five crates, all of them the TOML parser chain, pinned exactly and with
 no proc-macro and no native code. M3d adds SQLite and SHA-256: fifteen more
 linked crates, among them the 269,376-line SQLite C amalgamation, and five
-build-only crates reviewed in a list of their own. `rustix`, the last of
-[ADR-0035](adr/0035-m3-authority-dependency-set.md)'s set, enters with M3e's
-peer credentials.
+build-only crates reviewed in a list of their own. M3e adds `rustix`, the
+last of [ADR-0035](adr/0035-m3-authority-dependency-set.md)'s set, for peer
+credentials -- Linux only, with `linux-raw-sys` beneath it; the exact gate's
+union grows to 25 runtime crates because it must also name `errno`,
+`windows-sys` and `windows-link`, which no supported build links
+([ADR-0041](adr/0041-m3e-authenticated-dwkp-transport.md) §14).
 
 M3d's acceptance evidence is `make authority-state-evidence` (real files:
 store refusal and quarantine, fencing, admission, both gates, the audit chain
@@ -93,9 +96,23 @@ forbidden writes as a second operating-system user and reports NOT EXERCISED
 rather than passing where no second user exists. What M3d does **not** deliver
 is a decision about a proposed action over DWKP -- `QueryAuthority` refuses one
 with `NO_CANONICAL_ACTION` until M4 can build the complete canonical action
-policy decides on -- nor anything reachable from outside the process: the authority is not served,
-no peer is authenticated, and the M3 acceptance line "runtime user cannot write
-`kernel.db`" is met only where the probe has been run with two identities.
+policy decides on -- nor anything reachable from outside the process.
+
+**M3e delivers the boundary** ([ADR-0041](adr/0041-m3e-authenticated-dwkp-transport.md)): `dwkd-authority serve`,
+Linux only, on a Unix-domain socket whose name the runtime cannot remove or
+replace; the kernel's peer credentials checked against the operator's uid list
+before a byte is read; one fresh lease holder per accepted connection;
+handshake first; the production decoder; every request to the M3d dispatcher
+unchanged; bounded connections, frames, deadlines and writes; a poisoned store
+that stops serving; and transport refusals audited, rate-limited. Its evidence
+is `make authority-transport-evidence` -- the real binary, a real socket, a
+client in another process, a real second OS user, `SIGKILL` and restart, a
+hostile client -- and M3's five evaluations, now active and gating
+(`authority-security`). The cross-uid property and the runtime-write probe need
+two identities: CI's Linux jobs provide `nobody`, and a one-user workstation
+reports them NOT EXERCISED. **M3 is complete when that hosted run is green.**
+M3 still provides no canonical filesystem resource, no `ToolInvoke`, no
+execution, no broker effect, no sandbox, no approvals and no model provider.
 **Deliverables:** capability grammar + ⊑ lattice + attenuation; policy engine + TOML rule loader + explanation; three shipped profiles with fixture suites; hash-chained audit; **`dwkd-authority`** DWKP server with peer credential verification and **strict schema rejection** ([ADR-0023](adr/0023-dwkp-strict-schema.md)); epoch fencing (kernel is the epoch authority); `kernel.db` holding **every policy input** ([ADR-0028](adr/0028-policy-input-ownership.md)); the `dwkd-authority`/`dwkd-broker` split and the per-invocation authorisation format ([ADR-0018](adr/0018-authority-broker-split.md)).
 **Acceptance:** policy p99 < 200 µs at 300 rules; every decision carries `rule_source`; audit chain verifies; runtime user cannot write `kernel.db` (verified by attempting it).
 **Tests:** property tests for all eight lattice properties ([CAPABILITIES.md](CAPABILITIES.md) §3); 10⁶ generated delegation chains, zero escalations; policy fixtures including negative cases.
@@ -125,7 +142,8 @@ no peer is authenticated, and the M3 acceptance line "runtime user cannot write
 
 ### M7 · Providers and model egress
 **Deps:** M3. **Deliverables:** `ModelProvider` interface; Anthropic and OpenAI-compatible adapters; kernel model egress with credential injection, privacy-class enforcement, declarative usage extraction, streaming relay; router with health and circuit breakers.
-**Acceptance:** no provider name outside `providers/` (CI gate); a `LOCAL_ONLY` run cannot reach a vendor; metering matches provider-reported usage.
+**Ollama as a first-class local provider** (a project-owner requirement, recorded at M3e; nothing is implemented before M7). Ollama is a **local** model provider behind the same `ModelProvider` interface as every other -- provider and model choice stay model-agnostic. An Ollama model reference (`<ollama-model-ref>`: any reference the installed Ollama supports, a model name or a model:tag variant) is passed as **data and configuration**, and nothing matches, branches on or hard-codes a model name: `qwen3.8` in the example below is illustrative, and no model is special. Local use must fit the privacy and model-authority model of [MODEL_ROUTING.md](MODEL_ROUTING.md) and [ADR-0020](adr/0020-provider-request-path-v2.md): the kernel performs the egress, the privacy class is kernel-derived ([ADR-0028](adr/0028-policy-input-ownership.md)), and a local endpoint is an origin like any other. **`--model` selects intelligence only.** It never selects or widens policy, capabilities, approvals, the sandbox, the privacy class or the authority profile.
+**Acceptance:** no provider name outside `providers/` (CI gate); a `LOCAL_ONLY` run cannot reach a vendor; metering matches provider-reported usage; an Ollama model reference changes which model answers and nothing that decides authority.
 **Adversarial:** router asked to route to an unauthorised upstream; credential-to-wrong-endpoint; cross-origin redirect credential leak.
 
 ### M8 · Storage, events, run state machine
@@ -165,6 +183,14 @@ no peer is authenticated, and the M3 acceptance line "runtime user cannot write
 ### M17 · CLI and doctor
 **Deps:** M9–M16. Full command surface; `doctor` verifying facts not settings; export/import. The CLI is **not** a `ChannelAdapter` — that claim was retracted in Phase 0.1 ([ARCHITECTURE.md](ARCHITECTURE.md) §27); the interface is designed at M20 against two real channels.
 **Acceptance:** startup to first prompt **< 400 ms with a warm kernel daemon, 1–2 s cold** ([PRODUCT_SPEC.md](PRODUCT_SPEC.md) §9 — audit verification is incremental against a signed checkpoint, not O(history), and Python import time dominates the cold path); `doctor` detects a deliberately misconfigured permission by attempting the write that should fail.
+**Ollama launch integration** (a project-owner requirement, recorded at M3e). Target first-class invocation:
+
+```text
+ollama launch direwolf --model <ollama-model-ref>
+# e.g. ollama launch direwolf --model qwen3.8   -- illustrative only; no model is hard-coded
+```
+
+M17 exposes a stable DireWolf launch and configuration contract suitable for Ollama's launcher; validates **arbitrary** Ollama model references rather than one named model; tests the launch path in ordinary CI against a small fixture model, with real Ollama and model smoke tests in dedicated integration and release jobs rather than on every pull request. Ollama's launcher uses an application integration registry: once DireWolf's M7/M17 contract is stable, an upstream integration is proposed so that `direwolf` becomes a first-class launch target. The model reference selects intelligence only -- never policy, capabilities, approvals, sandbox, privacy class or authority profile. (M3e changes nothing in the Ollama repository and adds no Ollama dependency or provider.)
 
 ### M18 · V1 hardening → **V1.0**
 Full eval suite green; fuzzing soak; 24 h soak runs; performance targets met; docs complete; third-party security review commissioned; **published eval results including failures**.

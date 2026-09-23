@@ -134,7 +134,19 @@ jobs:
       # compares against evals/baselines/main.json and fails on a regression;
       # nothing here rewrites that file. Pending suites are reported as pending,
       # which is neither a pass nor a skip.
+      #
+      # The M3 authority suite runs the real `dwkd-authority` process here.
+      # Strict (ADR-0041): an eval this job cannot exercise FAILS the gate
+      # rather than being listed as not exercised -- and `scripts/dw.py` makes
+      # the gate strict under GitHub Actions even without the line below.
+      # `nobody`, reached through the runner's passwordless sudo, is the second
+      # operating-system identity the cross-uid property needs, accepted only
+      # if its numeric uid is neither the runner's nor root's. The harness
+      # switches users; the authority never does.
       - run: make eval-check
+        env:
+          DW_EVAL_REQUIRE_EXERCISED: "1"
+          DW_PEER_AS: nobody
       - name: Keep the machine-readable results when the gate fails
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -159,6 +171,36 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v5.0.1
       - uses: ./.github/actions/setup
       - run: python scripts/dw.py test
+
+  # M3e's real-process evidence (ADR-0041): the released binary, a real
+  # Unix-domain socket, a client in another process -- and a client running as
+  # a genuinely different uid, which is the only evidence that the server's
+  # subject comes from the kernel. Then M3d's runtime-write probe under the
+  # same second identity (ADR-0039 section 14), then the M3 eval gate, strict.
+  # Linux: where the server runs.
+  #
+  # Fail-closed, by construction rather than by care: `nobody` is proven to be
+  # a second identity by its numeric uid before anything runs (it must differ
+  # from the runner's and must not be root), the two `#[ignore]`d cross-uid
+  # tests are selected by name and must both run and report every case, and
+  # the strict gate fails an eval it could not exercise. No step here may be
+  # conditional or allowed to fail; the `ci` job below requires this one.
+  authority-transport:
+    name: authority boundary (make authority-transport-evidence)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v5.0.1
+      - uses: ./.github/actions/setup
+      - run: make authority-transport-evidence
+        env:
+          DW_PEER_AS: nobody
+      - run: make authority-write-probe
+        env:
+          DW_PROBE_AS: nobody
+      - run: make eval-check
+        env:
+          DW_EVAL_REQUIRE_EXERCISED: "1"
+          DW_PEER_AS: nobody
 
   supply-chain:
     name: dependencies (make security)
@@ -193,16 +235,35 @@ jobs:
 
   # A single required check for branch protection, so adding a job later does
   # not silently become optional.
+  #
+  # `always()` so that this job runs -- and fails -- when a job it needs did
+  # not succeed. Only "success" counts: a "skipped" job proved nothing, so a
+  # skipped authority-transport (a condition added later, a job that never
+  # started) is as red as a failed one.
   ci:
     name: CI
     runs-on: ubuntu-latest
-    needs: [format, lint, typecheck, architecture, schema, evals, test, supply-chain, build]
+    needs: [format, lint, typecheck, architecture, schema, evals, test, authority-transport, supply-chain, build]
     if: always()
     steps:
-      - name: Fail if any job did not succeed
+      - name: Fail unless every required job succeeded
+        env:
+          # Through the environment, not interpolated into the script.
+          NEEDS: ${{ toJSON(needs) }}
         run: |
-          if echo '${{ toJSON(needs) }}' | grep -q '"result": *"\(failure\|cancelled\)"'; then
-            echo "::error::one or more CI jobs failed"
-            exit 1
-          fi
-          echo "all CI jobs succeeded"
+          python3 - <<'PY'
+          import json, os, sys
+          needs = json.loads(os.environ["NEEDS"])
+          if not needs:
+              print("::error::the aggregate job depends on no jobs")
+              sys.exit(1)
+          failed = sorted(
+              (name, job.get("result")) for name, job in needs.items()
+              if job.get("result") != "success"
+          )
+          for name, result in failed:
+              print(f"::error::required job {name} finished {result!r}; only 'success' counts")
+          if failed:
+              sys.exit(1)
+          print(f"all {len(needs)} required CI jobs succeeded")
+          PY

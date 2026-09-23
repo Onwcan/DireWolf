@@ -27,24 +27,25 @@ from typing import Final
 from direwolf_evals.discovery import discover
 from direwolf_evals.fixtures import FixtureError, load_fixture
 from direwolf_evals.model import Eval, Outcome, Status, Suite
+from direwolf_evals.preconditions import unmet
 from direwolf_evals.results import Result, RunReport
 from direwolf_evals.runners import Context, resolve
 from direwolf_evals.scoring import ScoringError, score_outcome
 
-__all__ = ["AVAILABLE_MILESTONES", "collect", "run_eval", "run_suites"]
+__all__ = ["AVAILABLE_MILESTONES", "collect", "not_exercised", "run_eval", "run_suites"]
 
 MAX_REASON_CHARS: Final = 1000
 """An error detail is diagnostics, not a channel. Bounded, like everything else
 that reaches a result file."""
 
-AVAILABLE_MILESTONES: Final[frozenset[str]] = frozenset({"M1", "M2", "M2.5"})
+AVAILABLE_MILESTONES: Final[frozenset[str]] = frozenset({"M1", "M2", "M2.5", "M3"})
 """What this build has. An eval requiring anything else is pending.
 
-Extending this set is how a future milestone turns its suites on: add "M3"
-here in the commit that makes M3 real, and every suite that has been waiting
-starts running and must pass. Nothing else gates them — in particular a
-``pending_reason`` left in a suite file does not keep an eval dormant, and an
-eval with no runner reports ERROR once its milestone is here.
+Extending this set is how a milestone turns its suites on: "M3" joined it in
+the commit that made M3 real (M3e, ADR-0041), and every suite that had been
+waiting for it started running and must pass. Nothing else gates them — in
+particular a ``pending_reason`` left in a suite file does not keep an eval
+dormant, and an eval with no runner reports ERROR once its milestone is here.
 """
 
 
@@ -126,6 +127,27 @@ def run_eval(
         ]
     runner_name = evaluation.runner
 
+    # The property exists; this machine may still be unable to measure it --
+    # the wrong platform, or no second operating-system identity. That is
+    # "not exercised": a SKIP with the reason, never a pass, never pending.
+    precondition = unmet(evaluation.platforms, evaluation.needs)
+    if precondition is not None:
+        return [
+            _result(
+                suite,
+                evaluation,
+                Status.SKIP,
+                None,
+                0.0,
+                seed,
+                0,
+                precondition,
+                {},
+                {},
+                None,
+            )
+        ]
+
     # A declared fixture is resolved before anything runs, even when the runner
     # would not have read it: otherwise a typo in a fixture path is invisible,
     # and an eval can pass while measuring nothing it claimed to measure.
@@ -187,6 +209,15 @@ def run_eval(
             )
         )
     return results
+
+
+def not_exercised(evals_root: Path) -> frozenset[str]:
+    """Every eval this machine cannot exercise, by its declared preconditions."""
+    return frozenset(
+        evaluation.id
+        for _, evaluation in collect(evals_root)
+        if unmet(evaluation.platforms, evaluation.needs) is not None
+    )
 
 
 def run_suites(

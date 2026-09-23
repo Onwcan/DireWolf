@@ -41,8 +41,9 @@ directory lives under `/var`, which is one — so on Unix the authority resolves
 the ancestors once, proves by `(device, inode)` that the result is the very
 directory it checked, and builds every state path from that resolved directory.
 SQLite's `SQLITE_OPEN_NOFOLLOW` stays on and refuses a symlink in any component
-of what it is given. M3d's authority takes the state directory as a parameter; where it sits under
-`$DIREWOLF_HOME` is fixed when the daemon is served (M3e) and packaged. Mode
+of what it is given. The authority takes the state directory as a parameter — `dwkd-authority serve
+--state-dir`, M3e ([ADR-0041](adr/0041-m3e-authenticated-dwkp-transport.md)) — and where it sits under
+`$DIREWOLF_HOME` is fixed when the daemon is packaged (M17). Mode
 bits are not the claim: `make authority-write-probe` attempts the writes as
 the runtime user and reports NOT EXERCISED where no second user exists.
 
@@ -65,7 +66,7 @@ PRAGMA mmap_size     = 268435456;
 
 **Connection discipline:** one writer connection with a serialised queue, plus a reader pool. SQLite permits multiple writers with retries; we do not use that, because `SQLITE_BUSY` retry loops under contention produce latency spikes that are indistinguishable from hangs. One writer makes behaviour predictable.
 
-*The kernel store departs from this, deliberately and for now.* M3d gives each authority handle its own connection and serialises writers with `BEGIN IMMEDIATE`; a writer that waits past the busy timeout fails closed with `Busy` and changes nothing. There is no retry loop, so the spike this section warns about becomes a refusal rather than a hang. M3e's server decides whether it needs the queue.
+*The kernel store departs from this, deliberately and for now.* M3d gives each authority handle its own connection and serialises writers with `BEGIN IMMEDIATE`; a writer that waits past the busy timeout fails closed with `Busy` and changes nothing. There is no retry loop, so the spike this section warns about becomes a refusal rather than a hang. M3e's server answered the question with a queue: one worker owns the authority and every connection's request waits in a bounded channel for it, so no two authority transactions contend and `Busy` is unreachable from the server ([ADR-0041](adr/0041-m3e-authenticated-dwkp-transport.md) §10).
 
 ## 3. Corruption handling
 

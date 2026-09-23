@@ -1,7 +1,8 @@
 //! Mapping internal outcomes onto the M3 wire — truthfully, or not at all.
 //!
-//! M3d has no transport. These functions are the boundary M3e will call: an
-//! internal outcome in, a `dwk-proto` response body out. Every answer an M3
+//! These functions are the boundary the M3e server carries: an internal
+//! outcome in, a `dwk-proto` response body out. The server adds the envelope
+//! and nothing else. Every answer an M3
 //! request can receive has a truthful wire form ([ADR-0040]): an admission's
 //! withheld capabilities all have reasons, a proposal the authority cannot
 //! describe as a complete canonical action is a refusal

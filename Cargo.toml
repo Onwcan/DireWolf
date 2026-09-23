@@ -76,6 +76,16 @@ rusqlite = { version = "=0.40.2", default-features = false, features = ["bundled
 # default features: no `alloc` convenience API and no OID tables.
 sha2 = { version = "=0.11.0", default-features = false }
 
+# Peer credentials (M3e): the uid the kernel attaches to the other end of a
+# Unix-domain socket (`SO_PEERCRED`), which stable Rust's standard library does
+# not expose. Accepted by ADR-0035 section 3; ADR-0041 records what M3e
+# actually linked. The authority declares it for `target_os = "linux"` only:
+# on Linux it makes raw syscalls through `linux-raw-sys`, with no libc and no
+# C, and the workspace keeps `unsafe_code = "forbid"` unchanged. `time` is not
+# optional: measured again for M3e, `net`'s `sockopt` module does not compile
+# without it. Pinned exactly for the same reason as `toml`.
+rustix = { version = "=1.1.5", default-features = false, features = ["std", "net", "time"] }
+
 # --- dev-only: tests, property tests, differential oracles ------------------
 # Never linked into a shipped binary. dwcheck excludes dev-only edges from the
 # TCB closure and a fixture proves it does not exclude normal ones.

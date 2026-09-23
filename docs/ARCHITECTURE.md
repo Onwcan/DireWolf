@@ -290,7 +290,7 @@ flowchart LR
 |----------|------|
 | TB0 → TB1 | Content enters as data only, never as a control channel. MCP tool *descriptions* are untrusted text, not instructions. |
 | TB1 → TB2 | Output is size-capped, secret-scrubbed, MIME-typed, trust-labelled, spilled to artifacts above threshold. |
-| TB2 → TB4 | **The only crossing with authority semantics.** Typed protocol over a Unix domain socket / named pipe with peer credential verification. Every message carries a capability token. |
+| TB2 → TB4 | **The only crossing with authority semantics.** Typed protocol over a Unix domain socket with peer credential verification — implemented at M3e on Linux: the kernel's uid, checked against the operator's list before a byte is read, one lease holder per connection ([ADR-0041](adr/0041-m3e-authenticated-dwkp-transport.md)); no named pipe exists, and native Windows has no server. Every message carries a capability token (from M4's `ToolInvoke`). |
 | TB4 → TB1 | Kernel spawns and constrains; secrets injected into the child, never returned upward. |
 | TB5 → TB4 | Approvals and policy arrive out-of-band relative to the runtime; the runtime cannot forge, replay or relay them. |
 | TB4 → TB2 | Decisions, metered usage, redacted results. Never plaintext long-lived credentials. |

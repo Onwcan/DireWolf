@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, Final
 
 from direwolf_evals.model import DEFAULT_TIMEOUT_S, Eval, Suite
+from direwolf_evals.preconditions import NEEDS, PLATFORMS
 from direwolf_evals.scoring import is_scorer, scorer_names
 
 __all__ = ["DiscoveryError", "discover", "suite_paths"]
@@ -36,6 +37,8 @@ EVAL_KEYS: Final = frozenset(
         "pending_reason",
         "tags",
         "gate",
+        "platforms",
+        "needs",
     }
 )
 
@@ -122,7 +125,22 @@ def _eval(
         pending_reason=pending,
         tags=_strs(source, raw, "tags"),
         gate=_bool(source, name, raw, "gate", suite_gate),
+        platforms=_closed(source, name, raw, "platforms", PLATFORMS),
+        needs=_closed(source, name, raw, "needs", NEEDS),
     )
+
+
+def _closed(
+    source: str, name: str, raw: dict[str, Any], key: str, allowed: frozenset[str]
+) -> tuple[str, ...]:
+    """A precondition vocabulary is closed. "Linux" or "second_identity" would
+    never match, and the eval would be *not exercised* everywhere with a reason
+    that reads correctly -- dormancy through a typo."""
+    values = _strs(source, raw, key)
+    unknown = sorted(set(values) - allowed)
+    if unknown:
+        raise DiscoveryError(f"{source}: {name}: unknown {key} {unknown}; known: {sorted(allowed)}")
+    return tuple(sorted(set(values)))
 
 
 def _milestones(source: str, name: str, values: set[str]) -> tuple[str, ...]:

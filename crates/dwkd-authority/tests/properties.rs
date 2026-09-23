@@ -42,6 +42,8 @@ use toml as _;
 // Likewise the M3d state layer's storage and wire dependencies.
 use dwk_proto as _;
 use rusqlite as _;
+#[cfg(target_os = "linux")]
+use rustix as _;
 use sha2 as _;
 
 mod common;

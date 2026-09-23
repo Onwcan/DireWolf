@@ -22,7 +22,7 @@ from direwolf_evals import inventory as inventory_module
 from direwolf_evals import report as report_module
 from direwolf_evals.discovery import DiscoveryError, discover
 from direwolf_evals.results import RunReport, write_jsonl
-from direwolf_evals.runner import collect, run_eval, run_suites
+from direwolf_evals.runner import collect, not_exercised, run_eval, run_suites
 
 __all__ = ["main"]
 
@@ -50,6 +50,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     check.add_argument("--baseline", type=Path, default=None)
     check.add_argument("--out", type=Path, default=None)
     check.add_argument("--all", action="store_true", help="every suite, not only the gate subset")
+    check.add_argument(
+        "--require-exercised",
+        action="store_true",
+        help="fail on any gating eval this machine cannot exercise (CI's gate)",
+    )
 
     sub.add_parser("list", help="list suites and evals without running them")
     sub.add_parser("inventory", help="security properties by milestone")
@@ -121,7 +126,12 @@ def _check(args: argparse.Namespace, repo_root: Path, evals_root: Path) -> int:
 
     path = args.baseline or (evals_root / DEFAULT_BASELINE)
     known = {evaluation.id for _, evaluation in collect(evals_root)}
-    comparison = baseline_module.compare(baseline_module.Baseline.load(path), report.results, known)
+    # Strict, CI's gate: an eval this machine cannot exercise fails. Lenient,
+    # a contributor's machine: it is listed as NOT EXERCISED, never passed.
+    unexercised = frozenset() if args.require_exercised else not_exercised(evals_root)
+    comparison = baseline_module.compare(
+        baseline_module.Baseline.load(path), report.results, known, unexercised
+    )
     rendered = baseline_module.render(comparison)
     if rendered:
         print()
@@ -134,9 +144,11 @@ def _check(args: argparse.Namespace, repo_root: Path, evals_root: Path) -> int:
         )
         return 1
     counts = report.counts()
+    unexercised_count = len(comparison.not_exercised)
     print(
         f"\ndirewolf_evals: gate ok ({counts['pass']} passed, {counts['pending']} pending, "
-        f"{counts['skip']} skipped) against {_display(path, repo_root)}"
+        f"{counts['skip']} skipped, {unexercised_count} not exercised here) against "
+        f"{_display(path, repo_root)}"
     )
     return 0
 

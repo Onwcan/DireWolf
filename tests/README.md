@@ -10,8 +10,8 @@ Where a test goes is decided by *what it needs*, not by what it is about.
 | `tests/protocol/` | **Data, not tests:** golden vectors both languages run, and the V8 oracle that produced their canonical bytes | nothing (Node only to regenerate) |
 | `fuzz/` | cargo-fuzz targets; bodies shared with `crates/dwk-proto/tests/fuzz_smoke.rs` | nightly, cargo-fuzz, a C++ compiler |
 | `tools/dwcheck/tests/` | Unit tests for the boundary checker itself | the package importable |
-| `tests/architecture/` | Repository-level checks: the boundary rules and the quality gates | the tools installed |
-| `tests/authority/` | Deployment verification run **as a different operating-system user**: `runtime_write_probe.py` attempts the runtime's forbidden writes to authority state (`make authority-write-probe`) | a second identity; otherwise it reports NOT EXERCISED and fails |
+| `tests/architecture/` | Repository-level checks: the boundary rules, the quality gates, and the CI wiring that carries evidence only CI can produce (`test_ci_authority_gate.py`) | the tools installed |
+| `tests/authority/` | Deployment verification run **as a different operating-system user**: `runtime_write_probe.py` attempts the runtime's forbidden writes to authority state (`make authority-write-probe`); `foreign_peer_client.py` is the M3e cross-uid DWKP client the transport evidence runs through `sudo -n -u $DW_PEER_AS` | a second identity; otherwise it reports NOT EXERCISED and fails |
 | `tests/integration/` | Cross-process tests: runtime ↔ authority ↔ broker | **M3+**; does not exist yet |
 | `evals/` | The evaluation harness, its suites, fixtures and baseline | the harness installed (`make eval`) |
 
@@ -60,6 +60,20 @@ admit a second run (ADR-0040).
 the closure report together; `state_probe.rs` holds the two `#[ignore]`d
 fixtures that need something `cargo test` cannot provide — a second user, and
 a quiet machine.
+
+**Authority transport tests (M3e)** — `crates/dwkd-authority/tests/transport_*.rs`
+— are **real-process** evidence: they spawn the released `dwkd-authority`
+binary (`serve`, the operator's code path — there is no test server), prepare
+state through the in-process operator API before it starts, and talk to it
+from the test process over a real Unix-domain socket, reading `audit.log`
+through the verifier. `transport_server.rs` covers the request path, the
+kernel-derived subject, holders, fencing, `SIGKILL` and restart, a poisoned
+store and socket-name attacks; `transport_hostile.rs` is the hostile DWKP
+client; `transport_stress.rs` the resource bounds; `transport_foreign.rs`
+(`#[ignore]`d) runs a client as a **different OS user**. Each passing case
+prints one `DWKP-EVIDENCE` line, which the M3 evaluations read.
+`make authority-transport-evidence` runs them all and needs `DW_PEER_AS` for the
+cross-uid half ([ADR-0041](../docs/adr/0041-m3e-authenticated-dwkp-transport.md)).
 
 **`tests/architecture/`** is the unusual one, and it is the point of M1. It
 contains two things:

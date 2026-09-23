@@ -28,6 +28,7 @@ import platform
 import shutil
 import subprocess
 import sys
+from collections.abc import Mapping
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -249,8 +250,31 @@ def task_eval() -> None:
 
 
 def task_eval_check() -> None:
-    """The eval merge gate: the deterministic subset, compared with the baseline."""
-    uvrun("direwolf_evals", "check")
+    """The eval merge gate: the deterministic subset, compared with the baseline.
+
+    An eval this machine cannot exercise -- the DWKP server on macOS or
+    Windows, a cross-uid property with no second identity -- is listed as NOT
+    EXERCISED, never passed. Strict -- DW_EVAL_REQUIRE_EXERCISED=1, and always
+    under GitHub Actions -- not exercising a gating eval fails the gate.
+    """
+    args = ["check"]
+    if eval_gate_is_strict(os.environ):
+        args.append("--require-exercised")
+    uvrun("direwolf_evals", *args)
+
+
+def eval_gate_is_strict(environ: Mapping[str, str]) -> bool:
+    """Whether "not exercised" fails the eval gate.
+
+    Fail-closed in both directions a mistake could take. Under GitHub Actions
+    the gate is strict whatever the environment says, so a job that loses its
+    DW_EVAL_REQUIRE_EXERCISED line cannot turn a missing cross-uid run into a
+    green check. And any value other than empty or "0" is strict, so a typo
+    ("true", "yes") never quietly means lenient.
+    """
+    if environ.get("GITHUB_ACTIONS") == "true":
+        return True
+    return environ.get("DW_EVAL_REQUIRE_EXERCISED", "").strip() not in ("", "0")
 
 
 def task_eval_one() -> None:
@@ -394,6 +418,187 @@ def task_authority_state_evidence() -> None:
     uvrun("dwcheck", "closure", "--report")
 
 
+TRANSPORT_SUITES = ("transport_server", "transport_hostile", "transport_stress")
+
+# The cross-uid suite: both tests are `#[ignore]`d, so that a plain `cargo test`
+# stays runnable on a one-user machine, and this task selects them BY NAME.
+# `--ignored` with a filter that matched nothing would be a green "0 passed";
+# `_require_foreign_evidence` makes that a failure.
+FOREIGN_TESTS = (
+    "linux::a_real_foreign_uid_is_refused_by_the_identity_the_kernel_reports",
+    "linux::a_foreign_uid_cannot_remove_replace_or_shadow_the_socket",
+)
+# Every case those tests report, one evidence line each, printed only after
+# the case's assertions held. The same set as the peer-credential-check eval's.
+FOREIGN_CASES = (
+    "foreign-uid-valid-handshake",
+    "foreign-uid-malformed-payload",
+    "foreign-uid-flood",
+    "foreign-uid-impersonation",
+)
+
+
+def task_authority_transport_evidence() -> None:
+    """M3e's real-process evidence (ADR-0041): the released `dwkd-authority`
+    binary, a real Unix-domain socket and a client in another process.
+
+    With DW_PEER_AS set, the second identity is proven first -- by numbers, see
+    `second_identity` -- so a broken prerequisite fails before anything else
+    runs. Then the same-uid suites (the full request path, holders, fencing,
+    restart after SIGKILL, a poisoned store, socket-name attacks, the hostile
+    client, resource pressure); then the cross-uid suite, selected by name and
+    required to report every case, with a client running as that user through
+    `sudo -n -u`; then the measured authority closure. Linux only: that is
+    where the server runs.
+
+    Without a second identity the cross-uid half is NOT EXERCISED and this task
+    fails after running everything else -- it never reports a pass it did not
+    earn. CI's Linux job provides one.
+    """
+    if not sys.platform.startswith("linux"):
+        raise TaskError(
+            "NOT EXERCISED: the DWKP server runs only on Linux (ADR-0041); use WSL2 on Windows"
+        )
+    user = os.environ.get("DW_PEER_AS", "").strip()
+    if user:
+        second_identity("DW_PEER_AS")
+    suites: list[str] = []
+    for suite in TRANSPORT_SUITES:
+        suites += ["--test", suite]
+    run("cargo", "test", "--locked", "-p", "dwkd-authority", *suites, "--", "--nocapture")
+    if user:
+        output = run_captured(
+            "cargo",
+            "test",
+            "--locked",
+            "-p",
+            "dwkd-authority",
+            "--test",
+            "transport_foreign",
+            "--",
+            "--ignored",
+            "--exact",
+            "--nocapture",
+            *FOREIGN_TESTS,
+        )
+        require_foreign_evidence(output)
+    uvrun("dwcheck", "closure", "--report")
+    if not user:
+        raise TaskError(
+            "NOT EXERCISED: the cross-uid half needs a second identity. Set DW_PEER_AS to a "
+            "user `sudo -n -u` can switch to (CI uses `nobody`); every same-uid suite above ran"
+        )
+
+
+def second_identity(variable: str) -> tuple[str, int, int]:
+    """The user `variable` names, proven to be a second, ordinary identity.
+
+    By numbers, not names: `sudo -n -u <user> id -u` must start a real process
+    as that user; the uid that process reports must differ from this process's
+    effective uid, and must not be root, which is outside the threat model.
+    Prints both uids, for the CI log.
+
+    Returns (user, this uid, the second uid); raises TaskError otherwise. The
+    harness switches users; the authority never does.
+    """
+    user = os.environ.get(variable, "").strip()
+    if not user:
+        raise TaskError(f"NOT EXERCISED: {variable} names no second identity")
+    if not sys.platform.startswith("linux") or shutil.which("sudo") is None:
+        raise TaskError(f"NOT EXERCISED: {variable}={user} needs Linux and `sudo`")
+    own = os.geteuid()
+    try:
+        switched = subprocess.run(
+            ["sudo", "-n", "-u", user, "id", "-u"],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise TaskError(f"NOT EXERCISED: `sudo -n -u {user}` could not run: {exc}") from exc
+    reported = switched.stdout.strip()
+    if switched.returncode != 0 or not reported.isdigit():
+        raise TaskError(
+            f"NOT EXERCISED: `sudo -n -u {user} id -u` did not start a process as {user} "
+            f"(exit {switched.returncode}): {switched.stderr.strip()[:300]}"
+        )
+    peer = int(reported)
+    print(
+        f"second identity: this process runs as uid {own}; {variable}={user} runs as uid {peer}",
+        flush=True,
+    )
+    if peer == own:
+        raise TaskError(
+            f"{variable}={user} runs as uid {peer}, this process's own: one identity, not two"
+        )
+    if peer == 0:
+        raise TaskError(
+            f"{variable}={user} is root, outside the threat model; the hostile peer must be an "
+            "ordinary local user such as `nobody`"
+        )
+    return user, own, peer
+
+
+def run_captured(*command: str) -> str:
+    """`run`, also returning everything the command printed -- stdout and
+    stderr, interleaved as it happened -- which is echoed as it arrives."""
+    printable = " ".join(command)
+    print(f"{DIM}$ {printable}{OFF}", flush=True)
+    lines: list[str] = []
+    with subprocess.Popen(
+        list(command),
+        cwd=str(ROOT),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        errors="replace",
+    ) as process:
+        if process.stdout is None:
+            raise TaskError(f"`{printable}`: no output stream")
+        for line in process.stdout:
+            print(line, end="", flush=True)
+            lines.append(line)
+        returncode = process.wait()
+    if returncode != 0:
+        raise TaskError(f"`{printable}` failed with exit code {returncode}")
+    return "".join(lines)
+
+
+def require_foreign_evidence(output: str) -> None:
+    """The cross-uid suite counts only if both tests ran and every case reported.
+
+    libtest exits 0 when a filter selects nothing, so a renamed test, a changed
+    `cfg` or a lost `--ignored` would otherwise be a green run that proved
+    nothing. Each case's evidence line is printed after its assertions held.
+    """
+    summaries = [line for line in output.splitlines() if line.startswith("test result: ")]
+    expected = f"test result: ok. {len(FOREIGN_TESTS)} passed; 0 failed; 0 ignored"
+    if len(summaries) != 1 or not summaries[0].startswith(expected):
+        raise TaskError(
+            f"the cross-uid suite did not run both of its tests: expected `{expected}`, "
+            f"got {summaries or 'no summary'}"
+        )
+    reported: set[str] = set()
+    for line in output.splitlines():
+        at = line.find(EVIDENCE_PREFIX)
+        if at < 0:
+            continue
+        try:
+            evidence = json.loads(line[at + len(EVIDENCE_PREFIX) :])
+        except json.JSONDecodeError as exc:
+            raise TaskError(f"unreadable evidence line: {line[:200]}") from exc
+        if isinstance(evidence, dict) and evidence.get("contained") is True:
+            reported.add(str(evidence.get("case")))
+    missing = sorted(set(FOREIGN_CASES) - reported)
+    if missing:
+        raise TaskError(f"the cross-uid suite did not report: {', '.join(missing)}")
+    print(f"cross-uid evidence: {len(FOREIGN_TESTS)} tests, {len(FOREIGN_CASES)} cases contained")
+
+
+EVIDENCE_PREFIX = "DWKP-EVIDENCE "
+
+
 def task_authority_write_probe() -> None:
     """Attempt the runtime's forbidden writes as a SECOND operating-system user.
 
@@ -438,8 +643,12 @@ def task_authority_write_probe() -> None:
     staged = parent / "runtime_write_probe.py"
     shutil.copyfile(probe, staged)
     staged.chmod(0o644)
+    # The system interpreter, not this checkout's virtualenv: the probe is
+    # standard-library only, and the second user may not be able to reach a
+    # virtualenv under the first user's home directory.
+    interpreter = "/usr/bin/python3" if Path("/usr/bin/python3").exists() else sys.executable
     result = subprocess.run(
-        ["sudo", "-n", "-u", user, sys.executable, str(staged), str(state)],
+        ["sudo", "-n", "-u", user, interpreter, str(staged), str(state)],
         check=False,
     )
     if result.returncode == 0:
@@ -599,6 +808,7 @@ TASKS = {
     "capability-evidence": task_capability_evidence,
     "policy-benchmark": task_policy_benchmark,
     "authority-state-evidence": task_authority_state_evidence,
+    "authority-transport-evidence": task_authority_transport_evidence,
     "authority-write-probe": task_authority_write_probe,
     "fuzz-smoke": task_fuzz_smoke,
     "fuzz": task_fuzz,

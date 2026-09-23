@@ -1,6 +1,7 @@
 //! A hostile runtime, in process.
 //!
-//! M3e will put a real socket and a real peer in front of these operations.
+//! M3e puts a real socket and a real peer in front of these operations; the
+//! real-process versions of these attacks are `transport_hostile.rs`.
 //! Until then the adversary is a caller of `dispatch` with decoded DWKP
 //! messages — the same objects the socket will produce — and the question is
 //! always the same: **can any of this become broader authority?**
@@ -16,6 +17,8 @@
     clippy::too_many_lines
 )]
 
+#[cfg(target_os = "linux")]
+use rustix as _;
 use sha2 as _;
 use toml as _;
 

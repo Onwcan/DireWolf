@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from direwolf_evals.model import Eval, Outcome
-from direwolf_evals.runners import harness, protocol, replay
+from direwolf_evals.runners import authority, harness, protocol, replay
 
 __all__ = ["RUNNERS", "Context", "Runner", "resolve"]
 
@@ -42,6 +42,13 @@ RUNNERS: dict[str, Runner] = {
     # Replay: recorded responses, no provider, no network.
     "replay.deterministic": replay.deterministic,
     "replay.fixture_integrity": replay.fixture_integrity,
+    # M3: the authority as the product -- the real process, the real socket,
+    # the real lattice and engine. Never a model of them.
+    "authority.hostile_dwkp_client": authority.hostile_dwkp_client,
+    "authority.peer_credential_check": authority.peer_credential_check,
+    "authority.epoch_fencing": authority.epoch_fencing,
+    "authority.policy_denies_by_default": authority.policy_denies_by_default,
+    "authority.capability_attenuation": authority.capability_attenuation,
     # The harness proving itself against a dummy process.
     "harness.checkpoint": harness.checkpoint,
     "harness.pause_resume": harness.pause_resume,

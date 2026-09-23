@@ -19,10 +19,20 @@ inputs are decided by the real decoder and counted; a known-bad result fails
 the gate; replay is byte-deterministic; the fault-injection harness controls a
 dummy process; pending suites are declared and counted apart.
 
-**Cannot:** anything about authority, policy, capabilities, approvals,
-sandboxing, secrets or model egress. Those systems do not exist yet. Their
-suites are **PENDING** — see `python -m direwolf_evals inventory` — and pending
-is never a pass.
+**Can, since M3:** measure the authority as the product. The
+`authority-security` suite is a merge gate: its runners launch the real
+`dwkd-authority` process and attack it over its socket (the hostile DWKP
+client, a real second OS user, stale writers, a restart, a poisoned store),
+and run the real capability lattice and policy engine. Every expected case is
+listed in the runner and every result says **where** each case was contained —
+peer gate, framing, decoder, connection protocol, state fence,
+capability/policy, resource bound, filesystem — so a case contained later than
+it used to be is visible ([ADR-0041](../docs/adr/0041-m3e-authenticated-dwkp-transport.md)).
+
+**Cannot:** anything about approvals, sandboxing, secrets, filesystem
+canonicalisation or model egress. Those systems do not exist yet. Their suites
+are **PENDING** — see `python -m direwolf_evals inventory` — and pending is
+never a pass.
 
 ## Commands
 
@@ -51,7 +61,7 @@ usage or configuration error.
    never averaged.
 2. Add an `[[eval]]` table: `name`, `description`, `runner`, and optionally
    `fixture`, `scorer`, `seed`, `runs`, `timeout_s`, `requires`, `tags`,
-   `gate`, `pending_reason`. Unknown keys are an error, not a silent no-op, and
+   `gate`, `pending_reason`, `platforms`, `needs`. Unknown keys are an error, not a silent no-op, and
    so is a malformed value: `seed = "zero"` or `gate = "false"` is a
    configuration error with a location, never a traceback (and never a `gate`
    that reads as the opposite of what the file says, which is what
@@ -72,6 +82,39 @@ usage or configuration error.
 Discovery sorts suites by id and evals by id, so the same tree always produces
 the same set, the same order and the same identifiers. Nothing depends on
 filesystem traversal order, import order, the clock or a random value.
+
+## Not exercised: where a property cannot be measured
+
+Some properties exist and still cannot be measured on every machine. An eval
+declares that, in a closed vocabulary checked at discovery:
+
+```toml
+platforms = ["linux"]          # the DWKP server runs only on Linux
+needs = ["second-identity"]    # a client running as ANOTHER operating-system user
+```
+
+`second-identity` is satisfied when `DW_PEER_AS` names a user that is provably
+a second, ordinary identity — checked by numbers, not names: `sudo -n -u <user>
+id -u` must start a process as that user, and the uid it reports must be
+neither this process's nor root's. An eval whose precondition is unmet is **not
+exercised**: SKIP with a generated reason, never a pass and never pending (the
+component exists).
+
+Two gates, deliberately different:
+
+| | a developer's `make eval-check` | CI's (strict) |
+|---|---|---|
+| when | the default | `DW_EVAL_REQUIRE_EXERCISED` set to anything but `0`, **or** running under GitHub Actions at all |
+| an eval this machine cannot exercise | listed under "NOT EXERCISED on this machine", counted as skipped — never passed; the gate still passes | a **regression**: the gate fails |
+| where | a one-user workstation, macOS, Windows | the `evals` and `authority-transport` jobs: Linux, `DW_PEER_AS=nobody` |
+
+The baseline records what the **strict** gate must see — `pass` for
+`peer-credential-check` too — and is an expectation, not an observation: the
+comparison is always against what this run actually did, so a SKIP is never
+read as a PASS, and against a `pass` expectation the strict gate fails it
+(`evals/tests/test_authority.py` runs `check` end to end both ways). M3 is in
+`AVAILABLE_MILESTONES` because CI measures the cross-uid property; it is not
+moved back to pending on a machine that cannot.
 
 ## Pending, and how a suite turns on
 
@@ -98,6 +141,12 @@ Turning a milestone on is therefore:
 1. add it to `AVAILABLE_MILESTONES`;
 2. give each eval that was waiting a real runner;
 3. watch it pass.
+
+M3e did exactly that: `"M3"` joined `AVAILABLE_MILESTONES`, and the five
+properties that waited in `pending-kernel` moved to the gated
+`authority-security` suite with runners in `runners/authority.py` — which run
+the real-process Rust suites and the existing lattice and engine evidence
+rather than reimplementing any of them.
 
 Step 2 is not optional. An eval whose milestone has arrived and which has **no
 runner, or an unknown one, reports ERROR** and fails the gate. That is

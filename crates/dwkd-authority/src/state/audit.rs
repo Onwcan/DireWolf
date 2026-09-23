@@ -134,11 +134,21 @@ pub enum AuditEvent {
     QueryRefused,
     /// A run's taint became more restrictive.
     TaintRaised,
+    /// The DWKP server refused a connection whose kernel-reported uid the
+    /// operator's peer policy does not name, before reading a byte from it.
+    TransportPeerRefused,
+    /// The DWKP server refused an allowed peer's connection because it was at
+    /// its connection limit.
+    TransportConnectionRefused,
+    /// The DWKP server closed a connection for a protocol violation.
+    TransportProtocolViolation,
+    /// Transport records the rate limit withheld, counted rather than written.
+    TransportAuditSuppressed,
 }
 
 impl AuditEvent {
     /// Every kind, in declaration order.
-    pub const ALL: [Self; 20] = [
+    pub const ALL: [Self; 24] = [
         Self::StoreCreated,
         Self::StoreOpened,
         Self::PolicyInstalled,
@@ -159,6 +169,10 @@ impl AuditEvent {
         Self::AuthorityDecision,
         Self::QueryRefused,
         Self::TaintRaised,
+        Self::TransportPeerRefused,
+        Self::TransportConnectionRefused,
+        Self::TransportProtocolViolation,
+        Self::TransportAuditSuppressed,
     ];
 
     /// The spelling in a record's `event` field.
@@ -185,6 +199,10 @@ impl AuditEvent {
             Self::AuthorityDecision => "authority.decision",
             Self::QueryRefused => "authority.query_refused",
             Self::TaintRaised => "run.taint_raised",
+            Self::TransportPeerRefused => "transport.peer_refused",
+            Self::TransportConnectionRefused => "transport.connection_refused",
+            Self::TransportProtocolViolation => "transport.protocol_violation",
+            Self::TransportAuditSuppressed => "transport.audit_suppressed",
         }
     }
 }
@@ -662,6 +680,121 @@ pub fn verify_audit_log(path: &Path) -> Result<AuditLogSummary, AuditLogFault> {
         }
     }
     Ok(AuditLogSummary { records, head })
+}
+
+/// One record of `audit.log`, returned only after the whole log verified.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AuditRecord {
+    seq: u64,
+    event: String,
+    object: Object,
+}
+
+impl AuditRecord {
+    /// The record's sequence number.
+    #[must_use]
+    pub const fn seq(&self) -> u64 {
+        self.seq
+    }
+
+    /// The event kind, as spelled in the record (`transport.peer_refused`).
+    #[must_use]
+    pub fn event(&self) -> &str {
+        &self.event
+    }
+
+    /// A text field, if the record has one under `key`.
+    #[must_use]
+    pub fn text(&self, key: &str) -> Option<&str> {
+        match self.object.get(key) {
+            Some(Value::String(value)) => Some(value),
+            _ => None,
+        }
+    }
+
+    /// A non-negative integer field, if the record has one under `key`.
+    #[must_use]
+    pub fn int(&self, key: &str) -> Option<u64> {
+        match self.object.get(key) {
+            Some(Value::Number(Number::Int(value))) => u64::try_from(*value).ok(),
+            _ => None,
+        }
+    }
+
+    /// A boolean field, if the record has one under `key`.
+    #[must_use]
+    pub fn flag(&self, key: &str) -> Option<bool> {
+        match self.object.get(key) {
+            Some(Value::Bool(value)) => Some(*value),
+            _ => None,
+        }
+    }
+}
+
+/// Verify `audit.log` exactly as [`verify_audit_log`] does and, only if every
+/// record verifies, return the records. Read-only.
+///
+/// For operators, tests and evaluations that must assert **which** events the
+/// authority recorded: they read the chain through the verifier instead of
+/// parsing the file themselves, so an assertion about a record is never made
+/// about a record the chain does not vouch for. It holds every record in
+/// memory, so it is a tool for inspecting a log, not for serving one.
+///
+/// # Errors
+///
+/// As [`verify_audit_log`].
+pub fn read_audit_log(path: &Path) -> Result<Vec<AuditRecord>, AuditLogFault> {
+    let mut reader = LogReader::open(path).map_err(|e| AuditLogFault::Io(e.to_string()))?;
+    let mut head = Sha256Hash::ZERO;
+    let mut records = Vec::new();
+    let mut count = 0u64;
+    while let Some((_, chunk)) = reader
+        .read_chunk()
+        .map_err(|e| AuditLogFault::Io(e.to_string()))?
+    {
+        let line = count.saturating_add(1);
+        match chunk {
+            Chunk::Line(bytes) => {
+                let verified = verify_line(&bytes, line, &head)
+                    .map_err(|fault| AuditLogFault::Record { line, fault })?;
+                let Ok(Value::Object(object)) = json::parse(&bytes, ParseOptions::dwkp()) else {
+                    return Err(AuditLogFault::Record {
+                        line,
+                        fault: RecordFault::NotJson,
+                    });
+                };
+                let event = match object.get("event") {
+                    Some(Value::String(event)) => event.clone(),
+                    _ => {
+                        return Err(AuditLogFault::Record {
+                            line,
+                            fault: RecordFault::MissingField("event"),
+                        });
+                    }
+                };
+                head = verified.hash;
+                count = verified.seq;
+                records.push(AuditRecord {
+                    seq: verified.seq,
+                    event,
+                    object,
+                });
+            }
+            Chunk::Tail(bytes) => {
+                return Err(AuditLogFault::TornTail {
+                    after_records: count,
+                    bytes: u64::try_from(bytes.len()).unwrap_or(u64::MAX),
+                });
+            }
+            Chunk::Oversized => {
+                return Err(AuditLogFault::Record {
+                    line,
+                    fault: RecordFault::Oversized,
+                });
+            }
+        }
+    }
+    Ok(records)
 }
 
 /// How `audit.log` compares with `kernel.db`'s record of it.

@@ -19,29 +19,31 @@
 //! in [ADR-0019] is true rather than aspirational, so adding a dependency here
 //! requires a note on that ADR and a reviewer other than the author.
 //!
-//! # Status: not implemented
+//! # Status: M3 — the authority serves DWKP; nothing is executed yet
 //!
-//! M1 is the repository foundation. This crate exists so that the boundary
-//! between deciding and doing is a package boundary from the first commit
-//! rather than something extracted later — retrofitting a privilege boundary is
-//! the mistake the whole architecture exists to avoid. The DWKP server, the
-//! policy engine and the capability broker arrive at **M3**.
+//! `dwkd-authority serve` (M3e) is the DWKP server: a Unix-domain socket whose
+//! peers are identified by the kernel (`SO_PEERCRED`), admitted only if the
+//! operator listed their uid, given one fresh lease holder per connection, and
+//! required to handshake before anything else. Behind it are the library
+//! halves — the capability lattice (M3b), the policy engine (M3c) and the
+//! durable state (M3d) — which the server calls and never duplicates
+//! ([ADR-0041]). **Linux only**: macOS and native Windows have no peer
+//! credential this build can read safely, and `serve` refuses there before
+//! touching a file.
 //!
-//! M3b added the library half (`dwkd_authority::capability`): the typed
-//! capability vocabulary and the `⊑` lattice over it; M3c the policy engine;
-//! M3d the durable state behind them — `kernel.db`, leases, admission and the
-//! hash-chained audit log. **Nothing in this binary serves any of it**:
-//! answering a request needs the socket and peer authentication of M3e. The
-//! help text reports the vocabulary's size so that "linked, not running" is
-//! something you can see rather than something you have to assume.
+//! What the authority still does **not** do: execute anything, canonicalise a
+//! filesystem resource, answer `ToolInvoke` or `CanonicalPreview` (both
+//! reserved until M4), hold approvals (M6) or call a model provider (M7).
 //!
-//! One operator tool is here, because it is read-only and needs no socket:
+//! One operator tool is here too, because it is read-only and needs no socket:
 //! `verify-audit`, which checks `audit.log`'s hash chain and compares it with
-//! `kernel.db`'s record of it. It opens both for reading only.
+//! `kernel.db`'s record of it. It opens both for reading only, and it works on
+//! every platform.
 //!
 //! [ADR-0000]: ../../../docs/adr/0000-authority-plane-separation.md
 //! [ADR-0018]: ../../../docs/adr/0018-authority-broker-split.md
 //! [ADR-0019]: ../../../docs/adr/0019-language-rationale-v2.md
+//! [ADR-0041]: ../../../docs/adr/0041-m3e-authenticated-dwkp-transport.md
 
 // Pedantic lints on the security crates, per docs/LANGUAGE_SELECTION.md §7.
 #![warn(clippy::pedantic)]
@@ -50,19 +52,19 @@ use std::path::Path;
 use std::process::ExitCode;
 
 use dwkd_authority::capability::Verb;
+use dwkd_authority::server::{self, SERVE_USAGE, ServeError, Stopped};
 use dwkd_authority::state::{AUDIT_LOG, KERNEL_DB, verify_audit_against_store, verify_audit_log};
 
-// The policy loader's parser is a dependency of the LIBRARY. The binary
-// inherits the manifest edge without using it -- there is no DWKP server yet,
-// so nothing here reads a policy file. Acknowledged rather than silenced with
-// an `#[allow]`, so the day this binary does load policy the acknowledgement
-// becomes a real `use` instead.
-use toml as _;
-// Likewise the M3d storage and wire dependencies: the library links them, and
-// this binary reaches them only through `dwkd_authority::state`.
+// The library's dependencies, which this binary reaches only through
+// `dwkd_authority`: the policy loader's parser, the M3d storage and wire
+// crates, and (Linux only) the peer-credential wrapper. Acknowledged rather
+// than silenced with an `#[allow]`.
 use dwk_proto as _;
 use rusqlite as _;
+#[cfg(target_os = "linux")]
+use rustix as _;
 use sha2 as _;
+use toml as _;
 
 // Dev-only, and the binary's test target inherits the manifest edge without
 // using it. Acknowledged rather than silenced with an `#[allow]`.
@@ -90,12 +92,37 @@ fn main() -> ExitCode {
                 ExitCode::from(2)
             }
         }
+        Some("serve") => serve(args.get(1..).unwrap_or_default()),
         _ => {
             eprint!("{}", help());
-            eprintln!();
-            eprintln!("{NAME} does not serve DWKP yet: the server and peer authentication arrive");
-            eprintln!("at M3e, the brokers at M4, approvals and budgets at M6.");
-            eprintln!("See docs/ROADMAP.md and docs/adr/0018-authority-broker-split.md.");
+            ExitCode::from(2)
+        }
+    }
+}
+
+/// `serve`. Exit codes: 2 a usage error, 3 an unsupported platform, 1 the
+/// server did not start, 4 it stopped because the store was poisoned. It does
+/// not return otherwise: it serves until the process is killed.
+fn serve(args: &[String]) -> ExitCode {
+    let config = match server::parse_serve_args(args) {
+        Ok(config) => config,
+        Err(error) => {
+            eprintln!("{NAME} serve: {error}");
+            eprintln!("usage: {NAME} serve [flags]\n{SERVE_USAGE}");
+            return ExitCode::from(2);
+        }
+    };
+    match server::serve(&config) {
+        Ok(Stopped::Poisoned(reason)) => {
+            eprintln!("{NAME}: stopped serving: the authority store is poisoned: {reason}");
+            ExitCode::from(4)
+        }
+        Err(error @ ServeError::Unsupported(_)) => {
+            eprintln!("{NAME} serve: {error}");
+            ExitCode::from(3)
+        }
+        Err(error) => {
+            eprintln!("{NAME} serve: {error}");
             ExitCode::FAILURE
         }
     }
@@ -143,11 +170,17 @@ fn help() -> String {
          \n\
          USAGE:\n    \
              {NAME} [-V | --version] [-h | --help]\n    \
+             {NAME} serve [flags]               serve DWKP on a Unix-domain socket (Linux only)\n    \
              {NAME} verify-audit <state-dir>   read-only audit chain check\n\
          \n\
-         STATUS: not implemented; the DWKP server arrives at milestone M3e.\n\
-         The capability vocabulary ({verbs} verbs, M3b), the policy engine (M3c) and the\n\
-         durable authority state (M3d) are linked; nothing serves them yet.\n",
+         SERVE FLAGS:\n{SERVE_USAGE}\
+         \n\
+         STATUS: milestone M3. `serve` answers the six M3 authority requests over DWKP to\n\
+         peers whose kernel-reported uid the operator listed: one fresh lease holder per\n\
+         connection, handshake first. On macOS and Windows it refuses to start.\n\
+         Linked: the capability vocabulary ({verbs} verbs, M3b), the policy engine (M3c)\n\
+         and the durable authority state (M3d). Not yet: tool execution, canonical\n\
+         resources and CanonicalPreview (M4), approvals (M6), model providers (M7).\n",
         env!("CARGO_PKG_VERSION"),
         verbs = Verb::ALL.len()
     )
@@ -158,13 +191,21 @@ mod tests {
     use super::{NAME, help};
 
     #[test]
-    fn help_names_the_component_and_its_milestone() {
+    fn help_names_the_component_and_what_it_does_now() {
         let h = help();
         assert!(h.contains(NAME));
+        assert!(h.contains("M3"), "help must name the milestone");
         assert!(
-            h.contains("M3"),
-            "help must name the milestone that implements this"
+            h.contains("serve"),
+            "help must describe the server that exists"
         );
-        assert!(h.contains("not implemented"));
+        assert!(
+            !h.contains("not implemented"),
+            "help must not claim the server is missing"
+        );
+        assert!(
+            h.contains("Linux only"),
+            "help must state the platform limit"
+        );
     }
 }

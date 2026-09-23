@@ -23,16 +23,17 @@
 //! # Where they come from — and where they do not
 //!
 //! **Neither is ever read from a DWKP message.** No envelope field, payload
-//! field or string carries either, and none may ([ADR-0028]). M3e derives the
-//! subject from the operating system's peer credentials (`SO_PEERCRED` and its
-//! equivalents) and asks the authority for a holder per accepted connection.
+//! field or string carries either, and none may ([ADR-0028]). The DWKP server
+//! (`crate::server`, M3e, [ADR-0041]) derives the subject from the kernel's
+//! peer credentials (`SO_PEERCRED`) for each accepted socket, before reading a
+//! byte from it, and asks the authority for a holder exactly once per accepted
+//! connection.
 //!
-//! **M3d authenticates nobody.** There is no socket and no peer-credential
-//! call in this milestone. A `AuthenticatedSubject` is a trusted in-process
-//! value: whoever constructs one is asserting it, and in M3d the only callers
-//! that construct one are tests acting as that future bridge. The type exists
-//! now so the state machine has the right *shape*; it is not evidence that the
-//! peer was checked.
+//! **This module authenticates nobody itself.** An `AuthenticatedSubject` is a
+//! trusted in-process value: whoever constructs one is asserting it. In the
+//! server the assertion is the kernel's report; in the M3d state tests, which
+//! call this module directly, it is the test's. The type is the right *shape*
+//! for both; only the server's use of it is evidence that a peer was checked.
 //!
 //! A [`LeaseHolder`] cannot be constructed at all outside this module: the only
 //! way to obtain one is [`Authority::connect`](super::Authority::connect),
@@ -42,15 +43,16 @@
 //! [ADR-0011]: ../../../../../docs/adr/0011-session-concurrency.md
 //! [ADR-0028]: ../../../../../docs/adr/0028-policy-input-ownership.md
 //! [ADR-0036]: ../../../../../docs/adr/0036-m3-authority-operations-and-the-capability-wire-form.md
+//! [ADR-0041]: ../../../../../docs/adr/0041-m3e-authenticated-dwkp-transport.md
 
 use core::fmt;
 
 /// The stable identity of an authenticated peer.
 ///
-/// A closed shape rather than a string: the only identity M3e will produce on
-/// the platform where assurance is claimed is a Unix uid, and a free-form
-/// string is the shape that would let "parse it from the request" look
-/// reasonable.
+/// A closed shape rather than a string: the only identity the M3e server
+/// produces, on the one platform where it serves, is a Unix uid, and a
+/// free-form string is the shape that would let "parse it from the request"
+/// look reasonable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct AuthenticatedSubject {
     uid: u32,
@@ -60,8 +62,9 @@ impl AuthenticatedSubject {
     /// The subject whose peer credentials report `uid`.
     ///
     /// **Trusted input.** Calling this asserts that `uid` came from the
-    /// kernel's report about a real connection. M3e's peer-credential bridge
-    /// is the production caller; until it exists, tests are.
+    /// kernel's report about a real connection. The DWKP server's
+    /// peer-credential gate is the production caller; the M3d state tests are
+    /// the others.
     #[must_use]
     pub const fn unix_uid(uid: u32) -> Self {
         Self { uid }

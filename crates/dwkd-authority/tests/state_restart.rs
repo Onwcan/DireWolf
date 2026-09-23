@@ -25,6 +25,8 @@
 )]
 
 use proptest as _;
+#[cfg(target_os = "linux")]
+use rustix as _;
 use sha2 as _;
 use toml as _;
 
@@ -144,7 +146,7 @@ fn a_lost_response_then_authority_death_then_restart_then_the_same_retry_is_admi
         h.authority().admit_run(&a, &retry).unwrap(),
         Reply::Refused(RefusalReason::AdmissionEnded)
     );
-    // The same answer on the wire, as M3e will send it.
+    // The same answer on the wire, as the M3e server sends it.
     let DwkpBody::AuthorityRefused(refusal) = h.authority().dispatch(&a, &retry).unwrap() else {
         panic!("a refusal")
     };
