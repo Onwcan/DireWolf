@@ -1,7 +1,9 @@
-# FIXTURE: the shared wire-contract crate, broken in its manifest two ways
-# (and in src/lib.rs a third, TX002):
+# FIXTURE: the shared wire-contract crate, broken in its manifest three ways
+# (and in src/lib.rs a fourth, TX002):
 #   * it links an in-tree crate, which makes it a bridge (RS009);
-#   * it links a parser outside the TCB allowlist as a NORMAL dependency (RS004).
+#   * it links a parser outside the TCB allowlist as a NORMAL dependency (RS004);
+#   * it links a Unicode database the authority may use and the wire contract
+#     may not (RS016) -- allowlisted, so RS004 is silent and RS016 alone fires.
 # The dev-dependency below is not linked and must not be reported; the
 # checker's unit tests assert that separately.
 [package]
@@ -11,6 +13,7 @@ version = "0.0.0"
 [dependencies]
 dwk-common = { path = "../dwk-common" }
 serde_json = { workspace = true }
+unicode-normalization = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }

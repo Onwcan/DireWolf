@@ -75,6 +75,19 @@ prints one `DWKP-EVIDENCE` line, which the M3 evaluations read.
 `make authority-transport-evidence` runs them all and needs `DW_PEER_AS` for the
 cross-uid half ([ADR-0041](../docs/adr/0041-m3e-authenticated-dwkp-transport.md)).
 
+**Canonical filesystem tests (M4a)** are real-filesystem evidence for the
+one resolver ([ADR-0042](../docs/adr/0042-m4a-canonical-filesystem-resolution.md)).
+`crates/dwkd-authority/src/resource/fs/linux/tests.rs` runs the production
+resolver — there is no test resolver — against real symlinks, procfs magic
+links, mount points, hard links, FIFOs, sockets, devices, NFC/NFD twins and
+a replaced root, and runs six TOCTOU campaigns in which an attacker thread
+exchanges names while the resolver walks; `tests/resource_workspace.rs`
+covers the state layer — binding a root, resolving for a run, the workspace
+anchor, and migrating an M3 store. Each case prints one `FS-EVIDENCE` line.
+`make filesystem-canonicalization-evidence` (Linux) runs both and fails on a
+category with no exercised case, a race campaign with an escape, or a case
+not exercised that an ordinary machine can exercise.
+
 **`tests/architecture/`** is the unusual one, and it is the point of M1. It
 contains two things:
 

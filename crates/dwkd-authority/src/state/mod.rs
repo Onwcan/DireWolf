@@ -69,6 +69,7 @@ mod ids;
 mod lease;
 mod policy_state;
 mod query;
+mod resolution;
 mod schema;
 mod transport;
 pub mod wire;
@@ -110,6 +111,7 @@ pub use identity::{AuthenticatedSubject, CallerContext, LeaseHolder};
 pub use lease::{DEFAULT_LEASE_TTL_MS, MAX_EPOCH, MAX_LEASE_TTL_MS, MIN_LEASE_TTL_MS};
 pub use policy_state::{MAX_CEILING_CAPABILITIES, MAX_POLICY_SOURCES, PolicySet, PolicySource};
 pub use query::{AuthorityAnswer, DecisionRecord, Proposal, TaintCause, Undecidable};
+pub use resolution::ResolutionRefused;
 pub use transport::{TransportClass, TransportEvent, Violation};
 pub use wire::WireGap;
 
@@ -832,6 +834,51 @@ impl Authority {
         self.transact(|work| query::policy_context(work, run.as_str(), active))
     }
 
+    /// Pin the workspace root of an active run (M4a, ADR-0042 §8): open the
+    /// operator's bound path and prove it is the directory that was installed.
+    ///
+    /// The result is an anchor held by descriptor; nothing resolved beneath it
+    /// is affected by what later happens to the path. In-process only: no DWKP
+    /// operation reaches it.
+    ///
+    /// # Errors
+    ///
+    /// [`ResolutionRefused`], and [`ResolutionRefused::Root`] with
+    /// [`RootError::Replaced`](crate::resource::fs::RootError::Replaced) when
+    /// the path now names a different directory.
+    pub fn pin_run_workspace(
+        &mut self,
+        run: &RunId,
+    ) -> Result<crate::resource::fs::PinnedRoot, ResolutionRefused> {
+        let binding = self.transact(|work| resolution::run_root(work, run.as_str()))??;
+        crate::resource::fs::PinnedRoot::reopen(&binding.host_path, &binding.fingerprint)
+            .map_err(ResolutionRefused::Root)
+    }
+
+    /// Resolve a declared path for an active run, beneath its pinned workspace
+    /// root (M4a, ADR-0042). The one production entry point from a declaration
+    /// to a canonical filesystem object; M4b's `ToolInvoke` and
+    /// `CanonicalPreview` will call it.
+    ///
+    /// Performs no effect and writes no audit record: the result is a
+    /// canonical path, an identity and a checked handle, and what may be done
+    /// with them is a later, separate decision.
+    ///
+    /// # Errors
+    ///
+    /// [`ResolutionRefused`], naming the class of refusal.
+    pub fn resolve_for_run(
+        &mut self,
+        run: &RunId,
+        declared: &crate::capability::DeclaredPath,
+        access: crate::resource::fs::Access,
+        expect: crate::resource::fs::Expect,
+    ) -> Result<crate::resource::fs::ResolvedResource, ResolutionRefused> {
+        let root = self.pin_run_workspace(run)?;
+        root.resolve(declared, access, expect)
+            .map_err(ResolutionRefused::Resolve)
+    }
+
     /// Answer one decoded DWKP request with the response body the M3e server
     /// sends.
     ///
@@ -1033,6 +1080,39 @@ impl OperatorBootstrap<'_> {
         self.run(|tx, now, audit| config::install_workspace(tx, now, id, sensitivity, audit))
     }
 
+    /// Bind a workspace to the filesystem directory at `host_path` (M4a,
+    /// ADR-0042 §8).
+    ///
+    /// The directory is opened and measured here — a real directory, not a
+    /// symlink, not on procfs or sysfs — and the binding records the path and
+    /// the identity it had: device, inode and, where the filesystem reports
+    /// one, birth time. Every later resolution for a run in this workspace
+    /// reopens the path and proves it is still that directory, so replacing
+    /// the directory at the path redirects nothing.
+    ///
+    /// Once per workspace. The same binding again is a no-op; a different one
+    /// is refused, because a different root is a different workspace. Audited
+    /// as `config.workspace_root_installed`.
+    ///
+    /// # Errors
+    ///
+    /// [`ConfigError::Invalid`] for an unknown workspace, a path that cannot
+    /// be pinned (with the [`RootError`](crate::resource::fs::RootError) code),
+    /// or a workspace already bound to another root.
+    pub fn install_workspace_root(
+        &mut self,
+        id: &WorkspaceId,
+        host_path: &str,
+    ) -> Result<(), ConfigError> {
+        let (_measured, fingerprint) = crate::resource::fs::PinnedRoot::install(host_path)
+            .map_err(|error| ConfigError::Invalid(format!("workspace root: {error}")))?;
+        let binding = config::RootBinding {
+            host_path: host_path.to_owned(),
+            fingerprint,
+        };
+        self.run(|tx, now, audit| config::install_workspace_root(tx, now, id, &binding, audit))
+    }
+
     /// Bind a session to a workspace, for the session's life.
     ///
     /// # Errors
@@ -1104,7 +1184,7 @@ fn open_store(paths: &StatePaths, layout: Layout, now_ms: u64) -> Result<Opened,
             })?;
             created = true;
         }
-        Ok(Shape::Older(version)) => migrate_store(&mut conn, version)?,
+        Ok(Shape::Older(version)) => migrate_store(&mut conn, version, now_ms)?,
         Ok(Shape::Current) => {}
         Err(ShapeError::Foreign) => return Err(StartError::ForeignDatabase),
         Err(ShapeError::Future(found)) => {
@@ -1223,12 +1303,30 @@ fn create_store(conn: &mut Connection, now_ms: u64) -> Result<(), StoreCreation>
     Ok(())
 }
 
-/// Migrate an older store forward in one transaction; a failure rolls it back.
-fn migrate_store(conn: &mut Connection, from: i64) -> Result<(), StartError> {
+/// Migrate an older store forward in one transaction, and record that it
+/// happened in the same transaction; a failure rolls both back.
+///
+/// The record is appended to the outbox like every other and reaches
+/// `audit.log` through the startup reconciliation that follows, so a
+/// structural change to the store is on the chain before anything is served
+/// from it (ADR-0042 §8).
+fn migrate_store(conn: &mut Connection, from: i64, now_ms: u64) -> Result<(), StartError> {
     let failed = |error: rusqlite::Error| StartError::Migration(error.to_string());
     let tx = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(failed)?;
-    schema::migrate(&tx, from, schema::MIGRATIONS).map_err(failed)?;
+    let to = schema::migrate(&tx, from, schema::MIGRATIONS).map_err(failed)?;
+    audit::append(
+        &tx,
+        now_ms,
+        AuditEvent::StoreMigrated,
+        Fields::new()
+            .int("from_schema_version", u64::try_from(from).unwrap_or(0))
+            .int("to_schema_version", u64::try_from(to).unwrap_or(0)),
+    )
+    .map_err(|error| match error {
+        audit::AuditAppendError::Sqlite(error) => failed(error),
+        audit::AuditAppendError::Authority(error) => StartError::Migration(error.to_string()),
+    })?;
     tx.commit().map_err(failed)
 }

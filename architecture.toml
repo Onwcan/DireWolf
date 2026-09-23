@@ -352,9 +352,17 @@ real-process suites and the hostile-client evaluation are the evidence.
 """
 
 [[text_rules]]
-id = "TX008-peer-credentials-are-read-in-one-place"
+id = "TX008-rustix-only-at-reviewed-syscall-boundaries"
 paths = ["crates/dwkd-authority/src"]
-exempt_paths = ["crates/dwkd-authority/src/server/peer.rs"]
+# FILES, not directories: a new file dropped beside a reviewed boundary is not
+# reviewed by being there. `linux/tests.rs` is the boundary's own test module;
+# it builds the hostile trees (symlinks, FIFOs, renames) the resolver is
+# measured against, and is compiled only under `cfg(test)`.
+exempt_paths = [
+    "crates/dwkd-authority/src/server/peer.rs",
+    "crates/dwkd-authority/src/resource/fs/linux/mod.rs",
+    "crates/dwkd-authority/src/resource/fs/linux/tests.rs",
+]
 suffixes = [".rs"]
 # The binary's `use rustix as _;` acknowledges the manifest edge for
 # `unused_crate_dependencies` and uses nothing; it is not a finding.
@@ -362,11 +370,20 @@ patterns = [
     '^(?!\s*//)(?!\s*use\s+rustix\s+as\s+_\s*;).*\brustix\b',
 ]
 reason = """
-rustix entered the authority for one call: the kernel's peer credentials on an
-accepted socket (ADR-0035 section 3, ADR-0041). Everything else it can do --
-processes, files, memory maps, signals -- is a surface the authority has no
-reviewed use for, and a second use of it anywhere is a new decision, not a
-convenience. `server/peer.rs` is the one module that may name it.
+rustix is the authority's only path to the kernel below std, and it has
+exactly two reviewed uses: the kernel's peer credentials on an accepted socket
+(`server/peer.rs`; ADR-0035 section 3, ADR-0041), and handle-relative
+filesystem resolution beneath a pinned root -- openat2 with RESOLVE_BENEATH,
+fstat, statx, the listing that verifies an exact name
+(`resource/fs/linux/mod.rs`; ADR-0042). Everything else it can do --
+processes, memory maps, signals, writes, a path-based open anywhere else in
+the authority -- is a surface with no reviewed use, and a third use is a new
+decision, not a convenience.
+
+Until M4a this rule was TX008-peer-credentials-are-read-in-one-place, with one
+exempt file. ADR-0042 widened it by one file and its test module, and kept the
+rest of the authority -- including `resource/fs/mod.rs`, the portable half of
+the same resolver -- under it.
 """
 
 [[text_rules]]
@@ -409,6 +426,68 @@ never runs a shell and never starts a process. M4's broker is where execution
 lives, behind a per-invocation authorisation.
 
 Hygiene, not containment.
+"""
+
+[[text_rules]]
+id = "TX011-only-the-state-layer-reaches-the-resolver"
+paths = ["crates/dwkd-authority/src"]
+exempt_paths = [
+    "crates/dwkd-authority/src/resource",
+    "crates/dwkd-authority/src/state",
+]
+suffixes = [".rs"]
+patterns = [
+    '^(?!\s*//).*\bresource\s*::\s*fs\b',
+    '^(?!\s*//).*\bresource\s*::\s*\{[^}]*\bfs\b',
+]
+reason = """
+`resource::fs` is the one module in the authority that looks at the host
+filesystem (M4a, ADR-0042): it opens a pinned root and resolves a declared
+path beneath it. Its only caller is the state layer, which owns WHICH root a
+run resolves beneath -- the operator's binding in kernel.db -- and hands the
+resolver nothing but that. The capability core and the policy engine are pure
+functions of values (TX003, TX004): a canonical path arrives in them as a
+value the state layer derived, never as a lookup they perform. The transport
+calls the state layer and nothing past it (TX007).
+
+So a call to the resolver from `policy`, `capability` or `server` is the
+mistake ADR-0037 exists to prevent -- authority decided by looking at the
+world at the moment somebody asked -- arriving through a module that is
+allowed to look. TX003 and TX004 ban `std::fs`; this bans the back door.
+
+Hygiene, not containment.
+"""
+
+[[text_rules]]
+id = "TX012-unicode-normalization-is-confined-to-the-name-checker"
+paths = [
+    "crates/dwkd-authority/src",
+    "crates/dwk-proto/src",
+]
+exempt_paths = [
+    "crates/dwkd-authority/src/resource/fs/names.rs",
+    "crates/dwkd-authority/src/resource/fs/tests.rs",
+]
+suffixes = [".rs"]
+# The binary's `use unicode_normalization as _;` acknowledges the manifest edge
+# for `unused_crate_dependencies` and uses nothing; it is not a finding.
+patterns = [
+    '^(?!\s*//)(?!\s*use\s+unicode_normalization\s+as\s+_\s*;).*\bunicode_normalization\b',
+]
+reason = """
+M4a links unicode-normalization for one question about a filesystem name:
+is this component already NFC, and does a sibling on disk normalise to the
+same name (ADR-0042)? It answers by CHECKING, never by rewriting: a
+declared name that is not NFC is refused, and nothing is looked up under a
+spelling nobody sent. `resource/fs/names.rs` asks it; the resolver's
+property tests use it as an oracle.
+
+It must not spread. ADR-0034 removed NFC from the wire precisely so that DWKP
+decoding needs no Unicode database -- Rust and Python ship different
+versions, and a normaliser in the decoder is a cross-language divergence. A
+normaliser in the policy engine would be a second canonicaliser. So the
+crate is named in one file and its tests, and dwk-proto may not depend on it
+at all (RS016).
 """
 
 # ===========================================================================
@@ -537,6 +616,20 @@ protocols; it does not link them.  Linking would put authority code in a
 process a user launches directly, with that user's privileges.
 """
 
+[[crate_rules]]
+id = "RS016-the-wire-contract-links-no-unicode-database"
+crate = "dwk-proto"
+forbidden_dependencies = ["unicode-normalization", "tinyvec"]
+reason = """
+ADR-0034: DWKP rejects every undeclared member and every declared name is
+ASCII, so the decoder needs no Unicode database -- and must not have one,
+because the Python runtime's database is a different version and a
+normalising decoder on one side is a divergence on the wire.  M4a brings
+unicode-normalization into the AUTHORITY for filesystem names (ADR-0042),
+behind TX012.  This keeps it out of the crate both daemons and the runtime's
+generated bindings agree on.
+"""
+
 # The TCB's dependency set is a load-bearing claim of ADR-0019. As of M3c it
 # was no longer empty; as of M3d it includes SQLite's C. Dev-dependencies
 # (proptest, serde_json) are excluded because they are never linked;
@@ -602,8 +695,16 @@ process a user launches directly, with that user's privileges.
 #                           The authority declares rustix for
 #                           target_os = "linux" ONLY; on Linux x86_64 and
 #                           aarch64 it makes raw syscalls through linux-raw-sys
-#                           (Rust bindings, no C, no libc).  Only
-#                           `server/peer.rs` may use it (TX008).
+#                           (Rust bindings, no C, no libc).
+#                           M4a (ADR-0042) enables its `fs` feature for
+#                           handle-relative resolution: openat2 with
+#                           RESOLVE_BENEATH, fstat, statx, fstatfs, directory
+#                           listing.  The feature is `fs = []` in rustix's
+#                           manifest -- it adds code, not crates, and the
+#                           closure below is unchanged by it; the syscall
+#                           surface is what grew, and that is the TCB change
+#                           ADR-0042 records.  Only `server/peer.rs` and
+#                           `resource/fs/linux/` may name it (TX008).
 #
 #   errno                   TARGET-CONDITIONAL: rustix's libc backend, which it
 #                           uses on Linux targets without a raw-syscall backend
@@ -618,11 +719,28 @@ process a user launches directly, with that user's privileges.
 #                           every target Cargo resolved has to name them, not
 #                           because any supported build links them.
 #
+#   unicode-normalization   M4a (ADR-0042): the NFC CHECK on filesystem names --
+#   tinyvec                 `is_nfc` on a declared component, and the NFC form
+#                           of an on-disk sibling to detect an alias.  Pinned
+#                           =0.1.25 (Unicode 17.0.0), default-features = false
+#                           (no `std`).  tinyvec 1.13.3 (feature `alloc`) is
+#                           its only dependency, and is unconditionally
+#                           `#![forbid(unsafe_code)]`.  unicode-normalization
+#                           is `#![deny(unsafe_code)]` with five local
+#                           exceptions, all in Hangul (de)composition, all
+#                           `char::from_u32_unchecked` on arithmetic bounded by
+#                           the Hangul block constants (normalize.rs, reviewed
+#                           for ADR-0042).  Neither has a build script or a
+#                           proc macro; neither does I/O.  Named in one module
+#                           (TX012); forbidden to dwk-proto (RS016).
+#
 # M2 briefly added unicode-normalization here, for NFC comparison of object
 # keys.  ADR-0034 removed the need: DWKP rejects every undeclared member and
 # every declared name is ASCII, so a normalisation collision is unrepresentable
 # without consulting a Unicode database -- which also removed a cross-language
-# divergence, because Rust and Python ship different database versions.
+# divergence, because Rust and Python ship different database versions.  That
+# stays true: M4a's use is for FILESYSTEM names inside the authority, which no
+# peer compares, and the wire contract still links no Unicode database.
 #
 # Adding an entry requires a new ADR amending ADR-0019 (never an edit to it)
 # and a reviewer other than the author.
@@ -661,6 +779,9 @@ allowed_third_party = [
     # In the union only: rustix/errno for cfg(windows), never built there.
     "windows-sys",
     "windows-link",
+    # M4a: the NFC check on filesystem names (ADR-0042; TX012, RS016).
+    "unicode-normalization",
+    "tinyvec",
 ]
 
 # Crates that are NOT linked into the authority and DO execute while it is

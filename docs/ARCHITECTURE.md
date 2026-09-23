@@ -501,7 +501,10 @@ independent: a capability answers "is this authority shape contained by that
 one?", never "should this be allowed?". Of the request fields above, M3d
 supplies `session_id`, `run_id`, `workspace_id`, `taint_level`, `mode_profile`
 and `origin` from kernel rows; the resolved paths, hosts and IPs are M4's
-canonicaliser, and `budget_snapshot` is M6's. Because those are missing, M3d
+canonicaliser -- whose filesystem half, M4a, resolves paths in process and
+feeds nothing on the wire until M4b
+([ADR-0042](adr/0042-m4a-canonical-filesystem-resolution.md)) -- and
+`budget_snapshot` is M6's. Because those are missing, M3d
 decides only complete canonical actions supplied in process; a proposal over
 DWKP is refused with `NO_CANONICAL_ACTION` rather than decided on invented
 facts ([ADR-0040](adr/0040-m3d-reconciliation-admission-across-tenures-and-undecidable-proposals.md)).)*

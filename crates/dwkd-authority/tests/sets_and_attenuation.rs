@@ -25,6 +25,7 @@ use rusqlite as _;
 #[cfg(target_os = "linux")]
 use rustix as _;
 use sha2 as _;
+use unicode_normalization as _;
 
 mod common;
 

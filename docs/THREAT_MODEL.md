@@ -108,7 +108,7 @@ E9 and E6 rank highest because they are attacker-*chosen* content delivered thro
 
 | STRIDE | Threat | Mitigation |
 |---|---|---|
-| **T** | TOCTOU between check and execution | fd-relative execution; binding re-verified immediately pre-exec; DNS pinned to the checked IP set |
+| **T** | TOCTOU between check and execution | fd-relative execution; binding re-verified immediately pre-exec; DNS pinned to the checked IP set. **M4a:** a path resolves by descriptor, one `openat2` per component beneath a pinned root, and the chain is re-verified after the walk; six race campaigns must return zero escaped objects ([ADR-0042](adr/0042-m4a-canonical-filesystem-resolution.md)). Using the checked descriptor for the effect is M4b's |
 | **I** | Secret leaks into output, logs or artifacts | Redaction index applied on the return path; injection mode (A) avoids the secret ever being in the child |
 | **D** | Sandboxed process exhausts host resources | cgroups: CPU, memory, PID, disk quota; wall-clock timeout; reaping on parent death |
 | **E** | Sandbox escape | Non-root, read-only rootfs, all caps dropped, `no-new-privileges`, seccomp, user namespaces, **never mount the container socket** |

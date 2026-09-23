@@ -84,7 +84,22 @@ sha2 = { version = "=0.11.0", default-features = false }
 # C, and the workspace keeps `unsafe_code = "forbid"` unchanged. `time` is not
 # optional: measured again for M3e, `net`'s `sockopt` module does not compile
 # without it. Pinned exactly for the same reason as `toml`.
-rustix = { version = "=1.1.5", default-features = false, features = ["std", "net", "time"] }
+#
+# `fs` (M4a, ADR-0042): the canonical filesystem resolver -- `openat2` with
+# RESOLVE_BENEATH | NO_SYMLINKS | NO_MAGICLINKS | NO_XDEV, `fstat`, `statat`,
+# `fstatfs`, `statx` and directory listing, all relative to held descriptors.
+# The feature is `fs = []` in rustix's manifest: it adds code, not crates.
+rustix = { version = "=1.1.5", default-features = false, features = ["std", "net", "time", "fs"] }
+
+# Unicode NFC for filesystem names (M4a, ADR-0042): whether a component is
+# already NFC, and whether a sibling directory entry normalises to the same
+# name. The standard library has no normalisation and hand-written tables
+# would be ~23 000 generated lines to track against each Unicode release.
+# Reviewed once before for the protocol (ADR-0033 section 4) and removed from
+# it (ADR-0034); it re-enters for the RESOURCE layer only: `dwk-proto` may not
+# depend on it (RS016) and only `crate::resource::fs` may name it (TX012).
+# No default features: `std` adds nothing the checks use.
+unicode-normalization = { version = "=0.1.25", default-features = false }
 
 # --- dev-only: tests, property tests, differential oracles ------------------
 # Never linked into a shipped binary. dwcheck excludes dev-only edges from the

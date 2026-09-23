@@ -278,8 +278,8 @@ An earlier draft of this document said policy matches "inode-identity containmen
 
 What actually happens, and is sound:
 
-1. The **canonicaliser** — not the policy engine — resolves the candidate once: NFC, absolute, symlink-free, via `openat2` under a held root fd, producing a `CanonicalPath` and its `(dev, ino)`.
-2. The **workspace root is pinned by `(dev, ino)` at run admission** and held as an open fd for the life of the run. That is what makes `${WORKSPACE}` an identity rather than a name: swap the directory out from under a running agent and the held fd still refers to the original, so the swap cannot silently redirect writes.
+1. The **canonicaliser** — not the policy engine — resolves the candidate once: NFC (required, never applied), absolute, symlink-free, via `openat2` under a held root fd, producing a `CanonicalPath` and its `(dev, ino)`.
+2. The **workspace root is pinned by `(dev, ino)`** — recorded when the operator binds it to the workspace, re-proved on every pin, and held as an open fd while a resolution walks beneath it ([ADR-0042](adr/0042-m4a-canonical-filesystem-resolution.md) §8). That is what makes `${WORKSPACE}` an identity rather than a name: swap the directory out from under a running agent and a root already pinned still refers to the original, while the next pin is refused because the path now names another directory — the swap cannot silently redirect anything.
 3. The policy engine then performs **string prefix matching on the canonical path under that pinned root.** Pure, allocation-light, microseconds.
 
 The identity check is real and lives in the canonicaliser; the policy engine stays a pure function over already-resolved values. Both properties survive — the earlier phrasing collapsed the two layers and got both slightly wrong.

@@ -51,7 +51,7 @@ use rusqlite::Connection;
 pub(super) const APPLICATION_ID: i64 = 0x4457_4B44;
 
 /// The schema version this build creates and understands.
-pub(super) const CURRENT_VERSION: i64 = 1;
+pub(super) const CURRENT_VERSION: i64 = 2;
 
 /// Schema version 1, the first. Static text: nothing in it is assembled from a
 /// value, and every value the authority stores is bound as a parameter.
@@ -380,6 +380,35 @@ CREATE TRIGGER admission_idempotency_no_delete BEFORE DELETE ON admission_idempo
 BEGIN SELECT RAISE(ABORT, 'an idempotency record is never deleted'); END;
 ";
 
+/// Schema version 2 (M4a, ADR-0042 §8): a workspace's filesystem root.
+///
+/// One row per workspace that has one, written once by the operator and never
+/// changed: the host path the root was opened through, and the identity the
+/// directory had when it was measured — device and inode as decimal text, so
+/// the whole `u64` range survives SQLite's signed integers, and the birth time
+/// where the filesystem reports one. Binding a different root is a new
+/// workspace, never an edit, so a live run's workspace can never be re-pointed
+/// by a configuration change.
+pub(super) const SCHEMA_V2: &str = r"
+CREATE TABLE workspace_root (
+    workspace_id  TEXT    PRIMARY KEY REFERENCES workspace(workspace_id) ON DELETE RESTRICT,
+    host_path     TEXT    NOT NULL CHECK (length(CAST(host_path AS BLOB)) BETWEEN 1 AND 4096
+                                          AND substr(host_path, 1, 1) = '/'),
+    root_device   TEXT    NOT NULL CHECK (length(root_device) BETWEEN 1 AND 20
+                                          AND root_device NOT GLOB '*[^0-9]*'),
+    root_inode    TEXT    NOT NULL CHECK (length(root_inode) BETWEEN 1 AND 20
+                                          AND root_inode NOT GLOB '*[^0-9]*'),
+    birth_sec     INTEGER,
+    birth_nsec    INTEGER CHECK (birth_nsec IS NULL OR (birth_nsec >= 0 AND birth_nsec < 1000000000)),
+    installed_ms  INTEGER NOT NULL,
+    CHECK ((birth_sec IS NULL) = (birth_nsec IS NULL))
+) STRICT;
+CREATE TRIGGER workspace_root_no_update BEFORE UPDATE ON workspace_root
+BEGIN SELECT RAISE(ABORT, 'a workspace root binding is immutable; bind another root as a new workspace'); END;
+CREATE TRIGGER workspace_root_no_delete BEFORE DELETE ON workspace_root
+BEGIN SELECT RAISE(ABORT, 'a workspace root binding is never deleted'); END;
+";
+
 /// One step from a version to the next.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct Migration {
@@ -390,10 +419,16 @@ pub(super) struct Migration {
 }
 
 /// Every migration this build knows, in order. Version 0 is "no schema".
-pub(super) const MIGRATIONS: &[Migration] = &[Migration {
-    to: 1,
-    sql: SCHEMA_V1,
-}];
+pub(super) const MIGRATIONS: &[Migration] = &[
+    Migration {
+        to: 1,
+        sql: SCHEMA_V1,
+    },
+    Migration {
+        to: 2,
+        sql: SCHEMA_V2,
+    },
+];
 
 /// What an opened file turned out to be.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -490,7 +525,9 @@ fn objects(conn: &Connection) -> rusqlite::Result<Vec<Object>> {
 /// object and byte by byte. Returns a description of the first difference.
 pub(super) fn verify_exact(conn: &Connection) -> rusqlite::Result<Result<(), String>> {
     let reference = Connection::open_in_memory()?;
-    reference.execute_batch(SCHEMA_V1)?;
+    for step in MIGRATIONS {
+        reference.execute_batch(step.sql)?;
+    }
     let expected = objects(&reference)?;
     let found = objects(conn)?;
     for object in &expected {
@@ -544,8 +581,8 @@ pub(super) fn foreign_key_check(conn: &Connection) -> rusqlite::Result<Result<()
 #[cfg(test)]
 mod tests {
     use super::{
-        APPLICATION_ID, CURRENT_VERSION, MIGRATIONS, Migration, SCHEMA_V1, Shape, ShapeError,
-        decide, migrate, verify_exact,
+        APPLICATION_ID, CURRENT_VERSION, MIGRATIONS, Migration, SCHEMA_V1, SCHEMA_V2, Shape,
+        ShapeError, decide, migrate, verify_exact,
     };
     use rusqlite::Connection;
 
@@ -605,6 +642,7 @@ mod tests {
             unreachable!("in-memory SQLite")
         };
         assert!(conn.execute_batch(SCHEMA_V1).is_ok());
+        assert!(conn.execute_batch(SCHEMA_V2).is_ok());
         assert!(
             conn.execute_batch("DROP TRIGGER run_never_resurrects")
                 .is_ok()
@@ -621,6 +659,7 @@ mod tests {
             unreachable!("in-memory SQLite")
         };
         assert!(conn.execute_batch(SCHEMA_V1).is_ok());
+        assert!(conn.execute_batch(SCHEMA_V2).is_ok());
         assert!(
             conn.execute_batch("CREATE TABLE backdoor (x INTEGER)")
                 .is_ok()
@@ -645,32 +684,94 @@ mod tests {
             assert!(migrate(&tx, 0, MIGRATIONS).is_ok());
             assert!(tx.commit().is_ok());
         }
-        let Some(first) = MIGRATIONS.first() else {
-            unreachable!("version 1 exists")
-        };
-        let failing = [
-            *first,
-            Migration {
-                to: 2,
-                sql: "CREATE TABLE added_by_v2 (x INTEGER) STRICT; \
-                      THIS IS NOT SQL;",
-            },
-        ];
+        let mut failing = MIGRATIONS.to_vec();
+        failing.push(Migration {
+            to: CURRENT_VERSION + 1,
+            sql: "CREATE TABLE added_by_the_future (x INTEGER) STRICT; \
+                  THIS IS NOT SQL;",
+        });
         {
             let Ok(tx) = conn.unchecked_transaction() else {
                 unreachable!("a transaction")
             };
-            assert!(migrate(&tx, 1, &failing).is_err(), "the step must fail");
+            assert!(
+                migrate(&tx, CURRENT_VERSION, &failing).is_err(),
+                "the step must fail"
+            );
             // Dropped without commit: rolled back.
         }
         let version: i64 = conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap_or(-1);
-        assert_eq!(version, 1, "the version did not move");
+        assert_eq!(version, CURRENT_VERSION, "the version did not move");
         assert_eq!(
             verify_exact(&conn).ok(),
             Some(Ok(())),
             "no half-applied table"
+        );
+    }
+
+    #[test]
+    fn a_version_one_store_migrates_to_the_current_schema_exactly() {
+        let Ok(conn) = Connection::open_in_memory() else {
+            unreachable!("in-memory SQLite")
+        };
+        let Some(first) = MIGRATIONS.first() else {
+            unreachable!("version 1 exists")
+        };
+        {
+            let Ok(tx) = conn.unchecked_transaction() else {
+                unreachable!("a transaction")
+            };
+            assert_eq!(migrate(&tx, 0, &[*first]).ok(), Some(1));
+            assert!(tx.commit().is_ok());
+        }
+        assert!(
+            matches!(verify_exact(&conn), Ok(Err(_))),
+            "a v1 store is not a v2 store"
+        );
+        {
+            let Ok(tx) = conn.unchecked_transaction() else {
+                unreachable!("a transaction")
+            };
+            assert_eq!(migrate(&tx, 1, MIGRATIONS).ok(), Some(CURRENT_VERSION));
+            assert!(tx.commit().is_ok());
+        }
+        assert_eq!(verify_exact(&conn).ok(), Some(Ok(())));
+    }
+
+    #[test]
+    fn a_workspace_root_binding_is_immutable_and_bounded() {
+        let Ok(conn) = Connection::open_in_memory() else {
+            unreachable!("in-memory SQLite")
+        };
+        assert!(conn.execute_batch(SCHEMA_V1).is_ok());
+        assert!(conn.execute_batch(SCHEMA_V2).is_ok());
+        assert!(
+            conn.execute(
+                "INSERT INTO workspace (workspace_id, sensitivity, installed_ms) VALUES ('w', 0, 0)",
+                [],
+            )
+            .is_ok()
+        );
+        let insert = |path: &str, device: &str, inode: &str| {
+            conn.execute(
+                "INSERT INTO workspace_root (workspace_id, host_path, root_device, root_inode, \
+                 birth_sec, birth_nsec, installed_ms) VALUES ('w', ?1, ?2, ?3, NULL, NULL, 0)",
+                rusqlite::params![path, device, inode],
+            )
+        };
+        assert!(insert("relative", "1", "2").is_err(), "not absolute");
+        assert!(insert("/srv/w", "-1", "2").is_err(), "not a decimal u64");
+        assert!(insert("/srv/w", "1", "18446744073709551615").is_ok());
+        assert!(
+            conn.execute("UPDATE workspace_root SET host_path = '/elsewhere'", [])
+                .is_err(),
+            "a binding is never re-pointed"
+        );
+        assert!(
+            conn.execute("DELETE FROM workspace_root", []).is_err(),
+            "a binding is never removed"
         );
     }
 }

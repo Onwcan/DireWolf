@@ -144,11 +144,16 @@ pub enum AuditEvent {
     TransportProtocolViolation,
     /// Transport records the rate limit withheld, counted rather than written.
     TransportAuditSuppressed,
+    /// An operator bound a workspace to a filesystem root (M4a): the recorded
+    /// host path and the identity the directory had when it was measured.
+    WorkspaceRootInstalled,
+    /// `kernel.db` was migrated to a newer schema version.
+    StoreMigrated,
 }
 
 impl AuditEvent {
     /// Every kind, in declaration order.
-    pub const ALL: [Self; 24] = [
+    pub const ALL: [Self; 26] = [
         Self::StoreCreated,
         Self::StoreOpened,
         Self::PolicyInstalled,
@@ -173,6 +178,8 @@ impl AuditEvent {
         Self::TransportConnectionRefused,
         Self::TransportProtocolViolation,
         Self::TransportAuditSuppressed,
+        Self::WorkspaceRootInstalled,
+        Self::StoreMigrated,
     ];
 
     /// The spelling in a record's `event` field.
@@ -203,6 +210,8 @@ impl AuditEvent {
             Self::TransportConnectionRefused => "transport.connection_refused",
             Self::TransportProtocolViolation => "transport.protocol_violation",
             Self::TransportAuditSuppressed => "transport.audit_suppressed",
+            Self::WorkspaceRootInstalled => "config.workspace_root_installed",
+            Self::StoreMigrated => "store.migrated",
         }
     }
 }

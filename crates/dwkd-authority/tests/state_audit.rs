@@ -13,6 +13,7 @@ use proptest as _;
 #[cfg(target_os = "linux")]
 use rustix as _;
 use toml as _;
+use unicode_normalization as _;
 
 mod state_support;
 

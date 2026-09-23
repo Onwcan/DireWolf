@@ -244,13 +244,67 @@ def test_the_transport_cannot_become_a_second_authority_engine(
     assert all("FIXTURE" not in f.message for f in findings), "a comment line was a finding"
 
 
-def test_peer_credentials_are_read_in_one_module(violation_rules: list[str]) -> None:
-    """TX008: rustix outside `server/peer.rs` is a finding; the binary's
-    `use rustix as _;` acknowledgement is not."""
-    rule = "TX008-peer-credentials-are-read-in-one-place"
+def test_rustix_is_named_only_at_the_reviewed_syscall_boundaries(
+    violation_rules: list[str],
+) -> None:
+    """TX008 (narrowed by ADR-0042): rustix outside `server/peer.rs` and
+    `resource/fs/linux/` is a finding -- including in `resource/fs/mod.rs`,
+    the portable half of the same resolver, one directory up. The fixture's
+    `resource/fs/linux/mod.rs` uses rustix and is NOT a finding, which proves
+    the exemption names that file rather than silencing the rule; the
+    binary's `use rustix as _;` acknowledgement is not a finding either."""
+    rule = "TX008-rustix-only-at-reviewed-syscall-boundaries"
     assert rule in violation_rules
     findings = [f for f in check_text(load(VIOLATIONS, RULES)) if f.rule == rule]
     assert findings and all("as _" not in f.message for f in findings)
+    assert {f.path for f in findings} == {
+        "crates/dwkd-authority/src/stray_peer.rs",
+        "crates/dwkd-authority/src/resource/fs/mod.rs",
+    }, sorted({f.path for f in findings})
+
+
+def test_only_the_state_layer_reaches_the_filesystem_resolver(
+    violation_rules: list[str],
+) -> None:
+    """TX011 (M4a): the policy engine calling `resource::fs` -- by path and by
+    a brace import -- is a finding. TX004 bans `std::fs` in the policy core;
+    this bans the back door through the one module allowed to look."""
+    rule = "TX011-only-the-state-layer-reaches-the-resolver"
+    assert rule in violation_rules
+    findings = [f for f in check_text(load(VIOLATIONS, RULES)) if f.rule == rule]
+    assert sorted((f.path, f.line) for f in findings) == [
+        ("crates/dwkd-authority/src/policy/resolve.rs", 6),
+        ("crates/dwkd-authority/src/policy/resolve.rs", 9),
+    ], "the import and the call; never the doc comment naming them"
+
+
+def test_the_nfc_crate_is_confined_to_the_name_checker(violation_rules: list[str]) -> None:
+    """TX012 (M4a): unicode_normalization named in the policy engine is a
+    second canonicaliser. The fixture's `use ... as _;` acknowledgement and
+    the fixture's `resource/fs/names.rs`, which may name it, are not findings."""
+    rule = "TX012-unicode-normalization-is-confined-to-the-name-checker"
+    assert rule in violation_rules
+    findings = [f for f in check_text(load(VIOLATIONS, RULES)) if f.rule == rule]
+    assert [(f.path, f.line) for f in findings] == [
+        ("crates/dwkd-authority/src/policy/fold.rs", 6),
+    ]
+
+
+def test_the_wire_contract_links_no_unicode_database(violation_rules: list[str]) -> None:
+    """RS016 (M4a): unicode-normalization is on the authority's allowlist, so
+    RS004 is silent about it in dwk-proto -- and RS016 is not. ADR-0034 keeps
+    the wire contract free of a Unicode database."""
+    rule = "RS016-the-wire-contract-links-no-unicode-database"
+    assert rule in violation_rules
+    findings = [f for f in check_crates(load(VIOLATIONS, RULES)) if f.rule == rule]
+    assert [f.path for f in findings] == ["crates/dwk-proto/Cargo.toml"]
+    assert "unicode-normalization" in findings[0].message
+    rs004 = [
+        f.message
+        for f in check_crates(load(VIOLATIONS, RULES))
+        if f.rule.startswith("RS004") and f.path == "crates/dwk-proto/Cargo.toml"
+    ]
+    assert not any("unicode-normalization" in m for m in rs004), rs004
 
 
 def test_a_second_listener_is_rejected(violation_rules: list[str]) -> None:
@@ -350,14 +404,17 @@ def test_the_required_boundary_rules_are_all_declared() -> None:
         "TX005-the-pure-cores-never-touch-the-store",
         "TX006-state-sql-is-static-and-the-state-layer-has-no-ambient-effects",
         "TX007-the-transport-is-an-adapter",
-        "TX008-peer-credentials-are-read-in-one-place",
+        "TX008-rustix-only-at-reviewed-syscall-boundaries",
         "TX009-one-authority-server",
         "TX010-the-authority-executes-nothing",
+        "TX011-only-the-state-layer-reaches-the-resolver",
+        "TX012-unicode-normalization-is-confined-to-the-name-checker",
         "DEP001-no-agent-framework-dependency",
         "DEP002-runtime-has-no-transport-dependency",
         "RS001-authority-depends-on-nothing-in-tree",
         "RS002-broker-cannot-reach-authority-internals",
         "RS003-cli-holds-no-authority",
+        "RS016-the-wire-contract-links-no-unicode-database",
     }
     missing = required - set(_declared_rule_ids())
     assert not missing, f"boundary rules removed from architecture.toml: {sorted(missing)}"

@@ -64,7 +64,8 @@ use rusqlite::OptionalExtension as _;
 
 use crate::capability::{self, Capability, PrivacyClass, UnresolvedScope};
 use crate::policy::{
-    self, CanonicalAction, Decision, Effect, IpAddress, Origin, PolicyContext, TaintLevel,
+    self, CanonicalAction, Decision, Effect, IpAddress, Origin, PathAnchors, PolicyContext,
+    TaintLevel,
 };
 
 use super::admission::{self, Admission, taint_from_rank, taint_rank};
@@ -269,9 +270,19 @@ pub(super) fn policy_context(
     let privacy = PrivacyClass::parse(&privacy).ok_or(AuthorityError::Invariant(
         "a stored privacy class is malformed",
     ))?;
+    // `${WORKSPACE}` is filled only when the run's workspace has a root the
+    // operator bound (M4a, ADR-0042 §10): then it is the canonical anchor every
+    // path resolved for this run hangs from. No other anchor has a kernel-owned
+    // source yet, so every other stays unresolved and a rule that needs one is
+    // refused at evaluation rather than read as "no match".
+    let mut anchors = PathAnchors::empty();
+    if super::resolution::run_workspace_bound(work, run)? {
+        anchors.workspace = Some(crate::resource::fs::workspace_anchor());
+    }
     Ok(PolicyContext::new(origin, taint)
         .with_privacy(privacy)
-        .with_config(active.flags))
+        .with_config(active.flags)
+        .with_anchors(anchors))
 }
 
 fn refuse(

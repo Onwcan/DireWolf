@@ -51,11 +51,19 @@ toml = { workspace = true }
 rusqlite = { workspace = true }
 sha2 = { workspace = true }
 
-# Peer credentials for the DWKP server (M3e): `SO_PEERCRED` through a
-# maintained safe wrapper, so the crate keeps `forbid(unsafe_code)`. Linux only,
-# because Linux is the one platform where the authority claims peer
-# authentication (ADR-0035, ADR-0041); elsewhere the server refuses to start
-# and nothing here is linked. Only `crate::server::peer` may use it (TX008).
+# NFC checks for filesystem names (M4a, ADR-0042): the resource layer's name
+# grammar, which is pure and compiled everywhere. Only `crate::resource::fs`
+# may name it (TX012).
+unicode-normalization = { workspace = true }
+
+# Peer credentials for the DWKP server (M3e) and the canonical filesystem
+# resolver (M4a): `SO_PEERCRED`, and `openat2` relative to held descriptors,
+# through a maintained safe wrapper, so the crate keeps `forbid(unsafe_code)`.
+# Linux only, because Linux is the one platform where the authority claims
+# peer authentication (ADR-0035, ADR-0041) or high-assurance resolution
+# (ADR-0042); elsewhere the server refuses to start, the resolver refuses to
+# resolve, and nothing here is linked. Only `crate::server::peer` and
+# `crate::resource::fs::linux` may use it (TX008).
 [target.'cfg(target_os = "linux")'.dependencies]
 rustix = { workspace = true }
 

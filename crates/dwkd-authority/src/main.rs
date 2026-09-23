@@ -65,6 +65,7 @@ use rusqlite as _;
 use rustix as _;
 use sha2 as _;
 use toml as _;
+use unicode_normalization as _;
 
 // Dev-only, and the binary's test target inherits the manifest edge without
 // using it. Acknowledged rather than silenced with an `#[allow]`.

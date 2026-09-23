@@ -89,9 +89,9 @@ Deviations from the profile are recorded in the audit log and shown by `direwolf
 Every filesystem operation resolves to a **file descriptor obtained under a pinned root**, and policy matches on `(device, inode)`, not on a path string.
 
 ```
-1. Normalise:  Unicode NFC, reject NUL, reject overlong/invalid UTF-8,
-               reject bidi/format control chars (U+202A–U+202E, U+2066–U+2069, U+200B–U+200F)
-2. Open root:  workspace root fd, opened once at run admission and held
+1. Check:      already NFC (refused, never normalised), no NUL, valid UTF-8,
+               no bidi/format control chars (U+202A–U+202E, U+2066–U+2069, U+200B–U+200F)
+2. Open root:  workspace root fd, proved to be the directory the operator bound
 3. Resolve:    openat2(root_fd, rel, { RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS
                                      | RESOLVE_NO_MAGICLINKS | RESOLVE_NO_XDEV })
 4. Identify:   fstat -> (dev, ino)
@@ -101,7 +101,9 @@ Every filesystem operation resolves to a **file descriptor obtained under a pinn
 
 Step 6 is what actually closes TOCTOU. Re-opening by path between the check and the operation reintroduces every race the resolution just eliminated.
 
-**Platform fallbacks.** `openat2` requires Linux 5.6+. On older Linux, macOS and Windows we fall back to a manual component-wise walk with `O_NOFOLLOW` at each step plus `fstat` verification, which is slower and slightly weaker. The fallback is reported by `direwolf doctor` and recorded in the environment's assurance metadata rather than being silently equivalent.
+**As built in M4a** ([ADR-0042](adr/0042-m4a-canonical-filesystem-resolution.md)): steps 1–4 are the authority's resolver. The root's identity is recorded when the operator binds it to a workspace, and every pin re-proves it, so a directory put in its place is refused rather than followed. Each component is opened relative to the previous descriptor, its name is verified against its directory — spelled exactly as on disk, with no canonically equivalent twin beside it — and the chain is re-verified after the walk. Step 6 is M4b's, on the checked descriptor.
+
+**Platform fallbacks.** `openat2` requires Linux 5.6+. **M4a implements no fallback**: on older Linux, macOS and Windows every resolution is refused as unsupported ([ADR-0042](adr/0042-m4a-canonical-filesystem-resolution.md) §5). The intended fallback — a manual component-wise walk with `O_NOFOLLOW` at each step plus `fstat` verification, slower and slightly weaker — needs its own ADR and evidence before it exists; when it does, it is reported by `direwolf doctor` and recorded in the environment's assurance metadata rather than being silently equivalent.
 
 ### Attacks and defences
 
@@ -110,7 +112,7 @@ Step 6 is what actually closes TOCTOU. Re-opening by path between the check and 
 | `../../../etc/passwd` | `RESOLVE_BENEATH`; resolution never escapes the root fd |
 | Symlink to `/etc/shadow` | `RESOLVE_NO_SYMLINKS` for policy-relevant resolution |
 | Symlink swapped between check and use | Operate on the fd, never re-resolve |
-| Hardlink to a file outside the workspace | Link count check + device check; cross-device hardlinks are impossible, same-device ones are caught by inode-identity policy matching |
+| Hardlink to a file outside the workspace | Not a symlink, so no `RESOLVE_*` flag applies. Cross-device hardlinks are impossible; a same-device one is **read** through its inside name (refusing every multiply-linked file would break pnpm, `git clone --local` and build caches, and planting the link needs read access to the target already), and **modifying** a regular file with more than one link is refused, because the change would reach names outside the workspace ([ADR-0042](adr/0042-m4a-canonical-filesystem-resolution.md) §7) |
 | Bind-mount escape | `RESOLVE_NO_XDEV`; mount changes inside the sandbox are blocked by seccomp (`mount` denied) |
 | `/proc/self/root`, `/proc/<pid>/cwd` magic links | `RESOLVE_NO_MAGICLINKS`; `/proc` masked in the sandbox |
 | **Unicode normalisation escape** — homoglyph or alternate normalisation producing a different string that resolves to the same file, or vice versa | NFC normalisation **before** comparison, and identity matching after resolution so the string never decides. *(This is the class behind a published `workspaceOnly` escape in a comparable system.)* |
@@ -171,7 +173,7 @@ None of this makes the allowlist a confinement boundary. It narrows what an inje
 | Landlock (host exec) | ✅ 5.13+ | ✗ | ✗ |
 | Seatbelt (host exec) | ✗ | ✅ `sandbox_init` (deprecated but functional) | ✗ |
 | Job objects / restricted tokens (host exec) | ✗ | ✗ | ✅ partial |
-| `openat2` RESOLVE_* | ✅ 5.6+ | ✗ — fallback walk | ✗ — fallback walk + handle identity |
+| `openat2` RESOLVE_* | ✅ 5.6+ | ✗ — no resolver in M4a (a fallback walk needs its own ADR) | ✗ — no resolver in M4a (a fallback walk + handle identity needs its own ADR) |
 | cgroup resource limits | ✅ | via VM | via VM |
 | User namespace remap | ✅ | n/a | n/a |
 | **Overall host-exec assurance** | **Good** | **Moderate** | **Weak** |

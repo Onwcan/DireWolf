@@ -22,7 +22,7 @@ compromised host.
 
 ---
 
-## Status: M3d — protocol, schemas, the evaluation harness, the capability core, the policy engine, and durable authority state
+## Status: M3 complete; M4a — canonical filesystem resolution
 
 **None of the above is implemented yet.** This repository contains the Phase 0
 architecture package, the M1 foundation (the monorepo layout, the Rust and
@@ -128,6 +128,19 @@ and the M2 wire contract:
   than guess who is on the other end. It adds `rustix` (and, on Linux,
   `linux-raw-sys`) for the one syscall the standard library does not expose;
   DireWolf's Rust still contains no `unsafe`.
+- **canonical filesystem resolution** (M4a, the first part of M4): what a
+  declared path *means*. An operator binds a workspace to a directory once;
+  the authority records the directory's identity and refuses to resolve
+  through its path if another directory is ever put there. `/workspace/...`
+  resolves one component at a time with `openat2` relative to the previous
+  descriptor — no symlink, magic link or mount point is ever crossed, `..`
+  cannot escape, a name must be spelled exactly as on disk and in NFC, and
+  a canonically equivalent twin makes both unnameable — and the result keeps
+  the checked descriptor for the broker that will later act on it. Six race
+  campaigns swap names while it resolves and must return zero escaped
+  objects ([ADR-0042](docs/adr/0042-m4a-canonical-filesystem-resolution.md),
+  `make filesystem-canonicalization-evidence`). **Linux only**, and it
+  performs no tool effect: nothing reads or writes a file yet.
 
 What M2 establishes is that **malformed DWKP is rejected structurally**, and
 what M2.5 adds is the machinery to *measure* claims like that. M3a adds the
@@ -142,9 +155,11 @@ they decide against, and M3e the process boundary in front of it: a runtime
 can now reach the authority, and cannot choose who it is when it does. What M3
 still does **not** provide is anything that acts: no canonical filesystem
 resource, no `ToolInvoke`, no execution, no broker effect, no sandbox, no
-approvals, no model provider (and so no Ollama). `QueryAuthority` reports
-authority and refuses to decide a proposed action until M4 can canonicalise
-one. An authority that can only be asked authorises no effect.
+approvals, no model provider (and so no Ollama). M4a adds the first thing
+that looks at a filesystem — deciding which object a path names — and still
+acts on nothing. `QueryAuthority` reports authority and refuses to decide a
+proposed action until M4 can canonicalise all of one. An authority that can
+only be asked authorises no effect.
 See [docs/PROTOCOL.md](docs/PROTOCOL.md),
 [ADR-0032](docs/adr/0032-wire-contract-framing-strict-json-and-jcs.md) and
 [evals/README.md](evals/README.md).

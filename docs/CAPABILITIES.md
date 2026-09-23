@@ -136,7 +136,7 @@ Each scope type defines what "narrower" means. This is the heart of the system.
 
 | Scope type | Containment test |
 |---|---|
-| Canonical path | `b` is a path-prefix of `a` **after** canonicalisation to inode identity + NFC normalisation. Never a string prefix on raw input. |
+| Canonical path | `b` is a component-prefix of `a` **after** canonicalisation: names verified symlink-free and NFC beneath a root pinned by inode identity ([ADR-0042](adr/0042-m4a-canonical-filesystem-resolution.md)). Never a string prefix on raw input. |
 | Host pattern | `*.example.com` contains `api.example.com`; explicit hosts contain only themselves. Wildcards may not appear in the TLD position. |
 | Executable identity | `(resolved path, sha256)`. `*` contains any; a specific pair contains only itself. |
 | Numeric constraint | `min` for counts/bytes, `max` for the *narrower* side: `max_requests=50 ⊑ max_requests=100`. |

@@ -48,13 +48,29 @@
 //! M3b owns the opaque value and its comparison semantics. **M4 owns the right
 //! to create one.** Nothing between them may forge one.
 //!
+//! # The resolver (M4a)
+//!
+//! [`fs`] is that canonicaliser for filesystem paths
+//! ([ADR-0042](../../../../../docs/adr/0042-m4a-canonical-filesystem-resolution.md)):
+//! a workspace root pinned by identity, `openat2` one component at a time with
+//! symlinks, magic links, mount crossings and escapes refused by the kernel,
+//! every name verified against the directory that holds it, and the chain
+//! re-verified. It is the first production code to construct a
+//! [`PathComponent`] and a [`CanonicalPath`], and it does so as a submodule, so
+//! the constructors below stay `pub(in crate::resource)`.
+//!
+//! The executable half — `(resolved path, sha256)` — is M4d's; nothing
+//! constructs an [`ExecutableIdentity`] yet.
+//!
 //! # What this module deliberately does not do
 //!
-//! It touches no filesystem. `std::fs` does not appear here, and TX003 covers
-//! `capability/`; when M4 adds a resolver *inside* this module, the I/O arrives
-//! with it and TX003's boundary is precisely where the I/O is.
+//! This file touches no filesystem; the I/O lives in [`fs`], and only there.
+//! TX003 covers `capability/`, TX005 keeps the store out of everything here,
+//! and TX011 lets only `crate::state` name the resolver.
 //!
 //! [`CAPABILITIES.md`]: ../../../../../docs/CAPABILITIES.md
+
+pub mod fs;
 
 use core::fmt;
 
@@ -75,18 +91,9 @@ impl PathComponent {
     /// prefix but does not name the directory it appears to.
     ///
     /// **Visibility is the control.** In-module only, so nothing outside
-    /// `crate::resource` can make one.
-    // Dead in a production M3b build, and that is the property rather than an
-    // oversight: nothing outside this module may construct a canonical
-    // identity, and the module that will -- M4's canonicaliser -- does not
-    // exist yet. Scoped to `not(test)` because the synthetic helpers below do
-    // call it, and written as `expect` rather than `allow` so that the day M4
-    // adds a real caller the expectation goes unfulfilled and this attribute
-    // has to be deleted.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "M4's canonicaliser is the first caller")
-    )]
+    /// `crate::resource` can make one. Its production caller is the M4a
+    /// resolver's grammar ([`fs`]), which accepts a name only after stricter
+    /// checks of its own (NFC, no control or bidi characters).
     pub(in crate::resource) fn new(name: &str) -> Option<Self> {
         let ok = !name.is_empty()
             && name != "."
@@ -110,7 +117,7 @@ impl PathComponent {
 /// **There is no way for production code outside `crate::resource` to build
 /// one**, and that absence is the control. No `from_str`, no `From<&Path>`, no
 /// `Default` — and [`CanonicalPath::from_components`], the real constructor, is
-/// visible only inside this module, where M4's canonicaliser will live.
+/// visible only inside this module, where M4a's canonicaliser, [`fs`], lives.
 ///
 /// Containment is component-wise, so `/workspace` covers `/workspace/src` and
 /// does not cover `/workspaceX`: the string-prefix bug is unrepresentable
@@ -170,7 +177,10 @@ impl CanonicalPath {
     /// is in-module only, like every other way to make one.
     #[cfg_attr(
         not(test),
-        expect(dead_code, reason = "M4's canonicaliser is the first caller")
+        expect(
+            dead_code,
+            reason = "no production caller: M4a's resolver names nothing above /workspace"
+        )
     )]
     pub(in crate::resource) fn root() -> Self {
         Self {
@@ -186,7 +196,10 @@ impl CanonicalPath {
     /// and the answer is this module and its descendants only.
     #[cfg_attr(
         not(test),
-        expect(dead_code, reason = "M4's canonicaliser is the first caller")
+        expect(
+            dead_code,
+            reason = "no production caller: M4a's resolver assembles components it verified"
+        )
     )]
     pub(in crate::resource) fn from_components<S: AsRef<str>>(components: &[S]) -> Option<Self> {
         if components.len() > Self::MAX_COMPONENTS {

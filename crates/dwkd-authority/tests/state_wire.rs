@@ -27,6 +27,7 @@ use proptest as _;
 use rustix as _;
 use sha2 as _;
 use toml as _;
+use unicode_normalization as _;
 
 mod state_support;
 

@@ -14,7 +14,8 @@ $DIREWOLF_HOME/
   runtime.db-wal
   authority/          kernel-owned     0700: the authority's private state directory
     kernel.db         kernel-owned     epochs, leases, runs, grants, policy inputs and
-                                       revisions (M3d); approvals, budgets, secrets
+                                       revisions (M3d); workspace roots (M4a);
+                                       approvals, budgets, secrets
                                        index (later milestones)
     kernel.db-wal
     audit.log         kernel-owned     append-only, hash-chained
@@ -124,7 +125,7 @@ Rules:
 5. The schema version is recorded in `schema_migrations`; a database newer than the binary refuses to open rather than guessing.
 6. Kernel and runtime schemas version independently — they are separate stores with separate lifecycles.
 
-**`kernel.db` versions itself differently, and more strictly** ([ADR-0039](adr/0039-durable-authority-state.md) §4). The version is `PRAGMA user_version`, written in the same transaction as the schema it describes, and `PRAGMA application_id` marks the file as a kernel store; there is no second version table to disagree with. A store claiming the current version must contain exactly the objects this build's DDL creates, byte-identical, and nothing else. A newer version, a foreign database, or a missing or extra object is refused, never repaired. Security history is append-only by trigger. Kernel migrations are static SQL applied in one transaction; there is no migration framework and no `risk: high` kernel migration yet, because version 1 is the only version.
+**`kernel.db` versions itself differently, and more strictly** ([ADR-0039](adr/0039-durable-authority-state.md) §4). The version is `PRAGMA user_version`, written in the same transaction as the schema it describes, and `PRAGMA application_id` marks the file as a kernel store; there is no second version table to disagree with. A store claiming the current version must contain exactly the objects this build's DDL creates, byte-identical, and nothing else. A newer version, a foreign database, or a missing or extra object is refused, never repaired. Security history is append-only by trigger. Kernel migrations are static SQL applied in one transaction; there is no migration framework. Version 2 (M4a, [ADR-0042](adr/0042-m4a-canonical-filesystem-resolution.md) §8) adds one immutable table, `workspace_root` -- the operator's binding of a workspace to a directory and that directory's identity -- and an M3 store migrates to it on first start, recording `store.migrated` in the audit chain.
 
 **Event schema evolution** is the harder half and is covered in [PROTOCOL.md](PROTOCOL.md) §6: events are data, not rows, and old events must remain readable forever. Upcasters translate at read time; projections are rebuildable from scratch (`direwolf store rebuild-projections`), which is the escape hatch when a projection's shape changes.
 

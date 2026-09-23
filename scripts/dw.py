@@ -418,6 +418,150 @@ def task_authority_state_evidence() -> None:
     uvrun("dwcheck", "closure", "--report")
 
 
+FS_EVIDENCE_PREFIX = "FS-EVIDENCE "
+# Every category the M4a resolver is measured against (ADR-0042 section 14). A
+# category with no EXERCISED case fails the task: a green run must have raced,
+# followed, crossed and aliased something, not merely compiled.
+FS_EVIDENCE_CATEGORIES = (
+    "normal",
+    "platform",
+    "traversal",
+    "symlink",
+    "magic-link",
+    "mount-crossing",
+    "hardlink",
+    "unicode",
+    "resource-kind",
+    "root-replacement",
+    "toctou",
+    "leak",
+    "performance",
+    "state",
+)
+# The race campaigns, by name: libtest exits 0 when a filter selects nothing,
+# so a renamed test would otherwise vanish from the evidence silently.
+FS_TOCTOU_CASES = (
+    "file-symlink-exchange",
+    "directory-symlink-exchange",
+    "parent-rename",
+    "parent-moved-out-and-back",
+    "leaf-replaced",
+    "root-path-exchange",
+)
+# Cases no ordinary machine can produce: a bind mount or a casefold filesystem
+# needs privileges, a cross-device hard link is impossible by construction, and
+# an inode recycled with the same birth time depends on the allocator. They are
+# printed as NOT EXERCISED, never counted. Any OTHER case not exercised fails.
+FS_ENVIRONMENTAL = (
+    "bind-mount-inside-workspace",
+    "casefold-filesystem",
+    "cross-device-link",
+    "recreated-same-inode",
+)
+
+
+def task_filesystem_canonicalization_evidence() -> None:
+    """M4a's canonical filesystem evidence (ADR-0042), on real directories.
+
+    The production resolver against symlinks, magic links, mount points, hard
+    links, NFC/NFD aliases, special files and a replaced root; the TOCTOU race
+    campaigns (an attacker thread exchanging names while the resolver walks);
+    the descriptor-leak and cost measurements; then the state layer binding a
+    root to a workspace, resolving for a run, and migrating an M3 store. Each
+    case prints one `FS-EVIDENCE` line after its assertions held; this task
+    requires every category, every race campaign with zero escapes, and lists
+    what the machine could not exercise. Linux only: the resolver is openat2.
+    """
+    if not sys.platform.startswith("linux"):
+        raise TaskError(
+            "NOT EXERCISED: the canonical resolver is Linux-only (openat2, ADR-0042); "
+            "on this platform it refuses every root as UNSUPPORTED_PLATFORM. Use WSL2 on Windows"
+        )
+    resolver = run_captured(
+        "cargo",
+        "test",
+        "--locked",
+        "--release",
+        "-p",
+        "dwkd-authority",
+        "--lib",
+        "resource::fs::",
+        "--",
+        "--nocapture",
+    )
+    state = run_captured(
+        "cargo",
+        "test",
+        "--locked",
+        "-p",
+        "dwkd-authority",
+        "--test",
+        "resource_workspace",
+        "--",
+        "--nocapture",
+    )
+    # Joined on a line break: an output that does not end in one must not
+    # merge its last evidence line with the next output's first.
+    require_filesystem_evidence(f"{resolver}\n{state}")
+    uvrun("dwcheck", "closure", "--report")
+
+
+def require_filesystem_evidence(output: str) -> None:
+    """Check the `FS-EVIDENCE` lines a run printed; raise TaskError if short."""
+    exercised: dict[str, list[tuple[str, str, int]]] = {}
+    unexercised: list[tuple[str, str, str]] = []
+    for line in output.splitlines():
+        at = line.find(FS_EVIDENCE_PREFIX)
+        if at < 0:
+            continue
+        try:
+            record = json.loads(line[at + len(FS_EVIDENCE_PREFIX) :])
+        except json.JSONDecodeError as exc:
+            raise TaskError(f"unreadable evidence line: {line[:200]}") from exc
+        if not isinstance(record, dict) or not isinstance(record.get("count"), int):
+            raise TaskError(f"malformed evidence line: {line[:200]}")
+        category, case, outcome = (
+            str(record.get("category")),
+            str(record.get("case")),
+            str(record.get("outcome")),
+        )
+        if outcome.startswith("not-exercised"):
+            unexercised.append((category, case, outcome))
+        else:
+            exercised.setdefault(category, []).append((case, outcome, record["count"]))
+
+    problems: list[str] = []
+    for category in FS_EVIDENCE_CATEGORIES:
+        if not exercised.get(category):
+            problems.append(f"category `{category}` has no exercised case")
+    races = {
+        case: (outcome, count)
+        for case, outcome, count in exercised.get("toctou", [])
+        if case in FS_TOCTOU_CASES
+    }
+    for case in FS_TOCTOU_CASES:
+        reported = races.get(case)
+        if reported is None:
+            problems.append(f"race campaign `{case}` did not report")
+        elif not reported[0].startswith("escaped-0-unexpected-0-"):
+            problems.append(f"race campaign `{case}`: {reported[0]}")
+    for category, case, outcome in unexercised:
+        if case not in FS_ENVIRONMENTAL:
+            problems.append(f"{category}/{case} was not exercised ({outcome})")
+
+    for category in FS_EVIDENCE_CATEGORIES:
+        cases = exercised.get(category, [])
+        total = sum(count for _, _, count in cases)
+        print(f"  {category:<17} {len(cases):>3} cases  {total:>7} observations")
+    raced = sum(count for _, count in races.values())
+    print(f"  race campaigns: {len(races)}, {raced} raced resolutions, 0 escapes required")
+    for category, case, outcome in unexercised:
+        print(f"  NOT EXERCISED  {category}/{case}: {outcome}")
+    if problems:
+        raise TaskError("filesystem evidence incomplete:\n  " + "\n  ".join(problems))
+    print(f"{GREEN}filesystem canonicalization evidence: complete{OFF}")
+
+
 TRANSPORT_SUITES = ("transport_server", "transport_hostile", "transport_stress")
 
 # The cross-uid suite: both tests are `#[ignore]`d, so that a plain `cargo test`
@@ -808,6 +952,7 @@ TASKS = {
     "capability-evidence": task_capability_evidence,
     "policy-benchmark": task_policy_benchmark,
     "authority-state-evidence": task_authority_state_evidence,
+    "filesystem-canonicalization-evidence": task_filesystem_canonicalization_evidence,
     "authority-transport-evidence": task_authority_transport_evidence,
     "authority-write-probe": task_authority_write_probe,
     "fuzz-smoke": task_fuzz_smoke,

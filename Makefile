@@ -15,7 +15,8 @@ DW := $(PY) scripts/dw.py
 .DEFAULT_GOAL := help
 .PHONY: help dev check test lint fmt fmt-check typecheck arch schema schema-check \
         eval eval-check eval-one capability-evidence policy-benchmark \
-        authority-state-evidence authority-transport-evidence authority-write-probe fuzz-smoke \
+        authority-state-evidence filesystem-canonicalization-evidence \
+        authority-transport-evidence authority-write-probe fuzz-smoke \
         fuzz security docs \
         preflight tools hooks clean
 
@@ -69,6 +70,9 @@ policy-benchmark: ## The 300-rule policy evaluation benchmark (release; p99 < 20
 
 authority-state-evidence: ## M3d real-file state evidence: crash windows, audit, contention, latency
 	@$(DW) authority-state-evidence
+
+filesystem-canonicalization-evidence: ## M4a real-fs resolver evidence: symlinks, races, roots (Linux)
+	@$(DW) filesystem-canonicalization-evidence
 
 authority-transport-evidence: ## M3e real-process DWKP evidence; cross-uid half needs DW_PEER_AS
 	@$(DW) authority-transport-evidence

@@ -16,7 +16,9 @@
 //! records a new revision, and the previous one stays, so an admission can
 //! always be explained against the exact revision it was minted from. A
 //! workspace's sensitivity can only become stricter; loosening it means a new
-//! workspace. A session's workspace binding is fixed for the session's life.
+//! workspace. A session's workspace binding is fixed for the session's life,
+//! and a workspace's filesystem root (M4a) is bound once: another root is
+//! another workspace.
 //!
 //! [`PROTOCOL.md`]: ../../../../../docs/PROTOCOL.md
 
@@ -26,6 +28,7 @@ use dwk_proto::wire::scalar::{AgentProfileName, SkillName};
 use rusqlite::{Connection, OptionalExtension as _};
 
 use crate::capability::{self, CapabilitySpec, PrivacyClass};
+use crate::resource::fs::{BirthTime, RootFingerprint};
 
 use super::audit::{AuditEvent, Fields};
 use super::digest::{self, DomainHash, Sha256Hash};
@@ -178,10 +181,12 @@ impl WorkspaceSensitivity {
 
 /// A workspace's kernel-side identity: a name, **not** a path.
 ///
-/// M4 pins a workspace root by `(dev, ino)` and only `crate::resource` may
-/// build its canonical identity. M3d records the security metadata that
-/// belongs to a workspace — its sensitivity — under an operator-chosen name,
-/// and never touches the filesystem to do it.
+/// Its security metadata — its sensitivity, and since M4a the filesystem root
+/// the operator bound to it — is recorded under this operator-chosen name. The
+/// root is a host path plus the identity the directory had when measured; the
+/// canonical identity of anything beneath it is only ever built by
+/// `crate::resource::fs`, and a runtime can only *name* a workspace, never
+/// supply its path.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct WorkspaceId(String);
 
@@ -460,6 +465,121 @@ pub(super) fn install_workspace(
             .text("sensitivity", sensitivity.as_str()),
     )?;
     Ok(())
+}
+
+/// A workspace's bound filesystem root, as recorded (M4a, ADR-0042 §8): the
+/// operator's host path and the fingerprint the directory had when measured.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct RootBinding {
+    pub(super) host_path: String,
+    pub(super) fingerprint: RootFingerprint,
+}
+
+/// Bind a workspace to the root the operator measured. Once: the same binding
+/// again is a no-op, and any other is refused — a different root is a
+/// different workspace.
+pub(super) fn install_workspace_root(
+    tx: &Connection,
+    now_ms: i64,
+    id: &WorkspaceId,
+    binding: &RootBinding,
+    audit: &mut dyn FnMut(AuditEvent, Fields) -> Result<(), AuthorityError>,
+) -> Result<(), ConfigError> {
+    let known: Option<i64> = tx
+        .query_row(
+            "SELECT sensitivity FROM workspace WHERE workspace_id = ?1",
+            [id.as_str()],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(sql)?;
+    if known.is_none() {
+        return Err(ConfigError::Invalid(format!(
+            "no workspace `{id}` is installed"
+        )));
+    }
+    if let Some(current) = workspace_root(tx, id.as_str())? {
+        if &current == binding {
+            return Ok(());
+        }
+        return Err(ConfigError::Invalid(format!(
+            "workspace `{id}` is already bound to a root; a different root is a new workspace"
+        )));
+    }
+    let fingerprint = binding.fingerprint;
+    let (seconds, nanoseconds) = fingerprint.birth().map_or((None, None), |birth| {
+        (Some(birth.seconds), Some(i64::from(birth.nanoseconds)))
+    });
+    tx.execute(
+        "INSERT INTO workspace_root (workspace_id, host_path, root_device, root_inode, \
+         birth_sec, birth_nsec, installed_ms) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        rusqlite::params![
+            id.as_str(),
+            binding.host_path,
+            fingerprint.device().to_string(),
+            fingerprint.inode().to_string(),
+            seconds,
+            nanoseconds,
+            now_ms
+        ],
+    )
+    .map_err(sql)?;
+    audit(
+        AuditEvent::WorkspaceRootInstalled,
+        Fields::new()
+            .text("workspace_id", id.as_str())
+            .text("host_path", binding.host_path.as_str())
+            .text("root_device", fingerprint.device().to_string())
+            .text("root_inode", fingerprint.inode().to_string())
+            .flag("birth_time_recorded", fingerprint.birth().is_some()),
+    )?;
+    Ok(())
+}
+
+/// A `workspace_root` row: host path, device, inode, birth seconds and
+/// nanoseconds.
+type RootRow = (String, String, String, Option<i64>, Option<i64>);
+
+/// The root a workspace is bound to, if it has one.
+pub(super) fn workspace_root(
+    tx: &Connection,
+    workspace: &str,
+) -> Result<Option<RootBinding>, AuthorityError> {
+    let row: Option<RootRow> = tx
+        .query_row(
+            "SELECT host_path, root_device, root_inode, birth_sec, birth_nsec \
+             FROM workspace_root WHERE workspace_id = ?1",
+            [workspace],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(sql)?;
+    let Some((host_path, device, inode, seconds, nanoseconds)) = row else {
+        return Ok(None);
+    };
+    let malformed = || AuthorityError::Invariant("a stored workspace root is malformed");
+    let device: u64 = device.parse().map_err(|_| malformed())?;
+    let inode: u64 = inode.parse().map_err(|_| malformed())?;
+    let birth = match (seconds, nanoseconds) {
+        (Some(seconds), Some(nanoseconds)) => Some(BirthTime {
+            seconds,
+            nanoseconds: u32::try_from(nanoseconds).map_err(|_| malformed())?,
+        }),
+        (None, None) => None,
+        _ => return Err(malformed()),
+    };
+    Ok(Some(RootBinding {
+        host_path,
+        fingerprint: RootFingerprint::new(device, inode, birth),
+    }))
 }
 
 /// Bind a session to a workspace, once.

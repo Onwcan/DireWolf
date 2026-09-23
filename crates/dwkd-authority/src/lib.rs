@@ -30,26 +30,35 @@
 //! `dwk-proto`'s strict decoder, and hands each request to [`state`] unchanged
 //! ([ADR-0041]). It decides nothing about authority itself.
 //!
+//! [`resource::fs`] (M4a): the canonical filesystem resolver — a declared
+//! path, resolved beneath the run's operator-bound workspace root, pinned by
+//! identity, with `openat2` relative to held descriptors, into a canonical
+//! path, the opened object's identity and the checked descriptor; or refused
+//! ([ADR-0042]). The state layer calls it; nothing else may (TX011).
+//!
 //! # What is not here
 //!
-//! No brokered effect (M4+), no canonical filesystem resource (M4), no
-//! `ToolInvoke` or `CanonicalPreview` (reserved until M4), no approvals (M6),
-//! no model provider (M7).
+//! No brokered effect (M4b+), no `ToolInvoke` or `CanonicalPreview` (reserved
+//! until M4b), no executable resolution (M4d), no approvals (M6), no model
+//! provider (M7).
 //!
-//! Above all, this crate resolves no resource. `fs` and `process` scopes name
-//! resources whose authority identity is an inode and an executable hash;
-//! deriving those from untrusted text is M4's job, and doing it badly is the
-//! bug class [`capability::scope`] is shaped to prevent. Admission withholds
-//! such a request rather than guessing.
+//! Above all, this crate performs no tool effect, and admission still resolves
+//! no requested resource. `fs` and `process` scopes name resources whose
+//! authority identity is an object and an executable hash; deriving those from
+//! untrusted text badly is the bug class [`capability::scope`] is shaped to
+//! prevent. M4a supplies the filesystem half of the derivation, and admission
+//! keeps withholding such a request rather than guessing until M4b resolves
+//! every term of a grant through it.
 //!
 //! [`resource`] is where that shape lives, and it is the only module that may
 //! **create** a canonical identity. Its constructors are `pub(in crate::resource)`,
 //! so the lattice, the parser, M3c's policy engine and M3d's admission can all
-//! hold one and none of them can mint one. M4's canonicaliser will be a
-//! submodule there, and that is how it inherits the right.
+//! hold one and none of them can mint one. M4a's canonicaliser is a submodule
+//! there, [`resource::fs`], and that is how it inherits the right.
 //!
 //! [ADR-0039]: ../../../docs/adr/0039-durable-authority-state.md
 //! [ADR-0041]: ../../../docs/adr/0041-m3e-authenticated-dwkp-transport.md
+//! [ADR-0042]: ../../../docs/adr/0042-m4a-canonical-filesystem-resolution.md
 
 // Pedantic lints on the security crates, per docs/LANGUAGE_SELECTION.md §7.
 #![warn(clippy::pedantic)]

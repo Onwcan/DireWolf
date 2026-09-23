@@ -63,6 +63,7 @@ Windows does and does not give you.
 | `make eval-check` | The eval merge gate: the deterministic subset against the baseline (part of `make check`) |
 | `make eval-one` | Re-run one eval: `make eval-one ID=protocol-security/framing` |
 | `make capability-evidence` | The 10⁶ delegation-chain capability campaign ([CAPABILITIES.md](docs/CAPABILITIES.md) §3). Not part of `make check`: it is evidence, produced deliberately, and the fast suite runs a thousand chains to keep it working between runs. `DW_EVIDENCE_SEED` replays a run; `DW_EVIDENCE_CHAINS` shortens one while debugging |
+| `make filesystem-canonicalization-evidence` | M4a's real-filesystem resolver evidence (Linux): symlinks, magic links, mounts, hard links, Unicode twins, a replaced root and the TOCTOU race campaigns ([ADR-0042](docs/adr/0042-m4a-canonical-filesystem-resolution.md) §14). Fails on a missing category, an escape, or a case left unexercised that the machine could exercise |
 | `make schema` | Regenerate `schemas/`, `docs/DWKP_OPERATIONS.md` and the Python bindings from `dwk-proto` |
 | `make schema-check` | Fail if any of those is stale or hand-edited (part of `make check`) |
 | `make fuzz-smoke` | Type-check the cargo-fuzz targets; stable mutation fuzzing (`DWK_FUZZ_SECONDS`) |
