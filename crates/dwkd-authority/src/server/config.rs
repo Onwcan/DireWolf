@@ -214,7 +214,8 @@ impl Parsed {
                     .filter(|ttl| (MIN_LEASE_TTL_MS..=MAX_LEASE_TTL_MS).contains(ttl))
                     .ok_or_else(|| {
                         UsageError::new(format!(
-                            "--lease-ttl-ms must be a whole number of milliseconds in                              {MIN_LEASE_TTL_MS}..={MAX_LEASE_TTL_MS}"
+                            "--lease-ttl-ms must be a whole number of milliseconds in \
+                             {MIN_LEASE_TTL_MS}..={MAX_LEASE_TTL_MS}"
                         ))
                     })?;
                 once(&mut self.lease_ttl_ms, flag, ttl)
@@ -237,7 +238,8 @@ impl Parsed {
             .ok_or_else(|| UsageError::new("--socket is required"))?;
         if !socket.is_absolute() {
             return Err(UsageError::new(
-                "--socket must be an absolute path: a relative one would mean whatever the                  working directory makes it mean",
+                "--socket must be an absolute path: a relative one would mean whatever the \
+                 working directory makes it mean",
             ));
         }
         if self.uids.is_empty() {
@@ -256,7 +258,8 @@ impl Parsed {
             },
             (None, None, false) => {
                 return Err(UsageError::new(
-                    "--policy-file needs --policy-profile: the profile to compose is named,                      never guessed",
+                    "--policy-file needs --policy-profile: the profile to compose is named, \
+                     never guessed",
                 ));
             }
             (None, Some(_), true) => {
@@ -266,7 +269,8 @@ impl Parsed {
             }
             (None, None, true) => {
                 return Err(UsageError::new(
-                    "a policy is required: --policy-shipped, or --policy-file with                      --policy-profile",
+                    "a policy is required: --policy-shipped, or --policy-file with \
+                     --policy-profile",
                 ));
             }
             (Some(_), _, _) => {
@@ -360,7 +364,7 @@ mod tests {
     use std::path::Path;
 
     use super::{PolicyInput, UsageError, parse_serve_args};
-    use crate::state::{DEFAULT_LEASE_TTL_MS, Mode};
+    use crate::state::{DEFAULT_LEASE_TTL_MS, MAX_LEASE_TTL_MS, MIN_LEASE_TTL_MS, Mode};
 
     /// A socket path that is absolute on the target the tests are compiled
     /// for. `/run/...` is not absolute on Windows -- there a path needs a drive
@@ -494,6 +498,58 @@ mod tests {
             let mut words = base();
             words.extend(["--lease-ttl-ms", bad]);
             assert!(error(&words).contains("--lease-ttl-ms"), "{bad}");
+        }
+    }
+
+    #[test]
+    fn the_four_wrapped_messages_read_with_single_spaces() {
+        // These four messages are wrapped across source lines with a `\`
+        // continuation; without it, the source indentation lands inside the
+        // sentence the operator reads. Each is rendered through the parser
+        // and compared whole.
+        let mut relative_socket = base();
+        set(&mut relative_socket, 3, "kernel.sock");
+
+        let mut ttl_out_of_range = base();
+        ttl_out_of_range.extend(["--lease-ttl-ms", "0"]);
+
+        let mut file_without_profile = base();
+        file_without_profile.drain(6..8);
+        file_without_profile.extend(["--policy-file", "/etc/p.toml"]);
+
+        let mut no_policy = base();
+        no_policy.drain(6..8);
+
+        let cases = [
+            (
+                relative_socket,
+                "--socket must be an absolute path: a relative one would mean whatever the \
+                 working directory makes it mean"
+                    .to_owned(),
+            ),
+            (
+                ttl_out_of_range,
+                format!(
+                    "--lease-ttl-ms must be a whole number of milliseconds in \
+                     {MIN_LEASE_TTL_MS}..={MAX_LEASE_TTL_MS}"
+                ),
+            ),
+            (
+                file_without_profile,
+                "--policy-file needs --policy-profile: the profile to compose is named, \
+                 never guessed"
+                    .to_owned(),
+            ),
+            (
+                no_policy,
+                "a policy is required: --policy-shipped, or --policy-file with --policy-profile"
+                    .to_owned(),
+            ),
+        ];
+        for (words, expected) in &cases {
+            let message = error(words);
+            assert_eq!(&message, expected);
+            assert!(!message.contains("  "), "{message:?}");
         }
     }
 
