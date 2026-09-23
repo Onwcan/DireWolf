@@ -357,8 +357,21 @@ fn bounded(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use super::{PolicyInput, UsageError, parse_serve_args};
     use crate::state::{DEFAULT_LEASE_TTL_MS, Mode};
+
+    /// A socket path that is absolute on the target the tests are compiled
+    /// for. `/run/...` is not absolute on Windows -- there a path needs a drive
+    /// or UNC prefix as well as a root -- and the parser rightly refuses it,
+    /// which would stop every test below at the socket check instead of the
+    /// property it is about. The parser is the same on every target; only
+    /// this fixture differs.
+    #[cfg(windows)]
+    const ABSOLUTE_SOCKET: &str = r"C:\run\dw\kernel.sock";
+    #[cfg(not(windows))]
+    const ABSOLUTE_SOCKET: &str = "/run/dw/kernel.sock";
 
     fn args(words: &[&str]) -> Vec<String> {
         words.iter().map(|w| (*w).to_owned()).collect()
@@ -369,7 +382,7 @@ mod tests {
             "--state-dir",
             "/srv/state",
             "--socket",
-            "/run/dw/kernel.sock",
+            ABSOLUTE_SOCKET,
             "--allow-uid",
             "1001",
             "--policy-shipped",
@@ -393,10 +406,20 @@ mod tests {
     }
 
     #[test]
+    fn the_fixture_socket_is_absolute_on_this_target() {
+        assert!(
+            Path::new(ABSOLUTE_SOCKET).is_absolute(),
+            "the base command line must pass the socket check on every target, or the \
+             tests below measure that check instead of their own property"
+        );
+    }
+
+    #[test]
     fn a_minimal_command_line_parses() {
         let Ok(config) = parse_serve_args(&args(&base())) else {
             unreachable!("the base command line parses")
         };
+        assert_eq!(config.socket, Path::new(ABSOLUTE_SOCKET));
         assert!(config.peers.allows(1001));
         assert!(!config.peers.allows(0), "root is not implied");
         assert!(!config.peers.authority_uid_permitted());
