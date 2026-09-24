@@ -521,8 +521,9 @@ patterns = [
     # It speaks the private protocol only: no DWKP dispatch, no DWCP, no events.
     '^(?!\s*//).*\bdwk_proto\s*::\s*(dwkp|dwcp|envelope|events)\b',
     '^(?!\s*//).*\bdwk_proto\s*::\s*\{[^}]*\b(dwkp|dwcp|envelope|events)\b',
-    # No store, no audit, no key material.
-    '^(?!\s*//).*\b(rusqlite|sha2|hmac|ring|ed25519_dalek|aws_lc_rs|keyring)\b',
+    # No store, no audit, no key material. (A plain digest, for proving a
+    # patch's revisions, is TX018's, and confined to one file.)
+    '^(?!\s*//).*\b(rusqlite|hmac|ring|ed25519_dalek|aws_lc_rs|keyring)\b',
     '^(?!\s*//).*(kernel\.db|audit\.log)',
     # No execution until M4d designs it.
     '^(?!\s*//).*\bCommand\s*::\s*new\b',
@@ -531,8 +532,10 @@ patterns = [
     '^(?!\s*//).*\b(allow|expect)\s*\(\s*unsafe_code\b',
 ]
 reason = """
-The broker does; it decides nothing (ADR-0018), and in M4b it does one thing:
-reads the file descriptor the authority checked and handed over (ADR-0043).
+The broker does; it decides nothing (ADR-0018). In M4b it read the file
+descriptor the authority checked and handed over (ADR-0043); in M4c it also
+stats, lists, searches, and changes one validated name in a directory the
+authority handed over (ADR-0044) -- still nothing it chooses.
 Each pattern is a way that erodes. A TCP listener or an outbound socket makes
 it reachable, or makes it reach, beyond the authority. DWKP dispatch in it is a
 second authority engine the runtime could aim at. A database, an audit log or
@@ -580,9 +583,17 @@ paths = ["crates/dwkd-broker/src"]
 # directory, as the authority's socket module does; nothing else opens a path.
 # `exchange/tests.rs` is the exchange's own test module, compiled only under
 # `cfg(test)`: it creates the files the checks are measured against.
+#
+# M4c (ADR-0044): `exchange/mutate.rs` and `exchange/staging.rs` open names
+# -- the broker's own staging directory, a new file or a record in it, a
+# directory about to be removed -- but only relative to a directory
+# descriptor they hold, never by path. They are exempt here and bound instead
+# by TX019, which is stricter about everything else.
 exempt_paths = [
     "crates/dwkd-broker/src/listener.rs",
     "crates/dwkd-broker/src/exchange/tests.rs",
+    "crates/dwkd-broker/src/exchange/mutate.rs",
+    "crates/dwkd-broker/src/exchange/staging.rs",
 ]
 suffixes = [".rs"]
 patterns = [
@@ -592,6 +603,8 @@ patterns = [
     '^(?!\s*//).*\bFile\s*::\s*(open|create)\b',
     '^(?!\s*//).*\brustix\s*::\s*fs\s*::\s*(open|openat|openat2)\b',
     '^(?!\s*//).*\b(openat2?|open)\s*\(',
+    # Nothing relative to the process's working directory, anywhere.
+    '^(?!\s*//).*\bCWD\b',
 ]
 reason = """
 The broker never opens the object it reads (ADR-0043). The authority resolved
@@ -617,7 +630,7 @@ exempt_paths = []
 suffixes = [".py", ".rs"]
 patterns = [
     '^(?!\s*(//|#)).*\bbrokerp\b',
-    '^(?!\s*(//|#)).*\bbroker\.(hello|fs_read|outcome)\b',
+    '^(?!\s*(//|#)).*\bbroker\.(hello|fs_[a-z]+|outcome)\b',
 ]
 reason = """
 The authority-to-broker protocol is private (ADR-0043): no envelope, no
@@ -652,6 +665,67 @@ the authority itself resolved and stored, and one module may use it for that.
 A second caller would be a way to mint authority over a path nobody resolved.
 
 Hygiene, not containment: the resolver's own refusals are the control.
+"""
+
+[[text_rules]]
+id = "TX018-the-broker-hashes-only-to-prove-a-revision"
+paths = ["crates/dwkd-broker/src"]
+# `fs.patch` proves the file holds its base revision, and the result its post
+# revision, by SHA-256 (ADR-0044 §12): one file computes a digest, and its
+# test module checks it.
+exempt_paths = [
+    "crates/dwkd-broker/src/exchange/mutate.rs",
+    "crates/dwkd-broker/src/exchange/tests.rs",
+]
+suffixes = [".rs"]
+patterns = [
+    '^(?!\s*//).*\bsha2\b',
+]
+reason = """
+A digest is not key material, but a hashing crate anywhere in the broker is
+the first step towards one that is -- a MAC over authorisations, a token cache
+-- which TX013 exists to keep out. The broker hashes for exactly one reason:
+to prove, before and after a replacement, that a file holds the revision the
+runtime stated (ADR-0044). That is one file's business.
+
+Hygiene, not containment.
+"""
+
+[[text_rules]]
+id = "TX019-the-broker-changes-names-only-inside-directories-it-holds"
+paths = [
+    "crates/dwkd-broker/src/exchange/mutate.rs",
+    "crates/dwkd-broker/src/exchange/staging.rs",
+]
+exempt_paths = []
+suffixes = [".rs"]
+patterns = [
+    # No path: every name is one validated component, relative to a held
+    # directory descriptor.
+    '^(?!\s*//).*\bstd\s*::\s*fs\b',
+    '^(?!\s*//).*\bstd\s*::\s*\{[^}]*\bfs\b',
+    '^(?!\s*//).*\bstd\s*::\s*path\b',
+    '^(?!\s*//).*\b(Path|PathBuf)\b',
+    '^(?!\s*//).*\bOpenOptions\b',
+    '^(?!\s*//).*\bFile\s*::\s*(open|create)\b',
+    '^(?!\s*//).*\brustix\s*::\s*fs\s*::\s*(open|openat2)\b',
+    '^(?!\s*//).*\b(openat2|open)\s*\(',
+    '^(?!\s*//).*\bCWD\b',
+    # No emulation: a rename that fails is refused, never copied and deleted.
+    '^(?!\s*//).*\b(copy_file_range|sendfile|splice|linkat|symlinkat)\b',
+]
+reason = """
+The four operations that change names act on one validated name in a
+directory the authority opened and proved (ADR-0044): every *at call is
+relative to a held descriptor -- the handed-over parent, or the broker's own
+staging directory inside it. A path, the working directory, openat2's
+resolution or a copy-and-delete fallback would each be a way to change a name
+the authority never checked: a second canonicaliser, or an effect that is not
+the one authorised (a move across a mount emulated by copying is a different,
+non-atomic operation).
+
+Hygiene, not containment: the broker's identity checks before and after every
+change are the control.
 """
 
 # ===========================================================================

@@ -177,7 +177,13 @@ def _files(
         base = root / entry
         if not base.exists():
             continue
-        for file in sorted(base.rglob(f"*{suffix}")):
+        # A rule may name one file: `rglob` on a file finds nothing, and a rule
+        # that silently checks nothing is the one failure a hygiene check must
+        # not have.
+        candidates = [base] if base.is_file() else sorted(base.rglob(f"*{suffix}"))
+        for file in candidates:
+            if file.suffix != suffix:
+                continue
             if any(part in _SKIP_DIRS for part in file.parts):
                 continue
             resolved = file.resolve()

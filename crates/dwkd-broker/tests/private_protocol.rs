@@ -21,6 +21,9 @@
 )]
 
 use dwk_proto as _;
+// Linux-only, like the operations that digest with it.
+#[cfg(target_os = "linux")]
+use sha2 as _;
 
 #[cfg(not(target_os = "linux"))]
 #[test]
@@ -55,12 +58,14 @@ mod linux {
     use std::time::{Duration, Instant};
 
     use dwk_proto::brokerp::{
-        self, BrokerHello, BrokerRefusal, ChannelNonce, FsReadAuthorisation, FsReadOutcome,
-        OutcomeResult,
+        self, Authorisation, BrokerHello, BrokerOutcome, BrokerRefusal, ChannelNonce, Common,
+        ContentRevision, FsDeleteAuthorisation, FsMoveAuthorisation, FsPatchAuthorisation,
+        FsReadAuthorisation, FsReclaimAuthorisation, FsStatAuthorisation, FsWriteAuthorisation,
+        LeafName, MoveSide, OutcomeResult, PatchEdit, PatchEdits, StagingOperation,
     };
     use dwk_proto::frame::{ContentType, FrameDecoder};
     use dwk_proto::wire::id::InvocationId;
-    use dwk_proto::wire::scalar::ReadLimit;
+    use dwk_proto::wire::scalar::{ContentDigest, HexContent, PatchLength, ReadLimit, StatKind};
     use rustix::fs::{Mode, OFlags};
     use rustix::net::{SendAncillaryBuffer, SendAncillaryMessage, SendFlags};
 
@@ -323,9 +328,9 @@ mod linux {
             self.try_send(bytes, fds).unwrap();
         }
 
-        fn outcome(&mut self) -> Option<FsReadOutcome> {
+        fn outcome(&mut self) -> Option<BrokerOutcome> {
             self.frame()
-                .map(|body| FsReadOutcome::decode_frame_body(&body).unwrap())
+                .map(|body| BrokerOutcome::decode_frame_body(&body).unwrap())
         }
 
         /// Whether the broker closed without another frame.
@@ -363,17 +368,33 @@ mod linux {
         brokerp::encode_frame(&a).unwrap()
     }
 
-    fn refused(outcome: Option<FsReadOutcome>) -> BrokerRefusal {
-        match outcome.expect("an outcome").result().unwrap() {
+    /// An `fs.write` authorisation's body text: `leaf` in the scratch
+    /// directory's parent identity, replacing `target` or creating.
+    fn write(channel: &ChannelNonce, leaf: &str, target: Option<(u64, u64)>) -> String {
+        let a = FsWriteAuthorisation::new(
+            Common::new(channel.clone(), invocation(1)),
+            (1, 2),
+            LeafName::new(leaf).unwrap(),
+            target,
+            HexContent::from_bytes(b"x").unwrap(),
+        );
+        String::from_utf8(brokerp::encode_frame(&a).unwrap()[5..].to_vec()).unwrap()
+    }
+
+    fn refused(outcome: Option<BrokerOutcome>) -> BrokerRefusal {
+        match outcome.expect("an outcome").result() {
             OutcomeResult::Refused(why) => why,
-            OutcomeResult::Done(done) => panic!("read {} bytes", done.content.byte_len()),
+            other => panic!("not a refusal: {other:?}"),
         }
     }
 
-    fn done(outcome: Option<FsReadOutcome>) -> (Vec<u8>, bool) {
-        match outcome.expect("an outcome").result().unwrap() {
-            OutcomeResult::Done(done) => (done.content.to_bytes(), done.eof_observed),
-            OutcomeResult::Refused(why) => panic!("refused {why:?}"),
+    fn done(outcome: Option<BrokerOutcome>) -> (Vec<u8>, bool) {
+        match outcome.expect("an outcome").result() {
+            OutcomeResult::Done(done) => {
+                let read = done.fs_read.expect("an fs.read result");
+                (read.content.to_bytes(), read.eof_observed)
+            }
+            other => panic!("not a result: {other:?}"),
         }
     }
 
@@ -677,6 +698,187 @@ mod linux {
         evidence("descriptor-count-and-kind", "refused-before-read");
     }
 
+    /// One line of M4c evidence for `make filesystem-operations-evidence`.
+    fn fsop(case: &str, outcome: &str) {
+        println!(
+            "FSOP-EVIDENCE {{\"suite\":\"private-protocol\",\"case\":\"{case}\",\"outcome\":\"{outcome}\"}}"
+        );
+    }
+
+    #[test]
+    fn a_v2_descriptor_of_the_wrong_role_changes_nothing() {
+        let scratch = Scratch::new("v2-roles");
+        let broker = Broker::shared(&scratch.socket());
+        let file = scratch.file("f", b"content");
+        let other = scratch.file("g", b"other");
+        let dir = scratch.0.clone();
+        let elsewhere = scratch.0.join("elsewhere");
+        std::fs::create_dir(&elsewhere).unwrap();
+        let leaf = || LeafName::new("f").unwrap();
+        let common = |c: &ChannelNonce| Common::new(c.clone(), invocation(1));
+        let body = |a: &Authorisation| a.encode_frame().unwrap();
+        let write = |c: &ChannelNonce| {
+            body(&Authorisation::FsWrite(FsWriteAuthorisation::new(
+                common(c),
+                identity(&dir),
+                leaf(),
+                Some(identity(&file)),
+                HexContent::from_bytes(b"CHANGED").unwrap(),
+            )))
+        };
+        let reclaim = |c: &ChannelNonce| {
+            body(&Authorisation::FsReclaim(FsReclaimAuthorisation::new(
+                common(c),
+                identity(&dir),
+                leaf(),
+                StagingOperation::Delete,
+                Some(identity(&file)),
+            )))
+        };
+        let exchange = |make: &dyn Fn(&ChannelNonce) -> Vec<u8>, fds: &[BorrowedFd<'_>]| {
+            let mut peer = Peer::connect(&scratch.socket());
+            let hello = peer.hello();
+            peer.send(&make(&hello.channel), fds);
+            refused(peer.outcome())
+        };
+        let path_dir =
+            rustix::fs::open(&dir, OFlags::PATH | OFlags::CLOEXEC, Mode::empty()).unwrap();
+        let (d, f) = (open(&dir), open(&file));
+        let cases: Vec<(&str, BrokerRefusal)> = vec![
+            ("write-given-a-file", exchange(&write, &[f.as_fd()])),
+            (
+                "write-given-an-o-path-directory",
+                exchange(&write, &[path_dir.as_fd()]),
+            ),
+            (
+                "write-given-another-directory",
+                exchange(&write, &[open(&elsewhere).as_fd()]),
+            ),
+            ("write-given-two", exchange(&write, &[d.as_fd(), d.as_fd()])),
+            (
+                "move-given-one",
+                exchange(
+                    &|c: &ChannelNonce| {
+                        body(&Authorisation::FsMove(FsMoveAuthorisation::new(
+                            common(c),
+                            MoveSide {
+                                parent: identity(&dir),
+                                leaf: leaf(),
+                            },
+                            identity(&file),
+                            MoveSide {
+                                parent: identity(&dir),
+                                leaf: LeafName::new("moved").unwrap(),
+                            },
+                        )))
+                    },
+                    &[d.as_fd()],
+                ),
+            ),
+            (
+                "stat-given-a-readable-descriptor",
+                exchange(
+                    &|c: &ChannelNonce| {
+                        let (device, inode) = identity(&file);
+                        body(&Authorisation::FsStat(FsStatAuthorisation::new(
+                            common(c),
+                            device,
+                            inode,
+                        )))
+                    },
+                    &[f.as_fd()],
+                ),
+            ),
+            (
+                "patch-given-its-descriptors-reversed",
+                exchange(
+                    &|c: &ChannelNonce| {
+                        let revision = |fill: &str| ContentRevision {
+                            sha256: ContentDigest::new(fill.repeat(64)).unwrap(),
+                            length: PatchLength::new(7).unwrap(),
+                        };
+                        let edits = PatchEdits::new(vec![PatchEdit {
+                            offset: PatchLength::new(0).unwrap(),
+                            delete: PatchLength::new(1).unwrap(),
+                            insert: HexContent::from_bytes(b"C").unwrap(),
+                        }])
+                        .unwrap();
+                        body(&Authorisation::FsPatch(FsPatchAuthorisation::new(
+                            common(c),
+                            identity(&dir),
+                            leaf(),
+                            identity(&file),
+                            (revision("a"), revision("b"), edits),
+                        )))
+                    },
+                    &[f.as_fd(), d.as_fd()],
+                ),
+            ),
+            (
+                "delete-naming-another-object",
+                exchange(
+                    &|c: &ChannelNonce| {
+                        body(&Authorisation::FsDelete(FsDeleteAuthorisation::new(
+                            common(c),
+                            identity(&dir),
+                            leaf(),
+                            identity(&other),
+                            StatKind::RegularFile,
+                        )))
+                    },
+                    &[d.as_fd()],
+                ),
+            ),
+            ("reclaim-given-a-file", exchange(&reclaim, &[f.as_fd()])),
+            (
+                "reclaim-given-two",
+                exchange(&reclaim, &[d.as_fd(), d.as_fd()]),
+            ),
+            (
+                "reclaim-given-another-directory",
+                exchange(&reclaim, &[open(&elsewhere).as_fd()]),
+            ),
+        ];
+        let expected = [
+            BrokerRefusal::DescriptorNotDirectory,
+            BrokerRefusal::DescriptorNotReadable,
+            BrokerRefusal::IdentityMismatch,
+            BrokerRefusal::DescriptorCount,
+            BrokerRefusal::DescriptorCount,
+            BrokerRefusal::DescriptorNotPath,
+            BrokerRefusal::DescriptorNotDirectory,
+            BrokerRefusal::ObjectChanged,
+            BrokerRefusal::DescriptorNotDirectory,
+            BrokerRefusal::DescriptorCount,
+            BrokerRefusal::IdentityMismatch,
+        ];
+        assert_eq!(cases.len(), expected.len());
+        for ((case, got), want) in cases.iter().zip(expected) {
+            assert_eq!(*got, want, "{case}");
+            fsop(&format!("v2-{case}"), want.as_str());
+        }
+        // Nothing changed, nothing was left behind, nothing executed.
+        assert_eq!(std::fs::read(&file).unwrap(), b"content");
+        assert_eq!(std::fs::read(&other).unwrap(), b"other");
+        let staged = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|e| e.file_name().to_string_lossy().starts_with(".dwkd-"))
+            .count();
+        assert_eq!(staged, 0);
+        assert_eq!(broker.count("executed"), 0);
+        // And the honest authorisation still performs.
+        let mut peer = Peer::connect(&scratch.socket());
+        let hello = peer.hello();
+        peer.send(&write(&hello.channel), &[open(&dir).as_fd()]);
+        assert!(matches!(
+            peer.outcome().unwrap().result(),
+            OutcomeResult::Done(_)
+        ));
+        assert_eq!(std::fs::read(&file).unwrap(), b"CHANGED");
+        fsop("v2-descriptor-roles", "refused-before-any-change");
+    }
+
     #[test]
     fn a_frame_that_is_not_one_strict_authorisation_is_closed_unanswered() {
         let scratch = Scratch::new("malformed");
@@ -687,8 +889,9 @@ mod linux {
             |text: &str| dwk_proto::frame::encode(ContentType::Json, text.as_bytes()).unwrap();
         let cases: Vec<(&str, Make)> = vec![
             (
+                // One byte over one DWKP frame, the largest authorisation.
                 "oversized-header",
-                Box::new(|_| vec![0x00, 0x00, 0x40, 0x01, 0x01]),
+                Box::new(|_| vec![0x00, 0x10, 0x00, 0x01, 0x01]),
             ),
             (
                 "huge-header",
@@ -745,11 +948,87 @@ mod linux {
                 }),
             ),
             (
-                "protocol-two",
+                "protocol-one",
                 Box::new(move |c| {
                     let a = authorisation(c, 1, id, 7);
                     let text = String::from_utf8(a[5..].to_vec()).unwrap();
-                    json(&text.replace(r#""protocol":1"#, r#""protocol":2"#))
+                    assert!(text.contains(r#""protocol":2"#));
+                    json(&text.replace(r#""protocol":2"#, r#""protocol":1"#))
+                }),
+            ),
+            (
+                "an-outcome",
+                Box::new(|c| {
+                    let outcome = BrokerOutcome::new(
+                        c.clone(),
+                        invocation(1),
+                        OutcomeResult::Refused(BrokerRefusal::IoError),
+                    );
+                    brokerp::encode_frame(&outcome).unwrap()
+                }),
+            ),
+            (
+                "unknown-kind",
+                Box::new(move |c| {
+                    let a = authorisation(c, 1, id, 7);
+                    let text = String::from_utf8(a[5..].to_vec()).unwrap();
+                    json(&text.replace("broker.fs_read", "broker.fs_mkdir"))
+                }),
+            ),
+            (
+                "stat-with-two-descriptors",
+                Box::new(move |c| {
+                    let a =
+                        FsStatAuthorisation::new(Common::new(c.clone(), invocation(1)), id.0, id.1);
+                    let text = String::from_utf8(brokerp::encode_frame(&a).unwrap()[5..].to_vec())
+                        .unwrap();
+                    json(&text.replace(r#""descriptors":1"#, r#""descriptors":2"#))
+                }),
+            ),
+            (
+                "write-vacant-naming-a-target",
+                Box::new(move |c| {
+                    let a = write(c, "f", Some(id));
+                    json(&a.replace(r#""object":"EXISTING""#, r#""object":"VACANT""#))
+                }),
+            ),
+            (
+                "write-existing-naming-none",
+                Box::new(move |c| {
+                    let a = write(c, "f", None);
+                    json(&a.replace(r#""object":"VACANT""#, r#""object":"EXISTING""#))
+                }),
+            ),
+            (
+                "leaf-dotdot",
+                Box::new(move |c| {
+                    json(&write(c, "PLACEHOLDER", None).replace("PLACEHOLDER", ".."))
+                }),
+            ),
+            (
+                "leaf-dot",
+                Box::new(move |c| json(&write(c, "PLACEHOLDER", None).replace("PLACEHOLDER", "."))),
+            ),
+            (
+                "leaf-slash",
+                Box::new(move |c| {
+                    json(&write(c, "PLACEHOLDER", None).replace("PLACEHOLDER", "a/b"))
+                }),
+            ),
+            (
+                "leaf-absolute",
+                Box::new(move |c| {
+                    json(&write(c, "PLACEHOLDER", None).replace("PLACEHOLDER", "/etc"))
+                }),
+            ),
+            (
+                "leaf-empty",
+                Box::new(move |c| json(&write(c, "PLACEHOLDER", None).replace("PLACEHOLDER", ""))),
+            ),
+            (
+                "a-path-member",
+                Box::new(move |c| {
+                    json(&write(c, "f", None).replacen('{', r#"{"path":"/workspace/f","#, 1))
                 }),
             ),
         ];
@@ -788,11 +1067,12 @@ mod linux {
             peer.send(&authorisation(&hello.channel, n, id, 262_144), &fds);
             let outcome = peer.outcome().unwrap();
             if n % 4 == 1 {
-                let OutcomeResult::Done(done) = outcome.result().unwrap() else {
+                let OutcomeResult::Done(done) = outcome.result() else {
                     panic!("one descriptor is read")
                 };
-                assert_eq!(done.content.byte_len(), 262_144);
-                assert!(!done.eof_observed);
+                let read = done.fs_read.expect("an fs.read result");
+                assert_eq!(read.content.byte_len(), 262_144);
+                assert!(!read.eof_observed);
             }
         }
         std::thread::sleep(Duration::from_millis(100));

@@ -75,7 +75,7 @@ pub mod fs;
 /// The checked, readable file an `fs.read` hands the broker (M4b). Re-exported
 /// here so the broker channel can hold one without naming the resolver
 /// (TX011): it receives a result, never the means to produce one.
-pub use fs::{FileIdentity, ReadHandoff};
+pub use fs::{FileIdentity, ObjectHandoff, ParentHandoff, ReadHandoff, ResourceKind};
 
 use core::fmt;
 

@@ -75,6 +75,37 @@ prints one `DWKP-EVIDENCE` line, which the M3 evaluations read.
 `make authority-transport-evidence` runs them all and needs `DW_PEER_AS` for the
 cross-uid half ([ADR-0041](../docs/adr/0041-m3e-authenticated-dwkp-transport.md)).
 
+**Filesystem operation tests (M4c)** are the evidence behind
+`make filesystem-operations-evidence` ([ADR-0044](../docs/adr/0044-m4c-filesystem-operations-plans-and-atomic-mutation.md)):
+`crates/dwkd-authority/tests/broker_fs_ops.rs` drives every tool end to end
+through the released daemons — previews against a tree snapshot and the
+preview/invoke differential, compound denials, idempotency keys, hard links,
+symlinks, listing names, search bounds, `fs.create` scope semantics, version 1
+answered in version 1, no content in the audit log, and stable descriptors;
+`fs_ops_state.rs` runs the race campaigns (R1–R9, the tree changed between the
+handoff and the broker), the crash campaigns (A–K: authority crash points,
+and a debug broker aborting at `DWKD_BROKER_CRASH_AT`) with every staging
+directory's settlement, and the staging campaigns (pre-effect crashes removed,
+repeated crashes bounded and tracked, directories spelled like the broker's
+never touched, reclamation never following a replaced, renamed or symlinked
+root or a replaced parent) on the real channel; `broker_state.rs` proves a
+stored grant re-reads unchanged while every tool target is resolved afresh,
+and `src/state/lookup_tests.rs` — inside the authority crate, where the
+test-only lookup counter lives — that a stored grant and an admission replay
+begin zero filesystem lookups; the broker's own unit tests place
+substitutions before and after its last check, fail its undos, and judge
+every staging state, through a test-only hook that also records which points
+were reached and traces every namespace change and `fsync`, holding every
+operation to the durability order (each changed directory synced before the
+next change);
+`crates/dwk-proto/tests/dwkp_v2.rs` encodes the largest patch request whole
+and proves it fits one frame; `crates/dwkd-broker/tests/private_protocol.rs`
+adds hostile version-2 descriptors, reclamations included; `permission_model.rs` is the local half of the write permission
+experiment; and `fs_ops_foreign.rs` needs three identities and a write group
+(`DW_BROKER_AS`, `DW_PEER_AS`, `DW_WRITE_GROUP`) and is `#[ignore]`d unless the
+evidence task selects it by name. Locally the three-identity half is NOT
+EXERCISED; CI's Linux job creates the broker user and the group.
+
 **Brokered `fs.read` tests (M4b)** are real-process evidence for the private
 channel ([ADR-0043](../docs/adr/0043-m4b-private-broker-channel-and-brokered-fs-read.md)):
 `crates/dwkd-authority/tests/broker_fs_read.rs` drives the released authority and

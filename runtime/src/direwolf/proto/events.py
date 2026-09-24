@@ -52,16 +52,19 @@ class LeaseAcquired:
         return out
 
 
-MESSAGES: Final[Mapping[tuple[str, str], MessageSpec]] = MappingProxyType({
-    ('event', 'direwolf.session.lease_acquired'): MessageSpec(
-        schema='direwolf.session.lease_acquired',
-        message_type='event',
-        versions=VersionRange(1, 1),
-        rules=Rules('optional', 'optional', 'required', 'forbidden', 'forbidden', 'forbidden'),
-        payload=LeaseAcquired,
+MESSAGES: Final[Mapping[tuple[str, str], tuple[MessageSpec, ...]]] = MappingProxyType({
+    ('event', 'direwolf.session.lease_acquired'): (
+        MessageSpec(
+            schema='direwolf.session.lease_acquired',
+            message_type='event',
+            versions=VersionRange(1, 1),
+            rules=Rules('optional', 'optional', 'required', 'forbidden', 'forbidden', 'forbidden'),
+            payload=LeaseAcquired,
+        ),
     ),
 })
-"""Every message of this family the build knows, keyed by (type, schema)."""
+"""Every message of this family the build knows, keyed by (type, schema): one spec
+per version range, in ascending order."""
 
 
 def read(data: bytes) -> envelope.EventRecord:

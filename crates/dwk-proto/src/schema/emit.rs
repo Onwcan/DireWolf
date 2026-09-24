@@ -9,6 +9,9 @@
 //! reviewer can read one file to see everything a message may contain.
 
 use crate::dwcp;
+use crate::dwkp::fsops::{
+    CanonicalPreviewResultV2, ToolCall, ToolDenialV2, ToolFailureV2, ToolRefusalV2, ToolResultV2,
+};
 use crate::dwkp::messages::{
     Ack, AdmitRun, AuthorityQuery, AuthorityRefusal, CanonicalPreview, CanonicalPreviewResult,
     EffectiveAuthority, Handshake, HandshakeAccepted, HeartbeatPayload, LeaseAcquire, LeaseGrant,
@@ -78,6 +81,12 @@ pub fn payload_schema(name: &str, defs: &mut Defs) -> Option<Value> {
         "CanonicalPreviewResult" => CanonicalPreviewResult::schema(defs),
         "ToolRefusal" => ToolRefusal::schema(defs),
         "ToolFailure" => ToolFailure::schema(defs),
+        "ToolCall" => ToolCall::schema(defs),
+        "ToolResultV2" => ToolResultV2::schema(defs),
+        "ToolDenialV2" => ToolDenialV2::schema(defs),
+        "CanonicalPreviewResultV2" => CanonicalPreviewResultV2::schema(defs),
+        "ToolRefusalV2" => ToolRefusalV2::schema(defs),
+        "ToolFailureV2" => ToolFailureV2::schema(defs),
         "Ack" => Ack::schema(defs),
         "ProtocolErrorPayload" => ProtocolErrorPayload::schema(defs),
         "ClientError" => dwcp::ClientError::schema(defs),

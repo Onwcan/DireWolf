@@ -67,6 +67,21 @@ BROKER_SUITES = (
     REPO_ROOT / "crates" / "dwkd-broker" / "tests" / "private_protocol.rs",
     BROKER_FOREIGN_SUITE,
 )
+# M4c's filesystem-operation evidence, and the tests that print it.
+FSOPS_JOB = "filesystem-operations"
+FSOPS_EVIDENCE = "make filesystem-operations-evidence"
+FSOPS_FOREIGN_SUITE = REPO_ROOT / "crates" / "dwkd-authority" / "tests" / "fs_ops_foreign.rs"
+FSOPS_SUITES = (
+    REPO_ROOT / "crates" / "dwkd-authority" / "tests" / "broker_fs_ops.rs",
+    REPO_ROOT / "crates" / "dwkd-authority" / "tests" / "fs_ops_state.rs",
+    REPO_ROOT / "crates" / "dwkd-authority" / "tests" / "broker_state.rs",
+    REPO_ROOT / "crates" / "dwkd-authority" / "src" / "state" / "lookup_tests.rs",
+    REPO_ROOT / "crates" / "dwk-proto" / "tests" / "dwkp_v2.rs",
+    REPO_ROOT / "crates" / "dwkd-broker" / "tests" / "private_protocol.rs",
+    REPO_ROOT / "crates" / "dwkd-broker" / "tests" / "permission_model.rs",
+    REPO_ROOT / "crates" / "dwkd-broker" / "src" / "exchange" / "tests.rs",
+    FSOPS_FOREIGN_SUITE,
+)
 
 
 # --- a small reader for this workflow's layout -----------------------------
@@ -189,7 +204,7 @@ def test_nothing_around_the_evidence_may_fail_quietly() -> None:
     """No `continue-on-error`, no shell escape hatch, and no step condition --
     except the evals job's upload of its results when it has already failed,
     which cannot change the job's outcome."""
-    for name in (EVIDENCE_JOB, EVAL_JOB, FILESYSTEM_JOB, BROKER_JOB, AGGREGATE_JOB):
+    for name in (EVIDENCE_JOB, EVAL_JOB, FILESYSTEM_JOB, BROKER_JOB, FSOPS_JOB, AGGREGATE_JOB):
         text = "\n".join(_uncommented(line) for line in _jobs()[name])
         for hatch in ("continue-on-error", "|| true", "|| :", "set +e", "exit 0"):
             assert hatch not in text, f"`{hatch}` in job {name}"
@@ -212,7 +227,7 @@ def test_every_job_is_required_by_the_aggregate_check() -> None:
     jobs = set(_jobs()) - {AGGREGATE_JOB}
     needs = set(_needs())
     assert EVIDENCE_JOB in needs and EVAL_JOB in needs and FILESYSTEM_JOB in needs
-    assert BROKER_JOB in needs
+    assert BROKER_JOB in needs and FSOPS_JOB in needs
     assert jobs == needs, f"not required: {sorted(jobs - needs)}; unknown: {sorted(needs - jobs)}"
 
 
@@ -746,4 +761,230 @@ def test_the_broker_task_off_linux_is_not_exercised_and_runs_nothing(
     monkeypatch.setattr(dw, "uvrun", recorder.uvrun)
     with pytest.raises(dw.TaskError, match="NOT EXERCISED"):
         dw.task_broker_fs_read_evidence()
+    assert recorder.commands == []
+
+
+# --- M4c: the filesystem-operation evidence ----------------------------------
+
+
+def _block(step: list[str]) -> list[str]:
+    """The commands of a `run: |` block, one per line."""
+    lines: list[str] = []
+    inside = False
+    for line in step:
+        text = _uncommented(line)
+        if re.match(r"\s*(?:- )?run:\s*\|\s*$", text):
+            inside = True
+            continue
+        if inside and text.strip():
+            if not line.startswith("          "):
+                break
+            lines.append(text.strip())
+    return lines
+
+
+def _fsops_evidence_step() -> list[str]:
+    found = [s for s in _steps(_jobs()[FSOPS_JOB]) if (_run(s) or "").endswith(FSOPS_EVIDENCE)]
+    assert len(found) == 1, f"{FSOPS_JOB} must run `{FSOPS_EVIDENCE}` exactly once"
+    return found[0]
+
+
+def test_the_filesystem_operations_job_exists_on_linux_and_is_unconditional() -> None:
+    job = _jobs().get(FSOPS_JOB)
+    assert job is not None, f"no `{FSOPS_JOB}` job: the M4c operations are measured nowhere"
+    text = "\n".join(_uncommented(line) for line in job)
+    assert re.search(r"^    runs-on:\s*ubuntu-latest\s*$", text, re.MULTILINE), "Linux only"
+    for forbidden in ("strategy:", "matrix", "continue-on-error"):
+        assert forbidden not in text, f"`{forbidden}` in {FSOPS_JOB}"
+    assert not re.search(r"^\s+if:", text, re.MULTILINE), f"{FSOPS_JOB} has a condition"
+
+
+def test_the_filesystem_operations_job_has_three_identities_and_the_write_group() -> None:
+    step = _fsops_evidence_step()
+    env = _env(step)
+    broker, peer, group = env.get("DW_BROKER_AS"), env.get("DW_PEER_AS"), env.get("DW_WRITE_GROUP")
+    _second_identity(broker)
+    _second_identity(peer)
+    assert broker != peer, "the broker and the hostile runtime must be two identities"
+    assert group, "no write group: the write permission model is proven nowhere"
+    # The evidence runs as the runner, in a session that has the new group --
+    # never as root.
+    command = _run(step) or ""
+    assert command.startswith('sudo --non-interactive --preserve-env --user "$USER" '), command
+    assert "root" not in command and "--user root" not in command
+    # The identities and the group are created in the job, before the evidence:
+    # the broker's user and the runner in the group, the runtime's user not.
+    steps = _steps(_jobs()[FSOPS_JOB])
+    setup = [i for i, s in enumerate(steps) if _block(s)]
+    evidence = steps.index(step)
+    assert len(setup) == 1 and setup[0] < evidence
+    commands = _block(steps[setup[0]])
+    assert any(c.startswith("sudo useradd") and c.split()[-1] == broker for c in commands)
+    assert any(c.startswith("sudo groupadd") and c.split()[-1] == group for c in commands)
+    members = [c.split()[-1] for c in commands if c.startswith("sudo usermod") and group in c]
+    assert broker in members and '"$USER"' in members, members
+    assert peer not in members, "the hostile runtime must not be in the write group"
+
+
+def test_the_filesystem_foreign_tests_are_ignored_by_default_and_selected_by_name() -> None:
+    source = FSOPS_FOREIGN_SUITE.read_text(encoding="utf-8")
+    assert len(dw.FSOP_FOREIGN_TESTS) == 2
+    for name in dw.FSOP_FOREIGN_TESTS:
+        module, function = name.split("::")
+        assert module == "linux"
+        assert re.search(r"#\[ignore = [^\]]*\]\s*fn " + re.escape(function) + r"\(\)", source), (
+            f"{function} is not an #[ignore]d test in {FSOPS_FOREIGN_SUITE.name}"
+        )
+
+
+def test_the_fsops_task_names_what_the_tests_print() -> None:
+    """A renamed case would otherwise fail only in CI."""
+    source = "\n".join(path.read_text(encoding="utf-8") for path in FSOPS_SUITES)
+    for suite, case in (*dw.FSOP_CASES, *dw.FSOP_FOREIGN_CASES):
+        assert f'\\"suite\\":\\"{suite}\\"' in source or f'"{suite}"' in source, (
+            f"no test prints suite `{suite}`"
+        )
+        stems = {case, case.removeprefix("v2-"), case.removeprefix("no-grant-")}
+        spelled = any(f'"{stem}"' in source for stem in stems)
+        assert spelled, f"no test prints `{case}`"
+
+
+def _fsop_line(suite: str, case: str, outcome: str = "ok") -> str:
+    return f'FSOP-EVIDENCE {{"suite":"{suite}","case":"{case}","outcome":"{outcome}"}}'
+
+
+def _fsop_complete(cases: tuple[tuple[str, str], ...]) -> str:
+    return "\n".join(_fsop_line(suite, case) for suite, case in cases)
+
+
+def test_filesystem_evidence_requires_every_case_exercised(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    dw.require_fsop_evidence(_fsop_complete(dw.FSOP_CASES), dw.FSOP_CASES)
+    lines = _fsop_complete(dw.FSOP_CASES).splitlines()
+    with pytest.raises(dw.TaskError, match="fs-ops-state/J-move-after-rename"):
+        dw.require_fsop_evidence(
+            "\n".join(line for line in lines if '"J-move-after-rename"' not in line),
+            dw.FSOP_CASES,
+        )
+    # A case that says it was not exercised is not evidence.
+    skipped = [
+        _fsop_line("permission-model", "descriptor-is-not-a-grant", "not-exercised:running-as-root")
+        if '"descriptor-is-not-a-grant"' in line
+        else line
+        for line in lines
+    ]
+    with pytest.raises(dw.TaskError, match="permission-model/descriptor-is-not-a-grant"):
+        dw.require_fsop_evidence("\n".join(skipped), dw.FSOP_CASES)
+    with pytest.raises(dw.TaskError, match="unreadable"):
+        dw.require_fsop_evidence("FSOP-EVIDENCE {nope", dw.FSOP_CASES)
+    with pytest.raises(dw.TaskError, match="malformed"):
+        dw.require_fsop_evidence('FSOP-EVIDENCE {"suite":"x","case":"y"}', dw.FSOP_CASES)
+    capsys.readouterr()
+
+
+def _fsop_libtest(passed: int, cases: tuple[tuple[str, str], ...]) -> str:
+    return "\n".join(
+        [
+            "running 2 tests",
+            _fsop_complete(cases),
+            f"test result: ok. {passed} passed; 0 failed; 0 ignored; 0 measured; "
+            f"{2 - passed} filtered out; finished in 1.00s",
+        ]
+    )
+
+
+def test_a_filesystem_three_identity_run_that_selected_nothing_is_not_evidence(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with pytest.raises(dw.TaskError, match="did not run all"):
+        dw.require_fsop_foreign_evidence(_fsop_libtest(0, ()))
+    with pytest.raises(dw.TaskError, match="did not run all"):
+        dw.require_fsop_foreign_evidence(_fsop_libtest(1, dw.FSOP_FOREIGN_CASES))
+    with pytest.raises(dw.TaskError, match="grant-is-ambient"):
+        dw.require_fsop_foreign_evidence(
+            _fsop_libtest(2, tuple(c for c in dw.FSOP_FOREIGN_CASES if c[1] != "grant-is-ambient"))
+        )
+    dw.require_fsop_foreign_evidence(_fsop_libtest(2, dw.FSOP_FOREIGN_CASES))
+    capsys.readouterr()
+
+
+class _FsopRecorder(_Recorder):
+    def captured(self, *command: str) -> str:
+        self.commands.append(command)
+        if "fs_ops_foreign" in command:
+            return _fsop_libtest(2, dw.FSOP_FOREIGN_CASES)
+        return _fsop_complete(dw.FSOP_CASES)
+
+
+def _fsop_env(monkeypatch: pytest.MonkeyPatch, recorder: _FsopRecorder) -> None:
+    monkeypatch.setenv("DW_BROKER_AS", "dwbroker")
+    monkeypatch.setenv("DW_PEER_AS", "nobody")
+    monkeypatch.setenv("DW_WRITE_GROUP", "dwwrite")
+    monkeypatch.setattr(dw, "run", recorder.run)
+    monkeypatch.setattr(dw, "run_captured", recorder.captured)
+    monkeypatch.setattr(dw, "uvrun", recorder.uvrun)
+
+
+@pytest.mark.skipif(not LINUX, reason="the task runs only where the channel does")
+def test_the_fsops_task_proves_both_identities_first_and_selects_the_ignored_tests(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    recorder = _FsopRecorder()
+    proven: list[tuple[str, int]] = []
+    uids = {"DW_BROKER_AS": 998, "DW_PEER_AS": 65534}
+
+    def second_identity(variable: str) -> tuple[str, int, int]:
+        proven.append((variable, len(recorder.commands)))
+        return variable.lower(), 1001, uids[variable]
+
+    _fsop_env(monkeypatch, recorder)
+    monkeypatch.setattr(dw, "second_identity", second_identity)
+    dw.task_filesystem_operations_evidence()
+    assert proven == [("DW_BROKER_AS", 0), ("DW_PEER_AS", 0)], "proven before anything runs"
+    assert recorder.commands[0][:4] == ("cargo", "build", "--locked", "-p")
+    suites = [c for c in recorder.commands if "broker_fs_ops" in c or "private_protocol" in c]
+    assert len(suites) == 2, "both same-identity runs"
+    foreign = [c for c in recorder.commands if "fs_ops_foreign" in c]
+    assert len(foreign) == 1
+    for flag in ("--ignored", "--exact", *dw.FSOP_FOREIGN_TESTS):
+        assert flag in foreign[0], f"the three-identity run lacks {flag}"
+    capsys.readouterr()
+
+
+@pytest.mark.skipif(not LINUX, reason="the task runs only where the channel does")
+@pytest.mark.parametrize("missing", ["DW_BROKER_AS", "DW_PEER_AS", "DW_WRITE_GROUP"])
+def test_the_fsops_task_without_the_identities_is_not_exercised(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], missing: str
+) -> None:
+    recorder = _FsopRecorder()
+    _fsop_env(monkeypatch, recorder)
+    monkeypatch.delenv(missing)
+    with pytest.raises(dw.TaskError, match="NOT EXERCISED"):
+        dw.task_filesystem_operations_evidence()
+    assert not [c for c in recorder.commands if "fs_ops_foreign" in c]
+    assert [c for c in recorder.commands if "broker_fs_ops" in c], "the same-uid half ran"
+    capsys.readouterr()
+
+
+@pytest.mark.skipif(not LINUX, reason="the task runs only where the channel does")
+def test_the_fsops_task_refuses_one_identity_in_two_roles(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recorder = _FsopRecorder()
+    _fsop_env(monkeypatch, recorder)
+    monkeypatch.setattr(dw, "second_identity", lambda _variable: ("nobody", 1001, 65534))
+    with pytest.raises(dw.TaskError, match="two identities"):
+        dw.task_filesystem_operations_evidence()
+    assert recorder.commands == []
+
+
+def test_the_fsops_task_off_linux_is_not_exercised_and_runs_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recorder = _FsopRecorder()
+    monkeypatch.setattr(sys, "platform", "darwin")
+    _fsop_env(monkeypatch, recorder)
+    with pytest.raises(dw.TaskError, match="NOT EXERCISED"):
+        dw.task_filesystem_operations_evidence()
     assert recorder.commands == []

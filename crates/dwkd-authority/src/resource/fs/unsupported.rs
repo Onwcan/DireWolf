@@ -10,7 +10,7 @@
 //!
 //! [ADR-0042]: ../../../../../../docs/adr/0042-m4a-canonical-filesystem-resolution.md
 
-use super::{FileIdentity, ResolveError, RootError, RootFingerprint, Walked};
+use super::{FileIdentity, Probe, ResolveError, RootError, RootFingerprint, Walked};
 use crate::resource::PathComponent;
 
 /// No descriptor exists on this platform.
@@ -37,6 +37,35 @@ pub(in crate::resource) fn still_bound(
     _expected: FileIdentity,
 ) -> Result<(), ResolveError> {
     match *leaf {}
+}
+
+pub(in crate::resource) fn probe_vacant(
+    root: &Fd,
+    _root_id: FileIdentity,
+    _parents: &[PathComponent],
+    _leaf: &PathComponent,
+) -> Result<Probe, ResolveError> {
+    match *root {}
+}
+
+pub(in crate::resource) fn still_vacant(
+    parent: &Fd,
+    _parent_identity: FileIdentity,
+    _guard: Option<(&Fd, &PathComponent)>,
+    _leaf: &PathComponent,
+) -> Result<(), ResolveError> {
+    match *parent {}
+}
+
+pub(in crate::resource) fn open_directory(
+    dir: &Fd,
+    _expected: FileIdentity,
+) -> Result<Fd, ResolveError> {
+    match *dir {}
+}
+
+pub(in crate::resource) fn held_identity(fd: &Fd) -> Result<FileIdentity, ResolveError> {
+    match *fd {}
 }
 
 pub(in crate::resource) fn open_for_read(

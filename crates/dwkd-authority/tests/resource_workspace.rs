@@ -415,10 +415,10 @@ mod linux {
         let mut h = Harness::new("ws-wire");
         let b = bound_run(&mut h, "proj", 1);
 
-        // M4b (ADR-0043) mints `fs.read` in its canonical form, whether or
-        // not a root is bound: a scope is canonicalised by the grammar alone.
-        // Every other filesystem verb is still withheld until M4c defines
-        // what its target means.
+        // M4b (ADR-0043) mints `fs.read` in its canonical form, the path
+        // resolved beneath the bound root. M4c (ADR-0044) resolves the other
+        // filesystem verbs it implements the same way; `fs.exec_bit` is still
+        // withheld until M4d defines what its target means.
         let admission = admitted(
             h.authority()
                 .admit_run(
@@ -427,7 +427,11 @@ mod linux {
                         &b.session,
                         b.epoch,
                         "k2",
-                        &["fs.read:/workspace", "fs.write:/workspace", "model.call:*"],
+                        &[
+                            "fs.read:/workspace",
+                            "fs.exec_bit:/workspace",
+                            "model.call:*",
+                        ],
                     ),
                 )
                 .unwrap(),
@@ -439,10 +443,10 @@ mod linux {
                 .any(|g| g.capability().to_canonical_string() == "fs.read:/workspace")
         );
         assert!(admission.withheld().iter().any(|w| w.requested().as_str()
-            == "fs.write:/workspace"
+            == "fs.exec_bit:/workspace"
             && w.cause() == WithheldCause::NeedsCanonicalization(UnresolvedScope::CanonicalPath)));
         evidence(
-            "admission-mints-fs-read-withholds-fs-write",
+            "admission-mints-fs-read-withholds-fs-exec-bit",
             "granted:fs.read withheld:UNRESOLVED_RESOURCE",
         );
 
@@ -503,12 +507,16 @@ mod linux {
             .unwrap();
         h.stop();
         // Make it exactly an M3 (schema 1) store: schema 2 is schema 1 plus
-        // the workspace-root table and its two triggers, and schema 3 (M4b)
-        // adds the tool-invocation table, its index and its three triggers.
+        // the workspace-root table and its two triggers, schema 3 (M4b) adds
+        // the tool-invocation table, its index and its three triggers, and
+        // schema 4 (M4c) rebuilds that table and adds the tool-idempotency
+        // table and its two triggers and the tool-staging table, its index
+        // and its four triggers.
         {
             let conn = raw(&h.state());
             conn.execute_batch(
-                "DROP TABLE tool_invocation; DROP TABLE workspace_root; PRAGMA user_version = 1;",
+                "DROP TABLE tool_staging; DROP TABLE tool_idempotency; DROP TABLE tool_invocation; \
+                 DROP TABLE workspace_root; PRAGMA user_version = 1;",
             )
             .unwrap();
         }
@@ -532,7 +540,7 @@ mod linux {
             .operator()
             .install_workspace_root(&id, host(&root))
             .unwrap();
-        evidence("m3-store-migrates", "migrated:1-to-3");
+        evidence("m3-store-migrates", "migrated:1-to-4");
     }
 
     #[test]
@@ -543,8 +551,10 @@ mod linux {
         // Exactly an M4a (schema 2) store.
         {
             let conn = raw(&h.state());
-            conn.execute_batch("DROP TABLE tool_invocation; PRAGMA user_version = 2;")
-                .unwrap();
+            conn.execute_batch(
+                "DROP TABLE tool_staging; DROP TABLE tool_idempotency; DROP TABLE tool_invocation;                  PRAGMA user_version = 2;",
+            )
+            .unwrap();
         }
         h.try_restart().expect("an M4a store migrates");
         assert_eq!(h.report.schema_version, KERNEL_SCHEMA_VERSION);
@@ -566,7 +576,7 @@ mod linux {
             .unwrap();
         assert_eq!(invocations, 0);
         drop(b);
-        evidence("m4a-store-migrates", "migrated:2-to-3");
+        evidence("m4a-store-migrates", "migrated:2-to-4");
     }
 }
 

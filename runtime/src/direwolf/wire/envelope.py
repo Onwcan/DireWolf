@@ -132,7 +132,28 @@ class MessageSpec:
     payload: type[Payload]
 
 
-type Registry = Mapping[tuple[str, str], MessageSpec]
+type Registry = Mapping[tuple[str, str], tuple[MessageSpec, ...]]
+"""Every message of a family, keyed by (type, schema). A schema may have several
+specs with disjoint version ranges, each with its own rules and payload: the
+tool messages keep version 1 exactly and add version 2 beside it (ADR-0044)."""
+
+
+def _spec_for(
+    registry: Registry, message_type: str, schema: str, version: int
+) -> MessageSpec | None:
+    """The spec whose range holds ``version``, or None."""
+    for spec in registry.get((message_type, schema), ()):
+        if spec.versions.contains(version):
+            return spec
+    return None
+
+
+def _span(registry: Registry, message_type: str, schema: str) -> VersionRange | None:
+    """Every version of a message this build knows, as one range."""
+    specs = registry.get((message_type, schema), ())
+    if not specs:
+        return None
+    return VersionRange(min(s.versions.min for s in specs), max(s.versions.max for s in specs))
 
 
 @dataclass(frozen=True, slots=True)
@@ -295,20 +316,21 @@ def decode_dwkp(data: bytes, registry: Registry) -> DwkpMessage:
     """Decode a DWKP frame body. Rejects everything ``dwk-proto`` rejects."""
     value = strict_json.parse(data, strict_json.SAFE_INTEGER)
     preamble = read_preamble(value)
-    spec = registry.get((preamble.type, preamble.schema))
-    if spec is None:
+    span = _span(registry, preamble.type, preamble.schema)
+    if span is None:
         raise ProtocolError(
             UNKNOWN_OPERATION,
             f"no DWKP {preamble.type} named {preamble.schema} exists in this build",
             path="/schema",
         )
-    if not spec.versions.contains(preamble.schema_version):
+    spec = _spec_for(registry, preamble.type, preamble.schema, preamble.schema_version)
+    if spec is None:
         raise ProtocolError(
             VERSION_UNSUPPORTED,
-            f"{spec.schema} schema_version {preamble.schema_version} is not supported",
+            f"{preamble.schema} schema_version {preamble.schema_version} is not supported",
             violation=OUT_OF_RANGE,
             path="/schema_version",
-            supported=spec.versions,
+            supported=span,
         )
     if not isinstance(value, dict):  # read_preamble has already rejected this
         raise schema_violation(WRONG_TYPE, "", "a message is an object")
@@ -318,10 +340,12 @@ def decode_dwkp(data: bytes, registry: Registry) -> DwkpMessage:
 
 def encode_dwkp(message: DwkpMessage, registry: Registry) -> bytes:
     """Canonical bytes, re-decoded before return: never emit what would be rejected."""
-    spec = registry.get((message.header.type, message.header.schema))
+    spec = _spec_for(
+        registry, message.header.type, message.header.schema, message.header.schema_version
+    )
     if spec is None or not isinstance(message.body, spec.payload):
         raise schema_violation(
-            INCONSISTENT, "/schema", "the header's type and schema do not match the body"
+            INCONSISTENT, "/schema", "the header's type, schema and version do not match the body"
         )
     data = jcs.canonicalize(message.header.encode(message.body.encode(), {}))
     if decode_dwkp(data, registry) != message:
@@ -352,8 +376,8 @@ def decode_dwcp(data: bytes, registry: Registry) -> DwcpMessage:
     preamble = read_preamble(value)
     if not isinstance(value, dict):  # read_preamble has already rejected this
         raise schema_violation(WRONG_TYPE, "", "a message is an object")
-    spec = registry.get((preamble.type, preamble.schema))
-    if spec is not None and spec.versions.contains(preamble.schema_version):
+    spec = _spec_for(registry, preamble.type, preamble.schema, preamble.schema_version)
+    if spec is not None:
         header, payload, extensions = decode_header(value, preamble, spec.rules, preserve=True)
         return DwcpMessage(header, extensions, _decode_payload(spec, payload))
     header, payload, extensions = decode_header(value, preamble, PERMISSIVE, preserve=True)
@@ -422,8 +446,8 @@ def read_event(data: bytes, registry: Registry) -> EventRecord:
     if preamble.type != "event":
         error = schema_violation("UNKNOWN_VARIANT", "/type", 'an event record has type "event"')
         return EventRecord(data, InvalidEvent(error))
-    spec = registry.get(("event", preamble.schema))
-    if spec is None or not spec.versions.contains(preamble.schema_version):
+    spec = _spec_for(registry, "event", preamble.schema, preamble.schema_version)
+    if spec is None:
         unknown = ProtocolError(
             UNKNOWN_OPERATION, "unknown event schema and version", path="/schema"
         )

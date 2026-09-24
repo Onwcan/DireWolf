@@ -869,6 +869,351 @@ wire_enum! {
     }
 }
 
+// ---------------------------------------------------------------------------
+// M4c filesystem vocabulary (ADR-0044). Version 2 of the tool messages uses
+// these; version 1 keeps the M4b enumerations above exactly, because widening
+// a closed enumeration a version-1 decoder accepts would change what version 1
+// means (PROTOCOL.md §1).
+// ---------------------------------------------------------------------------
+
+wire_int! {
+    /// How many directory entries an `fs.list` may examine and return.
+    ListLimit(u16), min = 1, max = 512
+}
+
+wire_int! {
+    /// How many bytes an `fs.search` may scan from the start of the file. The
+    /// `max_bytes` of the `fs.read` the search requires, and the `byte_count`
+    /// policy decides on (ADR-0044 §4).
+    ScanLimit(u32), min = 1, max = 16_777_216
+}
+
+wire_int! {
+    /// How many match offsets an `fs.search` may return.
+    MatchLimit(u16), min = 1, max = 1024
+}
+
+wire_int! {
+    /// A byte count or byte offset the authority states: a file's size, the
+    /// bytes an action moves, a match offset. Safe-integer bounded, like every
+    /// wire integer.
+    ByteCount(u64), min = 0, max = 9_007_199_254_740_991
+}
+
+wire_int! {
+    /// A count of directory entries: at most [`ListLimit::MAX`].
+    EntryCount(u16), min = 0, max = 512
+}
+
+wire_int! {
+    /// A file's hard-link count, as `st_nlink` reports it.
+    LinkCount(u64), min = 0, max = 9_007_199_254_740_991
+}
+
+wire_int! {
+    /// A length or offset within a file `fs.patch` operates on: at most
+    /// [`crate::limits::MAX_PATCH_FILE_BYTES`].
+    PatchLength(u32), min = 0, max = 1_048_576
+}
+
+wire_text! {
+    /// A SHA-256 digest of content, lowercase hexadecimal.
+    ContentDigest,
+    max_chars = 64,
+    pattern = Some("^[0-9a-f]{64}$"),
+    format = None,
+    validate = valid_sha256_hex
+}
+
+wire_text! {
+    /// An `fs.search` needle: literal bytes, as lowercase hexadecimal, at
+    /// least one byte and at most [`crate::limits::MAX_SEARCH_NEEDLE_BYTES`].
+    /// Bytes, not text: no decoding, no case folding, no pattern language.
+    Needle,
+    max_chars = 2048,
+    pattern = Some("^(?:[0-9a-f]{2})+$"),
+    format = None,
+    validate = |s| !s.is_empty() && valid_hex_content(s)
+}
+
+impl Needle {
+    /// The bytes this needle spells.
+    #[must_use]
+    pub fn to_bytes(&self) -> Vec<u8> {
+        HexContent::new(self.as_str()).map_or_else(Vec::new, |hex| hex.to_bytes())
+    }
+
+    /// Encode `bytes`, or `None` if they are empty or too long.
+    #[must_use]
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        Self::new(HexContent::from_bytes(bytes)?.as_str())
+    }
+}
+
+wire_text! {
+    /// One directory entry's name, as `fs.list` reports it: a single component
+    /// of the canonical path grammar (ADR-0042). **Lexical bounds here**: one
+    /// to 255 characters, no `/`, no NUL, not `.` or `..`. The authority lists
+    /// only names that pass the full grammar — NFC, no control, bidi or
+    /// invisible-format character, at most 255 bytes — and counts the rest
+    /// without emitting them (ADR-0044 §6).
+    EntryName,
+    max_chars = 255,
+    pattern = Some("^(?!\\.\\.?$)[^/\\u0000]{1,255}$"),
+    format = None,
+    validate = valid_entry_name
+}
+
+fn valid_entry_name(s: &str) -> bool {
+    !s.is_empty() && s != "." && s != ".." && !s.contains('/') && !s.contains('\0')
+}
+
+wire_enum! {
+    /// A filesystem tool (`TOOL_SYSTEM.md` §3): the eight of the canonical
+    /// inventory. A name, not a dispatch key: each has its own typed call.
+    FsTool {
+        /// Read bytes from one regular file.
+        FsRead = "fs.read",
+        /// List one directory, not recursively.
+        FsList = "fs.list",
+        /// Search one regular file for a literal byte string.
+        FsSearch = "fs.search",
+        /// Report one object's metadata.
+        FsStat = "fs.stat",
+        /// Replace or create one regular file, atomically.
+        FsWrite = "fs.write",
+        /// Apply typed edits to one regular file, atomically, against a base revision.
+        FsPatch = "fs.patch",
+        /// Rename one regular file to a vacant name.
+        FsMove = "fs.move",
+        /// Remove one regular file or empty directory.
+        FsDelete = "fs.delete",
+    }
+}
+
+wire_enum! {
+    /// A filesystem **capability verb** (CAPABILITIES.md §2): what an action
+    /// in a plan requires. Not a tool name — `fs.patch`, `fs.move` and
+    /// `fs.search` are tools whose authority is derived as these (ADR-0044 §4).
+    /// `fs.exec_bit` is absent: no M4c effect uses it.
+    FsVerb {
+        /// Read content.
+        FsRead = "fs.read",
+        /// Enumerate a directory.
+        FsList = "fs.list",
+        /// Read metadata.
+        FsStat = "fs.stat",
+        /// Replace content.
+        FsWrite = "fs.write",
+        /// Create a name that did not exist.
+        FsCreate = "fs.create",
+        /// Remove a name.
+        FsDelete = "fs.delete",
+    }
+}
+
+wire_enum! {
+    /// What part an action plays in a plan.
+    ActionRole {
+        /// The one object the tool operates on.
+        Target = "TARGET",
+        /// A move's source name, which is removed.
+        Source = "SOURCE",
+        /// A move's destination name, which is created.
+        Destination = "DESTINATION",
+    }
+}
+
+wire_enum! {
+    /// Whether the object an action names existed when it was resolved.
+    ObjectState {
+        /// An object resolved beneath the pinned root.
+        Existing = "EXISTING",
+        /// No object: a checked parent directory and a validated, absent name.
+        Vacant = "VACANT",
+    }
+}
+
+wire_enum! {
+    /// Why the two gates decided one action of a plan as they did. The M4b
+    /// reasons, and one more: a rule allowed the action with an obligation this
+    /// authority cannot enforce, which is not permission (ADR-0044 §9).
+    FsDecisionReason {
+        /// Both gates permitted it.
+        AllowedByRule = "ALLOWED_BY_RULE",
+        /// A rule matched and its effect was `DENY` — or `REQUIRE_APPROVAL`,
+        /// which nothing in this build can satisfy (M6).
+        DeniedByRule = "DENIED_BY_RULE",
+        /// No rule matched before the mandatory `default` rule.
+        DefaultDeny = "DEFAULT_DENY",
+        /// Policy permitted it; no held capability covers it.
+        NoCapability = "NO_CAPABILITY",
+        /// The named rule needed a canonical input this authority does not hold.
+        UnresolvedPolicyInput = "UNRESOLVED_POLICY_INPUT",
+        /// The named rule allowed it with an obligation this authority cannot
+        /// enforce, so it denied (fail closed).
+        ObligationUnenforceable = "OBLIGATION_UNENFORCEABLE",
+    }
+}
+
+wire_enum! {
+    /// Why a version-2 tool operation was refused before any effect was
+    /// authorised. Nothing was executed and no broker was contacted.
+    FsRefusalReason {
+        /// The epoch presented is not the session's current epoch.
+        StaleEpoch = "STALE_EPOCH",
+        /// The run named is not a live admission of this caller.
+        UnknownRun = "UNKNOWN_RUN",
+        /// The idempotency key was already used by this caller in this
+        /// session. A key names one invocation; it is never performed twice.
+        IdempotencyKeyReused = "IDEMPOTENCY_KEY_REUSED",
+        /// The run's session has no workspace, or its workspace no bound root.
+        WorkspaceUnbound = "WORKSPACE_UNBOUND",
+        /// The workspace root's path now names a different directory.
+        RootReplaced = "ROOT_REPLACED",
+        /// The workspace root could not be opened.
+        RootUnavailable = "ROOT_UNAVAILABLE",
+        /// This platform has no canonical resolver (only Linux does).
+        UnsupportedPlatform = "UNSUPPORTED_PLATFORM",
+        /// The path is not under `/workspace`.
+        PathOutsideWorkspace = "PATH_OUTSIDE_WORKSPACE",
+        /// The path contains `.` or `..`.
+        PathTraversal = "PATH_TRAVERSAL",
+        /// The path is not the one canonical spelling of a workspace path.
+        PathNotCanonical = "PATH_NOT_CANONICAL",
+        /// No entry by that name — or, for a vacant target, no parent directory.
+        NotFound = "NOT_FOUND",
+        /// An intermediate component is not a directory.
+        NotADirectory = "NOT_A_DIRECTORY",
+        /// A component is a symlink.
+        Symlink = "SYMLINK",
+        /// A component is a procfs magic link.
+        MagicLink = "MAGIC_LINK",
+        /// A component is a mount point.
+        MountCrossing = "MOUNT_CROSSING",
+        /// The directory holds no entry spelled exactly like the name.
+        NameMismatch = "NAME_MISMATCH",
+        /// Another entry is canonically equivalent to the name.
+        NormalizationAmbiguity = "NORMALIZATION_AMBIGUITY",
+        /// The object is a FIFO, socket, device or of unknown type.
+        SpecialFile = "SPECIAL_FILE",
+        /// The object is not a kind this tool operates on.
+        WrongKind = "WRONG_KIND",
+        /// A regular file with more than one hard link cannot have its content
+        /// changed: the change would reach every other name (ADR-0042 §7).
+        MultiplyLinked = "MULTIPLY_LINKED",
+        /// The workspace root itself cannot be written, moved or removed.
+        WorkspaceRoot = "WORKSPACE_ROOT",
+        /// A move's destination names an object that exists.
+        DestinationExists = "DESTINATION_EXISTS",
+        /// A patch's edits do not describe a transformation of its base into
+        /// its post revision: out of order, overlapping, out of range, or not
+        /// adding up to the stated lengths.
+        PatchInconsistent = "PATCH_INCONSISTENT",
+        /// A patch's edits insert more than
+        /// [`crate::limits::MAX_PATCH_INSERT_BYTES_TOTAL`] bytes together: more
+        /// than an inline patch may carry (ADR-0044 §12).
+        PatchTooLarge = "PATCH_TOO_LARGE",
+        /// A name stopped binding to the object checked for it.
+        Race = "RACE",
+        /// The authority may not traverse or open something on the path.
+        PermissionDenied = "PERMISSION_DENIED",
+        /// A directory on the path is too large to verify a name in.
+        DirectoryTooLarge = "DIRECTORY_TOO_LARGE",
+        /// Another operating-system error while resolving.
+        IoError = "IO_ERROR",
+    }
+}
+
+wire_enum! {
+    /// Why an authorised version-2 invocation produced no result. **After**
+    /// both gates allowed every action of its plan and its intent was recorded
+    /// durably: failures of the effect path, never decisions. "Nothing was
+    /// changed" means no persistent change: a change that reached an object
+    /// nobody authorised was undone and the undo proved, though for that
+    /// moment it may have been visible (ADR-0044 §5). A change whose undo
+    /// cannot be proved is never one of these: it is `OUTCOME_UNKNOWN`.
+    FsFailureReason {
+        /// The checked object was replaced or renamed after its intent was
+        /// recorded. Nothing was changed.
+        ObjectChanged = "OBJECT_CHANGED",
+        /// The checked object could not be opened for the handoff. Nothing was
+        /// sent to the broker.
+        ObjectUnreadable = "OBJECT_UNREADABLE",
+        /// A name that was vacant when decided is occupied now. Nothing was
+        /// created and nothing was replaced.
+        TargetOccupied = "TARGET_OCCUPIED",
+        /// The file's content is neither the patch's base revision nor its
+        /// post revision. Nothing was changed.
+        Conflict = "CONFLICT",
+        /// The directory to remove is not empty. Nothing was removed.
+        DirectoryNotEmpty = "DIRECTORY_NOT_EMPTY",
+        /// The broker's own operating-system identity may not change names in
+        /// that directory: the workspace is not write-enabled for it
+        /// (ADR-0044 §3). Nothing was changed.
+        WriteDenied = "WRITE_DENIED",
+        /// A replacement could not keep the replaced file's group. Nothing was
+        /// changed.
+        AttributesNotPreserved = "ATTRIBUTES_NOT_PRESERVED",
+        /// The directory whose names would change is writable by every user,
+        /// so a writer outside the trusted set could race the change: the
+        /// broker changes names only where the operator's permission model
+        /// excludes that (ADR-0044 §8). Nothing was changed.
+        SharedDirectory = "SHARED_DIRECTORY",
+        /// No broker answered as the configured broker. Nothing was sent.
+        BrokerUnavailable = "BROKER_UNAVAILABLE",
+        /// The broker's reply did not decode, or did not answer this
+        /// invocation on this channel, before it could have acted.
+        BrokerProtocolError = "BROKER_PROTOCOL_ERROR",
+        /// The broker refused before acting: a descriptor was not the
+        /// authorised object, or the operating system refused a read.
+        BrokerExecutionError = "BROKER_EXECUTION_ERROR",
+        /// The effect may or may not have happened, and the authority cannot
+        /// prove which. Recorded as such; never retried by the authority. For
+        /// `fs.move` and `fs.delete` the invocation is `UNKNOWN`
+        /// (RELIABILITY.md §1).
+        OutcomeUnknown = "OUTCOME_UNKNOWN",
+    }
+}
+
+wire_enum! {
+    /// What a directory entry is, from the directory itself (`d_type`) — the
+    /// entry is not opened or followed to find out.
+    EntryKind {
+        /// A regular file.
+        RegularFile = "REGULAR_FILE",
+        /// A directory.
+        Directory = "DIRECTORY",
+        /// A symbolic link. Listed; never followed.
+        Symlink = "SYMLINK",
+        /// A FIFO, socket or device.
+        Other = "OTHER",
+        /// The filesystem did not say.
+        Unknown = "UNKNOWN",
+    }
+}
+
+wire_enum! {
+    /// What `fs.stat` found: the resolver returns no other kind.
+    StatKind {
+        /// A regular file.
+        RegularFile = "REGULAR_FILE",
+        /// A directory.
+        Directory = "DIRECTORY",
+    }
+}
+
+wire_enum! {
+    /// Whether an `fs.patch` changed the file.
+    PatchOutcome {
+        /// The file held the base revision and now holds the post revision.
+        Applied = "APPLIED",
+        /// The file already held the post revision: the same patch, applied
+        /// before. Nothing was changed. This is what makes a retry safe.
+        AlreadyApplied = "ALREADY_APPLIED",
+    }
+}
+
 fn valid_schema_name(s: &str) -> bool {
     let Some(rest) = s.strip_prefix("direwolf.") else {
         return false;

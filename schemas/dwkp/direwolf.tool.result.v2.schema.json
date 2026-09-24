@@ -1,0 +1,531 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:direwolf:schema:dwkp:direwolf.tool.result:2",
+  "title": "direwolf.tool.result v2",
+  "description": "An invocation whose whole plan was allowed, performed on the checked objects, and recorded.",
+  "type": "object",
+  "properties": {
+    "v": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1,
+      "x-direwolf-type": "Version"
+    },
+    "id": {
+      "type": "string",
+      "minLength": 30,
+      "maxLength": 30,
+      "pattern": "^msg_[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+      "x-direwolf-type": "MessageId",
+      "x-direwolf-format": "uuid7-id",
+      "x-direwolf-id-prefix": "msg"
+    },
+    "type": {
+      "const": "response",
+      "x-direwolf-type": "MessageType"
+    },
+    "schema": {
+      "const": "direwolf.tool.result",
+      "x-direwolf-type": "SchemaName"
+    },
+    "schema_version": {
+      "type": "integer",
+      "minimum": 2,
+      "maximum": 2,
+      "x-direwolf-type": "Version"
+    },
+    "ts": {
+      "type": "string",
+      "maxLength": 24,
+      "x-direwolf-type": "Timestamp",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$",
+      "x-direwolf-format": "rfc3339-utc-millis"
+    },
+    "correlation_id": {
+      "type": "string",
+      "maxLength": 35,
+      "pattern": "^[a-z]{2,8}_[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+      "x-direwolf-type": "AnyId",
+      "x-direwolf-format": "uuid7-id"
+    },
+    "causation_id": {
+      "type": "string",
+      "maxLength": 35,
+      "pattern": "^[a-z]{2,8}_[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+      "x-direwolf-type": "AnyId",
+      "x-direwolf-format": "uuid7-id"
+    },
+    "payload": {
+      "$ref": "#/$defs/ToolResultV2"
+    }
+  },
+  "required": ["v", "id", "type", "schema", "schema_version", "ts", "causation_id", "payload"],
+  "additionalProperties": false,
+  "not": {
+    "anyOf": [
+      {
+        "required": ["session_id"]
+      },
+      {
+        "required": ["run_id"]
+      },
+      {
+        "required": ["epoch"]
+      },
+      {
+        "required": ["idempotency_key"]
+      }
+    ]
+  },
+  "x-direwolf-family": "dwkp",
+  "x-direwolf-message-type": "response",
+  "x-direwolf-schema": "direwolf.tool.result",
+  "x-direwolf-schema-versions": {
+    "min": 2,
+    "max": 2
+  },
+  "x-direwolf-envelope-versions": {
+    "min": 1,
+    "max": 1
+  },
+  "x-direwolf-envelope": {
+    "correlation_id": "optional",
+    "causation_id": "required",
+    "session_id": "forbidden",
+    "run_id": "forbidden",
+    "epoch": "forbidden",
+    "idempotency_key": "forbidden"
+  },
+  "x-direwolf-id-prefix": "msg",
+  "x-direwolf-unknown-fields": "reject",
+  "x-direwolf-payload": "ToolResultV2",
+  "$defs": {
+    "ActionDecision": {
+      "type": "object",
+      "description": "How the two gates of ADR-0006 decided one action of a plan.",
+      "properties": {
+        "effect": {
+          "type": "string",
+          "enum": ["ALLOW", "DENY"],
+          "x-direwolf-type": "DecisionEffect",
+          "description": "What was decided for this action."
+        },
+        "reason": {
+          "type": "string",
+          "enum": ["ALLOWED_BY_RULE", "DENIED_BY_RULE", "DEFAULT_DENY", "NO_CAPABILITY", "UNRESOLVED_POLICY_INPUT", "OBLIGATION_UNENFORCEABLE"],
+          "x-direwolf-type": "FsDecisionReason",
+          "description": "Why."
+        },
+        "capability_result": {
+          "type": "string",
+          "enum": ["SATISFIED", "NOT_SATISFIED"],
+          "x-direwolf-type": "GateResult",
+          "description": "Whether a held capability covers the action."
+        },
+        "policy_result": {
+          "type": "string",
+          "enum": ["SATISFIED", "NOT_SATISFIED"],
+          "x-direwolf-type": "GateResult",
+          "description": "Whether policy permits it."
+        },
+        "rule_id": {
+          "type": "string",
+          "maxLength": 64,
+          "x-direwolf-type": "RuleId",
+          "pattern": "^[a-z][a-z0-9-]{0,63}$",
+          "description": "The rule that produced the effect, or could not be evaluated."
+        },
+        "rule_source": {
+          "type": "string",
+          "maxLength": 256,
+          "x-direwolf-type": "RuleSource",
+          "pattern": "^[A-Za-z0-9._/-]{1,240}:[0-9]{1,8}$",
+          "description": "Where that rule is written."
+        }
+      },
+      "required": ["effect", "reason", "capability_result", "policy_result", "rule_id", "rule_source"],
+      "additionalProperties": false,
+      "x-direwolf-unknown-fields": "reject"
+    },
+    "ContentRevision": {
+      "type": "object",
+      "description": "A file revision, stated exactly: the SHA-256 of its whole content and\nits length. Objectively checkable; no timestamp, no version-control\nsystem, no claim the file cannot confirm.",
+      "properties": {
+        "sha256": {
+          "type": "string",
+          "maxLength": 64,
+          "x-direwolf-type": "ContentDigest",
+          "pattern": "^[0-9a-f]{64}$",
+          "description": "SHA-256 of the whole content."
+        },
+        "length": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1048576,
+          "x-direwolf-type": "PatchLength",
+          "description": "Its length in bytes."
+        }
+      },
+      "required": ["sha256", "length"],
+      "additionalProperties": false,
+      "x-direwolf-unknown-fields": "reject"
+    },
+    "FsDeleteResult": {
+      "type": "object",
+      "description": "An `fs.delete` completed: the name no longer exists.",
+      "properties": {},
+      "required": [],
+      "additionalProperties": false,
+      "x-direwolf-unknown-fields": "reject"
+    },
+    "FsListEntry": {
+      "type": "object",
+      "description": "One entry of a directory listing.",
+      "properties": {
+        "name": {
+          "type": "string",
+          "maxLength": 255,
+          "x-direwolf-type": "EntryName",
+          "pattern": "^(?!\\.\\.?$)[^/\\u0000]{1,255}$",
+          "description": "Its name: one canonical path component."
+        },
+        "kind": {
+          "type": "string",
+          "enum": ["REGULAR_FILE", "DIRECTORY", "SYMLINK", "OTHER", "UNKNOWN"],
+          "x-direwolf-type": "EntryKind",
+          "description": "What the directory says it is. Not followed or opened."
+        }
+      },
+      "required": ["name", "kind"],
+      "additionalProperties": false,
+      "x-direwolf-unknown-fields": "reject"
+    },
+    "FsListResult": {
+      "type": "object",
+      "description": "What an `fs.list` returned. The broker examined the first `max_entries`\nnames in byte order; the addressable ones are listed, and the ones no\ncanonical path can name — not UTF-8, not NFC, or holding a control,\nbidi or invisible-format character — are counted and never emitted.",
+      "properties": {
+        "entries": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/FsListEntry"
+          },
+          "maxItems": 512,
+          "x-direwolf-type": "BoundedList",
+          "description": "The addressable entries, in ascending byte order."
+        },
+        "unaddressable": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 512,
+          "x-direwolf-type": "EntryCount",
+          "description": "How many of the examined entries could not be named."
+        },
+        "complete": {
+          "type": "boolean",
+          "description": "Whether every entry of the directory was examined."
+        }
+      },
+      "required": ["entries", "unaddressable", "complete"],
+      "additionalProperties": false,
+      "x-direwolf-unknown-fields": "reject"
+    },
+    "FsMoveResult": {
+      "type": "object",
+      "description": "An `fs.move` completed: the source name no longer exists and the\ndestination name binds the object that was checked.",
+      "properties": {},
+      "required": [],
+      "additionalProperties": false,
+      "x-direwolf-unknown-fields": "reject"
+    },
+    "FsPatchResult": {
+      "type": "object",
+      "description": "What an `fs.patch` did.",
+      "properties": {
+        "outcome": {
+          "type": "string",
+          "enum": ["APPLIED", "ALREADY_APPLIED"],
+          "x-direwolf-type": "PatchOutcome",
+          "description": "Whether it changed the file."
+        },
+        "post": {
+          "$ref": "#/$defs/ContentRevision",
+          "description": "The file's revision now: the patch's post revision."
+        }
+      },
+      "required": ["outcome", "post"],
+      "additionalProperties": false,
+      "x-direwolf-unknown-fields": "reject"
+    },
+    "FsReadResult": {
+      "type": "object",
+      "description": "What an `fs.read` returned.",
+      "properties": {
+        "content": {
+          "type": "string",
+          "maxLength": 524288,
+          "x-direwolf-type": "HexContent",
+          "pattern": "^(?:[0-9a-f]{2})*$",
+          "description": "The bytes read from the start of the file, exactly, as hexadecimal.\nAt most the call's `max_bytes`; their count is the content's\nlength, and is not repeated."
+        },
+        "eof_observed": {
+          "type": "boolean",
+          "description": "Whether the end of the file was **observed** during this read: a\nread returned no bytes before `max_bytes` were read. `false` when\nexactly `max_bytes` were read — the end was then not proven, because\nfinding it would have meant reading past the authorised bound, and\nthe broker never does (ADR-0043)."
+        }
+      },
+      "required": ["content", "eof_observed"],
+      "additionalProperties": false,
+      "x-direwolf-unknown-fields": "reject"
+    },
+    "FsSearchResult": {
+      "type": "object",
+      "description": "What an `fs.search` returned: offsets, never content.",
+      "properties": {
+        "offsets": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991,
+            "x-direwolf-type": "ByteCount"
+          },
+          "maxItems": 1024,
+          "x-direwolf-type": "BoundedList",
+          "description": "Every offset at which the needle starts and ends within the scanned\nbytes, overlapping occurrences included, up to `max_matches`."
+        },
+        "scanned": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991,
+          "x-direwolf-type": "ByteCount",
+          "description": "How many bytes were scanned: at most `max_scan_bytes`, never more."
+        },
+        "eof_observed": {
+          "type": "boolean",
+          "description": "Whether the end of the file was observed within the scan."
+        },
+        "matches_truncated": {
+          "type": "boolean",
+          "description": "Whether more matches were found than were returned."
+        }
+      },
+      "required": ["offsets", "scanned", "eof_observed", "matches_truncated"],
+      "additionalProperties": false,
+      "x-direwolf-unknown-fields": "reject"
+    },
+    "FsStatResult": {
+      "type": "object",
+      "description": "What an `fs.stat` returned, from the checked object's own descriptor.",
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": ["REGULAR_FILE", "DIRECTORY"],
+          "x-direwolf-type": "StatKind",
+          "description": "What the object is."
+        },
+        "size": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991,
+          "x-direwolf-type": "ByteCount",
+          "description": "`st_size`: a regular file's length; for a directory, the\nfilesystem's size of the directory object, not of its contents."
+        },
+        "link_count": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991,
+          "x-direwolf-type": "LinkCount",
+          "description": "`st_nlink`."
+        },
+        "executable": {
+          "type": "boolean",
+          "description": "Whether a regular file has any execute bit. Always false for a\ndirectory."
+        }
+      },
+      "required": ["kind", "size", "link_count", "executable"],
+      "additionalProperties": false,
+      "x-direwolf-unknown-fields": "reject"
+    },
+    "FsWriteResult": {
+      "type": "object",
+      "description": "What an `fs.write` did.",
+      "properties": {
+        "created": {
+          "type": "boolean",
+          "description": "Whether the file did not exist and was created."
+        },
+        "length": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991,
+          "x-direwolf-type": "ByteCount",
+          "description": "The new content's length."
+        },
+        "sha256": {
+          "type": "string",
+          "maxLength": 64,
+          "x-direwolf-type": "ContentDigest",
+          "pattern": "^[0-9a-f]{64}$",
+          "description": "The new content's SHA-256."
+        }
+      },
+      "required": ["created", "length", "sha256"],
+      "additionalProperties": false,
+      "x-direwolf-unknown-fields": "reject"
+    },
+    "PlannedAction": {
+      "type": "object",
+      "description": "One canonical action a call requires: every fact policy decided on,\nstated by the authority. The capability it required is\n`<verb>:<canonical_path>?max_bytes=<byte_count>&no_symlink_targets=true`\nfor `fs.read` and `fs.write`, and\n`<verb>:<canonical_path>?no_symlink_targets=true` for the others.",
+      "properties": {
+        "role": {
+          "type": "string",
+          "enum": ["TARGET", "SOURCE", "DESTINATION"],
+          "x-direwolf-type": "ActionRole",
+          "description": "What part it plays."
+        },
+        "verb": {
+          "type": "string",
+          "enum": ["fs.read", "fs.list", "fs.stat", "fs.write", "fs.create", "fs.delete"],
+          "x-direwolf-type": "FsVerb",
+          "description": "The capability verb it requires."
+        },
+        "canonical_path": {
+          "type": "string",
+          "maxLength": 384,
+          "x-direwolf-type": "WorkspacePath",
+          "pattern": "^/[^\\u0000]{0,383}$",
+          "description": "The object's canonical path: resolved beneath the pinned root, or —\nfor a vacant name — the checked parent's path and the validated\nname."
+        },
+        "object": {
+          "type": "string",
+          "enum": ["EXISTING", "VACANT"],
+          "x-direwolf-type": "ObjectState",
+          "description": "Whether the object existed when it was resolved."
+        },
+        "byte_count": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991,
+          "x-direwolf-type": "ByteCount",
+          "description": "The file-content bytes the action reads or writes, which is what\npolicy's `max_bytes` bounds: the request's bound for a read or a\nscan, the content's length for a write, zero for metadata and names."
+        },
+        "decision": {
+          "$ref": "#/$defs/ActionDecision",
+          "description": "Both gates' decision for this action."
+        }
+      },
+      "required": ["role", "verb", "canonical_path", "object", "byte_count", "decision"],
+      "additionalProperties": false,
+      "x-direwolf-unknown-fields": "reject"
+    },
+    "ToolOutput": {
+      "type": "object",
+      "description": "A tool's output: **exactly one** member, the call's own.",
+      "properties": {
+        "fs_read": {
+          "$ref": "#/$defs/FsReadResult",
+          "description": "An `fs.read`'s bytes."
+        },
+        "fs_list": {
+          "$ref": "#/$defs/FsListResult",
+          "description": "An `fs.list`'s entries."
+        },
+        "fs_search": {
+          "$ref": "#/$defs/FsSearchResult",
+          "description": "An `fs.search`'s offsets."
+        },
+        "fs_stat": {
+          "$ref": "#/$defs/FsStatResult",
+          "description": "An `fs.stat`'s metadata."
+        },
+        "fs_write": {
+          "$ref": "#/$defs/FsWriteResult",
+          "description": "An `fs.write`'s acknowledgement."
+        },
+        "fs_patch": {
+          "$ref": "#/$defs/FsPatchResult",
+          "description": "An `fs.patch`'s acknowledgement."
+        },
+        "fs_move": {
+          "$ref": "#/$defs/FsMoveResult",
+          "description": "An `fs.move`'s acknowledgement."
+        },
+        "fs_delete": {
+          "$ref": "#/$defs/FsDeleteResult",
+          "description": "An `fs.delete`'s acknowledgement."
+        }
+      },
+      "required": [],
+      "additionalProperties": false,
+      "x-direwolf-unknown-fields": "reject",
+      "minProperties": 1,
+      "maxProperties": 1,
+      "x-direwolf-check": {
+        "kind": "exactly-one",
+        "members": ["fs_read", "fs_list", "fs_search", "fs_stat", "fs_write", "fs_patch", "fs_move", "fs_delete"]
+      }
+    },
+    "ToolPlan": {
+      "type": "object",
+      "description": "The canonical plan a call resolves to: the tool, where it runs, the\ndecision, and every action it requires. `effect` is `ALLOW` only if\n**every** action is allowed; one denied action denies the call and\nnothing is performed.",
+      "properties": {
+        "tool": {
+          "type": "string",
+          "enum": ["fs.read", "fs.list", "fs.search", "fs.stat", "fs.write", "fs.patch", "fs.move", "fs.delete"],
+          "x-direwolf-type": "FsTool",
+          "description": "The tool."
+        },
+        "environment": {
+          "type": "string",
+          "enum": ["HOST", "SANDBOX"],
+          "x-direwolf-type": "ActionEnvironment",
+          "description": "Where it runs."
+        },
+        "effect": {
+          "type": "string",
+          "enum": ["ALLOW", "DENY"],
+          "x-direwolf-type": "DecisionEffect",
+          "description": "The decision for the whole call."
+        },
+        "actions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PlannedAction"
+          },
+          "maxItems": 4,
+          "x-direwolf-type": "BoundedList",
+          "description": "Every action the call requires."
+        }
+      },
+      "required": ["tool", "environment", "effect", "actions"],
+      "additionalProperties": false,
+      "x-direwolf-unknown-fields": "reject"
+    },
+    "ToolResultV2": {
+      "type": "object",
+      "description": "An invocation every action of whose plan was allowed, which the broker\nperformed on the objects that were checked, and which the authority\nrecorded — in that order.",
+      "properties": {
+        "invocation_id": {
+          "type": "string",
+          "minLength": 30,
+          "maxLength": 30,
+          "pattern": "^inv_[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+          "x-direwolf-type": "InvocationId",
+          "x-direwolf-format": "uuid7-id",
+          "x-direwolf-id-prefix": "inv",
+          "description": "The authority's id for this invocation."
+        },
+        "plan": {
+          "$ref": "#/$defs/ToolPlan",
+          "description": "The plan that was decided and performed."
+        },
+        "output": {
+          "$ref": "#/$defs/ToolOutput",
+          "description": "The tool's output."
+        }
+      },
+      "required": ["invocation_id", "plan", "output"],
+      "additionalProperties": false,
+      "x-direwolf-unknown-fields": "reject"
+    }
+  }
+}

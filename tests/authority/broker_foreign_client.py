@@ -14,6 +14,11 @@ Modes:
                                       descriptor of a file this user can open
   flood <socket> <count>              connect and close, repeatedly
   read-path <path>                    open a path for reading
+  create-path <path>                  create a new file by path, and remove it
+                                      again: whether this user can change
+                                      names in that directory by itself (M4c)
+  rename-path <from> <to>             rename a name, and rename it back
+  remove-path <path>                  remove a name
   probe-authority <state-dir> <kernel-socket> <handshake-hex>
                                       everything the broker identity must not
                                       be able to do to the authority
@@ -107,6 +112,33 @@ def read_path(path: str) -> dict[str, object]:
     return {"refused": False, "bytes": len(data)}
 
 
+def create_path(path: str) -> dict[str, object]:
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except OSError as exc:
+        return {"refused": True, "errno": _errno_name(exc)}
+    os.close(fd)
+    Path(path).unlink()
+    return {"refused": False}
+
+
+def rename_path(source: str, destination: str) -> dict[str, object]:
+    try:
+        Path(source).rename(destination)
+    except OSError as exc:
+        return {"refused": True, "errno": _errno_name(exc)}
+    Path(destination).rename(source)
+    return {"refused": False}
+
+
+def remove_path(path: str) -> dict[str, object]:
+    try:
+        Path(path).unlink()
+    except OSError as exc:
+        return {"refused": True, "errno": _errno_name(exc)}
+    return {"refused": False}
+
+
 def probe_authority(state_dir: str, kernel_socket: str, handshake_hex: str) -> dict[str, object]:
     state = Path(state_dir)
     attempts: list[dict[str, object]] = []
@@ -157,6 +189,12 @@ def main(argv: list[str]) -> int:
         report = flood(argv[2], int(argv[3]))
     elif mode == "read-path":
         report = read_path(argv[2])
+    elif mode == "create-path":
+        report = create_path(argv[2])
+    elif mode == "rename-path":
+        report = rename_path(argv[2], argv[3])
+    elif mode == "remove-path":
+        report = remove_path(argv[2])
     elif mode == "probe-authority":
         report = probe_authority(argv[2], argv[3], argv[4])
     else:

@@ -58,16 +58,19 @@ class ClientError:
         return out
 
 
-MESSAGES: Final[Mapping[tuple[str, str], MessageSpec]] = MappingProxyType({
-    ('response', 'direwolf.error'): MessageSpec(
-        schema='direwolf.error',
-        message_type='response',
-        versions=VersionRange(1, 1),
-        rules=Rules('optional', 'optional', 'optional', 'optional', 'forbidden', 'forbidden'),
-        payload=ClientError,
+MESSAGES: Final[Mapping[tuple[str, str], tuple[MessageSpec, ...]]] = MappingProxyType({
+    ('response', 'direwolf.error'): (
+        MessageSpec(
+            schema='direwolf.error',
+            message_type='response',
+            versions=VersionRange(1, 1),
+            rules=Rules('optional', 'optional', 'optional', 'optional', 'forbidden', 'forbidden'),
+            payload=ClientError,
+        ),
     ),
 })
-"""Every message of this family the build knows, keyed by (type, schema)."""
+"""Every message of this family the build knows, keyed by (type, schema): one spec
+per version range, in ascending order."""
 
 
 def decode(data: bytes) -> envelope.DwcpMessage:

@@ -240,6 +240,37 @@ jobs:
           DW_BROKER_AS: dwbroker
           DW_PEER_AS: nobody
 
+  # M4c's filesystem operations (ADR-0044): every tool end to end through the
+  # released daemons, the race and crash campaigns on the real channel, the
+  # hostile private-protocol cases -- and the write permission model on THREE
+  # genuine identities. The job creates the broker's own user and the group an
+  # operator would grant a write-enabled workspace to (the broker's user and
+  # the workspace owner, which is the runner); the evidence runs in a session
+  # that has that group (`sudo --user "$USER"` re-reads the group database, so
+  # the new membership applies). The TEST HARNESS applies the grant to its own
+  # fixture workspace and prints exactly what it granted; the product never
+  # changes a workspace's permissions. The broker's user proves a held
+  # directory is no right to change its names (no grant: WRITE_DENIED), and
+  # the grant is what makes a workspace writable, only where applied, and
+  # ambient. Nothing here is conditional, and the `ci` job requires it.
+  filesystem-operations:
+    name: filesystem operations (make filesystem-operations-evidence)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v5.0.1
+      - uses: ./.github/actions/setup
+      - name: Create the broker's own identity and the write-enabled workspace group
+        run: |
+          sudo useradd --system --no-create-home --shell /usr/sbin/nologin dwbroker
+          sudo groupadd --system dwwrite
+          sudo usermod --append --groups dwwrite dwbroker
+          sudo usermod --append --groups dwwrite "$USER"
+      - run: sudo --non-interactive --preserve-env --user "$USER" env "PATH=$PATH" make filesystem-operations-evidence
+        env:
+          DW_BROKER_AS: dwbroker
+          DW_PEER_AS: nobody
+          DW_WRITE_GROUP: dwwrite
+
   supply-chain:
     name: dependencies (make security)
     runs-on: ubuntu-latest
@@ -281,7 +312,7 @@ jobs:
   ci:
     name: CI
     runs-on: ubuntu-latest
-    needs: [format, lint, typecheck, architecture, schema, evals, test, authority-transport, filesystem-canonicalization, broker-fs-read, supply-chain, build]
+    needs: [format, lint, typecheck, architecture, schema, evals, test, authority-transport, filesystem-canonicalization, broker-fs-read, filesystem-operations, supply-chain, build]
     if: always()
     steps:
       - name: Fail unless every required job succeeded

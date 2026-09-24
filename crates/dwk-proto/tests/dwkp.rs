@@ -413,19 +413,27 @@ fn every_operation_that_can_be_refused_lists_the_refusal_as_a_response() {
 }
 
 #[test]
-fn admit_run_is_the_only_operation_that_carries_an_idempotency_key() {
+fn only_admission_and_a_version_two_invocation_carry_an_idempotency_key() {
     // Admission mints authority, so a retry that is not deduplicated mints a
     // second grant. The key is Required rather than Optional because an
     // optional one leaves the kernel two paths and a retry takes the
     // unprotected one (ADR-0036 section 8).
     //
+    // A version-2 ToolInvoke carries one for the same reason (ADR-0044):
+    // fs.move and fs.delete are not retry-safe, so a key names one invocation,
+    // is never performed twice, and is what a lost response is later asked
+    // about by. Version 1 carries fs.read only, which is retry-safe, and keeps
+    // M4b's rule exactly.
+    //
     // Everything else stays Forbidden, and for reasons rather than by default:
     // ReleaseRun is idempotent by shape -- releasing twice is acknowledged
-    // twice and resurrects nothing -- and QueryAuthority is pure, so a replay
-    // has nothing to duplicate. A key on either would be a field with no
-    // meaning, which is a field that can acquire one.
+    // twice and resurrects nothing -- QueryAuthority and CanonicalPreview are
+    // pure, so a replay has nothing to duplicate. A key on any of them would
+    // be a field with no meaning, which is a field that can acquire one.
     for spec in MESSAGES {
-        let expected = if spec.schema == "direwolf.run.admit" {
+        let keyed = spec.schema == "direwolf.run.admit"
+            || (spec.schema == "direwolf.tool.invoke" && spec.versions.min == 2);
+        let expected = if keyed {
             Presence::Required
         } else {
             Presence::Forbidden

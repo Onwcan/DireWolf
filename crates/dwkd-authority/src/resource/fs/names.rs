@@ -94,11 +94,8 @@ pub(super) fn check(name: &str) -> Result<(), NameProblem> {
 /// `name` is NFC (the grammar refused it otherwise), so equivalence is
 /// `NFC(sibling) == name`. An ASCII sibling is already NFC and differs from
 /// `name` byte-wise, so only a non-ASCII sibling can collide — but it can
-/// collide with an ASCII name: KELVIN SIGN normalises to `K`.
-#[cfg_attr(
-    all(not(target_os = "linux"), not(test)),
-    expect(dead_code, reason = "only the Linux resolver lists a directory")
-)]
+/// collide with an ASCII name: KELVIN SIGN normalises to `K`. Used on every
+/// platform: a listing's names are judged by it (M4c) wherever they came from.
 pub(super) fn equivalent(sibling: &str, name: &str) -> bool {
     if sibling.is_ascii() || sibling.len() > 4 * PathComponent::MAX_BYTES {
         // A sibling longer than any NFC expansion of a 255-byte name could be

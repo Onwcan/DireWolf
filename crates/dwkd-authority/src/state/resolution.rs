@@ -105,6 +105,28 @@ pub(super) fn run_root(
     Ok(config::workspace_root(work.tx, &workspace)?.ok_or(ResolutionRefused::NoWorkspaceRoot))
 }
 
+/// The root a run's workspace is bound to, **whatever the run's state**: for
+/// the authority's own settling of what an invocation left behind (a staging
+/// directory, ADR-0044 §10), never for a resolution on the run's behalf — an
+/// ended run's authority ended with it ([`run_root`]).
+pub(super) fn recorded_root(
+    work: &Work<'_>,
+    run: &str,
+) -> Result<Option<RootBinding>, AuthorityError> {
+    let workspace: Option<Option<String>> = work.db(work
+        .tx
+        .query_row(
+            "SELECT workspace_id FROM run_policy_input WHERE run_id = ?1",
+            [run],
+            |row| row.get(0),
+        )
+        .optional())?;
+    match workspace.flatten() {
+        Some(workspace) => config::workspace_root(work.tx, &workspace),
+        None => Ok(None),
+    }
+}
+
 /// Whether a run's workspace has a bound root — the kernel-owned fact that
 /// makes `${WORKSPACE}` resolvable for it.
 pub(super) fn run_workspace_bound(work: &Work<'_>, run: &str) -> Result<bool, AuthorityError> {

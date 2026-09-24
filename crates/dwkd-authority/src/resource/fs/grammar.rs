@@ -175,6 +175,16 @@ pub(in crate::resource) fn parse(declared: &DeclaredPath) -> Result<LogicalPath,
     Ok(LogicalPath { components })
 }
 
+/// Whether `name` is one component the grammar accepts, alone: what a
+/// listing's name must be to be named by a canonical path (M4c).
+///
+/// # Errors
+///
+/// The [`PathError`] the name would be refused with, at index 1.
+pub(in crate::resource) fn single_component(name: &str) -> Result<PathComponent, PathError> {
+    component(name, 1)
+}
+
 /// One component, or why it cannot be one.
 fn component(part: &str, index: usize) -> Result<PathComponent, PathError> {
     match part {

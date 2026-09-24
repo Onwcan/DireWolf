@@ -39,8 +39,8 @@ use rustix::fs::{self as sys, AtFlags, FileType, Mode, OFlags, ResolveFlags, Sta
 use rustix::io::Errno;
 
 use super::{
-    BirthTime, FileIdentity, PathError, ResolveError, ResourceKind, RootError, RootFingerprint,
-    Walked,
+    BirthTime, FileIdentity, PathError, Probe, ResolveError, ResourceKind, RootError,
+    RootFingerprint, Walked,
 };
 use crate::resource::PathComponent;
 
@@ -324,6 +324,161 @@ fn verify_chain(
         }
     }
     Ok(())
+}
+
+/// Find whether `leaf` names something in the directory `parents` resolve to
+/// (M4c, ADR-0044 §6). A name that exists is resolved the ordinary way by the
+/// caller; a vacant one is proved vacant here:
+///
+/// ```text
+/// parent = walk(parents)                       -- a directory, checked
+/// openat2(parent, leaf, O_PATH | O_NOFOLLOW)   -- ENOENT
+/// list(parent): no entry spelled `leaf`, and none canonically equivalent
+/// the parent still binds where it was found, and is still the object held
+/// ```
+///
+/// The listing refuses a name that would collide, under normalisation, with
+/// an existing entry: creating `é` beside `e` + U+0301 would make two objects
+/// share one canonical spelling.
+pub(in crate::resource) fn probe_vacant(
+    root: &OwnedFd,
+    root_id: FileIdentity,
+    parents: &[PathComponent],
+    leaf: &PathComponent,
+) -> Result<Probe, ResolveError> {
+    let depth = parents.len() + 1;
+    let (parent, parent_identity, guard) = if parents.is_empty() {
+        let parent = here(root.as_fd(), 0)?;
+        let st = sys::fstat(&parent).map_err(|errno| io(0, errno))?;
+        if identity(&st) != root_id {
+            return Err(ResolveError::Race { depth: 0 });
+        }
+        (parent, root_id, None)
+    } else {
+        let walked = walk(root, root_id, parents)?;
+        if walked.kind != ResourceKind::Directory {
+            return Err(ResolveError::NotADirectory {
+                depth: parents.len(),
+            });
+        }
+        (walked.leaf, walked.identity, walked.parent)
+    };
+    match sys::openat2(
+        &parent,
+        leaf.as_str(),
+        OFlags::PATH | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+        RESOLVE,
+    ) {
+        Ok(_) => return Ok(Probe::Exists),
+        Err(Errno::NOENT) => {}
+        Err(errno) => return Err(open_error(parent.as_fd(), leaf.as_str(), errno, depth)),
+    }
+    verify_absent_within(parent.as_fd(), leaf.as_str(), depth, MAX_LISTING_ENTRIES)?;
+    let held = sys::fstat(&parent).map(|st| identity(&st));
+    if held != Ok(parent_identity) {
+        return Err(ResolveError::Race { depth: depth - 1 });
+    }
+    if let Some((grandparent, name)) = &guard {
+        let bound = sys::statat(grandparent, name.as_str(), AtFlags::SYMLINK_NOFOLLOW)
+            .map(|st| identity(&st));
+        if bound != Ok(parent_identity) {
+            return Err(ResolveError::Race { depth: depth - 1 });
+        }
+    }
+    Ok(Probe::Vacant {
+        parent,
+        parent_identity,
+        guard,
+    })
+}
+
+/// Prove the directory holds no entry spelled `name` and none canonically
+/// equivalent to it.
+fn verify_absent_within(
+    parent: BorrowedFd<'_>,
+    name: &str,
+    depth: usize,
+    limit: usize,
+) -> Result<(), ResolveError> {
+    let listing = sys::openat2(
+        parent,
+        ".",
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+        Mode::empty(),
+        RESOLVE,
+    )
+    .map_err(|errno| match errno {
+        Errno::ACCESS => ResolveError::PermissionDenied { depth },
+        other => io(depth, other),
+    })?;
+    let entries = sys::Dir::new(listing).map_err(|errno| io(depth, errno))?;
+    for (count, entry) in entries.enumerate() {
+        if count >= limit {
+            return Err(ResolveError::DirectoryTooLarge { depth });
+        }
+        let entry = entry.map_err(|errno| io(depth, errno))?;
+        let bytes = entry.file_name().to_bytes();
+        if bytes == name.as_bytes() {
+            // It appeared between the lookup and the listing.
+            return Err(ResolveError::Race { depth });
+        }
+        if let Ok(sibling) = core::str::from_utf8(bytes)
+            && super::names::equivalent(sibling, name)
+        {
+            return Err(ResolveError::NormalizationAmbiguity { depth });
+        }
+    }
+    Ok(())
+}
+
+/// Whether a name found vacant is still vacant, and its parent still where it
+/// was: the re-check an effect path runs before handing a vacant name on.
+pub(in crate::resource) fn still_vacant(
+    parent: &OwnedFd,
+    parent_identity: FileIdentity,
+    guard: Option<(&OwnedFd, &PathComponent)>,
+    leaf: &PathComponent,
+) -> Result<(), ResolveError> {
+    still_bound(parent, guard, parent_identity)?;
+    match sys::statat(parent, leaf.as_str(), AtFlags::SYMLINK_NOFOLLOW) {
+        Err(Errno::NOENT) => Ok(()),
+        // Occupied now, or unanswerable: either way not the state decided on.
+        _ => Err(ResolveError::Race { depth: 0 }),
+    }
+}
+
+/// Open a checked directory, held as `O_PATH`, **for reading** — for a
+/// listing's enumeration, or for a namespace operation's `fsync` — and prove
+/// the opened directory is `expected`. Relative to the held descriptor, never
+/// by name.
+pub(in crate::resource) fn open_directory(
+    dir: &OwnedFd,
+    expected: FileIdentity,
+) -> Result<OwnedFd, ResolveError> {
+    let fd = sys::openat2(
+        dir,
+        ".",
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+        Mode::empty(),
+        RESOLVE,
+    )
+    .map_err(|errno| match errno {
+        Errno::ACCESS => ResolveError::PermissionDenied { depth: 0 },
+        other => io(0, other),
+    })?;
+    let st = sys::fstat(&fd).map_err(|errno| io(0, errno))?;
+    if identity(&st) != expected || FileType::from_raw_mode(st.st_mode) != FileType::Directory {
+        return Err(ResolveError::Race { depth: 0 });
+    }
+    Ok(fd)
+}
+
+/// The identity of the object a held descriptor refers to.
+pub(in crate::resource) fn held_identity(fd: &OwnedFd) -> Result<FileIdentity, ResolveError> {
+    sys::fstat(fd)
+        .map(|st| identity(&st))
+        .map_err(|errno| io(0, errno))
 }
 
 /// Whether a resolved object is still the one its name binds to.

@@ -36,3 +36,7 @@ dwk-proto = { workspace = true }
 # rustix, and the broker adds no feature to it. Linux only, like the channel.
 [target.'cfg(target_os = "linux")'.dependencies]
 rustix = { workspace = true }
+# M4c (ADR-0044 §12): `fs.patch` proves a file holds its base revision, and
+# its result the post revision, by SHA-256 -- the digest the runtime states
+# them by. The same pinned, pure-Rust crate and features the authority uses.
+sha2 = { workspace = true }

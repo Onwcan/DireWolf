@@ -58,8 +58,17 @@
 >   `fs.read:*` needs no resolution. A grant the authority stored is re-read by
 >   its canonical text, never resolved again. The capability an invocation
 >   requires is `fs.read:<canonical path>?max_bytes=<bound>&no_symlink_targets=true`.
->   Every other `fs` verb and `process` stay `UNRESOLVED_RESOURCE`
+>   In M4b every other `fs` verb stayed `UNRESOLVED_RESOURCE`
 >   ([ADR-0043](adr/0043-m4b-private-broker-channel-and-brokered-fs-read.md) §8).
+> - **`fs.list`, `fs.stat`, `fs.write`, `fs.create` and `fs.delete` resolve too
+>   (M4c).** The same resolver gives their concrete scope paths a meaning; for
+>   `fs.write` and `fs.create` a scope may name a **vacant** path — a checked
+>   parent directory and one validated, unambiguous name — and covers that name
+>   and everything beneath it, component by component (`out.txt` never covers
+>   `out.txtX`). For the other verbs a scope naming nothing covers nothing. A
+>   scope whose meaning is unstable — a missing parent, an ambiguous name — is
+>   withheld. `fs.exec_bit` and `process` stay `UNRESOLVED_RESOURCE`
+>   ([ADR-0044](adr/0044-m4c-filesystem-operations-plans-and-atomic-mutation.md) §6).
 > - **No policy preflight** (§4 step 7). `AdmitRun` carries no action for policy
 >   to decide, and inventing one would be deciding something nobody asked to
 >   do. Policy decides a *complete canonical action*, where both gates run

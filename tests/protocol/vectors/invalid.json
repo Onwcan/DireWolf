@@ -1213,6 +1213,158 @@
    "code": "PROTOCOL_SCHEMA_VIOLATION",
    "violation": "UNKNOWN_FIELD",
    "path": "/payload/resolution"
+  },
+  {
+   "name": "v2 tool invoke without its idempotency key",
+   "family": "dwkp",
+   "input": "{\"v\": 1, \"id\": \"msg_01M24BB8G0E87TVJX9GX248ADD\", \"type\": \"request\", \"ts\": \"2026-09-12T09:14:22.481Z\", \"session_id\": \"ses_01M24BB8G2E87V1ZPZXQ7DSCVW\", \"run_id\": \"run_01M24BB8G3E0A851TRWE3M8FZF\", \"epoch\": 7, \"schema\": \"direwolf.tool.invoke\", \"schema_version\": 2, \"payload\": {\"fs_delete\": {\"path\": \"/workspace/a\"}}}",
+   "code": "PROTOCOL_SCHEMA_VIOLATION",
+   "violation": "MISSING_FIELD",
+   "path": "/idempotency_key"
+  },
+  {
+   "name": "v2 tool preview carrying an idempotency key",
+   "family": "dwkp",
+   "input": "{\"v\": 1, \"id\": \"msg_01M24BB8G0E87TVJX9GX248ADD\", \"type\": \"request\", \"ts\": \"2026-09-12T09:14:22.481Z\", \"session_id\": \"ses_01M24BB8G2E87V1ZPZXQ7DSCVW\", \"run_id\": \"run_01M24BB8G3E0A851TRWE3M8FZF\", \"epoch\": 7, \"schema\": \"direwolf.tool.preview\", \"schema_version\": 2, \"idempotency_key\": \"inv-7f3a\", \"payload\": {\"fs_delete\": {\"path\": \"/workspace/a\"}}}",
+   "code": "PROTOCOL_SCHEMA_VIOLATION",
+   "violation": "FORBIDDEN_FIELD",
+   "path": "/idempotency_key"
+  },
+  {
+   "name": "v2 tool invoke naming no call",
+   "family": "dwkp",
+   "input": "{\"v\": 1, \"id\": \"msg_01M24BB8G0E87TVJX9GX248ADD\", \"type\": \"request\", \"ts\": \"2026-09-12T09:14:22.481Z\", \"session_id\": \"ses_01M24BB8G2E87V1ZPZXQ7DSCVW\", \"run_id\": \"run_01M24BB8G3E0A851TRWE3M8FZF\", \"epoch\": 7, \"schema\": \"direwolf.tool.invoke\", \"schema_version\": 2, \"idempotency_key\": \"inv-7f3a\", \"payload\": {}}",
+   "code": "PROTOCOL_SCHEMA_VIOLATION",
+   "violation": "MISSING_FIELD",
+   "path": "/payload"
+  },
+  {
+   "name": "v2 tool invoke naming two calls",
+   "family": "dwkp",
+   "input": "{\"v\": 1, \"id\": \"msg_01M24BB8G0E87TVJX9GX248ADD\", \"type\": \"request\", \"ts\": \"2026-09-12T09:14:22.481Z\", \"session_id\": \"ses_01M24BB8G2E87V1ZPZXQ7DSCVW\", \"run_id\": \"run_01M24BB8G3E0A851TRWE3M8FZF\", \"epoch\": 7, \"schema\": \"direwolf.tool.invoke\", \"schema_version\": 2, \"idempotency_key\": \"inv-7f3a\", \"payload\": {\"fs_read\": {\"path\": \"/workspace/a\", \"max_bytes\": 1}, \"fs_stat\": {\"path\": \"/workspace/a\"}}}",
+   "code": "PROTOCOL_SCHEMA_VIOLATION",
+   "violation": "INCONSISTENT",
+   "path": "/payload/fs_stat"
+  },
+  {
+   "name": "v2 tool invoke naming a tool that does not exist",
+   "family": "dwkp",
+   "input": "{\"v\": 1, \"id\": \"msg_01M24BB8G0E87TVJX9GX248ADD\", \"type\": \"request\", \"ts\": \"2026-09-12T09:14:22.481Z\", \"session_id\": \"ses_01M24BB8G2E87V1ZPZXQ7DSCVW\", \"run_id\": \"run_01M24BB8G3E0A851TRWE3M8FZF\", \"epoch\": 7, \"schema\": \"direwolf.tool.invoke\", \"schema_version\": 2, \"idempotency_key\": \"inv-7f3a\", \"payload\": {\"fs_copy\": {\"source\": \"/workspace/a\", \"destination\": \"/workspace/b\"}}}",
+   "code": "PROTOCOL_SCHEMA_VIOLATION",
+   "violation": "UNKNOWN_FIELD",
+   "path": "/payload/fs_copy"
+  },
+  {
+   "name": "v1 tool invoke naming a version-2 tool",
+   "family": "dwkp",
+   "input": "{\"v\": 1, \"id\": \"msg_01M24BB8G0E87TVJX9GX248ADD\", \"type\": \"request\", \"ts\": \"2026-09-12T09:14:22.481Z\", \"session_id\": \"ses_01M24BB8G2E87V1ZPZXQ7DSCVW\", \"run_id\": \"run_01M24BB8G3E0A851TRWE3M8FZF\", \"epoch\": 7, \"schema\": \"direwolf.tool.invoke\", \"schema_version\": 1, \"payload\": {\"fs_write\": {\"path\": \"/workspace/a\", \"content\": \"00\"}}}",
+   "code": "PROTOCOL_SCHEMA_VIOLATION",
+   "violation": "UNKNOWN_FIELD",
+   "path": "/payload/fs_write"
+  },
+  {
+   "name": "v2 fs.write asserting that it creates",
+   "family": "dwkp",
+   "input": "{\"v\": 1, \"id\": \"msg_01M24BB8G0E87TVJX9GX248ADD\", \"type\": \"request\", \"ts\": \"2026-09-12T09:14:22.481Z\", \"session_id\": \"ses_01M24BB8G2E87V1ZPZXQ7DSCVW\", \"run_id\": \"run_01M24BB8G3E0A851TRWE3M8FZF\", \"epoch\": 7, \"schema\": \"direwolf.tool.invoke\", \"schema_version\": 2, \"idempotency_key\": \"inv-7f3a\", \"payload\": {\"fs_write\": {\"path\": \"/workspace/a\", \"content\": \"00\", \"create\": true}}}",
+   "code": "PROTOCOL_SCHEMA_VIOLATION",
+   "violation": "UNKNOWN_FIELD",
+   "path": "/payload/fs_write/create"
+  },
+  {
+   "name": "v2 fs.move asking to replace",
+   "family": "dwkp",
+   "input": "{\"v\": 1, \"id\": \"msg_01M24BB8G0E87TVJX9GX248ADD\", \"type\": \"request\", \"ts\": \"2026-09-12T09:14:22.481Z\", \"session_id\": \"ses_01M24BB8G2E87V1ZPZXQ7DSCVW\", \"run_id\": \"run_01M24BB8G3E0A851TRWE3M8FZF\", \"epoch\": 7, \"schema\": \"direwolf.tool.invoke\", \"schema_version\": 2, \"idempotency_key\": \"inv-7f3a\", \"payload\": {\"fs_move\": {\"source\": \"/workspace/a\", \"destination\": \"/workspace/b\", \"replace\": true}}}",
+   "code": "PROTOCOL_SCHEMA_VIOLATION",
+   "violation": "UNKNOWN_FIELD",
+   "path": "/payload/fs_move/replace"
+  },
+  {
+   "name": "v2 fs.delete asking to recurse",
+   "family": "dwkp",
+   "input": "{\"v\": 1, \"id\": \"msg_01M24BB8G0E87TVJX9GX248ADD\", \"type\": \"request\", \"ts\": \"2026-09-12T09:14:22.481Z\", \"session_id\": \"ses_01M24BB8G2E87V1ZPZXQ7DSCVW\", \"run_id\": \"run_01M24BB8G3E0A851TRWE3M8FZF\", \"epoch\": 7, \"schema\": \"direwolf.tool.invoke\", \"schema_version\": 2, \"idempotency_key\": \"inv-7f3a\", \"payload\": {\"fs_delete\": {\"path\": \"/workspace/a\", \"recursive\": true}}}",
+   "code": "PROTOCOL_SCHEMA_VIOLATION",
+   "violation": "UNKNOWN_FIELD",
+   "path": "/payload/fs_delete/recursive"
+  },
+  {
+   "name": "v2 fs.search needle in upper-case hex",
+   "family": "dwkp",
+   "input": "{\"v\": 1, \"id\": \"msg_01M24BB8G0E87TVJX9GX248ADD\", \"type\": \"request\", \"ts\": \"2026-09-12T09:14:22.481Z\", \"session_id\": \"ses_01M24BB8G2E87V1ZPZXQ7DSCVW\", \"run_id\": \"run_01M24BB8G3E0A851TRWE3M8FZF\", \"epoch\": 7, \"schema\": \"direwolf.tool.invoke\", \"schema_version\": 2, \"idempotency_key\": \"inv-7f3a\", \"payload\": {\"fs_search\": {\"path\": \"/workspace/a\", \"needle\": \"0A\", \"max_scan_bytes\": 1, \"max_matches\": 1}}}",
+   "code": "PROTOCOL_SCHEMA_VIOLATION",
+   "violation": "INVALID_FORMAT",
+   "path": "/payload/fs_search/needle"
+  },
+  {
+   "name": "v2 fs.search with an empty needle",
+   "family": "dwkp",
+   "input": "{\"v\": 1, \"id\": \"msg_01M24BB8G0E87TVJX9GX248ADD\", \"type\": \"request\", \"ts\": \"2026-09-12T09:14:22.481Z\", \"session_id\": \"ses_01M24BB8G2E87V1ZPZXQ7DSCVW\", \"run_id\": \"run_01M24BB8G3E0A851TRWE3M8FZF\", \"epoch\": 7, \"schema\": \"direwolf.tool.invoke\", \"schema_version\": 2, \"idempotency_key\": \"inv-7f3a\", \"payload\": {\"fs_search\": {\"path\": \"/workspace/a\", \"needle\": \"\", \"max_scan_bytes\": 1, \"max_matches\": 1}}}",
+   "code": "PROTOCOL_SCHEMA_VIOLATION",
+   "violation": "INVALID_FORMAT",
+   "path": "/payload/fs_search/needle"
+  },
+  {
+   "name": "v2 fs.list over the entry bound",
+   "family": "dwkp",
+   "input": "{\"v\": 1, \"id\": \"msg_01M24BB8G0E87TVJX9GX248ADD\", \"type\": \"request\", \"ts\": \"2026-09-12T09:14:22.481Z\", \"session_id\": \"ses_01M24BB8G2E87V1ZPZXQ7DSCVW\", \"run_id\": \"run_01M24BB8G3E0A851TRWE3M8FZF\", \"epoch\": 7, \"schema\": \"direwolf.tool.invoke\", \"schema_version\": 2, \"idempotency_key\": \"inv-7f3a\", \"payload\": {\"fs_list\": {\"path\": \"/workspace\", \"max_entries\": 513}}}",
+   "code": "PROTOCOL_SCHEMA_VIOLATION",
+   "violation": "OUT_OF_RANGE",
+   "path": "/payload/fs_list/max_entries"
+  },
+  {
+   "name": "v2 fs.patch with a malformed revision",
+   "family": "dwkp",
+   "input": "{\"v\": 1, \"id\": \"msg_01M24BB8G0E87TVJX9GX248ADD\", \"type\": \"request\", \"ts\": \"2026-09-12T09:14:22.481Z\", \"session_id\": \"ses_01M24BB8G2E87V1ZPZXQ7DSCVW\", \"run_id\": \"run_01M24BB8G3E0A851TRWE3M8FZF\", \"epoch\": 7, \"schema\": \"direwolf.tool.invoke\", \"schema_version\": 2, \"idempotency_key\": \"inv-7f3a\", \"payload\": {\"fs_patch\": {\"path\": \"/workspace/a\", \"base\": {\"sha256\": \"00\", \"length\": 0}, \"post\": {\"sha256\": \"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\", \"length\": 0}, \"edits\": []}}}",
+   "code": "PROTOCOL_SCHEMA_VIOLATION",
+   "violation": "INVALID_FORMAT",
+   "path": "/payload/fs_patch/base/sha256"
+  },
+  {
+   "name": "v2 tool refusal a preview cannot produce",
+   "family": "dwkp",
+   "input": "{\"v\": 1, \"id\": \"msg_01M24BB8G0E87TVJX9GX248ADD\", \"type\": \"response\", \"ts\": \"2026-09-12T09:14:22.481Z\", \"causation_id\": \"msg_01M24BB8G1FQR94D2PF2XVQDV4\", \"schema\": \"direwolf.tool.refused\", \"schema_version\": 2, \"payload\": {\"operation\": \"CANONICAL_PREVIEW\", \"reason\": \"IDEMPOTENCY_KEY_REUSED\"}}",
+   "code": "PROTOCOL_SCHEMA_VIOLATION",
+   "violation": "INCONSISTENT",
+   "path": "/payload/reason"
+  },
+  {
+   "name": "v2 tool result with two outputs",
+   "family": "dwkp",
+   "input": "{\"v\": 1, \"id\": \"msg_01M24BB8G0E87TVJX9GX248ADD\", \"type\": \"response\", \"ts\": \"2026-09-12T09:14:22.481Z\", \"causation_id\": \"msg_01M24BB8G1FQR94D2PF2XVQDV4\", \"schema\": \"direwolf.tool.result\", \"schema_version\": 2, \"payload\": {\"invocation_id\": \"inv_01M24BB8G4E87TVJX9GX248ADD\", \"plan\": {\"tool\": \"fs.delete\", \"environment\": \"HOST\", \"effect\": \"ALLOW\", \"actions\": []}, \"output\": {\"fs_move\": {}, \"fs_delete\": {}}}}",
+   "code": "PROTOCOL_SCHEMA_VIOLATION",
+   "violation": "INCONSISTENT",
+   "path": "/payload/output/fs_delete"
+  },
+  {
+   "name": "v2 listing naming the parent directory",
+   "family": "dwkp",
+   "input": "{\"v\": 1, \"id\": \"msg_01M24BB8G0E87TVJX9GX248ADD\", \"type\": \"response\", \"ts\": \"2026-09-12T09:14:22.481Z\", \"causation_id\": \"msg_01M24BB8G1FQR94D2PF2XVQDV4\", \"schema\": \"direwolf.tool.result\", \"schema_version\": 2, \"payload\": {\"invocation_id\": \"inv_01M24BB8G4E87TVJX9GX248ADD\", \"plan\": {\"tool\": \"fs.list\", \"environment\": \"HOST\", \"effect\": \"ALLOW\", \"actions\": []}, \"output\": {\"fs_list\": {\"entries\": [{\"name\": \"..\", \"kind\": \"DIRECTORY\"}], \"unaddressable\": 0, \"complete\": true}}}}",
+   "code": "PROTOCOL_SCHEMA_VIOLATION",
+   "violation": "INVALID_FORMAT",
+   "path": "/payload/output/fs_list/entries/0/name"
+  },
+  {
+   "name": "v1 tool failure with a version-2 reason",
+   "family": "dwkp",
+   "input": "{\"v\": 1, \"id\": \"msg_01M24BB8G0E87TVJX9GX248ADD\", \"type\": \"response\", \"ts\": \"2026-09-12T09:14:22.481Z\", \"causation_id\": \"msg_01M24BB8G1FQR94D2PF2XVQDV4\", \"schema\": \"direwolf.tool.failed\", \"schema_version\": 1, \"payload\": {\"invocation_id\": \"inv_01M24BB8G4E87TVJX9GX248ADD\", \"reason\": \"OUTCOME_UNKNOWN\"}}",
+   "code": "PROTOCOL_SCHEMA_VIOLATION",
+   "violation": "UNKNOWN_VARIANT",
+   "path": "/payload/reason"
+  },
+  {
+   "name": "v2 plan with more actions than a plan holds",
+   "family": "dwkp",
+   "input": "{\"v\": 1, \"id\": \"msg_01M24BB8G0E87TVJX9GX248ADD\", \"type\": \"response\", \"ts\": \"2026-09-12T09:14:22.481Z\", \"causation_id\": \"msg_01M24BB8G1FQR94D2PF2XVQDV4\", \"schema\": \"direwolf.tool.denied\", \"schema_version\": 2, \"payload\": {\"plan\": {\"tool\": \"fs.move\", \"environment\": \"HOST\", \"effect\": \"DENY\", \"actions\": [{\"role\": \"SOURCE\", \"verb\": \"fs.delete\", \"canonical_path\": \"/workspace/a\", \"object\": \"EXISTING\", \"byte_count\": 0, \"decision\": {\"effect\": \"ALLOW\", \"reason\": \"ALLOWED_BY_RULE\", \"capability_result\": \"SATISFIED\", \"policy_result\": \"SATISFIED\", \"rule_id\": \"allow-workspace-write\", \"rule_source\": \"policy/operator.toml:81\"}}, {\"role\": \"SOURCE\", \"verb\": \"fs.delete\", \"canonical_path\": \"/workspace/a\", \"object\": \"EXISTING\", \"byte_count\": 0, \"decision\": {\"effect\": \"ALLOW\", \"reason\": \"ALLOWED_BY_RULE\", \"capability_result\": \"SATISFIED\", \"policy_result\": \"SATISFIED\", \"rule_id\": \"allow-workspace-write\", \"rule_source\": \"policy/operator.toml:81\"}}, {\"role\": \"SOURCE\", \"verb\": \"fs.delete\", \"canonical_path\": \"/workspace/a\", \"object\": \"EXISTING\", \"byte_count\": 0, \"decision\": {\"effect\": \"ALLOW\", \"reason\": \"ALLOWED_BY_RULE\", \"capability_result\": \"SATISFIED\", \"policy_result\": \"SATISFIED\", \"rule_id\": \"allow-workspace-write\", \"rule_source\": \"policy/operator.toml:81\"}}, {\"role\": \"SOURCE\", \"verb\": \"fs.delete\", \"canonical_path\": \"/workspace/a\", \"object\": \"EXISTING\", \"byte_count\": 0, \"decision\": {\"effect\": \"ALLOW\", \"reason\": \"ALLOWED_BY_RULE\", \"capability_result\": \"SATISFIED\", \"policy_result\": \"SATISFIED\", \"rule_id\": \"allow-workspace-write\", \"rule_source\": \"policy/operator.toml:81\"}}, {\"role\": \"SOURCE\", \"verb\": \"fs.delete\", \"canonical_path\": \"/workspace/a\", \"object\": \"EXISTING\", \"byte_count\": 0, \"decision\": {\"effect\": \"ALLOW\", \"reason\": \"ALLOWED_BY_RULE\", \"capability_result\": \"SATISFIED\", \"policy_result\": \"SATISFIED\", \"rule_id\": \"allow-workspace-write\", \"rule_source\": \"policy/operator.toml:81\"}}]}}}",
+   "code": "PROTOCOL_SCHEMA_VIOLATION",
+   "violation": "TOO_MANY_ITEMS",
+   "path": "/payload/plan/actions"
+  },
+  {
+   "name": "tool invoke at a version this build does not know",
+   "family": "dwkp",
+   "input": "{\"v\": 1, \"id\": \"msg_01M24BB8G0E87TVJX9GX248ADD\", \"type\": \"request\", \"ts\": \"2026-09-12T09:14:22.481Z\", \"session_id\": \"ses_01M24BB8G2E87V1ZPZXQ7DSCVW\", \"run_id\": \"run_01M24BB8G3E0A851TRWE3M8FZF\", \"epoch\": 7, \"schema\": \"direwolf.tool.invoke\", \"schema_version\": 3, \"idempotency_key\": \"inv-7f3a\", \"payload\": {\"fs_delete\": {\"path\": \"/workspace/a\"}}}",
+   "code": "PROTOCOL_VERSION_UNSUPPORTED",
+   "violation": "OUT_OF_RANGE",
+   "path": "/schema_version"
   }
  ]
 }

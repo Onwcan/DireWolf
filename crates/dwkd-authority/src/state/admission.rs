@@ -119,7 +119,7 @@ use dwk_proto::wire::scalar::{
 };
 use rusqlite::OptionalExtension as _;
 
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 
 use crate::capability::{
     self, Capability, CapabilitySet, CapabilitySpec, DeclaredPath, PrivacyClass, UnresolvedScope,
@@ -134,7 +134,7 @@ use super::error::AuthorityError;
 use super::identity::CallerContext;
 use super::lease::{self, to_sql};
 use super::policy_state::ActiveAuthority;
-use super::scopes::{self, Resolutions, Unresolved};
+use super::scopes::{self, Resolutions, Unresolved, VacantScope};
 use super::{Reply, Work};
 
 /// Why a requested capability was not granted.
@@ -470,17 +470,18 @@ pub(super) const PASSES: usize = 3;
 pub(super) enum Pass {
     /// The answer: refused, replayed or admitted — recorded.
     Answered(Reply<Admission>),
-    /// Nothing was written: these concrete `fs.read` paths must first be
+    /// Nothing was written: these concrete filesystem paths must first be
     /// resolved beneath `binding`, with no transaction open.
     Resolve {
         /// The session's workspace root binding.
         binding: RootBinding,
-        /// Every concrete `fs.read` path the admission's terms name.
-        paths: Vec<DeclaredPath>,
+        /// Every concrete filesystem path the admission's terms name, and
+        /// whether any declaration naming it may name a vacant one.
+        paths: Vec<(DeclaredPath, VacantScope)>,
     },
 }
 
-/// The concrete `fs.read` paths an admission names, and what the resolver
+/// The concrete filesystem paths an admission names, and what the resolver
 /// said about each: the input to minting, and to its audit record.
 struct FsTerms {
     paths: Vec<DeclaredPath>,
@@ -545,14 +546,18 @@ pub(super) fn admit(
 
     // 5. Every concrete fs.read path any term names, with the M4a resolver's
     //    answer for it -- or, first, a pass that asks for them.
-    let paths = concrete_paths(request, &profile, &skills, active);
+    let probes = concrete_paths(request, &profile, &skills, active);
+    let paths: Vec<DeclaredPath> = probes.iter().map(|(path, _)| path.clone()).collect();
     let Some(resolutions) = fs_resolutions(work, session, &paths, resolved, last)? else {
         let Some(binding) = session_root(work, session)? else {
             return Err(AuthorityError::Invariant(
                 "a pass asked to resolve with no root to resolve beneath",
             ));
         };
-        return Ok(Pass::Resolve { binding, paths });
+        return Ok(Pass::Resolve {
+            binding,
+            paths: probes,
+        });
     };
     let fs = FsTerms { paths, resolutions };
 
@@ -569,29 +574,38 @@ pub(super) fn admit(
     Ok(Pass::Answered(Reply::Done(admission)))
 }
 
-/// Every concrete `fs.read` path the request, the profile, the contributing
-/// skills and the mode ceiling name, once each, in order.
+/// Every concrete filesystem path the request, the profile, the contributing
+/// skills and the mode ceiling name, once each, in order — each with whether
+/// any declaration naming it is for a verb that may name a vacant path
+/// (`fs.write`, `fs.create`). Only such a path is probed for vacancy; one
+/// named only by verbs that act on what exists is resolved as M4b resolved
+/// it, and a missing object is `NOT_FOUND`.
 fn concrete_paths(
     request: &AdmitRun,
     profile: &config::ProfileRecord,
     skills: &[ActiveSkill],
     active: &ActiveAuthority,
-) -> Vec<DeclaredPath> {
+) -> Vec<(DeclaredPath, VacantScope)> {
     let requested: Vec<CapabilitySpec> = request
         .requested_capabilities
         .iter()
         .filter_map(|text| capability::parse(text.as_str()).ok())
         .collect();
     let declared = skills.iter().filter_map(ActiveSkill::declaration).flatten();
-    let mut paths = BTreeSet::new();
+    let mut paths: BTreeMap<DeclaredPath, VacantScope> = BTreeMap::new();
     for spec in requested
         .iter()
         .chain(&profile.declared)
         .chain(declared)
         .chain(&active.ceiling)
     {
-        if let Some(path) = scopes::concrete_read_path(spec) {
-            paths.insert(path.clone());
+        if let (Some(path), Some(vacant)) =
+            (scopes::concrete_path(spec), scopes::scope_rule(spec.verb()))
+        {
+            let entry = paths.entry(path.clone()).or_insert(vacant);
+            if vacant == VacantScope::Accepted {
+                *entry = VacantScope::Accepted;
+            }
         }
     }
     paths.into_iter().collect()
@@ -1055,10 +1069,15 @@ fn fs_path_fields(fs: &FsTerms) -> Fields {
         }
         let mut entry = vec![("path", Field::Text(path.as_str().to_owned()))];
         match answer {
-            Ok((_, identity)) => {
+            Ok((_, scopes::Found::Existing(identity))) => {
                 entry.push(("outcome", Field::Text("RESOLVED".to_owned())));
                 entry.push(("device", Field::Text(identity.device().to_string())));
                 entry.push(("inode", Field::Text(identity.inode().to_string())));
+            }
+            Ok((_, scopes::Found::Vacant(parent))) => {
+                entry.push(("outcome", Field::Text("VACANT".to_owned())));
+                entry.push(("parent_device", Field::Text(parent.device().to_string())));
+                entry.push(("parent_inode", Field::Text(parent.inode().to_string())));
             }
             Err(why) => entry.push(("outcome", Field::Text(why.class().to_owned()))),
         }
@@ -1388,7 +1407,11 @@ mod tests {
         .into_iter()
         .filter_map(DeclaredPath::new)
         .collect();
-        let answers = resolve_paths(&binding, &paths);
+        let probes: Vec<_> = paths
+            .iter()
+            .map(|p| (p.clone(), super::scopes::VacantScope::Refused))
+            .collect();
+        let answers = resolve_paths(&binding, &probes);
         let term = |texts: &[&str]| {
             let specs: Vec<_> = texts.iter().filter_map(|t| parse(t).ok()).collect();
             resolvable(&specs, &answers)

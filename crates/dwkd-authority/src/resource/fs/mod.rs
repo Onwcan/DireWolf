@@ -67,10 +67,23 @@
 //! # What this module does not do
 //!
 //! It performs no read, write, listing, execution or other tool effect. It
-//! hands a descriptor out in exactly one way: [`ResolvedResource::into_read_handoff`]
-//! consumes a checked regular file and opens it read-only relative to its
-//! checked parent, and only the broker link can take the descriptor out of the
-//! resulting [`ReadHandoff`] (M4b, ADR-0043; TX014). It writes no audit record — resolution is
+//! hands descriptors out only by **consuming** a checked resource into a
+//! handoff, each with one fixed role, and only the broker link can take a
+//! descriptor out of a handoff (TX014):
+//!
+//! | handoff | descriptor | for |
+//! |---|---|---|
+//! | [`ReadHandoff`] (M4b) | the regular file, open for reading | `fs.read`, `fs.search`, `fs.patch`'s base |
+//! | [`ObjectHandoff`] | the object, `O_PATH`; or the directory, open for reading | `fs.stat`; `fs.list` |
+//! | [`ParentHandoff`] | the parent directory, open for reading, and one validated name | `fs.write`, `fs.patch`, `fs.move`, `fs.delete` |
+//!
+//! A **vacant** name — one that does not exist yet, which a creating
+//! `fs.write` or a move's destination names — is resolved by
+//! [`PinnedRoot::resolve_target`] into a [`VacantResource`]: a checked parent
+//! directory, a validated name, and proof that nothing, not even a
+//! canonically equivalent spelling, occupies it (M4c, ADR-0044 §6). It is a
+//! different type from a [`ResolvedResource`], so code cannot treat "absent"
+//! as "the object that was checked". It writes no audit record — resolution is
 //! an internal step of a decision, not an effect ([ADR-0027]). It does not
 //! read `kernel.db`: the state layer loads the operator's root binding and
 //! calls in (TX005, TX011). Only Linux is supported; elsewhere every call
@@ -376,6 +389,7 @@ impl PinnedRoot {
     /// including a same-numbered one with a different birth time — and every
     /// error [`PinnedRoot::install`] can return.
     pub(crate) fn reopen(host_path: &str, expected: &RootFingerprint) -> Result<Self, RootError> {
+        looked_up();
         let (root, found) = Self::install(host_path)?;
         if expected.matches(&found) {
             Ok(root)
@@ -409,6 +423,7 @@ impl PinnedRoot {
         access: Access,
         expect: Expect,
     ) -> Result<ResolvedResource, ResolveError> {
+        looked_up();
         let path = grammar::parse(declared).map_err(ResolveError::Path)?;
         let walked = imp::walk(&self.handle.0, self.identity, path.components())?;
         judge(walked.kind, walked.links, access, expect)?;
@@ -422,6 +437,82 @@ impl PinnedRoot {
             parent: walked.parent.map(|(fd, name)| (Handle(fd), name)),
         })
     }
+}
+
+impl PinnedRoot {
+    /// Resolve a declared path beneath this root where a **vacant** name is
+    /// acceptable (M4c): a creating `fs.write`, a move's destination, a
+    /// capability that may name what does not exist yet. An existing object is
+    /// resolved exactly as [`PinnedRoot::resolve`] would, with `access` and
+    /// `expect`; a vacant name is proved vacant ([`VacantResource`]).
+    ///
+    /// `/workspace` itself is never vacant.
+    ///
+    /// # Errors
+    ///
+    /// As [`PinnedRoot::resolve`], and — for a vacant name — the parent's
+    /// refusals, [`ResolveError::NormalizationAmbiguity`] when an existing
+    /// entry is canonically equivalent to it, and [`ResolveError::Race`] when
+    /// it appears while being proved vacant.
+    pub fn resolve_target(
+        &self,
+        declared: &DeclaredPath,
+        access: Access,
+        expect: Expect,
+    ) -> Result<Target, ResolveError> {
+        looked_up();
+        let path = grammar::parse(declared).map_err(ResolveError::Path)?;
+        let Some((leaf, parents)) = path.components().split_last() else {
+            return self.resolve(declared, access, expect).map(Target::Existing);
+        };
+        match imp::probe_vacant(&self.handle.0, self.identity, parents, leaf)? {
+            Probe::Exists => self.resolve(declared, access, expect).map(Target::Existing),
+            Probe::Vacant {
+                parent,
+                parent_identity,
+                guard,
+            } => Ok(Target::Vacant(VacantResource {
+                canonical: path.canonical(),
+                parent: Handle(parent),
+                parent_identity,
+                guard: guard.map(|(fd, name)| (Handle(fd), name)),
+                leaf: leaf.clone(),
+                root: self.identity,
+            })),
+        }
+    }
+}
+
+/// Classify the names a listing found (M4c, ADR-0044 §6): `true` for a name a
+/// canonical path can name — UTF-8, one component the grammar accepts (NFC,
+/// no control, bidi or invisible-format character, at most 255 bytes, not `.`
+/// or `..`), and not canonically equivalent to another name in the listing —
+/// and `false` for one it cannot. A name the grammar refuses is never
+/// converted to one it accepts: it is counted, not rewritten.
+#[must_use]
+pub fn addressable_names(names: &[&[u8]]) -> Vec<bool> {
+    let texts: Vec<Option<&str>> = names
+        .iter()
+        .map(|bytes| {
+            let text = core::str::from_utf8(bytes).ok()?;
+            grammar::single_component(text).ok().map(|_| text)
+        })
+        .collect();
+    texts
+        .iter()
+        .enumerate()
+        .map(|(index, text)| {
+            text.is_some_and(|name| {
+                // Ambiguous if any other examined name, UTF-8 or not, would
+                // normalise to it.
+                !names.iter().enumerate().any(|(other, bytes)| {
+                    other != index
+                        && core::str::from_utf8(bytes)
+                            .is_ok_and(|sibling| names::equivalent(sibling, name))
+                })
+            })
+        })
+        .collect()
 }
 
 /// `${WORKSPACE}`: the canonical path `/workspace`.
@@ -484,6 +575,169 @@ pub(in crate::resource) struct Walked {
     pub(in crate::resource) links: u64,
     pub(in crate::resource) leaf: imp::Fd,
     pub(in crate::resource) parent: Option<(imp::Fd, PathComponent)>,
+}
+
+/// What [`imp::probe_vacant`] found. Internal. Off Linux nothing is found.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(in crate::resource) enum Probe {
+    /// Something is there: resolve it the ordinary way.
+    Exists,
+    /// Nothing is there, and the parent was held and checked.
+    Vacant {
+        /// The parent directory, `O_PATH`.
+        parent: imp::Fd,
+        /// Its identity.
+        parent_identity: FileIdentity,
+        /// Where the parent was found, to re-check it still binds there.
+        guard: Option<(imp::Fd, PathComponent)>,
+    },
+}
+
+/// What a declared path names beneath the pinned root when a vacant name is
+/// acceptable: an object that exists, or a name that does not — **two types**,
+/// so that "nothing was there" can never be used as "the object that was
+/// checked", and an object that appears in a vacant name is never mistaken
+/// for one that was authorised.
+#[derive(Debug)]
+pub enum Target {
+    /// An object exists at the name and was resolved.
+    Existing(ResolvedResource),
+    /// Nothing exists at the name; its parent does.
+    Vacant(VacantResource),
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Filesystem lookups this thread has begun: see [`lookups_on_this_thread`].
+    static LOOKUPS: core::cell::Cell<u64> = const { core::cell::Cell::new(0) };
+}
+
+/// Count a filesystem lookup — in this crate's unit tests; nothing in any
+/// other build.
+#[cfg_attr(not(test), allow(clippy::missing_const_for_fn))]
+fn looked_up() {
+    #[cfg(test)]
+    LOOKUPS.with(|count| count.set(count.get().saturating_add(1)));
+}
+
+/// How many filesystem lookups this thread has begun: every re-pinning of a
+/// bound workspace root, and every resolution beneath one. **Test
+/// observation, not an interface**: `#[cfg(test)]`, so it exists only in this
+/// crate's unit tests, where it proves that a path which must not consult the
+/// filesystem — an admission replay, a stored grant re-read — begins no lookup
+/// at all (ADR-0044 §6; `state/lookup_tests.rs`), rather than inferring it
+/// from an answer that happened not to change.
+#[cfg(test)]
+pub(crate) fn lookups_on_this_thread() -> u64 {
+    LOOKUPS.with(core::cell::Cell::get)
+}
+
+/// A name that does not exist yet, beneath a checked parent directory (M4c,
+/// ADR-0044 §6).
+///
+/// What it proves, at resolution: the parent resolved beneath the pinned root
+/// as a directory, one component at a time, like any other object; the name
+/// is one canonical component — valid, NFC, bounded; nothing is found at the
+/// name; **no other entry in the parent is canonically equivalent to it**; and
+/// the parent still binds where it was found. Its canonical path is the
+/// parent's canonical path and the name — derived from what was checked, not
+/// from the declaration's spelling.
+///
+/// Absence is re-proved before the name is handed on
+/// ([`VacantResource::into_parent_handoff`]), and the broker creates with
+/// `RENAME_NOREPLACE`, so an object that appears in the name meanwhile is
+/// never replaced.
+///
+/// ```compile_fail
+/// // Not constructible by naming its fields.
+/// use dwkd_authority::resource::fs::VacantResource;
+/// fn forge(v: VacantResource) -> VacantResource { VacantResource { ..v } }
+/// ```
+pub struct VacantResource {
+    canonical: CanonicalPath,
+    parent: Handle,
+    parent_identity: FileIdentity,
+    guard: Option<(Handle, PathComponent)>,
+    leaf: PathComponent,
+    root: FileIdentity,
+}
+
+impl fmt::Debug for VacantResource {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("VacantResource")
+            .field("canonical", &self.canonical)
+            .field("parent_identity", &self.parent_identity)
+            .field("root", &self.root)
+            .finish_non_exhaustive()
+    }
+}
+
+impl VacantResource {
+    /// The canonical path the name would have: the checked parent's, and the
+    /// validated name.
+    #[must_use]
+    pub const fn canonical_path(&self) -> &CanonicalPath {
+        &self.canonical
+    }
+
+    /// The parent directory's identity.
+    #[must_use]
+    pub const fn parent_identity(&self) -> FileIdentity {
+        self.parent_identity
+    }
+
+    /// The validated name, in the parent.
+    #[must_use]
+    pub fn leaf_name(&self) -> &str {
+        self.leaf.as_str()
+    }
+
+    /// The pinned root it was resolved beneath.
+    #[must_use]
+    pub const fn root_identity(&self) -> FileIdentity {
+        self.root
+    }
+
+    /// How it was resolved.
+    #[must_use]
+    pub const fn assurance(&self) -> Assurance {
+        Assurance::LinuxOpenat2
+    }
+
+    /// Hand the parent on for creating the name: the parent directory, opened
+    /// for reading relative to the held descriptor and proved to be the one
+    /// checked, after re-proving that the name is still vacant and the parent
+    /// still where it was found.
+    ///
+    /// # Errors
+    ///
+    /// [`ResolveError::Race`] when the name is occupied now or the parent
+    /// moved; the open's own refusals.
+    pub fn into_parent_handoff(self) -> Result<ParentHandoff, ResolveError> {
+        let Self {
+            canonical,
+            parent,
+            parent_identity,
+            guard,
+            leaf,
+            root,
+        } = self;
+        imp::still_vacant(
+            &parent.0,
+            parent_identity,
+            guard.as_ref().map(|(handle, name)| (&handle.0, name)),
+            &leaf,
+        )?;
+        let directory = imp::open_directory(&parent.0, parent_identity)?;
+        Ok(ParentHandoff {
+            directory: Handle(directory),
+            directory_identity: parent_identity,
+            leaf,
+            target: None,
+            canonical,
+            root,
+        })
+    }
 }
 
 /// A declared path, resolved: the canonical name policy and capabilities
@@ -587,6 +841,159 @@ impl ResolvedResource {
             self.parent.as_ref().map(|(handle, name)| (&handle.0, name)),
             self.identity,
         )
+    }
+
+    /// Whether this is the workspace root itself, which has no parent in the
+    /// workspace and so cannot be written, moved or removed.
+    #[must_use]
+    pub const fn is_workspace_root(&self) -> bool {
+        self.parent.is_none()
+    }
+
+    /// The verified name of the object in its parent — `None` for the
+    /// workspace root.
+    #[must_use]
+    pub fn leaf_name(&self) -> Option<&str> {
+        self.parent.as_ref().map(|(_, name)| name.as_str())
+    }
+
+    /// The identity of the parent directory the object was found in, from
+    /// the held descriptor: the directory whose name would change.
+    ///
+    /// # Errors
+    ///
+    /// [`ResolveError::WrongKind`] for the workspace root, which has no
+    /// parent; the `fstat`'s own failure.
+    pub fn parent_identity(&self) -> Result<FileIdentity, ResolveError> {
+        match &self.parent {
+            Some((parent, _)) => imp::held_identity(&parent.0),
+            None => Err(ResolveError::WrongKind { found: self.kind }),
+        }
+    }
+
+    /// Hand the object on for `fs.stat`: its own `O_PATH` descriptor, which
+    /// can name the object and nothing more — no read, no write, no
+    /// enumeration — after re-proving the name still binds it.
+    ///
+    /// # Errors
+    ///
+    /// [`ResolveError::Race`] when the name no longer binds it.
+    pub fn into_stat_handoff(self) -> Result<ObjectHandoff, ResolveError> {
+        self.still_bound()?;
+        Ok(ObjectHandoff {
+            handle: self.leaf,
+            identity: self.identity,
+            kind: self.kind,
+            role: HandoffRole::Stat,
+            canonical: self.canonical,
+            root: self.root,
+        })
+    }
+
+    /// Hand a checked directory on for `fs.list`: the directory opened for
+    /// reading relative to its own held descriptor and proved to be it. Not
+    /// its parent, not the workspace root.
+    ///
+    /// # Errors
+    ///
+    /// [`ResolveError::WrongKind`] for a regular file; [`ResolveError::Race`]
+    /// when the name no longer binds it; the open's own refusals.
+    pub fn into_list_handoff(self) -> Result<ObjectHandoff, ResolveError> {
+        if self.kind != ResourceKind::Directory {
+            return Err(ResolveError::WrongKind { found: self.kind });
+        }
+        self.still_bound()?;
+        let directory = imp::open_directory(&self.leaf.0, self.identity)?;
+        Ok(ObjectHandoff {
+            handle: Handle(directory),
+            identity: self.identity,
+            kind: self.kind,
+            role: HandoffRole::List,
+            canonical: self.canonical,
+            root: self.root,
+        })
+    }
+
+    /// Hand the object's **name** on, for replacing or removing it: its parent
+    /// directory opened for reading and proved to be the parent that was
+    /// checked, the one validated name, and the identity and kind the name
+    /// must still bind. Namespace operations act on a name in a directory, so
+    /// the object's own descriptor is not what they need.
+    ///
+    /// # Errors
+    ///
+    /// [`ResolveError::WrongKind`] for the workspace root, which has no
+    /// parent; [`ResolveError::Race`] when the name no longer binds it.
+    pub fn into_parent_handoff(self) -> Result<ParentHandoff, ResolveError> {
+        self.still_bound()?;
+        let Self {
+            canonical,
+            identity,
+            kind,
+            links: _,
+            root,
+            leaf: _,
+            parent,
+        } = self;
+        let Some((parent, name)) = parent else {
+            return Err(ResolveError::WrongKind { found: kind });
+        };
+        let parent_identity = imp::held_identity(&parent.0)?;
+        let directory = imp::open_directory(&parent.0, parent_identity)?;
+        Ok(ParentHandoff {
+            directory: Handle(directory),
+            directory_identity: parent_identity,
+            leaf: name,
+            target: Some((identity, kind)),
+            canonical,
+            root,
+        })
+    }
+
+    /// Hand a checked regular file on for `fs.patch`: its parent, as
+    /// [`ResolvedResource::into_parent_handoff`], and the file itself opened
+    /// for reading, as [`ResolvedResource::into_read_handoff`] — the broker
+    /// hashes the base through it and needs no permission to read the file
+    /// itself.
+    ///
+    /// # Errors
+    ///
+    /// As the two handoffs.
+    pub fn into_patch_handoff(self) -> Result<(ParentHandoff, ReadHandoff), ResolveError> {
+        let Self {
+            canonical,
+            identity,
+            kind,
+            links: _,
+            root,
+            leaf,
+            parent,
+        } = self;
+        if kind != ResourceKind::RegularFile {
+            return Err(ResolveError::WrongKind { found: kind });
+        }
+        let Some((parent, name)) = parent else {
+            return Err(ResolveError::WrongKind { found: kind });
+        };
+        let readable = imp::open_for_read(&leaf.0, &parent.0, &name, identity)?;
+        let parent_identity = imp::held_identity(&parent.0)?;
+        let directory = imp::open_directory(&parent.0, parent_identity)?;
+        Ok((
+            ParentHandoff {
+                directory: Handle(directory),
+                directory_identity: parent_identity,
+                leaf: name,
+                target: Some((identity, kind)),
+                canonical: canonical.clone(),
+                root,
+            },
+            ReadHandoff {
+                file: Handle(readable),
+                identity,
+                canonical,
+                root,
+            },
+        ))
     }
 
     /// Turn a checked regular file into the one thing an `fs.read` hands the
@@ -709,6 +1116,155 @@ impl ReadHandoff {
     #[cfg(target_os = "linux")]
     pub(crate) fn into_transfer_descriptor(self) -> (std::os::fd::OwnedFd, FileIdentity) {
         (self.file.0, self.identity)
+    }
+}
+
+/// What an [`ObjectHandoff`]'s descriptor is for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HandoffRole {
+    /// `fs.stat`: the object, `O_PATH`.
+    Stat,
+    /// `fs.list`: the directory, open for reading.
+    List,
+}
+
+/// A checked object handed on by its own descriptor (M4c): `O_PATH` for
+/// `fs.stat`, or a directory open for reading for `fs.list`. Not `Clone`; no
+/// descriptor in its `Debug`; the descriptor leaves only through the broker
+/// link (TX014).
+pub struct ObjectHandoff {
+    #[cfg_attr(
+        not(target_os = "linux"),
+        expect(
+            dead_code,
+            reason = "the descriptor leaves only through the Linux broker link"
+        )
+    )]
+    handle: Handle,
+    identity: FileIdentity,
+    kind: ResourceKind,
+    role: HandoffRole,
+    canonical: CanonicalPath,
+    root: FileIdentity,
+}
+
+impl fmt::Debug for ObjectHandoff {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ObjectHandoff")
+            .field("canonical", &self.canonical)
+            .field("identity", &self.identity)
+            .field("role", &self.role)
+            .finish_non_exhaustive()
+    }
+}
+
+impl ObjectHandoff {
+    /// The object's identity.
+    #[must_use]
+    pub const fn identity(&self) -> FileIdentity {
+        self.identity
+    }
+
+    /// Directory or regular file.
+    #[must_use]
+    pub const fn kind(&self) -> ResourceKind {
+        self.kind
+    }
+
+    /// What the descriptor is for.
+    #[must_use]
+    pub const fn role(&self) -> HandoffRole {
+        self.role
+    }
+
+    /// The canonical path it was resolved at.
+    #[must_use]
+    pub const fn canonical_path(&self) -> &CanonicalPath {
+        &self.canonical
+    }
+
+    /// The pinned root it was resolved beneath.
+    #[must_use]
+    pub const fn root_identity(&self) -> FileIdentity {
+        self.root
+    }
+
+    /// Give up the descriptor, for sending to the broker. **Only the broker
+    /// channel may call this** (TX014).
+    #[cfg(target_os = "linux")]
+    pub(crate) fn into_transfer_descriptor(self) -> (std::os::fd::OwnedFd, FileIdentity) {
+        (self.handle.0, self.identity)
+    }
+}
+
+/// A name handed on by its checked parent directory (M4c, ADR-0044 §8): the
+/// directory, open for reading and proved to be the parent that was checked;
+/// **one** validated name component in it; and, for an existing object, the
+/// identity and kind the name must still bind when the broker acts. What a
+/// namespace operation needs, and no more: not the object's own descriptor,
+/// not the workspace root, never a path.
+pub struct ParentHandoff {
+    #[cfg_attr(
+        not(target_os = "linux"),
+        expect(
+            dead_code,
+            reason = "the descriptor leaves only through the Linux broker link"
+        )
+    )]
+    directory: Handle,
+    directory_identity: FileIdentity,
+    leaf: PathComponent,
+    target: Option<(FileIdentity, ResourceKind)>,
+    canonical: CanonicalPath,
+    root: FileIdentity,
+}
+
+impl fmt::Debug for ParentHandoff {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ParentHandoff")
+            .field("canonical", &self.canonical)
+            .field("directory_identity", &self.directory_identity)
+            .field("target", &self.target)
+            .finish_non_exhaustive()
+    }
+}
+
+impl ParentHandoff {
+    /// The parent directory's identity.
+    #[must_use]
+    pub const fn directory_identity(&self) -> FileIdentity {
+        self.directory_identity
+    }
+
+    /// The one name, as the canonical grammar accepted it.
+    #[must_use]
+    pub fn leaf_name(&self) -> &str {
+        self.leaf.as_str()
+    }
+
+    /// The object the name must bind, or `None` for a vacant name.
+    #[must_use]
+    pub const fn target(&self) -> Option<(FileIdentity, ResourceKind)> {
+        self.target
+    }
+
+    /// The canonical path of the name.
+    #[must_use]
+    pub const fn canonical_path(&self) -> &CanonicalPath {
+        &self.canonical
+    }
+
+    /// The pinned root it was resolved beneath.
+    #[must_use]
+    pub const fn root_identity(&self) -> FileIdentity {
+        self.root
+    }
+
+    /// Give up the directory descriptor, for sending to the broker. **Only
+    /// the broker channel may call this** (TX014).
+    #[cfg(target_os = "linux")]
+    pub(crate) fn into_transfer_descriptor(self) -> (std::os::fd::OwnedFd, FileIdentity) {
+        (self.directory.0, self.directory_identity)
     }
 }
 

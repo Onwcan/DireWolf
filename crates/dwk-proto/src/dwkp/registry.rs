@@ -168,6 +168,20 @@ const REQUEST_ADMIT: EnvelopeRules = EnvelopeRules {
     idempotency_key: Presence::Required,
 };
 
+/// A version-2 tool invocation (M4c, ADR-0044 §§2, 7): a run request that also
+/// carries the key naming this one invocation. Required, for the reason
+/// `REQUEST_ADMIT`'s is: `fs.move` and `fs.delete` are not retry-safe, a lost
+/// response is the ordinary failure of a socket, and a key the kernel records
+/// is what lets the caller later ask what happened instead of trying again.
+const REQUEST_RUN_KEYED: EnvelopeRules = EnvelopeRules {
+    correlation_id: Presence::Optional,
+    causation_id: Presence::Optional,
+    session_id: Presence::Required,
+    run_id: Presence::Required,
+    epoch: Presence::Required,
+    idempotency_key: Presence::Required,
+};
+
 /// A request about an existing run: it names the session it belongs to, the
 /// epoch it is fenced to, and the run itself.
 const REQUEST_RUN: EnvelopeRules = EnvelopeRules {
@@ -195,7 +209,11 @@ const PROTOCOL_ERROR: EnvelopeRules = EnvelopeRules {
     ..RESPONSE
 };
 
-/// Every DWKP message this build decodes.
+/// Every DWKP message this build decodes. A schema may appear more than once,
+/// with disjoint version ranges and its own rules and payload for each: the
+/// tool messages keep version 1 exactly as M4b defined it (ADR-0043) and add
+/// version 2 beside it (ADR-0044). A version is never decoded under another
+/// version's rules.
 pub const MESSAGES: &[MessageSpec] = &[
     MessageSpec {
         schema: "direwolf.handshake",
@@ -350,6 +368,62 @@ pub const MESSAGES: &[MessageSpec] = &[
         summary: "An authorised invocation produced no result.",
     },
     MessageSpec {
+        schema: "direwolf.tool.invoke",
+        message_type: MessageType::Request,
+        versions: V2,
+        rules: REQUEST_RUN_KEYED,
+        payload: "ToolCall",
+        summary: "Perform one typed filesystem tool call for a run, under an idempotency key.",
+    },
+    MessageSpec {
+        schema: "direwolf.tool.preview",
+        message_type: MessageType::Request,
+        versions: V2,
+        rules: REQUEST_RUN,
+        payload: "ToolCall",
+        summary: "Ask what a filesystem tool call's complete plan would be, without performing it.",
+    },
+    MessageSpec {
+        schema: "direwolf.tool.result",
+        message_type: MessageType::Response,
+        versions: V2,
+        rules: RESPONSE,
+        payload: "ToolResultV2",
+        summary: "An invocation whose whole plan was allowed, performed on the checked objects, and recorded.",
+    },
+    MessageSpec {
+        schema: "direwolf.tool.denied",
+        message_type: MessageType::Response,
+        versions: V2,
+        rules: RESPONSE,
+        payload: "ToolDenialV2",
+        summary: "An action of the plan was refused; nothing was performed.",
+    },
+    MessageSpec {
+        schema: "direwolf.tool.previewed",
+        message_type: MessageType::Response,
+        versions: V2,
+        rules: RESPONSE,
+        payload: "CanonicalPreviewResultV2",
+        summary: "The complete canonical plan and decisions a tool call would receive.",
+    },
+    MessageSpec {
+        schema: "direwolf.tool.refused",
+        message_type: MessageType::Response,
+        versions: V2,
+        rules: RESPONSE,
+        payload: "ToolRefusalV2",
+        summary: "A version-2 tool operation refused before any effect was authorised.",
+    },
+    MessageSpec {
+        schema: "direwolf.tool.failed",
+        message_type: MessageType::Response,
+        versions: V2,
+        rules: RESPONSE,
+        payload: "ToolFailureV2",
+        summary: "An authorised version-2 invocation produced no result, or its outcome is unknown.",
+    },
+    MessageSpec {
         schema: "direwolf.ack",
         message_type: MessageType::Response,
         versions: V1,
@@ -367,12 +441,31 @@ pub const MESSAGES: &[MessageSpec] = &[
     },
 ];
 
-/// Look up a message by its type and schema.
+/// Look up a message by its type, schema and version.
 #[must_use]
-pub fn message(message_type: MessageType, schema: &str) -> Option<&'static MessageSpec> {
+pub fn message(
+    message_type: MessageType,
+    schema: &str,
+    version: u16,
+) -> Option<&'static MessageSpec> {
+    MESSAGES.iter().find(|m| {
+        m.message_type == message_type && m.schema == schema && m.versions.contains(version)
+    })
+}
+
+/// Every version of a message this build decodes, as one range, or `None` if
+/// it knows no message of that type and schema. The ranges of one schema are
+/// contiguous (a test holds them to it), so their union is a range.
+#[must_use]
+pub fn versions(message_type: MessageType, schema: &str) -> Option<VersionRange> {
     MESSAGES
         .iter()
-        .find(|m| m.message_type == message_type && m.schema == schema)
+        .filter(|m| m.message_type == message_type && m.schema == schema)
+        .map(|m| m.versions)
+        .reduce(|a, b| VersionRange {
+            min: a.min.min(b.min),
+            max: a.max.max(b.max),
+        })
 }
 
 const ERR: &str = "direwolf.protocol.error";
@@ -490,12 +583,12 @@ pub const OPERATIONS: &[OperationSpec] = &[
         ],
         initiator: "runtime",
         receiver: "dwkd-authority",
-        semantics_owner: "M4b (fs.read); M4c-M4e, M5, M10 (further tools)",
+        semantics_owner: "M4b (fs.read, version 1); M4c (the eight filesystem tools, version 2); M4d-M4e, M5, M10 (further tools)",
         effect_bearing: true,
         authority_bearing: true,
-        carries: "Envelope session_id, run_id and epoch; one typed call per tool -- in this build only fs_read{path, max_bytes}. Responses ToolResult{invocation_id, action, decision, fs_read{content, eof_observed}}, ToolDenial, ToolRefusal or ToolFailure. No capability, cap_id, environment, taint or idempotency_key: each would be the runtime asserting something the authority decides.",
-        consumer: "dwkd-authority: fence, run, the canonical resolver beneath the run's pinned root (ADR-0042), capability gate, policy gate, durable intent; only then the file opened for reading and one channel-bound authorisation with that one descriptor to dwkd-broker over the private channel; then the durable outcome and the run's taint (ADR-0043).",
-        second_path: "This IS the path from cognition to effect, and there is no other. It names one tool from a closed inventory with typed arguments the authority canonicalises itself: a tool this build lacks is an undeclared member and fails to decode, so nothing dispatches on a string. The runtime proposes a path and a byte bound; the authority resolves the path beneath the run's pinned workspace root (ADR-0042) so that the filesystem, not the spelling, supplies its canonical meaning, derives the required capability (fs.read:<canonical path>?max_bytes=<bound>), builds the complete canonical action (environment HOST, byte_count the bound) and requires both gates -- a held grant covering it and a policy ALLOW. It then records the intent durably, and only after that opens exactly that file for reading relative to its verified parent, proves the opened file is the checked object, and hands the broker one channel-bound, single-use authorisation with that one descriptor. The broker verifies the descriptor's identity again, reads at most the bound -- never a byte past it -- and returns the bytes to the authority, which records the outcome and raises the run's taint before answering. Because resolution precedes the gates, a refusal can say whether a workspace path exists even where policy would deny reading it; it never says what it holds. The broker is not addressable from cognition, never reopens a path, and never decides. Retry-safe, so no idempotency_key; a tool that is not must add one with a new version (ADR-0043).",
+        carries: "Envelope session_id, run_id and epoch. Version 1: one typed fs_read{path, max_bytes}; responses ToolResult{invocation_id, action, decision, fs_read}, ToolDenial, ToolRefusal or ToolFailure -- unchanged since M4b. Version 2: exactly one of eight typed members (fs_read, fs_list, fs_search, fs_stat, fs_write, fs_patch, fs_move, fs_delete) and a mandatory envelope idempotency_key; responses ToolResultV2{invocation_id, plan, output}, ToolDenialV2{plan}, ToolRefusalV2 or ToolFailureV2, each in the version of the request. No capability, cap_id, environment, taint, existence claim or retry class: each would be the runtime asserting something the authority decides.",
+        consumer: "dwkd-authority: fence, run and key; the canonical resolver for every target, existing or vacant, beneath the run's pinned root (ADR-0042, ADR-0044); the canonical plan and both gates for every action of it; the durable intent and the bound key; only then the descriptors the operation needs -- the file opened for reading, the directory opened for listing, the parent directories whose names change -- and one channel-bound authorisation to dwkd-broker over the private channel; then the durable outcome -- completed, failed, or UNKNOWN when an effect is not proved -- and, for a read-family result, the run's taint (ADR-0043, ADR-0044).",
+        second_path: "This IS the path from cognition to effect, and there is no other. A call names one tool from a closed inventory with typed arguments the authority canonicalises itself: a tool this build lacks is an undeclared member and fails to decode, so nothing dispatches on a string or an argument map. The authority resolves every path beneath the run's pinned workspace root so that the filesystem, not the spelling, supplies its meaning -- a vacant target as a checked parent directory and one validated name -- and derives the complete plan itself: the capability verbs each tool needs (a creating write needs fs.write and fs.create; a move fs.delete on its source and fs.create on its destination; a patch fs.read and fs.write), each with its canonical path and byte bound, environment HOST. Every action must be covered by a held grant and allowed by policy, with every obligation enforceable, or nothing happens. The intent and the idempotency key are recorded durably before any descriptor that could perform the effect exists. The broker receives exactly the operation's descriptors and at most one validated leaf name, re-proves every identity, checks the name immediately before and after changing it atomically (exchange or no-replace rename of a new file, never in place), undoes a change that reached an object it did not prove -- Linux has no compare-and-swap of a name against an inode, so the permission model keeps untrusted writers out of a write-enabled workspace -- and reports an outcome or an undo it cannot prove as indeterminate; the authority records that as UNKNOWN and never performs the invocation again. Every staging directory the broker may make is recorded with the intent and settled afterwards, removed only when it provably holds the broker's own uncommitted data. A key names one invocation for ever: a reuse is refused before anything is resolved. Because resolution precedes the gates, a refusal can say whether a workspace path exists or is vacant even where policy would deny the action; it never says what a file holds. The broker is not addressable from cognition, never opens a path, and never decides (ADR-0043, ADR-0044).",
     },
     OperationSpec {
         name: "ToolCancel",
@@ -535,12 +628,12 @@ pub const OPERATIONS: &[OperationSpec] = &[
         responses: &["direwolf.tool.previewed", "direwolf.tool.refused", ERR],
         initiator: "runtime, CLI",
         receiver: "dwkd-authority",
-        semantics_owner: "M4b",
+        semantics_owner: "M4b (version 1); M4c (version 2)",
         effect_bearing: false,
         authority_bearing: false,
-        carries: "Envelope session_id, run_id and epoch; the same typed call ToolInvoke carries. Response CanonicalPreviewResult{action, decision} or ToolRefusal.",
+        carries: "Envelope session_id, run_id and epoch; the same typed call ToolInvoke carries in the same version, and never an idempotency_key. Response CanonicalPreviewResult{action, decision} or ToolRefusal (version 1), CanonicalPreviewResultV2{plan} or ToolRefusalV2 (version 2).",
         consumer: "direwolf policy simulate; the approval [w]hy branch (M6); a runtime asking what it lacks.",
-        second_path: "It resolves the path and builds the canonical action and runs both gates through the same code ToolInvoke uses, so the untrusted side never duplicates canonicalisation, and it performs nothing: it opens no file for reading, contacts no broker, mints no invocation id, issues no authorisation and reserves nothing. Its resolution is the same lookup ToolInvoke performs first. Its answer authorises nothing: it is information, stale the moment it is sent, and a later ToolInvoke fences, canonicalises and decides again from scratch.",
+        second_path: "It resolves every target, builds the complete plan and runs every gate of every action through the same code ToolInvoke uses, so the untrusted side never duplicates canonicalisation, and it performs nothing: it opens nothing for an effect, contacts no broker, mints no invocation id, binds no key, records no intent, issues no authorisation and reserves nothing. Its resolution is the same lookup ToolInvoke performs first, and a differential test holds each invocation to the plan its preview named. Its answer authorises nothing: it is information, stale the moment it is sent, and a later ToolInvoke fences, canonicalises and decides again from scratch.",
     },
     OperationSpec {
         name: "CreateArtifact",
@@ -697,7 +790,7 @@ pub const OPERATIONS: &[OperationSpec] = &[
 
 #[cfg(test)]
 mod tests {
-    use super::{MESSAGES, OPERATIONS, WireStatus, message};
+    use super::{MESSAGES, OPERATIONS, WireStatus, message, versions};
 
     #[test]
     fn every_defined_operation_names_registered_messages() {
@@ -827,12 +920,67 @@ mod tests {
     }
 
     #[test]
-    fn lookup_is_by_type_and_schema() {
+    fn lookup_is_by_type_schema_and_version() {
         use crate::envelope::MessageType;
-        assert!(message(MessageType::Request, "direwolf.heartbeat").is_some());
-        assert!(message(MessageType::Response, "direwolf.heartbeat").is_none());
-        assert!(message(MessageType::Request, "direwolf.tool.invoke").is_some());
-        assert!(message(MessageType::Response, "direwolf.tool.invoke").is_none());
-        assert!(message(MessageType::Request, "direwolf.tool.cancel").is_none());
+        assert!(message(MessageType::Request, "direwolf.heartbeat", 1).is_some());
+        assert!(message(MessageType::Request, "direwolf.heartbeat", 2).is_none());
+        assert!(message(MessageType::Response, "direwolf.heartbeat", 1).is_none());
+        assert!(message(MessageType::Request, "direwolf.tool.cancel", 1).is_none());
+        // The tool messages carry two versions, each with its own payload.
+        let v1 = message(MessageType::Request, "direwolf.tool.invoke", 1).map(|m| m.payload);
+        let v2 = message(MessageType::Request, "direwolf.tool.invoke", 2).map(|m| m.payload);
+        assert_eq!(v1, Some("ToolInvoke"));
+        assert_eq!(v2, Some("ToolCall"));
+        assert!(message(MessageType::Request, "direwolf.tool.invoke", 3).is_none());
+        assert_eq!(
+            versions(MessageType::Request, "direwolf.tool.invoke").map(|r| (r.min, r.max)),
+            Some((1, 2))
+        );
+        assert_eq!(
+            versions(MessageType::Response, "direwolf.tool.invoke"),
+            None
+        );
+    }
+
+    #[test]
+    fn a_schemas_versions_are_disjoint_and_contiguous() {
+        let mut keys: Vec<(&str, &str)> = MESSAGES
+            .iter()
+            .map(|m| (m.message_type.as_str(), m.schema))
+            .collect();
+        keys.sort_unstable();
+        keys.dedup();
+        for (message_type, schema) in keys {
+            let mut ranges: Vec<(u16, u16)> = MESSAGES
+                .iter()
+                .filter(|m| m.message_type.as_str() == message_type && m.schema == schema)
+                .map(|m| (m.versions.min, m.versions.max))
+                .collect();
+            ranges.sort_unstable();
+            for pair in ranges.windows(2) {
+                if let [(_, high), (low, _)] = pair {
+                    assert_eq!(
+                        high.checked_add(1),
+                        Some(*low),
+                        "{schema}: versions must be disjoint and contiguous"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_version_two_invocation_requires_an_idempotency_key() {
+        use crate::envelope::{MessageType, Presence};
+        let v1 = message(MessageType::Request, "direwolf.tool.invoke", 1).map(|m| m.rules);
+        let v2 = message(MessageType::Request, "direwolf.tool.invoke", 2).map(|m| m.rules);
+        assert_eq!(v1.map(|r| r.idempotency_key), Some(Presence::Forbidden));
+        assert_eq!(v2.map(|r| r.idempotency_key), Some(Presence::Required));
+        // A preview performs nothing, so it names no invocation.
+        let preview = message(MessageType::Request, "direwolf.tool.preview", 2).map(|m| m.rules);
+        assert_eq!(
+            preview.map(|r| r.idempotency_key),
+            Some(Presence::Forbidden)
+        );
     }
 }

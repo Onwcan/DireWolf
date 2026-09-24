@@ -229,6 +229,24 @@ def ordered(low_name: str, low: int, high_name: str, high: int, cx: Cx) -> None:
         )
 
 
+def exactly_one(members: tuple[tuple[str, bool], ...], cx: Cx) -> None:
+    """The ``exactly_one(a, b, ...)`` cross-field check: a closed sum.
+
+    Every listed member is optional and exactly one is present. None is a
+    missing field at the struct; two or more are inconsistent at the second
+    present member, in declaration order -- where ``dwk-proto`` reports them.
+    """
+    present = [name for name, here in members if here]
+    if not present:
+        raise cx.violation(MISSING_FIELD, "exactly one alternative is required, and none was given")
+    if len(present) > 1:
+        raise schema_violation(
+            INCONSISTENT,
+            cx.child(present[1]),
+            f"exactly one alternative is permitted; {len(present)} were given",
+        )
+
+
 def paired(
     left_name: str,
     left: str,

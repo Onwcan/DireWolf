@@ -52,26 +52,31 @@ mod linux {
     use std::time::Duration;
 
     use dwk_proto::brokerp::{
-        self, BrokerHello, BrokerRefusal, ChannelNonce, FsReadAuthorisation, FsReadDone,
-        FsReadOutcome, OutcomeResult,
+        self, BrokerDone, BrokerHello, BrokerOutcome, BrokerRefusal, ChannelNonce,
+        FsReadAuthorisation, FsReadDone, OutcomeResult,
     };
+    use dwk_proto::dwkp::DwkpBody;
     use dwk_proto::dwkp::messages::FsReadCall;
     use dwk_proto::frame::FrameDecoder;
     use dwk_proto::wire::id::{InvocationId, RunId, SessionId};
-    use dwk_proto::wire::scalar::{Epoch, HexContent, ReadLimit, ToolFailureReason, WorkspacePath};
+    use dwk_proto::wire::scalar::{
+        Epoch, FsFailureReason as ToolFailureReason, HexContent, ReadLimit, WorkspacePath,
+    };
     use dwkd_authority::broker::{
-        BrokerFailure, EffectBroker, FsReadDelivery, FsReadOrder, UnixBroker,
+        BrokerDelivery, BrokerError, BrokerOrder, EffectBroker, FsReadDelivery, Operation,
+        UnixBroker,
     };
     use dwkd_authority::state::{
         Authority, CallerContext, CrashHook, CrashPoint, HookAction, ManualClock, Reply,
-        StartOptions, StartReport, ToolReply, verify_audit_against_store,
+        StartOptions, StartReport, ToolReply, ToolRequest, verify_audit_against_store,
     };
     use rustix::fs::{FileType, OFlags};
     use rustix::net::{RecvAncillaryBuffer, RecvAncillaryMessage, RecvFlags};
 
     use super::broker_support::{Broker, POLICY, Setup, evidence};
     use super::state_support::{
-        START_MS, admit_simple, audit_records, config, policy, raw, session, subject, text,
+        START_MS, admit_simple, audit_records, config, policy, query_msg, raw, session, subject,
+        text,
     };
     use super::transport_support::own_uid;
 
@@ -133,7 +138,20 @@ mod linux {
         path: &str,
         max: u32,
     ) -> Result<ToolReply, dwkd_authority::state::AuthorityError> {
-        authority.tool_invoke(&l.caller, &l.session, &l.run, l.epoch, &call(path, max))
+        let request = ToolRequest::v1(&call(path, max));
+        authority.tool_invoke(&l.caller, &l.session, &l.run, l.epoch, &request)
+    }
+
+    /// The bytes an `fs.read` invocation returned.
+    fn read_bytes(reply: &ToolReply) -> Vec<u8> {
+        let ToolReply::Done { output, .. } = reply else {
+            panic!("{reply:?}")
+        };
+        output
+            .fs_read
+            .as_ref()
+            .map(|read| read.content.to_bytes())
+            .expect("an fs.read result")
     }
 
     fn rows(state: &Path) -> Vec<(String, String)> {
@@ -197,25 +215,29 @@ mod linux {
     type Watch = (PathBuf, Vec<(usize, usize)>);
 
     impl EffectBroker for Recording {
-        fn fs_read(&self, order: FsReadOrder) -> Result<FsReadDelivery, BrokerFailure> {
+        fn perform(&self, order: BrokerOrder) -> Result<BrokerDelivery, BrokerError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
+            let Operation::Read { max_bytes, .. } = order.operation() else {
+                panic!("only fs.read is ordered here: {order:?}")
+            };
             if let Some((path, seen)) = self.watch.lock().unwrap().as_mut() {
                 seen.push(descriptors_on(path));
             }
             self.orders.lock().unwrap().push((
                 order.invocation().as_str().to_owned(),
-                order.max_bytes().get(),
+                max_bytes.get(),
                 order.identity().inode(),
             ));
-            Ok(self
-                .reply
-                .lock()
-                .unwrap()
-                .clone()
-                .unwrap_or(FsReadDelivery {
-                    content: b"made up".to_vec(),
-                    eof_observed: true,
-                }))
+            Ok(BrokerDelivery::Read(
+                self.reply
+                    .lock()
+                    .unwrap()
+                    .clone()
+                    .unwrap_or(FsReadDelivery {
+                        content: b"made up".to_vec(),
+                        eof_observed: true,
+                    }),
+            ))
         }
     }
 
@@ -657,6 +679,140 @@ mod linux {
         evidence(SUITE, "admission-replay-no-remint", "recorded-grant", 0);
     }
 
+    #[test]
+    fn a_stored_grant_is_frozen_text_and_each_invocation_resolves_its_target_afresh() {
+        // Three paths, kept apart (ADR-0043 §8, ADR-0044 §6):
+        //
+        //   a NEW declaration  -> the production resolver -> canonical authority
+        //   a STORED grant     -> its canonical text, re-read: no re-mint
+        //   a TOOL TARGET      -> the production resolver again, at invocation,
+        //                         compared with the frozen grant
+        //
+        // That the stored grant and the replay begin no filesystem lookup at
+        // all is measured inside the crate, by a counter that exists only in
+        // its unit tests (`src/state/lookup_tests.rs`); here, what each path
+        // answers when the object behind the grant is gone or replaced.
+        use dwkd_authority::state::Admission;
+
+        let setup = Setup::new("m4c-grant-frozen");
+        std::fs::write(setup.root.join("a.txt"), b"first").unwrap();
+        let fake = Arc::new(Recording::default());
+        let (mut authority, _) = start(&setup, START_MS + 10_000, None, Some(fake.clone()));
+        let caller = authority.connect(subject(1000));
+        let session = session(1);
+        let Reply::Done(epoch) = authority.acquire_lease(&caller, &session).unwrap() else {
+            panic!("a lease")
+        };
+        let declared = ["fs.read:/workspace/a.txt?max_bytes=64"];
+        let granted = |a: &Admission| -> Vec<String> {
+            a.granted()
+                .iter()
+                .map(|g| g.capability().to_canonical_string())
+                .collect()
+        };
+        let grant_rows = |state: &Path| -> i64 {
+            raw(state)
+                .query_row("SELECT count(*) FROM run_grant", [], |r| r.get(0))
+                .unwrap()
+        };
+
+        // A new declaration is resolved.
+        let admit = admit_simple(&session, epoch, "k1", &declared);
+        let Reply::Done(first) = authority.admit_run(&caller, &admit).unwrap() else {
+            panic!("admitted")
+        };
+        assert_eq!(granted(&first), declared);
+        let minted = grant_rows(&setup.state());
+
+        // The replay under the same key: the record.
+        let Reply::Done(replayed) = authority.admit_run(&caller, &admit).unwrap() else {
+            panic!("replayed")
+        };
+        assert_eq!(granted(&replayed), declared);
+
+        // 1. The object deleted: the stored grant rehydrates unchanged —
+        //    re-read for a query, and for a replay.
+        std::fs::remove_file(setup.root.join("a.txt")).unwrap();
+        let query = query_msg(&session, first.run_id(), epoch, None);
+        let DwkpBody::EffectiveAuthority(answer) = authority.dispatch(&caller, &query).unwrap()
+        else {
+            panic!("an answer")
+        };
+        let texts: Vec<&str> = answer
+            .granted
+            .iter()
+            .map(|g| g.capability.as_str())
+            .collect();
+        assert_eq!(texts, declared);
+        // 2. And the replay after the deletion: the same grant.
+        let Reply::Done(after_delete) = authority.admit_run(&caller, &admit).unwrap() else {
+            panic!("replayed")
+        };
+        assert_eq!(granted(&after_delete), declared);
+
+        // 3. A NEW admission of the deleted path: resolved now, and withheld.
+        let again = admit_simple(&session, epoch, "k2", &declared);
+        let Reply::Done(fresh) = authority.admit_run(&caller, &again).unwrap() else {
+            panic!("admitted")
+        };
+        assert!(granted(&fresh).is_empty());
+        assert_eq!(
+            fresh
+                .withheld()
+                .iter()
+                .map(|w| (w.requested().as_str().to_owned(), w.cause().code()))
+                .collect::<Vec<_>>(),
+            // `UNRESOLVED_RESOURCE` on the wire.
+            [(declared[0].to_owned(), "NEEDS_CANONICAL_PATH")]
+        );
+
+        // 4. A ToolInvoke on the deleted path: its target is resolved at
+        //    invocation, and there is nothing there. Nothing recorded, nothing
+        //    ordered.
+        let l = Live {
+            caller,
+            session,
+            epoch,
+            run: first.run_id().clone(),
+        };
+        let reply = invoke(&mut authority, &l, "/workspace/a.txt", 8).unwrap();
+        assert!(
+            matches!(
+                reply,
+                ToolReply::Refused(_, dwk_proto::wire::scalar::FsRefusalReason::NotFound)
+            ),
+            "{reply:?}"
+        );
+        assert!(rows(&setup.state()).is_empty());
+        assert_eq!(fake.calls.load(Ordering::SeqCst), 0);
+
+        // 5. Another object at the same canonical path: the invocation
+        //    resolves it afresh — the order names the new inode — and the
+        //    frozen grant covers its canonical path. Nothing is re-minted.
+        std::fs::write(setup.root.join("a.txt"), b"second").unwrap();
+        let inode = std::fs::metadata(setup.root.join("a.txt")).unwrap().ino();
+        let reply = invoke(&mut authority, &l, "/workspace/a.txt", 8).unwrap();
+        assert!(matches!(reply, ToolReply::Done { .. }), "{reply:?}");
+        assert_eq!(fake.orders.lock().unwrap().last().map(|o| o.2), Some(inode));
+        assert_eq!(
+            grant_rows(&setup.state()),
+            minted,
+            "the stored grant was not re-minted"
+        );
+        assert_eq!(audit_records(&setup.state(), "run.admitted").len(), 2);
+        for (case, outcome) in [
+            ("stored-grant-rehydrated-after-delete", "identical"),
+            ("admission-replay", "recorded-grant"),
+            ("new-admission-of-deleted-path", "withheld"),
+            ("invoke-on-deleted-path", "NOT_FOUND-nothing-recorded"),
+            ("replaced-object-same-path", "resolved-afresh-not-reminted"),
+        ] {
+            println!(
+                "FSOP-EVIDENCE {{\"suite\":\"grant-rehydration\",\"case\":\"{case}\",\"outcome\":\"{outcome}\"}}"
+            );
+        }
+    }
+
     // ---- which object is read, when the tree changes after the check -------
 
     /// The real channel to the real broker, with something done to the tree
@@ -669,9 +825,9 @@ mod linux {
     }
 
     impl EffectBroker for ChangeThenReal {
-        fn fs_read(&self, order: FsReadOrder) -> Result<FsReadDelivery, BrokerFailure> {
+        fn perform(&self, order: BrokerOrder) -> Result<BrokerDelivery, BrokerError> {
             (self.change)(&self.root);
-            self.inner.fs_read(order)
+            self.inner.perform(order)
         }
     }
 
@@ -722,11 +878,13 @@ mod linux {
         ];
         for (tag, change) in changes {
             let (setup, answer, original) = read_after(tag, change);
-            let ToolReply::Done { delivery, .. } = answer else {
-                panic!("{tag}: {answer:?}")
-            };
+            assert!(
+                matches!(answer, ToolReply::Done { .. }),
+                "{tag}: {answer:?}"
+            );
             assert_eq!(
-                delivery.content, b"hello, workspace\n",
+                read_bytes(&answer),
+                b"hello, workspace\n",
                 "{tag}: the checked object"
             );
             let now = std::fs::read(setup.root.join("a.txt")).unwrap();
@@ -749,10 +907,7 @@ mod linux {
         // write that file can change what it holds between the check and the
         // read, and the outcome records the digest of what was actually read.
         let (setup, answer, _) = read_after("m4b-rewrite", rewrite_in_place);
-        let ToolReply::Done { delivery, .. } = answer else {
-            panic!("{answer:?}")
-        };
-        assert_eq!(delivery.content, b"REWRITTEN");
+        assert_eq!(read_bytes(&answer), b"REWRITTEN");
         let done = &audit_records(&setup.state(), "tool.completed")[0];
         assert_eq!(super::state_support::int(done, "bytes_returned"), Some(9));
         evidence(SUITE, "in-place-rewrite", "object-not-content", 1);
@@ -855,13 +1010,13 @@ mod linux {
             }
             let authorisation = FsReadAuthorisation::decode_frame_body(&body).unwrap();
             let done = |bytes: &[u8]| {
-                OutcomeResult::Done(FsReadDone {
+                OutcomeResult::Done(BrokerDone::read(FsReadDone {
                     content: HexContent::from_bytes(bytes).unwrap(),
                     eof_observed: true,
-                })
+                }))
             };
             let outcome = |ch: ChannelNonce, inv: InvocationId, result| {
-                brokerp::encode_frame(&FsReadOutcome::new(ch, inv, result)).unwrap()
+                brokerp::encode_frame(&BrokerOutcome::new(ch, inv, result)).unwrap()
             };
             let other = InvocationId::parse("inv_01M24BB8G3E0A851TRWE3M8FZF").unwrap();
             let inv = authorisation.invocation_id.clone();
@@ -958,10 +1113,7 @@ mod linux {
             let state = setup.state();
             match expected {
                 None => {
-                    let ToolReply::Done { delivery, .. } = &answer else {
-                        panic!("{script:?}: {answer:?}")
-                    };
-                    assert_eq!(delivery.content, b"honest");
+                    assert_eq!(read_bytes(&answer), b"honest", "{script:?}");
                     assert_eq!(rows(&state)[0].1, "COMPLETED");
                 }
                 Some(reason) => {

@@ -77,7 +77,14 @@ def test_each_generated_registry_is_exactly_its_schema_directory() -> None:
         for path in sorted((SCHEMAS / family).glob("*.schema.json")):
             doc = json.loads(path.read_text(encoding="utf-8"))
             on_disk.add((doc["x-direwolf-message-type"], doc["x-direwolf-schema"]))
-            spec = module.MESSAGES[(doc["x-direwolf-message-type"], doc["x-direwolf-schema"])]
+            versions = doc["x-direwolf-schema-versions"]
+            specs = module.MESSAGES[(doc["x-direwolf-message-type"], doc["x-direwolf-schema"])]
+            (spec,) = [
+                s
+                for s in specs
+                if (s.versions.min, s.versions.max) == (versions["min"], versions["max"])
+            ]
+            assert spec.payload.__name__ == doc["x-direwolf-payload"], path.name
             envelope_rules = doc["x-direwolf-envelope"]
             assert dict(spec.rules.items()) == envelope_rules, path.name
             policy = doc["x-direwolf-unknown-fields"]

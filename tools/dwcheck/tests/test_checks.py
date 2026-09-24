@@ -388,6 +388,21 @@ def test_proto_source_rule_fires(tmp_path: Path, line: str) -> None:
     assert [f.rule for f in check_text(_config(tmp_path))] == ["TX002-proto-has-no-ambient-effects"]
 
 
+def test_a_rule_that_names_one_file_checks_that_file(tmp_path: Path) -> None:
+    """TX019 names a single file. `rglob` on a file finds nothing, so without
+    care a file-scoped rule would pass everything by checking nothing."""
+    rule = "TX019-the-broker-changes-names-only-inside-directories-it-holds"
+    _tree(
+        tmp_path,
+        {
+            "crates/dwkd-broker/src/exchange/mutate.rs": "use std::fs::File;\n",
+            "crates/dwkd-broker/src/exchange/other.rs": "use std::path::PathBuf;\n",
+        },
+    )
+    findings = [f for f in check_text(_config(tmp_path)) if f.rule == rule]
+    assert [f.path for f in findings] == ["crates/dwkd-broker/src/exchange/mutate.rs"]
+
+
 # --- accepted ADRs are immutable -------------------------------------------
 
 NEWLINE = chr(10)

@@ -1,37 +1,38 @@
-//! One exchange on one connection from the authority (M4b, ADR-0043).
+//! One exchange on one connection from the authority (M4b, ADR-0043; the M4c
+//! operations, ADR-0044).
 //!
-//! | step | refusal, before any byte of the file is read |
+//! | step | refusal, before anything is read or changed |
 //! |---|---|
 //! | send `BrokerHello{channel}` | — |
-//! | receive one frame (at most 16 KiB) and every descriptor with it | malformed: close, no reply |
-//! | decode strictly as `FsReadAuthorisation` | malformed: close, no reply |
+//! | receive one frame (at most one DWKP frame) and every descriptor with it | malformed: close, no reply |
+//! | decode strictly as one authorisation, by its `kind`, with the kind's descriptor count | malformed: close, no reply |
 //! | channel is this connection's | `CHANNEL_MISMATCH` |
-//! | exactly the declared one descriptor, control data not truncated | `DESCRIPTOR_COUNT` |
-//! | open for reading only, not `O_PATH` | `DESCRIPTOR_NOT_READABLE` |
-//! | a regular file | `DESCRIPTOR_NOT_REGULAR` |
-//! | `(st_dev, st_ino)` is the authorised object's | `IDENTITY_MISMATCH` |
-//! | `pread` from offset 0, at most `max_bytes` | `READ_FAILED` |
+//! | exactly the kind's descriptors arrived, control data not truncated | `DESCRIPTOR_COUNT` |
+//! | each descriptor is its role's open mode and kind, and the object named | `DESCRIPTOR_NOT_*`, `IDENTITY_MISMATCH` |
+//! | the operation's own checks | see `observe`, `search`, `mutate`, `staging` |
 //!
-//! **Never a byte past the bound.** Every read's window ends at `max_bytes`,
-//! and no read is made once the bound is reached, so the end of the file is
-//! reported only when it was *observed* — a read returned nothing before the
-//! bound (`eof_observed`). Exactly `max_bytes` read leaves the end unproven: to
-//! prove it would take reading byte `max_bytes + 1`, which the authority did not
-//! authorise.
-//!
-//! **Exactly one descriptor, or none is used.** No descriptor, two, three —
+//! **Exactly the kind's descriptors, or none is used.** Too few, too many —
 //! or truncated control data — is `DESCRIPTOR_COUNT`: every descriptor that
-//! arrived is closed and nothing is read from any of them. The first is not
-//! "the one" with the rest discarded.
+//! arrived is closed and nothing is done through any of them. At most two are
+//! ever held while the count is judged; any beyond that is closed the moment
+//! it arrives.
 //!
-//! Then one `FsReadOutcome` and the connection closes: a second authorisation
-//! on the same connection is never read.
+//! Then one `BrokerOutcome` — `done`, `refused` (no persistent change) or
+//! `indeterminate` (something may have been, and the broker cannot prove
+//! what) — and the connection closes: a second authorisation on the same
+//! connection is never read.
 //!
-//! The broker has no path to open: it reads the one object the authority
-//! checked, through the descriptor the authority opened, after proving the
-//! descriptor is that object. It does not canonicalise, resolve, evaluate
-//! policy or record anything; the authority does all of that, before and
-//! after.
+//! The broker has no path to open: it acts on the objects the authority
+//! checked, through the descriptors the authority opened, on at most the one
+//! validated name the authorisation carries, after proving each descriptor is
+//! the object named. It does not canonicalise, resolve, evaluate policy or
+//! record anything; the authority does all of that, before and after.
+
+mod checks;
+mod mutate;
+mod observe;
+mod search;
+mod staging;
 
 use std::io::{IoSliceMut, Write as _};
 use std::mem::MaybeUninit;
@@ -40,12 +41,10 @@ use std::os::unix::net::UnixStream;
 use std::time::{Duration, Instant};
 
 use dwk_proto::brokerp::{
-    self, BrokerHello, BrokerRefusal, ChannelNonce, FS_READ_DESCRIPTORS, FsReadAuthorisation,
-    FsReadDone, FsReadOutcome, MAX_AUTHORISATION_BODY, OutcomeResult,
+    self, Authorisation, BrokerHello, BrokerOutcome, BrokerRefusal, ChannelNonce,
+    MAX_AUTHORISATION_BODY, OutcomeResult,
 };
 use dwk_proto::frame::{ContentType, HEADER_LEN};
-use dwk_proto::wire::scalar::HexContent;
-use rustix::fs::{FileType, OFlags};
 use rustix::io::Errno;
 use rustix::net::{RecvAncillaryBuffer, RecvAncillaryMessage, RecvFlags, ReturnFlags};
 
@@ -56,8 +55,12 @@ pub(crate) const DEADLINE: Duration = Duration::from_secs(10);
 /// The largest authorisation frame, header included.
 const MAX_AUTHORISATION_FRAME: usize = HEADER_LEN + MAX_AUTHORISATION_BODY;
 
-/// Serve one connection the kernel says the authority made.
-pub(crate) fn serve_one(stream: &UnixStream, channel: Option<ChannelNonce>) {
+/// The most descriptors any authorisation carries.
+const MAX_DESCRIPTORS: usize = 2;
+
+/// Serve one connection the kernel says the authority made. `own_uid` is the
+/// broker's effective uid, which its staging directories must be owned by.
+pub(crate) fn serve_one(stream: &UnixStream, channel: Option<ChannelNonce>, own_uid: u32) {
     let Some(channel) = channel else {
         crate::event("channels_exhausted");
         return;
@@ -78,26 +81,39 @@ pub(crate) fn serve_one(stream: &UnixStream, channel: Option<ChannelNonce>) {
             return;
         }
     };
-    let Ok(authorisation) = FsReadAuthorisation::decode_frame_body(&received.body) else {
+    let Ok(authorisation) = Authorisation::decode_frame_body(&received.body) else {
         crate::event("malformed reason=authorisation");
         return;
     };
-    let invocation = authorisation.invocation_id.clone();
-    let result = execute(&channel, &authorisation, received.descriptors);
+    let invocation = authorisation.invocation_id().clone();
+    let operation = authorisation.kind().as_str();
+    let result = execute(&channel, &authorisation, received.descriptors, own_uid);
     match &result {
-        OutcomeResult::Done(done) => crate::event(&format!(
-            "executed invocation={} bytes={} eof_observed={}",
-            invocation.as_str(),
-            done.content.byte_len(),
-            done.eof_observed
-        )),
+        OutcomeResult::Done(done) => {
+            let detail = done.fs_read.as_ref().map_or_else(String::new, |read| {
+                format!(
+                    " bytes={} eof_observed={}",
+                    read.content.byte_len(),
+                    read.eof_observed
+                )
+            });
+            crate::event(&format!(
+                "executed invocation={}{detail} op={operation}",
+                invocation.as_str()
+            ));
+        }
         OutcomeResult::Refused(why) => crate::event(&format!(
-            "refused invocation={} reason={}",
+            "refused invocation={} reason={} op={operation}",
+            invocation.as_str(),
+            why.as_str()
+        )),
+        OutcomeResult::Indeterminate(why) => crate::event(&format!(
+            "indeterminate invocation={} reason={} op={operation}",
             invocation.as_str(),
             why.as_str()
         )),
     }
-    let outcome = FsReadOutcome::new(channel, invocation, result);
+    let outcome = BrokerOutcome::new(channel, invocation, result);
     let delivered =
         brokerp::encode_frame(&outcome).is_ok_and(|frame| write_all(stream, &frame, until).is_ok());
     if !delivered {
@@ -113,14 +129,15 @@ struct Received {
 
 /// Every descriptor that arrived with the authorisation, counted.
 ///
-/// Only the first is held, and only until the count is judged: every later
-/// one is closed the moment it arrives, because a message that carries more
-/// than one is refused whatever the first one is — so a peer cannot make the
-/// broker hold descriptors by sending many, and nothing is ever read from a
-/// descriptor before the count is known to be exactly one.
+/// At most [`MAX_DESCRIPTORS`] are held, and only until the count is judged:
+/// any later one is closed the moment it arrives, because a message that
+/// carries more than its kind's count is refused whatever the first ones are
+/// — so a peer cannot make the broker hold descriptors by sending many, and
+/// nothing is ever done through a descriptor before the count is known to be
+/// exactly right.
 #[derive(Default)]
 struct Descriptors {
-    first: Option<OwnedFd>,
+    held: Vec<OwnedFd>,
     count: usize,
     truncated: bool,
 }
@@ -128,30 +145,33 @@ struct Descriptors {
 impl Descriptors {
     fn receive(&mut self, fd: OwnedFd) {
         self.count = self.count.saturating_add(1);
-        if self.count == 1 {
-            self.first = Some(fd);
+        if self.held.len() < MAX_DESCRIPTORS {
+            self.held.push(fd);
         } else {
-            // Not the first: closed here, unread.
+            // Beyond any kind's count: closed here, unused.
             drop(fd);
         }
     }
 
-    /// The one descriptor — when exactly one arrived, intact, and the
-    /// authorisation declared exactly one. Otherwise every descriptor that
-    /// arrived is closed here, unread, and the answer is a refusal.
-    fn exactly_one(self, declared: u8) -> Result<OwnedFd, BrokerRefusal> {
+    /// The descriptors — when exactly `expected` arrived, intact, and the
+    /// authorisation declared exactly that many. Otherwise every descriptor
+    /// that arrived is closed here, unused, and the answer is a refusal.
+    fn exactly(self, declared: u8, expected: u8) -> Result<Vec<OwnedFd>, BrokerRefusal> {
         let Self {
-            first,
+            held,
             count,
             truncated,
         } = self;
-        let exact = !truncated && count == 1 && declared == FS_READ_DESCRIPTORS;
-        match first {
-            Some(fd) if exact => Ok(fd),
-            other => {
-                drop(other);
-                Err(BrokerRefusal::DescriptorCount)
-            }
+        let expected = usize::from(expected);
+        let exact = !truncated
+            && count == expected
+            && usize::from(declared) == expected
+            && held.len() == expected;
+        if exact {
+            Ok(held)
+        } else {
+            drop(held);
+            Err(BrokerRefusal::DescriptorCount)
         }
     }
 }
@@ -234,90 +254,41 @@ fn receive(stream: &UnixStream, until: Instant) -> Result<Received, &'static str
     }
 }
 
-/// Check the authorisation and its descriptor, then read.
+/// Check the authorisation's channel and descriptor count, then perform it.
 fn execute(
     channel: &ChannelNonce,
-    authorisation: &FsReadAuthorisation,
+    authorisation: &Authorisation,
     descriptors: Descriptors,
+    own_uid: u32,
 ) -> OutcomeResult {
-    if &authorisation.channel != channel {
+    if authorisation.channel() != channel {
         return OutcomeResult::Refused(BrokerRefusal::ChannelMismatch);
     }
-    let file = match descriptors.exactly_one(authorisation.descriptors.get()) {
-        Ok(file) => file,
+    let Some(expected) = authorisation.kind().descriptors() else {
+        return OutcomeResult::Refused(BrokerRefusal::DescriptorCount);
+    };
+    let fds = match descriptors.exactly(authorisation.declared_descriptors(), expected) {
+        Ok(fds) => fds,
         Err(refusal) => return OutcomeResult::Refused(refusal),
     };
-    let Ok(flags) = rustix::fs::fcntl_getfl(&file) else {
-        return OutcomeResult::Refused(BrokerRefusal::DescriptorNotReadable);
+    let mut fds = fds.into_iter();
+    let (Some(first), second) = (fds.next(), fds.next()) else {
+        return OutcomeResult::Refused(BrokerRefusal::DescriptorCount);
     };
-    if flags.contains(OFlags::PATH) || flags & OFlags::RWMODE != OFlags::RDONLY {
-        return OutcomeResult::Refused(BrokerRefusal::DescriptorNotReadable);
-    }
-    let Ok(st) = rustix::fs::fstat(&file) else {
-        return OutcomeResult::Refused(BrokerRefusal::ReadFailed);
-    };
-    if FileType::from_raw_mode(st.st_mode) != FileType::RegularFile {
-        return OutcomeResult::Refused(BrokerRefusal::DescriptorNotRegular);
-    }
-    let identity = (widen(st.st_dev), widen(st.st_ino));
-    if identity != (authorisation.device.value(), authorisation.inode.value()) {
-        return OutcomeResult::Refused(BrokerRefusal::IdentityMismatch);
-    }
-    match read_bounded(&file, authorisation.max_bytes.get()) {
-        Some(done) => OutcomeResult::Done(done),
-        None => OutcomeResult::Refused(BrokerRefusal::ReadFailed),
-    }
-}
-
-/// Widen a kernel integer without a lossy cast.
-fn widen<T: Into<u64>>(value: T) -> u64 {
-    value.into()
-}
-
-/// Read at most `max_bytes` from offset zero of the handed descriptor.
-fn read_bounded(file: &OwnedFd, max_bytes: u32) -> Option<FsReadDone> {
-    read_within(max_bytes, |window, offset| {
-        rustix::io::pread(file, window, offset)
-    })
-}
-
-/// Read at most `max_bytes` bytes from offset zero through `read_at`, asking
-/// for no byte past the bound: every window ends at `max_bytes`, and no read
-/// is made once it is reached. The end of the file is reported only when a
-/// read returned nothing before the bound — never discovered by reading past
-/// it. The buffer is sized from the bound, which decoding has already limited
-/// to 256 KiB, so nothing is allocated before the bound is known to hold.
-///
-/// `read_at` is the file: `pread` in production, a counting double in tests.
-fn read_within(
-    max_bytes: u32,
-    mut read_at: impl FnMut(&mut [u8], u64) -> Result<usize, Errno>,
-) -> Option<FsReadDone> {
-    let bound = usize::try_from(max_bytes).ok()?;
-    let mut content = vec![0u8; bound];
-    let mut filled = 0usize;
-    let mut eof_observed = false;
-    while filled < bound {
-        let room = bound.checked_sub(filled)?;
-        let offset = u64::try_from(filled).ok()?;
-        let window = content.get_mut(filled..bound)?;
-        match read_at(window, offset) {
-            Ok(0) => {
-                eof_observed = true;
-                break;
-            }
-            // A read cannot return more than it was given room for; one that
-            // claims to is not a read this broker trusts.
-            Ok(n) if n <= room => filled = filled.checked_add(n)?,
-            Err(Errno::INTR) => {}
-            Ok(_) | Err(_) => return None,
+    match (authorisation, second) {
+        (Authorisation::FsRead(read), None) => observe::read(read, &first),
+        (Authorisation::FsStat(stat), None) => observe::stat(stat, &first),
+        (Authorisation::FsList(list), None) => observe::list(list, first),
+        (Authorisation::FsSearch(found), None) => search::search(found, &first),
+        (Authorisation::FsWrite(write), None) => mutate::write(write, &first, own_uid),
+        (Authorisation::FsPatch(patch), Some(file)) => mutate::patch(patch, &first, &file, own_uid),
+        (Authorisation::FsMove(moved), Some(destination)) => {
+            mutate::move_file(moved, &first, &destination)
         }
+        (Authorisation::FsDelete(delete), None) => mutate::delete(delete, &first, own_uid),
+        (Authorisation::FsReclaim(reclaim), None) => staging::reclaim(reclaim, &first, own_uid),
+        _ => OutcomeResult::Refused(BrokerRefusal::DescriptorCount),
     }
-    content.truncate(filled);
-    Some(FsReadDone {
-        content: HexContent::from_bytes(&content)?,
-        eof_observed,
-    })
 }
 
 #[cfg(test)]

@@ -167,13 +167,24 @@ pub enum AuditEvent {
     ToolFailed,
     /// An invocation whose intent a previous incarnation recorded and whose
     /// outcome it never did: its result, if the broker produced one, was never
-    /// delivered (M4b).
+    /// delivered (M4b). Only for a tool without effect.
     ToolInterrupted,
+    /// An invocation of a tool with an effect whose outcome is not proved:
+    /// the broker may have acted and nothing shows whether, or a previous
+    /// incarnation recorded its intent and never its outcome (M4c). Never
+    /// performed again by the authority.
+    ToolOutcomeUnknown,
+    /// A staging directory an invocation may have left behind was judged by
+    /// the broker and settled (M4c): removed because it provably held only the
+    /// broker's own uncommitted data, or retained — with what it holds — for
+    /// the operator and M9's reconciliation, or found absent or not the
+    /// broker's. Never the invocation performed again.
+    ToolStagingSettled,
 }
 
 impl AuditEvent {
     /// Every kind, in declaration order.
-    pub const ALL: [Self; 33] = [
+    pub const ALL: [Self; 35] = [
         Self::StoreCreated,
         Self::StoreOpened,
         Self::PolicyInstalled,
@@ -207,6 +218,8 @@ impl AuditEvent {
         Self::ToolCompleted,
         Self::ToolFailed,
         Self::ToolInterrupted,
+        Self::ToolOutcomeUnknown,
+        Self::ToolStagingSettled,
     ];
 
     /// The spelling in a record's `event` field.
@@ -246,6 +259,8 @@ impl AuditEvent {
             Self::ToolCompleted => "tool.completed",
             Self::ToolFailed => "tool.failed",
             Self::ToolInterrupted => "tool.interrupted",
+            Self::ToolOutcomeUnknown => "tool.outcome_unknown",
+            Self::ToolStagingSettled => "tool.staging_settled",
         }
     }
 }

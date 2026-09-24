@@ -22,7 +22,7 @@ compromised host.
 
 ---
 
-## Status: M3 complete; M4a complete; M4b — one brokered `fs.read`; M4 incomplete
+## Status: M3 complete; M4a and M4b complete; M4c — the filesystem tools; M4 incomplete
 
 **None of the above is implemented yet.** This repository contains the Phase 0
 architecture package, the M1 foundation (the monorepo layout, the Rust and
@@ -142,6 +142,20 @@ and the M2 wire contract:
   objects ([ADR-0042](docs/adr/0042-m4a-canonical-filesystem-resolution.md),
   `make filesystem-canonicalization-evidence`). **Linux only**, and it
   performs no tool effect.
+- **the filesystem tools** (M4c, the third part of M4): `fs.list`, `fs.search`,
+  `fs.stat`, `fs.write`, `fs.patch`, `fs.move` and `fs.delete`, as version 2 of
+  the tool messages. Each call is a plan of canonical actions — a creating
+  write needs `fs.write` and `fs.create`, a move `fs.delete` and `fs.create` —
+  and every action must pass both gates. The broker changes one checked name
+  atomically, never in place, checking it immediately before and after the
+  change and undoing a change that reached anything else; an effect or an
+  undo nothing proves is recorded `UNKNOWN` and never repeated. A workspace is
+  writable only where the operator grants the broker's own user directory
+  write permission, which is ambient authority and stated as such — and,
+  since Linux cannot compare a name against an inode atomically, the grant
+  must also keep untrusted writers out
+  ([ADR-0044](docs/adr/0044-m4c-filesystem-operations-plans-and-atomic-mutation.md),
+  `make filesystem-operations-evidence`). **Linux only.**
 - **one brokered effect: `fs.read`** (M4b, the second part of M4).
   `ToolInvoke` and `CanonicalPreview` have their first wire forms — one typed
   call, `fs_read{path, max_bytes}`, and no tool name or argument map a second
@@ -176,10 +190,11 @@ they decide against, and M3e the process boundary in front of it: a runtime
 can now reach the authority, and cannot choose who it is when it does. M4a
 adds the first thing that looks at a filesystem — deciding which object a path
 names — and M4b the first effect: reading at most 256 KiB of one checked file,
-through the broker, for a run both gates allow. That is all that acts. There
-is still no `fs.write` or other filesystem tool, no execution, no secret, no
-sandbox (a read runs on the host, and policy is told so), no approvals and no
-model provider (and so no Ollama). `QueryAuthority` still reports authority and
+through the broker, for a run both gates allow — and M4c the other
+filesystem tools, including the first that change files. There is still no
+execution, no secret, no sandbox (every action runs on the host, and policy is
+told so), no approvals, no artifacts and no model provider (and so no
+Ollama). `QueryAuthority` still reports authority and
 refuses to decide a proposed action; `CanonicalPreview` is how a runtime asks
 what a read would be decided.
 See [docs/PROTOCOL.md](docs/PROTOCOL.md),

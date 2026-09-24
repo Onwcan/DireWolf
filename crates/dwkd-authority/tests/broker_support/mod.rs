@@ -97,6 +97,90 @@ effect = "DENY"
 reason = "NO_MATCHING_RULE"
 "#;
 
+/// The M4c operator policy (ADR-0044): reads, listings and stats anywhere in
+/// the workspace; writes, creations and deletions too, except where a rule
+/// says otherwise:
+///
+/// * `locked/` — every mutation denied by a rule;
+/// * `nocreate/` — writes allowed, creations denied: a creating write is a
+///   compound plan one of whose actions is denied;
+/// * `artifacts/` — writes and creations allowed only with
+///   `require_artifact_capture`, which this build cannot enforce;
+/// * `approval/` — deletion requires approval, which this build cannot obtain.
+pub(crate) const FSOPS_POLICY: &str = r#"schema_version = 1
+
+[meta]
+name = "m4c"
+
+[[rule]]
+id = "deny-locked"
+effect = "DENY"
+reason = "SENSITIVE_PATH"
+when.verb = ["fs.write", "fs.create", "fs.delete"]
+when.path_under = "${WORKSPACE}/locked"
+
+[[rule]]
+id = "deny-create-in-nocreate"
+effect = "DENY"
+reason = "NO_MATCHING_RULE"
+when.verb = "fs.create"
+when.path_under = "${WORKSPACE}/nocreate"
+
+[[rule]]
+id = "artifact-captured-writes"
+effect = "ALLOW"
+when.verb = ["fs.write", "fs.create"]
+when.path_under = "${WORKSPACE}/artifacts"
+obligations = ["require_artifact_capture"]
+
+[[rule]]
+id = "approve-deletes"
+effect = "REQUIRE_APPROVAL"
+reason = "DESTRUCTIVE_IN_WORKSPACE"
+when.verb = "fs.delete"
+when.path_under = "${WORKSPACE}/approval"
+approval.scope = "path_set"
+approval.ttl = "10m"
+approval.max_uses = 1
+
+[[rule]]
+id = "allow-workspace-observe"
+effect = "ALLOW"
+when.verb = ["fs.read", "fs.list", "fs.stat"]
+when.path_under = "${WORKSPACE}"
+when.max_bytes = 16777216
+
+[[rule]]
+id = "allow-workspace-mutate"
+effect = "ALLOW"
+when.verb = ["fs.write", "fs.create", "fs.delete"]
+when.path_under = "${WORKSPACE}"
+
+[[rule]]
+id = "default"
+effect = "DENY"
+reason = "NO_MATCHING_RULE"
+"#;
+
+/// The M4b ceiling and the filesystem verbs M4c implements.
+pub(crate) fn fsops_ceiling() -> Vec<String> {
+    let mut all = ceiling();
+    for verb in ["fs.list", "fs.stat", "fs.write", "fs.create", "fs.delete"] {
+        all.push(format!("{verb}:*"));
+    }
+    all
+}
+
+/// Every filesystem capability a `maintainer` run of the M4c fixture asks for.
+pub(crate) const FSOPS_CAPABILITIES: &[&str] = &[
+    "fs.read:/workspace",
+    "fs.list:/workspace",
+    "fs.stat:/workspace",
+    "fs.write:/workspace",
+    "fs.create:/workspace",
+    "fs.delete:/workspace",
+];
+
 /// Bytes 0..=255, twice: every byte value, so a lossy path shows.
 pub(crate) fn every_byte() -> Vec<u8> {
     (0..=255u8).chain(0..=255u8).collect()
@@ -130,6 +214,28 @@ impl Broker {
         let mut command = Command::new(broker_bin());
         command.env_clear();
         Self::spawn(command, None, socket, authority_uid, extra)
+    }
+
+    /// Start the (debug) broker so that it aborts at crash point `point`
+    /// (M4c, `DWKD_BROKER_CRASH_AT`), as this uid.
+    pub(crate) fn start_crashing_at(socket: &Path, point: &str) -> Self {
+        let mut command = Command::new(broker_bin());
+        command.env_clear().env("DWKD_BROKER_CRASH_AT", point);
+        match Self::spawn(
+            command,
+            None,
+            socket,
+            own_uid(),
+            &["--allow-shared-authority-uid"],
+        ) {
+            Ok(broker) => broker,
+            Err(text) => panic!("the broker did not start:\n{text}"),
+        }
+    }
+
+    /// Whether the process has exited (a crash point aborted it).
+    pub(crate) fn exited(&mut self) -> bool {
+        matches!(self.child.try_wait(), Ok(Some(_)))
     }
 
     /// Start the broker as `user` through `sudo -n -u` -- a test harness
@@ -226,6 +332,15 @@ impl Broker {
         self.events().iter().filter(|e| e.starts_with(kind)).count()
     }
 
+    /// How many staging reclamations the broker executed (ADR-0044 §10):
+    /// housekeeping after an outcome, never an invocation performed.
+    pub(crate) fn reclaims(&self) -> usize {
+        self.events()
+            .iter()
+            .filter(|e| e.starts_with("executed") && e.ends_with("op=broker.fs_reclaim"))
+            .count()
+    }
+
     /// Wait until at least `n` events start with `kind`.
     pub(crate) fn wait_for(&self, kind: &str, n: usize) {
         let deadline = Instant::now() + PROMPT;
@@ -289,6 +404,10 @@ pub(crate) struct Setup {
     pub(crate) root: PathBuf,
     pub(crate) outside: PathBuf,
     pub(crate) policy: PathBuf,
+    /// The policy profile name `--policy-profile` names.
+    pub(crate) profile: &'static str,
+    /// The mode ceiling.
+    pub(crate) ceiling: Vec<String>,
 }
 
 /// The fixture workspace's name.
@@ -303,6 +422,46 @@ impl Setup {
     }
 
     pub(crate) fn with_policy(tag: &str, policy_text: &str) -> Self {
+        Self::build(tag, policy_text, "m4b", ceiling(), |_| {})
+    }
+
+    /// The M4c fixture (ADR-0044): the M4b tree, the write-enabled policy
+    /// [`FSOPS_POLICY`], a `maintainer` agent profile that declares every
+    /// filesystem verb M4c implements, and a mode ceiling that allows them.
+    pub(crate) fn fsops(tag: &str) -> Self {
+        Self::fsops_with(tag, FSOPS_POLICY)
+    }
+
+    /// The M4c fixture under another policy.
+    pub(crate) fn fsops_with(tag: &str, policy_text: &str) -> Self {
+        Self::build(tag, policy_text, "m4c", fsops_ceiling(), |authority| {
+            authority
+                .operator()
+                .install_agent_profile(&super::state_support::profile(
+                    "maintainer",
+                    &[
+                        "fs.read:*",
+                        "fs.list:*",
+                        "fs.stat:*",
+                        "fs.write:*",
+                        "fs.create:*",
+                        "fs.delete:*",
+                        "model.call:*",
+                    ],
+                    &[],
+                    dwkd_authority::capability::PrivacyClass::Any,
+                ))
+                .expect("maintainer installs");
+        })
+    }
+
+    fn build(
+        tag: &str,
+        policy_text: &str,
+        profile: &'static str,
+        ceiling: Vec<String>,
+        extra: impl FnOnce(&mut dwkd_authority::state::Authority),
+    ) -> Self {
         let dir = TempDir::new(tag);
         let root = dir.path().join("proj");
         for sub in ["src", "secret", "capped", "empty-dir"] {
@@ -318,7 +477,7 @@ impl Setup {
         std::fs::create_dir_all(&outside).unwrap();
         std::fs::write(outside.join("secret"), b"OUTSIDE-SECRET").unwrap();
         std::os::unix::fs::symlink(outside.join("secret"), root.join("link")).unwrap();
-        let policy = dir.path().join("m4b.toml");
+        let policy = dir.path().join(format!("{profile}.toml"));
         std::fs::write(&policy, policy_text).unwrap();
 
         let clock = Arc::new(dwkd_authority::state::ManualClock::new(START_MS));
@@ -330,6 +489,7 @@ impl Setup {
         )
         .expect("the fixture store starts");
         install_fixtures(&mut authority);
+        extra(&mut authority);
         {
             let workspace = WorkspaceId::new(WORKSPACE).unwrap();
             let mut operator = authority.operator();
@@ -351,6 +511,8 @@ impl Setup {
             root,
             outside,
             policy,
+            profile,
+            ceiling,
         }
     }
 
@@ -378,16 +540,16 @@ impl Setup {
             "--policy-file".to_owned(),
             self.policy.display().to_string(),
             "--policy-profile".to_owned(),
-            "m4b".to_owned(),
+            self.profile.to_owned(),
             "--mode".to_owned(),
             "balanced".to_owned(),
             "--allow-uid".to_owned(),
             own_uid().to_string(),
             "--allow-authority-uid".to_owned(),
         ];
-        for capability in ceiling() {
+        for capability in &self.ceiling {
             args.push("--ceiling".to_owned());
-            args.push(capability);
+            args.push(capability.clone());
         }
         if let Some(uid) = broker_uid {
             args.push("--broker-socket".to_owned());
@@ -432,6 +594,8 @@ pub(crate) struct Runtime {
     pub(crate) session: SessionId,
     pub(crate) epoch: u64,
     pub(crate) run: RunId,
+    /// What the admission granted and withheld.
+    pub(crate) grant: dwk_proto::dwkp::messages::RunGrant,
     sent: u64,
 }
 
@@ -455,17 +619,82 @@ impl Runtime {
             capabilities,
             n,
         ));
-        let run = match &admitted.body {
-            DwkpBody::RunGrant(grant) => grant.run_id.clone(),
+        let grant = match &admitted.body {
+            DwkpBody::RunGrant(grant) => grant.clone(),
             other => panic!("admission: {other:?}"),
         };
         Self {
             client,
             session,
             epoch: epoch.get(),
-            run,
+            run: grant.run_id.clone(),
+            grant,
             sent: 0,
         }
+    }
+
+    /// Handshake, lease session `n`, admit a run of `agent_profile`
+    /// requesting `capabilities`.
+    pub(crate) fn admit_as(
+        socket: &Path,
+        n: u64,
+        agent_profile: &str,
+        capabilities: &[&str],
+    ) -> Self {
+        let mut client = Client::connect(socket);
+        client.handshake();
+        let session = session(n);
+        let epoch = match &client.call(&acquire_msg(&session)).body {
+            DwkpBody::LeaseGrant(grant) => grant.epoch,
+            other => panic!("lease: {other:?}"),
+        };
+        let admitted = client.call(&admit_msg(
+            &session,
+            epoch,
+            &format!("k{n}"),
+            agent_profile,
+            &[],
+            capabilities,
+            n,
+        ));
+        let grant = match &admitted.body {
+            DwkpBody::RunGrant(grant) => grant.clone(),
+            other => panic!("admission: {other:?}"),
+        };
+        Self {
+            client,
+            session,
+            epoch: epoch.get(),
+            run: grant.run_id.clone(),
+            grant,
+            sent: 0,
+        }
+    }
+
+    /// A version-2 tool request (M4c): `payload` is the `ToolCall` object's
+    /// JSON text; an invocation carries `key` as its idempotency key.
+    pub(crate) fn v2_json(&mut self, schema: &str, payload: &str, key: Option<&str>) -> String {
+        let n = self.next();
+        let key = key.map_or_else(String::new, |k| format!(r#","idempotency_key":"{k}""#));
+        format!(
+            r#"{{"v":1,"id":"{id}","type":"request","schema":"{schema}","schema_version":2,"ts":"2026-09-24T10:00:00.000Z","session_id":"{session}","run_id":"{run}","epoch":{epoch}{key},"payload":{payload}}}"#,
+            id = id("msg", 800_000 + n),
+            session = self.session.as_str(),
+            run = self.run.as_str(),
+            epoch = self.epoch,
+        )
+    }
+
+    /// Version-2 `ToolInvoke` with idempotency key `key`.
+    pub(crate) fn invoke_v2(&mut self, payload: &str, key: &str) -> DwkpMessage {
+        let text = self.v2_json("direwolf.tool.invoke", payload, Some(key));
+        self.client.call(&decode(&text))
+    }
+
+    /// Version-2 `CanonicalPreview`.
+    pub(crate) fn preview_v2(&mut self, payload: &str) -> DwkpMessage {
+        let text = self.v2_json("direwolf.tool.preview", payload, None);
+        self.client.call(&decode(&text))
     }
 
     /// Admit another run in the same session and lease.

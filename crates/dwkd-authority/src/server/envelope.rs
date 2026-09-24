@@ -10,7 +10,7 @@
 //! |---|---|---|
 //! | `v` | the negotiated envelope version | the handshake chose it |
 //! | `id` | a fresh `msg_` UUIDv7 the authority mints | never the request's, never chosen by the peer |
-//! | `schema_version` | the registry's version for the response schema | `direwolf.run.grant`, `.authority.effective` and `.authority.refused` are version 2 only (ADR-0040) |
+//! | `schema_version` | the version the response body belongs to, which the registry must hold | `direwolf.run.grant`, `.authority.effective` and `.authority.refused` are version 2 only (ADR-0040); a tool request is answered in its own version (ADR-0044) |
 //! | `ts` | the authority's clock, advisory | never an input to anything |
 //! | `causation_id` | the request's `id` | the one binding between a request and its answer |
 //! | `correlation_id` | the request's, if it carried one | groups one logical operation; it is the caller's label |
@@ -145,9 +145,12 @@ impl Responder {
         request: Option<&Header>,
         body: DwkpBody,
     ) -> Result<Vec<u8>, Unencodable> {
-        let (message_type, schema) = body.identity();
-        let spec = registry::message(message_type, schema)
-            .ok_or_else(|| Unencodable(format!("{schema} is not a registered message")))?;
+        let (message_type, schema, version) = body.versioned_identity();
+        if registry::message(message_type, schema, version).is_none() {
+            return Err(Unencodable(format!(
+                "{schema} version {version} is not a registered message"
+            )));
+        }
         let now = now_ms();
         let header = Header {
             v: Version::new(v).ok_or_else(|| Unencodable("envelope version 0".to_owned()))?,
@@ -158,9 +161,10 @@ impl Responder {
             message_type,
             schema: SchemaName::new(schema)
                 .ok_or_else(|| Unencodable(format!("{schema} is not a schema name")))?,
-            // The registry's version for this response: the highest it
-            // supports, which for the ADR-0040 messages is 2 and only 2.
-            schema_version: Version::new(spec.versions.max)
+            // The version this body is: each body type belongs to one. The
+            // ADR-0040 messages are 2 and only 2; a tool response is the
+            // version of the request it answers (ADR-0044).
+            schema_version: Version::new(version)
                 .ok_or_else(|| Unencodable("schema version 0".to_owned()))?,
             ts: timestamp(now)
                 .ok_or_else(|| Unencodable("the clock is out of range".to_owned()))?,

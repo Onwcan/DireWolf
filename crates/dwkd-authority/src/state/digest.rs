@@ -50,10 +50,13 @@ pub(crate) const STORE_ID: &str = "direwolf.store.id.v1";
 /// The bytes an `fs.read` returned, recorded in its outcome so an auditor can
 /// check what was delivered without the audit log holding the content (M4b).
 pub(crate) const TOOL_CONTENT: &str = "direwolf.tool.fs_read.content.v1";
+/// The canonical version-2 tool call, with its run, an idempotency key is
+/// bound to (M4c).
+pub(crate) const TOOL_REQUEST: &str = "direwolf.dwkp.tool_invoke.request.v2";
 
 /// Every domain, for the test that they are pairwise distinct.
 #[cfg(test)]
-const ALL_DOMAINS: [&str; 9] = [
+const ALL_DOMAINS: [&str; 10] = [
     POLICY_REVISION,
     ADMIT_REQUEST,
     AUDIT_RECORD,
@@ -63,6 +66,7 @@ const ALL_DOMAINS: [&str; 9] = [
     CEILING,
     STORE_ID,
     TOOL_CONTENT,
+    TOOL_REQUEST,
 ];
 
 /// A full 256-bit SHA-256 value. Never truncated.

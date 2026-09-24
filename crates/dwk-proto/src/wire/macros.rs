@@ -21,9 +21,11 @@
 //! The policy is part of the **type**, not of the call: a DWKP payload cannot be
 //! decoded leniently by passing the wrong flag, because there is no flag.
 //!
-//! `ordered(a <= b)` is the only cross-field check. The closed set is deliberate:
-//! every check must be mirrored by the Python generator, and an open-ended
-//! "validate with this function" hook is a place for the two to diverge.
+//! The cross-field checks are a closed set — `ordered(a <= b)`,
+//! `paired(left -> right, table)` and `exactly_one(a, b, ...)` — and that is
+//! deliberate: every check must be mirrored by the Python generator, and an
+//! open-ended "validate with this function" hook is a place for the two to
+//! diverge.
 
 /// Map a field kind to its Rust type.
 macro_rules! field_type {
@@ -74,6 +76,7 @@ macro_rules! wire_struct {
         }
         $( ordered($lo:ident <= $hi:ident) )?
         $( paired($left:ident -> $right:ident, $table:expr) )?
+        $( exactly_one($($one:ident),+ $(,)?) )?
     ) => {
         $(#[doc = $doc])*
         #[derive(Debug, Clone, PartialEq, Eq)]
@@ -108,6 +111,9 @@ macro_rules! wire_struct {
                     decoded.$left.as_str(), decoded.$right.as_str(),
                     stringify!($left), stringify!($right), $table, cx
                 )?; )?
+                $( $crate::wire::macros::check_exactly_one(
+                    &[$( (stringify!($one), decoded.$one.is_some()) ),+], cx
+                )?; )?
                 Ok(decoded)
             }
 
@@ -129,6 +135,9 @@ macro_rules! wire_struct {
                         ))) )?
                         $( .or(Some($crate::wire::macros::paired_schema(
                             stringify!($left), stringify!($right), $table
+                        ))) )?
+                        $( .or(Some($crate::wire::macros::exactly_one_schema(
+                            &[$(stringify!($one)),+]
                         ))) )?;
                     $crate::wire::macros::struct_schema(
                         concat!($($doc, "\n"),*),
@@ -237,7 +246,7 @@ pub(crate) use {field_put, field_required, field_take, field_type, wire_struct};
 
 use crate::error::{ProtocolError, Violation};
 use crate::json::{Object, Value};
-use crate::schema::{description, obj, string, strings};
+use crate::schema::{description, int, obj, string, strings};
 use crate::wire::{Cx, UnknownFields};
 
 /// The `ordered(lo <= hi)` cross-field check.
@@ -290,6 +299,46 @@ pub fn check_paired(
     );
     cx.pop();
     Err(err)
+}
+
+/// The `exactly_one(a, b, ...)` check: a closed sum. Every listed member is
+/// optional, and exactly one of them is present — so a message names one
+/// alternative, never none and never two, and an undeclared alternative is an
+/// unknown member (ADR-0044 §2).
+pub fn check_exactly_one(members: &[(&str, bool)], cx: &mut Cx) -> Result<(), ProtocolError> {
+    let present: Vec<&str> = members
+        .iter()
+        .filter(|(_, present)| *present)
+        .map(|(name, _)| *name)
+        .collect();
+    match present.as_slice() {
+        [_] => Ok(()),
+        [] => Err(cx.violation(
+            Violation::MissingField,
+            "exactly one alternative is required, and none was given",
+        )),
+        [_, second, ..] => {
+            cx.push(second);
+            let err = cx.violation(
+                Violation::Inconsistent,
+                format!(
+                    "exactly one alternative is permitted; {} were given",
+                    present.len()
+                ),
+            );
+            cx.pop();
+            Err(err)
+        }
+    }
+}
+
+/// The schema annotation for an `exactly_one` check.
+#[must_use]
+pub fn exactly_one_schema(members: &[&str]) -> Value {
+    obj(vec![
+        ("kind", string("exactly-one")),
+        ("members", strings(members)),
+    ])
 }
 
 /// The schema annotation for an `ordered` check.
@@ -350,6 +399,12 @@ pub fn struct_schema(
         }
     }
     if let Some(check) = check {
+        // A closed sum also states it in plain JSON Schema, so a validator
+        // that ignores DireWolf's annotation still enforces one member.
+        if matches!(&check, Value::Object(o) if o.get("kind") == Some(&string("exactly-one"))) {
+            members.push(("minProperties", int(1)));
+            members.push(("maxProperties", int(1)));
+        }
         members.push(("x-direwolf-check", check));
     }
     obj(members)

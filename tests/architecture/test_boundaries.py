@@ -336,12 +336,15 @@ def test_the_broker_grows_no_authority_and_no_other_input(violation_rules: list[
     assert rule in violation_rules
     findings = [f for f in check_text(load(VIOLATIONS, RULES)) if f.rule == rule]
     texts = " ".join(f.message for f in findings)
-    for needle in ("dwkp", "rusqlite", "kernel", "Command", "TcpListener"):
+    for needle in ("dwkp", "rusqlite", "kernel", "Command", "TcpListener", "hmac"):
         assert needle in texts, needle
     assert {f.path for f in findings} == {
         "crates/dwkd-broker/src/dispatch.rs",
         "crates/dwkd-broker/src/tcp.rs",
+        "crates/dwkd-broker/src/hash.rs",
     }
+    # A digest is TX018's, not TX013's.
+    assert not any("sha2" in f.message for f in findings)
 
 
 def test_only_the_broker_link_hands_out_a_descriptor(violation_rules: list[str]) -> None:
@@ -359,10 +362,46 @@ def test_only_the_broker_link_hands_out_a_descriptor(violation_rules: list[str])
 
 def test_the_broker_opens_nothing_by_path(violation_rules: list[str]) -> None:
     """TX015 (M4b): a path-based open in the broker is a second canonicaliser;
-    the listener, which creates its own lock file, is exempt by name."""
+    the listener, which creates its own lock file, is exempt by name, and so
+    are `exchange/mutate.rs` and `exchange/staging.rs`, which TX019 binds
+    instead (M4c)."""
     rule = "TX015-the-broker-reads-only-what-it-is-handed"
     assert rule in violation_rules
-    assert _paths(rule) == {"crates/dwkd-broker/src/dispatch.rs"}
+    assert _paths(rule) == {
+        "crates/dwkd-broker/src/dispatch.rs",
+        "crates/dwkd-broker/src/hash.rs",
+    }, sorted(_paths(rule))
+
+
+def test_the_broker_hashes_in_one_file(violation_rules: list[str]) -> None:
+    """TX018 (M4c): a digest crate anywhere in the broker but the patch
+    operations is a finding; the fixture `exchange/mutate.rs`, which hashes,
+    is not."""
+    rule = "TX018-the-broker-hashes-only-to-prove-a-revision"
+    assert rule in violation_rules
+    assert _paths(rule) == {"crates/dwkd-broker/src/hash.rs"}
+
+
+def test_the_broker_changes_names_only_relative_to_held_directories(
+    violation_rules: list[str],
+) -> None:
+    """TX019 (M4c): in the files that change names -- the operations and the
+    staging directory -- a path, the working directory, `openat2` resolution
+    or a copy-and-delete fallback is each a finding -- line by line, and the
+    relative `openat` beside them is not."""
+    rule = "TX019-the-broker-changes-names-only-inside-directories-it-holds"
+    assert rule in violation_rules
+    findings = [f for f in check_text(load(VIOLATIONS, RULES)) if f.rule == rule]
+    mutate = "crates/dwkd-broker/src/exchange/mutate.rs"
+    staging = "crates/dwkd-broker/src/exchange/staging.rs"
+    assert {f.path for f in findings} == {mutate, staging}
+    texts = " ".join(f.message for f in findings if f.path == mutate)
+    for needle in ("std::fs", "CWD", "PathBuf", "openat2", "copy_file_range"):
+        assert needle in texts, needle
+    lines = {f.line for f in findings if f.path == mutate}
+    assert 6 not in lines, "a relative openat on a held directory is the sanctioned form"
+    staged = {f.line for f in findings if f.path == staging}
+    assert staged == {9, 13}, sorted(staged)
 
 
 def test_the_cognition_side_cannot_name_the_private_channel(violation_rules: list[str]) -> None:
@@ -491,6 +530,8 @@ def test_the_required_boundary_rules_are_all_declared() -> None:
         "TX015-the-broker-reads-only-what-it-is-handed",
         "TX016-the-cognition-side-cannot-name-the-private-channel",
         "TX017-a-new-declaration-means-only-what-the-resolver-found",
+        "TX018-the-broker-hashes-only-to-prove-a-revision",
+        "TX019-the-broker-changes-names-only-inside-directories-it-holds",
         "DEP001-no-agent-framework-dependency",
         "DEP002-runtime-has-no-transport-dependency",
         "RS001-authority-depends-on-nothing-in-tree",

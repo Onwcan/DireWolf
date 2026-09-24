@@ -835,6 +835,158 @@ BROKER_FOREIGN_CASES = (
 )
 
 
+FSOP_EVIDENCE_PREFIX = "FSOP-EVIDENCE "
+
+# M4c's same-identity evidence (ADR-0044): the released authority and broker
+# end to end for every tool, the in-process race and crash campaigns on the
+# real channel, the hostile private-protocol cases for the new operations, and
+# the local half of the write permission experiment. Every (suite, case) is
+# printed by exactly one test after its assertions held; a missing one -- or
+# one whose outcome says it was not exercised -- fails the task.
+FSOP_CASES = (
+    ("fs-ops", "fs.stat"),
+    ("fs-ops", "fs.list"),
+    ("fs-ops", "fs.search"),
+    ("fs-ops", "fs.write-existing"),
+    ("fs-ops", "fs.write-vacant"),
+    ("fs-ops", "fs.patch"),
+    ("fs-ops", "fs.move"),
+    ("fs-ops", "fs.delete"),
+    ("fs-ops", "audit-holds-no-content"),
+    ("fs-ops", "taint-read-family-only"),
+    ("fs-ops", "preview-zero-effect"),
+    ("fs-ops", "preview-invoke-differential"),
+    ("fs-ops", "obligation-unenforceable"),
+    ("fs-ops", "obligation-both-versions"),
+    ("fs-ops", "compound-denial"),
+    ("fs-ops", "idempotency-key"),
+    ("fs-ops", "hardlink-write-patch"),
+    ("fs-ops", "hardlink-move-delete"),
+    ("fs-ops", "symlink-containment"),
+    ("fs-ops", "fs.list-unaddressable"),
+    ("fs-ops", "fs.search-bounds"),
+    ("fs-ops", "fs.create-scope-semantics"),
+    ("fs-ops", "public-versioning"),
+    ("fs-ops", "resource-leaks"),
+    ("fs-ops", "patch-inline-bound-exceeded"),
+    ("fs-ops", "patch-inline-bound-exact"),
+    ("fs-ops-state", "R1-write-existing-target-swapped"),
+    ("fs-ops-state", "R2-write-vacant-name-occupied"),
+    ("fs-ops-state", "R3-move-destination-occupied"),
+    ("fs-ops-state", "R4-move-source-swapped"),
+    ("fs-ops-state", "R5-delete-target-swapped"),
+    ("fs-ops-state", "R6-delete-empty-dir-swapped-for-a-full-one"),
+    ("fs-ops-state", "R7-patch-rewritten-in-place"),
+    ("fs-ops-state", "R8-target-swapped-for-a-symlink"),
+    ("fs-ops-state", "R9-parent-swapped"),
+    ("fs-ops-state", "A-write-after-intent"),
+    ("fs-ops-state", "B-move-after-open"),
+    ("fs-ops-state", "C-delete-after-broker"),
+    ("fs-ops-state", "D-patch-after-outcome"),
+    ("fs-ops-state", "E-read-after-broker"),
+    ("fs-ops-state", "F-write-before-exchange"),
+    ("fs-ops-state", "G-write-after-exchange"),
+    ("fs-ops-state", "H-patch-after-sync"),
+    ("fs-ops-state", "I-create-after-rename"),
+    ("fs-ops-state", "J-move-after-rename"),
+    ("fs-ops-state", "K-delete-after-stage"),
+    ("fs-ops-state", "K2-delete-after-unlink"),
+    ("fs-ops-state", "U-restore-failed"),
+    ("fs-ops-state", "staging-F-write-before-exchange"),
+    ("fs-ops-state", "staging-G-write-after-exchange"),
+    ("fs-ops-state", "staging-I-create-after-rename"),
+    ("fs-ops-state", "staging-K-delete-after-stage"),
+    ("fs-ops-state", "staging-K2-delete-after-unlink"),
+    ("fs-ops-state", "staging-S1-replace-before-record"),
+    ("fs-ops-state", "staging-S2-patch-before-check"),
+    ("fs-ops-state", "staging-S3-create-before-check"),
+    ("fs-ops-state", "staging-S4-delete-before-check"),
+    ("fs-ops-state", "staging-S5-repeated-crash-injection"),
+    ("fs-ops-state", "staging-S6-unrelated-by-spelling"),
+    ("fs-ops-state", "staging-R1-root-renamed-and-replaced"),
+    ("fs-ops-state", "staging-R2-symlink-at-root-path"),
+    ("fs-ops-state", "staging-R3-lookalike-in-replacement-root"),
+    ("fs-ops-state", "staging-R4-original-root-renamed-then-restored"),
+    ("fs-ops-state", "staging-R5-parent-replaced-beneath-the-root"),
+    ("broker-window", "replace-target-swapped-before-check"),
+    ("broker-window", "patch-base-rewritten-before-check"),
+    ("broker-window", "create-name-taken-before-check"),
+    ("broker-window", "move-source-swapped-before-check"),
+    ("broker-window", "delete-target-swapped-before-check"),
+    ("broker-window", "replace-target-swapped-after-check"),
+    ("broker-window", "patch-base-rewritten-after-check"),
+    ("broker-window", "create-name-taken-after-check"),
+    ("broker-window", "move-source-swapped-after-check"),
+    ("broker-window", "move-destination-taken-after-check"),
+    ("broker-window", "delete-target-swapped-after-check"),
+    ("broker-window", "replace-restore-fails"),
+    ("broker-window", "move-restore-fails"),
+    ("broker-window", "delete-restore-fails"),
+    ("broker-window", "shared-directory"),
+    ("broker-window", "reclaim-pre-effect-staging"),
+    ("broker-window", "reclaim-post-effect-staging"),
+    ("broker-window", "reclaim-by-spelling"),
+    ("broker-durability", "A-staging-directory-created"),
+    ("broker-durability", "B-record-written"),
+    ("broker-durability", "C-new-written"),
+    ("broker-durability", "D-exchange-or-rename"),
+    ("broker-durability", "E-undo"),
+    ("broker-durability", "F-taken-into-staging"),
+    ("broker-durability", "G-staging-entries-removed"),
+    ("broker-durability", "H-staging-directory-removed"),
+    ("patch-frame", "largest-decodable-patch-request"),
+    ("patch-frame", "largest-valid-patch-request"),
+    ("grant-rehydration", "stored-grant-rehydrated-after-delete"),
+    ("grant-rehydration", "admission-replay"),
+    ("grant-rehydration", "new-admission-of-deleted-path"),
+    ("grant-rehydration", "invoke-on-deleted-path"),
+    ("grant-rehydration", "replaced-object-same-path"),
+    ("grant-rehydration", "lookups-new-declaration"),
+    ("grant-rehydration", "lookups-admission-replay"),
+    ("grant-rehydration", "lookups-stored-grant-after-delete"),
+    ("grant-rehydration", "lookups-tool-target"),
+    ("private-protocol", "v2-write-given-a-file"),
+    ("private-protocol", "v2-write-given-an-o-path-directory"),
+    ("private-protocol", "v2-write-given-another-directory"),
+    ("private-protocol", "v2-write-given-two"),
+    ("private-protocol", "v2-move-given-one"),
+    ("private-protocol", "v2-stat-given-a-readable-descriptor"),
+    ("private-protocol", "v2-patch-given-its-descriptors-reversed"),
+    ("private-protocol", "v2-delete-naming-another-object"),
+    ("private-protocol", "v2-reclaim-given-a-file"),
+    ("private-protocol", "v2-reclaim-given-two"),
+    ("private-protocol", "v2-reclaim-given-another-directory"),
+    ("private-protocol", "v2-descriptor-roles"),
+    ("permission-model", "descriptor-is-not-a-grant"),
+    ("permission-model", "lookup-needs-search"),
+    ("permission-model", "write-bit-is-the-grant"),
+    ("permission-model", "noreplace-exchange-supported"),
+)
+
+# The three-identity half: `#[ignore]`d, selected BY NAME, required to run every
+# test and report every case.
+FSOP_FOREIGN_TESTS = (
+    "linux::a_held_directory_is_not_a_right_to_change_its_names",
+    "linux::a_write_enabled_workspace_is_changed_by_the_broker_uid_and_only_where_granted",
+)
+FSOP_FOREIGN_CASES = (
+    ("fs-ops-foreign", "observe-through-descriptors-cross-uid"),
+    ("fs-ops-foreign", "no-grant-write-existing"),
+    ("fs-ops-foreign", "no-grant-write-vacant"),
+    ("fs-ops-foreign", "no-grant-move"),
+    ("fs-ops-foreign", "no-grant-delete"),
+    ("fs-ops-foreign", "descriptor-is-not-a-namespace-grant-cross-uid"),
+    ("fs-ops-foreign", "permission-grant"),
+    ("fs-ops-foreign", "write-existing-cross-uid"),
+    ("fs-ops-foreign", "write-vacant-cross-uid"),
+    ("fs-ops-foreign", "patch-move-delete-cross-uid"),
+    ("fs-ops-foreign", "outside-the-grant-cross-uid"),
+    ("fs-ops-foreign", "group-not-keepable-cross-uid"),
+    ("fs-ops-foreign", "grant-is-ambient"),
+    ("fs-ops-foreign", "runtime-uid-outside-the-grant"),
+)
+
+
 def task_broker_fs_read_evidence() -> None:
     """M4b's brokered fs.read evidence (ADR-0043); three identities need DW_BROKER_AS, DW_PEER_AS.
 
@@ -955,6 +1107,172 @@ def require_broker_foreign_evidence(output: str) -> None:
             f"got {summaries or 'no summary'}"
         )
     require_broker_evidence(output, BROKER_FOREIGN_CASES)
+
+
+def task_filesystem_operations_evidence() -> None:
+    """M4c's filesystem-operation evidence (ADR-0044); three identities and the
+    write group need DW_BROKER_AS, DW_PEER_AS and DW_WRITE_GROUP.
+
+    With all three set, the two users are proven first -- by numbers, distinct
+    from this process, from root and from each other. Then the broker binary is
+    built and the same-identity suites run: every tool end to end through the
+    released daemons, previews, compound denials, idempotency keys, hard links,
+    symlinks, bounds and leaks; the race campaigns and the crash campaigns
+    (authority crash points and debug-broker crash points) on the real channel;
+    reclamation against a replaced, renamed or symlinked root; the durability
+    order of every namespace change the broker makes (a trace of its system
+    calls -- not a power cut); the zero-lookup proof, inside the authority crate
+    where its counter lives; the hostile private-protocol cases for the new
+    operations; and the local half of the write permission experiment. Every
+    case must report. Then the
+    three-identity suite, selected by name: the broker as its own user, a
+    workspace with no grant (nothing changes, WRITE_DENIED) and one the harness
+    grants to DW_WRITE_GROUP (everything changes, only there, and the grant is
+    shown to be ambient). The harness applies the grant and prints exactly what
+    it granted; the product never does.
+
+    Without the identities and the group that half is NOT EXERCISED and this
+    task fails after running everything else. CI's Linux job creates the broker
+    user and the group. Linux only.
+    """
+    if not sys.platform.startswith("linux"):
+        raise TaskError(
+            "NOT EXERCISED: the filesystem operations run only on Linux (ADR-0044); "
+            "use WSL2 on Windows"
+        )
+    broker_user = os.environ.get("DW_BROKER_AS", "").strip()
+    peer_user = os.environ.get("DW_PEER_AS", "").strip()
+    group = os.environ.get("DW_WRITE_GROUP", "").strip()
+    identities = bool(broker_user and peer_user and group)
+    if identities:
+        _, _, broker_uid = second_identity("DW_BROKER_AS")
+        _, _, peer_uid = second_identity("DW_PEER_AS")
+        if broker_uid == peer_uid:
+            raise TaskError(
+                f"DW_BROKER_AS={broker_user} and DW_PEER_AS={peer_user} are both uid {peer_uid}: "
+                "the broker and the hostile runtime must be two identities"
+            )
+    # The suites spawn the broker binary Cargo builds beside the authority.
+    run("cargo", "build", "--locked", "-p", "dwkd-broker")
+    authority = run_captured(
+        "cargo",
+        "test",
+        "--locked",
+        "-p",
+        "dwkd-authority",
+        "--test",
+        "broker_fs_ops",
+        "--test",
+        "fs_ops_state",
+        "--test",
+        "broker_state",
+        "--",
+        "--nocapture",
+    )
+    # The lookup counter exists only in the authority's own unit tests, so
+    # the zero-lookup proof runs there (`src/state/lookup_tests.rs`).
+    lookups = run_captured(
+        "cargo",
+        "test",
+        "--locked",
+        "-p",
+        "dwkd-authority",
+        "--lib",
+        "lookup_tests",
+        "--",
+        "--nocapture",
+    )
+    frame = run_captured(
+        "cargo",
+        "test",
+        "--locked",
+        "-p",
+        "dwk-proto",
+        "--test",
+        "dwkp_v2",
+        "--",
+        "--nocapture",
+    )
+    broker = run_captured(
+        "cargo",
+        "test",
+        "--locked",
+        "-p",
+        "dwkd-broker",
+        "--bins",
+        "--test",
+        "private_protocol",
+        "--test",
+        "permission_model",
+        "--",
+        "--nocapture",
+    )
+    require_fsop_evidence(f"{authority}\n{lookups}\n{frame}\n{broker}", FSOP_CASES)
+    if identities:
+        foreign = run_captured(
+            "cargo",
+            "test",
+            "--locked",
+            "-p",
+            "dwkd-authority",
+            "--test",
+            "fs_ops_foreign",
+            "--",
+            "--ignored",
+            "--exact",
+            "--nocapture",
+            *FSOP_FOREIGN_TESTS,
+        )
+        require_fsop_foreign_evidence(foreign)
+    uvrun("dwcheck", "closure", "--report")
+    if not identities:
+        raise TaskError(
+            "NOT EXERCISED: the three-identity half needs DW_BROKER_AS (the broker's own user), "
+            "DW_PEER_AS (a hostile local user) and DW_WRITE_GROUP (a group holding the broker's "
+            "user and this one); every same-identity suite above ran"
+        )
+
+
+def _fsop_evidence(output: str) -> set[tuple[str, str]]:
+    """Every (suite, case) an FSOP-EVIDENCE line reported as exercised."""
+    reported: set[tuple[str, str]] = set()
+    for line in output.splitlines():
+        at = line.find(FSOP_EVIDENCE_PREFIX)
+        if at < 0:
+            continue
+        try:
+            record = json.loads(line[at + len(FSOP_EVIDENCE_PREFIX) :])
+        except json.JSONDecodeError as exc:
+            raise TaskError(f"unreadable evidence line: {line[:200]}") from exc
+        if not isinstance(record, dict) or not record.get("outcome") or not record.get("suite"):
+            raise TaskError(f"malformed evidence line: {line[:200]}")
+        if str(record["outcome"]).startswith("not-exercised"):
+            continue
+        reported.add((str(record["suite"]), str(record.get("case"))))
+    return reported
+
+
+def require_fsop_evidence(output: str, cases: tuple[tuple[str, str], ...]) -> None:
+    """Every (suite, case) must have printed its evidence line, exercised."""
+    reported = _fsop_evidence(output)
+    missing = [f"{suite}/{case}" for suite, case in cases if (suite, case) not in reported]
+    if missing:
+        raise TaskError(
+            "filesystem-operation evidence incomplete, not reported: " + ", ".join(missing)
+        )
+    print(f"{GREEN}filesystem-operation evidence: {len(cases)} cases reported{OFF}")
+
+
+def require_fsop_foreign_evidence(output: str) -> None:
+    """The three-identity suite counts only if every test ran and every case reported."""
+    summaries = [line for line in output.splitlines() if line.startswith("test result: ")]
+    expected = f"test result: ok. {len(FSOP_FOREIGN_TESTS)} passed; 0 failed; 0 ignored"
+    if len(summaries) != 1 or not summaries[0].startswith(expected):
+        raise TaskError(
+            f"the three-identity suite did not run all of its tests: expected `{expected}`, "
+            f"got {summaries or 'no summary'}"
+        )
+    require_fsop_evidence(output, FSOP_FOREIGN_CASES)
 
 
 def task_authority_write_probe() -> None:
@@ -1170,6 +1488,7 @@ TASKS = {
     "authority-transport-evidence": task_authority_transport_evidence,
     "authority-write-probe": task_authority_write_probe,
     "broker-fs-read-evidence": task_broker_fs_read_evidence,
+    "filesystem-operations-evidence": task_filesystem_operations_evidence,
     "fuzz-smoke": task_fuzz_smoke,
     "fuzz": task_fuzz,
     "security": task_security,

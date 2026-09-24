@@ -67,11 +67,15 @@ mod files;
 mod identity;
 mod ids;
 mod lease;
+#[cfg(all(test, target_os = "linux"))]
+mod lookup_tests;
+mod plan;
 mod policy_state;
 mod query;
 mod resolution;
 mod schema;
 mod scopes;
+mod staging;
 mod tool;
 mod transport;
 pub mod wire;
@@ -82,17 +86,17 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use dwk_proto::dwkp::messages::Ack;
-use dwk_proto::dwkp::messages::FsReadCall;
 use dwk_proto::dwkp::{DwkpBody, DwkpMessage};
 use dwk_proto::wire::id::{CapId, InvocationId, RunId, SessionId};
 use dwk_proto::wire::scalar::{
-    Epoch, RefusalReason, RefusedOperation, ToolOperation, ToolRefusalReason,
+    Epoch, FsFailureReason, FsRefusalReason, RefusalReason, RefusedOperation, ToolOperation,
 };
 use rusqlite::{Connection, OptionalExtension as _, TransactionBehavior};
 
-use crate::broker::{BrokerFailure, EffectBroker, FsReadOrder};
+use crate::broker::{
+    BrokerDelivery, BrokerError, BrokerFailure, BrokerOrder, EffectBroker, Operation,
+};
 use crate::policy::{PolicyContext, TaintLevel};
-use crate::resource::fs::ResolvedResource;
 
 /// The operator configuration flags a [`StartupConfig`] carries, re-exported so
 /// the state API is self-contained for its callers (the DWKP server).
@@ -116,10 +120,12 @@ pub use error::{AuthorityError, PoisonReason, StartError};
 pub use files::{AUDIT_LOG, KERNEL_DB, LOCK_FILE, QUARANTINE_MARKER};
 pub use identity::{AuthenticatedSubject, CallerContext, LeaseHolder};
 pub use lease::{DEFAULT_LEASE_TTL_MS, MAX_EPOCH, MAX_LEASE_TTL_MS, MIN_LEASE_TTL_MS};
+pub use plan::{PlannedAction, RetryClass, ToolPlan, ToolVersion};
 pub use policy_state::{MAX_CEILING_CAPABILITIES, MAX_POLICY_SOURCES, PolicySet, PolicySource};
 pub use query::{AuthorityAnswer, DecisionRecord, Proposal, TaintCause, Undecidable};
 pub use resolution::ResolutionRefused;
-pub use tool::{ToolDecision, ToolReply};
+pub use staging::{MAX_RECLAIMS_PER_SWEEP, Settled};
+pub use tool::{ToolReply, ToolRequest};
 pub use transport::{TransportClass, TransportEvent, Violation};
 pub use wire::WireGap;
 
@@ -211,9 +217,16 @@ pub struct StartReport {
     pub leases_invalidated: u64,
     /// Active runs the previous process left, now reaped.
     pub runs_reaped: u64,
-    /// Tool invocations the previous process authorised and never finished,
-    /// now recorded as interrupted (M4b).
+    /// Tool invocations without effect the previous process authorised and
+    /// never finished, now recorded as interrupted (M4b).
     pub invocations_interrupted: u64,
+    /// Tool invocations with an effect the previous process authorised and
+    /// never finished, now recorded as unknown — and never performed again
+    /// (M4c).
+    pub invocations_unknown: u64,
+    /// The start-up sweep of staging directories invocations may have left
+    /// behind (M4c, ADR-0044 §10).
+    pub staging: StagingSweep,
     /// Audit records already in `audit.log` above the flushed mark: reconciled,
     /// not appended again.
     pub audit_reconciled: u64,
@@ -225,6 +238,26 @@ pub struct StartReport {
     pub policy_revision: Sha256Hash,
     /// The active activation.
     pub activation_id: i64,
+}
+
+/// How many staging records the sweep after an invocation with an effect
+/// settles, at most.
+const RECLAIMS_AFTER_AN_EFFECT: usize = 4;
+
+/// What one sweep of `EXPECTED` staging records settled (ADR-0044 §10).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct StagingSweep {
+    /// No staging directory was there.
+    pub absent: u64,
+    /// Removed: provably only the broker's own uncommitted data.
+    pub removed: u64,
+    /// Retained: a workspace object, or the evidence of an effect.
+    pub retained: u64,
+    /// Something by that name that is not the broker's; untouched.
+    pub foreign: u64,
+    /// Not reached this time — no broker, no root, a moved parent, no
+    /// answer: still `EXPECTED`, still tracked.
+    pub pending: u64,
 }
 
 /// A well-formed answer: done, or refused with a typed reason.
@@ -539,9 +572,16 @@ impl Authority {
         });
         let mut authority = Self { shared, conn };
 
-        let (incarnation, leases_invalidated, runs_reaped, invocations_interrupted) =
-            authority.begin_incarnation(created, &recovered)?;
+        let (
+            incarnation,
+            leases_invalidated,
+            runs_reaped,
+            (invocations_interrupted, invocations_unknown),
+        ) = authority.begin_incarnation(created, &recovered)?;
         let activation_id = authority.activate(&prepared, config.mode, config.flags, &ceiling)?;
+        // What a previous incarnation's invocations may have left in a
+        // workspace is judged now; nothing is performed again.
+        let staging = authority.reclaim_staging(None, MAX_RECLAIMS_PER_SWEEP)?;
         let revision = prepared.revision;
         let _ = authority.shared.active.set(ActiveAuthority {
             activation_id,
@@ -559,6 +599,8 @@ impl Authority {
             leases_invalidated,
             runs_reaped,
             invocations_interrupted,
+            invocations_unknown,
+            staging,
             audit_reconciled: recovered.reconciled,
             audit_appended: recovered.appended,
             audit_torn_tail_bytes: recovered.torn_tail_bytes,
@@ -575,8 +617,8 @@ impl Authority {
         &mut self,
         created: bool,
         recovered: &audit::Recovered,
-    ) -> Result<(u64, u64, u64, u64), AuthorityError> {
-        let (incarnation, leases, runs, interrupted) = self.transact(|work| {
+    ) -> Result<(u64, u64, u64, (u64, u64)), AuthorityError> {
+        let (incarnation, leases, runs, ended) = self.transact(|work| {
             let incarnation: i64 = work.db(work.tx.query_row(
                 "UPDATE store_meta SET incarnation = incarnation + 1 WHERE singleton = 1                  RETURNING incarnation",
                 [],
@@ -585,7 +627,7 @@ impl Authority {
             let incarnation = u64::try_from(incarnation)
                 .map_err(|_| AuthorityError::Invariant("the incarnation is negative"))?;
             let (leases, runs) = lease::invalidate_all(work)?;
-            let interrupted = tool::interrupt_open(work)?;
+            let (interrupted, unknown) = tool::reconcile_open(work)?;
             work.audit(
                 AuditEvent::StoreOpened,
                 Fields::new()
@@ -595,14 +637,15 @@ impl Authority {
                     .int("leases_invalidated", leases)
                     .int("runs_reaped", runs)
                     .int("invocations_interrupted", interrupted)
+                    .int("invocations_unknown", unknown)
                     .int("audit_reconciled", recovered.reconciled)
                     .int("audit_appended", recovered.appended)
                     .int("audit_torn_tail_bytes", recovered.torn_tail_bytes),
             )?;
-            Ok((incarnation, leases, runs, interrupted))
+            Ok((incarnation, leases, runs, (interrupted, unknown)))
         })?;
         self.shared.incarnation.store(incarnation, Ordering::SeqCst);
-        Ok((incarnation, leases, runs, interrupted))
+        Ok((incarnation, leases, runs, ended))
     }
 
     /// Install the prepared policy revision if it is new, and make it, the
@@ -931,11 +974,13 @@ impl Authority {
             .map_err(ResolutionRefused::Resolve)
     }
 
-    /// `ToolInvoke` for one `fs.read` (M4b, ADR-0043), in the order
-    /// `state::tool` sets out: locate; resolve beneath the pinned root (`O_PATH`
-    /// only, no transaction); decide and — if both gates allow — record the
-    /// intent durably; **only then** open the checked object for reading; the
-    /// broker; the outcome and the taint, durably — and only then answer.
+    /// `ToolInvoke` (M4b, ADR-0043; every filesystem tool, M4c, ADR-0044), in
+    /// the order `state::tool` sets out: locate; resolve every target beneath
+    /// the pinned root (`O_PATH` only, no transaction); build the plan and
+    /// decide every action of it, and — if every action is allowed — record
+    /// the intent durably; **only then** make the effect-capable descriptors;
+    /// the broker; the outcome (completed, failed, or unknown), durably — and
+    /// only then answer.
     ///
     /// # Errors
     ///
@@ -948,52 +993,48 @@ impl Authority {
         session: &SessionId,
         run: &RunId,
         epoch: Epoch,
-        call: &FsReadCall,
+        request: &ToolRequest,
     ) -> Result<ToolReply, AuthorityError> {
         let shared = Arc::clone(&self.shared);
         let active = shared.active()?;
-        let operation = ToolOperation::ToolInvoke;
-        let resolved = match self.resolve_call(caller, operation, session, run, epoch, call)? {
-            Ok(resolved) => resolved,
-            Err(reason) => return Ok(ToolReply::Refused(operation, reason)),
+        let asked = tool::Asked {
+            caller,
+            operation: ToolOperation::ToolInvoke,
+            session,
+            run,
+            epoch,
+            request,
         };
-        let decided = self.transact(|work| {
-            tool::decide(
-                work,
-                caller,
-                operation,
-                session,
-                run,
-                epoch,
-                call.max_bytes,
-                &resolved,
-                active,
-            )
-        })?;
-        let (decision, invocation) = match decided {
-            tool::Decided::Refused(reason) => return Ok(ToolReply::Refused(operation, reason)),
-            tool::Decided::Denied(decision) => return Ok(ToolReply::Denied(decision)),
+        let (call, targets) = match self.resolve_call(&asked)? {
+            Ok(found) => found,
+            Err(reason) => return Ok(ToolReply::Refused(asked.operation, reason)),
+        };
+        let decided = self.transact(|work| tool::decide(work, &asked, &call, &targets, active))?;
+        let (plan, invocation) = match decided {
+            tool::Decided::Refused(reason) => {
+                return Ok(ToolReply::Refused(asked.operation, reason));
+            }
+            tool::Decided::Denied(plan) => return Ok(ToolReply::Denied(plan)),
             tool::Decided::Previewed(_) => {
                 return Err(AuthorityError::Invariant(
                     "an invocation was answered as a preview",
                 ));
             }
-            tool::Decided::Authorised {
-                decision,
-                invocation,
-            } => (decision, invocation),
+            tool::Decided::Authorised { plan, invocation } => (plan, invocation),
         };
         // The intent is committed and its audit record fsynced. Until here
-        // nothing was open for reading: the resolver holds `O_PATH` handles.
+        // nothing could perform an effect: the resolver holds `O_PATH` handles.
         shared.crash(CrashPoint::ToolAfterIntent)?;
 
-        // Only now: open the checked object for reading, relative to its
-        // retained parent, and prove it is the object resolved.
-        let handoff = match resolved.into_read_handoff() {
-            Ok(handoff) => handoff,
-            Err(error) => {
-                let reason =
-                    self.transact(|work| tool::record_open_failure(work, run, &invocation, error))?;
+        // Only now: the descriptors the operation needs, each proved to be
+        // the object checked, a vacant name re-proved vacant.
+        let decided_call = call.clone();
+        let operation = match tool::handoff(call, targets) {
+            Ok(operation) => operation,
+            Err(failure) => {
+                let reason = self.transact(|work| {
+                    tool::record_handoff_failure(work, run, &invocation, failure)
+                })?;
                 return Ok(ToolReply::Failed { invocation, reason });
             }
         };
@@ -1001,47 +1042,119 @@ impl Authority {
 
         // No transaction is open; the broker is told nothing the intent
         // record does not already hold.
-        let order = FsReadOrder::new(invocation.clone(), decision.max_bytes(), handoff);
-        let outcome = if let Some(broker) = &shared.broker {
-            broker.fs_read(order)
+        let order = BrokerOrder::new(invocation.clone(), operation);
+        let result = if let Some(broker) = &shared.broker {
+            broker.perform(order)
         } else {
             drop(order);
-            Err(BrokerFailure::NotConfigured)
+            Err(BrokerError::before_sending(BrokerFailure::NotConfigured))
         };
-        // Whatever carried it, a delivery longer than the bound both gates
-        // decided on is not a result: it is never recorded as one, never
-        // taints, never reaches the runtime.
-        let bound = usize::try_from(decision.max_bytes().get()).unwrap_or(usize::MAX);
-        let outcome = outcome.and_then(|delivery| {
-            if delivery.content.len() > bound {
-                Err(BrokerFailure::Protocol(
-                    "the broker returned more than was authorised",
-                ))
-            } else {
-                Ok(delivery)
-            }
-        });
         shared.crash(CrashPoint::ToolAfterBroker)?;
 
-        self.transact(|work| tool::record_outcome(work, run, &invocation, &outcome))?;
+        // A staging directory is provably not left behind only when nothing
+        // was sent, or the broker answered `done` with no debris.
+        let sent_nothing = matches!(&result, Err(error) if !error.sent);
+        let done_clean = matches!(
+            &result,
+            Ok(BrokerDelivery::Write { debris: false, .. }
+                | BrokerDelivery::Patch { debris: false, .. }
+                | BrokerDelivery::Delete { debris: false }
+                | BrokerDelivery::Move)
+        );
+        // Whatever carried it, a delivery that does not fit what was decided
+        // is not a result; an effect that is not proved is UNKNOWN.
+        let (ending, detail) = tool::classify(&decided_call, &plan, result)?;
+        let staging_clear =
+            sent_nothing || (done_clean && matches!(ending, tool::Ending::Completed(_)));
+        self.transact(|work| {
+            tool::record_outcome(
+                work,
+                run,
+                &invocation,
+                plan.tool(),
+                (&ending, detail),
+                staging_clear,
+            )
+        })?;
         shared.crash(CrashPoint::ToolAfterOutcome)?;
-        Ok(match outcome {
-            Ok(delivery) => ToolReply::Done {
+        if plan::has_effect(plan.tool()) {
+            // This run's staging records its invocations left EXPECTED —
+            // this one's first, if it did — are judged now, while the broker
+            // is at hand. Bounded; the rest wait for the next sweep.
+            self.reclaim_staging(Some(run), RECLAIMS_AFTER_AN_EFFECT)?;
+        }
+        Ok(match ending {
+            tool::Ending::Completed(completion) => ToolReply::Done {
                 invocation,
-                decision,
-                delivery,
+                plan,
+                output: Box::new(completion.output),
             },
-            Err(failure) => ToolReply::Failed {
+            tool::Ending::Failed(reason) => ToolReply::Failed { invocation, reason },
+            tool::Ending::Unknown => ToolReply::Failed {
                 invocation,
-                reason: tool::failure_reason(failure),
+                reason: FsFailureReason::OutcomeUnknown,
             },
         })
     }
 
-    /// `CanonicalPreview` for one `fs.read` (M4b, ADR-0043): the same locate,
-    /// resolution and gates as [`Authority::tool_invoke`] — so a preview names
-    /// exactly the action an invocation would decide on — stopping there. No
-    /// invocation id, no intent, nothing opened for reading, no broker.
+    /// Settle staging records left `EXPECTED` — at most `limit`, of `run`
+    /// only if given, oldest first, and only for invocations whose outcome is
+    /// recorded (ADR-0044 §10). For each, the recorded parent directory is
+    /// resolved beneath the run's pinned root and proved to be the one
+    /// recorded, and the broker is asked to reclaim the invocation's staging
+    /// directory: it removes it only if it provably holds nothing but its own
+    /// uncommitted data, and otherwise keeps it and says what it holds. The
+    /// invocation is never performed again, and its outcome never changes.
+    ///
+    /// Runs at start-up and after every invocation with an effect; an
+    /// operator may run it at any time.
+    ///
+    /// # Errors
+    ///
+    /// [`AuthorityError`] when the store cannot record a settlement. A broker
+    /// that cannot be reached settles nothing and is not an error: the records
+    /// stay `EXPECTED`.
+    pub fn reclaim_staging(
+        &mut self,
+        run: Option<&RunId>,
+        limit: usize,
+    ) -> Result<StagingSweep, AuthorityError> {
+        let shared = Arc::clone(&self.shared);
+        let mut sweep = StagingSweep::default();
+        let Some(broker) = &shared.broker else {
+            return Ok(sweep);
+        };
+        let pending = self.transact(|work| staging::pending(work, run, limit))?;
+        for item in pending {
+            let Some(directory) = staging::directory(&item) else {
+                sweep.pending = sweep.pending.saturating_add(1);
+                continue;
+            };
+            let order = BrokerOrder::new(
+                item.invocation.clone(),
+                Operation::Reclaim {
+                    directory,
+                    staging: item.spec.clone(),
+                },
+            );
+            let result = broker.perform(order);
+            let count = match self.transact(|work| staging::settle(work, &item, &result))? {
+                Some(Settled::Absent) => &mut sweep.absent,
+                Some(Settled::Removed) => &mut sweep.removed,
+                Some(Settled::Retained) => &mut sweep.retained,
+                Some(Settled::Foreign) => &mut sweep.foreign,
+                None => &mut sweep.pending,
+            };
+            *count = count.saturating_add(1);
+        }
+        Ok(sweep)
+    }
+
+    /// `CanonicalPreview` (M4b, ADR-0043; M4c, ADR-0044): the same locate,
+    /// resolution and plan as [`Authority::tool_invoke`] — so a preview names
+    /// exactly the plan an invocation would decide on — stopping there. No
+    /// invocation id, no key, no intent, nothing opened for an effect, no
+    /// broker.
     ///
     /// # Errors
     ///
@@ -1052,33 +1165,28 @@ impl Authority {
         session: &SessionId,
         run: &RunId,
         epoch: Epoch,
-        call: &FsReadCall,
+        request: &ToolRequest,
     ) -> Result<ToolReply, AuthorityError> {
         let shared = Arc::clone(&self.shared);
         let active = shared.active()?;
-        let operation = ToolOperation::CanonicalPreview;
-        let resolved = match self.resolve_call(caller, operation, session, run, epoch, call)? {
-            Ok(resolved) => resolved,
-            Err(reason) => return Ok(ToolReply::Refused(operation, reason)),
+        let asked = tool::Asked {
+            caller,
+            operation: ToolOperation::CanonicalPreview,
+            session,
+            run,
+            epoch,
+            request,
         };
-        let decided = self.transact(|work| {
-            tool::decide(
-                work,
-                caller,
-                operation,
-                session,
-                run,
-                epoch,
-                call.max_bytes,
-                &resolved,
-                active,
-            )
-        })?;
-        // The resolved object's `O_PATH` handles close here, unread.
-        drop(resolved);
+        let (call, targets) = match self.resolve_call(&asked)? {
+            Ok(found) => found,
+            Err(reason) => return Ok(ToolReply::Refused(asked.operation, reason)),
+        };
+        let decided = self.transact(|work| tool::decide(work, &asked, &call, &targets, active))?;
+        // The resolved targets' `O_PATH` handles close here, unused.
+        drop(targets);
         Ok(match decided {
-            tool::Decided::Refused(reason) => ToolReply::Refused(operation, reason),
-            tool::Decided::Previewed(decision) => ToolReply::Previewed(decision),
+            tool::Decided::Refused(reason) => ToolReply::Refused(asked.operation, reason),
+            tool::Decided::Previewed(plan) => ToolReply::Previewed(plan),
             tool::Decided::Denied(_) | tool::Decided::Authorised { .. } => {
                 return Err(AuthorityError::Invariant(
                     "a preview was answered as an invocation",
@@ -1088,33 +1196,24 @@ impl Authority {
     }
 
     /// Steps 1 and 2 of a tool call: locate it (one transaction), then resolve
-    /// its path beneath the run's pinned root with **no transaction open** —
-    /// `O_PATH` descriptors only; nothing is opened for reading. A refusal at
-    /// either step is recorded and returned.
+    /// every target beneath the run's pinned root with **no transaction open**
+    /// — `O_PATH` descriptors only; nothing is opened for an effect. A refusal
+    /// at either step is recorded and returned.
     fn resolve_call(
         &mut self,
-        caller: &CallerContext,
-        operation: ToolOperation,
-        session: &SessionId,
-        run: &RunId,
-        epoch: Epoch,
-        call: &FsReadCall,
-    ) -> Result<Result<ResolvedResource, ToolRefusalReason>, AuthorityError> {
+        asked: &tool::Asked<'_>,
+    ) -> Result<Result<(plan::Call, tool::Targets), FsRefusalReason>, AuthorityError> {
         let shared = Arc::clone(&self.shared);
         let active = shared.active()?;
-        let located = self.transact(|work| {
-            tool::locate(work, caller, operation, session, run, epoch, call, active)
-        })?;
-        let (declared, binding) = match located {
+        let located = self.transact(|work| tool::locate(work, asked, active))?;
+        let (call, binding) = match located {
             tool::Located::Refused(reason) => return Ok(Err(reason)),
-            tool::Located::At { declared, binding } => (declared, binding),
+            tool::Located::At { call, binding } => (call, binding),
         };
-        match resolve_file(&binding, &declared) {
-            Ok(resolved) => Ok(Ok(resolved)),
+        match tool::resolve_targets(&binding, &call) {
+            Ok(targets) => Ok(Ok((call, targets))),
             Err(reason) => {
-                self.transact(|work| {
-                    tool::refuse(work, caller, operation, session, run, epoch, reason)
-                })?;
+                self.transact(|work| tool::refuse(work, asked, reason))?;
                 Ok(Err(reason))
             }
         }
@@ -1207,15 +1306,34 @@ impl Authority {
                 let session = session.ok_or_else(missing)?;
                 let run = header.run_id.as_ref().ok_or_else(missing)?;
                 let epoch = header.epoch.ok_or_else(missing)?;
-                let reply = self.tool_invoke(caller, session, run, epoch, &invoke.fs_read)?;
+                let request = ToolRequest::v1(&invoke.fs_read);
+                let reply = self.tool_invoke(caller, session, run, epoch, &request)?;
                 wire::tool_reply(&reply).map_err(unrepresentable)
             }
             DwkpBody::CanonicalPreview(preview) => {
                 let session = session.ok_or_else(missing)?;
                 let run = header.run_id.as_ref().ok_or_else(missing)?;
                 let epoch = header.epoch.ok_or_else(missing)?;
-                let reply = self.tool_preview(caller, session, run, epoch, &preview.fs_read)?;
+                let request = ToolRequest::v1(&preview.fs_read);
+                let reply = self.tool_preview(caller, session, run, epoch, &request)?;
                 wire::tool_reply(&reply).map_err(unrepresentable)
+            }
+            DwkpBody::ToolInvokeV2(call) => {
+                let session = session.ok_or_else(missing)?;
+                let run = header.run_id.as_ref().ok_or_else(missing)?;
+                let epoch = header.epoch.ok_or_else(missing)?;
+                let key = header.idempotency_key.clone().ok_or_else(missing)?;
+                let request = ToolRequest::v2(call.clone(), Some(key));
+                let reply = self.tool_invoke(caller, session, run, epoch, &request)?;
+                wire::tool_reply_v2(&reply).map_err(unrepresentable)
+            }
+            DwkpBody::CanonicalPreviewV2(call) => {
+                let session = session.ok_or_else(missing)?;
+                let run = header.run_id.as_ref().ok_or_else(missing)?;
+                let epoch = header.epoch.ok_or_else(missing)?;
+                let request = ToolRequest::v2(call.clone(), None);
+                let reply = self.tool_preview(caller, session, run, epoch, &request)?;
+                wire::tool_reply_v2(&reply).map_err(unrepresentable)
             }
             _ => Err(AuthorityError::NotAnAuthorityRequest),
         }
@@ -1244,20 +1362,6 @@ impl Authority {
     pub fn operator(&mut self) -> OperatorBootstrap<'_> {
         OperatorBootstrap { authority: self }
     }
-}
-
-/// Pin the run's root and resolve the call's path beneath it with the M4a
-/// resolver: the object must exist as a regular file. `O_PATH` descriptors
-/// only — nothing is opened for reading here.
-fn resolve_file(
-    binding: &config::RootBinding,
-    declared: &crate::capability::DeclaredPath,
-) -> Result<ResolvedResource, ToolRefusalReason> {
-    use crate::resource::fs::{Access, Expect, PinnedRoot};
-    PinnedRoot::reopen(&binding.host_path, &binding.fingerprint)
-        .map_err(tool::root_refusal)?
-        .resolve(declared, Access::Observe, Expect::RegularFile)
-        .map_err(tool::resolve_refusal)
 }
 
 /// Installs kernel-owned configuration: agent profiles, skills, workspaces and

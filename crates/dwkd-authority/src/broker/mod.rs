@@ -1,10 +1,12 @@
-//! The authority's side of the private broker channel (M4b, [ADR-0043]).
+//! The authority's side of the private broker channel (M4b, [ADR-0043]; the
+//! M4c operations, [ADR-0044]).
 //!
 //! The authority decides; `dwkd-broker` does ([ADR-0018]). This module is the
 //! one place an authorised effect crosses from the first to the second: the
-//! state layer hands it an [`FsReadOrder`] — an invocation both gates allowed,
-//! whose intent is already durable, holding the one checked file opened for
-//! reading — and gets back the bytes, or why there are none.
+//! state layer hands it a [`BrokerOrder`] — an invocation whose whole plan was
+//! allowed, whose intent is already durable, holding exactly the checked
+//! descriptors the operation needs — and gets back the result, or why there is
+//! none, and whether the authorisation had left.
 //!
 //! # What it trusts, and what it does not
 //!
@@ -16,19 +18,20 @@
 //! * **One connection, one authorisation.** The broker's hello names a fresh
 //!   channel; the authorisation names it back; the broker executes at most
 //!   one per connection. No key, no MAC, no token outlives the connection.
-//! * **One descriptor, and it leaves by `SCM_RIGHTS`.** The readable file is
-//!   the only thing sent that grants anything, and it is sent as a descriptor,
-//!   never as a path or a number.
+//! * **Exactly the operation's descriptors, and they leave by `SCM_RIGHTS`.**
+//!   Never a path, a host root or a number that grants anything.
 //! * **The reply is checked, not believed.** It must answer this invocation on
-//!   this channel, carry exactly one result, and hold no more bytes than were
-//!   authorised.
+//!   this channel, carry exactly one answer, be the answer to *this*
+//!   operation, and stay within every bound the plan was decided on.
 //!
 //! The broker decides nothing and this module decides nothing: it has no
 //! policy, no capability and no store. What to do with an outcome — audit it,
-//! raise taint, answer the runtime — is the state layer's.
+//! raise taint, record it as unknown, answer the runtime — is the state
+//! layer's.
 //!
 //! [ADR-0018]: ../../../../docs/adr/0018-authority-broker-split.md
 //! [ADR-0043]: ../../../../docs/adr/0043-m4b-private-broker-channel-and-brokered-fs-read.md
+//! [ADR-0044]: ../../../../docs/adr/0044-m4c-filesystem-operations-plans-and-atomic-mutation.md
 
 #[cfg(target_os = "linux")]
 mod link;
@@ -37,39 +40,144 @@ use core::fmt;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use dwk_proto::brokerp::BrokerRefusal;
+use dwk_proto::brokerp::{
+    BrokerRefusal, Indeterminate, ReclaimState, StagingHolds, StagingOperation,
+};
+use dwk_proto::dwkp::fsops::{ContentRevision, PatchEdits};
 use dwk_proto::wire::id::InvocationId;
-use dwk_proto::wire::scalar::ReadLimit;
+use dwk_proto::wire::scalar::{
+    EntryKind, ListLimit, MatchLimit, Needle, PatchOutcome, ReadLimit, ScanLimit, StatKind,
+};
 
-use crate::resource::{FileIdentity, ReadHandoff};
+use crate::resource::{FileIdentity, ObjectHandoff, ParentHandoff, ReadHandoff};
 
 /// How long one broker exchange may take, end to end: connect, hello,
-/// authorisation, read, outcome. A bound, not a target — a read of the largest
-/// permitted size from a local file takes milliseconds.
+/// authorisation, the operation, outcome. A bound, not a target — every
+/// operation is local and bounded, and takes milliseconds.
 pub const EXCHANGE_DEADLINE: Duration = Duration::from_secs(10);
 
-/// One `fs.read` the authority authorised, ready to hand over.
-///
-/// Built only by the state layer, after both gates allowed the action and its
-/// intent was recorded. Holds the checked file; dropping an order closes it.
+/// What an order asks for, and the checked descriptors it holds.
 #[derive(Debug)]
-pub struct FsReadOrder {
-    invocation: InvocationId,
-    max_bytes: ReadLimit,
-    file: ReadHandoff,
+pub enum Operation {
+    /// Read at most `max_bytes` of the file.
+    Read {
+        /// The bound.
+        max_bytes: ReadLimit,
+        /// The file, open for reading.
+        file: ReadHandoff,
+    },
+    /// Report the object's metadata.
+    Stat {
+        /// The object, `O_PATH`.
+        object: ObjectHandoff,
+    },
+    /// List the directory.
+    List {
+        /// How many entries to examine.
+        max_entries: ListLimit,
+        /// The directory, open for reading.
+        directory: ObjectHandoff,
+    },
+    /// Search the file.
+    Search {
+        /// The bytes to find.
+        needle: Needle,
+        /// The most bytes to scan.
+        max_scan_bytes: ScanLimit,
+        /// The most offsets to report.
+        max_matches: MatchLimit,
+        /// The file, open for reading.
+        file: ReadHandoff,
+    },
+    /// Replace or create the file the name in `parent` names.
+    Write {
+        /// The parent, the name and — for a replacement — the target.
+        parent: ParentHandoff,
+        /// The complete new content.
+        content: Vec<u8>,
+    },
+    /// Patch the file.
+    Patch {
+        /// The parent, the name and the target.
+        parent: ParentHandoff,
+        /// The file, open for reading.
+        file: ReadHandoff,
+        /// What it must hold.
+        base: ContentRevision,
+        /// What it will hold.
+        post: ContentRevision,
+        /// The edits.
+        edits: PatchEdits,
+    },
+    /// Rename a file to a vacant name.
+    Move {
+        /// The source's parent, name and target.
+        source: ParentHandoff,
+        /// The destination's parent and name.
+        destination: ParentHandoff,
+    },
+    /// Remove a name.
+    Delete {
+        /// The parent, the name and the target.
+        parent: ParentHandoff,
+    },
+    /// Reclaim the staging directory of an invocation whose outcome is
+    /// recorded (ADR-0044 §10): the order's invocation is that one.
+    Reclaim {
+        /// The directory the staging directory is in, open for reading.
+        directory: ObjectHandoff,
+        /// What the staging directory was made for.
+        staging: StagingSpec,
+    },
 }
 
-impl FsReadOrder {
+/// What a staging directory was made for: the operation, the one name it
+/// concerned, and — for a replacement or a delete — the object authorised.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StagingSpec {
+    /// Replace, create or delete.
+    pub operation: StagingOperation,
+    /// The name the invocation changed.
+    pub leaf: String,
+    /// The object authorised: `(device, inode)`.
+    pub target: Option<(u64, u64)>,
+}
+
+impl Operation {
+    /// A stable name for the audit record.
+    #[must_use]
+    pub const fn name(&self) -> &'static str {
+        match self {
+            Self::Read { .. } => "fs.read",
+            Self::Stat { .. } => "fs.stat",
+            Self::List { .. } => "fs.list",
+            Self::Search { .. } => "fs.search",
+            Self::Write { .. } => "fs.write",
+            Self::Patch { .. } => "fs.patch",
+            Self::Move { .. } => "fs.move",
+            Self::Delete { .. } => "fs.delete",
+            Self::Reclaim { .. } => "staging.reclaim",
+        }
+    }
+}
+
+/// One operation the authority authorised, ready to hand over.
+///
+/// Built only by the state layer, after every action of the plan was allowed
+/// and the intent was recorded. Holds the checked descriptors; dropping an
+/// order closes them.
+#[derive(Debug)]
+pub struct BrokerOrder {
+    invocation: InvocationId,
+    operation: Operation,
+}
+
+impl BrokerOrder {
     /// An order. Crate-internal: only the state layer makes one.
-    pub(crate) const fn new(
-        invocation: InvocationId,
-        max_bytes: ReadLimit,
-        file: ReadHandoff,
-    ) -> Self {
+    pub(crate) const fn new(invocation: InvocationId, operation: Operation) -> Self {
         Self {
             invocation,
-            max_bytes,
-            file,
+            operation,
         }
     }
 
@@ -79,16 +187,37 @@ impl FsReadOrder {
         &self.invocation
     }
 
-    /// The most bytes it authorises.
+    /// What it asks for.
     #[must_use]
-    pub const fn max_bytes(&self) -> ReadLimit {
-        self.max_bytes
+    pub const fn operation(&self) -> &Operation {
+        &self.operation
     }
 
-    /// The identity of the file it authorises.
+    /// The identity of the object it names first: the file, directory or
+    /// object for the read family, the target (or, for a creation, the parent
+    /// directory) otherwise.
     #[must_use]
-    pub const fn identity(&self) -> FileIdentity {
-        self.file.identity()
+    pub fn identity(&self) -> FileIdentity {
+        match &self.operation {
+            Operation::Read { file, .. } | Operation::Search { file, .. } => file.identity(),
+            Operation::Stat { object } => object.identity(),
+            Operation::List { directory, .. } | Operation::Reclaim { directory, .. } => {
+                directory.identity()
+            }
+            Operation::Write { parent, .. }
+            | Operation::Patch { parent, .. }
+            | Operation::Delete { parent } => parent
+                .target()
+                .map_or_else(|| parent.directory_identity(), |(identity, _)| identity),
+            Operation::Move { source, .. } => source
+                .target()
+                .map_or_else(|| source.directory_identity(), |(identity, _)| identity),
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn into_parts(self) -> (InvocationId, Operation) {
+        (self.invocation, self.operation)
     }
 }
 
@@ -103,7 +232,94 @@ pub struct FsReadDelivery {
     pub eof_observed: bool,
 }
 
-/// Why no connection could be used. Nothing was sent in any of these cases.
+/// What `fstat` said about the object.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StatDelivery {
+    /// What it is.
+    pub kind: StatKind,
+    /// `st_size`.
+    pub size: u64,
+    /// `st_nlink`.
+    pub link_count: u64,
+    /// `st_mode & 0o7777`.
+    pub mode: u16,
+}
+
+/// One entry of a listing, as the directory holds it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RawListEntry {
+    /// The name's bytes, which need not be UTF-8.
+    pub name: Vec<u8>,
+    /// Its `d_type`.
+    pub kind: EntryKind,
+}
+
+/// What the broker listed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListDelivery {
+    /// The first `max_entries` entries in byte order of their names.
+    pub entries: Vec<RawListEntry>,
+    /// Whether every entry was examined.
+    pub complete: bool,
+}
+
+/// Where the needle was found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SearchDelivery {
+    /// Ascending start offsets.
+    pub offsets: Vec<u64>,
+    /// How many bytes were scanned.
+    pub scanned: u64,
+    /// Whether the end of the file was observed within the scan.
+    pub eof_observed: bool,
+    /// Whether more matches were found than reported.
+    pub matches_truncated: bool,
+}
+
+/// What the broker did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BrokerDelivery {
+    /// `fs.read`'s bytes.
+    Read(FsReadDelivery),
+    /// `fs.stat`'s metadata.
+    Stat(StatDelivery),
+    /// `fs.list`'s entries.
+    List(ListDelivery),
+    /// `fs.search`'s offsets.
+    Search(SearchDelivery),
+    /// `fs.write` completed, durably.
+    Write {
+        /// Whether the file was created.
+        created: bool,
+        /// Whether the staging directory was left behind.
+        debris: bool,
+    },
+    /// `fs.patch` completed, durably, or had already been applied.
+    Patch {
+        /// Which.
+        outcome: PatchOutcome,
+        /// Whether the staging directory was left behind.
+        debris: bool,
+    },
+    /// `fs.move` completed, durably.
+    Move,
+    /// `fs.delete` completed, durably.
+    Delete {
+        /// Whether the staging directory was left behind.
+        debris: bool,
+    },
+    /// A staging directory was judged, and removed only if disposable.
+    Reclaim {
+        /// What was found and done.
+        state: ReclaimState,
+        /// For a retained directory: why.
+        holds: Option<StagingHolds>,
+        /// For a retained object: its `(device, inode)`.
+        held: Option<(u64, u64)>,
+    },
+}
+
+/// Why no connection could be used.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Unreachable {
     /// Connecting to the configured socket failed.
@@ -132,7 +348,7 @@ impl Unreachable {
     }
 }
 
-/// Why an `fs.read` produced no bytes.
+/// Why an order produced no result.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BrokerFailure {
     /// No broker is configured: this authority performs no effects.
@@ -146,10 +362,12 @@ pub enum BrokerFailure {
         observed_uid: u32,
     },
     /// The broker's messages did not decode, or did not answer this
-    /// invocation on this channel, or claimed more bytes than authorised.
+    /// invocation on this channel, or claimed more than was authorised.
     Protocol(&'static str),
-    /// The broker refused the authorisation before reading.
+    /// The broker refused: it changed nothing.
     Refused(BrokerRefusal),
+    /// The broker may have changed something and cannot prove what.
+    Indeterminate(Indeterminate),
 }
 
 impl BrokerFailure {
@@ -162,6 +380,7 @@ impl BrokerFailure {
             Self::PeerRefused { .. } => "peer_refused",
             Self::Protocol(_) => "protocol",
             Self::Refused(_) => "refused",
+            Self::Indeterminate(_) => "indeterminate",
         }
     }
 }
@@ -179,24 +398,66 @@ impl fmt::Display for BrokerFailure {
             }
             Self::Protocol(why) => write!(f, "broker protocol error: {why}"),
             Self::Refused(why) => write!(f, "the broker refused: {}", why.as_str()),
+            Self::Indeterminate(why) => {
+                write!(f, "the broker cannot say what changed: {}", why.as_str())
+            }
         }
     }
 }
 
-/// Something that performs an authorised `fs.read`.
+/// An order that produced no result, and — what decides whether the effect
+/// is provably absent — whether the authorisation had left for the broker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BrokerError {
+    /// What went wrong.
+    pub failure: BrokerFailure,
+    /// Whether the authorisation was sent. `false` means the broker was told
+    /// nothing, so nothing was done. `true` means the broker may have acted,
+    /// unless it said it refused.
+    pub sent: bool,
+}
+
+impl BrokerError {
+    /// A failure before anything was sent.
+    #[must_use]
+    pub const fn before_sending(failure: BrokerFailure) -> Self {
+        Self {
+            failure,
+            sent: false,
+        }
+    }
+
+    /// A failure after the authorisation left.
+    #[must_use]
+    pub const fn after_sending(failure: BrokerFailure) -> Self {
+        Self {
+            failure,
+            sent: true,
+        }
+    }
+
+    /// Whether the broker provably changed nothing: it was told nothing, or it
+    /// said it refused.
+    #[must_use]
+    pub const fn provably_without_effect(&self) -> bool {
+        !self.sent || matches!(self.failure, BrokerFailure::Refused(_))
+    }
+}
+
+/// Something that performs an authorised operation.
 ///
 /// One production implementation, [`UnixBroker`]. The trait exists so the
 /// state layer's phase boundaries can be tested in process; a fake cannot take
-/// the descriptor out of an order (nothing outside this crate can), so it can
-/// only ever return bytes it made up — which is why no fake counts as
+/// a descriptor out of an order (nothing outside this crate can), so it can
+/// only ever return results it made up — which is why no fake counts as
 /// end-to-end evidence (ADR-0043).
 pub trait EffectBroker: Send + Sync + fmt::Debug {
-    /// Perform one `fs.read`.
+    /// Perform one operation.
     ///
     /// # Errors
     ///
-    /// [`BrokerFailure`]: nothing was read, or nothing trustworthy came back.
-    fn fs_read(&self, order: FsReadOrder) -> Result<FsReadDelivery, BrokerFailure>;
+    /// [`BrokerError`]: no result, and whether the authorisation had left.
+    fn perform(&self, order: BrokerOrder) -> Result<BrokerDelivery, BrokerError>;
 }
 
 /// The broker channel: a Unix-domain socket the broker listens on, and the uid
@@ -245,13 +506,15 @@ impl UnixBroker {
 
 impl EffectBroker for UnixBroker {
     #[cfg(target_os = "linux")]
-    fn fs_read(&self, order: FsReadOrder) -> Result<FsReadDelivery, BrokerFailure> {
-        link::fs_read(&self.socket, self.broker_uid, self.deadline, order)
+    fn perform(&self, order: BrokerOrder) -> Result<BrokerDelivery, BrokerError> {
+        link::perform(&self.socket, self.broker_uid, self.deadline, order)
     }
 
     #[cfg(not(target_os = "linux"))]
-    fn fs_read(&self, order: FsReadOrder) -> Result<FsReadDelivery, BrokerFailure> {
+    fn perform(&self, order: BrokerOrder) -> Result<BrokerDelivery, BrokerError> {
         drop(order);
-        Err(BrokerFailure::Unreachable(Unreachable::Unsupported))
+        Err(BrokerError::before_sending(BrokerFailure::Unreachable(
+            Unreachable::Unsupported,
+        )))
     }
 }

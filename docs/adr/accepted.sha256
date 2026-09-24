@@ -52,3 +52,4 @@ b5d0068fabf796725c5e901e1bb87854df6307542203049fc23336f05d173298  0038-policy-ev
 c5bd6df1b40f7f850ab079ad2920f4b1bcb54b4c3ba0c7175d4d3b96a44071af  0041-m3e-authenticated-dwkp-transport.md
 08f354cff065b41cd7e81cb60a55fff645bc316093bedf65362fe0fea1c0a9e2  0042-m4a-canonical-filesystem-resolution.md
 965f1d6147731432826bc032eada422c717350cf7478f7cd82365bfe82d9f1d0  0043-m4b-private-broker-channel-and-brokered-fs-read.md
+e175bb962d8065f66e28f783d21a16e8541cca885e8ebcdfcffc9a6586442195  0044-m4c-filesystem-operations-plans-and-atomic-mutation.md

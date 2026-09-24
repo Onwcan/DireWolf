@@ -289,7 +289,236 @@ def _content(rng: random.Random) -> str:
     return bytes(rng.randrange(256) for _ in range(size)).hex()
 
 
-def _payload(rng: random.Random, schema: str) -> object:
+def _hex(rng: random.Random, low: int, high: int) -> str:
+    return bytes(rng.randrange(256) for _ in range(rng.randint(low, high))).hex()
+
+
+def _digest(rng: random.Random) -> str:
+    return "".join(rng.choice("0123456789abcdef") for _ in range(64))
+
+
+def _content_revision(rng: random.Random) -> dwkp.ContentRevision:
+    return dwkp.ContentRevision(sha256=_digest(rng), length=rng.randint(0, 1_048_576))
+
+
+def _tool_call(rng: random.Random) -> dwkp.ToolCall:
+    """Version 2: exactly one of the eight typed members."""
+    path = _workspace_path(rng)
+    member = rng.choice(
+        [
+            "fs_read",
+            "fs_list",
+            "fs_search",
+            "fs_stat",
+            "fs_write",
+            "fs_patch",
+            "fs_move",
+            "fs_delete",
+        ]
+    )
+    if member == "fs_read":
+        return dwkp.ToolCall(fs_read=_read_call(rng))
+    if member == "fs_list":
+        return dwkp.ToolCall(fs_list=dwkp.FsListCall(path=path, max_entries=rng.randint(1, 512)))
+    if member == "fs_search":
+        return dwkp.ToolCall(
+            fs_search=dwkp.FsSearchCall(
+                path=path,
+                needle=_hex(rng, 1, 64),
+                max_scan_bytes=rng.randint(1, 16_777_216),
+                max_matches=rng.randint(1, 1024),
+            )
+        )
+    if member == "fs_stat":
+        return dwkp.ToolCall(fs_stat=dwkp.FsStatCall(path=path))
+    if member == "fs_write":
+        return dwkp.ToolCall(fs_write=dwkp.FsWriteCall(path=path, content=_content(rng)))
+    if member == "fs_patch":
+        edits = [
+            dwkp.PatchEdit(
+                offset=rng.randint(0, 1_048_576),
+                delete=rng.randint(0, 64),
+                insert=_hex(rng, 0, 16),
+            )
+            for _ in range(rng.randint(0, 3))
+        ]
+        return dwkp.ToolCall(
+            fs_patch=dwkp.FsPatchCall(
+                path=path, base=_content_revision(rng), post=_content_revision(rng), edits=edits
+            )
+        )
+    if member == "fs_move":
+        return dwkp.ToolCall(fs_move=dwkp.FsMoveCall(source=path, destination=_workspace_path(rng)))
+    return dwkp.ToolCall(fs_delete=dwkp.FsDeleteCall(path=path))
+
+
+def _action_decision(rng: random.Random) -> dwkp.ActionDecision:
+    return dwkp.ActionDecision(
+        effect=rng.choice(["ALLOW", "DENY"]),
+        reason=rng.choice(
+            [
+                "ALLOWED_BY_RULE",
+                "DENIED_BY_RULE",
+                "DEFAULT_DENY",
+                "NO_CAPABILITY",
+                "UNRESOLVED_POLICY_INPUT",
+                "OBLIGATION_UNENFORCEABLE",
+            ]
+        ),
+        capability_result=rng.choice(["SATISFIED", "NOT_SATISFIED"]),
+        policy_result=rng.choice(["SATISFIED", "NOT_SATISFIED"]),
+        rule_id=_kebab(rng, 63),
+        rule_source=_rule_source(rng),
+    )
+
+
+def _tool_plan(rng: random.Random) -> dwkp.ToolPlan:
+    return dwkp.ToolPlan(
+        tool=rng.choice(
+            [
+                "fs.read",
+                "fs.list",
+                "fs.search",
+                "fs.stat",
+                "fs.write",
+                "fs.patch",
+                "fs.move",
+                "fs.delete",
+            ]
+        ),
+        environment=rng.choice(["HOST", "SANDBOX"]),
+        effect=rng.choice(["ALLOW", "DENY"]),
+        actions=[
+            dwkp.PlannedAction(
+                role=rng.choice(["TARGET", "SOURCE", "DESTINATION"]),
+                verb=rng.choice(
+                    ["fs.read", "fs.list", "fs.stat", "fs.write", "fs.create", "fs.delete"]
+                ),
+                canonical_path=_workspace_path(rng),
+                object=rng.choice(["EXISTING", "VACANT"]),
+                byte_count=rng.randint(0, MAX_SAFE_INTEGER),
+                decision=_action_decision(rng),
+            )
+            for _ in range(rng.randint(0, 4))
+        ],
+    )
+
+
+def _entry_name(rng: random.Random) -> str:
+    alphabet = "abcdefghijklmnopqrstuvwxyz0123456789._- é世"
+    while True:
+        name = "".join(rng.choice(alphabet) for _ in range(rng.randint(1, 30)))
+        if name not in (".", ".."):
+            return name
+
+
+def _tool_output(rng: random.Random) -> dwkp.ToolOutput:
+    member = rng.randrange(8)
+    if member == 0:
+        return dwkp.ToolOutput(
+            fs_read=dwkp.FsReadResult(content=_content(rng), eof_observed=rng.random() < 0.5)
+        )
+    if member == 1:
+        return dwkp.ToolOutput(
+            fs_list=dwkp.FsListResult(
+                entries=[
+                    dwkp.FsListEntry(
+                        name=_entry_name(rng),
+                        kind=rng.choice(
+                            ["REGULAR_FILE", "DIRECTORY", "SYMLINK", "OTHER", "UNKNOWN"]
+                        ),
+                    )
+                    for _ in range(rng.randint(0, 5))
+                ],
+                unaddressable=rng.randint(0, 512),
+                complete=rng.random() < 0.5,
+            )
+        )
+    if member == 2:
+        return dwkp.ToolOutput(
+            fs_search=dwkp.FsSearchResult(
+                offsets=[rng.randint(0, MAX_SAFE_INTEGER) for _ in range(rng.randint(0, 5))],
+                scanned=rng.randint(0, 16_777_216),
+                eof_observed=rng.random() < 0.5,
+                matches_truncated=rng.random() < 0.5,
+            )
+        )
+    if member == 3:
+        return dwkp.ToolOutput(
+            fs_stat=dwkp.FsStatResult(
+                kind=rng.choice(["REGULAR_FILE", "DIRECTORY"]),
+                size=rng.randint(0, MAX_SAFE_INTEGER),
+                link_count=rng.randint(0, 100),
+                executable=rng.random() < 0.5,
+            )
+        )
+    if member == 4:
+        return dwkp.ToolOutput(
+            fs_write=dwkp.FsWriteResult(
+                created=rng.random() < 0.5, length=rng.randint(0, 262144), sha256=_digest(rng)
+            )
+        )
+    if member == 5:
+        return dwkp.ToolOutput(
+            fs_patch=dwkp.FsPatchResult(
+                outcome=rng.choice(["APPLIED", "ALREADY_APPLIED"]), post=_content_revision(rng)
+            )
+        )
+    if member == 6:
+        return dwkp.ToolOutput(fs_move=dwkp.FsMoveResult())
+    return dwkp.ToolOutput(fs_delete=dwkp.FsDeleteResult())
+
+
+_FS_REFUSALS_PREVIEW = [
+    "STALE_EPOCH",
+    "UNKNOWN_RUN",
+    "WORKSPACE_UNBOUND",
+    "NOT_FOUND",
+    "SYMLINK",
+    "MULTIPLY_LINKED",
+    "WORKSPACE_ROOT",
+    "DESTINATION_EXISTS",
+    "PATCH_INCONSISTENT",
+]
+
+
+def _payload_v2(rng: random.Random, schema: str) -> object:
+    if schema in ("direwolf.tool.invoke", "direwolf.tool.preview"):
+        return _tool_call(rng)
+    if schema == "direwolf.tool.result":
+        return dwkp.ToolResultV2(
+            invocation_id=_id(rng, "inv"), plan=_tool_plan(rng), output=_tool_output(rng)
+        )
+    if schema == "direwolf.tool.denied":
+        return dwkp.ToolDenialV2(plan=_tool_plan(rng))
+    if schema == "direwolf.tool.previewed":
+        return dwkp.CanonicalPreviewResultV2(plan=_tool_plan(rng))
+    if schema == "direwolf.tool.refused":
+        operation = rng.choice(["TOOL_INVOKE", "CANONICAL_PREVIEW"])
+        reasons = _FS_REFUSALS_PREVIEW + (
+            ["IDEMPOTENCY_KEY_REUSED"] if operation == "TOOL_INVOKE" else []
+        )
+        return dwkp.ToolRefusalV2(operation=operation, reason=rng.choice(reasons))
+    if schema == "direwolf.tool.failed":
+        return dwkp.ToolFailureV2(
+            invocation_id=_id(rng, "inv"),
+            reason=rng.choice(
+                [
+                    "OBJECT_CHANGED",
+                    "TARGET_OCCUPIED",
+                    "CONFLICT",
+                    "DIRECTORY_NOT_EMPTY",
+                    "WRITE_DENIED",
+                    "OUTCOME_UNKNOWN",
+                ]
+            ),
+        )
+    raise AssertionError(f"no version-2 generator for {schema}")
+
+
+def _payload(rng: random.Random, schema: str, version: int = 1) -> object:
+    if version == 2 and schema.startswith("direwolf.tool."):
+        return _payload_v2(rng, schema)
     if schema == "direwolf.tool.invoke":
         return dwkp.ToolInvoke(fs_read=_read_call(rng))
     if schema == "direwolf.tool.preview":
@@ -382,7 +611,8 @@ def _payload(rng: random.Random, schema: str) -> object:
 
 
 def _message(rng: random.Random) -> DwkpMessage:
-    (message_type, schema), spec = rng.choice(sorted(dwkp.MESSAGES.items()))
+    (message_type, schema), specs = rng.choice(sorted(dwkp.MESSAGES.items()))
+    spec = rng.choice(specs)
     fields: dict[str, str | int | None] = {}
     generators: dict[str, Callable[[], str | int]] = {
         "correlation_id": lambda: _id(rng, rng.choice(["msg", "run", "ses", "abcdefgh"])),
@@ -410,7 +640,7 @@ def _message(rng: random.Random) -> DwkpMessage:
         ts=_timestamp(rng),
         **fields,  # type: ignore[arg-type]
     )
-    return DwkpMessage(header, _payload(rng, schema))  # type: ignore[arg-type]
+    return DwkpMessage(header, _payload(rng, schema, header.schema_version))  # type: ignore[arg-type]
 
 
 def _cases(seed: int) -> list[random.Random]:

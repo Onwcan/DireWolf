@@ -59,3 +59,88 @@ pub const MAX_ERROR_DETAIL_CHARS: usize = 512;
 /// spill in M4b, and a read the transport cannot return is refused at the
 /// boundary rather than truncated silently.
 pub const MAX_FS_READ_BYTES: usize = 256 * 1024;
+
+// ---------------------------------------------------------------------------
+// M4c filesystem operations (ADR-0044 §12). Each bound is derived from the
+// 1 MiB frame, which carries everything inline: there is still no artifact
+// spill, so a result the transport cannot return is refused, never truncated.
+// ---------------------------------------------------------------------------
+
+/// The most bytes one `fs.write` may carry, inline. The same derivation as
+/// [`MAX_FS_READ_BYTES`]: 524 288 hex characters, leaving half the frame for
+/// the envelope and the path.
+pub const MAX_FS_WRITE_BYTES: usize = 256 * 1024;
+
+/// The largest file `fs.patch` operates on, before and after: the broker holds
+/// the base and the result in memory, and hashes both. The file's bytes never
+/// cross DWKP — only its revisions and the edits do.
+pub const MAX_PATCH_FILE_BYTES: usize = 1024 * 1024;
+
+/// The most edits one `fs.patch` may carry.
+pub const MAX_PATCH_EDITS: usize = 64;
+
+/// The most bytes all of one `fs.patch`'s edits may insert, **together**.
+///
+/// **Derived from the frame, like [`MAX_FS_WRITE_BYTES`], and for the same
+/// reason**: the inserted bytes are the only part of a patch that grows with
+/// the change, and they travel inline as hexadecimal — two characters a byte.
+/// 262 144 bytes are 524 288 characters; everything else a worst-case
+/// `ToolInvoke` carries (the envelope, a 384-character path at six bytes a
+/// character, two revisions, and 64 edits' offsets, lengths and punctuation) is
+/// bounded at [`MAX_PATCH_REQUEST_OVERHEAD_BYTES`], so the largest valid patch
+/// request is at most [`MAX_PATCH_REQUEST_ENCODED_BYTES`] — leaving
+/// [`PATCH_FRAME_MARGIN_BYTES`] of the 1 MiB frame unused. A test
+/// (`tests/dwkp_v2.rs`) builds that request and encodes the whole envelope.
+///
+/// The bytes an edit **deletes** are not bounded separately: they are a range
+/// of the base, which is at most [`MAX_PATCH_FILE_BYTES`], and they cross DWKP
+/// as two integers, not as bytes. A patch whose inserts exceed this is refused
+/// `PATCH_TOO_LARGE` before anything is resolved or recorded (ADR-0044 §12);
+/// the 1 MiB file bound is unchanged, because the file itself never crosses.
+pub const MAX_PATCH_INSERT_BYTES_TOTAL: usize = 256 * 1024;
+
+/// Everything in the largest `fs.patch` request that is not inserted content,
+/// bounded above: the envelope (under 1 KiB), the path (384 characters, at most
+/// six bytes each when canonical JSON escapes it: 2 306 bytes with its quotes),
+/// two revisions (under 256 bytes), and 64 edits of at most 64 bytes of
+/// offsets, lengths, names and punctuation each (4 096 bytes). 16 KiB is more
+/// than twice their sum.
+pub const MAX_PATCH_REQUEST_OVERHEAD_BYTES: usize = 16 * 1024;
+
+/// The largest a valid `fs.patch` `ToolInvoke` can encode to, frame header
+/// included: every inserted byte as two hexadecimal characters, and the
+/// overhead above.
+pub const MAX_PATCH_REQUEST_ENCODED_BYTES: usize =
+    2 * MAX_PATCH_INSERT_BYTES_TOTAL + MAX_PATCH_REQUEST_OVERHEAD_BYTES;
+
+/// How much of the frame the largest valid `fs.patch` request leaves unused.
+pub const PATCH_FRAME_MARGIN_BYTES: usize = MAX_FRAME_BODY - MAX_PATCH_REQUEST_ENCODED_BYTES;
+
+const _: () = assert!(MAX_PATCH_REQUEST_ENCODED_BYTES < MAX_FRAME_BODY);
+const _: () = assert!(PATCH_FRAME_MARGIN_BYTES >= MAX_FRAME_BODY >> 2);
+
+/// The most directory entries one `fs.list` examines and returns. A listing
+/// of 512 names of 255 bytes each, every byte a `"` that canonical JSON escapes
+/// to two, is 261 120 characters of names: under a third of the frame.
+pub const MAX_LIST_ENTRIES: usize = 512;
+
+/// The most names one `fs.list` reads from a directory before it sorts them:
+/// the same bound the resolver keeps when it verifies a name in a directory
+/// (ADR-0042). A larger directory is refused, never listed in part by an order
+/// the directory chose. At most 255 bytes a name, the broker holds at most
+/// 16 MiB of names.
+pub const MAX_LIST_SCAN_ENTRIES: usize = 65_536;
+
+/// The most bytes one `fs.search` may scan. Scanning moves no content across
+/// DWKP, so this bounds the broker's work, not the frame.
+pub const MAX_SEARCH_SCAN_BYTES: usize = 16 * 1024 * 1024;
+
+/// The most match offsets one `fs.search` returns: at most 16 digits each.
+pub const MAX_SEARCH_MATCHES: usize = 1024;
+
+/// The longest literal `fs.search` needle, in bytes.
+pub const MAX_SEARCH_NEEDLE_BYTES: usize = 1024;
+
+/// The most canonical actions one tool plan holds (`fs.patch` and a creating
+/// `fs.write` need two, `fs.move` two; four leaves room and no more).
+pub const MAX_PLAN_ACTIONS: usize = 4;

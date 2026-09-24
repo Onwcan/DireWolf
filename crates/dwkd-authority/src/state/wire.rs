@@ -48,23 +48,29 @@
 use core::fmt;
 
 use dwk_proto::dwkp::DwkpBody;
+use dwk_proto::dwkp::fsops::{
+    ActionDecision, CanonicalPreviewResultV2, PlannedAction as WireAction, PlannedActions,
+    ToolDenialV2, ToolFailureV2, ToolPlan as WirePlan, ToolRefusalV2, ToolResultV2,
+};
 use dwk_proto::dwkp::messages::{
     AuthorityDecision, AuthorityRefusal, CanonicalPreviewResult, CapabilityGrant,
-    EffectiveAuthority, FsReadResult, GrantSet, LeaseGrant, RunGrant, ToolAction, ToolDecision,
-    ToolDenial, ToolFailure, ToolRefusal, ToolResult, WithheldCapability, WithheldSet,
+    EffectiveAuthority, GrantSet, LeaseGrant, RunGrant, ToolAction, ToolDecision, ToolDenial,
+    ToolFailure, ToolRefusal, ToolResult, WithheldCapability, WithheldSet,
 };
 use dwk_proto::wire::id::SessionId;
 use dwk_proto::wire::scalar::{
-    ActionEnvironment, CapabilityText, DecisionEffect, DecisionReason, Epoch, GateResult,
-    HexContent, PolicyRevision, RefusalReason, RefusedOperation, RuleId, RuleSource,
-    ToolDecisionReason, ToolName, WorkspacePath,
+    ActionEnvironment, ByteCount, CapabilityText, DecisionEffect, DecisionReason, Epoch,
+    FsDecisionReason, FsFailureReason, FsRefusalReason, FsTool, FsVerb, GateResult, PolicyRevision,
+    ReadLimit, RefusalReason, RefusedOperation, RuleId, RuleSource, ToolDecisionReason,
+    ToolFailureReason, ToolName, ToolRefusalReason, WorkspacePath,
 };
 
-use crate::policy::{Effect, Environment, SourceLocation, Unevaluable};
+use crate::policy::{Effect, SourceLocation, Unevaluable};
 
 use super::admission::Admission;
+use super::plan::{PlannedAction, ToolPlan};
 use super::query::{AuthorityAnswer, DecisionRecord};
-use super::tool::{self, ToolReply};
+use super::tool::ToolReply;
 
 /// What the M3 wire cannot say truthfully. Unreachable from any M3 request.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -229,93 +235,215 @@ pub fn effective_authority(answer: &AuthorityAnswer) -> Result<EffectiveAuthorit
 }
 
 // ---------------------------------------------------------------------------
-// M4b: tool operations (ADR-0043).
+// Tool operations: version 1 (M4b, ADR-0043) and version 2 (M4c, ADR-0044).
 //
 // Every tool outcome has a truthful wire form, including the one the M3 table
 // above calls a gap: a rule that could not be evaluated -- today, any rule
 // naming `~`, which has no kernel-owned value yet -- is reported as
 // `UNRESOLVED_POLICY_INPUT` with that rule's id, not dressed as a rule that
 // matched.
+//
+// A request is answered in its own version. Version 1 is M4b's contract,
+// exactly: one `fs.read`, one action. Its closed enumerations are not widened;
+// the one M4c decision it has no word for -- a rule that allowed with an
+// obligation this build cannot enforce -- is reported the way a
+// `REQUIRE_APPROVAL` rule is: `DENY`, `DENIED_BY_RULE`, the policy gate not
+// satisfied, attributed to that rule. Nothing a version-1 `fs.read` can reach
+// lacks a version-1 spelling; anything else is a bug, and a gap.
 // ---------------------------------------------------------------------------
 
-/// The wire view of a decided tool action.
-fn tool_action(decision: &tool::ToolDecision) -> Result<ToolAction, WireGap> {
-    Ok(ToolAction {
-        tool: ToolName::FsRead,
-        canonical_path: WorkspacePath::new(decision.canonical_path().to_string())
-            .ok_or(WireGap::Unrepresentable("canonical path"))?,
-        byte_count: decision.max_bytes(),
-        environment: match decision.action().environment() {
-            Environment::Host => ActionEnvironment::Host,
-            Environment::Sandbox => ActionEnvironment::Sandbox,
-        },
-    })
+/// A version-1 spelling of a version-2 value, found by its wire text: the two
+/// enumerations share every version-1 member's spelling by construction.
+fn v1_spelling<V: Copy, W: Copy>(
+    value: V,
+    spell: fn(V) -> &'static str,
+    all: &'static [W],
+    spelled: fn(W) -> &'static str,
+) -> Option<W> {
+    all.iter().copied().find(|w| spelled(*w) == spell(value))
 }
 
-/// Both gates, on the tool wire.
-fn tool_decision(record: &DecisionRecord) -> Result<ToolDecision, WireGap> {
-    let policy = record.policy();
-    let reason = if record.permits() {
-        ToolDecisionReason::AllowedByRule
-    } else if policy.unevaluable().is_some() {
-        ToolDecisionReason::UnresolvedPolicyInput
-    } else if policy.effect() == Effect::Allow {
-        ToolDecisionReason::NoCapability
-    } else if policy.rule_id().is_default() {
-        ToolDecisionReason::DefaultDeny
-    } else {
-        ToolDecisionReason::DeniedByRule
+/// The version-1 action of a one-action `fs.read` plan.
+fn v1_action(plan: &ToolPlan) -> Result<(ToolAction, &PlannedAction), WireGap> {
+    let gap = || WireGap::Unrepresentable("a version-1 tool plan");
+    let [planned] = plan.actions() else {
+        return Err(gap());
+    };
+    if plan.tool() != FsTool::FsRead || planned.verb() != FsVerb::FsRead {
+        return Err(gap());
+    }
+    let byte_count = u32::try_from(planned.byte_count())
+        .ok()
+        .and_then(ReadLimit::new)
+        .ok_or_else(gap)?;
+    Ok((
+        ToolAction {
+            tool: ToolName::FsRead,
+            canonical_path: WorkspacePath::new(planned.canonical_path().to_string())
+                .ok_or(WireGap::Unrepresentable("canonical path"))?,
+            byte_count,
+            environment: ActionEnvironment::Host,
+        },
+        planned,
+    ))
+}
+
+/// Both gates of one action, on the version-1 tool wire.
+fn tool_decision(planned: &PlannedAction) -> Result<ToolDecision, WireGap> {
+    let policy = planned.record().policy();
+    let reason = match planned.reason() {
+        FsDecisionReason::AllowedByRule => ToolDecisionReason::AllowedByRule,
+        FsDecisionReason::UnresolvedPolicyInput => ToolDecisionReason::UnresolvedPolicyInput,
+        FsDecisionReason::NoCapability => ToolDecisionReason::NoCapability,
+        FsDecisionReason::DefaultDeny => ToolDecisionReason::DefaultDeny,
+        FsDecisionReason::DeniedByRule | FsDecisionReason::ObligationUnenforceable => {
+            ToolDecisionReason::DeniedByRule
+        }
     };
     let (rule_id, rule_source) = rule(policy.rule_id().as_str(), policy.rule_source())?;
     Ok(ToolDecision {
-        effect: if record.permits() {
+        effect: if planned.permits() {
             DecisionEffect::Allow
         } else {
             DecisionEffect::Deny
         },
         reason,
-        capability_result: gate(record.capability_satisfied()),
-        policy_result: gate(record.policy_satisfied()),
+        capability_result: gate(planned.record().capability_satisfied()),
+        policy_result: gate(planned.policy_satisfied()),
         rule_id,
         rule_source,
     })
 }
 
-/// The response body for a tool operation's outcome.
+/// The response body for a version-1 tool operation's outcome.
 ///
 /// # Errors
 ///
 /// [`WireGap::Unrepresentable`] only for a value that does not fit its wire
-/// type -- a bug, never a sound outcome.
+/// type -- a bug, never a sound outcome of a version-1 request.
 pub fn tool_reply(reply: &ToolReply) -> Result<DwkpBody, WireGap> {
     Ok(match reply {
         ToolReply::Done {
             invocation,
-            decision,
-            delivery,
-        } => DwkpBody::ToolResult(ToolResult {
-            invocation_id: invocation.clone(),
-            action: tool_action(decision)?,
-            decision: tool_decision(decision.record())?,
-            fs_read: FsReadResult {
-                content: HexContent::from_bytes(&delivery.content)
-                    .ok_or(WireGap::Unrepresentable("fs.read content"))?,
-                eof_observed: delivery.eof_observed,
-            },
-        }),
-        ToolReply::Denied(decision) => DwkpBody::ToolDenied(ToolDenial {
-            action: tool_action(decision)?,
-            decision: tool_decision(decision.record())?,
-        }),
-        ToolReply::Previewed(decision) => DwkpBody::ToolPreviewed(CanonicalPreviewResult {
-            action: tool_action(decision)?,
-            decision: tool_decision(decision.record())?,
-        }),
+            plan,
+            output,
+        } => {
+            let (action, planned) = v1_action(plan)?;
+            DwkpBody::ToolResult(ToolResult {
+                invocation_id: invocation.clone(),
+                action,
+                decision: tool_decision(planned)?,
+                fs_read: output
+                    .fs_read
+                    .clone()
+                    .ok_or(WireGap::Unrepresentable("a version-1 result"))?,
+            })
+        }
+        ToolReply::Denied(plan) => {
+            let (action, planned) = v1_action(plan)?;
+            DwkpBody::ToolDenied(ToolDenial {
+                action,
+                decision: tool_decision(planned)?,
+            })
+        }
+        ToolReply::Previewed(plan) => {
+            let (action, planned) = v1_action(plan)?;
+            DwkpBody::ToolPreviewed(CanonicalPreviewResult {
+                action,
+                decision: tool_decision(planned)?,
+            })
+        }
         ToolReply::Refused(operation, reason) => DwkpBody::ToolRefused(ToolRefusal {
+            operation: *operation,
+            reason: v1_spelling(
+                *reason,
+                FsRefusalReason::as_str,
+                ToolRefusalReason::ALL,
+                ToolRefusalReason::as_str,
+            )
+            .ok_or(WireGap::Unrepresentable("a version-1 refusal"))?,
+        }),
+        ToolReply::Failed { invocation, reason } => DwkpBody::ToolFailed(ToolFailure {
+            invocation_id: invocation.clone(),
+            reason: v1_spelling(
+                *reason,
+                FsFailureReason::as_str,
+                ToolFailureReason::ALL,
+                ToolFailureReason::as_str,
+            )
+            .ok_or(WireGap::Unrepresentable("a version-1 failure"))?,
+        }),
+    })
+}
+
+/// A plan on the version-2 wire: every action, each with both gates.
+fn wire_plan(plan: &ToolPlan) -> Result<WirePlan, WireGap> {
+    let mut actions = Vec::new();
+    for planned in plan.actions() {
+        let policy = planned.record().policy();
+        let (rule_id, rule_source) = rule(policy.rule_id().as_str(), policy.rule_source())?;
+        actions.push(WireAction {
+            role: planned.role(),
+            verb: planned.verb(),
+            canonical_path: WorkspacePath::new(planned.canonical_path().to_string())
+                .ok_or(WireGap::Unrepresentable("canonical path"))?,
+            object: planned.object(),
+            byte_count: ByteCount::new(planned.byte_count())
+                .ok_or(WireGap::Unrepresentable("byte count"))?,
+            decision: ActionDecision {
+                effect: if planned.permits() {
+                    DecisionEffect::Allow
+                } else {
+                    DecisionEffect::Deny
+                },
+                reason: planned.reason(),
+                capability_result: gate(planned.record().capability_satisfied()),
+                policy_result: gate(planned.policy_satisfied()),
+                rule_id,
+                rule_source,
+            },
+        });
+    }
+    Ok(WirePlan {
+        tool: plan.tool(),
+        environment: ActionEnvironment::Host,
+        effect: if plan.permits() {
+            DecisionEffect::Allow
+        } else {
+            DecisionEffect::Deny
+        },
+        actions: PlannedActions::new(actions).ok_or(WireGap::Unrepresentable("a plan"))?,
+    })
+}
+
+/// The response body for a version-2 tool operation's outcome.
+///
+/// # Errors
+///
+/// [`WireGap::Unrepresentable`] only for a value that does not fit its wire
+/// type -- a bug.
+pub fn tool_reply_v2(reply: &ToolReply) -> Result<DwkpBody, WireGap> {
+    Ok(match reply {
+        ToolReply::Done {
+            invocation,
+            plan,
+            output,
+        } => DwkpBody::ToolResultV2(ToolResultV2 {
+            invocation_id: invocation.clone(),
+            plan: wire_plan(plan)?,
+            output: (**output).clone(),
+        }),
+        ToolReply::Denied(plan) => DwkpBody::ToolDeniedV2(ToolDenialV2 {
+            plan: wire_plan(plan)?,
+        }),
+        ToolReply::Previewed(plan) => DwkpBody::ToolPreviewedV2(CanonicalPreviewResultV2 {
+            plan: wire_plan(plan)?,
+        }),
+        ToolReply::Refused(operation, reason) => DwkpBody::ToolRefusedV2(ToolRefusalV2 {
             operation: *operation,
             reason: *reason,
         }),
-        ToolReply::Failed { invocation, reason } => DwkpBody::ToolFailed(ToolFailure {
+        ToolReply::Failed { invocation, reason } => DwkpBody::ToolFailedV2(ToolFailureV2 {
             invocation_id: invocation.clone(),
             reason: *reason,
         }),

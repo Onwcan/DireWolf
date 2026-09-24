@@ -51,7 +51,7 @@ use rusqlite::Connection;
 pub(super) const APPLICATION_ID: i64 = 0x4457_4B44;
 
 /// The schema version this build creates and understands.
-pub(super) const CURRENT_VERSION: i64 = 3;
+pub(super) const CURRENT_VERSION: i64 = 4;
 
 /// Schema version 1, the first. Static text: nothing in it is assembled from a
 /// value, and every value the authority stores is bound as a parameter.
@@ -461,6 +461,200 @@ CREATE TRIGGER tool_invocation_no_delete BEFORE DELETE ON tool_invocation
 BEGIN SELECT RAISE(ABORT, 'an invocation record is never deleted'); END;
 ";
 
+/// Schema version 4 (M4c, ADR-0044 §7): every filesystem tool, its retry
+/// class, and an outcome that may be **unknown**.
+///
+/// `tool_invocation` is rebuilt — SQLite cannot change a `CHECK` in place —
+/// inside the migration's one transaction: the version-3 table is renamed
+/// aside, the version-4 table created, every row copied (a version-3 row is an
+/// `fs.read`: `RETRY_SAFE`, an existing object, completed as `READ` with the
+/// bytes it returned), and the old table dropped with its triggers and index.
+/// A failure anywhere rolls the whole step back (`migrate`).
+///
+/// What changes:
+///
+/// * **Eight tools, each with its fixed retry class**: `fs.move` and
+///   `fs.delete` are `NON_RETRYABLE`, every other `RETRY_SAFE`. A `CHECK`
+///   ties the class to the tool, so no row can claim a move is safe to repeat.
+/// * **A target may be vacant** (a creating `fs.write`): then its identity
+///   columns hold its parent directory's. A move's destination has its own
+///   columns — the destination's canonical path and its parent's identity.
+/// * **Two ambiguous endings, kept apart.** `INTERRUPTED` — the process ended
+///   between intent and outcome — is only for a tool without effect (the read
+///   family), where nothing can be in doubt. `UNKNOWN` — the broker may have
+///   changed something and nothing proves what — is only for a tool with an
+///   effect. Start-up ends an open intent `INTERRUPTED` or `UNKNOWN` by that
+///   rule and **never performs it** (ADR-0044 §10).
+/// * **A completion**, fixed per tool (`CREATED` or `REPLACED` for a write,
+///   `APPLIED` or `ALREADY_APPLIED` for a patch, …), and the content bytes it
+///   moved, which never exceed the bound decided on.
+///
+/// `tool_idempotency` binds a version-2 invocation's idempotency key, scoped
+/// to its caller and session like `admission_idempotency`, to the one
+/// invocation minted for it — in the transaction that records the intent. A
+/// key names one invocation, ever: it is never deleted and never re-bound.
+///
+/// `tool_staging` records, **with the intent**, the one staging directory a
+/// write, a patch or a delete may make (ADR-0044 §10): where it will be — the
+/// checked parent directory's canonical path and identity — and the name and
+/// object it concerns, so that a directory a crash leaves behind is never
+/// untracked. It starts `EXPECTED` and settles once: `CLEARED` when the
+/// broker's answer proves nothing is left (or nothing was sent), `REMOVED`
+/// when a reclamation found it disposable and removed it, `RETAINED` — with
+/// what it holds, and the held object's identity — when it may hold a
+/// workspace object or is the evidence of an effect, and `FOREIGN` when the
+/// name is not the broker's. A row is never deleted.
+pub(super) const SCHEMA_V4: &str = r"
+ALTER TABLE tool_invocation RENAME TO tool_invocation_v3;
+CREATE TABLE tool_invocation (
+    invocation_id       TEXT    PRIMARY KEY CHECK (length(invocation_id) = 30
+                                                   AND substr(invocation_id, 1, 4) = 'inv_'),
+    run_id              TEXT    NOT NULL REFERENCES run(run_id) ON DELETE RESTRICT,
+    tool                TEXT    NOT NULL CHECK (tool IN ('fs.read', 'fs.list', 'fs.search',
+                                    'fs.stat', 'fs.write', 'fs.patch', 'fs.move', 'fs.delete')),
+    retry_class         TEXT    NOT NULL CHECK (retry_class IN ('RETRY_SAFE', 'NON_RETRYABLE')),
+    canonical_path      TEXT    NOT NULL CHECK (length(CAST(canonical_path AS BLOB)) BETWEEN 10 AND 4096
+                                                AND substr(canonical_path, 1, 10) = '/workspace'),
+    object_state        TEXT    NOT NULL CHECK (object_state IN ('EXISTING', 'VACANT')),
+    object_device       TEXT    NOT NULL CHECK (length(object_device) BETWEEN 1 AND 20
+                                                AND object_device NOT GLOB '*[^0-9]*'),
+    object_inode        TEXT    NOT NULL CHECK (length(object_inode) BETWEEN 1 AND 20
+                                                AND object_inode NOT GLOB '*[^0-9]*'),
+    destination_path    TEXT    CHECK (destination_path IS NULL
+                                       OR (length(CAST(destination_path AS BLOB)) BETWEEN 11 AND 4096
+                                           AND substr(destination_path, 1, 11) = '/workspace/')),
+    destination_device  TEXT    CHECK (destination_device IS NULL
+                                       OR (length(destination_device) BETWEEN 1 AND 20
+                                           AND destination_device NOT GLOB '*[^0-9]*')),
+    destination_inode   TEXT    CHECK (destination_inode IS NULL
+                                       OR (length(destination_inode) BETWEEN 1 AND 20
+                                           AND destination_inode NOT GLOB '*[^0-9]*')),
+    byte_count          INTEGER NOT NULL CHECK (byte_count BETWEEN 0 AND 16777216),
+    incarnation         INTEGER NOT NULL CHECK (incarnation >= 1),
+    state               TEXT    NOT NULL CHECK (state IN ('INTENT', 'COMPLETED', 'FAILED',
+                                                          'INTERRUPTED', 'UNKNOWN')),
+    failure             TEXT    CHECK (failure IS NULL OR failure IN ('OBJECT_CHANGED',
+                                       'OBJECT_UNREADABLE', 'TARGET_OCCUPIED', 'CONFLICT',
+                                       'DIRECTORY_NOT_EMPTY', 'WRITE_DENIED',
+                                       'ATTRIBUTES_NOT_PRESERVED', 'SHARED_DIRECTORY',
+                                       'BROKER_UNAVAILABLE',
+                                       'BROKER_PROTOCOL_ERROR', 'BROKER_EXECUTION_ERROR')),
+    completion          TEXT,
+    content_bytes       INTEGER CHECK (content_bytes IS NULL OR content_bytes BETWEEN 0 AND byte_count),
+    intent_ms           INTEGER NOT NULL,
+    ended_ms            INTEGER,
+    CHECK ((retry_class = 'NON_RETRYABLE') = (tool IN ('fs.move', 'fs.delete'))),
+    CHECK (object_state = 'EXISTING' OR tool = 'fs.write'),
+    CHECK (tool != 'fs.read' OR byte_count BETWEEN 1 AND 262144),
+    CHECK ((tool = 'fs.move') = (destination_path IS NOT NULL)),
+    CHECK ((destination_path IS NULL) = (destination_device IS NULL)),
+    CHECK ((destination_path IS NULL) = (destination_inode IS NULL)),
+    CHECK ((state = 'INTENT') = (ended_ms IS NULL)),
+    CHECK ((state = 'FAILED') = (failure IS NOT NULL)),
+    CHECK ((state = 'COMPLETED') = (completion IS NOT NULL)),
+    CHECK ((completion IS NULL) = (content_bytes IS NULL)),
+    CHECK (state != 'INTERRUPTED' OR tool IN ('fs.read', 'fs.list', 'fs.search', 'fs.stat')),
+    CHECK (state != 'UNKNOWN' OR tool IN ('fs.write', 'fs.patch', 'fs.move', 'fs.delete')),
+    CHECK (completion IS NULL
+           OR (tool = 'fs.read' AND completion = 'READ')
+           OR (tool = 'fs.list' AND completion = 'LISTED')
+           OR (tool = 'fs.search' AND completion = 'SEARCHED')
+           OR (tool = 'fs.stat' AND completion = 'STATED')
+           OR (tool = 'fs.write' AND completion IN ('CREATED', 'REPLACED'))
+           OR (tool = 'fs.patch' AND completion IN ('APPLIED', 'ALREADY_APPLIED'))
+           OR (tool = 'fs.move' AND completion = 'MOVED')
+           OR (tool = 'fs.delete' AND completion = 'DELETED'))
+) STRICT;
+INSERT INTO tool_invocation (invocation_id, run_id, tool, retry_class, canonical_path,
+    object_state, object_device, object_inode, destination_path, destination_device,
+    destination_inode, byte_count, incarnation, state, failure, completion, content_bytes,
+    intent_ms, ended_ms)
+SELECT invocation_id, run_id, tool, 'RETRY_SAFE', canonical_path, 'EXISTING', object_device,
+    object_inode, NULL, NULL, NULL, byte_count, incarnation, state, failure,
+    CASE WHEN state = 'COMPLETED' THEN 'READ' END, bytes_returned, intent_ms, ended_ms
+FROM tool_invocation_v3;
+DROP TABLE tool_invocation_v3;
+CREATE INDEX tool_invocation_by_state ON tool_invocation(state);
+CREATE TRIGGER tool_invocation_intent_fixed BEFORE UPDATE OF invocation_id, run_id, tool,
+    retry_class, canonical_path, object_state, object_device, object_inode, destination_path,
+    destination_device, destination_inode, byte_count, incarnation, intent_ms
+    ON tool_invocation
+BEGIN SELECT RAISE(ABORT, 'an invocation''s intent is immutable'); END;
+CREATE TRIGGER tool_invocation_ends_once BEFORE UPDATE OF state, failure, completion,
+    content_bytes, ended_ms ON tool_invocation
+WHEN OLD.state != 'INTENT'
+BEGIN SELECT RAISE(ABORT, 'an invocation ends once'); END;
+CREATE TRIGGER tool_invocation_no_delete BEFORE DELETE ON tool_invocation
+BEGIN SELECT RAISE(ABORT, 'an invocation record is never deleted'); END;
+
+CREATE TABLE tool_idempotency (
+    subject          TEXT    NOT NULL,
+    session_id       TEXT    NOT NULL,
+    idempotency_key  TEXT    NOT NULL,
+    request_digest   TEXT    NOT NULL CHECK (length(request_digest) = 64
+                                             AND request_digest NOT GLOB '*[^0-9a-f]*'),
+    invocation_id    TEXT    NOT NULL UNIQUE REFERENCES tool_invocation(invocation_id)
+                                             ON DELETE RESTRICT,
+    recorded_ms      INTEGER NOT NULL,
+    PRIMARY KEY (subject, session_id, idempotency_key)
+) STRICT;
+CREATE TRIGGER tool_idempotency_no_update BEFORE UPDATE ON tool_idempotency
+BEGIN SELECT RAISE(ABORT, 'an idempotency record is immutable'); END;
+CREATE TRIGGER tool_idempotency_no_delete BEFORE DELETE ON tool_idempotency
+BEGIN SELECT RAISE(ABORT, 'an idempotency record is never deleted'); END;
+
+CREATE TABLE tool_staging (
+    invocation_id   TEXT    PRIMARY KEY REFERENCES tool_invocation(invocation_id)
+                                        ON DELETE RESTRICT,
+    operation       TEXT    NOT NULL CHECK (operation IN ('REPLACE', 'CREATE', 'DELETE')),
+    parent_path     TEXT    NOT NULL CHECK (length(CAST(parent_path AS BLOB)) BETWEEN 10 AND 4096
+                                            AND substr(parent_path, 1, 10) = '/workspace'),
+    parent_device   TEXT    NOT NULL CHECK (length(parent_device) BETWEEN 1 AND 20
+                                            AND parent_device NOT GLOB '*[^0-9]*'),
+    parent_inode    TEXT    NOT NULL CHECK (length(parent_inode) BETWEEN 1 AND 20
+                                            AND parent_inode NOT GLOB '*[^0-9]*'),
+    leaf            TEXT    NOT NULL CHECK (length(CAST(leaf AS BLOB)) BETWEEN 1 AND 255),
+    target_device   TEXT    CHECK (target_device IS NULL
+                                   OR (length(target_device) BETWEEN 1 AND 20
+                                       AND target_device NOT GLOB '*[^0-9]*')),
+    target_inode    TEXT    CHECK (target_inode IS NULL
+                                   OR (length(target_inode) BETWEEN 1 AND 20
+                                       AND target_inode NOT GLOB '*[^0-9]*')),
+    state           TEXT    NOT NULL CHECK (state IN ('EXPECTED', 'CLEARED', 'REMOVED',
+                                                      'RETAINED', 'FOREIGN')),
+    holds           TEXT    CHECK (holds IS NULL
+                                   OR holds IN ('DISPLACED', 'TAKEN', 'EVIDENCE', 'UNEXPECTED')),
+    held_device     TEXT    CHECK (held_device IS NULL
+                                   OR (length(held_device) BETWEEN 1 AND 20
+                                       AND held_device NOT GLOB '*[^0-9]*')),
+    held_inode      TEXT    CHECK (held_inode IS NULL
+                                   OR (length(held_inode) BETWEEN 1 AND 20
+                                       AND held_inode NOT GLOB '*[^0-9]*')),
+    recorded_ms     INTEGER NOT NULL,
+    settled_ms      INTEGER,
+    CHECK ((operation = 'CREATE') = (target_device IS NULL)),
+    CHECK ((target_device IS NULL) = (target_inode IS NULL)),
+    CHECK ((state = 'EXPECTED') = (settled_ms IS NULL)),
+    CHECK ((state = 'RETAINED') = (holds IS NOT NULL)),
+    CHECK ((held_device IS NULL) = (held_inode IS NULL)),
+    CHECK (held_device IS NULL OR state = 'RETAINED')
+) STRICT;
+CREATE INDEX tool_staging_by_state ON tool_staging(state);
+CREATE TRIGGER tool_staging_only_for_names BEFORE INSERT ON tool_staging
+WHEN (SELECT tool FROM tool_invocation WHERE invocation_id = NEW.invocation_id)
+     NOT IN ('fs.write', 'fs.patch', 'fs.delete')
+BEGIN SELECT RAISE(ABORT, 'only a write, a patch or a delete stages'); END;
+CREATE TRIGGER tool_staging_fixed BEFORE UPDATE OF invocation_id, operation, parent_path,
+    parent_device, parent_inode, leaf, target_device, target_inode, recorded_ms ON tool_staging
+BEGIN SELECT RAISE(ABORT, 'a staging record''s location is immutable'); END;
+CREATE TRIGGER tool_staging_settles_once BEFORE UPDATE OF state, holds, held_device,
+    held_inode, settled_ms ON tool_staging
+WHEN OLD.state != 'EXPECTED'
+BEGIN SELECT RAISE(ABORT, 'a staging record settles once'); END;
+CREATE TRIGGER tool_staging_no_delete BEFORE DELETE ON tool_staging
+BEGIN SELECT RAISE(ABORT, 'a staging record is never deleted'); END;
+";
+
 /// One step from a version to the next.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct Migration {
@@ -483,6 +677,10 @@ pub(super) const MIGRATIONS: &[Migration] = &[
     Migration {
         to: 3,
         sql: SCHEMA_V3,
+    },
+    Migration {
+        to: 4,
+        sql: SCHEMA_V4,
     },
 ];
 
@@ -638,7 +836,7 @@ pub(super) fn foreign_key_check(conn: &Connection) -> rusqlite::Result<Result<()
 mod tests {
     use super::{
         APPLICATION_ID, CURRENT_VERSION, MIGRATIONS, Migration, SCHEMA_V1, SCHEMA_V2, SCHEMA_V3,
-        Shape, ShapeError, decide, migrate, verify_exact,
+        SCHEMA_V4, Shape, ShapeError, decide, migrate, verify_exact,
     };
     use rusqlite::Connection;
 
@@ -700,6 +898,7 @@ mod tests {
         assert!(conn.execute_batch(SCHEMA_V1).is_ok());
         assert!(conn.execute_batch(SCHEMA_V2).is_ok());
         assert!(conn.execute_batch(SCHEMA_V3).is_ok());
+        assert!(conn.execute_batch(SCHEMA_V4).is_ok());
         assert!(
             conn.execute_batch("DROP TRIGGER run_never_resurrects")
                 .is_ok()
@@ -718,6 +917,7 @@ mod tests {
         assert!(conn.execute_batch(SCHEMA_V1).is_ok());
         assert!(conn.execute_batch(SCHEMA_V2).is_ok());
         assert!(conn.execute_batch(SCHEMA_V3).is_ok());
+        assert!(conn.execute_batch(SCHEMA_V4).is_ok());
         assert!(
             conn.execute_batch("CREATE TABLE backdoor (x INTEGER)")
                 .is_ok()
@@ -798,20 +998,33 @@ mod tests {
         assert_eq!(verify_exact(&conn).ok(), Some(Ok(())));
     }
 
-    #[test]
-    fn an_invocation_intent_is_fixed_and_ends_exactly_once() {
+    /// A store at exactly `version`, foreign keys off: the rows these tests
+    /// insert name runs that do not exist. Foreign keys are the store's
+    /// configuration (`db::configure` turns them on), not what they measure.
+    fn store_at(version: i64) -> Connection {
         let Ok(conn) = Connection::open_in_memory() else {
             unreachable!("in-memory SQLite")
         };
-        let Ok(tx) = conn.unchecked_transaction() else {
-            unreachable!("a transaction")
-        };
-        assert!(migrate(&tx, 0, MIGRATIONS).is_ok());
-        assert!(tx.commit().is_ok());
-        // The row below names a run that does not exist. Foreign keys are the
-        // store's configuration (`db::configure` turns them on), not what this
-        // test measures, so they are off here and the column rules are alone.
+        let steps: Vec<Migration> = MIGRATIONS
+            .iter()
+            .copied()
+            .filter(|m| m.to <= version)
+            .collect();
+        {
+            let Ok(tx) = conn.unchecked_transaction() else {
+                unreachable!("a transaction")
+            };
+            assert_eq!(migrate(&tx, 0, &steps).ok(), Some(version));
+            assert!(tx.commit().is_ok());
+        }
         assert!(conn.pragma_update(None, "foreign_keys", false).is_ok());
+        conn
+    }
+
+    #[test]
+    fn an_invocation_intent_is_fixed_and_ends_exactly_once() {
+        // The version-3 rules, which the version-4 table keeps.
+        let conn = store_at(3);
         let insert = |id: &str, path: &str, count: i64, state: &str| {
             conn.execute(
                 "INSERT INTO tool_invocation (invocation_id, run_id, tool, canonical_path, \
@@ -878,6 +1091,267 @@ mod tests {
             "an ended invocation ends once"
         );
         assert!(ended("DELETE FROM tool_invocation").is_err());
+    }
+
+    /// A version-3 invocation: `(n, state, failure, bytes returned, ended)`.
+    type V3Row<'a> = (u8, &'a str, Option<&'a str>, Option<i64>, Option<i64>);
+
+    /// An invocation id, the `n`th.
+    fn inv(n: u8) -> String {
+        format!("inv_01M24BB8G3E0A851TRWE3M8FZ{}", char::from(b'A' + n))
+    }
+
+    /// Every version-4 invocation row, spelled out.
+    fn v4_rows(conn: &Connection) -> Vec<String> {
+        let Ok(mut statement) = conn.prepare(
+            "SELECT invocation_id, tool, retry_class, object_state, state, failure, completion, \
+             content_bytes, ended_ms FROM tool_invocation ORDER BY invocation_id",
+        ) else {
+            unreachable!("the version-4 table")
+        };
+        let Ok(rows) = statement
+            .query_map([], |row| {
+                let text = |i| row.get::<_, String>(i);
+                Ok(format!(
+                    "{} {} {} {} {} {:?} {:?} {:?} {:?}",
+                    text(0)?,
+                    text(1)?,
+                    text(2)?,
+                    text(3)?,
+                    text(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                    row.get::<_, Option<String>>(6)?,
+                    row.get::<_, Option<i64>>(7)?,
+                    row.get::<_, Option<i64>>(8)?,
+                ))
+            })
+            .and_then(Iterator::collect::<rusqlite::Result<Vec<String>>>)
+        else {
+            unreachable!("the rows read back")
+        };
+        rows
+    }
+
+    #[test]
+    fn a_version_three_store_migrates_with_every_invocation_it_holds() {
+        let conn = store_at(3);
+        let rows: [V3Row<'_>; 4] = [
+            (0, "INTENT", None, None, None),
+            (1, "COMPLETED", None, Some(3), Some(1)),
+            (2, "FAILED", Some("OBJECT_CHANGED"), None, Some(1)),
+            (3, "INTERRUPTED", None, None, Some(2)),
+        ];
+        for (n, state, failure, bytes, ended) in rows {
+            let inserted = conn.execute(
+                "INSERT INTO tool_invocation (invocation_id, run_id, tool, canonical_path, \
+                 byte_count, object_device, object_inode, incarnation, state, failure, \
+                 bytes_returned, intent_ms, ended_ms) VALUES (?1, 'run_x', 'fs.read', \
+                 '/workspace/a', 4, '2049', '12', 1, ?2, ?3, ?4, 0, ?5)",
+                rusqlite::params![inv(n), state, failure, bytes, ended],
+            );
+            assert!(inserted.is_ok(), "{n}");
+        }
+        {
+            let Ok(tx) = conn.unchecked_transaction() else {
+                unreachable!("a transaction")
+            };
+            assert_eq!(migrate(&tx, 3, MIGRATIONS).ok(), Some(4));
+            assert!(tx.commit().is_ok());
+        }
+        assert_eq!(verify_exact(&conn).ok(), Some(Ok(())), "exactly version 4");
+        let head = |n: u8| format!("{} fs.read RETRY_SAFE EXISTING", inv(n));
+        assert_eq!(
+            v4_rows(&conn),
+            [
+                format!("{} INTENT None None None None", head(0)),
+                format!("{} COMPLETED None Some(\"READ\") Some(3) Some(1)", head(1)),
+                format!(
+                    "{} FAILED Some(\"OBJECT_CHANGED\") None None Some(1)",
+                    head(2)
+                ),
+                format!("{} INTERRUPTED None None None Some(2)", head(3)),
+            ]
+        );
+        // The old table, its index and its triggers are gone, and the new
+        // triggers hold.
+        let old: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_schema WHERE sql LIKE '%tool_invocation_v3%'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(-1);
+        assert_eq!(old, 0);
+        let end = |state: &str| {
+            conn.execute(
+                "UPDATE tool_invocation SET state = ?2, ended_ms = 3 WHERE invocation_id = ?1",
+                [inv(0), state.to_owned()],
+            )
+        };
+        assert!(end("UNKNOWN").is_err(), "a read is never UNKNOWN");
+        assert!(end("INTERRUPTED").is_ok());
+        assert!(conn.execute("DELETE FROM tool_invocation", []).is_err());
+    }
+
+    /// Insert an open version-4 invocation.
+    fn v4_insert(
+        conn: &Connection,
+        n: u8,
+        (tool, class, object): (&str, &str, &str),
+        destination: Option<&str>,
+    ) -> rusqlite::Result<usize> {
+        conn.execute(
+            "INSERT INTO tool_invocation (invocation_id, run_id, tool, retry_class, \
+             canonical_path, object_state, object_device, object_inode, destination_path, \
+             destination_device, destination_inode, byte_count, incarnation, state, failure, \
+             completion, content_bytes, intent_ms, ended_ms) VALUES (?1, 'run_x', ?2, ?3, \
+             '/workspace/a', ?4, '2049', '12', ?5, ?6, ?6, 4, 1, 'INTENT', NULL, NULL, NULL, \
+             0, NULL)",
+            rusqlite::params![
+                inv(n),
+                tool,
+                class,
+                object,
+                destination,
+                destination.map(|_| "7")
+            ],
+        )
+    }
+
+    /// A version-4 store holding an open write (vacant), move, delete and
+    /// patch: invocations 0 to 3.
+    fn v4_with_four() -> Connection {
+        let conn = store_at(4);
+        let dest = Some("/workspace/b");
+        for (n, row, destination) in [
+            (0, ("fs.write", "RETRY_SAFE", "VACANT"), None),
+            (1, ("fs.move", "NON_RETRYABLE", "EXISTING"), dest),
+            (2, ("fs.delete", "NON_RETRYABLE", "EXISTING"), None),
+            (3, ("fs.patch", "RETRY_SAFE", "EXISTING"), None),
+        ] {
+            assert!(v4_insert(&conn, n, row, destination).is_ok(), "{n}");
+        }
+        conn
+    }
+
+    #[test]
+    fn the_retry_class_and_the_target_are_bound_to_the_tool() {
+        let conn = v4_with_four();
+        let dest = Some("/workspace/b");
+        for (n, row, destination, why) in [
+            (
+                4,
+                ("fs.move", "RETRY_SAFE", "EXISTING"),
+                dest,
+                "a move is never retry-safe",
+            ),
+            (
+                5,
+                ("fs.delete", "RETRY_SAFE", "EXISTING"),
+                None,
+                "a delete is never retry-safe",
+            ),
+            (
+                6,
+                ("fs.write", "NON_RETRYABLE", "EXISTING"),
+                None,
+                "a write is retry-safe",
+            ),
+            (
+                7,
+                ("fs.delete", "NON_RETRYABLE", "VACANT"),
+                None,
+                "only a write creates",
+            ),
+            (
+                8,
+                ("fs.move", "NON_RETRYABLE", "EXISTING"),
+                None,
+                "a move has a destination",
+            ),
+            (
+                9,
+                ("fs.write", "RETRY_SAFE", "EXISTING"),
+                dest,
+                "only a move has one",
+            ),
+            (
+                10,
+                ("fs.move", "NON_RETRYABLE", "EXISTING"),
+                Some("/workspace"),
+                "never the root",
+            ),
+            (
+                11,
+                ("fs.mkdir", "RETRY_SAFE", "EXISTING"),
+                None,
+                "no such tool",
+            ),
+        ] {
+            assert!(v4_insert(&conn, n, row, destination).is_err(), "{why}");
+        }
+    }
+
+    #[test]
+    fn an_ending_is_bound_to_the_tool_and_written_once() {
+        let conn = v4_with_four();
+        // `(state, failure, completion, content_bytes)`, all bound: the SQL is
+        // static (TX006).
+        let end = |n: u8,
+                   (state, failure, completion, bytes): (
+            &str,
+            Option<&str>,
+            Option<&str>,
+            Option<i64>,
+        )| {
+            conn.execute(
+                "UPDATE tool_invocation SET state = ?2, failure = ?3, completion = ?4,                  content_bytes = ?5, ended_ms = 1 WHERE invocation_id = ?1",
+                rusqlite::params![inv(n), state, failure, completion, bytes],
+            )
+        };
+        let completed = |class, bytes| ("COMPLETED", None, Some(class), Some(bytes));
+        let failed = |why| ("FAILED", Some(why), None, None);
+        assert!(
+            end(3, ("INTERRUPTED", None, None, None)).is_err(),
+            "a patch has an effect"
+        );
+        assert!(
+            end(3, completed("MOVED", 4)).is_err(),
+            "not a patch's completion"
+        );
+        assert!(end(3, completed("APPLIED", 5)).is_err(), "over the bound");
+        assert!(end(3, completed("ALREADY_APPLIED", 0)).is_ok());
+        assert!(end(1, ("UNKNOWN", None, None, None)).is_ok());
+        assert!(
+            end(1, completed("MOVED", 0)).is_err(),
+            "an unknown outcome is never rewritten"
+        );
+        assert!(end(2, failed("DIRECTORY_NOT_EMPTY")).is_ok());
+        assert!(
+            end(0, failed("OUTCOME_UNKNOWN")).is_err(),
+            "unknown is a state, not a failure"
+        );
+    }
+
+    #[test]
+    fn a_tool_key_names_one_invocation_for_ever() {
+        let conn = v4_with_four();
+        let key = |key: &str, n: u8| {
+            conn.execute(
+                "INSERT INTO tool_idempotency (subject, session_id, idempotency_key, \
+                 request_digest, invocation_id, recorded_ms) VALUES ('uid:1000', 'ses_x', ?1, \
+                 ?2, ?3, 0)",
+                rusqlite::params![key, "ab".repeat(32), inv(n)],
+            )
+        };
+        assert!(key("k1", 0).is_ok());
+        assert!(key("k1", 1).is_err(), "a key names one invocation");
+        assert!(key("k2", 0).is_err(), "an invocation has one key");
+        assert!(
+            conn.execute("UPDATE tool_idempotency SET idempotency_key = 'k3'", [])
+                .is_err()
+        );
+        assert!(conn.execute("DELETE FROM tool_idempotency", []).is_err());
     }
 
     #[test]

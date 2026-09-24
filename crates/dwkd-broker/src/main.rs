@@ -27,14 +27,24 @@
 //! authority's uid, and it speaks only the private protocol
 //! ([`dwk_proto::brokerp`]), which no cognition-side code can name.
 //!
-//! # Status: M4b — one effect, `fs.read`
+//! # Status: M4c — the filesystem tools
 //!
 //! [ADR-0043]: one private Unix-domain listener (`listener`), one exchange per
 //! connection (`exchange`): a hello naming a fresh channel, one authorisation
-//! with exactly one descriptor for the file the authority checked and opened,
-//! identity and mode re-verified, at most `max_bytes` read from offset zero,
-//! one outcome. Linux only. `fs.write` and the other filesystem tools arrive at
-//! M4c, exec at M4d, secrets at M4e, the sandbox and egress at M5.
+//! with exactly the descriptors its operation needs, each re-verified, one
+//! outcome. Linux only.
+//!
+//! [ADR-0044] adds `fs.stat`, `fs.list` and `fs.search` through the
+//! authority's descriptors, and the four operations that change names —
+//! `fs.write`, `fs.patch`, `fs.move`, `fs.delete` — each on one validated name
+//! in a directory the authority opened, atomically, never replacing or
+//! removing an object it did not prove to be the one authorised. Changing a
+//! name needs directory write permission for the broker's **own** uid on that
+//! directory — ambient authority the operator grants on a write-enabled
+//! workspace, stated in ADR-0044 §3. Exec arrives at M4d, secrets at M4e, the
+//! sandbox and egress at M5.
+//!
+//! [ADR-0044]: ../../../docs/adr/0044-m4c-filesystem-operations-plans-and-atomic-mutation.md
 //!
 //! [ADR-0018]: ../../../docs/adr/0018-authority-broker-split.md
 //! [ADR-0043]: ../../../docs/adr/0043-m4b-private-broker-channel-and-brokered-fs-read.md
@@ -43,6 +53,8 @@
 #![warn(clippy::pedantic)]
 
 mod config;
+#[cfg(target_os = "linux")]
+mod crash;
 #[cfg(target_os = "linux")]
 mod exchange;
 // Off Linux the broker does not serve, so nothing names the wire types; the
@@ -144,7 +156,8 @@ fn serve(config: &config::ServeConfig) -> ExitCode {
         std::process::id()
     );
     let mut channels = nonce::Channels::new();
-    listener::serve(&bound, config.authority_uid, &mut channels);
+    crash::init();
+    listener::serve(&bound, config.authority_uid, own_uid, &mut channels);
     ExitCode::SUCCESS
 }
 
@@ -174,8 +187,9 @@ fn help() -> String {
              --authority-uid <UID>           the only uid the broker reads from\n    \
              --allow-shared-authority-uid    permit the authority to be the broker's own uid (development only)\n\
          \n\
-         STATUS: M4b - fs.read only, Linux only. fs.write and the other filesystem\n\
-         tools arrive at M4c, exec at M4d, secrets at M4e, the sandbox at M5.\n",
+         STATUS: M4c - the filesystem tools (read, stat, list, search, write,\n\
+         patch, move, delete), Linux only. Exec arrives at M4d, secrets at M4e,\n\
+         the sandbox at M5.\n",
         env!("CARGO_PKG_VERSION")
     )
 }
@@ -188,8 +202,8 @@ mod tests {
     fn help_names_the_component_its_one_effect_and_what_comes_later() {
         let h = help();
         assert!(h.contains(NAME));
-        assert!(h.contains("fs.read only"));
-        assert!(h.contains("M4c") && h.contains("M5"));
+        assert!(h.contains("filesystem tools"));
+        assert!(h.contains("M4d") && h.contains("M5"));
         assert!(h.contains("--authority-uid"));
     }
 
