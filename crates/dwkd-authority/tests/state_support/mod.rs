@@ -77,9 +77,23 @@ pub(crate) fn status(command: &mut Command) -> std::io::Result<ExitStatus> {
     spawn(command)?.wait()
 }
 
+/// The mode of every [`TempDir`] on Unix, whatever the process's umask.
+pub(crate) const PRIVATE_DIR_MODE: u32 = 0o700;
+
 /// A directory removed when dropped. No `tempfile` crate: the authority's own
 /// dependency set is the thing under review, and a test helper is not a reason
 /// to grow it.
+///
+/// **Private by default, on every host.** On Unix it is `0700` — created so,
+/// then set and verified — never whatever the umask happened to leave: a
+/// fixture's security meaning must not depend on the environment it runs in.
+/// Every socket the tests bind lies beneath one, and a daemon rightly refuses
+/// a socket below a directory another user may write (a CI job that re-enters
+/// the runner's identity through `sudo` ran with umask `0002`, which made them
+/// `0775`, and the broker refused to serve). A test
+/// that needs another identity inside widens it itself, explicitly:
+/// traverse-only (`0711`) for a cross-uid fixture, or the write group's grant
+/// (`2770`) for a write-enabled workspace.
 #[derive(Debug)]
 pub(crate) struct TempDir(PathBuf);
 
@@ -91,7 +105,7 @@ impl TempDir {
         let n = UNIQUE.fetch_add(1, Ordering::SeqCst);
         let path =
             std::env::temp_dir().join(format!("dw-m3d-{tag}-{}-{nanos}-{n}", std::process::id()));
-        std::fs::create_dir_all(&path).expect("temp dir");
+        private_dir(&path);
         Self(path)
     }
 
@@ -110,6 +124,35 @@ impl Drop for TempDir {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.0);
     }
+}
+
+/// Create `path` as a directory only its owner can use: on Unix, made `0700`,
+/// then set to exactly `0700` — a umask only ever removes bits, and a
+/// restrictive one must not leave the owner locked out either — and verified.
+#[cfg(unix)]
+fn private_dir(path: &Path) {
+    use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(PRIVATE_DIR_MODE)
+        .create(path)
+        .expect("temp dir");
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(PRIVATE_DIR_MODE))
+        .expect("temp dir mode");
+    let meta = std::fs::symlink_metadata(path).expect("temp dir");
+    assert!(meta.is_dir(), "{} is a directory", path.display());
+    assert_eq!(
+        meta.permissions().mode() & 0o7777,
+        PRIVATE_DIR_MODE,
+        "{} is private whatever the umask",
+        path.display()
+    );
+}
+
+/// Elsewhere there is no mode to set: the host's own defaults apply.
+#[cfg(not(unix))]
+fn private_dir(path: &Path) {
+    std::fs::create_dir_all(path).expect("temp dir");
 }
 
 /// A UUIDv7 value distinct for every `n`.

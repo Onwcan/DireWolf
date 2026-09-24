@@ -534,6 +534,39 @@ mod tests {
     }
 
     #[test]
+    fn an_ancestor_others_can_write_without_the_sticky_bit_is_refused() {
+        // The rule a CI fixture made under umask 0002 ran into: a directory
+        // above the socket directory that a group or other can write lets
+        // them rename the socket directory away. It is refused whatever
+        // else the mode says; sticky, or writable by its owner alone, it is
+        // served.
+        let scratch = Scratch::new("ancestors");
+        let above = scratch.0.join("above");
+        must(fs::create_dir(&above), "above");
+        let socket = above.join("ipc").join("broker.sock");
+        let chmod = |mode: u32| {
+            must(
+                fs::set_permissions(&above, fs::Permissions::from_mode(mode)),
+                "chmod",
+            );
+        };
+        // Group-writable, other-writable, both; with or without setgid.
+        for mode in [0o775, 0o770, 0o2775, 0o757, 0o707, 0o777] {
+            chmod(mode);
+            let error = refused(&socket);
+            assert!(
+                error.contains("rename the socket directory away"),
+                "{mode:o}: {error}"
+            );
+        }
+        for mode in [0o1777, 0o1775, 0o755, 0o711, 0o700] {
+            chmod(mode);
+            let (place, _) = must(prepare(&socket), "a secured ancestor is served");
+            drop(place);
+        }
+    }
+
+    #[test]
     fn a_relative_or_nameless_socket_path_is_refused() {
         assert!(refused(Path::new("broker.sock")).contains("not absolute"));
         assert!(refused(Path::new("/")).contains("plain file name"));

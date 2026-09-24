@@ -178,6 +178,17 @@ subsystems are absent (`test_no_subsystem_modules_exist_yet`,
 `the_agent_command_surface_is_not_stubbed`). Those tests fail when someone adds
 a stub, which is exactly when a foundation starts rotting.
 
+**A fixture is private until a test widens it.** A test's security meaning must
+not depend on the host it runs on. Every temporary directory a socket is bound
+beneath (`state_support::TempDir`, the authority's in-crate `Scratch`, the
+broker's socket tests' scratch) is `0700` on Unix, set explicitly and never
+left to the umask: a socket
+below a directory a group can write is one both daemons rightly refuse to serve
+— which is what a CI job running under umask `0002` found. A test that needs
+another identity inside widens its own fixture, explicitly: traverse-only
+(`0711`) for a cross-uid test, the write group's grant (`2770`) for a
+write-enabled workspace.
+
 ## Running them
 
 ```bash

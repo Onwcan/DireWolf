@@ -179,6 +179,24 @@ mod linux {
         std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).unwrap();
     }
 
+    fn mode(dir: &Path) -> u32 {
+        std::fs::symlink_metadata(dir).unwrap().mode() & 0o7777
+    }
+
+    /// Not a three-identity test: it runs everywhere. A fixture is private
+    /// until the test that needs another uid inside widens it — here, with the
+    /// same helpers the hosted cross-uid tests use — and nothing is widened
+    /// for it by the host's umask.
+    #[test]
+    fn a_fixture_is_private_until_a_cross_uid_test_widens_it_explicitly() {
+        let dir = TempDir::new("m4c-widening");
+        assert_eq!(mode(dir.path()), 0o700, "private by default");
+        traversable_only(dir.path());
+        assert_eq!(mode(dir.path()), 0o711, "traverse-only, explicitly");
+        private(dir.path());
+        assert_eq!(mode(dir.path()), 0o700, "and private again");
+    }
+
     /// The broker binary and the probe client, where other users can run them.
     struct Staging {
         dir: TempDir,

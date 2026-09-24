@@ -138,6 +138,22 @@ fn a_store_from_a_newer_build_is_refused_and_left_untouched() {
     ));
 }
 
+/// The fixture contract every other test builds on: a `TempDir` is `0700`
+/// whatever the umask of the process that made it — observed, not assumed
+/// from the umask this machine happens to have. A test that needs another
+/// identity inside widens it explicitly (`fs_ops_foreign.rs`).
+#[cfg(unix)]
+#[test]
+fn a_temp_dir_is_private_whatever_the_umask() {
+    use std::os::unix::fs::PermissionsExt as _;
+    for tag in ["contract-a", "contract-b"] {
+        let dir = TempDir::new(tag);
+        let meta = std::fs::symlink_metadata(dir.path()).unwrap();
+        assert!(meta.is_dir() && !meta.file_type().is_symlink());
+        assert_eq!(meta.permissions().mode() & 0o7777, 0o700, "{tag}");
+    }
+}
+
 #[test]
 fn a_sqlite_file_that_is_not_a_kernel_store_is_refused() {
     let dir = TempDir::new("foreign");
