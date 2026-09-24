@@ -29,9 +29,10 @@ use crate::json::{self, ParseOptions, Value};
 use crate::version::SUPPORTED_ENVELOPE;
 use crate::wire::{Cx, UnknownFields, WireType};
 use messages::{
-    Ack, AdmitRun, AuthorityQuery, AuthorityRefusal, EffectiveAuthority, Handshake,
-    HandshakeAccepted, HeartbeatPayload, LeaseAcquire, LeaseGrant, LeaseRelease,
-    ProtocolErrorPayload, ReleaseRun, RunGrant,
+    Ack, AdmitRun, AuthorityQuery, AuthorityRefusal, CanonicalPreview, CanonicalPreviewResult,
+    EffectiveAuthority, Handshake, HandshakeAccepted, HeartbeatPayload, LeaseAcquire, LeaseGrant,
+    LeaseRelease, ProtocolErrorPayload, ReleaseRun, RunGrant, ToolDenial, ToolFailure, ToolInvoke,
+    ToolRefusal, ToolResult,
 };
 
 /// A decoded DWKP message body.
@@ -61,6 +62,20 @@ pub enum DwkpBody {
     EffectiveAuthority(EffectiveAuthority),
     /// `direwolf.authority.refused`
     AuthorityRefused(AuthorityRefusal),
+    /// `direwolf.tool.invoke`
+    ToolInvoke(ToolInvoke),
+    /// `direwolf.tool.preview`
+    CanonicalPreview(CanonicalPreview),
+    /// `direwolf.tool.result`
+    ToolResult(ToolResult),
+    /// `direwolf.tool.denied`
+    ToolDenied(ToolDenial),
+    /// `direwolf.tool.previewed`
+    ToolPreviewed(CanonicalPreviewResult),
+    /// `direwolf.tool.refused`
+    ToolRefused(ToolRefusal),
+    /// `direwolf.tool.failed`
+    ToolFailed(ToolFailure),
     /// `direwolf.ack`
     Ack(Ack),
     /// `direwolf.protocol.error`
@@ -84,6 +99,13 @@ impl DwkpBody {
             Self::AuthorityQuery(_) => (MessageType::Request, "direwolf.authority.query"),
             Self::EffectiveAuthority(_) => (MessageType::Response, "direwolf.authority.effective"),
             Self::AuthorityRefused(_) => (MessageType::Response, "direwolf.authority.refused"),
+            Self::ToolInvoke(_) => (MessageType::Request, "direwolf.tool.invoke"),
+            Self::CanonicalPreview(_) => (MessageType::Request, "direwolf.tool.preview"),
+            Self::ToolResult(_) => (MessageType::Response, "direwolf.tool.result"),
+            Self::ToolDenied(_) => (MessageType::Response, "direwolf.tool.denied"),
+            Self::ToolPreviewed(_) => (MessageType::Response, "direwolf.tool.previewed"),
+            Self::ToolRefused(_) => (MessageType::Response, "direwolf.tool.refused"),
+            Self::ToolFailed(_) => (MessageType::Response, "direwolf.tool.failed"),
             Self::Ack(_) => (MessageType::Response, "direwolf.ack"),
             Self::ProtocolError(_) => (MessageType::Response, "direwolf.protocol.error"),
         }
@@ -107,6 +129,13 @@ impl DwkpBody {
                 Self::EffectiveAuthority(WireType::decode(payload, cx)?)
             }
             "direwolf.authority.refused" => Self::AuthorityRefused(WireType::decode(payload, cx)?),
+            "direwolf.tool.invoke" => Self::ToolInvoke(WireType::decode(payload, cx)?),
+            "direwolf.tool.preview" => Self::CanonicalPreview(WireType::decode(payload, cx)?),
+            "direwolf.tool.result" => Self::ToolResult(WireType::decode(payload, cx)?),
+            "direwolf.tool.denied" => Self::ToolDenied(WireType::decode(payload, cx)?),
+            "direwolf.tool.previewed" => Self::ToolPreviewed(WireType::decode(payload, cx)?),
+            "direwolf.tool.refused" => Self::ToolRefused(WireType::decode(payload, cx)?),
+            "direwolf.tool.failed" => Self::ToolFailed(WireType::decode(payload, cx)?),
             "direwolf.ack" => Self::Ack(WireType::decode(payload, cx)?),
             "direwolf.protocol.error" => Self::ProtocolError(WireType::decode(payload, cx)?),
             other => {
@@ -133,6 +162,13 @@ impl DwkpBody {
             Self::AuthorityQuery(p) => p.encode(),
             Self::EffectiveAuthority(p) => p.encode(),
             Self::AuthorityRefused(p) => p.encode(),
+            Self::ToolInvoke(p) => p.encode(),
+            Self::CanonicalPreview(p) => p.encode(),
+            Self::ToolResult(p) => p.encode(),
+            Self::ToolDenied(p) => p.encode(),
+            Self::ToolPreviewed(p) => p.encode(),
+            Self::ToolRefused(p) => p.encode(),
+            Self::ToolFailed(p) => p.encode(),
             Self::Ack(p) => p.encode(),
             Self::ProtocolError(p) => p.encode(),
         }

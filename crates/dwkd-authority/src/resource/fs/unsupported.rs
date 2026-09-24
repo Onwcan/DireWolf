@@ -38,3 +38,12 @@ pub(in crate::resource) fn still_bound(
 ) -> Result<(), ResolveError> {
     match *leaf {}
 }
+
+pub(in crate::resource) fn open_for_read(
+    leaf: &Fd,
+    _parent: &Fd,
+    _name: &PathComponent,
+    _expected: FileIdentity,
+) -> Result<Fd, ResolveError> {
+    match *leaf {}
+}

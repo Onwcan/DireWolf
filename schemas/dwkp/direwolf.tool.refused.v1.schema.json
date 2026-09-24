@@ -1,0 +1,203 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:direwolf:schema:dwkp:direwolf.tool.refused:1",
+  "title": "direwolf.tool.refused v1",
+  "description": "A tool operation refused before any effect was authorised.",
+  "type": "object",
+  "properties": {
+    "v": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1,
+      "x-direwolf-type": "Version"
+    },
+    "id": {
+      "type": "string",
+      "minLength": 30,
+      "maxLength": 30,
+      "pattern": "^msg_[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+      "x-direwolf-type": "MessageId",
+      "x-direwolf-format": "uuid7-id",
+      "x-direwolf-id-prefix": "msg"
+    },
+    "type": {
+      "const": "response",
+      "x-direwolf-type": "MessageType"
+    },
+    "schema": {
+      "const": "direwolf.tool.refused",
+      "x-direwolf-type": "SchemaName"
+    },
+    "schema_version": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1,
+      "x-direwolf-type": "Version"
+    },
+    "ts": {
+      "type": "string",
+      "maxLength": 24,
+      "x-direwolf-type": "Timestamp",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$",
+      "x-direwolf-format": "rfc3339-utc-millis"
+    },
+    "correlation_id": {
+      "type": "string",
+      "maxLength": 35,
+      "pattern": "^[a-z]{2,8}_[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+      "x-direwolf-type": "AnyId",
+      "x-direwolf-format": "uuid7-id"
+    },
+    "causation_id": {
+      "type": "string",
+      "maxLength": 35,
+      "pattern": "^[a-z]{2,8}_[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+      "x-direwolf-type": "AnyId",
+      "x-direwolf-format": "uuid7-id"
+    },
+    "payload": {
+      "$ref": "#/$defs/ToolRefusal"
+    }
+  },
+  "required": ["v", "id", "type", "schema", "schema_version", "ts", "causation_id", "payload"],
+  "additionalProperties": false,
+  "not": {
+    "anyOf": [
+      {
+        "required": ["session_id"]
+      },
+      {
+        "required": ["run_id"]
+      },
+      {
+        "required": ["epoch"]
+      },
+      {
+        "required": ["idempotency_key"]
+      }
+    ]
+  },
+  "x-direwolf-family": "dwkp",
+  "x-direwolf-message-type": "response",
+  "x-direwolf-schema": "direwolf.tool.refused",
+  "x-direwolf-schema-versions": {
+    "min": 1,
+    "max": 1
+  },
+  "x-direwolf-envelope-versions": {
+    "min": 1,
+    "max": 1
+  },
+  "x-direwolf-envelope": {
+    "correlation_id": "optional",
+    "causation_id": "required",
+    "session_id": "forbidden",
+    "run_id": "forbidden",
+    "epoch": "forbidden",
+    "idempotency_key": "forbidden"
+  },
+  "x-direwolf-id-prefix": "msg",
+  "x-direwolf-unknown-fields": "reject",
+  "x-direwolf-payload": "ToolRefusal",
+  "$defs": {
+    "ToolRefusal": {
+      "type": "object",
+      "description": "A tool operation the authority would not attempt: its own state\nrefused it, or the path did not resolve. Nothing was performed and no\nbroker was contacted. Distinct from [`ToolDenial`], where the two gates\nran and refused, and from [`ToolFailure`], where an authorised effect\ndid not complete.",
+      "properties": {
+        "operation": {
+          "type": "string",
+          "enum": ["TOOL_INVOKE", "CANONICAL_PREVIEW"],
+          "x-direwolf-type": "ToolOperation",
+          "description": "Which operation."
+        },
+        "reason": {
+          "type": "string",
+          "enum": [
+            "STALE_EPOCH",
+            "UNKNOWN_RUN",
+            "WORKSPACE_UNBOUND",
+            "ROOT_REPLACED",
+            "ROOT_UNAVAILABLE",
+            "UNSUPPORTED_PLATFORM",
+            "PATH_OUTSIDE_WORKSPACE",
+            "PATH_TRAVERSAL",
+            "PATH_NOT_CANONICAL",
+            "NOT_FOUND",
+            "NOT_A_DIRECTORY",
+            "SYMLINK",
+            "MAGIC_LINK",
+            "MOUNT_CROSSING",
+            "NAME_MISMATCH",
+            "NORMALIZATION_AMBIGUITY",
+            "SPECIAL_FILE",
+            "WRONG_KIND",
+            "RACE",
+            "PERMISSION_DENIED",
+            "DIRECTORY_TOO_LARGE",
+            "IO_ERROR"
+          ],
+          "x-direwolf-type": "ToolRefusalReason",
+          "description": "Why."
+        }
+      },
+      "required": ["operation", "reason"],
+      "additionalProperties": false,
+      "x-direwolf-unknown-fields": "reject",
+      "x-direwolf-check": {
+        "kind": "paired",
+        "left": "operation",
+        "right": "reason",
+        "allowed": {
+          "TOOL_INVOKE": [
+            "STALE_EPOCH",
+            "UNKNOWN_RUN",
+            "WORKSPACE_UNBOUND",
+            "ROOT_REPLACED",
+            "ROOT_UNAVAILABLE",
+            "UNSUPPORTED_PLATFORM",
+            "PATH_OUTSIDE_WORKSPACE",
+            "PATH_TRAVERSAL",
+            "PATH_NOT_CANONICAL",
+            "NOT_FOUND",
+            "NOT_A_DIRECTORY",
+            "SYMLINK",
+            "MAGIC_LINK",
+            "MOUNT_CROSSING",
+            "NAME_MISMATCH",
+            "NORMALIZATION_AMBIGUITY",
+            "SPECIAL_FILE",
+            "WRONG_KIND",
+            "RACE",
+            "PERMISSION_DENIED",
+            "DIRECTORY_TOO_LARGE",
+            "IO_ERROR"
+          ],
+          "CANONICAL_PREVIEW": [
+            "STALE_EPOCH",
+            "UNKNOWN_RUN",
+            "WORKSPACE_UNBOUND",
+            "ROOT_REPLACED",
+            "ROOT_UNAVAILABLE",
+            "UNSUPPORTED_PLATFORM",
+            "PATH_OUTSIDE_WORKSPACE",
+            "PATH_TRAVERSAL",
+            "PATH_NOT_CANONICAL",
+            "NOT_FOUND",
+            "NOT_A_DIRECTORY",
+            "SYMLINK",
+            "MAGIC_LINK",
+            "MOUNT_CROSSING",
+            "NAME_MISMATCH",
+            "NORMALIZATION_AMBIGUITY",
+            "SPECIAL_FILE",
+            "WRONG_KIND",
+            "RACE",
+            "PERMISSION_DENIED",
+            "DIRECTORY_TOO_LARGE",
+            "IO_ERROR"
+          ]
+        }
+      }
+    }
+  }
+}

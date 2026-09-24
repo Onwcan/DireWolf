@@ -159,13 +159,14 @@ impl Server {
     }
 
     fn spawn(mut command: Command) -> Result<Self, (Option<ExitStatus>, String)> {
-        let mut child = command
-            .env_clear()
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("the binary spawns");
+        let mut child = super::state_support::spawn(
+            command
+                .env_clear()
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped()),
+        )
+        .expect("the binary spawns");
         let pid = child.id();
         let stdout = child.stdout.take().expect("stdout");
         let stderr_pipe = child.stderr.take().expect("stderr");

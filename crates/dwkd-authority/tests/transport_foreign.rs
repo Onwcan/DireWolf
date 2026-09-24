@@ -69,10 +69,10 @@ mod linux {
             "NOT EXERCISED: set DW_PEER_AS to a second user that `sudo -n -u` can switch to \
              (CI uses `nobody`); a cross-uid property is never passed without one"
         );
-        let probe = Command::new("sudo")
-            .args(["-n", "-u", &user, "id", "-u"])
-            .output()
-            .expect("sudo runs");
+        let probe = super::state_support::output(
+            Command::new("sudo").args(["-n", "-u", &user, "id", "-u"]),
+        )
+        .expect("sudo runs");
         assert!(
             probe.status.success(),
             "NOT EXERCISED: `sudo -n -u {user}` cannot start a process here: {}",
@@ -171,13 +171,14 @@ mod linux {
     /// Run the client as `user`; its one JSON line. It starts in the staging
     /// directory, which it can traverse, rather than in the harness's own.
     fn run_as(user: &str, script: &Path, args: &[&str]) -> json::Object {
-        let output = Command::new("sudo")
-            .args(["-n", "-u", user, python()])
-            .arg(script)
-            .args(args)
-            .current_dir(script.parent().unwrap())
-            .output()
-            .expect("sudo runs the client");
+        let output = super::state_support::output(
+            Command::new("sudo")
+                .args(["-n", "-u", user, python()])
+                .arg(script)
+                .args(args)
+                .current_dir(script.parent().unwrap()),
+        )
+        .expect("sudo runs the client");
         assert!(
             output.status.success(),
             "the foreign client failed: {}",
@@ -322,11 +323,9 @@ mod linux {
         assert_authority_state_still_private(&fx);
         // The whole chain, as an operator verifies it, once the server is gone.
         server.kill();
-        let verified = Command::new(BIN)
-            .arg("verify-audit")
-            .arg(fx.state())
-            .output()
-            .expect("verify-audit runs");
+        let verified =
+            super::state_support::output(Command::new(BIN).arg("verify-audit").arg(fx.state()))
+                .expect("verify-audit runs");
         assert!(
             verified.status.success(),
             "{}",

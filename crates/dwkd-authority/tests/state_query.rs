@@ -360,7 +360,7 @@ fn a_query_without_a_proposal_reports_authority_and_decides_nothing() {
     let mut h = Harness::new("report");
     let run = admit(
         &mut h,
-        &["model.call:*", "secret.use:x", "fs.read:/workspace"],
+        &["model.call:*", "secret.use:x", "fs.write:/workspace"],
     );
     let DwkpBody::EffectiveAuthority(answer) = h
         .authority()

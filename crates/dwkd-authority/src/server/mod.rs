@@ -256,6 +256,35 @@ fn start(
         ));
     }
 
+    let broker = match &config.broker {
+        None => {
+            log("no broker is configured: tool invocations are decided and never performed");
+            None
+        }
+        Some(broker) => {
+            let shared = broker.uid == authority_uid || config.peers.allows(broker.uid);
+            if shared && !broker.shared_uid_permitted {
+                return Err(ServeError::Configuration(format!(
+                    "--broker-uid {} is the authority's own uid or an allowed DWKP peer's; the \
+                     broker must be its own identity, so that neither the runtime nor the \
+                     broker inherits the other's or the authority's powers. Run it as its own \
+                     user, or pass --allow-shared-broker-uid for development",
+                    broker.uid
+                )));
+            }
+            if shared {
+                log(&format!(
+                    "REDUCED ASSURANCE: the broker uid {} is shared with the authority or a \
+                     DWKP peer (--allow-shared-broker-uid)",
+                    broker.uid
+                ));
+            }
+            let link: std::sync::Arc<dyn crate::broker::EffectBroker> = std::sync::Arc::new(
+                crate::broker::UnixBroker::new(broker.socket.clone(), broker.uid),
+            );
+            Some(link)
+        }
+    };
     let startup = StartupConfig {
         policy,
         mode: config.mode,
@@ -263,9 +292,12 @@ fn start(
         flags: config.flags,
         lease_ttl_ms: config.lease_ttl_ms,
     };
+    let options = StartOptions {
+        broker,
+        ..StartOptions::default()
+    };
     let (authority, report) =
-        Authority::start(&config.state_dir, &startup, StartOptions::default())
-            .map_err(ServeError::Start)?;
+        Authority::start(&config.state_dir, &startup, options).map_err(ServeError::Start)?;
     let owner = std::fs::metadata(authority.state_dir())
         .map_err(|e| ServeError::Io(format!("inspecting the state directory: {e}")))?
         .uid();

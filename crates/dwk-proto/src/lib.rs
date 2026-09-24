@@ -9,6 +9,11 @@
 //! format: JSON Schema is emitted from these types, and Python bindings are
 //! generated from that schema ([ADR-0033]).
 //!
+//! It also holds [`brokerp`], the private authority → broker protocol (M4b,
+//! ADR-0043): the one other thing both daemons must agree on. It is not DWKP,
+//! it is emitted into no schema and no binding, and the cognition side cannot
+//! name it.
+//!
 //! # What this crate must never contain
 //!
 //! Policy evaluation, authorisation, capability decisions, approval matching,
@@ -41,6 +46,7 @@
 // the same error on each would bury the documentation that matters.
 #![allow(clippy::missing_errors_doc)]
 
+pub mod brokerp;
 pub mod dwcp;
 pub mod dwkp;
 pub mod envelope;

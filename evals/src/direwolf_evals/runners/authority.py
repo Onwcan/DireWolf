@@ -95,7 +95,9 @@ HOSTILE_CASES: Final = frozenset(
         "unknown-field",
         "forbidden-envelope-field",
         "unknown-operation",
-        "reserved-tool-invoke",
+        # ToolInvoke is defined from M4b (ADR-0043) with exactly one tool: a call
+        # naming another is refused by the decoder, not dispatched.
+        "tool-invoke-names-no-other-tool",
         "reserved-canonical-preview",
         "reserved-model-call",
         "unsupported-envelope-version",

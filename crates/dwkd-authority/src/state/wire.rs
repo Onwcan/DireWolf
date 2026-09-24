@@ -47,20 +47,24 @@
 
 use core::fmt;
 
+use dwk_proto::dwkp::DwkpBody;
 use dwk_proto::dwkp::messages::{
-    AuthorityDecision, AuthorityRefusal, CapabilityGrant, EffectiveAuthority, GrantSet, LeaseGrant,
-    RunGrant, WithheldCapability, WithheldSet,
+    AuthorityDecision, AuthorityRefusal, CanonicalPreviewResult, CapabilityGrant,
+    EffectiveAuthority, FsReadResult, GrantSet, LeaseGrant, RunGrant, ToolAction, ToolDecision,
+    ToolDenial, ToolFailure, ToolRefusal, ToolResult, WithheldCapability, WithheldSet,
 };
 use dwk_proto::wire::id::SessionId;
 use dwk_proto::wire::scalar::{
-    CapabilityText, DecisionEffect, DecisionReason, Epoch, GateResult, PolicyRevision,
-    RefusalReason, RefusedOperation, RuleId, RuleSource,
+    ActionEnvironment, CapabilityText, DecisionEffect, DecisionReason, Epoch, GateResult,
+    HexContent, PolicyRevision, RefusalReason, RefusedOperation, RuleId, RuleSource,
+    ToolDecisionReason, ToolName, WorkspacePath,
 };
 
-use crate::policy::{Effect, SourceLocation, Unevaluable};
+use crate::policy::{Effect, Environment, SourceLocation, Unevaluable};
 
 use super::admission::Admission;
 use super::query::{AuthorityAnswer, DecisionRecord};
+use super::tool::{self, ToolReply};
 
 /// What the M3 wire cannot say truthfully. Unreachable from any M3 request.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -221,5 +225,99 @@ pub fn effective_authority(answer: &AuthorityAnswer) -> Result<EffectiveAuthorit
         granted,
         withheld,
         decision: answer.decision().map(decision).transpose()?,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// M4b: tool operations (ADR-0043).
+//
+// Every tool outcome has a truthful wire form, including the one the M3 table
+// above calls a gap: a rule that could not be evaluated -- today, any rule
+// naming `~`, which has no kernel-owned value yet -- is reported as
+// `UNRESOLVED_POLICY_INPUT` with that rule's id, not dressed as a rule that
+// matched.
+// ---------------------------------------------------------------------------
+
+/// The wire view of a decided tool action.
+fn tool_action(decision: &tool::ToolDecision) -> Result<ToolAction, WireGap> {
+    Ok(ToolAction {
+        tool: ToolName::FsRead,
+        canonical_path: WorkspacePath::new(decision.canonical_path().to_string())
+            .ok_or(WireGap::Unrepresentable("canonical path"))?,
+        byte_count: decision.max_bytes(),
+        environment: match decision.action().environment() {
+            Environment::Host => ActionEnvironment::Host,
+            Environment::Sandbox => ActionEnvironment::Sandbox,
+        },
+    })
+}
+
+/// Both gates, on the tool wire.
+fn tool_decision(record: &DecisionRecord) -> Result<ToolDecision, WireGap> {
+    let policy = record.policy();
+    let reason = if record.permits() {
+        ToolDecisionReason::AllowedByRule
+    } else if policy.unevaluable().is_some() {
+        ToolDecisionReason::UnresolvedPolicyInput
+    } else if policy.effect() == Effect::Allow {
+        ToolDecisionReason::NoCapability
+    } else if policy.rule_id().is_default() {
+        ToolDecisionReason::DefaultDeny
+    } else {
+        ToolDecisionReason::DeniedByRule
+    };
+    let (rule_id, rule_source) = rule(policy.rule_id().as_str(), policy.rule_source())?;
+    Ok(ToolDecision {
+        effect: if record.permits() {
+            DecisionEffect::Allow
+        } else {
+            DecisionEffect::Deny
+        },
+        reason,
+        capability_result: gate(record.capability_satisfied()),
+        policy_result: gate(record.policy_satisfied()),
+        rule_id,
+        rule_source,
+    })
+}
+
+/// The response body for a tool operation's outcome.
+///
+/// # Errors
+///
+/// [`WireGap::Unrepresentable`] only for a value that does not fit its wire
+/// type -- a bug, never a sound outcome.
+pub fn tool_reply(reply: &ToolReply) -> Result<DwkpBody, WireGap> {
+    Ok(match reply {
+        ToolReply::Done {
+            invocation,
+            decision,
+            delivery,
+        } => DwkpBody::ToolResult(ToolResult {
+            invocation_id: invocation.clone(),
+            action: tool_action(decision)?,
+            decision: tool_decision(decision.record())?,
+            fs_read: FsReadResult {
+                content: HexContent::from_bytes(&delivery.content)
+                    .ok_or(WireGap::Unrepresentable("fs.read content"))?,
+                eof_observed: delivery.eof_observed,
+            },
+        }),
+        ToolReply::Denied(decision) => DwkpBody::ToolDenied(ToolDenial {
+            action: tool_action(decision)?,
+            decision: tool_decision(decision.record())?,
+        }),
+        ToolReply::Previewed(decision) => DwkpBody::ToolPreviewed(CanonicalPreviewResult {
+            action: tool_action(decision)?,
+            decision: tool_decision(decision.record())?,
+        }),
+        ToolReply::Refused(operation, reason) => DwkpBody::ToolRefused(ToolRefusal {
+            operation: *operation,
+            reason: *reason,
+        }),
+        ToolReply::Failed { invocation, reason } => DwkpBody::ToolFailed(ToolFailure {
+            invocation_id: invocation.clone(),
+            reason: *reason,
+        }),
     })
 }

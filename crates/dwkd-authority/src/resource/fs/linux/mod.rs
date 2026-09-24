@@ -346,6 +346,40 @@ pub(in crate::resource) fn still_bound(
     Ok(())
 }
 
+/// Open a checked regular file for reading (M4b, ADR-0043): relative to its
+/// retained parent, by the one verified name, under the same `RESOLVE`
+/// constraints, and prove the opened file **is** the object that was checked
+/// before anyone may read it.
+///
+/// Not a reopen by path: the name is one component, looked up in a directory
+/// the authority already holds and already verified, and the result is
+/// rejected unless its own identity is `expected`. The name binding is
+/// re-checked first, so a rename since resolution is a refusal, not a read of
+/// whatever took its place. `O_NONBLOCK` keeps a FIFO swapped in by a racer
+/// from blocking the open (it is then refused by identity); on a regular file
+/// it changes nothing.
+pub(in crate::resource) fn open_for_read(
+    leaf: &OwnedFd,
+    parent: &OwnedFd,
+    name: &PathComponent,
+    expected: FileIdentity,
+) -> Result<OwnedFd, ResolveError> {
+    still_bound(leaf, Some((parent, name)), expected)?;
+    let fd = sys::openat2(
+        parent,
+        name.as_str(),
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NOCTTY | OFlags::NONBLOCK | OFlags::CLOEXEC,
+        Mode::empty(),
+        RESOLVE,
+    )
+    .map_err(|errno| open_error(parent.as_fd(), name.as_str(), errno, 0))?;
+    let st = sys::fstat(&fd).map_err(|errno| io(0, errno))?;
+    if identity(&st) != expected || FileType::from_raw_mode(st.st_mode) != FileType::RegularFile {
+        return Err(ResolveError::Race { depth: 0 });
+    }
+    Ok(fd)
+}
+
 /// A refusal to follow a link: a magic link when the directory holding it is
 /// procfs, a symlink otherwise.
 fn link_refusal(parent: BorrowedFd<'_>, depth: usize) -> ResolveError {

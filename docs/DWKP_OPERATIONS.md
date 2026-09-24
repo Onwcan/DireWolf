@@ -14,10 +14,10 @@ The authoritative list of every operation the architecture names for the kernel 
 | **ReleaseLease** | authority-primitive | defined | `direwolf.lease.release` | `direwolf.ack`<br>`direwolf.authority.refused`<br>`direwolf.protocol.error` | runtime → dwkd-authority | M3; M8 | no | yes |
 | **AdmitRun** | authority-primitive | defined | `direwolf.run.admit` | `direwolf.run.grant`<br>`direwolf.authority.refused`<br>`direwolf.protocol.error` | runtime → dwkd-authority | M3 | no | yes |
 | **ReleaseRun** | authority-primitive | defined | `direwolf.run.release` | `direwolf.ack`<br>`direwolf.authority.refused`<br>`direwolf.protocol.error` | runtime → dwkd-authority | M3 | no | yes |
-| **ToolInvoke** | authority-primitive | reserved | — | — | runtime → dwkd-authority | M3 (pipeline); M4, M5, M10 (tools) | yes | yes |
+| **ToolInvoke** | authority-primitive | defined | `direwolf.tool.invoke` | `direwolf.tool.result`<br>`direwolf.tool.denied`<br>`direwolf.tool.refused`<br>`direwolf.tool.failed`<br>`direwolf.protocol.error` | runtime → dwkd-authority | M4b (fs.read); M4c-M4e, M5, M10 (further tools) | yes | yes |
 | **ToolCancel** | authority-primitive | reserved | — | — | runtime → dwkd-authority | M9 | no | no |
 | **ModelCall** | authority-primitive | reserved | — | — | runtime → dwkd-authority | M7 | yes | yes |
-| **CanonicalPreview** | authority-primitive | reserved | — | — | runtime, CLI → dwkd-authority | M3/M4 | no | no |
+| **CanonicalPreview** | authority-primitive | defined | `direwolf.tool.preview` | `direwolf.tool.previewed`<br>`direwolf.tool.refused`<br>`direwolf.protocol.error` | runtime, CLI → dwkd-authority | M4b | no | no |
 | **CreateArtifact** | authority-primitive | reserved | — | — | runtime → dwkd-authority | M12 | yes | no |
 | **ReadArtifact** | authority-primitive | reserved | — | — | runtime → dwkd-authority | M12 | no | no |
 | **QueryBudget** | authority-primitive | reserved | — | — | runtime, CLI → dwkd-authority | M6 | no | no |
@@ -79,6 +79,22 @@ The authoritative list of every operation the architecture names for the kernel 
 - **Semantics owned by:** M3
 - **Why it is not a second path from cognition to effect:** It can only end authority, never extend it, and only for a run the caller holds at the stated current epoch. The payload is empty by design: a field here would be a way to say something about a run while ending it. Releasing an already-released run is acknowledged rather than refused, so a retry cannot be distinguished from success and cannot resurrect anything -- idempotent by shape, which is why it carries no idempotency_key and why UNKNOWN_RUN is not one of its refusals. The only way it can be refused is STALE_EPOCH, because ending a run at an epoch you no longer hold is an act by a fenced caller.
 
+### ToolInvoke
+
+- **Carries:** Envelope session_id, run_id and epoch; one typed call per tool -- in this build only fs_read{path, max_bytes}. Responses ToolResult{invocation_id, action, decision, fs_read{content, eof_observed}}, ToolDenial, ToolRefusal or ToolFailure. No capability, cap_id, environment, taint or idempotency_key: each would be the runtime asserting something the authority decides.
+- **Consumer:** dwkd-authority: fence, run, the canonical resolver beneath the run's pinned root (ADR-0042), capability gate, policy gate, durable intent; only then the file opened for reading and one channel-bound authorisation with that one descriptor to dwkd-broker over the private channel; then the durable outcome and the run's taint (ADR-0043).
+- **Can directly cause an effect:** yes
+- **Semantics owned by:** M4b (fs.read); M4c-M4e, M5, M10 (further tools)
+- **Why it is not a second path from cognition to effect:** This IS the path from cognition to effect, and there is no other. It names one tool from a closed inventory with typed arguments the authority canonicalises itself: a tool this build lacks is an undeclared member and fails to decode, so nothing dispatches on a string. The runtime proposes a path and a byte bound; the authority resolves the path beneath the run's pinned workspace root (ADR-0042) so that the filesystem, not the spelling, supplies its canonical meaning, derives the required capability (fs.read:<canonical path>?max_bytes=<bound>), builds the complete canonical action (environment HOST, byte_count the bound) and requires both gates -- a held grant covering it and a policy ALLOW. It then records the intent durably, and only after that opens exactly that file for reading relative to its verified parent, proves the opened file is the checked object, and hands the broker one channel-bound, single-use authorisation with that one descriptor. The broker verifies the descriptor's identity again, reads at most the bound -- never a byte past it -- and returns the bytes to the authority, which records the outcome and raises the run's taint before answering. Because resolution precedes the gates, a refusal can say whether a workspace path exists even where policy would deny reading it; it never says what it holds. The broker is not addressable from cognition, never reopens a path, and never decides. Retry-safe, so no idempotency_key; a tool that is not must add one with a new version (ADR-0043).
+
+### CanonicalPreview
+
+- **Carries:** Envelope session_id, run_id and epoch; the same typed call ToolInvoke carries. Response CanonicalPreviewResult{action, decision} or ToolRefusal.
+- **Consumer:** direwolf policy simulate; the approval [w]hy branch (M6); a runtime asking what it lacks.
+- **Can directly cause an effect:** no
+- **Semantics owned by:** M4b
+- **Why it is not a second path from cognition to effect:** It resolves the path and builds the canonical action and runs both gates through the same code ToolInvoke uses, so the untrusted side never duplicates canonicalisation, and it performs nothing: it opens no file for reading, contacts no broker, mints no invocation id, issues no authorisation and reserves nothing. Its resolution is the same lookup ToolInvoke performs first. Its answer authorises nothing: it is information, stale the moment it is sent, and a later ToolInvoke fences, canonicalises and decides again from scratch.
+
 ### QueryAuthority
 
 - **Carries:** Envelope session_id, run_id and epoch; an optional proposed capability. Response EffectiveAuthority{granted[], withheld[], profile, policy_revision, epoch}, plus a decision for a proposal the authority can express as a complete canonical action; any other proposal is refused with NO_CANONICAL_ACTION, which through M3e is every proposal.
@@ -88,14 +104,6 @@ The authoritative list of every operation the architecture names for the kernel 
 - **Why it is not a second path from cognition to effect:** Read-only in both shapes: it reports authority and grants none, names no tool, touches no resource, reserves nothing and produces no side effect. A proposal is decided only when the authority can construct the complete canonical action policy decides on, and is never performed -- the answer is a decision record, and obtaining an ALLOW from it authorises nothing on its own, because the effect path is ToolInvoke and ToolInvoke checks again. Capability text alone does not determine where an action runs, the address it reaches or the resource it names, so until M4's canonicaliser exists every proposal is refused with NO_CANONICAL_ACTION rather than decided on facts the kernel would have to invent, and no policy rule is attributed to an evaluation that did not run (ADR-0040). Repeating the same query against the same state returns the same decision, so it needs no idempotency_key: there is nothing for a replay to duplicate. A run the kernel does not hold is refused with UNKNOWN_RUN rather than answered with a denial -- there is no grant, no profile and no policy revision to report, so an EffectiveAuthority could not be filled in, and a DENY would claim an evaluation that never ran.
 
 ## Reserved operations
-
-### ToolInvoke
-
-- **Carries:** A typed tool invocation naming a tool from the canonical inventory, and the cap_id of the grant it exercises; responses ToolResult, Denial or ApprovalPending.
-- **Consumer:** Canonicaliser, policy, capabilities, approvals, budget, audit; then a per-invocation authorisation to dwkd-broker.
-- **Can directly cause an effect:** yes
-- **Semantics owned by:** M3 (pipeline); M4, M5, M10 (tools)
-- **Why it is not a second path from cognition to effect:** This IS the path from cognition to effect; there must be no other. When defined it must name a tool from the canonical inventory (TOOL_SYSTEM.md section 3) with typed arguments the kernel canonicalises itself; it must never accept an opaque command, script or frame. It stays reserved through M3 because its request cannot be designed before the first tool exists: the only shapes available to M3 are an argument map, which is the opaque payload the second-path rule forbids, or a decision-only form, which is QueryAuthority under another name and fails review question 1. M4 gives it its first wire form alongside the first filesystem tool and the canonicaliser that makes its arguments decidable (ADR-0036).
 
 ### ToolCancel
 
@@ -112,14 +120,6 @@ The authoritative list of every operation the architecture names for the kernel 
 - **Can directly cause an effect:** yes
 - **Semantics owned by:** M7
 - **Why it is not a second path from cognition to effect:** When defined it must carry semantics only: no URL, header, credential, raw body or endpoint, which is how ADR-0002's HttpRequestSpec became an unpoliced network capability. Open for M7: ADR-0020 lists privacy_class in the request while ADR-0028 makes privacy_class a kernel-derived policy input; M7 must either drop it from the request or accept it only as a request to narrow.
-
-### CanonicalPreview
-
-- **Carries:** A proposed tool invocation; response CanonicalAction.
-- **Consumer:** direwolf policy simulate; the approval [w]hy branch.
-- **Can directly cause an effect:** no
-- **Semantics owned by:** M3/M4
-- **Why it is not a second path from cognition to effect:** When defined: resolves what an action would mean without performing it, so the untrusted side never duplicates canonicalisation. It must not reserve, lock or touch the resource.
 
 ### CreateArtifact
 

@@ -362,6 +362,7 @@ exempt_paths = [
     "crates/dwkd-authority/src/server/peer.rs",
     "crates/dwkd-authority/src/resource/fs/linux/mod.rs",
     "crates/dwkd-authority/src/resource/fs/linux/tests.rs",
+    "crates/dwkd-authority/src/broker/link.rs",
 ]
 suffixes = [".rs"]
 # The binary's `use rustix as _;` acknowledges the manifest edge for
@@ -384,28 +385,45 @@ Until M4a this rule was TX008-peer-credentials-are-read-in-one-place, with one
 exempt file. ADR-0042 widened it by one file and its test module, and kept the
 rest of the authority -- including `resource/fs/mod.rs`, the portable half of
 the same resolver -- under it.
+
+M4b (ADR-0043) adds a third, and only a third: `broker/link.rs`, the
+authority's end of the private broker channel -- `SO_PEERCRED` on the
+connection it makes, and `sendmsg` with `SCM_RIGHTS` for the one descriptor it
+hands over. The rest of `broker/`, including the trait and the failure types,
+stays under the rule.
 """
 
 [[text_rules]]
-id = "TX009-one-authority-server"
+id = "TX009-one-listener-per-daemon"
 paths = [
     "crates/dwkd-authority/src",
     "crates/dwkd-broker/src",
     "crates/direwolf-cli/src",
     "crates/dwk-proto/src",
 ]
-exempt_paths = ["crates/dwkd-authority/src/server"]
+# A directory for the authority's server, which M3e reviewed as a whole, and ONE
+# FILE for the broker: a second file beside it is not reviewed by being there.
+exempt_paths = [
+    "crates/dwkd-authority/src/server",
+    "crates/dwkd-broker/src/listener.rs",
+]
 suffixes = [".rs"]
 patterns = [
-    '^(?!\s*//).*\b(UnixListener|TcpListener)\b',
+    '^(?!\s*//).*\b(UnixListener|TcpListener|UdpSocket|UnixDatagram)\b',
 ]
 reason = """
-There is one place that listens for the runtime: the authority's DWKP server,
-behind the peer-credential gate and the strict decoder. A listener anywhere
-else -- a "debug" socket in the authority, a broker socket the runtime could
-reach (ADR-0018: runtime to authority, never to the broker), a CLI helper
-daemon -- would be a second door with none of that in front of it. M4 designs
-the private authority-to-broker hop; it does not arrive by accident.
+Each daemon listens in exactly one place, and nothing else listens at all.
+
+The authority's DWKP server listens for the runtime, behind the peer-credential
+gate and the strict decoder (ADR-0041). The broker's `listener.rs` listens for
+the AUTHORITY, and closes every other peer before reading a byte (ADR-0043).
+A listener anywhere else -- a "debug" socket in the authority, a second broker
+socket, a TCP port on either, a CLI helper daemon -- would be a door with none
+of that in front of it.
+
+Until M4b this rule was TX009-one-authority-server and exempted only the
+authority's server; ADR-0043 designs the private authority-to-broker hop and
+exempts exactly the one file it lives in.
 """
 
 [[text_rules]]
@@ -488,6 +506,152 @@ versions, and a normaliser in the decoder is a cross-language divergence. A
 normaliser in the policy engine would be a second canonicaliser. So the
 crate is named in one file and its tests, and dwk-proto may not depend on it
 at all (RS016).
+"""
+
+[[text_rules]]
+id = "TX013-the-broker-decides-nothing-records-nothing-and-reaches-nothing"
+paths = ["crates/dwkd-broker/src"]
+exempt_paths = []
+suffixes = [".rs"]
+patterns = [
+    # A Unix-domain socket from the authority is its only input.
+    '^(?!\s*//).*\bstd\s*::\s*net\b',
+    '^(?!\s*//).*\bstd\s*::\s*\{[^}]*\bnet\b',
+    '^(?!\s*//).*\b(TcpListener|TcpStream|UdpSocket|ToSocketAddrs|SocketAddr)\b',
+    # It speaks the private protocol only: no DWKP dispatch, no DWCP, no events.
+    '^(?!\s*//).*\bdwk_proto\s*::\s*(dwkp|dwcp|envelope|events)\b',
+    '^(?!\s*//).*\bdwk_proto\s*::\s*\{[^}]*\b(dwkp|dwcp|envelope|events)\b',
+    # No store, no audit, no key material.
+    '^(?!\s*//).*\b(rusqlite|sha2|hmac|ring|ed25519_dalek|aws_lc_rs|keyring)\b',
+    '^(?!\s*//).*(kernel\.db|audit\.log)',
+    # No execution until M4d designs it.
+    '^(?!\s*//).*\bCommand\s*::\s*new\b',
+    '^(?!\s*//).*\bstd\s*::\s*process\s*::\s*(Command|Stdio)\b',
+    '^(?!\s*//).*\bunsafe\b',
+    '^(?!\s*//).*\b(allow|expect)\s*\(\s*unsafe_code\b',
+]
+reason = """
+The broker does; it decides nothing (ADR-0018), and in M4b it does one thing:
+reads the file descriptor the authority checked and handed over (ADR-0043).
+Each pattern is a way that erodes. A TCP listener or an outbound socket makes
+it reachable, or makes it reach, beyond the authority. DWKP dispatch in it is a
+second authority engine the runtime could aim at. A database, an audit log or
+a MAC library is state and key material the split exists to keep in the
+authority -- "the broker holds no long-lived key" is true because there is
+nothing here to hold one with. Starting a process is M4d's to design, behind
+its own authorisation.
+
+Hygiene, not containment: the real controls are the kernel's peer check on
+both ends of the channel and the broker's own identity.
+"""
+
+[[text_rules]]
+id = "TX014-only-the-broker-link-hands-out-a-descriptor"
+paths = ["crates/dwkd-authority/src"]
+# The link sends the descriptor; `resource/fs/mod.rs` defines the one method
+# that releases it from a checked hand-off.
+exempt_paths = [
+    "crates/dwkd-authority/src/broker/link.rs",
+    "crates/dwkd-authority/src/resource/fs/mod.rs",
+]
+suffixes = [".rs"]
+patterns = [
+    '^(?!\s*//).*\binto_transfer_descriptor\b',
+    '^(?!\s*//).*\bsendmsg\b',
+    '^(?!\s*//).*\bSendAncillary\w*\b',
+    '^(?!\s*//).*\bScmRights\b',
+]
+reason = """
+A checked, readable descriptor is the most authority the authority ever hands
+to another process (ADR-0043). It leaves in exactly one place -- the broker
+link, after the kernel has confirmed the peer is the broker's uid and the
+broker has issued a channel -- and it is taken out of its `ReadHandoff` in
+exactly one place. A second caller of `into_transfer_descriptor`, or a second
+`SCM_RIGHTS` send, would be a way for a descriptor to reach someone the peer
+check never looked at.
+
+Hygiene, not containment.
+"""
+
+[[text_rules]]
+id = "TX015-the-broker-reads-only-what-it-is-handed"
+paths = ["crates/dwkd-broker/src"]
+# The listener creates its own lock and uid-probe files in its own socket
+# directory, as the authority's socket module does; nothing else opens a path.
+# `exchange/tests.rs` is the exchange's own test module, compiled only under
+# `cfg(test)`: it creates the files the checks are measured against.
+exempt_paths = [
+    "crates/dwkd-broker/src/listener.rs",
+    "crates/dwkd-broker/src/exchange/tests.rs",
+]
+suffixes = [".rs"]
+patterns = [
+    '^(?!\s*//).*\bstd\s*::\s*fs\b',
+    '^(?!\s*//).*\bstd\s*::\s*\{[^}]*\bfs\b',
+    '^(?!\s*//).*\bOpenOptions\b',
+    '^(?!\s*//).*\bFile\s*::\s*(open|create)\b',
+    '^(?!\s*//).*\brustix\s*::\s*fs\s*::\s*(open|openat|openat2)\b',
+    '^(?!\s*//).*\b(openat2?|open)\s*\(',
+]
+reason = """
+The broker never opens the object it reads (ADR-0043). The authority resolved
+the declared path beneath the pinned root, opened the one file relative to its
+checked parent and proved its identity; the broker receives that descriptor,
+re-proves the identity, and reads it. A path-based open in the broker would
+be a second canonicaliser -- one outside the authority -- and would read
+whatever the name pointed at by then, which is precisely the TOCTOU the
+hand-off exists to close.
+
+Hygiene, not containment.
+"""
+
+[[text_rules]]
+id = "TX016-the-cognition-side-cannot-name-the-private-channel"
+paths = [
+    "runtime/src",
+    "crates/direwolf-cli/src",
+    "tools/protogen/src",
+    "scripts",
+]
+exempt_paths = []
+suffixes = [".py", ".rs"]
+patterns = [
+    '^(?!\s*(//|#)).*\bbrokerp\b',
+    '^(?!\s*(//|#)).*\bbroker\.(hello|fs_read|outcome)\b',
+]
+reason = """
+The authority-to-broker protocol is private (ADR-0043): no envelope, no
+registry entry, no emitted schema, no Python binding. The runtime cannot reach
+the broker as a peer the broker reads from; it should not be able to name its
+messages either, and neither should the tools that generate the cognition
+side's bindings, or the CLI a user runs. A reference here is the first step
+of a second path from cognition to effect.
+
+Hygiene, not containment.
+"""
+
+[[text_rules]]
+id = "TX017-a-new-declaration-means-only-what-the-resolver-found"
+paths = ["crates/dwkd-authority/src"]
+# `resource/fs/mod.rs` defines the grammar-only reader; `state/scopes.rs` is
+# the one module that re-reads a trusted stored grant with it.
+exempt_paths = [
+    "crates/dwkd-authority/src/resource/fs/mod.rs",
+    "crates/dwkd-authority/src/state/scopes.rs",
+]
+suffixes = [".rs"]
+patterns = [
+    '^(?!\s*//).*\bstored_canonical_path\b',
+]
+reason = """
+A concrete `fs.read` path in a NEW declaration -- a request, an agent profile,
+a skill, the mode ceiling -- means what the M4a resolver finds beneath the
+session's pinned root, and nothing else (ADR-0043 §8): the filesystem supplies
+its meaning. The grammar-only reader exists for one purpose, re-reading a grant
+the authority itself resolved and stored, and one module may use it for that.
+A second caller would be a way to mint authority over a path nobody resolved.
+
+Hygiene, not containment: the resolver's own refusals are the control.
 """
 
 # ===========================================================================

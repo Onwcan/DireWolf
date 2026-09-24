@@ -90,14 +90,15 @@ fn restart_child() {
 /// the files it left.
 fn after_a_dead_authority(tag: &str, mode: &str) -> Harness {
     let dir = TempDir::new(tag);
-    let status = std::process::Command::new(std::env::current_exe().unwrap())
-        .args(["--ignored", "--exact", "restart_child", "--test-threads=1"])
-        .env("DW_RESTART_DIR", dir.state())
-        .env("DW_RESTART_MODE", mode)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .expect("the child runs");
+    let status = state_support::status(
+        std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--ignored", "--exact", "restart_child", "--test-threads=1"])
+            .env("DW_RESTART_DIR", dir.state())
+            .env("DW_RESTART_MODE", mode)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null()),
+    )
+    .expect("the child runs");
     assert!(!status.success(), "the child must have died ({status})");
     let clock = Arc::new(ManualClock::new(START_MS));
     let config = balanced();

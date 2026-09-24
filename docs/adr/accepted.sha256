@@ -51,3 +51,4 @@ b5d0068fabf796725c5e901e1bb87854df6307542203049fc23336f05d173298  0038-policy-ev
 6d74553bec1a642336721530cf2cdb61ea261bd2c629ea27f884fd6eb68968d1  0040-m3d-reconciliation-admission-across-tenures-and-undecidable-proposals.md
 c5bd6df1b40f7f850ab079ad2920f4b1bcb54b4c3ba0c7175d4d3b96a44071af  0041-m3e-authenticated-dwkp-transport.md
 08f354cff065b41cd7e81cb60a55fff645bc316093bedf65362fe0fea1c0a9e2  0042-m4a-canonical-filesystem-resolution.md
+965f1d6147731432826bc032eada422c717350cf7478f7cd82365bfe82d9f1d0  0043-m4b-private-broker-channel-and-brokered-fs-read.md

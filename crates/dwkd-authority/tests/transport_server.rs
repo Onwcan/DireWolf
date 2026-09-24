@@ -40,21 +40,22 @@ fn off_linux_the_server_refuses_to_start_and_touches_nothing() {
     let dir = state_support::TempDir::new("unsupported");
     let state = dir.path().join("state");
     let ipc = dir.path().join("ipc");
-    let output = Command::new(bin)
-        .args(["serve", "--state-dir"])
-        .arg(&state)
-        .arg("--socket")
-        .arg(ipc.join("kernel.sock"))
-        .args([
-            "--allow-uid",
-            "1001",
-            "--policy-shipped",
-            "balanced",
-            "--mode",
-            "balanced",
-        ])
-        .output()
-        .expect("the binary runs");
+    let output = state_support::output(
+        Command::new(bin)
+            .args(["serve", "--state-dir"])
+            .arg(&state)
+            .arg("--socket")
+            .arg(ipc.join("kernel.sock"))
+            .args([
+                "--allow-uid",
+                "1001",
+                "--policy-shipped",
+                "balanced",
+                "--mode",
+                "balanced",
+            ]),
+    )
+    .expect("the binary runs");
     assert_eq!(output.status.code(), Some(3), "unsupported is exit 3");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("not"), "{stderr}");
@@ -62,7 +63,7 @@ fn off_linux_the_server_refuses_to_start_and_touches_nothing() {
     assert!(!ipc.exists(), "no IPC directory was created");
 
     for flag in ["--version", "--help"] {
-        let output = Command::new(bin).arg(flag).output().expect("runs");
+        let output = state_support::output(Command::new(bin).arg(flag)).expect("runs");
         assert!(output.status.success(), "{flag}");
     }
     // verify-audit, on a store an in-process authority created.
@@ -72,11 +73,8 @@ fn off_linux_the_server_refuses_to_start_and_touches_nothing() {
     let (authority, _) =
         state_support::start(&state, &state_support::balanced(), &clock, None).expect("a store");
     drop(authority);
-    let output = Command::new(bin)
-        .arg("verify-audit")
-        .arg(&state)
-        .output()
-        .expect("runs");
+    let output =
+        state_support::output(Command::new(bin).arg("verify-audit").arg(&state)).expect("runs");
     assert!(output.status.success(), "verify-audit works everywhere");
 }
 
@@ -707,11 +705,10 @@ mod linux {
             ],
             vec!["frobnicate"],
         ] {
-            let output = std::process::Command::new(BIN)
-                .args(&args)
-                .env_clear()
-                .output()
-                .unwrap();
+            let output = super::state_support::output(
+                std::process::Command::new(BIN).args(&args).env_clear(),
+            )
+            .unwrap();
             assert_eq!(output.status.code(), Some(2), "{args:?}");
         }
         assert!(!fx.socket().parent().unwrap().exists());
@@ -742,10 +739,8 @@ mod linux {
 
     #[test]
     fn help_describes_the_server_that_exists() {
-        let output = std::process::Command::new(BIN)
-            .arg("--help")
-            .output()
-            .unwrap();
+        let output =
+            super::state_support::output(std::process::Command::new(BIN).arg("--help")).unwrap();
         let text = String::from_utf8_lossy(&output.stdout);
         assert!(output.status.success());
         assert!(text.contains("serve"));

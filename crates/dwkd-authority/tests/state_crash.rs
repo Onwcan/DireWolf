@@ -124,6 +124,14 @@ fn assert_recovered(state: &Path, point: CrashPoint, report: &StartReport) {
             assert_eq!(report.audit_reconciled, 0);
             assert_eq!(report.audit_torn_tail_bytes, 0);
         }
+        // Crossed only between the phases of a tool invocation (M4b), never by
+        // an admission: `CrashPoint::ALL` does not contain them.
+        CrashPoint::ToolAfterIntent
+        | CrashPoint::ToolAfterOpen
+        | CrashPoint::ToolAfterBroker
+        | CrashPoint::ToolAfterOutcome => {
+            unreachable!("{point} is not a transaction crash point")
+        }
     }
 }
 
@@ -287,14 +295,15 @@ fn crash_child() {
 }
 
 fn crash_in_child(state: &Path, point: CrashPoint) -> std::process::ExitStatus {
-    std::process::Command::new(std::env::current_exe().unwrap())
-        .args(["--ignored", "--exact", "crash_child", "--test-threads=1"])
-        .env("DW_CRASH_DIR", state)
-        .env("DW_CRASH_POINT", point.letter().to_string())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .expect("the child runs")
+    state_support::status(
+        std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--ignored", "--exact", "crash_child", "--test-threads=1"])
+            .env("DW_CRASH_DIR", state)
+            .env("DW_CRASH_POINT", point.letter().to_string())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null()),
+    )
+    .expect("the child runs")
 }
 
 #[test]

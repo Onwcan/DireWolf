@@ -437,6 +437,7 @@ FS_EVIDENCE_CATEGORIES = (
     "leak",
     "performance",
     "state",
+    "admission",
 )
 # The race campaigns, by name: libtest exits 0 when a filter selects nothing,
 # so a renamed test would otherwise vanish from the evidence silently.
@@ -447,6 +448,16 @@ FS_TOCTOU_CASES = (
     "parent-moved-out-and-back",
     "leaf-replaced",
     "root-path-exchange",
+)
+# M4b: admission resolves every new concrete fs.read declaration through the
+# same resolver (ADR-0043 section 8). Each named case must report.
+FS_ADMISSION_CASES = (
+    "grant-through-resolver",
+    "missing-concrete-scope",
+    "root-replaced",
+    "workspace-unbound",
+    "non-nfc-declaration",
+    "stored-grant-rehydrated",
 )
 # Cases no ordinary machine can produce: a bind mount or a casefold filesystem
 # needs privileges, a cross-device hard link is impossible by construction, and
@@ -467,7 +478,8 @@ def task_filesystem_canonicalization_evidence() -> None:
     links, NFC/NFD aliases, special files and a replaced root; the TOCTOU race
     campaigns (an attacker thread exchanging names while the resolver walks);
     the descriptor-leak and cost measurements; then the state layer binding a
-    root to a workspace, resolving for a run, and migrating an M3 store. Each
+    root to a workspace, resolving for a run, and migrating an M3 store; then
+    admission resolving every new concrete fs.read declaration (M4b). Each
     case prints one `FS-EVIDENCE` line after its assertions held; this task
     requires every category, every race campaign with zero escapes, and lists
     what the machine could not exercise. Linux only: the resolver is openat2.
@@ -497,6 +509,8 @@ def task_filesystem_canonicalization_evidence() -> None:
         "dwkd-authority",
         "--test",
         "resource_workspace",
+        "--test",
+        "admission_fs",
         "--",
         "--nocapture",
     )
@@ -548,6 +562,10 @@ def require_filesystem_evidence(output: str) -> None:
     for category, case, outcome in unexercised:
         if case not in FS_ENVIRONMENTAL:
             problems.append(f"{category}/{case} was not exercised ({outcome})")
+    admitted = {case for case, _, _ in exercised.get("admission", [])}
+    for case in FS_ADMISSION_CASES:
+        if case not in admitted:
+            problems.append(f"admission case `{case}` did not report")
 
     for category in FS_EVIDENCE_CATEGORIES:
         cases = exercised.get(category, [])
@@ -741,6 +759,202 @@ def require_foreign_evidence(output: str) -> None:
 
 
 EVIDENCE_PREFIX = "DWKP-EVIDENCE "
+
+BROKER_EVIDENCE_PREFIX = "BROKER-EVIDENCE "
+
+# M4b's same-identity suites: the released authority and broker binaries as
+# real processes, the private channel, and a scripted hostile peer on each end.
+# Every (suite, case) below is printed by exactly one test, after its
+# assertions held; a missing one fails the task.
+BROKER_CASES = (
+    ("broker-fs-read", "fs-read-end-to-end"),
+    ("broker-fs-read", "max-bytes-before-effect"),
+    ("broker-fs-read", "zero-broker-contact-for-non-effects"),
+    ("broker-fs-read", "shipped-pack-denies-unevaluable"),
+    ("broker-fs-read", "preview-zero-effect-and-differential"),
+    ("broker-fs-read", "broker-down-and-restart"),
+    ("broker-fs-read", "no-broker-configured"),
+    ("broker-fs-read", "authority-verifies-broker-uid"),
+    ("broker-fs-read", "largest-result-one-frame"),
+    ("broker-fs-read", "cross-process-toctou"),
+    ("broker-fs-read", "authority-restart"),
+    ("broker-fs-read", "public-protocol-hostile"),
+    ("broker-fs-read", "shared-broker-uid-refused"),
+    ("broker-fs-read", "require-approval-not-performed"),
+    ("broker-state", "crash-sweep"),
+    ("broker-state", "interrupted-once"),
+    ("broker-state", "overlong-delivery"),
+    ("broker-state", "admission-replay-no-remint"),
+    ("broker-state", "no-readable-fd-before-intent"),
+    ("broker-state", "open-fails-after-intent-object-changed"),
+    ("broker-state", "open-fails-after-intent-object-unreadable"),
+    ("broker-state", "m4b-swap-rename"),
+    ("broker-state", "m4b-swap-symlink"),
+    ("broker-state", "in-place-rewrite"),
+    ("broker-state", "hostile-broker-honest"),
+    ("broker-state", "hostile-broker-wrongchannel"),
+    ("broker-state", "hostile-broker-wronginvocation"),
+    ("broker-state", "hostile-broker-toomanybytes"),
+    ("broker-state", "hostile-broker-bothresults"),
+    ("broker-state", "hostile-broker-garbage"),
+    ("broker-state", "hostile-broker-oversizedheader"),
+    ("broker-state", "hostile-broker-closeafterauthorisation"),
+    ("broker-state", "hostile-broker-stall"),
+    ("broker-state", "hostile-broker-nohello"),
+    ("broker-state", "hostile-broker-refuse"),
+    ("private-protocol", "non-authority-peer"),
+    ("private-protocol", "honest-exchange"),
+    ("private-protocol", "replay-other-connection"),
+    ("private-protocol", "replay-changed-bytes"),
+    ("private-protocol", "replay-other-descriptor"),
+    ("private-protocol", "replay-after-restart"),
+    ("private-protocol", "second-on-same-connection"),
+    ("private-protocol", "descriptor-count-and-kind"),
+    ("private-protocol", "descriptor-count-refused-closed"),
+    ("private-protocol", "read-bound-exact"),
+    ("private-protocol", "malformed-authorisations"),
+    ("private-protocol", "descriptor-pressure"),
+    ("private-protocol", "stalled-peer"),
+    ("private-protocol", "refuses-untrusted-configuration"),
+)
+
+# The three-identity suite: `#[ignore]`d, selected BY NAME, required to run
+# every test and report every case -- as FOREIGN_TESTS above.
+BROKER_FOREIGN_TESTS = (
+    "linux::three_identities_read_only_through_the_checked_descriptor",
+    "linux::a_listener_of_another_identity_is_sent_nothing",
+    "linux::the_broker_identity_reaches_no_authority_state_and_no_dwkp",
+)
+BROKER_FOREIGN_CASES = (
+    ("broker-foreign", "broker-uid-cannot-open-by-path"),
+    ("broker-foreign", "three-identity-fs-read"),
+    ("broker-foreign", "runtime-uid-cannot-reach-broker"),
+    ("broker-foreign", "authority-verifies-broker-uid"),
+    ("broker-foreign", "broker-uid-reaches-no-authority-state"),
+    ("broker-foreign", "broker-uid-cannot-speak-dwkp"),
+)
+
+
+def task_broker_fs_read_evidence() -> None:
+    """M4b's brokered fs.read evidence (ADR-0043); three identities need DW_BROKER_AS, DW_PEER_AS.
+
+    With DW_BROKER_AS (the broker's own user) and DW_PEER_AS (a hostile local
+    user, the runtime's position) set, both are proven first -- by numbers,
+    distinct from this process, from root and from each other. Then the broker
+    binary is built, and the same-identity suites run: the real authority and
+    broker end to end, the crash-point sweep, the hostile broker and the
+    hostile authority-side peer on the real private channel, and the
+    cross-process TOCTOU campaign. Every case must report. Then the
+    three-identity suite, selected by name, with the broker started as its own
+    user through `sudo -n -u` by the TEST HARNESS -- never by the authority.
+
+    Without both identities that half is NOT EXERCISED and this task fails after
+    running everything else. CI's Linux job creates a broker user and provides
+    both. Linux only: the channel needs SO_PEERCRED and SCM_RIGHTS.
+    """
+    if not sys.platform.startswith("linux"):
+        raise TaskError(
+            "NOT EXERCISED: the private broker channel runs only on Linux (ADR-0043); "
+            "use WSL2 on Windows"
+        )
+    broker_user = os.environ.get("DW_BROKER_AS", "").strip()
+    peer_user = os.environ.get("DW_PEER_AS", "").strip()
+    identities = bool(broker_user and peer_user)
+    if identities:
+        _, _, broker_uid = second_identity("DW_BROKER_AS")
+        _, _, peer_uid = second_identity("DW_PEER_AS")
+        if broker_uid == peer_uid:
+            raise TaskError(
+                f"DW_BROKER_AS={broker_user} and DW_PEER_AS={peer_user} are both uid {peer_uid}: "
+                "the broker and the hostile runtime must be two identities"
+            )
+    # The authority's suites spawn the broker binary Cargo builds beside it.
+    run("cargo", "build", "--locked", "-p", "dwkd-broker")
+    authority = run_captured(
+        "cargo",
+        "test",
+        "--locked",
+        "-p",
+        "dwkd-authority",
+        "--test",
+        "broker_fs_read",
+        "--test",
+        "broker_state",
+        "--",
+        "--nocapture",
+    )
+    broker = run_captured(
+        "cargo",
+        "test",
+        "--locked",
+        "-p",
+        "dwkd-broker",
+        "--test",
+        "private_protocol",
+        "--",
+        "--nocapture",
+    )
+    require_broker_evidence(f"{authority}\n{broker}", BROKER_CASES)
+    if identities:
+        foreign = run_captured(
+            "cargo",
+            "test",
+            "--locked",
+            "-p",
+            "dwkd-authority",
+            "--test",
+            "broker_foreign",
+            "--",
+            "--ignored",
+            "--exact",
+            "--nocapture",
+            *BROKER_FOREIGN_TESTS,
+        )
+        require_broker_foreign_evidence(foreign)
+    uvrun("dwcheck", "closure", "--report")
+    if not identities:
+        raise TaskError(
+            "NOT EXERCISED: the three-identity half needs DW_BROKER_AS (the broker's own user) "
+            "and DW_PEER_AS (a hostile local user), both reachable through `sudo -n -u`; "
+            "every same-identity suite above ran"
+        )
+
+
+def _broker_evidence(output: str) -> set[tuple[str, str]]:
+    reported: set[tuple[str, str]] = set()
+    for line in output.splitlines():
+        at = line.find(BROKER_EVIDENCE_PREFIX)
+        if at < 0:
+            continue
+        try:
+            record = json.loads(line[at + len(BROKER_EVIDENCE_PREFIX) :])
+        except json.JSONDecodeError as exc:
+            raise TaskError(f"unreadable evidence line: {line[:200]}") from exc
+        if not isinstance(record, dict) or not record.get("outcome"):
+            raise TaskError(f"malformed evidence line: {line[:200]}")
+        reported.add((str(record.get("suite")), str(record.get("case"))))
+    return reported
+
+
+def require_broker_evidence(output: str, cases: tuple[tuple[str, str], ...]) -> None:
+    """Every (suite, case) must have printed its evidence line."""
+    reported = _broker_evidence(output)
+    missing = [f"{suite}/{case}" for suite, case in cases if (suite, case) not in reported]
+    if missing:
+        raise TaskError("broker evidence incomplete, not reported: " + ", ".join(missing))
+    print(f"{GREEN}broker evidence: {len(cases)} cases reported{OFF}")
+
+
+def require_broker_foreign_evidence(output: str) -> None:
+    """The three-identity suite counts only if every test ran and every case reported."""
+    summaries = [line for line in output.splitlines() if line.startswith("test result: ")]
+    expected = f"test result: ok. {len(BROKER_FOREIGN_TESTS)} passed; 0 failed; 0 ignored"
+    if len(summaries) != 1 or not summaries[0].startswith(expected):
+        raise TaskError(
+            f"the three-identity suite did not run all of its tests: expected `{expected}`, "
+            f"got {summaries or 'no summary'}"
+        )
+    require_broker_evidence(output, BROKER_FOREIGN_CASES)
 
 
 def task_authority_write_probe() -> None:
@@ -955,6 +1169,7 @@ TASKS = {
     "filesystem-canonicalization-evidence": task_filesystem_canonicalization_evidence,
     "authority-transport-evidence": task_authority_transport_evidence,
     "authority-write-probe": task_authority_write_probe,
+    "broker-fs-read-evidence": task_broker_fs_read_evidence,
     "fuzz-smoke": task_fuzz_smoke,
     "fuzz": task_fuzz,
     "security": task_security,

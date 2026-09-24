@@ -7,6 +7,9 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
+# Half of the authority plane; never published. Also what lets it inherit the
+# in-tree `dwk-proto` by path without a version (deny.toml, `wildcards`).
+publish = false
 
 [[bin]]
 name = "dwkd-broker"
@@ -19,4 +22,17 @@ workspace = true
 # must not: a container client, an HTTP/TLS stack, content parsers.  That is
 # the point of the split (ADR-0018).  It may not depend on `dwkd-authority`,
 # and `dwcheck deps` enforces that.
+#
+# M4b (ADR-0043) needs very little: the private protocol's wire types, which
+# both daemons must agree on and which live in the one crate both may link, and
+# the kernel's peer credentials and descriptor passing. Nothing here is linked
+# into the authority.
 [dependencies]
+dwk-proto = { workspace = true }
+
+# `SO_PEERCRED`, `recvmsg` with `SCM_RIGHTS`, `fstat`, `fcntl` and `pread`,
+# through the same maintained safe wrapper and the same features the authority
+# already uses -- so a workspace build unifies to exactly the authority's
+# rustix, and the broker adds no feature to it. Linux only, like the channel.
+[target.'cfg(target_os = "linux")'.dependencies]
+rustix = { workspace = true }

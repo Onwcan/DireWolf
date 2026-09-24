@@ -10,9 +10,10 @@
 
 use crate::dwcp;
 use crate::dwkp::messages::{
-    Ack, AdmitRun, AuthorityQuery, AuthorityRefusal, EffectiveAuthority, Handshake,
-    HandshakeAccepted, HeartbeatPayload, LeaseAcquire, LeaseGrant, LeaseRelease,
-    ProtocolErrorPayload, ReleaseRun, RunGrant,
+    Ack, AdmitRun, AuthorityQuery, AuthorityRefusal, CanonicalPreview, CanonicalPreviewResult,
+    EffectiveAuthority, Handshake, HandshakeAccepted, HeartbeatPayload, LeaseAcquire, LeaseGrant,
+    LeaseRelease, ProtocolErrorPayload, ReleaseRun, RunGrant, ToolDenial, ToolFailure, ToolInvoke,
+    ToolRefusal, ToolResult,
 };
 use crate::dwkp::registry::{self, OPERATIONS};
 use crate::envelope::{EnvelopeRules, MessageType, Presence, field_schema};
@@ -70,6 +71,13 @@ pub fn payload_schema(name: &str, defs: &mut Defs) -> Option<Value> {
         "AuthorityQuery" => AuthorityQuery::schema(defs),
         "EffectiveAuthority" => EffectiveAuthority::schema(defs),
         "AuthorityRefusal" => AuthorityRefusal::schema(defs),
+        "ToolInvoke" => ToolInvoke::schema(defs),
+        "CanonicalPreview" => CanonicalPreview::schema(defs),
+        "ToolResult" => ToolResult::schema(defs),
+        "ToolDenial" => ToolDenial::schema(defs),
+        "CanonicalPreviewResult" => CanonicalPreviewResult::schema(defs),
+        "ToolRefusal" => ToolRefusal::schema(defs),
+        "ToolFailure" => ToolFailure::schema(defs),
         "Ack" => Ack::schema(defs),
         "ProtocolErrorPayload" => ProtocolErrorPayload::schema(defs),
         "ClientError" => dwcp::ClientError::schema(defs),

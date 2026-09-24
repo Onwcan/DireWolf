@@ -154,7 +154,7 @@ fn every_state_response_round_trips_and_every_refusal_pair_is_reached() {
         "secret.use:github",             // NOT_IN_AGENT_PROFILE
         "memory.read:*",                 // NOT_IN_SKILL_SET (web does not declare it)
         "network.https:api.example.com", // ABOVE_PROFILE_CEILING
-        "fs.read:/workspace",            // UNRESOLVED_RESOURCE
+        "fs.write:/workspace",           // UNRESOLVED_RESOURCE (until M4c)
     ];
     let admit = admit_msg(&s, e, "k1", "researcher", &["web"], &requested, 1);
     let DwkpBody::RunGrant(grant) = seen.send(&mut h, &a, &admit) else {

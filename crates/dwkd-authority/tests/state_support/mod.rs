@@ -17,8 +17,9 @@
 )]
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::process::{Child, Command, ExitStatus, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use dwk_proto::dwkp::{self, DwkpMessage};
 use dwk_proto::wire::id::{RunId, SessionId, encode_uuid};
@@ -34,6 +35,47 @@ use dwkd_authority::state::{
 pub(crate) const START_MS: u64 = 1_758_000_000_000;
 
 static UNIQUE: AtomicU64 = AtomicU64::new(0);
+
+/// Serialises this test process's child spawns with its in-process authority
+/// starts.
+///
+/// An in-process authority holds its state directory's lock through an
+/// `O_CLOEXEC` descriptor. A child forked by another test thread while that
+/// descriptor is open holds a copy of it until its `execve` closes it, and
+/// under load that window can outlast the authority: a server started for the
+/// same directory just after finds the lock held ("another authority holds the
+/// state directory"). `spawn()` returns only once the child has exec'd, so
+/// with every spawn and every in-process start holding this guard, no start
+/// can meet an inherited copy. The hazard is the harness's own: the authority
+/// never forks (TX010).
+static SPAWN: Mutex<()> = Mutex::new(());
+
+/// Hold while spawning a child or starting an in-process authority.
+pub(crate) fn spawn_guard() -> MutexGuard<'static, ()> {
+    SPAWN.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// `command.spawn()` under [`spawn_guard`].
+pub(crate) fn spawn(command: &mut Command) -> std::io::Result<Child> {
+    let _guard = spawn_guard();
+    command.spawn()
+}
+
+/// `command.output()`: spawned under [`spawn_guard`], waited for outside it.
+pub(crate) fn output(command: &mut Command) -> std::io::Result<Output> {
+    let child = spawn(
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    )?;
+    child.wait_with_output()
+}
+
+/// `command.status()`: spawned under [`spawn_guard`], waited for outside it.
+pub(crate) fn status(command: &mut Command) -> std::io::Result<ExitStatus> {
+    spawn(command)?.wait()
+}
 
 /// A directory removed when dropped. No `tempfile` crate: the authority's own
 /// dependency set is the thing under review, and a test helper is not a reason
@@ -138,6 +180,7 @@ pub(crate) fn options(clock: &Arc<ManualClock>, hook: Option<CrashHook>) -> Star
     StartOptions {
         clock: clock.clone(),
         crash_hook: hook,
+        broker: None,
     }
 }
 
@@ -147,6 +190,7 @@ pub(crate) fn start(
     clock: &Arc<ManualClock>,
     hook: Option<CrashHook>,
 ) -> Result<(Authority, StartReport), StartError> {
+    let _guard = spawn_guard();
     Authority::start(state, config, options(clock, hook))
 }
 

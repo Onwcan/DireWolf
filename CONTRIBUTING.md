@@ -63,6 +63,7 @@ Windows does and does not give you.
 | `make eval-check` | The eval merge gate: the deterministic subset against the baseline (part of `make check`) |
 | `make eval-one` | Re-run one eval: `make eval-one ID=protocol-security/framing` |
 | `make capability-evidence` | The 10⁶ delegation-chain capability campaign ([CAPABILITIES.md](docs/CAPABILITIES.md) §3). Not part of `make check`: it is evidence, produced deliberately, and the fast suite runs a thousand chains to keep it working between runs. `DW_EVIDENCE_SEED` replays a run; `DW_EVIDENCE_CHAINS` shortens one while debugging |
+| `make broker-fs-read-evidence` | M4b's brokered `fs.read` evidence (Linux): the released authority and broker end to end, the crash-point sweep, hostile brokers and hostile authority-side peers on the real private channel, the cross-process TOCTOU campaign — and, with `DW_BROKER_AS` and `DW_PEER_AS`, three real identities ([ADR-0043](docs/adr/0043-m4b-private-broker-channel-and-brokered-fs-read.md)). NOT EXERCISED, and failing, without both |
 | `make filesystem-canonicalization-evidence` | M4a's real-filesystem resolver evidence (Linux): symlinks, magic links, mounts, hard links, Unicode twins, a replaced root and the TOCTOU race campaigns ([ADR-0042](docs/adr/0042-m4a-canonical-filesystem-resolution.md) §14). Fails on a missing category, an escape, or a case left unexercised that the machine could exercise |
 | `make schema` | Regenerate `schemas/`, `docs/DWKP_OPERATIONS.md` and the Python bindings from `dwk-proto` |
 | `make schema-check` | Fail if any of those is stale or hand-edited (part of `make check`) |
@@ -220,7 +221,11 @@ goal — a small trusted surface is.
 
 **`dwkd-broker`** — this crate is *expected* to carry the large dependencies
 authority must not: a container client, an HTTP/TLS stack, content parsers.
-That is the point of the split. Normal review applies.
+That is the point of the split. Normal review applies. As of M4b it links
+`dwk-proto` and, on Linux, `rustix` with exactly the authority's features, so
+a workspace build adds no feature to the authority's `rustix`; TX013 keeps any
+store, audit, key or DWKP-dispatch crate out of it
+([ADR-0043](docs/adr/0043-m4b-private-broker-channel-and-brokered-fs-read.md)).
 
 **Rust, anywhere** — declare it once in `[workspace.dependencies]` and inherit
 it with `{ workspace = true }`. One table lists everything in the tree; a
@@ -275,8 +280,9 @@ contains no `unsafe`" is true. "The authority contains no unsafe or native
 code" is false, and nothing in this repository may say it.
 
 That is not a promise it never will. `dwkd-broker` will eventually need
-`openat2` with `RESOLVE_*` flags, `fexecve` and rlimits, and some of that is
-unreachable from safe Rust. When it happens:
+`fexecve` and rlimits, and some of that may be unreachable from safe Rust. M4b
+did not need an exception: `SCM_RIGHTS`, `SO_PEERCRED`, `fcntl`, `fstat` and
+`pread` all go through `rustix`'s safe API. When one is needed:
 
 - The exception is **crate-level and recorded in an ADR**, never a file-level
   `#[allow]` someone adds in passing.

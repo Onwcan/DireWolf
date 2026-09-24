@@ -226,7 +226,7 @@ This is what makes principle 7 true rather than aspirational — `dwkd-authority
 
 **Broker plane** (`dwkd-broker` — executes, decides nothing)
 
-- *Filesystem Broker* — file operations via fd-relative access under a pinned root fd handed to it by authority.
+- *Filesystem Broker* — file operations on descriptors authority checked and handed over. **M4b implements one:** `fs.read` of one regular file, received as exactly one read-only descriptor over `SCM_RIGHTS`, re-proven by `(st_dev, st_ino)`, mode and kind, and read with `pread` up to the authorised bound and never a byte past it; the broker never opens a path ([ADR-0043](adr/0043-m4b-private-broker-channel-and-brokered-fs-read.md)). The pinned root is never sent; the remaining operations are M4c's.
 - *Exec Broker* — spawns processes with a verified executable, scrubbed environment, resource limits.
 - *Sandbox Supervisor* — creates/destroys execution environments, applies isolation profiles, re-attaches by run-id label after a container-runtime restart.
 - *Network Egress* — the CONNECT proxy serving `PROXY_ONLY` sandboxes, and the kernel-performed `net.http`.
@@ -234,6 +234,8 @@ This is what makes principle 7 true rather than aspirational — `dwkd-authority
 - *Artifact capture* — MIME classification, structure-aware excerpting, redaction, CAS write.
 
 The broker holds fds, PIDs, sockets and containers. It holds **no long-lived key**, cannot mint a capability, cannot match or create an approval, cannot evaluate policy, cannot read `kernel.db` or the keychain, and cannot write `audit.log`. It receives a per-invocation authorisation — canonical action, obligations, and a one-shot secret injection where one was granted — and performs exactly that. See [ADR-0018](adr/0018-authority-broker-split.md).
+
+**The private channel (M4b).** The broker listens on one Unix-domain socket and reads only from a connection the kernel attributes to the authority's uid; the authority sends only to a listener the kernel attributes to the broker's uid. Each connection carries one authorisation, which must name the channel the broker issued in its hello — so it is single-use without a MAC, a key or a table — together with exactly one descriptor. The protocol is not DWKP: no envelope, no registry, no schema, no binding the cognition side could use. Three identities in production: the runtime's, the authority's, and the broker's own; the authority starts no process, so both daemons are the operator's to start ([ADR-0043](adr/0043-m4b-private-broker-channel-and-brokered-fs-read.md) §1–§5).
 
 ---
 

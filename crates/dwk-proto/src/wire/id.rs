@@ -155,6 +155,17 @@ wire_id! {
     CapId, "cap"
 }
 
+wire_id! {
+    /// Identifies one tool invocation the authority authorised (M4b).
+    ///
+    /// The authority mints it — the runtime never proposes one — when both
+    /// gates have allowed an action and its intent is about to be recorded. It
+    /// names one operation, one argument set, one checked object and one
+    /// result, and it is what binds the broker's outcome to the authorisation
+    /// that caused it (ADR-0043).
+    InvocationId, "inv"
+}
+
 /// Any DireWolf identifier: a lowercase prefix of two to eight letters and a
 /// UUIDv7 body. Used where the corpus permits any entity to be referenced —
 /// `correlation_id` (`PROTOCOL.md` §1 uses a run id) and `causation_id` (a

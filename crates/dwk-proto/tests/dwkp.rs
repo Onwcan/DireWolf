@@ -141,7 +141,6 @@ fn every_reserved_operation_is_rejected_on_the_wire() {
     // A reserved operation is not a half-implemented one. Whatever schema name
     // its owning milestone picks, today it decodes as UNKNOWN_OPERATION.
     let candidates = [
-        "direwolf.tool.invoke",
         "direwolf.tool.cancel",
         "direwolf.model.call",
         "direwolf.canonical.preview",
@@ -165,34 +164,95 @@ fn every_reserved_operation_is_rejected_on_the_wire() {
             "{schema}"
         );
     }
-    // M3 defined three of them (AdmitRun, ReleaseRun, QueryAuthority), so the
-    // floor drops by three. It is a floor, not an equality: the point is that
-    // reserving remains the normal state of an operation nobody can police yet.
+    // M3 defined three of them (AdmitRun, ReleaseRun, QueryAuthority) and M4b
+    // two more (ToolInvoke, CanonicalPreview), so the floor drops by five. It
+    // is a floor, not an equality: the point is that reserving remains the
+    // normal state of an operation nobody can police yet.
     assert!(
         OPERATIONS
             .iter()
             .filter(|o| o.status == WireStatus::Reserved)
             .count()
-            >= 13
+            >= 11
     );
 }
 
 #[test]
-fn tool_invoke_is_still_reserved_after_m3() {
-    // The operation that carries every effect stays off the wire until the
-    // milestone that owns the first tool. M3 owns the *pipeline* -- admission,
-    // capabilities, policy, audit -- and can prove all of it through
-    // QueryAuthority, which decides without performing. Defining ToolInvoke
-    // first would mean either an opaque argument map, which the second-path
-    // rule forbids, or a decision-only form indistinguishable from
-    // QueryAuthority. See ADR-0036.
+fn tool_invoke_is_defined_with_exactly_one_tool_and_no_opaque_arguments() {
+    // M4b gives ToolInvoke its first wire form together with the first tool
+    // (ADR-0043), which is what ADR-0036 waited for: a request whose every
+    // argument the authority can canonicalise. It is not a name plus an
+    // argument map -- the only member is `fs_read`, a typed call -- so another
+    // tool is an undeclared member and a protocol error, never a dispatch.
     let tool_invoke = OPERATIONS
         .iter()
         .find(|o| o.name == "ToolInvoke")
         .expect("ToolInvoke is in the inventory");
-    assert_eq!(tool_invoke.status, WireStatus::Reserved);
-    assert!(tool_invoke.request.is_none());
-    assert!(tool_invoke.responses.is_empty());
+    assert_eq!(tool_invoke.status, WireStatus::Defined);
+    assert_eq!(tool_invoke.request, Some("direwolf.tool.invoke"));
+    assert!(tool_invoke.effect_bearing && tool_invoke.authority_bearing);
+    let invoke = |payload: &str| {
+        format!(
+            r#"{{"v":1,"id":"msg_01M24BB8G0E87TVJX9GX248ADD","type":"request","schema":"direwolf.tool.invoke","schema_version":1,"ts":"2026-09-12T09:14:22.481Z","session_id":"ses_01M24BB8G1FQR94D2PF2XVQDV4","run_id":"run_01M24BB8G3E0A851TRWE3M8FZF","epoch":3,"payload":{payload}}}"#
+        )
+    };
+    let good = invoke(r#"{"fs_read":{"path":"/workspace/src/main.rs","max_bytes":4096}}"#);
+    assert!(matches!(
+        dwkp::decode_body(good.as_bytes())
+            .expect("fs.read decodes")
+            .body,
+        DwkpBody::ToolInvoke(_)
+    ));
+    for bad in [
+        // Another tool: an undeclared member.
+        r#"{"fs_write":{"path":"/workspace/a","max_bytes":1}}"#,
+        // A name-plus-arguments shape.
+        r#"{"tool":"fs.read","args":{"path":"/workspace/a"}}"#,
+        // A capability or grant asserted by the runtime.
+        r#"{"fs_read":{"path":"/workspace/a","max_bytes":1},"cap_id":"cap_01M24BB8G3E0A851TRWE3M8FZF"}"#,
+        r#"{"fs_read":{"path":"/workspace/a","max_bytes":1,"environment":"HOST"}}"#,
+        // An unbounded or out-of-range read.
+        r#"{"fs_read":{"path":"/workspace/a"}}"#,
+        r#"{"fs_read":{"path":"/workspace/a","max_bytes":0}}"#,
+        r#"{"fs_read":{"path":"/workspace/a","max_bytes":262145}}"#,
+        // A relative path.
+        r#"{"fs_read":{"path":"workspace/a","max_bytes":1}}"#,
+    ] {
+        assert!(
+            dwkp::decode_body(invoke(bad).as_bytes()).is_err(),
+            "{bad} decoded"
+        );
+    }
+}
+
+#[test]
+fn the_largest_tool_result_every_field_allows_fits_one_frame() {
+    // The bound on `fs.read` is derived from the frame (limits.rs); this is
+    // the proof. Every field at its worst: a canonical path of 384
+    // characters that each canonicalise to the most bytes (a control
+    // character escapes to six), a rule id and source at their maxima, and
+    // the content at MAX_FS_READ_BYTES.
+    let path = format!("/{}", "\\u0001".repeat(383));
+    let rule_id = format!("a{}", "-".repeat(63));
+    let rule_source = format!("{}:{}", "a".repeat(240), "9".repeat(8));
+    let result = |content: &str| {
+        format!(
+            r#"{{"v":1,"id":"msg_01M24BB8G0E87TVJX9GX248ADD","type":"response","schema":"direwolf.tool.result","schema_version":1,"ts":"2026-09-12T09:14:22.481Z","causation_id":"msg_01M24BB8G1FQR94D2PF2XVQDV4","correlation_id":"run_01M24BB8G3E0A851TRWE3M8FZF","payload":{{"invocation_id":"inv_01M24BB8G4E87TVJX9GX248ADD","action":{{"tool":"fs.read","canonical_path":"{path}","byte_count":262144,"environment":"SANDBOX"}},"decision":{{"effect":"DENY","reason":"UNRESOLVED_POLICY_INPUT","capability_result":"NOT_SATISFIED","policy_result":"NOT_SATISFIED","rule_id":"{rule_id}","rule_source":"{rule_source}"}},"fs_read":{{"content":"{content}","eof_observed":false}}}}}}"#
+        )
+    };
+    let largest = result(&"ff".repeat(dwk_proto::limits::MAX_FS_READ_BYTES));
+    let message = dwkp::decode_body(largest.as_bytes()).expect("the largest result decodes");
+    let frame = message.to_frame().expect("and frames");
+    assert!(frame.len() <= frame::HEADER_LEN + dwk_proto::limits::MAX_FRAME_BODY);
+    let overhead = frame.len() - frame::HEADER_LEN - 2 * dwk_proto::limits::MAX_FS_READ_BYTES;
+    assert!(
+        overhead < 8 * 1024,
+        "everything but the content is {overhead} bytes"
+    );
+    // One byte more is not a result at all.
+    let over = result(&"ff".repeat(dwk_proto::limits::MAX_FS_READ_BYTES + 1));
+    let refused = dwkp::decode_body(over.as_bytes()).expect_err("above the bound");
+    assert_eq!(refused.violation, Some(Violation::TooLong));
 }
 
 fn refusal(operation: &str, reason: &str) -> String {
@@ -526,22 +586,18 @@ fn the_three_changed_responses_are_version_two_only() {
 }
 
 #[test]
-fn no_defined_operation_is_effect_bearing_yet() {
-    // M2 defined wire contracts and no effects. M3 adds authority decisions and
-    // still no effects: admitting a run, releasing it and asking what it may do
-    // change kernel records only. The first effect-bearing operation on the
-    // wire arrives with the broker that performs it and the canonicaliser that
-    // makes its arguments decidable.
-    for op in OPERATIONS
+fn tool_invoke_is_the_only_defined_effect_bearing_operation() {
+    // M2 defined wire contracts and no effects; M3 added authority decisions
+    // and still no effects. M4b adds exactly one effect-bearing operation --
+    // ToolInvoke, with the broker that performs it and the canonicaliser that
+    // makes its arguments decidable. CanonicalPreview, defined alongside it,
+    // performs nothing.
+    let effect_bearing: Vec<&str> = OPERATIONS
         .iter()
-        .filter(|o| o.status == WireStatus::Defined)
-    {
-        assert!(
-            !op.effect_bearing,
-            "{} is defined and effect-bearing",
-            op.name
-        );
-    }
+        .filter(|o| o.status == WireStatus::Defined && o.effect_bearing)
+        .map(|o| o.name)
+        .collect();
+    assert_eq!(effect_bearing, ["ToolInvoke"]);
 }
 
 #[test]
@@ -592,6 +648,13 @@ fn the_runtime_cannot_express_a_policy_input_in_any_defined_message() {
         "effect",
         "rule_id",
         "rule_source",
+        // M4b: facts of a canonical action the authority states, never a
+        // request (ADR-0043).
+        "environment",
+        "byte_count",
+        "canonical_path",
+        "invocation_id",
+        "tool",
     ];
     // The only request fields permitted to name authority vocabulary, each
     // sanctioned by DWKP_OPERATIONS.md and ADR-0036.
@@ -631,7 +694,7 @@ fn the_runtime_cannot_express_a_policy_input_in_any_defined_message() {
         }
     }
     assert!(
-        checked_requests >= 6,
+        checked_requests >= 8,
         "expected to have checked every defined request, saw {checked_requests}"
     );
 }

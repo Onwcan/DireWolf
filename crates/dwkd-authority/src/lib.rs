@@ -63,6 +63,7 @@
 // Pedantic lints on the security crates, per docs/LANGUAGE_SELECTION.md §7.
 #![warn(clippy::pedantic)]
 
+pub mod broker;
 pub mod capability;
 pub mod policy;
 pub mod resource;

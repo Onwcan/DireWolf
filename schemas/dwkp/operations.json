@@ -94,17 +94,17 @@
     {
       "name": "ToolInvoke",
       "layer": "authority-primitive",
-      "status": "reserved",
-      "request": null,
-      "responses": [],
+      "status": "defined",
+      "request": "direwolf.tool.invoke",
+      "responses": ["direwolf.tool.result", "direwolf.tool.denied", "direwolf.tool.refused", "direwolf.tool.failed", "direwolf.protocol.error"],
       "initiator": "runtime",
       "receiver": "dwkd-authority",
-      "semantics_owner": "M3 (pipeline); M4, M5, M10 (tools)",
+      "semantics_owner": "M4b (fs.read); M4c-M4e, M5, M10 (further tools)",
       "effect_bearing": true,
       "authority_bearing": true,
-      "carries": "A typed tool invocation naming a tool from the canonical inventory, and the cap_id of the grant it exercises; responses ToolResult, Denial or ApprovalPending.",
-      "consumer": "Canonicaliser, policy, capabilities, approvals, budget, audit; then a per-invocation authorisation to dwkd-broker.",
-      "second_path": "This IS the path from cognition to effect; there must be no other. When defined it must name a tool from the canonical inventory (TOOL_SYSTEM.md section 3) with typed arguments the kernel canonicalises itself; it must never accept an opaque command, script or frame. It stays reserved through M3 because its request cannot be designed before the first tool exists: the only shapes available to M3 are an argument map, which is the opaque payload the second-path rule forbids, or a decision-only form, which is QueryAuthority under another name and fails review question 1. M4 gives it its first wire form alongside the first filesystem tool and the canonicaliser that makes its arguments decidable (ADR-0036)."
+      "carries": "Envelope session_id, run_id and epoch; one typed call per tool -- in this build only fs_read{path, max_bytes}. Responses ToolResult{invocation_id, action, decision, fs_read{content, eof_observed}}, ToolDenial, ToolRefusal or ToolFailure. No capability, cap_id, environment, taint or idempotency_key: each would be the runtime asserting something the authority decides.",
+      "consumer": "dwkd-authority: fence, run, the canonical resolver beneath the run's pinned root (ADR-0042), capability gate, policy gate, durable intent; only then the file opened for reading and one channel-bound authorisation with that one descriptor to dwkd-broker over the private channel; then the durable outcome and the run's taint (ADR-0043).",
+      "second_path": "This IS the path from cognition to effect, and there is no other. It names one tool from a closed inventory with typed arguments the authority canonicalises itself: a tool this build lacks is an undeclared member and fails to decode, so nothing dispatches on a string. The runtime proposes a path and a byte bound; the authority resolves the path beneath the run's pinned workspace root (ADR-0042) so that the filesystem, not the spelling, supplies its canonical meaning, derives the required capability (fs.read:<canonical path>?max_bytes=<bound>), builds the complete canonical action (environment HOST, byte_count the bound) and requires both gates -- a held grant covering it and a policy ALLOW. It then records the intent durably, and only after that opens exactly that file for reading relative to its verified parent, proves the opened file is the checked object, and hands the broker one channel-bound, single-use authorisation with that one descriptor. The broker verifies the descriptor's identity again, reads at most the bound -- never a byte past it -- and returns the bytes to the authority, which records the outcome and raises the run's taint before answering. Because resolution precedes the gates, a refusal can say whether a workspace path exists even where policy would deny reading it; it never says what it holds. The broker is not addressable from cognition, never reopens a path, and never decides. Retry-safe, so no idempotency_key; a tool that is not must add one with a new version (ADR-0043)."
     },
     {
       "name": "ToolCancel",
@@ -139,17 +139,17 @@
     {
       "name": "CanonicalPreview",
       "layer": "authority-primitive",
-      "status": "reserved",
-      "request": null,
-      "responses": [],
+      "status": "defined",
+      "request": "direwolf.tool.preview",
+      "responses": ["direwolf.tool.previewed", "direwolf.tool.refused", "direwolf.protocol.error"],
       "initiator": "runtime, CLI",
       "receiver": "dwkd-authority",
-      "semantics_owner": "M3/M4",
+      "semantics_owner": "M4b",
       "effect_bearing": false,
       "authority_bearing": false,
-      "carries": "A proposed tool invocation; response CanonicalAction.",
-      "consumer": "direwolf policy simulate; the approval [w]hy branch.",
-      "second_path": "When defined: resolves what an action would mean without performing it, so the untrusted side never duplicates canonicalisation. It must not reserve, lock or touch the resource."
+      "carries": "Envelope session_id, run_id and epoch; the same typed call ToolInvoke carries. Response CanonicalPreviewResult{action, decision} or ToolRefusal.",
+      "consumer": "direwolf policy simulate; the approval [w]hy branch (M6); a runtime asking what it lacks.",
+      "second_path": "It resolves the path and builds the canonical action and runs both gates through the same code ToolInvoke uses, so the untrusted side never duplicates canonicalisation, and it performs nothing: it opens no file for reading, contacts no broker, mints no invocation id, issues no authorisation and reserves nothing. Its resolution is the same lookup ToolInvoke performs first. Its answer authorises nothing: it is information, stale the moment it is sent, and a later ToolInvoke fences, canonicalises and decides again from scratch."
     },
     {
       "name": "CreateArtifact",

@@ -58,11 +58,28 @@
 //! that does not cover it ([`CAPABILITIES.md`] §4):
 //!
 //! ```text
-//! granted(r)  iff  r is resolvable            -- fs/process need M4
+//! granted(r)  iff  r is resolvable            -- else UNRESOLVED_RESOURCE
 //!             ∧   profile.declared  covers r   -- else NOT_IN_AGENT_PROFILE
 //!             ∧   ∀ active skill s: s covers r -- else NOT_IN_SKILL_SET
 //!             ∧   mode ceiling      covers r   -- else ABOVE_PROFILE_CEILING
 //! ```
+//!
+//! **A concrete `fs.read` path means what the filesystem says it means**
+//! (M4b, [ADR-0043] §8). Every one any term names — the request, the profile,
+//! every active skill, the ceiling — is resolved by the production M4a
+//! resolver beneath the session's pinned workspace root, **outside any
+//! transaction**, and becomes comparable only through the resolver's answer.
+//! So an admission that names one runs in passes: the first decides everything
+//! up to minting, writes nothing, and returns the paths; they are resolved;
+//! the second decides again from the start — the fence, the record, the
+//! profile, the skills — and mints from those answers, provided they were
+//! resolved beneath the binding in force and cover every path it now names.
+//! A path that did not resolve (missing, a symlink, a magic link, a mount, a
+//! normalisation ambiguity, a replaced root, no workspace) covers nothing and
+//! is granted to no one; a request for it is withheld `UNRESOLVED_RESOURCE`.
+//! `fs.read:*` names no object and needs no resolution. A replay is answered
+//! from the record before any path is looked at, so it never resolves or
+//! mints again.
 //!
 //! "Covers" is M3b's `CapabilitySet::covers`: **one** member of the term must
 //! contain `r` whole, so no grant is ever assembled from fragments of two
@@ -87,6 +104,7 @@
 //!
 //! [ADR-0028]: ../../../../../docs/adr/0028-policy-input-ownership.md
 //! [ADR-0036]: ../../../../../docs/adr/0036-m3-authority-operations-and-the-capability-wire-form.md
+//! [ADR-0043]: ../../../../../docs/adr/0043-m4b-private-broker-channel-and-brokered-fs-read.md
 //! [ADR-0040]: ../../../../../docs/adr/0040-m3d-reconciliation-admission-across-tenures-and-undecidable-proposals.md
 //! [`CAPABILITIES.md`]: ../../../../../docs/CAPABILITIES.md
 
@@ -101,19 +119,22 @@ use dwk_proto::wire::scalar::{
 };
 use rusqlite::OptionalExtension as _;
 
+use std::collections::BTreeSet;
+
 use crate::capability::{
-    self, Capability, CapabilitySet, CapabilitySpec, PrivacyClass, UnresolvedScope,
+    self, Capability, CapabilitySet, CapabilitySpec, DeclaredPath, PrivacyClass, UnresolvedScope,
 };
 use crate::policy::{Origin, TaintLevel};
 
 use super::Mode;
 use super::audit::{AuditEvent, Field, Fields};
-use super::config::{self, SkillRecord};
+use super::config::{self, RootBinding, SkillRecord};
 use super::digest::{self, DomainHash, Sha256Hash};
 use super::error::AuthorityError;
 use super::identity::CallerContext;
 use super::lease::{self, to_sql};
 use super::policy_state::ActiveAuthority;
+use super::scopes::{self, Resolutions, Unresolved};
 use super::{Reply, Work};
 
 /// Why a requested capability was not granted.
@@ -130,9 +151,11 @@ pub enum WithheldCause {
     NotInParentGrant,
     /// The mode ceiling does not cover it.
     AboveProfileCeiling,
-    /// It names an `fs` or `process` resource, whose authority identity only
-    /// M4's canonicaliser can derive. On the wire: `UNRESOLVED_RESOURCE`
-    /// (ADR-0040). Stored with the scope that could not be resolved.
+    /// It names an `fs` or `process` resource with no authority identity: an
+    /// `fs.read` path the M4a resolver did not resolve beneath the session's
+    /// root, or a verb M4b does not resolve at all. On the wire:
+    /// `UNRESOLVED_RESOURCE` (ADR-0040). Stored with the scope that could not
+    /// be resolved.
     NeedsCanonicalization(UnresolvedScope),
 }
 
@@ -337,13 +360,15 @@ fn grant_digest(admission: &Admission) -> Sha256Hash {
     hash.finish()
 }
 
-/// The members of a declaration that are comparable today. `fs` and `process`
-/// members cover nothing until M4 — and cannot need to, because a request in
-/// those families is withheld before any term is consulted.
-fn resolvable(specs: &[CapabilitySpec]) -> CapabilitySet {
+/// The members of a declaration that are comparable for this admission: a
+/// concrete `fs.read` member only through the resolver's answer for its path;
+/// other `fs` verbs and `process` not at all. A member that is not comparable
+/// covers nothing — which never widens anything, because a request that is
+/// not comparable is withheld before any term is consulted.
+fn resolvable(specs: &[CapabilitySpec], resolutions: &Resolutions) -> CapabilitySet {
     specs
         .iter()
-        .filter_map(|spec| spec.resolve().ok())
+        .filter_map(|spec| scopes::declared(spec, resolutions).ok())
         .collect()
 }
 
@@ -355,19 +380,28 @@ struct ActiveSkill {
 }
 
 impl ActiveSkill {
+    /// The declaration this skill contributes, if it contributes one.
+    fn declaration(&self) -> Option<&[CapabilitySpec]> {
+        match &self.record {
+            Some(record) if record.trust.contributes_declaration() => Some(&record.declared),
+            _ => None,
+        }
+    }
+
     /// What this skill contributes to the intersection. An unknown or
     /// quarantined skill contributes nothing, which withholds everything.
-    fn term(&self) -> CapabilitySet {
-        match &self.record {
-            Some(record) if record.trust.contributes_declaration() => resolvable(&record.declared),
-            _ => CapabilitySet::empty(),
-        }
+    fn term(&self, resolutions: &Resolutions) -> CapabilitySet {
+        self.declaration()
+            .map_or_else(CapabilitySet::empty, |declared| {
+                resolvable(declared, resolutions)
+            })
     }
 }
 
 /// The minting decision for one requested capability.
 fn mint_one(
     requested: &CapabilityText,
+    resolutions: &Resolutions,
     profile: &CapabilitySet,
     skills: &[CapabilitySet],
     ceiling: &CapabilitySet,
@@ -375,9 +409,8 @@ fn mint_one(
     let Ok(spec) = capability::parse(requested.as_str()) else {
         return Err(WithheldCause::NotInAgentProfile);
     };
-    let wanted = spec
-        .resolve()
-        .map_err(WithheldCause::NeedsCanonicalization)?;
+    let wanted =
+        scopes::declared(&spec, resolutions).map_err(WithheldCause::NeedsCanonicalization)?;
     if !profile.covers(&wanted) {
         return Err(WithheldCause::NotInAgentProfile);
     }
@@ -426,13 +459,44 @@ struct Inputs {
     workspace: Option<(String, super::config::WorkspaceSensitivity)>,
 }
 
-/// `AdmitRun`.
+/// The most passes one admission makes: the first finds the paths, the second
+/// normally mints, and a third absorbs a configuration change between them.
+/// The last pass never asks to resolve: a path it has no current answer for
+/// covers nothing.
+pub(super) const PASSES: usize = 3;
+
+/// What one pass of `AdmitRun` produced.
+#[derive(Debug)]
+pub(super) enum Pass {
+    /// The answer: refused, replayed or admitted — recorded.
+    Answered(Reply<Admission>),
+    /// Nothing was written: these concrete `fs.read` paths must first be
+    /// resolved beneath `binding`, with no transaction open.
+    Resolve {
+        /// The session's workspace root binding.
+        binding: RootBinding,
+        /// Every concrete `fs.read` path the admission's terms name.
+        paths: Vec<DeclaredPath>,
+    },
+}
+
+/// The concrete `fs.read` paths an admission names, and what the resolver
+/// said about each: the input to minting, and to its audit record.
+struct FsTerms {
+    paths: Vec<DeclaredPath>,
+    resolutions: Resolutions,
+}
+
+/// `AdmitRun`: one pass. `resolved` is what the previous pass's paths
+/// resolved to; `last` is whether this pass must answer.
 pub(super) fn admit(
     work: &mut Work<'_>,
     caller: &CallerContext,
     message: &DwkpMessage,
     active: &ActiveAuthority,
-) -> Result<Reply<Admission>, AuthorityError> {
+    resolved: Option<&Resolutions>,
+    last: bool,
+) -> Result<Pass, AuthorityError> {
     let DwkpBody::AdmitRun(request) = &message.body else {
         return Err(AuthorityError::NotAnAuthorityRequest);
     };
@@ -455,12 +519,14 @@ pub(super) fn admit(
 
     // 1. The fence. Nothing else is looked at first -- not even the key.
     if !lease::fence(work, caller, session, epoch)? {
-        return refuse(work, &attempt, RefusalReason::StaleEpoch, Fields::new());
+        return refuse(work, &attempt, RefusalReason::StaleEpoch, Fields::new())
+            .map(Pass::Answered);
     }
 
-    // 2. Only now, the idempotency record, under this subject's scope.
+    // 2. Only now, the idempotency record, under this subject's scope. A
+    //    replay is answered here: nothing below runs, nothing is resolved.
     if let Some(reply) = recorded(work, &attempt)? {
-        return Ok(reply);
+        return Ok(Pass::Answered(reply));
     }
 
     // 3. The profile, from the kernel's own record.
@@ -470,23 +536,111 @@ pub(super) fn admit(
             &attempt,
             RefusalReason::UnknownAgentProfile,
             Fields::new().text("agent_profile", attempt.agent_profile),
-        );
+        )
+        .map(Pass::Answered);
     };
 
     // 4. The active skills: the baseline, always; then what was named.
     let skills = active_skills(work, &profile, request)?;
 
-    // 5. Mint.
-    let (granted, withheld) = mint_all(request, &profile, &skills, active);
+    // 5. Every concrete fs.read path any term names, with the M4a resolver's
+    //    answer for it -- or, first, a pass that asks for them.
+    let paths = concrete_paths(request, &profile, &skills, active);
+    let Some(resolutions) = fs_resolutions(work, session, &paths, resolved, last)? else {
+        let Some(binding) = session_root(work, session)? else {
+            return Err(AuthorityError::Invariant(
+                "a pass asked to resolve with no root to resolve beneath",
+            ));
+        };
+        return Ok(Pass::Resolve { binding, paths });
+    };
+    let fs = FsTerms { paths, resolutions };
 
-    // 6. The run's policy inputs, derived here and nowhere else.
+    // 6. Mint.
+    let (granted, withheld) = mint_all(request, &profile, &skills, active, &fs.resolutions);
+
+    // 7. The run's policy inputs, derived here and nowhere else.
     let inputs = derive_inputs(work, &profile, session)?;
 
-    // 7. Identities, rows, the record, and the audit.
+    // 8. Identities, rows, the record, and the audit.
     let admission = persist(
-        work, &attempt, &profile, &skills, granted, withheld, &inputs, active,
+        work, &attempt, &profile, &skills, granted, withheld, &inputs, active, &fs,
     )?;
-    Ok(Reply::Done(admission))
+    Ok(Pass::Answered(Reply::Done(admission)))
+}
+
+/// Every concrete `fs.read` path the request, the profile, the contributing
+/// skills and the mode ceiling name, once each, in order.
+fn concrete_paths(
+    request: &AdmitRun,
+    profile: &config::ProfileRecord,
+    skills: &[ActiveSkill],
+    active: &ActiveAuthority,
+) -> Vec<DeclaredPath> {
+    let requested: Vec<CapabilitySpec> = request
+        .requested_capabilities
+        .iter()
+        .filter_map(|text| capability::parse(text.as_str()).ok())
+        .collect();
+    let declared = skills.iter().filter_map(ActiveSkill::declaration).flatten();
+    let mut paths = BTreeSet::new();
+    for spec in requested
+        .iter()
+        .chain(&profile.declared)
+        .chain(declared)
+        .chain(&active.ceiling)
+    {
+        if let Some(path) = scopes::concrete_read_path(spec) {
+            paths.insert(path.clone());
+        }
+    }
+    paths.into_iter().collect()
+}
+
+/// The session's workspace root binding, if it has one.
+fn session_root(
+    work: &Work<'_>,
+    session: &SessionId,
+) -> Result<Option<RootBinding>, AuthorityError> {
+    match config::session_workspace(work.tx, session.as_str())? {
+        Some((workspace, _)) => config::workspace_root(work.tx, &workspace),
+        None => Ok(None),
+    }
+}
+
+/// The resolver's answers for `paths`, or `None` when they must first be
+/// resolved (never on the last pass). Answers are used only if they were
+/// resolved beneath the binding in force now and cover every path named now.
+fn fs_resolutions(
+    work: &Work<'_>,
+    session: &SessionId,
+    paths: &[DeclaredPath],
+    resolved: Option<&Resolutions>,
+    last: bool,
+) -> Result<Option<Resolutions>, AuthorityError> {
+    if paths.is_empty() {
+        return Ok(Some(Resolutions::empty()));
+    }
+    let Some((workspace, _)) = config::session_workspace(work.tx, session.as_str())? else {
+        return Ok(Some(Resolutions::unavailable(
+            paths,
+            &Unresolved::NoWorkspace,
+        )));
+    };
+    let Some(binding) = config::workspace_root(work.tx, &workspace)? else {
+        return Ok(Some(Resolutions::unavailable(
+            paths,
+            &Unresolved::NoWorkspaceRoot,
+        )));
+    };
+    Ok(match resolved {
+        Some(answers) if answers.binding() == Some(&binding) && (last || answers.covers(paths)) => {
+            // On the last pass a path without an answer is `NOT_ATTEMPTED`.
+            Some(answers.clone())
+        }
+        _ if last => Some(Resolutions::unavailable(paths, &Unresolved::NotAttempted)),
+        _ => None,
+    })
 }
 
 /// Steps 3–5 of the contract, or `None` for a first admission.
@@ -603,9 +757,12 @@ fn mint_all(
     profile: &config::ProfileRecord,
     skills: &[ActiveSkill],
     active: &ActiveAuthority,
+    resolutions: &Resolutions,
 ) -> (Vec<Capability>, Vec<Withheld>) {
-    let skill_terms: Vec<CapabilitySet> = skills.iter().map(ActiveSkill::term).collect();
-    let profile_term = resolvable(&profile.declared);
+    let skill_terms: Vec<CapabilitySet> =
+        skills.iter().map(|skill| skill.term(resolutions)).collect();
+    let profile_term = resolvable(&profile.declared, resolutions);
+    let ceiling = resolvable(&active.ceiling, resolutions);
     let mut granted: Vec<Capability> = Vec::new();
     let mut withheld: Vec<Withheld> = Vec::new();
     let mut seen: Vec<&str> = Vec::new();
@@ -614,7 +771,13 @@ fn mint_all(
             continue;
         }
         seen.push(requested.as_str());
-        match mint_one(requested, &profile_term, &skill_terms, &active.ceiling) {
+        match mint_one(
+            requested,
+            resolutions,
+            &profile_term,
+            &skill_terms,
+            &ceiling,
+        ) {
             Ok(capability) => {
                 if !granted.contains(&capability) {
                     granted.push(capability);
@@ -667,6 +830,7 @@ fn persist(
     withheld: Vec<Withheld>,
     inputs: &Inputs,
     active: &ActiveAuthority,
+    fs: &FsTerms,
 ) -> Result<Admission, AuthorityError> {
     let subject = attempt.caller.subject().storage_key();
     let run_id = work.run_id()?;
@@ -725,18 +889,17 @@ fn persist(
             to_sql(work.now)?,
         ],
     ))?;
-    work.audit(
-        AuditEvent::RunAdmitted,
-        admitted_fields(
-            attempt,
-            profile,
-            skills,
-            inputs,
-            active,
-            &admission,
-            &recorded_grant,
-        ),
-    )?;
+    let mut fields = admitted_fields(
+        attempt,
+        profile,
+        skills,
+        inputs,
+        active,
+        &admission,
+        &recorded_grant,
+    );
+    fields.extend(fs_path_fields(fs));
+    work.audit(AuditEvent::RunAdmitted, fields)?;
     Ok(admission)
 }
 
@@ -873,6 +1036,43 @@ fn admitted_fields(
         )
 }
 
+/// The most resolved paths one admission's audit record lists; the totals
+/// count them all.
+const MAX_AUDITED_PATHS: usize = 32;
+
+/// What the resolver said about each concrete `fs.read` path, for the audit:
+/// the class of every refusal, and the identity of every object resolved.
+fn fs_path_fields(fs: &FsTerms) -> Fields {
+    let mut unresolved: u64 = 0;
+    let mut listed = Vec::new();
+    for path in &fs.paths {
+        let answer = fs.resolutions.answer(path);
+        if answer.is_err() {
+            unresolved += 1;
+        }
+        if listed.len() == MAX_AUDITED_PATHS {
+            continue;
+        }
+        let mut entry = vec![("path", Field::Text(path.as_str().to_owned()))];
+        match answer {
+            Ok((_, identity)) => {
+                entry.push(("outcome", Field::Text("RESOLVED".to_owned())));
+                entry.push(("device", Field::Text(identity.device().to_string())));
+                entry.push(("inode", Field::Text(identity.inode().to_string())));
+            }
+            Err(why) => entry.push(("outcome", Field::Text(why.class().to_owned()))),
+        }
+        listed.push(Field::Object(entry));
+    }
+    Fields::new()
+        .list("fs_paths", listed)
+        .int(
+            "fs_paths_total",
+            u64::try_from(fs.paths.len()).unwrap_or(u64::MAX),
+        )
+        .int("fs_paths_unresolved", unresolved)
+}
+
 /// Reconstruct an admission from its immutable rows.
 pub(super) fn load(work: &Work<'_>, run: &str) -> Result<Admission, AuthorityError> {
     let invariant = AuthorityError::Invariant;
@@ -907,10 +1107,16 @@ pub(super) fn load(work: &Work<'_>, run: &str) -> Result<Admission, AuthorityErr
         .into_iter()
         .map(|(cap_id, text)| {
             let cap_id = CapId::parse(&cap_id).ok_or(invariant("a stored cap_id is malformed"))?;
+            // Stored text is the authority's own canonical rendering of what it
+            // resolved and minted -- a trusted stored grant, not a declaration
+            // -- and the grammar that reads it back is exact: it must
+            // reproduce itself, or the store and this build disagree about
+            // what was granted.
             let capability = capability::parse(&text)
                 .ok()
-                .and_then(|spec| spec.resolve().ok())
-                .ok_or(invariant("a stored grant no longer resolves"))?;
+                .and_then(|spec| scopes::rehydrate(&spec).ok())
+                .filter(|capability| capability.to_canonical_string() == text)
+                .ok_or(invariant("a stored grant no longer resolves to itself"))?;
             Ok(Grant { cap_id, capability })
         })
         .collect::<Result<Vec<_>, AuthorityError>>()?;
@@ -1015,15 +1221,27 @@ fn ordinal_sql(ordinal: usize) -> i64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{WithheldCause, mint_one, resolvable, taint_from_rank, taint_rank};
-    use crate::capability::{CapabilitySet, UnresolvedScope, parse};
+    use super::{
+        Resolutions, WithheldCause, mint_one as mint_with, resolvable, taint_from_rank, taint_rank,
+    };
+    use crate::capability::{Capability, CapabilitySet, UnresolvedScope, parse};
     use crate::policy::TaintLevel;
     use dwk_proto::wire::scalar::{CapabilityText, WithheldReason};
 
     fn set(texts: &[&str]) -> CapabilitySet {
         let specs: Vec<_> = texts.iter().filter_map(|t| parse(t).ok()).collect();
         assert_eq!(specs.len(), texts.len(), "fixtures parse");
-        resolvable(&specs)
+        resolvable(&specs, &Resolutions::empty())
+    }
+
+    /// Minting with no filesystem answers: what every non-`fs` request sees.
+    fn mint_one(
+        requested: &CapabilityText,
+        profile: &CapabilitySet,
+        skills: &[CapabilitySet],
+        ceiling: &CapabilitySet,
+    ) -> Result<Capability, WithheldCause> {
+        mint_with(requested, &Resolutions::empty(), profile, skills, ceiling)
     }
 
     fn text(t: &str) -> CapabilityText {
@@ -1093,12 +1311,28 @@ mod tests {
     #[test]
     fn a_resource_the_kernel_cannot_yet_identify_is_withheld_honestly() {
         let all = set(&["model.call:*"]);
+        // M4b canonicalises fs.read and no other fs verb (ADR-0043).
         assert_eq!(
-            mint_one(&text("fs.read:/workspace"), &all, &[], &all),
+            mint_one(&text("fs.write:/workspace"), &all, &[], &all),
             Err(WithheldCause::NeedsCanonicalization(
                 UnresolvedScope::CanonicalPath
             ))
         );
+        // A concrete fs.read path with no resolver answer names no resource,
+        // however canonical its spelling: the grammar alone is no authority.
+        for path in [
+            "fs.read:/etc",
+            "fs.read:/workspace",
+            "fs.read:/workspace/src",
+        ] {
+            assert_eq!(
+                mint_one(&text(path), &set(&["fs.read:*"]), &[], &set(&["fs.read:*"])),
+                Err(WithheldCause::NeedsCanonicalization(
+                    UnresolvedScope::CanonicalPath
+                )),
+                "{path}"
+            );
+        }
         assert_eq!(
             mint_one(&text("process.exec:/usr/bin/git"), &all, &[], &all),
             Err(WithheldCause::NeedsCanonicalization(
@@ -1116,6 +1350,111 @@ mod tests {
                 WithheldReason::UnresolvedResource
             );
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn fs_read_is_minted_through_every_term_in_one_canonical_meaning() {
+        // M4b: the request and every declaration mean what the M4a resolver
+        // found beneath the root (ADR-0043 §8), so containment compares like
+        // with like -- and a path that does not resolve covers nothing.
+        use super::scopes::resolve_paths;
+        use crate::capability::DeclaredPath;
+        use crate::resource::fs::PinnedRoot;
+
+        let scratch = crate::scratch::Scratch::new("mint");
+        let dir = scratch.path().join("ws");
+        let made = std::fs::create_dir_all(dir.join("src"))
+            .and_then(|()| std::fs::write(dir.join("src/lib.rs"), b"x"))
+            .and_then(|()| std::fs::create_dir_all(dir.join("srcX")));
+        assert!(made.is_ok(), "the fixture tree");
+        let Some(host) = dir.to_str().map(str::to_owned) else {
+            unreachable!("a UTF-8 temporary directory")
+        };
+        let Ok((_, fingerprint)) = PinnedRoot::install(&host) else {
+            unreachable!("the fixture root pins")
+        };
+        let binding = super::RootBinding {
+            host_path: host,
+            fingerprint,
+        };
+        let paths: Vec<DeclaredPath> = [
+            "/workspace",
+            "/workspace/src",
+            "/workspace/src/lib.rs",
+            "/workspace/srcX",
+            "/workspace/missing",
+        ]
+        .into_iter()
+        .filter_map(DeclaredPath::new)
+        .collect();
+        let answers = resolve_paths(&binding, &paths);
+        let term = |texts: &[&str]| {
+            let specs: Vec<_> = texts.iter().filter_map(|t| parse(t).ok()).collect();
+            resolvable(&specs, &answers)
+        };
+        let profile = term(&["fs.read:/workspace"]);
+        let skill = term(&["fs.read:/workspace/src"]);
+        let ceiling = term(&["fs.read:/workspace?max_bytes=1048576"]);
+        let wanted = text("fs.read:/workspace/src/lib.rs?max_bytes=4096");
+        assert_eq!(
+            mint_with(
+                &wanted,
+                &answers,
+                &profile,
+                core::slice::from_ref(&skill),
+                &ceiling
+            )
+            .map(|c| c.to_canonical_string()),
+            Ok("fs.read:/workspace/src/lib.rs?max_bytes=4096".to_owned())
+        );
+        // A request the ceiling's byte bound does not cover.
+        assert_eq!(
+            mint_with(
+                &text("fs.read:/workspace/src"),
+                &answers,
+                &profile,
+                core::slice::from_ref(&skill),
+                &ceiling
+            ),
+            Err(WithheldCause::AboveProfileCeiling)
+        );
+        // A sibling of the skill's prefix, not below it.
+        assert_eq!(
+            mint_with(
+                &text("fs.read:/workspace/srcX?max_bytes=1"),
+                &answers,
+                &profile,
+                core::slice::from_ref(&skill),
+                &ceiling
+            ),
+            Err(WithheldCause::NotInSkillSet)
+        );
+        // A path that does not exist resolves to nothing: withheld, however
+        // well every term would have covered its spelling.
+        assert_eq!(
+            mint_with(
+                &text("fs.read:/workspace/missing?max_bytes=1"),
+                &answers,
+                &profile,
+                &[],
+                &ceiling
+            ),
+            Err(WithheldCause::NeedsCanonicalization(
+                UnresolvedScope::CanonicalPath
+            ))
+        );
+        // A profile member that did not resolve covers nothing.
+        assert_eq!(
+            mint_with(
+                &wanted,
+                &answers,
+                &term(&["fs.read:/workspace/missing"]),
+                &[],
+                &ceiling
+            ),
+            Err(WithheldCause::NotInAgentProfile)
+        );
     }
 
     #[test]

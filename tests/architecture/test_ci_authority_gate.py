@@ -19,6 +19,11 @@ M4a's canonical filesystem evidence (ADR-0042) is held to the same structure:
 its own unconditional Linux job, required by the aggregate, and a task that
 fails on a missing category, a race campaign that escaped or did not report,
 or a case left unexercised that an ordinary runner can exercise.
+
+So is M4b's brokered `fs.read` evidence (ADR-0043), with THREE identities: the
+job creates the broker's own user, names it and a hostile runtime user, and the
+task proves both by their numbers before anything runs, requires every
+same-identity case, and selects the three-identity tests by name.
 """
 
 from __future__ import annotations
@@ -51,6 +56,16 @@ FILESYSTEM_JOB = "filesystem-canonicalization"
 RESOLVER_TESTS = (
     REPO_ROOT / "crates" / "dwkd-authority" / "src" / "resource" / "fs" / "linux" / "tests.rs",
     REPO_ROOT / "crates" / "dwkd-authority" / "tests" / "resource_workspace.rs",
+    REPO_ROOT / "crates" / "dwkd-authority" / "tests" / "admission_fs.rs",
+)
+# M4b's brokered fs.read evidence, and the tests that print it.
+BROKER_JOB = "broker-fs-read"
+BROKER_FOREIGN_SUITE = REPO_ROOT / "crates" / "dwkd-authority" / "tests" / "broker_foreign.rs"
+BROKER_SUITES = (
+    REPO_ROOT / "crates" / "dwkd-authority" / "tests" / "broker_fs_read.rs",
+    REPO_ROOT / "crates" / "dwkd-authority" / "tests" / "broker_state.rs",
+    REPO_ROOT / "crates" / "dwkd-broker" / "tests" / "private_protocol.rs",
+    BROKER_FOREIGN_SUITE,
 )
 
 
@@ -174,7 +189,7 @@ def test_nothing_around_the_evidence_may_fail_quietly() -> None:
     """No `continue-on-error`, no shell escape hatch, and no step condition --
     except the evals job's upload of its results when it has already failed,
     which cannot change the job's outcome."""
-    for name in (EVIDENCE_JOB, EVAL_JOB, FILESYSTEM_JOB, AGGREGATE_JOB):
+    for name in (EVIDENCE_JOB, EVAL_JOB, FILESYSTEM_JOB, BROKER_JOB, AGGREGATE_JOB):
         text = "\n".join(_uncommented(line) for line in _jobs()[name])
         for hatch in ("continue-on-error", "|| true", "|| :", "set +e", "exit 0"):
             assert hatch not in text, f"`{hatch}` in job {name}"
@@ -197,6 +212,7 @@ def test_every_job_is_required_by_the_aggregate_check() -> None:
     jobs = set(_jobs()) - {AGGREGATE_JOB}
     needs = set(_needs())
     assert EVIDENCE_JOB in needs and EVAL_JOB in needs and FILESYSTEM_JOB in needs
+    assert BROKER_JOB in needs
     assert jobs == needs, f"not required: {sorted(jobs - needs)}; unknown: {sorted(needs - jobs)}"
 
 
@@ -403,6 +419,7 @@ def _fs_complete() -> list[str]:
         _fs_line("toctou", case, "escaped-0-unexpected-0-resolved-9-refused-1-swaps-500", 10)
         for case in dw.FS_TOCTOU_CASES
     ]
+    lines += [_fs_line("admission", case, "withheld") for case in dw.FS_ADMISSION_CASES]
     return lines
 
 
@@ -448,6 +465,7 @@ def _only_unexercised(category: str) -> Callable[[list[str]], list[str]]:
             "toctou/extra was not exercised",
         ),
         (_only_unexercised("magic-link"), "category `magic-link` has no exercised case"),
+        (_without("stored-grant-rehydrated"), "admission case `stored-grant-rehydrated`"),
         (_adding("FS-EVIDENCE {not json"), "unreadable evidence line"),
         (_adding('FS-EVIDENCE {"category":"x","count":"1"}'), "malformed evidence line"),
         (lambda _: [], "category `normal` has no exercised case"),
@@ -459,6 +477,7 @@ def _only_unexercised(category: str) -> Callable[[list[str]], list[str]]:
         "unexpected-object",
         "race-not-exercised",
         "category-only-unexercised",
+        "missing-admission-case",
         "unreadable",
         "malformed",
         "nothing",
@@ -480,7 +499,7 @@ def test_the_task_names_what_the_resolver_tests_print() -> None:
     every category it requires, is one a test prints. A renamed case would
     otherwise fail only in CI, or -- for an environmental one -- never."""
     source = "\n".join(path.read_text(encoding="utf-8") for path in RESOLVER_TESTS)
-    for case in (*dw.FS_TOCTOU_CASES, *dw.FS_ENVIRONMENTAL):
+    for case in (*dw.FS_TOCTOU_CASES, *dw.FS_ENVIRONMENTAL, *dw.FS_ADMISSION_CASES):
         assert f'"{case}"' in source, f"no resolver test prints `{case}`"
     for category in dw.FS_EVIDENCE_CATEGORIES:
         emitted = f'evidence("{category}"' in source or f'"{category}",' in source
@@ -521,7 +540,210 @@ def test_the_filesystem_task_checks_what_both_suites_printed(
     dw.task_filesystem_canonicalization_evidence()
     assert [c for c in commands if "resource::fs::" in c], commands
     assert [c for c in commands if "resource_workspace" in c], commands
+    assert [c for c in commands if "admission_fs" in c], commands
     outputs = iter([complete, ""])
     with pytest.raises(dw.TaskError, match="category `state` has no exercised case"):
         dw.task_filesystem_canonicalization_evidence()
     capsys.readouterr()
+
+
+# --- M4b: the brokered fs.read evidence --------------------------------------
+
+
+def test_the_broker_evidence_job_exists_on_linux_and_is_unconditional() -> None:
+    job = _jobs().get(BROKER_JOB)
+    assert job is not None, f"no `{BROKER_JOB}` job: the broker channel is measured nowhere"
+    text = "\n".join(_uncommented(line) for line in job)
+    assert re.search(r"^    runs-on:\s*ubuntu-latest\s*$", text, re.MULTILINE), "Linux only"
+    for forbidden in ("strategy:", "matrix", "continue-on-error"):
+        assert forbidden not in text, f"`{forbidden}` in {BROKER_JOB}"
+    assert not re.search(r"^\s+if:", text, re.MULTILINE), f"{BROKER_JOB} has a condition"
+
+
+def test_the_broker_job_runs_with_three_distinct_ordinary_identities() -> None:
+    step = _step_running(BROKER_JOB, "make broker-fs-read-evidence")
+    env = _env(step)
+    broker, peer = env.get("DW_BROKER_AS"), env.get("DW_PEER_AS")
+    _second_identity(broker)
+    _second_identity(peer)
+    assert broker != peer, "the broker and the hostile runtime must be two identities"
+    # The broker's user is created in the job, before the evidence runs.
+    steps = _steps(_jobs()[BROKER_JOB])
+    created = [i for i, s in enumerate(steps) if (_run(s) or "").startswith("sudo useradd")]
+    evidence = [i for i, s in enumerate(steps) if _run(s) == "make broker-fs-read-evidence"]
+    assert len(created) == 1 and evidence and created[0] < evidence[0]
+    assert (_run(steps[created[0]]) or "").split()[-1] == broker
+
+
+def test_the_three_identity_tests_are_ignored_by_default_and_selected_by_name() -> None:
+    source = BROKER_FOREIGN_SUITE.read_text(encoding="utf-8")
+    assert len(dw.BROKER_FOREIGN_TESTS) == 3
+    for name in dw.BROKER_FOREIGN_TESTS:
+        module, function = name.split("::")
+        assert module == "linux"
+        assert re.search(r"#\[ignore = [^\]]*\]\s*fn " + re.escape(function) + r"\(\)", source), (
+            f"{function} is not an #[ignore]d test in {BROKER_FOREIGN_SUITE.name}"
+        )
+
+
+def test_the_broker_task_names_what_the_broker_tests_print() -> None:
+    """A renamed case would otherwise fail only in CI."""
+    source = "\n".join(path.read_text(encoding="utf-8") for path in BROKER_SUITES)
+    for suite, case in (*dw.BROKER_CASES, *dw.BROKER_FOREIGN_CASES):
+        assert f'"{suite}"' in source, f"no broker test prints suite `{suite}`"
+        hostile = case.startswith("hostile-broker-")
+        assert hostile or f'"{case}"' in source, f"no broker test prints `{case}`"
+    # The hostile-broker cases are spelled from the script's variants.
+    state = BROKER_SUITES[1].read_text(encoding="utf-8")
+    for _suite, case in dw.BROKER_CASES:
+        if case.startswith("hostile-broker-"):
+            variant = case.removeprefix("hostile-broker-")
+            assert re.search(r"Script::(\w+)", state)
+            variants = {v.lower() for v in re.findall(r"Script::(\w+)", state)}
+            assert variant in variants, f"no scripted peer `{variant}`"
+
+
+def _broker_line(suite: str, case: str, outcome: str = "ok") -> str:
+    return (
+        f'BROKER-EVIDENCE {{"suite":"{suite}","case":"{case}","outcome":"{outcome}",'
+        f'"broker_contacts":0,"authority":"/t/dwkd-authority"}}'
+    )
+
+
+def _broker_complete(cases: tuple[tuple[str, str], ...]) -> str:
+    return "\n".join(_broker_line(suite, case) for suite, case in cases)
+
+
+def test_broker_evidence_requires_every_case(capsys: pytest.CaptureFixture[str]) -> None:
+    dw.require_broker_evidence(_broker_complete(dw.BROKER_CASES), dw.BROKER_CASES)
+    lines = _broker_complete(dw.BROKER_CASES).splitlines()
+    with pytest.raises(dw.TaskError, match="broker-state/crash-sweep"):
+        dw.require_broker_evidence(
+            "\n".join(line for line in lines if '"crash-sweep"' not in line), dw.BROKER_CASES
+        )
+    # The same case name under another suite is not the case.
+    moved = [
+        line.replace('"suite":"broker-fs-read"', '"suite":"elsewhere"')
+        if '"authority-verifies-broker-uid"' in line
+        else line
+        for line in lines
+    ]
+    with pytest.raises(dw.TaskError, match="broker-fs-read/authority-verifies-broker-uid"):
+        dw.require_broker_evidence("\n".join(moved), dw.BROKER_CASES)
+    with pytest.raises(dw.TaskError, match="unreadable"):
+        dw.require_broker_evidence("BROKER-EVIDENCE {nope", dw.BROKER_CASES)
+    with pytest.raises(dw.TaskError, match="malformed"):
+        dw.require_broker_evidence('BROKER-EVIDENCE {"suite":"x","case":"y"}', dw.BROKER_CASES)
+    capsys.readouterr()
+
+
+def _broker_libtest(passed: int, cases: tuple[tuple[str, str], ...]) -> str:
+    return "\n".join(
+        [
+            "running 3 tests",
+            _broker_complete(cases),
+            f"test result: ok. {passed} passed; 0 failed; 0 ignored; 0 measured; "
+            f"{3 - passed} filtered out; finished in 1.00s",
+        ]
+    )
+
+
+def test_a_three_identity_run_that_selected_nothing_is_not_evidence(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with pytest.raises(dw.TaskError, match="did not run all"):
+        dw.require_broker_foreign_evidence(_broker_libtest(0, ()))
+    with pytest.raises(dw.TaskError, match="did not run all"):
+        dw.require_broker_foreign_evidence(_broker_libtest(2, dw.BROKER_FOREIGN_CASES))
+    with pytest.raises(dw.TaskError, match="three-identity-fs-read"):
+        dw.require_broker_foreign_evidence(
+            _broker_libtest(
+                3, tuple(c for c in dw.BROKER_FOREIGN_CASES if c[1] != "three-identity-fs-read")
+            )
+        )
+    dw.require_broker_foreign_evidence(_broker_libtest(3, dw.BROKER_FOREIGN_CASES))
+    capsys.readouterr()
+
+
+class _BrokerRecorder(_Recorder):
+    def captured(self, *command: str) -> str:
+        self.commands.append(command)
+        if "broker_foreign" in command:
+            return _broker_libtest(3, dw.BROKER_FOREIGN_CASES)
+        return _broker_complete(dw.BROKER_CASES)
+
+
+@pytest.mark.skipif(not LINUX, reason="the task runs only where the channel does")
+def test_the_broker_task_proves_both_identities_first_and_selects_the_ignored_tests(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    recorder = _BrokerRecorder()
+    proven: list[tuple[str, int]] = []
+    uids = {"DW_BROKER_AS": 998, "DW_PEER_AS": 65534}
+
+    def second_identity(variable: str) -> tuple[str, int, int]:
+        proven.append((variable, len(recorder.commands)))
+        return variable.lower(), 1001, uids[variable]
+
+    monkeypatch.setenv("DW_BROKER_AS", "dwbroker")
+    monkeypatch.setenv("DW_PEER_AS", "nobody")
+    monkeypatch.setattr(dw, "run", recorder.run)
+    monkeypatch.setattr(dw, "run_captured", recorder.captured)
+    monkeypatch.setattr(dw, "uvrun", recorder.uvrun)
+    monkeypatch.setattr(dw, "second_identity", second_identity)
+    dw.task_broker_fs_read_evidence()
+    assert proven == [("DW_BROKER_AS", 0), ("DW_PEER_AS", 0)], "proven before anything runs"
+    assert recorder.commands[0][:4] == ("cargo", "build", "--locked", "-p")
+    foreign = [c for c in recorder.commands if "broker_foreign" in c]
+    assert len(foreign) == 1
+    for flag in ("--ignored", "--exact", *dw.BROKER_FOREIGN_TESTS):
+        assert flag in foreign[0], f"the three-identity run lacks {flag}"
+    capsys.readouterr()
+
+
+@pytest.mark.skipif(not LINUX, reason="the task runs only where the channel does")
+def test_the_broker_task_refuses_one_identity_in_two_roles(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recorder = _BrokerRecorder()
+    monkeypatch.setenv("DW_BROKER_AS", "nobody")
+    monkeypatch.setenv("DW_PEER_AS", "nobody")
+    monkeypatch.setattr(dw, "run", recorder.run)
+    monkeypatch.setattr(dw, "run_captured", recorder.captured)
+    monkeypatch.setattr(dw, "uvrun", recorder.uvrun)
+    monkeypatch.setattr(dw, "second_identity", lambda _variable: ("nobody", 1001, 65534))
+    with pytest.raises(dw.TaskError, match="two identities"):
+        dw.task_broker_fs_read_evidence()
+    assert recorder.commands == []
+
+
+@pytest.mark.skipif(not LINUX, reason="the task runs only where the channel does")
+@pytest.mark.parametrize("missing", ["DW_BROKER_AS", "DW_PEER_AS"])
+def test_the_broker_task_without_both_identities_is_not_exercised(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], missing: str
+) -> None:
+    recorder = _BrokerRecorder()
+    monkeypatch.setenv("DW_BROKER_AS", "dwbroker")
+    monkeypatch.setenv("DW_PEER_AS", "nobody")
+    monkeypatch.delenv(missing)
+    monkeypatch.setattr(dw, "run", recorder.run)
+    monkeypatch.setattr(dw, "run_captured", recorder.captured)
+    monkeypatch.setattr(dw, "uvrun", recorder.uvrun)
+    with pytest.raises(dw.TaskError, match="NOT EXERCISED"):
+        dw.task_broker_fs_read_evidence()
+    assert not [c for c in recorder.commands if "broker_foreign" in c]
+    assert [c for c in recorder.commands if "private_protocol" in c], "the same-uid half ran"
+    capsys.readouterr()
+
+
+def test_the_broker_task_off_linux_is_not_exercised_and_runs_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recorder = _BrokerRecorder()
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(dw, "run", recorder.run)
+    monkeypatch.setattr(dw, "run_captured", recorder.captured)
+    monkeypatch.setattr(dw, "uvrun", recorder.uvrun)
+    with pytest.raises(dw.TaskError, match="NOT EXERCISED"):
+        dw.task_broker_fs_read_evidence()
+    assert recorder.commands == []

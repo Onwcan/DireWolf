@@ -51,7 +51,7 @@ use rusqlite::Connection;
 pub(super) const APPLICATION_ID: i64 = 0x4457_4B44;
 
 /// The schema version this build creates and understands.
-pub(super) const CURRENT_VERSION: i64 = 2;
+pub(super) const CURRENT_VERSION: i64 = 3;
 
 /// Schema version 1, the first. Static text: nothing in it is assembled from a
 /// value, and every value the authority stores is bound as a parameter.
@@ -409,6 +409,58 @@ CREATE TRIGGER workspace_root_no_delete BEFORE DELETE ON workspace_root
 BEGIN SELECT RAISE(ABORT, 'a workspace root binding is never deleted'); END;
 ";
 
+/// Schema version 3 (M4b, ADR-0043 §7): one row per tool invocation the
+/// authority authorised.
+///
+/// The row is written in the transaction that records the intent — after the
+/// path resolved and both gates allowed the action, **before the object is
+/// opened for reading** and before the broker is told anything — and ended
+/// exactly once: `FAILED` (`OBJECT_CHANGED`, `OBJECT_UNREADABLE`) when the
+/// object can then not be opened and proved, `COMPLETED` or `FAILED` in the
+/// transaction that records the broker's outcome, or `INTERRUPTED` by the next
+/// incarnation's start when the process died in between. What was authorised
+/// (the run, the canonical path, the byte bound, the object's device and
+/// inode) is fixed at insert; how it ended is written once. So a crash between
+/// intent and outcome is never silent: the next start finds the open row and
+/// records that its result was never delivered.
+pub(super) const SCHEMA_V3: &str = r"
+CREATE TABLE tool_invocation (
+    invocation_id   TEXT    PRIMARY KEY CHECK (length(invocation_id) = 30
+                                               AND substr(invocation_id, 1, 4) = 'inv_'),
+    run_id          TEXT    NOT NULL REFERENCES run(run_id) ON DELETE RESTRICT,
+    tool            TEXT    NOT NULL CHECK (tool = 'fs.read'),
+    canonical_path  TEXT    NOT NULL CHECK (length(CAST(canonical_path AS BLOB)) BETWEEN 10 AND 4096
+                                            AND substr(canonical_path, 1, 10) = '/workspace'),
+    byte_count      INTEGER NOT NULL CHECK (byte_count BETWEEN 1 AND 262144),
+    object_device   TEXT    NOT NULL CHECK (length(object_device) BETWEEN 1 AND 20
+                                            AND object_device NOT GLOB '*[^0-9]*'),
+    object_inode    TEXT    NOT NULL CHECK (length(object_inode) BETWEEN 1 AND 20
+                                            AND object_inode NOT GLOB '*[^0-9]*'),
+    incarnation     INTEGER NOT NULL CHECK (incarnation >= 1),
+    state           TEXT    NOT NULL CHECK (state IN ('INTENT', 'COMPLETED', 'FAILED', 'INTERRUPTED')),
+    failure         TEXT    CHECK (failure IS NULL OR failure IN ('OBJECT_CHANGED',
+                                   'OBJECT_UNREADABLE', 'BROKER_UNAVAILABLE',
+                                   'BROKER_PROTOCOL_ERROR', 'BROKER_EXECUTION_ERROR')),
+    bytes_returned  INTEGER CHECK (bytes_returned IS NULL OR bytes_returned BETWEEN 0 AND byte_count),
+    intent_ms       INTEGER NOT NULL,
+    ended_ms        INTEGER,
+    CHECK ((state = 'INTENT') = (ended_ms IS NULL)),
+    CHECK ((state = 'FAILED') = (failure IS NOT NULL)),
+    CHECK ((state = 'COMPLETED') = (bytes_returned IS NOT NULL))
+) STRICT;
+CREATE INDEX tool_invocation_by_state ON tool_invocation(state);
+CREATE TRIGGER tool_invocation_intent_fixed BEFORE UPDATE OF invocation_id, run_id, tool,
+    canonical_path, byte_count, object_device, object_inode, incarnation, intent_ms
+    ON tool_invocation
+BEGIN SELECT RAISE(ABORT, 'an invocation''s intent is immutable'); END;
+CREATE TRIGGER tool_invocation_ends_once BEFORE UPDATE OF state, failure, bytes_returned,
+    ended_ms ON tool_invocation
+WHEN OLD.state != 'INTENT'
+BEGIN SELECT RAISE(ABORT, 'an invocation ends once'); END;
+CREATE TRIGGER tool_invocation_no_delete BEFORE DELETE ON tool_invocation
+BEGIN SELECT RAISE(ABORT, 'an invocation record is never deleted'); END;
+";
+
 /// One step from a version to the next.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct Migration {
@@ -427,6 +479,10 @@ pub(super) const MIGRATIONS: &[Migration] = &[
     Migration {
         to: 2,
         sql: SCHEMA_V2,
+    },
+    Migration {
+        to: 3,
+        sql: SCHEMA_V3,
     },
 ];
 
@@ -581,8 +637,8 @@ pub(super) fn foreign_key_check(conn: &Connection) -> rusqlite::Result<Result<()
 #[cfg(test)]
 mod tests {
     use super::{
-        APPLICATION_ID, CURRENT_VERSION, MIGRATIONS, Migration, SCHEMA_V1, SCHEMA_V2, Shape,
-        ShapeError, decide, migrate, verify_exact,
+        APPLICATION_ID, CURRENT_VERSION, MIGRATIONS, Migration, SCHEMA_V1, SCHEMA_V2, SCHEMA_V3,
+        Shape, ShapeError, decide, migrate, verify_exact,
     };
     use rusqlite::Connection;
 
@@ -643,6 +699,7 @@ mod tests {
         };
         assert!(conn.execute_batch(SCHEMA_V1).is_ok());
         assert!(conn.execute_batch(SCHEMA_V2).is_ok());
+        assert!(conn.execute_batch(SCHEMA_V3).is_ok());
         assert!(
             conn.execute_batch("DROP TRIGGER run_never_resurrects")
                 .is_ok()
@@ -660,6 +717,7 @@ mod tests {
         };
         assert!(conn.execute_batch(SCHEMA_V1).is_ok());
         assert!(conn.execute_batch(SCHEMA_V2).is_ok());
+        assert!(conn.execute_batch(SCHEMA_V3).is_ok());
         assert!(
             conn.execute_batch("CREATE TABLE backdoor (x INTEGER)")
                 .is_ok()
@@ -738,6 +796,88 @@ mod tests {
             assert!(tx.commit().is_ok());
         }
         assert_eq!(verify_exact(&conn).ok(), Some(Ok(())));
+    }
+
+    #[test]
+    fn an_invocation_intent_is_fixed_and_ends_exactly_once() {
+        let Ok(conn) = Connection::open_in_memory() else {
+            unreachable!("in-memory SQLite")
+        };
+        let Ok(tx) = conn.unchecked_transaction() else {
+            unreachable!("a transaction")
+        };
+        assert!(migrate(&tx, 0, MIGRATIONS).is_ok());
+        assert!(tx.commit().is_ok());
+        // The row below names a run that does not exist. Foreign keys are the
+        // store's configuration (`db::configure` turns them on), not what this
+        // test measures, so they are off here and the column rules are alone.
+        assert!(conn.pragma_update(None, "foreign_keys", false).is_ok());
+        let insert = |id: &str, path: &str, count: i64, state: &str| {
+            conn.execute(
+                "INSERT INTO tool_invocation (invocation_id, run_id, tool, canonical_path, \
+                 byte_count, object_device, object_inode, incarnation, state, failure, \
+                 bytes_returned, intent_ms, ended_ms) \
+                 VALUES (?1, 'run_x', 'fs.read', ?2, ?3, '2049', '12', 1, ?4, NULL, NULL, 0, NULL)",
+                rusqlite::params![id, path, count, state],
+            )
+        };
+        let id = "inv_01M24BB8G3E0A851TRWE3M8FZF";
+        assert!(insert(id, "/workspace/a", 4, "INTENT").is_ok());
+        for (bad_id, path, count, state) in [
+            ("inv_short", "/workspace/a", 4, "INTENT"),
+            (
+                "cap_01M24BB8G3E0A851TRWE3M8FZG",
+                "/workspace/a",
+                4,
+                "INTENT",
+            ),
+            ("inv_01M24BB8G3E0A851TRWE3M8FZG", "/etc/passwd", 4, "INTENT"),
+            (
+                "inv_01M24BB8G3E0A851TRWE3M8FZG",
+                "/workspace/a",
+                0,
+                "INTENT",
+            ),
+            (
+                "inv_01M24BB8G3E0A851TRWE3M8FZG",
+                "/workspace/a",
+                262_145,
+                "INTENT",
+            ),
+            (
+                "inv_01M24BB8G3E0A851TRWE3M8FZG",
+                "/workspace/a",
+                4,
+                "COMPLETED",
+            ),
+        ] {
+            assert!(
+                insert(bad_id, path, count, state).is_err(),
+                "{bad_id} {path} {count} {state}"
+            );
+        }
+        let ended = |sql: &str| conn.execute(sql, []);
+        assert!(ended("UPDATE tool_invocation SET canonical_path = '/workspace/b'").is_err());
+        assert!(ended("UPDATE tool_invocation SET object_inode = '13'").is_err());
+        assert!(
+            ended(
+                "UPDATE tool_invocation SET state = 'COMPLETED', bytes_returned = 5, ended_ms = 1"
+            )
+            .is_err(),
+            "more bytes than the bound"
+        );
+        assert!(
+            ended(
+                "UPDATE tool_invocation SET state = 'COMPLETED', bytes_returned = 4, ended_ms = 1"
+            )
+            .is_ok()
+        );
+        assert!(
+            ended("UPDATE tool_invocation SET state = 'INTERRUPTED', bytes_returned = NULL, ended_ms = 2")
+                .is_err(),
+            "an ended invocation ends once"
+        );
+        assert!(ended("DELETE FROM tool_invocation").is_err());
     }
 
     #[test]

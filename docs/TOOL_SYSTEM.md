@@ -37,7 +37,7 @@ Several fields exist purely so the kernel and the reliability layer do not have 
 - **`side_effect`** drives parallelism (only `PURE`/`READ` batch concurrently) and cancellation semantics.
 - **`retry` + `idempotency`** drive crash recovery. `UNKNOWN` is treated as `NON_RETRYABLE`; the default for a new tool is `UNKNOWN`, so forgetting to think about it fails safe.
 - **`compensation`** lets a tool declare how to undo itself during `DRAINING`.
-- **`capabilities`** may be a function of arguments — `fs.read` needs `fs.read:<the actual path>`, computed by the canonicaliser, not by the tool.
+- **`capabilities`** may be a function of arguments — `fs.read` needs `fs.read:<the actual path>`, computed by the canonicaliser, not by the tool. As implemented for `fs.read` at M4b: `fs.read:<canonical path>?max_bytes=<the requested bound>&no_symlink_targets=true`, derived by the authority; the request states neither ([ADR-0043](adr/0043-m4b-private-broker-channel-and-brokered-fs-read.md)). `fs.read` is the only tool with a wire form; the rest of this inventory is design.
 
 ## 2. Registry
 

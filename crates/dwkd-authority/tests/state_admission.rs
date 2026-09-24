@@ -670,24 +670,48 @@ fn a_filesystem_request_is_withheld_honestly_as_an_unresolved_resource() {
     let mut h = Harness::new("fs");
     let (a, s) = (h.connect(1000), session(1));
     let e = h.lease(&a, &s);
-    let msg = admit_simple(&s, e, "k1", &["fs.read:/workspace", "model.call:*"]);
+    // `fs.write` stays unresolved until M4c, and a concrete `fs.read` path
+    // means only what the M4a resolver finds beneath the session's workspace
+    // root (ADR-0043 §8) -- and this session is bound to none. Both are
+    // withheld as unresolved before any term is consulted, so the profile is
+    // not blamed.
+    let msg = admit_simple(
+        &s,
+        e,
+        "k1",
+        &["fs.write:/workspace", "fs.read:/workspace", "model.call:*"],
+    );
     let admission = admitted(h.authority().admit_run(&a, &msg).unwrap());
     assert_eq!(
         withheld(&admission),
-        [(
-            "fs.read:/workspace".to_owned(),
-            WithheldCause::NeedsCanonicalization(UnresolvedScope::CanonicalPath)
-        )],
-        "not NOT_IN_AGENT_PROFILE: the profile declares exactly this"
+        [
+            (
+                "fs.write:/workspace".to_owned(),
+                WithheldCause::NeedsCanonicalization(UnresolvedScope::CanonicalPath)
+            ),
+            (
+                "fs.read:/workspace".to_owned(),
+                WithheldCause::NeedsCanonicalization(UnresolvedScope::CanonicalPath)
+            )
+        ],
+        "not NOT_IN_AGENT_PROFILE: the request is unresolved before it is compared"
     );
+    assert_eq!(granted_texts(&admission), ["model.call:*"]);
     // On the wire it is UNRESOLVED_RESOURCE (ADR-0040), a reason that claims
     // nothing about any declaration.
     let DwkpBody::RunGrant(grant) = h.authority().dispatch(&a, &msg).unwrap() else {
         panic!("a RunGrant")
     };
     let reasons: Vec<WithheldReason> = grant.withheld.iter().map(|w| w.reason).collect();
-    assert_eq!(reasons, [WithheldReason::UnresolvedResource]);
-    // A universal fs scope needs no canonicalisation and is decided normally.
+    assert_eq!(
+        reasons,
+        [
+            WithheldReason::UnresolvedResource,
+            WithheldReason::UnresolvedResource
+        ]
+    );
+    // A universal fs scope names no object, needs no resolution and is
+    // decided normally.
     let universal = admitted(
         h.authority()
             .admit_run(&a, &admit_simple(&s, e, "k2", &["fs.read:*"]))

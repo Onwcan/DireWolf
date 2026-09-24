@@ -47,10 +47,13 @@ pub(crate) const SKILL: &str = "direwolf.config.skill.v1";
 pub(crate) const CEILING: &str = "direwolf.config.ceiling.v1";
 /// A store's own identity, fixed at creation.
 pub(crate) const STORE_ID: &str = "direwolf.store.id.v1";
+/// The bytes an `fs.read` returned, recorded in its outcome so an auditor can
+/// check what was delivered without the audit log holding the content (M4b).
+pub(crate) const TOOL_CONTENT: &str = "direwolf.tool.fs_read.content.v1";
 
 /// Every domain, for the test that they are pairwise distinct.
 #[cfg(test)]
-const ALL_DOMAINS: [&str; 8] = [
+const ALL_DOMAINS: [&str; 9] = [
     POLICY_REVISION,
     ADMIT_REQUEST,
     AUDIT_RECORD,
@@ -59,6 +62,7 @@ const ALL_DOMAINS: [&str; 8] = [
     SKILL,
     CEILING,
     STORE_ID,
+    TOOL_CONTENT,
 ];
 
 /// A full 256-bit SHA-256 value. Never truncated.

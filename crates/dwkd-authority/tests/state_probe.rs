@@ -46,6 +46,7 @@ fn create_probe_state() {
     let options = dwkd_authority::state::StartOptions {
         clock: Arc::new(SystemClock),
         crash_hook: None,
+        broker: None,
     };
     let (mut authority, _) = dwkd_authority::state::Authority::start(
         std::path::Path::new(&dir),

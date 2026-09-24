@@ -149,11 +149,31 @@ pub enum AuditEvent {
     WorkspaceRootInstalled,
     /// `kernel.db` was migrated to a newer schema version.
     StoreMigrated,
+    /// A tool action both gates refused (M4b). Nothing was resolved or sent.
+    ToolDenied,
+    /// A tool operation refused before any effect was authorised: stale epoch,
+    /// unknown run, or a path that did not resolve (M4b).
+    ToolRefused,
+    /// A `CanonicalPreview` answered: the action and the decision it would
+    /// receive (M4b). Nothing was performed.
+    ToolPreviewed,
+    /// An invocation both gates allowed, its object checked and opened for
+    /// reading, recorded **before** anything is sent to the broker (M4b).
+    ToolIntentRecorded,
+    /// The broker performed an invocation and the authority accepted the
+    /// result (M4b). Recorded before the runtime is answered.
+    ToolCompleted,
+    /// An authorised invocation produced no result (M4b).
+    ToolFailed,
+    /// An invocation whose intent a previous incarnation recorded and whose
+    /// outcome it never did: its result, if the broker produced one, was never
+    /// delivered (M4b).
+    ToolInterrupted,
 }
 
 impl AuditEvent {
     /// Every kind, in declaration order.
-    pub const ALL: [Self; 26] = [
+    pub const ALL: [Self; 33] = [
         Self::StoreCreated,
         Self::StoreOpened,
         Self::PolicyInstalled,
@@ -180,6 +200,13 @@ impl AuditEvent {
         Self::TransportAuditSuppressed,
         Self::WorkspaceRootInstalled,
         Self::StoreMigrated,
+        Self::ToolDenied,
+        Self::ToolRefused,
+        Self::ToolPreviewed,
+        Self::ToolIntentRecorded,
+        Self::ToolCompleted,
+        Self::ToolFailed,
+        Self::ToolInterrupted,
     ];
 
     /// The spelling in a record's `event` field.
@@ -212,6 +239,13 @@ impl AuditEvent {
             Self::TransportAuditSuppressed => "transport.audit_suppressed",
             Self::WorkspaceRootInstalled => "config.workspace_root_installed",
             Self::StoreMigrated => "store.migrated",
+            Self::ToolDenied => "tool.denied",
+            Self::ToolRefused => "tool.refused",
+            Self::ToolPreviewed => "tool.previewed",
+            Self::ToolIntentRecorded => "tool.intent_recorded",
+            Self::ToolCompleted => "tool.completed",
+            Self::ToolFailed => "tool.failed",
+            Self::ToolInterrupted => "tool.interrupted",
         }
     }
 }

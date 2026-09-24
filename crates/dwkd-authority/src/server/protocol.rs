@@ -64,7 +64,7 @@ pub(crate) enum Kind {
         /// The versions it offers.
         offered: VersionRange,
     },
-    /// One of the six authority requests, in envelope version `v`.
+    /// One of the eight authority requests, in envelope version `v`.
     AuthorityRequest {
         /// Its envelope version.
         v: u16,
@@ -91,12 +91,19 @@ pub(crate) fn classify(message: &DwkpMessage) -> Kind {
         | DwkpBody::LeaseRelease(_)
         | DwkpBody::AdmitRun(_)
         | DwkpBody::ReleaseRun(_)
-        | DwkpBody::AuthorityQuery(_) => Kind::AuthorityRequest { v },
+        | DwkpBody::AuthorityQuery(_)
+        | DwkpBody::ToolInvoke(_)
+        | DwkpBody::CanonicalPreview(_) => Kind::AuthorityRequest { v },
         DwkpBody::HandshakeAccepted(_)
         | DwkpBody::LeaseGrant(_)
         | DwkpBody::RunGrant(_)
         | DwkpBody::EffectiveAuthority(_)
         | DwkpBody::AuthorityRefused(_)
+        | DwkpBody::ToolResult(_)
+        | DwkpBody::ToolDenied(_)
+        | DwkpBody::ToolPreviewed(_)
+        | DwkpBody::ToolRefused(_)
+        | DwkpBody::ToolFailed(_)
         | DwkpBody::Ack(_)
         | DwkpBody::ProtocolError(_) => Kind::NotARequest,
     }

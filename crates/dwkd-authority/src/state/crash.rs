@@ -49,6 +49,19 @@ pub enum CrashPoint {
     AfterAuditSyncBeforeMark,
     /// G — `kernel.db` records the flush. The operation is complete.
     AfterAuditMark,
+    /// Tool window B (M4b): the invocation's intent is durable; the checked
+    /// object has not been opened for reading and nothing has been sent to the
+    /// broker.
+    ToolAfterIntent,
+    /// Tool window C (M4b): the checked object is open for reading and proved
+    /// to be the object resolved; nothing has been sent to the broker.
+    ToolAfterOpen,
+    /// Tool window E (M4b): the broker has answered and the outcome is not yet
+    /// recorded.
+    ToolAfterBroker,
+    /// Tool window F (M4b): the outcome is durable and the runtime has not been
+    /// answered.
+    ToolAfterOutcome,
 }
 
 impl CrashPoint {
@@ -74,8 +87,25 @@ impl CrashPoint {
             Self::AfterAuditWriteBeforeSync => 'E',
             Self::AfterAuditSyncBeforeMark => 'F',
             Self::AfterAuditMark => 'G',
+            Self::ToolAfterIntent => 'b',
+            Self::ToolAfterOpen => 'c',
+            Self::ToolAfterBroker => 'e',
+            Self::ToolAfterOutcome => 'f',
         }
     }
+}
+
+impl CrashPoint {
+    /// The points between the phases of one tool invocation (M4b, ADR-0043),
+    /// in the order it crosses them. Distinct from [`CrashPoint::ALL`], which
+    /// every transaction crosses: these are crossed only by `ToolInvoke`, and
+    /// only between its transactions — where no SQLite transaction is open.
+    pub const TOOL: [Self; 4] = [
+        Self::ToolAfterIntent,
+        Self::ToolAfterOpen,
+        Self::ToolAfterBroker,
+        Self::ToolAfterOutcome,
+    ];
 }
 
 impl fmt::Display for CrashPoint {

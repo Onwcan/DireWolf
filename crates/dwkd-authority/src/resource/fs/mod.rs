@@ -66,8 +66,11 @@
 //!
 //! # What this module does not do
 //!
-//! It performs no read, write, listing, execution or other tool effect, and
-//! it never hands out a descriptor. It writes no audit record — resolution is
+//! It performs no read, write, listing, execution or other tool effect. It
+//! hands a descriptor out in exactly one way: [`ResolvedResource::into_read_handoff`]
+//! consumes a checked regular file and opens it read-only relative to its
+//! checked parent, and only the broker link can take the descriptor out of the
+//! resulting [`ReadHandoff`] (M4b, ADR-0043; TX014). It writes no audit record — resolution is
 //! an internal step of a decision, not an effect ([ADR-0027]). It does not
 //! read `kernel.db`: the state layer loads the operator's root binding and
 //! calls in (TX005, TX011). Only Linux is supported; elsewhere every call
@@ -431,6 +434,27 @@ pub(crate) fn workspace_anchor() -> CanonicalPath {
     grammar::LogicalPath::root().canonical()
 }
 
+/// The canonical path a **stored** grant's text spells, by the grammar alone —
+/// without looking at any filesystem (M4b, ADR-0043).
+///
+/// **Only for re-reading what the authority itself already resolved and
+/// wrote to `kernel.db`**: a grant minted from a path [`PinnedRoot::resolve`]
+/// canonicalised, re-read after a restart or for a replay. It is the grammar
+/// the resolver starts with, and the grammar never rewrites, so the stored
+/// text reads back to exactly the path that was resolved.
+///
+/// **Never for a new declaration.** A declared path becomes authority only
+/// through [`PinnedRoot::resolve`], where the filesystem supplies its meaning:
+/// that it exists, crosses no symlink, magic link or mount, and is not
+/// ambiguous under normalisation. One module may name this function (TX017).
+///
+/// # Errors
+///
+/// [`PathError`] for every spelling that is not one canonical workspace path.
+pub(crate) fn stored_canonical_path(declared: &DeclaredPath) -> Result<CanonicalPath, PathError> {
+    grammar::parse(declared).map(|path| path.canonical())
+}
+
 /// The accept/refuse decision that depends on intent, applied after the object
 /// is known.
 fn judge(
@@ -563,6 +587,128 @@ impl ResolvedResource {
             self.parent.as_ref().map(|(handle, name)| (&handle.0, name)),
             self.identity,
         )
+    }
+
+    /// Turn a checked regular file into the one thing an `fs.read` hands the
+    /// broker: the file opened for reading, proved to be this object
+    /// (M4b, ADR-0043).
+    ///
+    /// **Consumes the resource.** The `O_PATH` descriptors on the leaf and its
+    /// parent are closed when this returns; what survives is one readable
+    /// descriptor on one file. The name binding is re-checked, the file is
+    /// opened relative to the retained parent by its verified name, and the
+    /// opened file's own identity must be the checked one — never the
+    /// canonical path, never the host root, never the process working
+    /// directory.
+    ///
+    /// # Errors
+    ///
+    /// [`ResolveError::WrongKind`] for anything but a regular file,
+    /// [`ResolveError::Race`] when the name no longer binds to the checked
+    /// object or the file opened is another, and the open's own refusals.
+    pub fn into_read_handoff(self) -> Result<ReadHandoff, ResolveError> {
+        let Self {
+            canonical,
+            identity,
+            kind,
+            links: _,
+            root,
+            leaf,
+            parent,
+        } = self;
+        if kind != ResourceKind::RegularFile {
+            return Err(ResolveError::WrongKind { found: kind });
+        }
+        let Some((parent, name)) = parent else {
+            return Err(ResolveError::WrongKind { found: kind });
+        };
+        let readable = imp::open_for_read(&leaf.0, &parent.0, &name, identity)?;
+        Ok(ReadHandoff {
+            file: Handle(readable),
+            identity,
+            canonical,
+            root,
+        })
+    }
+}
+
+/// A regular file opened **for reading**, proved to be the object the
+/// authority checked — the only descriptor an `fs.read` gives the broker
+/// (M4b, ADR-0043).
+///
+/// One file, not the directory it is in and not the workspace root: the least
+/// descriptor authority a read needs. Not `Clone`; its `Debug` shows no
+/// descriptor; and the descriptor comes out only through a crate-private
+/// method that one module — the broker channel — may call (TX014). Nothing in
+/// the public API can obtain it.
+///
+/// ```compile_fail
+/// // Not constructible by naming its fields.
+/// use dwkd_authority::resource::fs::ReadHandoff;
+/// fn forge(h: ReadHandoff) -> ReadHandoff { ReadHandoff { ..h } }
+/// ```
+///
+/// ```compile_fail
+/// // Not duplicable.
+/// use dwkd_authority::resource::fs::ReadHandoff;
+/// fn twice(h: &ReadHandoff) -> ReadHandoff { h.clone() }
+/// ```
+///
+/// ```compile_fail
+/// // The descriptor is not reachable from outside the crate.
+/// use dwkd_authority::resource::fs::ReadHandoff;
+/// fn steal(h: ReadHandoff) { let _ = h.into_transfer_descriptor(); }
+/// ```
+pub struct ReadHandoff {
+    #[cfg_attr(
+        not(target_os = "linux"),
+        expect(
+            dead_code,
+            reason = "the descriptor leaves only through the Linux broker link"
+        )
+    )]
+    file: Handle,
+    identity: FileIdentity,
+    canonical: CanonicalPath,
+    root: FileIdentity,
+}
+
+impl fmt::Debug for ReadHandoff {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ReadHandoff")
+            .field("canonical", &self.canonical)
+            .field("identity", &self.identity)
+            .field("root", &self.root)
+            .finish_non_exhaustive()
+    }
+}
+
+impl ReadHandoff {
+    /// The identity of the file, as checked and as re-proved on opening.
+    #[must_use]
+    pub const fn identity(&self) -> FileIdentity {
+        self.identity
+    }
+
+    /// The canonical path it was resolved at.
+    #[must_use]
+    pub const fn canonical_path(&self) -> &CanonicalPath {
+        &self.canonical
+    }
+
+    /// The pinned root it was resolved beneath.
+    #[must_use]
+    pub const fn root_identity(&self) -> FileIdentity {
+        self.root
+    }
+
+    /// Give up the readable descriptor, for sending to the broker. **Only the
+    /// broker channel may call this** (TX014): it is the one place a checked
+    /// descriptor leaves the authority, and it leaves by `SCM_RIGHTS`, never
+    /// as a path or a number.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn into_transfer_descriptor(self) -> (std::os::fd::OwnedFd, FileIdentity) {
+        (self.file.0, self.identity)
     }
 }
 

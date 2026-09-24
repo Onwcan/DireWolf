@@ -16,7 +16,7 @@ DW := $(PY) scripts/dw.py
 .PHONY: help dev check test lint fmt fmt-check typecheck arch schema schema-check \
         eval eval-check eval-one capability-evidence policy-benchmark \
         authority-state-evidence filesystem-canonicalization-evidence \
-        authority-transport-evidence authority-write-probe fuzz-smoke \
+        authority-transport-evidence authority-write-probe broker-fs-read-evidence fuzz-smoke \
         fuzz security docs \
         preflight tools hooks clean
 
@@ -79,6 +79,9 @@ authority-transport-evidence: ## M3e real-process DWKP evidence; cross-uid half 
 
 authority-write-probe: ## Attempt runtime writes to authority state as DW_PROBE_AS (two identities)
 	@$(DW) authority-write-probe
+
+broker-fs-read-evidence: ## M4b real-process brokered fs.read evidence; three identities need DW_BROKER_AS, DW_PEER_AS
+	@$(DW) broker-fs-read-evidence
 
 fuzz-smoke:      ## Stable mutation fuzzing of dwk-proto (not coverage-guided)
 	@$(DW) fuzz-smoke

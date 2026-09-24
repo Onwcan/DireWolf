@@ -44,7 +44,22 @@
 >
 > - **No tokens and no MAC.** A grant is a kernel record named by an id; the
 >   record *is* the authority, which is §4's own primary control. A `cap_id`
->   proves nothing by itself.
+>   proves nothing by itself. M4b keeps it that way: `ToolInvoke` presents no
+>   token and no `cap_id` — the authority derives the capability the call
+>   requires and finds the covering grant itself — and the per-invocation
+>   authorisation to the broker is bound to the kernel's peer identity and a
+>   broker-issued channel, not a MAC ([ADR-0043](adr/0043-m4b-private-broker-channel-and-brokered-fs-read.md)).
+>   §4's token layout below is the Phase 0 design and is not implemented.
+> - **`fs.read` resolves (M4b).** Every concrete `fs.read` path a new
+>   declaration names — the request, the profile, every active skill, the mode
+>   ceiling — is resolved by the M4a resolver beneath the session's pinned
+>   workspace root and means only what it found: a path that does not resolve
+>   covers nothing, and a request for one is withheld `UNRESOLVED_RESOURCE`.
+>   `fs.read:*` needs no resolution. A grant the authority stored is re-read by
+>   its canonical text, never resolved again. The capability an invocation
+>   requires is `fs.read:<canonical path>?max_bytes=<bound>&no_symlink_targets=true`.
+>   Every other `fs` verb and `process` stay `UNRESOLVED_RESOURCE`
+>   ([ADR-0043](adr/0043-m4b-private-broker-channel-and-brokered-fs-read.md) §8).
 > - **No policy preflight** (§4 step 7). `AdmitRun` carries no action for policy
 >   to decide, and inventing one would be deciding something nobody asked to
 >   do. Policy decides a *complete canonical action*, where both gates run

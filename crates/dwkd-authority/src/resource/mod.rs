@@ -72,6 +72,11 @@
 
 pub mod fs;
 
+/// The checked, readable file an `fs.read` hands the broker (M4b). Re-exported
+/// here so the broker channel can hold one without naming the resolver
+/// (TX011): it receives a result, never the means to produce one.
+pub use fs::{FileIdentity, ReadHandoff};
+
 use core::fmt;
 
 /// One component of a canonical path: a single directory or file name.

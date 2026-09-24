@@ -505,11 +505,12 @@ fn the_operator_verifier_reads_both_files_and_fails_loudly() {
     let mut h = busy();
     h.stop();
     let binary = env!("CARGO_BIN_EXE_dwkd-authority");
-    let clean = std::process::Command::new(binary)
-        .arg("verify-audit")
-        .arg(h.state())
-        .output()
-        .unwrap();
+    let clean = state_support::output(
+        std::process::Command::new(binary)
+            .arg("verify-audit")
+            .arg(h.state()),
+    )
+    .unwrap();
     assert!(
         clean.status.success(),
         "{}",
@@ -524,11 +525,12 @@ fn the_operator_verifier_reads_both_files_and_fails_loudly() {
     let mut bytes = before.clone();
     bytes[150] ^= 0x02;
     std::fs::write(&path, &bytes).unwrap();
-    let tampered = std::process::Command::new(binary)
-        .arg("verify-audit")
-        .arg(h.state())
-        .output()
-        .unwrap();
+    let tampered = state_support::output(
+        std::process::Command::new(binary)
+            .arg("verify-audit")
+            .arg(h.state()),
+    )
+    .unwrap();
     assert_eq!(tampered.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&tampered.stderr).contains("FAILED"));
     assert_eq!(

@@ -22,7 +22,7 @@ compromised host.
 
 ---
 
-## Status: M3 complete; M4a — canonical filesystem resolution
+## Status: M3 complete; M4a complete; M4b — one brokered `fs.read`; M4 incomplete
 
 **None of the above is implemented yet.** This repository contains the Phase 0
 architecture package, the M1 foundation (the monorepo layout, the Rust and
@@ -44,8 +44,9 @@ and the M2 wire contract:
 - the M3 authority **wire forms** (M3a): `AdmitRun`, `ReleaseRun` and
   `QueryAuthority`, with capabilities, grants, policy revisions and decisions as
   typed, bounded message fields. `ToolInvoke` — the operation that carries every
-  effect — remains reserved until the milestone that builds the first tool
-  ([ADR-0036](docs/adr/0036-m3-authority-operations-and-the-capability-wire-form.md)).
+  effect — stayed reserved until the milestone that built the first tool
+  ([ADR-0036](docs/adr/0036-m3-authority-operations-and-the-capability-wire-form.md));
+  M4b gives it its first wire form (below).
 - the **capability core** (M3b): the typed verb, scope and constraint
   vocabulary, the `⊑` lattice, set containment with no authority synthesis, and
   attenuation with no widening path — 10⁶ delegation chains, zero escalations.
@@ -140,7 +141,27 @@ and the M2 wire contract:
   campaigns swap names while it resolves and must return zero escaped
   objects ([ADR-0042](docs/adr/0042-m4a-canonical-filesystem-resolution.md),
   `make filesystem-canonicalization-evidence`). **Linux only**, and it
-  performs no tool effect: nothing reads or writes a file yet.
+  performs no tool effect.
+- **one brokered effect: `fs.read`** (M4b, the second part of M4).
+  `ToolInvoke` and `CanonicalPreview` have their first wire forms — one typed
+  call, `fs_read{path, max_bytes}`, and no tool name or argument map a second
+  tool could hide in. The authority fences the request, canonicalises the path,
+  derives the capability the read requires, builds the complete canonical
+  action — where it runs and how many bytes it may move — and applies both
+  gates; only an allowed read is resolved, opened read-only relative to its
+  checked directory and proved to be the checked object, and its intent is
+  recorded durably before anything else happens. Then `dwkd-broker` — its own
+  process, its own user, one private Unix-domain socket that reads only from
+  the authority's kernel-reported uid — receives that one descriptor by
+  `SCM_RIGHTS` with a single-use authorisation bound to a channel it issued for
+  that connection (no MAC, no key, no token), re-proves the descriptor, and
+  reads at most the authorised bound. The authority records the outcome and
+  raises the run's taint before it answers. The runtime cannot reach the
+  broker, and the broker cannot reach the authority's state
+  ([ADR-0043](docs/adr/0043-m4b-private-broker-channel-and-brokered-fs-read.md),
+  `make broker-fs-read-evidence`, which runs with three real users in CI).
+  **Linux only**, and the shipped policy packs deny every read until a home
+  anchor exists; a deployment reads files with an operator policy.
 
 What M2 establishes is that **malformed DWKP is rejected structurally**, and
 what M2.5 adds is the machinery to *measure* claims like that. M3a adds the
@@ -152,25 +173,27 @@ decisions behind them
 the two gates' *logic* — the lattice that answers "is this within the authority
 held?" and the engine that answers "should this be allowed?" — M3d the state
 they decide against, and M3e the process boundary in front of it: a runtime
-can now reach the authority, and cannot choose who it is when it does. What M3
-still does **not** provide is anything that acts: no canonical filesystem
-resource, no `ToolInvoke`, no execution, no broker effect, no sandbox, no
-approvals, no model provider (and so no Ollama). M4a adds the first thing
-that looks at a filesystem — deciding which object a path names — and still
-acts on nothing. `QueryAuthority` reports authority and refuses to decide a
-proposed action until M4 can canonicalise all of one. An authority that can
-only be asked authorises no effect.
+can now reach the authority, and cannot choose who it is when it does. M4a
+adds the first thing that looks at a filesystem — deciding which object a path
+names — and M4b the first effect: reading at most 256 KiB of one checked file,
+through the broker, for a run both gates allow. That is all that acts. There
+is still no `fs.write` or other filesystem tool, no execution, no secret, no
+sandbox (a read runs on the host, and policy is told so), no approvals and no
+model provider (and so no Ollama). `QueryAuthority` still reports authority and
+refuses to decide a proposed action; `CanonicalPreview` is how a runtime asks
+what a read would be decided.
 See [docs/PROTOCOL.md](docs/PROTOCOL.md),
 [ADR-0032](docs/adr/0032-wire-contract-framing-strict-json-and-jcs.md) and
 [evals/README.md](evals/README.md).
 
 `dwkd-authority serve` serves DWKP (Linux); `dwkd-authority verify-audit
-<dir>` checks an audit chain, read-only, everywhere; `dwkd-broker` builds and
-refuses to serve; `direwolf` supports `--version` and `doctor`, and nothing
+<dir>` checks an audit chain, read-only, everywhere; `dwkd-broker serve`
+serves the private channel (Linux) and performs `fs.read` and nothing else;
+`direwolf` supports `--version` and `doctor`, and nothing
 else, because a command that exists but cannot work invites callers, scripts
 and documentation to form around a shape nobody has designed yet.
 
-The filesystem, exec and secret brokers arrive at **M4**, the sandbox at
+The remaining filesystem operations, exec and secrets complete **M4**, the sandbox at
 **M5**, approvals at **M6**, and model providers — Ollama among them — at
 **M7**. See [docs/ROADMAP.md](docs/ROADMAP.md).
 
@@ -242,7 +265,7 @@ toolchain), Python 3.12+, `uv`, and git. Nothing else.
 **Review**
 [PHASE0_REVIEW](docs/PHASE0_REVIEW.md) — 62 findings from three independent adversarial review tracks, with dispositions.
 
-**Decisions**: [docs/adr/](docs/adr/) — 35 architecture decision records, three of them superseded and kept as history. Start with [ADR-0000](docs/adr/0000-authority-plane-separation.md), then [ADR-0018](docs/adr/0018-authority-broker-split.md); everything else is downstream. The [index](docs/adr/README.md) says which are current.
+**Decisions**: [docs/adr/](docs/adr/) — 44 architecture decision records (0000–0043), three of them superseded and kept as history. Start with [ADR-0000](docs/adr/0000-authority-plane-separation.md), then [ADR-0018](docs/adr/0018-authority-broker-split.md); everything else is downstream. The [index](docs/adr/README.md) says which are current.
 
 ---
 

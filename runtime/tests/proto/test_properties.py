@@ -240,7 +240,87 @@ def _refusal(rng: random.Random) -> dwkp.AuthorityRefusal:
     )
 
 
+def _workspace_path(rng: random.Random) -> str:
+    # Any absolute text without NUL, up to the bound: the wire carries the
+    # runtime's spelling and the authority judges it (ADR-0042, ADR-0043).
+    alphabet = "abcdefghijklmnopqrstuvwxyz0123456789._-/ \u00e9\u4e16"
+    length = rng.choice([0, 9, rng.randrange(0, 60), 383])
+    return "/" + "".join(rng.choice(alphabet) for _ in range(length))
+
+
+def _read_call(rng: random.Random) -> dwkp.FsReadCall:
+    return dwkp.FsReadCall(
+        path=_workspace_path(rng), max_bytes=rng.choice([1, rng.randint(1, 262144), 262144])
+    )
+
+
+def _tool_action(rng: random.Random) -> dwkp.ToolAction:
+    return dwkp.ToolAction(
+        tool="fs.read",
+        canonical_path=_workspace_path(rng),
+        byte_count=rng.randint(1, 262144),
+        environment=rng.choice(["HOST", "SANDBOX"]),
+    )
+
+
+def _tool_decision(rng: random.Random) -> dwkp.ToolDecision:
+    return dwkp.ToolDecision(
+        effect=rng.choice(["ALLOW", "DENY"]),
+        reason=rng.choice(
+            [
+                "ALLOWED_BY_RULE",
+                "DENIED_BY_RULE",
+                "DEFAULT_DENY",
+                "NO_CAPABILITY",
+                "UNRESOLVED_POLICY_INPUT",
+            ]
+        ),
+        capability_result=rng.choice(["SATISFIED", "NOT_SATISFIED"]),
+        policy_result=rng.choice(["SATISFIED", "NOT_SATISFIED"]),
+        rule_id=_kebab(rng, 63),
+        rule_source=_rule_source(rng),
+    )
+
+
+def _content(rng: random.Random) -> str:
+    # Lossless bytes, as hex: every byte value is possible, including the ones
+    # that are not UTF-8. The largest result is exercised by the Rust suite.
+    size = rng.choice([0, 1, rng.randrange(0, 64), 4096])
+    return bytes(rng.randrange(256) for _ in range(size)).hex()
+
+
 def _payload(rng: random.Random, schema: str) -> object:
+    if schema == "direwolf.tool.invoke":
+        return dwkp.ToolInvoke(fs_read=_read_call(rng))
+    if schema == "direwolf.tool.preview":
+        return dwkp.CanonicalPreview(fs_read=_read_call(rng))
+    if schema == "direwolf.tool.result":
+        return dwkp.ToolResult(
+            invocation_id=_id(rng, "inv"),
+            action=_tool_action(rng),
+            decision=_tool_decision(rng),
+            fs_read=dwkp.FsReadResult(content=_content(rng), eof_observed=rng.random() < 0.5),
+        )
+    if schema == "direwolf.tool.denied":
+        return dwkp.ToolDenial(action=_tool_action(rng), decision=_tool_decision(rng))
+    if schema == "direwolf.tool.previewed":
+        return dwkp.CanonicalPreviewResult(
+            action=_tool_action(rng),
+            decision=_tool_decision(rng),
+        )
+    if schema == "direwolf.tool.refused":
+        operation = rng.choice(sorted(dwkp._TOOLREFUSAL_PAIRING))
+        return dwkp.ToolRefusal(
+            operation=operation,
+            reason=rng.choice(dwkp._TOOLREFUSAL_PAIRING[operation]),
+        )
+    if schema == "direwolf.tool.failed":
+        return dwkp.ToolFailure(
+            invocation_id=_id(rng, "inv"),
+            reason=rng.choice(
+                ["BROKER_UNAVAILABLE", "BROKER_PROTOCOL_ERROR", "BROKER_EXECUTION_ERROR"]
+            ),
+        )
     if schema == "direwolf.handshake":
         lo, hi = _version_pair(rng)
         return dwkp.Handshake(min_version=lo, max_version=hi)

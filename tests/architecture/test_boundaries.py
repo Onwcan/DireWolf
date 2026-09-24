@@ -307,9 +307,86 @@ def test_the_wire_contract_links_no_unicode_database(violation_rules: list[str])
     assert not any("unicode-normalization" in m for m in rs004), rs004
 
 
+def _paths(rule: str) -> set[str]:
+    return {f.path for f in check_text(load(VIOLATIONS, RULES)) if f.rule == rule}
+
+
 def test_a_second_listener_is_rejected(violation_rules: list[str]) -> None:
-    """TX009: the broker, or anything but the authority's server, listening."""
-    assert "TX009-one-authority-server" in violation_rules
+    """TX009 (refined by ADR-0043): each daemon listens in exactly one place.
+
+    A second authority listener, a second broker listener, a broker TCP
+    listener and a CLI helper daemon are each findings; the broker's reviewed
+    `listener.rs` is not -- the exemption names that one file, so a sibling is
+    not reviewed by sitting beside it."""
+    rule = "TX009-one-listener-per-daemon"
+    assert rule in violation_rules
+    assert _paths(rule) == {
+        "crates/dwkd-authority/src/debug_socket.rs",
+        "crates/dwkd-broker/src/second_listener.rs",
+        "crates/dwkd-broker/src/tcp.rs",
+        "crates/direwolf-cli/src/helper.rs",
+    }, sorted(_paths(rule))
+
+
+def test_the_broker_grows_no_authority_and_no_other_input(violation_rules: list[str]) -> None:
+    """TX013 (M4b): DWKP dispatch, a store, a key library, `kernel.db`, a
+    process and a TCP socket in the broker are each findings -- and the
+    broker's reviewed listener is not."""
+    rule = "TX013-the-broker-decides-nothing-records-nothing-and-reaches-nothing"
+    assert rule in violation_rules
+    findings = [f for f in check_text(load(VIOLATIONS, RULES)) if f.rule == rule]
+    texts = " ".join(f.message for f in findings)
+    for needle in ("dwkp", "rusqlite", "kernel", "Command", "TcpListener"):
+        assert needle in texts, needle
+    assert {f.path for f in findings} == {
+        "crates/dwkd-broker/src/dispatch.rs",
+        "crates/dwkd-broker/src/tcp.rs",
+    }
+
+
+def test_only_the_broker_link_hands_out_a_descriptor(violation_rules: list[str]) -> None:
+    """TX014 (M4b): releasing a checked descriptor, or naming `SCM_RIGHTS`,
+    outside the broker link is a finding; the fixture's `broker/link.rs`,
+    which does both, is not."""
+    rule = "TX014-only-the-broker-link-hands-out-a-descriptor"
+    assert rule in violation_rules
+    findings = [f for f in check_text(load(VIOLATIONS, RULES)) if f.rule == rule]
+    assert sorted((f.path, f.line) for f in findings) == [
+        ("crates/dwkd-authority/src/state/leak.rs", 5),
+        ("crates/dwkd-authority/src/state/leak.rs", 8),
+    ], "the release and the SCM_RIGHTS name; never the doc comment"
+
+
+def test_the_broker_opens_nothing_by_path(violation_rules: list[str]) -> None:
+    """TX015 (M4b): a path-based open in the broker is a second canonicaliser;
+    the listener, which creates its own lock file, is exempt by name."""
+    rule = "TX015-the-broker-reads-only-what-it-is-handed"
+    assert rule in violation_rules
+    assert _paths(rule) == {"crates/dwkd-broker/src/dispatch.rs"}
+
+
+def test_the_cognition_side_cannot_name_the_private_channel(violation_rules: list[str]) -> None:
+    """TX016 (M4b): the runtime or the CLI naming the private protocol's module
+    or its message kinds is a finding."""
+    rule = "TX016-the-cognition-side-cannot-name-the-private-channel"
+    assert rule in violation_rules
+    assert _paths(rule) == {
+        "crates/direwolf-cli/src/helper.rs",
+        "runtime/src/direwolf/broker_reach.py",
+    }
+
+
+def test_a_new_declaration_means_only_what_the_resolver_found(
+    violation_rules: list[str],
+) -> None:
+    """TX017 (M4b): naming the grammar-only reader of stored grants outside the
+    one module that re-reads them is a finding; its doc-comment mention is not."""
+    rule = "TX017-a-new-declaration-means-only-what-the-resolver-found"
+    assert rule in violation_rules
+    findings = [f for f in check_text(load(VIOLATIONS, RULES)) if f.rule == rule]
+    assert sorted((f.path, f.line) for f in findings) == [
+        ("crates/dwkd-authority/src/state/grammar_grant.rs", 5),
+    ]
 
 
 def test_the_authority_starts_no_process(violation_rules: list[str]) -> None:
@@ -405,10 +482,15 @@ def test_the_required_boundary_rules_are_all_declared() -> None:
         "TX006-state-sql-is-static-and-the-state-layer-has-no-ambient-effects",
         "TX007-the-transport-is-an-adapter",
         "TX008-rustix-only-at-reviewed-syscall-boundaries",
-        "TX009-one-authority-server",
+        "TX009-one-listener-per-daemon",
         "TX010-the-authority-executes-nothing",
         "TX011-only-the-state-layer-reaches-the-resolver",
         "TX012-unicode-normalization-is-confined-to-the-name-checker",
+        "TX013-the-broker-decides-nothing-records-nothing-and-reaches-nothing",
+        "TX014-only-the-broker-link-hands-out-a-descriptor",
+        "TX015-the-broker-reads-only-what-it-is-handed",
+        "TX016-the-cognition-side-cannot-name-the-private-channel",
+        "TX017-a-new-declaration-means-only-what-the-resolver-found",
         "DEP001-no-agent-framework-dependency",
         "DEP002-runtime-has-no-transport-dependency",
         "RS001-authority-depends-on-nothing-in-tree",

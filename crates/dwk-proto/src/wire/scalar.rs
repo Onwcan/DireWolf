@@ -337,6 +337,96 @@ wire_text! {
     validate = valid_rule_source
 }
 
+// ---------------------------------------------------------------------------
+// M4b tool vocabulary (ADR-0043).
+// ---------------------------------------------------------------------------
+
+wire_int! {
+    /// How many bytes an `fs.read` may return: at least one, at most
+    /// [`crate::limits::MAX_FS_READ_BYTES`], which is derived from the frame
+    /// so that the largest permitted result always fits one response.
+    ///
+    /// Authority-relevant, not a hint: it is the `max_bytes` of the capability
+    /// the read requires and the `byte_count` policy decides on, before any
+    /// byte is read (ADR-0043).
+    ReadLimit(u32), min = 1, max = 262_144
+}
+
+wire_text! {
+    /// A path in DireWolf's logical filesystem namespace, as a request states
+    /// it or as the authority reports its canonical form: absolute, at most 384
+    /// characters, no NUL.
+    ///
+    /// **Lexical bounds only.** Whether it names a workspace object is the
+    /// authority's canonicaliser's question (ADR-0042): this type admits
+    /// `/etc/hosts` and `/workspace/../x`, and the authority refuses them.
+    WorkspacePath,
+    max_chars = 384,
+    pattern = Some("^/[^\\u0000]{0,383}$"),
+    format = None,
+    validate = |s| s.starts_with('/') && !s.contains('\0')
+}
+
+wire_text! {
+    /// Bytes, as lowercase hexadecimal: two characters a byte, and exactly one
+    /// spelling for every byte string, so the Rust and Python readers cannot
+    /// disagree about what a value means. Bounded at twice
+    /// [`crate::limits::MAX_FS_READ_BYTES`].
+    ///
+    /// Lossless: file content is bytes, and no text decoding is applied to it
+    /// anywhere between the file and the runtime.
+    HexContent,
+    max_chars = 524_288,
+    pattern = Some("^(?:[0-9a-f]{2})*$"),
+    format = None,
+    validate = valid_hex_content
+}
+
+impl HexContent {
+    /// Encode `bytes`, or `None` if they exceed the bound.
+    #[must_use]
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        const DIGITS: &[u8; 16] = b"0123456789abcdef";
+        let mut text = String::with_capacity(bytes.len().checked_mul(2)?);
+        for byte in bytes {
+            for nibble in [byte >> 4, byte & 0x0f] {
+                text.push(char::from(*DIGITS.get(usize::from(nibble))?));
+            }
+        }
+        Self::new(text)
+    }
+
+    /// The bytes this value spells.
+    #[must_use]
+    pub fn to_bytes(&self) -> Vec<u8> {
+        // Every character was validated as a lowercase hex digit, so the
+        // fallback is unreachable; it keeps the conversion total.
+        let digit = |c: u8| {
+            char::from(c)
+                .to_digit(16)
+                .and_then(|d| u8::try_from(d).ok())
+                .unwrap_or(0)
+        };
+        let (pairs, _) = self.as_str().as_bytes().as_chunks::<2>();
+        pairs
+            .iter()
+            .map(|[high, low]| (digit(*high) << 4) | digit(*low))
+            .collect()
+    }
+
+    /// How many bytes this value spells.
+    #[must_use]
+    pub fn byte_len(&self) -> usize {
+        self.as_str().len().checked_div(2).unwrap_or(0)
+    }
+}
+
+fn valid_hex_content(s: &str) -> bool {
+    s.len().is_multiple_of(2)
+        && s.bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
 /// A lowercase letter followed by lowercase letters, digits and hyphens.
 fn valid_lower_kebab(s: &str) -> bool {
     let mut chars = s.chars();
@@ -631,6 +721,154 @@ wire_enum! {
     }
 }
 
+wire_enum! {
+    /// A tool this build can invoke. **One**: M4b implements `fs.read` and
+    /// nothing else (ADR-0043). A name is not a dispatch key: each tool has its
+    /// own typed call, and a tool this build lacks cannot be spelled at all.
+    ToolName {
+        /// Read bytes from one regular file in the run's workspace.
+        FsRead = "fs.read",
+    }
+}
+
+wire_enum! {
+    /// Which tool operation a refusal answers.
+    ToolOperation {
+        /// `direwolf.tool.invoke`.
+        ToolInvoke = "TOOL_INVOKE",
+        /// `direwolf.tool.preview`.
+        CanonicalPreview = "CANONICAL_PREVIEW",
+    }
+}
+
+wire_enum! {
+    /// Where an action runs, as the authority states it — never as a request
+    /// states it: no request field carries an environment.
+    ActionEnvironment {
+        /// On the host, with the broker's own operating-system privileges.
+        /// Every M4b `fs.read`: there is no sandbox before M5, and the effect is
+        /// the broker reading one descriptor it was handed.
+        Host = "HOST",
+        /// Inside an execution environment (M5).
+        Sandbox = "SANDBOX",
+    }
+}
+
+wire_enum! {
+    /// Why the two gates decided a tool action as they did.
+    ///
+    /// Its own enumeration rather than [`DecisionReason`] because a tool action
+    /// is always decided, and one outcome `QueryAuthority` never reports can
+    /// happen here: a policy rule that could not be *evaluated* because a
+    /// canonical input it names is unresolved — `~/.ssh` before the home
+    /// anchor has a kernel-owned value. That refuses, attributed to the rule
+    /// that could not run, rather than reading as "did not match" and letting
+    /// a later ALLOW fire (ADR-0043).
+    ToolDecisionReason {
+        /// Both gates permitted it: a held capability covers it and a rule
+        /// allowed it.
+        AllowedByRule = "ALLOWED_BY_RULE",
+        /// A rule matched and its effect was `DENY` — or `REQUIRE_APPROVAL`,
+        /// which nothing in this build can satisfy (M6).
+        DeniedByRule = "DENIED_BY_RULE",
+        /// No rule matched before the mandatory `default` rule.
+        DefaultDeny = "DEFAULT_DENY",
+        /// Policy permitted it; no held capability covers it.
+        NoCapability = "NO_CAPABILITY",
+        /// The named rule needed a canonical input this authority does not
+        /// hold — an unresolved path anchor — so it denied (fail closed).
+        UnresolvedPolicyInput = "UNRESOLVED_POLICY_INPUT",
+    }
+}
+
+wire_enum! {
+    /// Why a tool operation was refused before any effect was authorised.
+    ///
+    /// **Not a policy denial and not an effect failure.** Nothing was
+    /// executed and no broker was contacted. The path codes come from the
+    /// canonical resolver (ADR-0042) and are reported only for an action both
+    /// gates had already permitted — or, for a spelling that is not a
+    /// workspace path at all, before any lookup — so a refusal is never an
+    /// oracle for whether a file the run may not read exists.
+    ToolRefusalReason {
+        /// The epoch presented is not the session's current epoch.
+        StaleEpoch = "STALE_EPOCH",
+        /// The run named is not a live admission of this caller.
+        UnknownRun = "UNKNOWN_RUN",
+        /// The run's session has no workspace, or its workspace no bound root.
+        WorkspaceUnbound = "WORKSPACE_UNBOUND",
+        /// The workspace root's path now names a different directory.
+        RootReplaced = "ROOT_REPLACED",
+        /// The workspace root could not be opened.
+        RootUnavailable = "ROOT_UNAVAILABLE",
+        /// This platform has no canonical resolver (only Linux does).
+        UnsupportedPlatform = "UNSUPPORTED_PLATFORM",
+        /// The path is not under `/workspace`.
+        PathOutsideWorkspace = "PATH_OUTSIDE_WORKSPACE",
+        /// The path contains `.` or `..`.
+        PathTraversal = "PATH_TRAVERSAL",
+        /// The path is not the one canonical spelling of a workspace path: an
+        /// empty component, a backslash, a control or invisible character, a
+        /// name not already in NFC, or past a bound.
+        PathNotCanonical = "PATH_NOT_CANONICAL",
+        /// No entry by that name.
+        NotFound = "NOT_FOUND",
+        /// An intermediate component is not a directory.
+        NotADirectory = "NOT_A_DIRECTORY",
+        /// A component is a symlink.
+        Symlink = "SYMLINK",
+        /// A component is a procfs magic link.
+        MagicLink = "MAGIC_LINK",
+        /// A component is a mount point.
+        MountCrossing = "MOUNT_CROSSING",
+        /// The directory holds no entry spelled exactly like the name.
+        NameMismatch = "NAME_MISMATCH",
+        /// Another entry is canonically equivalent to the name.
+        NormalizationAmbiguity = "NORMALIZATION_AMBIGUITY",
+        /// The object is a FIFO, socket, device or of unknown type.
+        SpecialFile = "SPECIAL_FILE",
+        /// The object is not the kind the tool reads.
+        WrongKind = "WRONG_KIND",
+        /// A name stopped binding to the object checked for it.
+        Race = "RACE",
+        /// The authority may not traverse or open something on the path.
+        PermissionDenied = "PERMISSION_DENIED",
+        /// A directory on the path is too large to verify a name in.
+        DirectoryTooLarge = "DIRECTORY_TOO_LARGE",
+        /// Another operating-system error while resolving.
+        IoError = "IO_ERROR",
+    }
+}
+
+wire_enum! {
+    /// Why an authorised `fs.read` produced no result.
+    ///
+    /// **After** both gates allowed it and the intent was recorded durably:
+    /// these are failures of the effect path, never decisions. A caller can
+    /// retry `fs.read` — it is retry-safe (ADR-0043) — and must not read any
+    /// of these as a denial it could argue with.
+    ToolFailureReason {
+        /// Opening the checked file for reading, after the intent was
+        /// recorded, found another object — it was replaced or renamed since
+        /// it was resolved. Nothing was sent to the broker.
+        ObjectChanged = "OBJECT_CHANGED",
+        /// The checked file could not be opened for reading after the intent
+        /// was recorded (for example, the authority may not read it). Nothing
+        /// was sent to the broker.
+        ObjectUnreadable = "OBJECT_UNREADABLE",
+        /// No broker answered as the configured broker: none is configured,
+        /// the connection failed or timed out, or the peer the kernel reported
+        /// was not the broker's identity. Nothing was sent to it.
+        BrokerUnavailable = "BROKER_UNAVAILABLE",
+        /// The broker's reply did not decode, or did not answer this
+        /// invocation on this channel.
+        BrokerProtocolError = "BROKER_PROTOCOL_ERROR",
+        /// The broker refused or could not perform the read: the descriptor
+        /// was not the authorised object, or reading it failed.
+        BrokerExecutionError = "BROKER_EXECUTION_ERROR",
+    }
+}
+
 fn valid_schema_name(s: &str) -> bool {
     let Some(rest) = s.strip_prefix("direwolf.") else {
         return false;
@@ -747,7 +985,7 @@ macro_rules! wire_enum {
     };
 }
 
-pub(crate) use wire_enum;
+pub(crate) use {wire_enum, wire_int, wire_text};
 
 #[cfg(test)]
 mod tests {

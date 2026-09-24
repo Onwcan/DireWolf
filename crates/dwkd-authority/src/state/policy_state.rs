@@ -44,7 +44,7 @@
 
 use rusqlite::{Connection, OptionalExtension as _};
 
-use crate::capability::{self, CapabilitySet, CapabilitySpec};
+use crate::capability::{self, CapabilitySpec};
 use crate::policy::{self, CompiledPolicy, ConfigFlags, ProfileName as PolicyProfileName};
 
 use super::Mode;
@@ -391,15 +391,22 @@ pub(super) struct ActiveAuthority {
     pub(super) revision: Sha256Hash,
     pub(super) mode: Mode,
     pub(super) flags: ConfigFlags,
-    pub(super) ceiling: CapabilitySet,
+    /// The mode ceiling as declared. Each admission makes it comparable: a
+    /// concrete `fs.read` entry through the M4a resolver beneath that
+    /// session's root (ADR-0043 §8).
+    pub(super) ceiling: Vec<CapabilitySpec>,
     pub(super) compiled: CompiledPolicy,
 }
 
-/// Parse and canonicalise a ceiling. Every entry must parse; `fs` and `process`
-/// entries are kept as declared text and cover nothing until M4 can resolve
-/// them — which never widens anything, because a request in those families is
-/// withheld before the ceiling is consulted.
-pub(super) fn prepare_ceiling(texts: &[String]) -> Result<(Vec<String>, CapabilitySet), String> {
+/// Parse a ceiling. Every entry must parse. Its entries are kept as declared:
+/// a concrete `fs.read` entry names a path that means something only beneath
+/// a session's root, so each admission resolves it there, like every other
+/// term (M4b); other `fs` and `process` entries cover nothing until M4c and
+/// M4d can resolve them — which never widens anything, because a request in
+/// those families is withheld before the ceiling is consulted.
+pub(super) fn prepare_ceiling(
+    texts: &[String],
+) -> Result<(Vec<String>, Vec<CapabilitySpec>), String> {
     if texts.len() > MAX_CEILING_CAPABILITIES {
         return Err(format!(
             "{} ceiling entries exceed the bound of {MAX_CEILING_CAPABILITIES}",
@@ -414,11 +421,7 @@ pub(super) fn prepare_ceiling(texts: &[String]) -> Result<(Vec<String>, Capabili
         canonical.push(spec.to_canonical_string());
         specs.push(spec);
     }
-    let resolved = specs
-        .iter()
-        .filter_map(|spec| spec.resolve().ok())
-        .collect();
-    Ok((canonical, resolved))
+    Ok((canonical, specs))
 }
 
 fn ceiling_digest(canonical: &[String]) -> Sha256Hash {

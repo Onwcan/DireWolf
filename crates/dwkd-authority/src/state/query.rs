@@ -399,7 +399,7 @@ pub(super) fn query(
 }
 
 /// Both gates. Neither consults the other.
-fn decide(
+pub(super) fn decide(
     action: &CanonicalAction,
     admission: &Admission,
     context: &PolicyContext,

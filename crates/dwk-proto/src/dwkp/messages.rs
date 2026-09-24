@@ -9,13 +9,15 @@ use crate::error::{ErrorCode, ProtocolError, Violation};
 use crate::json::Value;
 use crate::schema::{Defs, obj, string, strings};
 use crate::version::VersionRange;
-use crate::wire::id::{CapId, RunId, SessionId};
+use crate::wire::id::{CapId, InvocationId, RunId, SessionId};
 use crate::wire::list::BoundedList;
 use crate::wire::macros::wire_struct;
 use crate::wire::scalar::{
-    AgentProfileName, CapabilityText, DecisionEffect, DecisionReason, Detail, Epoch, ErrorPath,
-    GateResult, PolicyRevision, ProfileName, RefusalReason, RefusedOperation, RuleId, RuleSource,
-    SkillName, Version, WithheldReason,
+    ActionEnvironment, AgentProfileName, CapabilityText, DecisionEffect, DecisionReason, Detail,
+    Epoch, ErrorPath, GateResult, HexContent, PolicyRevision, ProfileName, ReadLimit,
+    RefusalReason, RefusedOperation, RuleId, RuleSource, SkillName, ToolDecisionReason,
+    ToolFailureReason, ToolName, ToolOperation, ToolRefusalReason, Version, WithheldReason,
+    WorkspacePath,
 };
 use crate::wire::{Cx, WireType, expect_string};
 
@@ -78,10 +80,10 @@ wire_struct! {
 // ---------------------------------------------------------------------------
 // M3 authority primitives.
 //
-// Three operations get their first wire form here: AdmitRun, ReleaseRun and
-// QueryAuthority. ToolInvoke deliberately does not -- see `super::registry` and
-// ADR-0036 for why an operation that must name a tool cannot be designed by the
-// milestone before the one that builds the first tool.
+// Three operations got their first wire form in M3: AdmitRun, ReleaseRun and
+// QueryAuthority. ToolInvoke deliberately did not -- an operation that must
+// name a tool could not be designed by the milestone before the one that
+// builds the first tool (ADR-0036). M4b gives it one, below.
 //
 // The list bounds below are protocol limits, not policy: they cap what one
 // frame can turn into. A run needing more than MAX_CAPABILITIES distinct
@@ -134,9 +136,10 @@ wire_struct! {
 wire_struct! {
     /// One capability the kernel granted, and the id it minted for it.
     CapabilityGrant: reject {
-        /// The kernel's handle for this grant. `ToolInvoke` will name it when
-        /// M4 gives that operation a wire form; the kernel resolves it against
-        /// its own record, so the id proves nothing by itself.
+        /// The kernel's handle for this grant, recorded against every decision
+        /// it covers. A request never presents one: `ToolInvoke` names a call,
+        /// and the authority finds the covering grant itself (ADR-0043), so
+        /// the id proves nothing and selects nothing.
         required cap_id: CapId,
         /// The granted capability, which may be narrower than the one asked
         /// for. Never wider: that is the ⊑ invariant the kernel enforces.
@@ -341,6 +344,224 @@ wire_struct! {
         required reason: RefusalReason,
     }
     paired(operation -> reason, REFUSALS)
+}
+
+// ---------------------------------------------------------------------------
+// M4b: the first tool (ADR-0043).
+//
+// `ToolInvoke` and `CanonicalPreview` get their first wire forms here, with the
+// first tool the authority can canonicalise and the broker can perform:
+// `fs.read`. There is no tool-name-plus-argument-map shape anywhere: each tool
+// is a member naming its own typed call, so a tool this build lacks is an
+// undeclared member -- a protocol error -- and never a string something
+// dispatches on (ADR-0036's second-path rule).
+//
+// The request carries **what the runtime proposes** -- a path and a byte
+// bound -- and nothing the authority decides: no capability, no cap_id, no
+// environment, no taint. The authority derives the required capability and
+// builds the canonical action itself.
+// ---------------------------------------------------------------------------
+
+wire_struct! {
+    /// An `fs.read`: read at most `max_bytes` from the start of one regular
+    /// file in the run's workspace.
+    FsReadCall: reject {
+        /// The file, in the logical namespace: `/workspace/...`. The authority
+        /// canonicalises it (ADR-0042); nothing here is trusted.
+        required path: WorkspacePath,
+        /// The most bytes to read. The authority decides on this bound before
+        /// anything is read: it is the `max_bytes` of the capability the read
+        /// requires and the `byte_count` policy evaluates.
+        required max_bytes: ReadLimit,
+    }
+}
+
+wire_struct! {
+    /// Asks the authority to perform one tool call for a run. The run, the
+    /// session and the epoch are the envelope's.
+    ///
+    /// **One member per tool, and this build has one tool.** A request naming
+    /// another tool is an undeclared member and fails to decode.
+    ///
+    /// No `idempotency_key`: `fs.read` is retry-safe, so a repeated invocation
+    /// is a second read of the same object, not a second effect (ADR-0043). A
+    /// tool that is not retry-safe needs a key, and a new version of this
+    /// message, before it can be added.
+    ToolInvoke: reject {
+        /// The `fs.read` call.
+        required fs_read: FsReadCall,
+    }
+}
+
+wire_struct! {
+    /// Asks what an invocation would mean, without performing it: the same
+    /// canonical action and the same two gates `ToolInvoke` uses, and never an
+    /// effect, a broker contact or an authorisation. **Information, not
+    /// authority**: nothing in the answer is presented later, and an
+    /// invocation decides again from scratch.
+    CanonicalPreview: reject {
+        /// The `fs.read` call, exactly as `ToolInvoke` would carry it.
+        required fs_read: FsReadCall,
+    }
+}
+
+wire_struct! {
+    /// The canonical action the authority built from a tool call: every fact
+    /// policy decided on, stated by the authority, never echoed from the
+    /// request.
+    ///
+    /// The capability the action required is exactly
+    /// `<tool>:<canonical_path>?max_bytes=<byte_count>`. It is not repeated as
+    /// capability text, because a canonical path may hold characters the
+    /// capability grammar's ASCII form cannot, and a truncated or re-spelled
+    /// copy would be a second spelling of one fact.
+    ToolAction: reject {
+        /// The tool.
+        required tool: ToolName,
+        /// The object's canonical path: the one spelling the grammar accepts,
+        /// verified name by name where the object was resolved.
+        required canonical_path: WorkspacePath,
+        /// The byte bound the action was decided with.
+        required byte_count: ReadLimit,
+        /// Where it runs.
+        required environment: ActionEnvironment,
+    }
+}
+
+wire_struct! {
+    /// How the two gates of ADR-0006 decided a tool action. Both always run.
+    ToolDecision: reject {
+        /// What was decided.
+        required effect: DecisionEffect,
+        /// Why.
+        required reason: ToolDecisionReason,
+        /// Whether a held capability covers the action.
+        required capability_result: GateResult,
+        /// Whether policy permits it. `REQUIRE_APPROVAL` does not: nothing
+        /// in this build can obtain an approval (M6).
+        required policy_result: GateResult,
+        /// The rule that produced the effect, or could not be evaluated.
+        required rule_id: RuleId,
+        /// Where that rule is written.
+        required rule_source: RuleSource,
+    }
+}
+
+wire_struct! {
+    /// What an `fs.read` returned.
+    FsReadResult: reject {
+        /// The bytes read from the start of the file, exactly, as hexadecimal.
+        /// At most the call's `max_bytes`; their count is the content's
+        /// length, and is not repeated.
+        required content: HexContent,
+        /// Whether the end of the file was **observed** during this read: a
+        /// read returned no bytes before `max_bytes` were read. `false` when
+        /// exactly `max_bytes` were read — the end was then not proven, because
+        /// finding it would have meant reading past the authorised bound, and
+        /// the broker never does (ADR-0043).
+        required eof_observed: bool,
+    }
+}
+
+wire_struct! {
+    /// An invocation the authority allowed, the broker performed on the object
+    /// that was checked, and the authority recorded -- in that order.
+    ToolResult: reject {
+        /// The authority's id for this invocation.
+        required invocation_id: InvocationId,
+        /// The canonical action that was decided and performed.
+        required action: ToolAction,
+        /// Both gates' decision.
+        required decision: ToolDecision,
+        /// The `fs.read` result.
+        required fs_read: FsReadResult,
+    }
+}
+
+wire_struct! {
+    /// The path resolved and the two gates refused the action it names.
+    /// Nothing was opened for reading, no broker was contacted and no
+    /// invocation id was minted.
+    ToolDenial: reject {
+        /// The canonical action that was decided.
+        required action: ToolAction,
+        /// The refusal, with the rule that made it.
+        required decision: ToolDecision,
+    }
+}
+
+wire_struct! {
+    /// What an invocation would mean. The path was resolved beneath the run's
+    /// pinned root (never opened for reading) and both gates ran on the
+    /// canonical action it names. Nothing was performed. A path that does not
+    /// resolve is a `ToolRefusal` instead.
+    CanonicalPreviewResult: reject {
+        /// The canonical action `ToolInvoke` would decide on.
+        required action: ToolAction,
+        /// How the gates decided it now.
+        required decision: ToolDecision,
+    }
+}
+
+/// Which refusal reasons each tool operation can produce. Both operations
+/// fence, look up the run and canonicalise the same way, so the rows are the
+/// same; the table exists so that adding an operation-specific reason is a
+/// visible edit and a version bump, as it is for [`REFUSALS`].
+pub const TOOL_REFUSALS: &[(&str, &[&str])] = &[
+    ("TOOL_INVOKE", TOOL_REFUSAL_REASONS),
+    ("CANONICAL_PREVIEW", TOOL_REFUSAL_REASONS),
+];
+
+const TOOL_REFUSAL_REASONS: &[&str] = &[
+    "STALE_EPOCH",
+    "UNKNOWN_RUN",
+    "WORKSPACE_UNBOUND",
+    "ROOT_REPLACED",
+    "ROOT_UNAVAILABLE",
+    "UNSUPPORTED_PLATFORM",
+    "PATH_OUTSIDE_WORKSPACE",
+    "PATH_TRAVERSAL",
+    "PATH_NOT_CANONICAL",
+    "NOT_FOUND",
+    "NOT_A_DIRECTORY",
+    "SYMLINK",
+    "MAGIC_LINK",
+    "MOUNT_CROSSING",
+    "NAME_MISMATCH",
+    "NORMALIZATION_AMBIGUITY",
+    "SPECIAL_FILE",
+    "WRONG_KIND",
+    "RACE",
+    "PERMISSION_DENIED",
+    "DIRECTORY_TOO_LARGE",
+    "IO_ERROR",
+];
+
+wire_struct! {
+    /// A tool operation the authority would not attempt: its own state
+    /// refused it, or the path did not resolve. Nothing was performed and no
+    /// broker was contacted. Distinct from [`ToolDenial`], where the two gates
+    /// ran and refused, and from [`ToolFailure`], where an authorised effect
+    /// did not complete.
+    ToolRefusal: reject {
+        /// Which operation.
+        required operation: ToolOperation,
+        /// Why.
+        required reason: ToolRefusalReason,
+    }
+    paired(operation -> reason, TOOL_REFUSALS)
+}
+
+wire_struct! {
+    /// An `fs.read` both gates allowed, whose intent was recorded, and which
+    /// did not produce a result. The audit record holds the detail; the
+    /// caller learns the class, which says whether retrying can help.
+    ToolFailure: reject {
+        /// The authority's id for the invocation that failed.
+        required invocation_id: InvocationId,
+        /// Why.
+        required reason: ToolFailureReason,
+    }
 }
 
 wire_struct! {

@@ -415,7 +415,10 @@ mod linux {
         let mut h = Harness::new("ws-wire");
         let b = bound_run(&mut h, "proj", 1);
 
-        // Admission still does not mint filesystem authority in M4a.
+        // M4b (ADR-0043) mints `fs.read` in its canonical form, whether or
+        // not a root is bound: a scope is canonicalised by the grammar alone.
+        // Every other filesystem verb is still withheld until M4c defines
+        // what its target means.
         let admission = admitted(
             h.authority()
                 .admit_run(
@@ -424,17 +427,23 @@ mod linux {
                         &b.session,
                         b.epoch,
                         "k2",
-                        &["fs.read:/workspace", "model.call:*"],
+                        &["fs.read:/workspace", "fs.write:/workspace", "model.call:*"],
                     ),
                 )
                 .unwrap(),
         );
+        assert!(
+            admission
+                .granted()
+                .iter()
+                .any(|g| g.capability().to_canonical_string() == "fs.read:/workspace")
+        );
         assert!(admission.withheld().iter().any(|w| w.requested().as_str()
-            == "fs.read:/workspace"
+            == "fs.write:/workspace"
             && w.cause() == WithheldCause::NeedsCanonicalization(UnresolvedScope::CanonicalPath)));
         evidence(
-            "admission-still-withholds-fs",
-            "withheld:UNRESOLVED_RESOURCE",
+            "admission-mints-fs-read-withholds-fs-write",
+            "granted:fs.read withheld:UNRESOLVED_RESOURCE",
         );
 
         // A proposal naming a resolvable path is still not a canonical action.
@@ -459,14 +468,22 @@ mod linux {
             "refused:NO_CANONICAL_ACTION",
         );
 
-        // The reserved operations are still unknown to the decoder.
-        for schema in ["direwolf.tool.invoke", "direwolf.canonical.preview"] {
+        // The operations that remain reserved are still unknown to the
+        // decoder. `direwolf.tool.invoke` is defined from M4b and refuses an
+        // empty payload as a schema violation, not as an unknown operation.
+        for (schema, code) in [
+            ("direwolf.tool.cancel", "PROTOCOL_UNKNOWN_OPERATION"),
+            ("direwolf.canonical.preview", "PROTOCOL_UNKNOWN_OPERATION"),
+            ("direwolf.tool.invoke", "PROTOCOL_SCHEMA_VIOLATION"),
+        ] {
             let message = format!(
                 r#"{{"v":1,"id":"{}","type":"request","schema":"{schema}","schema_version":1,"ts":"2026-09-21T10:00:00.000Z","payload":{{}}}}"#,
                 id("msg", 77)
             );
-            assert!(
-                dwk_proto::dwkp::decode_body(message.as_bytes()).is_err(),
+            let refused = dwk_proto::dwkp::decode_body(message.as_bytes());
+            assert_eq!(
+                refused.err().map(|e| e.code.as_str()),
+                Some(code),
                 "{schema}"
             );
         }
@@ -486,11 +503,14 @@ mod linux {
             .unwrap();
         h.stop();
         // Make it exactly an M3 (schema 1) store: schema 2 is schema 1 plus
-        // the workspace-root table and its two triggers.
+        // the workspace-root table and its two triggers, and schema 3 (M4b)
+        // adds the tool-invocation table, its index and its three triggers.
         {
             let conn = raw(&h.state());
-            conn.execute_batch("DROP TABLE workspace_root; PRAGMA user_version = 1;")
-                .unwrap();
+            conn.execute_batch(
+                "DROP TABLE tool_invocation; DROP TABLE workspace_root; PRAGMA user_version = 1;",
+            )
+            .unwrap();
         }
         h.try_restart().expect("an M3 store migrates");
         assert_eq!(h.report.schema_version, KERNEL_SCHEMA_VERSION);
@@ -512,7 +532,41 @@ mod linux {
             .operator()
             .install_workspace_root(&id, host(&root))
             .unwrap();
-        evidence("m3-store-migrates", "migrated:1-to-2");
+        evidence("m3-store-migrates", "migrated:1-to-3");
+    }
+
+    #[test]
+    fn an_m4a_store_migrates_to_m4b_and_keeps_its_root_binding() {
+        let mut h = Harness::new("ws-migrate-m4a");
+        let b = bound_run(&mut h, "proj", 1);
+        h.stop();
+        // Exactly an M4a (schema 2) store.
+        {
+            let conn = raw(&h.state());
+            conn.execute_batch("DROP TABLE tool_invocation; PRAGMA user_version = 2;")
+                .unwrap();
+        }
+        h.try_restart().expect("an M4a store migrates");
+        assert_eq!(h.report.schema_version, KERNEL_SCHEMA_VERSION);
+        let migrated = audit_records(&h.state(), "store.migrated");
+        assert_eq!(
+            super::state_support::int(&migrated[0], "from_schema_version"),
+            Some(2)
+        );
+        verify_audit_log(&h.state().join("audit.log")).expect("the chain verifies");
+        // The binding survived: a new run in the workspace resolves beneath
+        // the same root.
+        let conn = raw(&h.state());
+        let rows: i64 = conn
+            .query_row("SELECT count(*) FROM workspace_root", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(rows, 1);
+        let invocations: i64 = conn
+            .query_row("SELECT count(*) FROM tool_invocation", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(invocations, 0);
+        drop(b);
+        evidence("m4a-store-migrates", "migrated:2-to-3");
     }
 }
 

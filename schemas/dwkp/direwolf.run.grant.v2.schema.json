@@ -112,7 +112,7 @@
           "x-direwolf-type": "CapId",
           "x-direwolf-format": "uuid7-id",
           "x-direwolf-id-prefix": "cap",
-          "description": "The kernel's handle for this grant. `ToolInvoke` will name it when\nM4 gives that operation a wire form; the kernel resolves it against\nits own record, so the id proves nothing by itself."
+          "description": "The kernel's handle for this grant, recorded against every decision\nit covers. A request never presents one: `ToolInvoke` names a call,\nand the authority finds the covering grant itself (ADR-0043), so\nthe id proves nothing and selects nothing."
         },
         "capability": {
           "type": "string",

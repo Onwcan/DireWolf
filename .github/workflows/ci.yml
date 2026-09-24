@@ -216,6 +216,30 @@ jobs:
       - uses: ./.github/actions/setup
       - run: make filesystem-canonicalization-evidence
 
+  # M4b's brokered fs.read evidence (ADR-0043): the released authority and
+  # broker binaries end to end over the private channel, the crash-point sweep,
+  # a hostile broker and a hostile authority-side peer on the real channel, the
+  # cross-process TOCTOU campaign -- and then THREE genuine identities: the
+  # runner as the authority, a broker user created here, and `nobody` as the
+  # hostile runtime. Each is proven by its numeric uid before anything runs
+  # (distinct from the runner, from root and from each other); the three
+  # `#[ignore]`d three-identity tests are selected by name and must all run and
+  # report every case. The harness starts the broker as its user through
+  # `sudo -n -u`; the authority switches no users. Nothing here is conditional,
+  # and the `ci` job below requires this one.
+  broker-fs-read:
+    name: brokered fs.read (make broker-fs-read-evidence)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v5.0.1
+      - uses: ./.github/actions/setup
+      - name: Create the broker's own identity
+        run: sudo useradd --system --no-create-home --shell /usr/sbin/nologin dwbroker
+      - run: make broker-fs-read-evidence
+        env:
+          DW_BROKER_AS: dwbroker
+          DW_PEER_AS: nobody
+
   supply-chain:
     name: dependencies (make security)
     runs-on: ubuntu-latest
@@ -257,7 +281,7 @@ jobs:
   ci:
     name: CI
     runs-on: ubuntu-latest
-    needs: [format, lint, typecheck, architecture, schema, evals, test, authority-transport, filesystem-canonicalization, supply-chain, build]
+    needs: [format, lint, typecheck, architecture, schema, evals, test, authority-transport, filesystem-canonicalization, broker-fs-read, supply-chain, build]
     if: always()
     steps:
       - name: Fail unless every required job succeeded

@@ -20,6 +20,7 @@ use super::constraint::ConstraintSet;
 use super::error::{CapabilityError, UnresolvedScope};
 use super::scope::{Scope, ScopeSpec};
 use super::verb::Verb;
+use crate::resource::CanonicalPath;
 
 /// A capability as declared: verb, declared scope, constraints.
 ///
@@ -133,6 +134,31 @@ impl CapabilitySpec {
         // this cannot fail; mapping it keeps the function total rather than
         // asserting that.
         Capability::new(self.verb, scope, self.constraints.clone())
+            .map_err(|_: CapabilityError| UnresolvedScope::CanonicalPath)
+    }
+
+    /// Promote a path declaration, given the [`CanonicalPath`] the resource
+    /// layer's grammar derived **for this declaration's path** (M4b,
+    /// ADR-0043).
+    ///
+    /// This does not canonicalise and cannot: a [`CanonicalPath`] exists only
+    /// because `crate::resource` made one, so all this does is assemble the
+    /// capability from a value it could not have forged. Crate-internal — the
+    /// state layer is the one caller, and it passes the path it just derived
+    /// from [`Self::scope`].
+    ///
+    /// # Errors
+    ///
+    /// [`UnresolvedScope::CanonicalPath`] when the scope is not a declared
+    /// path.
+    pub(crate) fn resolve_path(
+        &self,
+        canonical: CanonicalPath,
+    ) -> Result<Capability, UnresolvedScope> {
+        if !matches!(self.scope, ScopeSpec::DeclaredPath(_)) {
+            return Err(UnresolvedScope::CanonicalPath);
+        }
+        Capability::new(self.verb, Scope::Path(canonical), self.constraints.clone())
             .map_err(|_: CapabilityError| UnresolvedScope::CanonicalPath)
     }
 

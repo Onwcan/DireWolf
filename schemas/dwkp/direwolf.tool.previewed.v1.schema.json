@@ -1,0 +1,203 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:direwolf:schema:dwkp:direwolf.tool.previewed:1",
+  "title": "direwolf.tool.previewed v1",
+  "description": "The canonical action and decision a tool call would receive.",
+  "type": "object",
+  "properties": {
+    "v": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1,
+      "x-direwolf-type": "Version"
+    },
+    "id": {
+      "type": "string",
+      "minLength": 30,
+      "maxLength": 30,
+      "pattern": "^msg_[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+      "x-direwolf-type": "MessageId",
+      "x-direwolf-format": "uuid7-id",
+      "x-direwolf-id-prefix": "msg"
+    },
+    "type": {
+      "const": "response",
+      "x-direwolf-type": "MessageType"
+    },
+    "schema": {
+      "const": "direwolf.tool.previewed",
+      "x-direwolf-type": "SchemaName"
+    },
+    "schema_version": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1,
+      "x-direwolf-type": "Version"
+    },
+    "ts": {
+      "type": "string",
+      "maxLength": 24,
+      "x-direwolf-type": "Timestamp",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$",
+      "x-direwolf-format": "rfc3339-utc-millis"
+    },
+    "correlation_id": {
+      "type": "string",
+      "maxLength": 35,
+      "pattern": "^[a-z]{2,8}_[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+      "x-direwolf-type": "AnyId",
+      "x-direwolf-format": "uuid7-id"
+    },
+    "causation_id": {
+      "type": "string",
+      "maxLength": 35,
+      "pattern": "^[a-z]{2,8}_[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+      "x-direwolf-type": "AnyId",
+      "x-direwolf-format": "uuid7-id"
+    },
+    "payload": {
+      "$ref": "#/$defs/CanonicalPreviewResult"
+    }
+  },
+  "required": ["v", "id", "type", "schema", "schema_version", "ts", "causation_id", "payload"],
+  "additionalProperties": false,
+  "not": {
+    "anyOf": [
+      {
+        "required": ["session_id"]
+      },
+      {
+        "required": ["run_id"]
+      },
+      {
+        "required": ["epoch"]
+      },
+      {
+        "required": ["idempotency_key"]
+      }
+    ]
+  },
+  "x-direwolf-family": "dwkp",
+  "x-direwolf-message-type": "response",
+  "x-direwolf-schema": "direwolf.tool.previewed",
+  "x-direwolf-schema-versions": {
+    "min": 1,
+    "max": 1
+  },
+  "x-direwolf-envelope-versions": {
+    "min": 1,
+    "max": 1
+  },
+  "x-direwolf-envelope": {
+    "correlation_id": "optional",
+    "causation_id": "required",
+    "session_id": "forbidden",
+    "run_id": "forbidden",
+    "epoch": "forbidden",
+    "idempotency_key": "forbidden"
+  },
+  "x-direwolf-id-prefix": "msg",
+  "x-direwolf-unknown-fields": "reject",
+  "x-direwolf-payload": "CanonicalPreviewResult",
+  "$defs": {
+    "CanonicalPreviewResult": {
+      "type": "object",
+      "description": "What an invocation would mean. The path was resolved beneath the run's\npinned root (never opened for reading) and both gates ran on the\ncanonical action it names. Nothing was performed. A path that does not\nresolve is a `ToolRefusal` instead.",
+      "properties": {
+        "action": {
+          "$ref": "#/$defs/ToolAction",
+          "description": "The canonical action `ToolInvoke` would decide on."
+        },
+        "decision": {
+          "$ref": "#/$defs/ToolDecision",
+          "description": "How the gates decided it now."
+        }
+      },
+      "required": ["action", "decision"],
+      "additionalProperties": false,
+      "x-direwolf-unknown-fields": "reject"
+    },
+    "ToolAction": {
+      "type": "object",
+      "description": "The canonical action the authority built from a tool call: every fact\npolicy decided on, stated by the authority, never echoed from the\nrequest.\n\nThe capability the action required is exactly\n`<tool>:<canonical_path>?max_bytes=<byte_count>`. It is not repeated as\ncapability text, because a canonical path may hold characters the\ncapability grammar's ASCII form cannot, and a truncated or re-spelled\ncopy would be a second spelling of one fact.",
+      "properties": {
+        "tool": {
+          "type": "string",
+          "enum": ["fs.read"],
+          "x-direwolf-type": "ToolName",
+          "description": "The tool."
+        },
+        "canonical_path": {
+          "type": "string",
+          "maxLength": 384,
+          "x-direwolf-type": "WorkspacePath",
+          "pattern": "^/[^\\u0000]{0,383}$",
+          "description": "The object's canonical path: the one spelling the grammar accepts,\nverified name by name where the object was resolved."
+        },
+        "byte_count": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 262144,
+          "x-direwolf-type": "ReadLimit",
+          "description": "The byte bound the action was decided with."
+        },
+        "environment": {
+          "type": "string",
+          "enum": ["HOST", "SANDBOX"],
+          "x-direwolf-type": "ActionEnvironment",
+          "description": "Where it runs."
+        }
+      },
+      "required": ["tool", "canonical_path", "byte_count", "environment"],
+      "additionalProperties": false,
+      "x-direwolf-unknown-fields": "reject"
+    },
+    "ToolDecision": {
+      "type": "object",
+      "description": "How the two gates of ADR-0006 decided a tool action. Both always run.",
+      "properties": {
+        "effect": {
+          "type": "string",
+          "enum": ["ALLOW", "DENY"],
+          "x-direwolf-type": "DecisionEffect",
+          "description": "What was decided."
+        },
+        "reason": {
+          "type": "string",
+          "enum": ["ALLOWED_BY_RULE", "DENIED_BY_RULE", "DEFAULT_DENY", "NO_CAPABILITY", "UNRESOLVED_POLICY_INPUT"],
+          "x-direwolf-type": "ToolDecisionReason",
+          "description": "Why."
+        },
+        "capability_result": {
+          "type": "string",
+          "enum": ["SATISFIED", "NOT_SATISFIED"],
+          "x-direwolf-type": "GateResult",
+          "description": "Whether a held capability covers the action."
+        },
+        "policy_result": {
+          "type": "string",
+          "enum": ["SATISFIED", "NOT_SATISFIED"],
+          "x-direwolf-type": "GateResult",
+          "description": "Whether policy permits it. `REQUIRE_APPROVAL` does not: nothing\nin this build can obtain an approval (M6)."
+        },
+        "rule_id": {
+          "type": "string",
+          "maxLength": 64,
+          "x-direwolf-type": "RuleId",
+          "pattern": "^[a-z][a-z0-9-]{0,63}$",
+          "description": "The rule that produced the effect, or could not be evaluated."
+        },
+        "rule_source": {
+          "type": "string",
+          "maxLength": 256,
+          "x-direwolf-type": "RuleSource",
+          "pattern": "^[A-Za-z0-9._/-]{1,240}:[0-9]{1,8}$",
+          "description": "Where that rule is written."
+        }
+      },
+      "required": ["effect", "reason", "capability_result", "policy_result", "rule_id", "rule_source"],
+      "additionalProperties": false,
+      "x-direwolf-unknown-fields": "reject"
+    }
+  }
+}

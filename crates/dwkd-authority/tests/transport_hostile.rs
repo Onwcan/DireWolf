@@ -316,9 +316,11 @@ mod linux {
                 None,
             ),
             (
-                "reserved-tool-invoke",
+                // Defined from M4b (ADR-0043), with exactly one tool: a call
+                // naming another is a schema violation, not an operation.
+                "tool-invoke-names-no-other-tool",
                 envelope("direwolf.tool.invoke", &format!(r#","session_id":"{sid}","epoch":1"#), r#""tool":"fs.write""#).into_bytes(),
-                ErrorCode::UnknownOperation,
+                ErrorCode::SchemaViolation,
                 None,
             ),
             (

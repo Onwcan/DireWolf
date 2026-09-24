@@ -75,6 +75,27 @@ prints one `DWKP-EVIDENCE` line, which the M3 evaluations read.
 `make authority-transport-evidence` runs them all and needs `DW_PEER_AS` for the
 cross-uid half ([ADR-0041](../docs/adr/0041-m3e-authenticated-dwkp-transport.md)).
 
+**Brokered `fs.read` tests (M4b)** are real-process evidence for the private
+channel ([ADR-0043](../docs/adr/0043-m4b-private-broker-channel-and-brokered-fs-read.md)):
+`crates/dwkd-authority/tests/broker_fs_read.rs` drives the released authority and
+broker end to end over DWKP; `broker_state.rs` sweeps every crash point of one
+invocation, proves from `/proc/self/fd` that no readable descriptor exists
+before the intent is durable, fails an invocation whose file changes between
+the intent and the open, scripts a hostile broker on the real channel and
+changes the tree between the check and the read;
+`crates/dwkd-broker/tests/private_protocol.rs` plays a hostile authority-side
+peer against the released broker, measuring with the kernel's `rchar` count
+that a read bounded at N reads N bytes and that a wrong descriptor count reads
+none; `admission_fs.rs` proves admission resolves every new concrete `fs.read`
+declaration through the M4a resolver;
+`broker_foreign.rs` needs three identities (`DW_BROKER_AS`, `DW_PEER_AS`) and is
+`#[ignore]`d unless `make broker-fs-read-evidence` selects it by name, with
+`tests/authority/broker_foreign_client.py` as the process that runs as the other
+users. Locally the three-identity half is NOT EXERCISED; CI's Linux job creates a
+broker user and runs it. The authority's suites spawn the broker binary Cargo
+builds beside the authority's, so run them through `cargo test --workspace` or
+the evidence command.
+
 **Canonical filesystem tests (M4a)** are real-filesystem evidence for the
 one resolver ([ADR-0042](../docs/adr/0042-m4a-canonical-filesystem-resolution.md)).
 `crates/dwkd-authority/src/resource/fs/linux/tests.rs` runs the production

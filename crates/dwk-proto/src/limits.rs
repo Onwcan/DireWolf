@@ -40,3 +40,22 @@ pub const MAX_ERROR_PATH_CHARS: usize = 256;
 
 /// Maximum length, in Unicode scalar values, of a protocol error's `detail`.
 pub const MAX_ERROR_DETAIL_CHARS: usize = 512;
+
+/// The most bytes one `fs.read` may return, inline, in one response (M4b,
+/// ADR-0043).
+///
+/// **Derived from the frame, not chosen for the tool.** The content travels as
+/// lowercase hexadecimal — two characters a byte, one spelling per value — so
+/// 262 144 bytes are 524 288 characters. That leaves 524 288 bytes of a
+/// 1 MiB frame ([`MAX_FRAME_BODY`]) for the envelope, the canonical action and
+/// the decision, which together are bounded at under 8 KiB (a 384-character
+/// path is at most 2 304 bytes even when every character is a control
+/// character that canonical JSON escapes to six, and every other field is a
+/// bounded identifier, enum or integer). The factor of more than sixty between
+/// the two is the safety margin. A test (`tests/dwkp.rs`) encodes the largest
+/// result every field allows and asserts the frame fits.
+///
+/// A request may ask for less. It may not ask for more: there is no artifact
+/// spill in M4b, and a read the transport cannot return is refused at the
+/// boundary rather than truncated silently.
+pub const MAX_FS_READ_BYTES: usize = 256 * 1024;

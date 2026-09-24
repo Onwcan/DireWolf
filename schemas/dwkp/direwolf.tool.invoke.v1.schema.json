@@ -1,0 +1,158 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:direwolf:schema:dwkp:direwolf.tool.invoke:1",
+  "title": "direwolf.tool.invoke v1",
+  "description": "Perform one typed tool call for a run; this build has one tool, fs.read.",
+  "type": "object",
+  "properties": {
+    "v": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1,
+      "x-direwolf-type": "Version"
+    },
+    "id": {
+      "type": "string",
+      "minLength": 30,
+      "maxLength": 30,
+      "pattern": "^msg_[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+      "x-direwolf-type": "MessageId",
+      "x-direwolf-format": "uuid7-id",
+      "x-direwolf-id-prefix": "msg"
+    },
+    "type": {
+      "const": "request",
+      "x-direwolf-type": "MessageType"
+    },
+    "schema": {
+      "const": "direwolf.tool.invoke",
+      "x-direwolf-type": "SchemaName"
+    },
+    "schema_version": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1,
+      "x-direwolf-type": "Version"
+    },
+    "ts": {
+      "type": "string",
+      "maxLength": 24,
+      "x-direwolf-type": "Timestamp",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$",
+      "x-direwolf-format": "rfc3339-utc-millis"
+    },
+    "correlation_id": {
+      "type": "string",
+      "maxLength": 35,
+      "pattern": "^[a-z]{2,8}_[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+      "x-direwolf-type": "AnyId",
+      "x-direwolf-format": "uuid7-id"
+    },
+    "causation_id": {
+      "type": "string",
+      "maxLength": 35,
+      "pattern": "^[a-z]{2,8}_[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+      "x-direwolf-type": "AnyId",
+      "x-direwolf-format": "uuid7-id"
+    },
+    "session_id": {
+      "type": "string",
+      "minLength": 30,
+      "maxLength": 30,
+      "pattern": "^ses_[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+      "x-direwolf-type": "SessionId",
+      "x-direwolf-format": "uuid7-id",
+      "x-direwolf-id-prefix": "ses"
+    },
+    "run_id": {
+      "type": "string",
+      "minLength": 30,
+      "maxLength": 30,
+      "pattern": "^run_[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+      "x-direwolf-type": "RunId",
+      "x-direwolf-format": "uuid7-id",
+      "x-direwolf-id-prefix": "run"
+    },
+    "epoch": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991,
+      "x-direwolf-type": "Epoch"
+    },
+    "payload": {
+      "$ref": "#/$defs/ToolInvoke"
+    }
+  },
+  "required": ["v", "id", "type", "schema", "schema_version", "ts", "session_id", "run_id", "epoch", "payload"],
+  "additionalProperties": false,
+  "not": {
+    "anyOf": [
+      {
+        "required": ["idempotency_key"]
+      }
+    ]
+  },
+  "dependentRequired": {
+    "epoch": ["session_id"]
+  },
+  "x-direwolf-family": "dwkp",
+  "x-direwolf-message-type": "request",
+  "x-direwolf-schema": "direwolf.tool.invoke",
+  "x-direwolf-schema-versions": {
+    "min": 1,
+    "max": 1
+  },
+  "x-direwolf-envelope-versions": {
+    "min": 1,
+    "max": 1
+  },
+  "x-direwolf-envelope": {
+    "correlation_id": "optional",
+    "causation_id": "optional",
+    "session_id": "required",
+    "run_id": "required",
+    "epoch": "required",
+    "idempotency_key": "forbidden"
+  },
+  "x-direwolf-id-prefix": "msg",
+  "x-direwolf-unknown-fields": "reject",
+  "x-direwolf-payload": "ToolInvoke",
+  "$defs": {
+    "FsReadCall": {
+      "type": "object",
+      "description": "An `fs.read`: read at most `max_bytes` from the start of one regular\nfile in the run's workspace.",
+      "properties": {
+        "path": {
+          "type": "string",
+          "maxLength": 384,
+          "x-direwolf-type": "WorkspacePath",
+          "pattern": "^/[^\\u0000]{0,383}$",
+          "description": "The file, in the logical namespace: `/workspace/...`. The authority\ncanonicalises it (ADR-0042); nothing here is trusted."
+        },
+        "max_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 262144,
+          "x-direwolf-type": "ReadLimit",
+          "description": "The most bytes to read. The authority decides on this bound before\nanything is read: it is the `max_bytes` of the capability the read\nrequires and the `byte_count` policy evaluates."
+        }
+      },
+      "required": ["path", "max_bytes"],
+      "additionalProperties": false,
+      "x-direwolf-unknown-fields": "reject"
+    },
+    "ToolInvoke": {
+      "type": "object",
+      "description": "Asks the authority to perform one tool call for a run. The run, the\nsession and the epoch are the envelope's.\n\n**One member per tool, and this build has one tool.** A request naming\nanother tool is an undeclared member and fails to decode.\n\nNo `idempotency_key`: `fs.read` is retry-safe, so a repeated invocation\nis a second read of the same object, not a second effect (ADR-0043). A\ntool that is not retry-safe needs a key, and a new version of this\nmessage, before it can be added.",
+      "properties": {
+        "fs_read": {
+          "$ref": "#/$defs/FsReadCall",
+          "description": "The `fs.read` call."
+        }
+      },
+      "required": ["fs_read"],
+      "additionalProperties": false,
+      "x-direwolf-unknown-fields": "reject"
+    }
+  }
+}

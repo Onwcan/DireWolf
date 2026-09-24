@@ -75,6 +75,24 @@ impl PeerPolicy {
     }
 }
 
+/// The private broker channel (M4b, ADR-0043): where the broker listens, and
+/// the uid the kernel must report for it.
+///
+/// Without one, the authority decides and performs nothing: an invocation both
+/// gates allow fails `BROKER_UNAVAILABLE` after its intent is recorded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BrokerConfig {
+    /// The broker's socket. Absolute. Not trusted: the peer is checked, not
+    /// the path.
+    pub socket: PathBuf,
+    /// The uid the kernel must report for the broker.
+    pub uid: u32,
+    /// The operator's acknowledgement that the broker uid may be the
+    /// authority's own or an allowed DWKP peer's — one machine, one user, for
+    /// development. Reduced assurance, stated at start-up; never implied.
+    pub shared_uid_permitted: bool,
+}
+
 /// Where the policy comes from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PolicyInput {
@@ -109,6 +127,8 @@ pub struct ServeConfig {
     pub flags: ConfigFlags,
     /// How long a lease lives without a heartbeat.
     pub lease_ttl_ms: u64,
+    /// The broker channel, if this authority performs effects.
+    pub broker: Option<BrokerConfig>,
 }
 
 /// A command line that does not describe a configuration.
@@ -142,6 +162,9 @@ pub const SERVE_USAGE: &str = "\
     --ceiling <CAPABILITY>     a capability in the mode ceiling; repeat for each
     --lease-ttl-ms <MS>        lease lifetime without a heartbeat (default 60000)
     --allow-host-execution     set the `security.allow_host_execution` policy flag
+    --broker-socket <PATH>     absolute path of the broker's private socket (with --broker-uid)
+    --broker-uid <UID>         the uid the kernel must report for the broker (with --broker-socket)
+    --allow-shared-broker-uid  permit a broker uid that is the authority's or a peer's (development only)
 ";
 
 /// Parse the arguments after `serve`.
@@ -172,6 +195,9 @@ struct Parsed {
     ceiling: Vec<String>,
     lease_ttl_ms: Option<u64>,
     flags: ConfigFlags,
+    broker_socket: Option<PathBuf>,
+    broker_uid: Option<u32>,
+    shared_broker_uid: bool,
 }
 
 impl Parsed {
@@ -221,6 +247,12 @@ impl Parsed {
                 once(&mut self.lease_ttl_ms, flag, ttl)
             }
             "--allow-host-execution" => switch(&mut self.flags.security_allow_host_execution, flag),
+            "--broker-socket" => once(&mut self.broker_socket, flag, PathBuf::from(value()?)),
+            "--broker-uid" => {
+                let uid = parse_uid_for(flag, value()?)?;
+                once(&mut self.broker_uid, flag, uid)
+            }
+            "--allow-shared-broker-uid" => switch(&mut self.shared_broker_uid, flag),
             other => Err(UsageError::new(format!(
                 "unknown serve argument {}",
                 bounded(other)
@@ -279,6 +311,32 @@ impl Parsed {
                 ));
             }
         };
+        let broker = match (self.broker_socket, self.broker_uid) {
+            (Some(socket), Some(uid)) => {
+                if !socket.is_absolute() {
+                    return Err(UsageError::new("--broker-socket must be an absolute path"));
+                }
+                Some(BrokerConfig {
+                    socket,
+                    uid,
+                    shared_uid_permitted: self.shared_broker_uid,
+                })
+            }
+            (None, None) => {
+                if self.shared_broker_uid {
+                    return Err(UsageError::new(
+                        "--allow-shared-broker-uid needs --broker-socket and --broker-uid",
+                    ));
+                }
+                None
+            }
+            _ => {
+                return Err(UsageError::new(
+                    "--broker-socket and --broker-uid go together: a broker is named by where \
+                     it listens and who the kernel says it is",
+                ));
+            }
+        };
         Ok(ServeConfig {
             state_dir,
             socket,
@@ -288,6 +346,7 @@ impl Parsed {
             ceiling: self.ceiling,
             flags: self.flags,
             lease_ttl_ms: self.lease_ttl_ms.unwrap_or(DEFAULT_LEASE_TTL_MS),
+            broker,
         })
     }
 }
@@ -316,17 +375,21 @@ fn once<T>(slot: &mut Option<T>, flag: &str, value: T) -> Result<(), UsageError>
 }
 
 fn parse_uid(text: &str) -> Result<u32, UsageError> {
+    parse_uid_for("--allow-uid", text)
+}
+
+fn parse_uid_for(flag: &str, text: &str) -> Result<u32, UsageError> {
     // Digits only: no sign, no whitespace, no hex, no user name. A name would
     // have to be resolved through the user database, which is exactly the
     // kind of indirection a peer policy must not have.
     if text.is_empty() || !text.bytes().all(|b| b.is_ascii_digit()) {
         return Err(UsageError::new(format!(
-            "--allow-uid takes a numeric uid, not {}",
+            "{flag} takes a numeric uid, not {}",
             bounded(text)
         )));
     }
     text.parse::<u32>()
-        .map_err(|_| UsageError::new(format!("--allow-uid {} is out of range", bounded(text))))
+        .map_err(|_| UsageError::new(format!("{flag} {} is out of range", bounded(text))))
 }
 
 fn parse_mode(text: &str) -> Result<Mode, UsageError> {

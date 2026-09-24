@@ -95,6 +95,10 @@ dependencies = [
 [[package]]
 name = "dwkd-broker"
 version = "0.0.0"
+dependencies = [
+ "dwk-proto",
+ "rustix",
+]
 
 [[package]]
 name = "errno"

@@ -269,7 +269,9 @@ def test_dwkp_rejects_unknown_and_reserved_operations() -> None:
     # A reserved operation has no wire name at all until its milestone defines one.
     reserved = [op for op in operations.OPERATIONS if op.status != "defined"]
     assert reserved and all(op.request is None for op in reserved)
-    for schema in ("direwolf.tool.invoke", "direwolf.exec.raw", "direwolf.session.created"):
+    # `direwolf.tool.invoke` is defined from M4b (ADR-0043); `tool.cancel` is
+    # not, and neither is anything no milestone has named.
+    for schema in ("direwolf.tool.cancel", "direwolf.exec.raw", "direwolf.session.created"):
         doc = {
             "v": 1,
             "id": MSG,

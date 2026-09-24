@@ -304,13 +304,6 @@
    "path": "/schema"
   },
   {
-   "name": "reserved operation is not on the wire",
-   "family": "dwkp",
-   "input": "{\"payload\":{},\"session_id\":\"ses_01M24BB8G2E87V1ZPZXQ7DSCVW\",\"epoch\":47,\"schema\":\"direwolf.tool.invoke\",\"type\":\"request\",\"id\":\"msg_01M24BB8G0E87TVJX9GX248ADD\",\"ts\":\"2026-09-12T09:14:22.481Z\",\"schema_version\":1,\"v\":1}",
-   "code": "PROTOCOL_UNKNOWN_OPERATION",
-   "path": "/schema"
-  },
-  {
    "name": "generic relay operation does not exist",
    "family": "dwkp",
    "input": "{\"payload\":{},\"session_id\":\"ses_01M24BB8G2E87V1ZPZXQ7DSCVW\",\"epoch\":47,\"schema\":\"direwolf.exec.raw\",\"type\":\"request\",\"id\":\"msg_01M24BB8G0E87TVJX9GX248ADD\",\"ts\":\"2026-09-12T09:14:22.481Z\",\"schema_version\":1,\"v\":1}",
@@ -621,10 +614,10 @@
   {
    "name": "keys equal only under NFC are undeclared fields in DWKP",
    "family": "dwkp",
-   "input": "{\"v\":1,\"id\":\"msg_01M24BB8G0E87TVJX9GX248ADD\",\"type\":\"request\",\"schema\":\"direwolf.heartbeat\",\"schema_version\":1,\"ts\":\"2026-09-12T09:14:22.481Z\",\"session_id\":\"ses_01M24BB8G2E87V1ZPZXQ7DSCVW\",\"epoch\":47,\"payload\":{\"café\":1,\"café\":2}}",
+   "input": "{\"v\":1,\"id\":\"msg_01M24BB8G0E87TVJX9GX248ADD\",\"type\":\"request\",\"schema\":\"direwolf.heartbeat\",\"schema_version\":1,\"ts\":\"2026-09-12T09:14:22.481Z\",\"session_id\":\"ses_01M24BB8G2E87V1ZPZXQ7DSCVW\",\"epoch\":47,\"payload\":{\"caf\u00e9\":1,\"cafe\u0301\":2}}",
    "code": "PROTOCOL_SCHEMA_VIOLATION",
    "violation": "UNKNOWN_FIELD",
-   "path": "/payload/café"
+   "path": "/payload/caf\u00e9"
   },
   {
    "name": "admit run with an unknown payload field",
@@ -815,12 +808,6 @@
    "code": "PROTOCOL_SCHEMA_VIOLATION",
    "violation": "MISSING_FIELD",
    "path": "/payload/decision/policy_result"
-  },
-  {
-   "name": "tool invoke is still not on the wire",
-   "family": "dwkp",
-   "input": "{\n  \"v\": 1,\n  \"id\": \"msg_01M24BB8G0E87TVJX9GX248ADD\",\n  \"type\": \"request\",\n  \"schema\": \"direwolf.tool.invoke\",\n  \"schema_version\": 1,\n  \"ts\": \"2026-09-12T09:14:22.481Z\",\n  \"payload\": {},\n  \"session_id\": \"ses_01M24BB8G2E87V1ZPZXQ7DSCVW\",\n  \"epoch\": 1\n}",
-   "code": "PROTOCOL_UNKNOWN_OPERATION"
   },
   {
    "name": "admit run proposing its own run id",
@@ -1051,6 +1038,181 @@
    "code": "PROTOCOL_SCHEMA_VIOLATION",
    "violation": "INCONSISTENT",
    "path": "/payload/reason"
+  },
+  {
+   "name": "reserved operation is not on the wire",
+   "family": "dwkp",
+   "input": "{\"v\": 1, \"id\": \"msg_01M24BB8G0E87TVJX9GX248ADD\", \"type\": \"request\", \"schema\": \"direwolf.tool.cancel\", \"schema_version\": 1, \"ts\": \"2026-09-12T09:14:22.481Z\", \"payload\": {}, \"session_id\": \"ses_01M24BB8G2E87V1ZPZXQ7DSCVW\", \"epoch\": 47}",
+   "code": "PROTOCOL_UNKNOWN_OPERATION",
+   "path": "/schema"
+  },
+  {
+   "name": "tool invoke with an empty payload",
+   "family": "dwkp",
+   "input": "{\"v\": 1, \"id\": \"msg_01M24BB8G0E87TVJX9GX248ADD\", \"type\": \"request\", \"schema\": \"direwolf.tool.invoke\", \"schema_version\": 1, \"ts\": \"2026-09-12T09:14:22.481Z\", \"payload\": {}, \"session_id\": \"ses_01M24BB8G2E87V1ZPZXQ7DSCVW\", \"run_id\": \"run_01M24BB8G3E0A851TRWE3M8FZF\", \"epoch\": 47}",
+   "code": "PROTOCOL_SCHEMA_VIOLATION",
+   "violation": "MISSING_FIELD",
+   "path": "/payload/fs_read"
+  },
+  {
+   "name": "tool invoke naming a second tool",
+   "family": "dwkp",
+   "input": "{\"v\": 1, \"id\": \"msg_01M24BB8G0E87TVJX9GX248ADD\", \"type\": \"request\", \"schema\": \"direwolf.tool.invoke\", \"schema_version\": 1, \"ts\": \"2026-09-12T09:14:22.481Z\", \"payload\": {\"fs_write\": {\"path\": \"/workspace/src/main.rs\", \"max_bytes\": 4096}}, \"session_id\": \"ses_01M24BB8G2E87V1ZPZXQ7DSCVW\", \"run_id\": \"run_01M24BB8G3E0A851TRWE3M8FZF\", \"epoch\": 47}",
+   "code": "PROTOCOL_SCHEMA_VIOLATION",
+   "violation": "UNKNOWN_FIELD",
+   "path": "/payload/fs_write"
+  },
+  {
+   "name": "tool invoke in the tool-and-arguments shape M4b does not use",
+   "family": "dwkp",
+   "input": "{\"v\": 1, \"id\": \"msg_01M24BB8G0E87TVJX9GX248ADD\", \"type\": \"request\", \"schema\": \"direwolf.tool.invoke\", \"schema_version\": 1, \"ts\": \"2026-09-12T09:14:22.481Z\", \"payload\": {\"tool\": \"fs.read\", \"args\": {\"path\": \"/workspace/a\"}}, \"session_id\": \"ses_01M24BB8G2E87V1ZPZXQ7DSCVW\", \"run_id\": \"run_01M24BB8G3E0A851TRWE3M8FZF\", \"epoch\": 47}",
+   "code": "PROTOCOL_SCHEMA_VIOLATION",
+   "violation": "UNKNOWN_FIELD",
+   "path": "/payload/tool"
+  },
+  {
+   "name": "tool invoke presenting a capability id",
+   "family": "dwkp",
+   "input": "{\"v\": 1, \"id\": \"msg_01M24BB8G0E87TVJX9GX248ADD\", \"type\": \"request\", \"schema\": \"direwolf.tool.invoke\", \"schema_version\": 1, \"ts\": \"2026-09-12T09:14:22.481Z\", \"payload\": {\"fs_read\": {\"path\": \"/workspace/src/main.rs\", \"max_bytes\": 4096, \"cap_id\": \"cap_01M24BB8G0E87TVJX9GX248ADD\"}}, \"session_id\": \"ses_01M24BB8G2E87V1ZPZXQ7DSCVW\", \"run_id\": \"run_01M24BB8G3E0A851TRWE3M8FZF\", \"epoch\": 47}",
+   "code": "PROTOCOL_SCHEMA_VIOLATION",
+   "violation": "UNKNOWN_FIELD",
+   "path": "/payload/fs_read/cap_id"
+  },
+  {
+   "name": "tool invoke choosing its own environment",
+   "family": "dwkp",
+   "input": "{\"v\": 1, \"id\": \"msg_01M24BB8G0E87TVJX9GX248ADD\", \"type\": \"request\", \"schema\": \"direwolf.tool.invoke\", \"schema_version\": 1, \"ts\": \"2026-09-12T09:14:22.481Z\", \"payload\": {\"fs_read\": {\"path\": \"/workspace/src/main.rs\", \"max_bytes\": 4096}, \"environment\": \"SANDBOX\"}, \"session_id\": \"ses_01M24BB8G2E87V1ZPZXQ7DSCVW\", \"run_id\": \"run_01M24BB8G3E0A851TRWE3M8FZF\", \"epoch\": 47}",
+   "code": "PROTOCOL_SCHEMA_VIOLATION",
+   "violation": "UNKNOWN_FIELD",
+   "path": "/payload/environment"
+  },
+  {
+   "name": "tool invoke without a byte bound",
+   "family": "dwkp",
+   "input": "{\"v\": 1, \"id\": \"msg_01M24BB8G0E87TVJX9GX248ADD\", \"type\": \"request\", \"schema\": \"direwolf.tool.invoke\", \"schema_version\": 1, \"ts\": \"2026-09-12T09:14:22.481Z\", \"payload\": {\"fs_read\": {\"path\": \"/workspace/a\"}}, \"session_id\": \"ses_01M24BB8G2E87V1ZPZXQ7DSCVW\", \"run_id\": \"run_01M24BB8G3E0A851TRWE3M8FZF\", \"epoch\": 47}",
+   "code": "PROTOCOL_SCHEMA_VIOLATION",
+   "violation": "MISSING_FIELD",
+   "path": "/payload/fs_read/max_bytes"
+  },
+  {
+   "name": "tool invoke with a zero byte bound",
+   "family": "dwkp",
+   "input": "{\"v\": 1, \"id\": \"msg_01M24BB8G0E87TVJX9GX248ADD\", \"type\": \"request\", \"schema\": \"direwolf.tool.invoke\", \"schema_version\": 1, \"ts\": \"2026-09-12T09:14:22.481Z\", \"payload\": {\"fs_read\": {\"path\": \"/workspace/a\", \"max_bytes\": 0}}, \"session_id\": \"ses_01M24BB8G2E87V1ZPZXQ7DSCVW\", \"run_id\": \"run_01M24BB8G3E0A851TRWE3M8FZF\", \"epoch\": 47}",
+   "code": "PROTOCOL_SCHEMA_VIOLATION",
+   "violation": "OUT_OF_RANGE",
+   "path": "/payload/fs_read/max_bytes"
+  },
+  {
+   "name": "tool invoke above the largest read bound",
+   "family": "dwkp",
+   "input": "{\"v\": 1, \"id\": \"msg_01M24BB8G0E87TVJX9GX248ADD\", \"type\": \"request\", \"schema\": \"direwolf.tool.invoke\", \"schema_version\": 1, \"ts\": \"2026-09-12T09:14:22.481Z\", \"payload\": {\"fs_read\": {\"path\": \"/workspace/a\", \"max_bytes\": 262145}}, \"session_id\": \"ses_01M24BB8G2E87V1ZPZXQ7DSCVW\", \"run_id\": \"run_01M24BB8G3E0A851TRWE3M8FZF\", \"epoch\": 47}",
+   "code": "PROTOCOL_SCHEMA_VIOLATION",
+   "violation": "OUT_OF_RANGE",
+   "path": "/payload/fs_read/max_bytes"
+  },
+  {
+   "name": "tool invoke with a relative path",
+   "family": "dwkp",
+   "input": "{\"v\": 1, \"id\": \"msg_01M24BB8G0E87TVJX9GX248ADD\", \"type\": \"request\", \"schema\": \"direwolf.tool.invoke\", \"schema_version\": 1, \"ts\": \"2026-09-12T09:14:22.481Z\", \"payload\": {\"fs_read\": {\"path\": \"workspace/a\", \"max_bytes\": 1}}, \"session_id\": \"ses_01M24BB8G2E87V1ZPZXQ7DSCVW\", \"run_id\": \"run_01M24BB8G3E0A851TRWE3M8FZF\", \"epoch\": 47}",
+   "code": "PROTOCOL_SCHEMA_VIOLATION",
+   "violation": "INVALID_FORMAT",
+   "path": "/payload/fs_read/path"
+  },
+  {
+   "name": "tool invoke with a path longer than any declared path",
+   "family": "dwkp",
+   "input": "{\"v\": 1, \"id\": \"msg_01M24BB8G0E87TVJX9GX248ADD\", \"type\": \"request\", \"schema\": \"direwolf.tool.invoke\", \"schema_version\": 1, \"ts\": \"2026-09-12T09:14:22.481Z\", \"payload\": {\"fs_read\": {\"path\": \"/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"max_bytes\": 1}}, \"session_id\": \"ses_01M24BB8G2E87V1ZPZXQ7DSCVW\", \"run_id\": \"run_01M24BB8G3E0A851TRWE3M8FZF\", \"epoch\": 47}",
+   "code": "PROTOCOL_SCHEMA_VIOLATION",
+   "violation": "TOO_LONG",
+   "path": "/payload/fs_read/path"
+  },
+  {
+   "name": "tool invoke without a run",
+   "family": "dwkp",
+   "input": "{\"v\": 1, \"id\": \"msg_01M24BB8G0E87TVJX9GX248ADD\", \"type\": \"request\", \"schema\": \"direwolf.tool.invoke\", \"schema_version\": 1, \"ts\": \"2026-09-12T09:14:22.481Z\", \"payload\": {\"fs_read\": {\"path\": \"/workspace/src/main.rs\", \"max_bytes\": 4096}}, \"session_id\": \"ses_01M24BB8G2E87V1ZPZXQ7DSCVW\", \"epoch\": 47}",
+   "code": "PROTOCOL_SCHEMA_VIOLATION",
+   "violation": "MISSING_FIELD",
+   "path": "/run_id"
+  },
+  {
+   "name": "tool invoke carrying an idempotency key",
+   "family": "dwkp",
+   "input": "{\"v\": 1, \"id\": \"msg_01M24BB8G0E87TVJX9GX248ADD\", \"type\": \"request\", \"schema\": \"direwolf.tool.invoke\", \"schema_version\": 1, \"ts\": \"2026-09-12T09:14:22.481Z\", \"payload\": {\"fs_read\": {\"path\": \"/workspace/src/main.rs\", \"max_bytes\": 4096}}, \"session_id\": \"ses_01M24BB8G2E87V1ZPZXQ7DSCVW\", \"run_id\": \"run_01M24BB8G3E0A851TRWE3M8FZF\", \"epoch\": 47, \"idempotency_key\": \"key-1\"}",
+   "code": "PROTOCOL_SCHEMA_VIOLATION",
+   "violation": "FORBIDDEN_FIELD",
+   "path": "/idempotency_key"
+  },
+  {
+   "name": "tool result with an odd number of hex digits",
+   "family": "dwkp",
+   "input": "{\"v\": 1, \"id\": \"msg_01M24BB8G0E87TVJX9GX248ADD\", \"type\": \"response\", \"schema\": \"direwolf.tool.result\", \"schema_version\": 1, \"ts\": \"2026-09-12T09:14:22.481Z\", \"causation_id\": \"msg_01M24BB8G1FQR94D2PF2XVQDV4\", \"payload\": {\"invocation_id\": \"inv_01M24BB8G4E87TVJX9GX248ADD\", \"action\": {\"tool\": \"fs.read\", \"canonical_path\": \"/workspace/src/main.rs\", \"byte_count\": 4096, \"environment\": \"HOST\"}, \"decision\": {\"effect\": \"ALLOW\", \"reason\": \"ALLOWED_BY_RULE\", \"capability_result\": \"SATISFIED\", \"policy_result\": \"SATISFIED\", \"rule_id\": \"allow-workspace-read\", \"rule_source\": \"policy/balanced.toml:74\"}, \"fs_read\": {\"content\": \"686\", \"eof_observed\": true}}}",
+   "code": "PROTOCOL_SCHEMA_VIOLATION",
+   "violation": "INVALID_FORMAT",
+   "path": "/payload/fs_read/content"
+  },
+  {
+   "name": "tool result with upper-case hex",
+   "family": "dwkp",
+   "input": "{\"v\": 1, \"id\": \"msg_01M24BB8G0E87TVJX9GX248ADD\", \"type\": \"response\", \"schema\": \"direwolf.tool.result\", \"schema_version\": 1, \"ts\": \"2026-09-12T09:14:22.481Z\", \"causation_id\": \"msg_01M24BB8G1FQR94D2PF2XVQDV4\", \"payload\": {\"invocation_id\": \"inv_01M24BB8G4E87TVJX9GX248ADD\", \"action\": {\"tool\": \"fs.read\", \"canonical_path\": \"/workspace/src/main.rs\", \"byte_count\": 4096, \"environment\": \"HOST\"}, \"decision\": {\"effect\": \"ALLOW\", \"reason\": \"ALLOWED_BY_RULE\", \"capability_result\": \"SATISFIED\", \"policy_result\": \"SATISFIED\", \"rule_id\": \"allow-workspace-read\", \"rule_source\": \"policy/balanced.toml:74\"}, \"fs_read\": {\"content\": \"4A4B\", \"eof_observed\": true}}}",
+   "code": "PROTOCOL_SCHEMA_VIOLATION",
+   "violation": "INVALID_FORMAT",
+   "path": "/payload/fs_read/content"
+  },
+  {
+   "name": "tool result naming another tool",
+   "family": "dwkp",
+   "input": "{\"v\": 1, \"id\": \"msg_01M24BB8G0E87TVJX9GX248ADD\", \"type\": \"response\", \"schema\": \"direwolf.tool.result\", \"schema_version\": 1, \"ts\": \"2026-09-12T09:14:22.481Z\", \"causation_id\": \"msg_01M24BB8G1FQR94D2PF2XVQDV4\", \"payload\": {\"invocation_id\": \"inv_01M24BB8G4E87TVJX9GX248ADD\", \"action\": {\"tool\": \"fs.write\", \"canonical_path\": \"/workspace/src/main.rs\", \"byte_count\": 4096, \"environment\": \"HOST\"}, \"decision\": {\"effect\": \"ALLOW\", \"reason\": \"ALLOWED_BY_RULE\", \"capability_result\": \"SATISFIED\", \"policy_result\": \"SATISFIED\", \"rule_id\": \"allow-workspace-read\", \"rule_source\": \"policy/balanced.toml:74\"}, \"fs_read\": {\"content\": \"6869\", \"eof_observed\": true}}}",
+   "code": "PROTOCOL_SCHEMA_VIOLATION",
+   "violation": "UNKNOWN_VARIANT",
+   "path": "/payload/action/tool"
+  },
+  {
+   "name": "tool result without an invocation id",
+   "family": "dwkp",
+   "input": "{\"v\": 1, \"id\": \"msg_01M24BB8G0E87TVJX9GX248ADD\", \"type\": \"response\", \"schema\": \"direwolf.tool.result\", \"schema_version\": 1, \"ts\": \"2026-09-12T09:14:22.481Z\", \"causation_id\": \"msg_01M24BB8G1FQR94D2PF2XVQDV4\", \"payload\": {\"action\": {\"tool\": \"fs.read\", \"canonical_path\": \"/workspace/src/main.rs\", \"byte_count\": 4096, \"environment\": \"HOST\"}, \"decision\": {\"effect\": \"ALLOW\", \"reason\": \"ALLOWED_BY_RULE\", \"capability_result\": \"SATISFIED\", \"policy_result\": \"SATISFIED\", \"rule_id\": \"allow-workspace-read\", \"rule_source\": \"policy/balanced.toml:74\"}, \"fs_read\": {\"content\": \"6869\", \"eof_observed\": true}}}",
+   "code": "PROTOCOL_SCHEMA_VIOLATION",
+   "violation": "MISSING_FIELD",
+   "path": "/payload/invocation_id"
+  },
+  {
+   "name": "tool result with an invocation id of another kind",
+   "family": "dwkp",
+   "input": "{\"v\": 1, \"id\": \"msg_01M24BB8G0E87TVJX9GX248ADD\", \"type\": \"response\", \"schema\": \"direwolf.tool.result\", \"schema_version\": 1, \"ts\": \"2026-09-12T09:14:22.481Z\", \"causation_id\": \"msg_01M24BB8G1FQR94D2PF2XVQDV4\", \"payload\": {\"invocation_id\": \"cap_01M24BB8G4E87TVJX9GX248ADD\", \"action\": {\"tool\": \"fs.read\", \"canonical_path\": \"/workspace/src/main.rs\", \"byte_count\": 4096, \"environment\": \"HOST\"}, \"decision\": {\"effect\": \"ALLOW\", \"reason\": \"ALLOWED_BY_RULE\", \"capability_result\": \"SATISFIED\", \"policy_result\": \"SATISFIED\", \"rule_id\": \"allow-workspace-read\", \"rule_source\": \"policy/balanced.toml:74\"}, \"fs_read\": {\"content\": \"6869\", \"eof_observed\": true}}}",
+   "code": "PROTOCOL_SCHEMA_VIOLATION",
+   "violation": "INVALID_FORMAT",
+   "path": "/payload/invocation_id"
+  },
+  {
+   "name": "tool result claiming eof, the field eof_observed replaced",
+   "family": "dwkp",
+   "input": "{\"v\": 1, \"id\": \"msg_01M24BB8G0E87TVJX9GX248ADD\", \"type\": \"response\", \"schema\": \"direwolf.tool.result\", \"schema_version\": 1, \"ts\": \"2026-09-12T09:14:22.481Z\", \"causation_id\": \"msg_01M24BB8G1FQR94D2PF2XVQDV4\", \"payload\": {\"invocation_id\": \"inv_01M24BB8G4E87TVJX9GX248ADD\", \"action\": {\"tool\": \"fs.read\", \"canonical_path\": \"/workspace/src/main.rs\", \"byte_count\": 4096, \"environment\": \"HOST\"}, \"decision\": {\"effect\": \"ALLOW\", \"reason\": \"ALLOWED_BY_RULE\", \"capability_result\": \"SATISFIED\", \"policy_result\": \"SATISFIED\", \"rule_id\": \"allow-workspace-read\", \"rule_source\": \"policy/balanced.toml:74\"}, \"fs_read\": {\"content\": \"6869\", \"eof\": true}}}",
+   "code": "PROTOCOL_SCHEMA_VIOLATION",
+   "violation": "UNKNOWN_FIELD",
+   "path": "/payload/fs_read/eof"
+  },
+  {
+   "name": "tool refusal naming an operation that does not exist",
+   "family": "dwkp",
+   "input": "{\"v\": 1, \"id\": \"msg_01M24BB8G0E87TVJX9GX248ADD\", \"type\": \"response\", \"schema\": \"direwolf.tool.refused\", \"schema_version\": 1, \"ts\": \"2026-09-12T09:14:22.481Z\", \"causation_id\": \"msg_01M24BB8G1FQR94D2PF2XVQDV4\", \"payload\": {\"operation\": \"TOOL_CANCEL\", \"reason\": \"NOT_FOUND\"}}",
+   "code": "PROTOCOL_SCHEMA_VIOLATION",
+   "violation": "UNKNOWN_VARIANT",
+   "path": "/payload/operation"
+  },
+  {
+   "name": "tool failure with a reason from another operation",
+   "family": "dwkp",
+   "input": "{\"v\": 1, \"id\": \"msg_01M24BB8G0E87TVJX9GX248ADD\", \"type\": \"response\", \"schema\": \"direwolf.tool.failed\", \"schema_version\": 1, \"ts\": \"2026-09-12T09:14:22.481Z\", \"causation_id\": \"msg_01M24BB8G1FQR94D2PF2XVQDV4\", \"payload\": {\"invocation_id\": \"inv_01M24BB8G4E87TVJX9GX248ADD\", \"reason\": \"STALE_EPOCH\"}}",
+   "code": "PROTOCOL_SCHEMA_VIOLATION",
+   "violation": "UNKNOWN_VARIANT",
+   "path": "/payload/reason"
+  },
+  {
+   "name": "preview result carrying the resolution field M4b removed",
+   "family": "dwkp",
+   "input": "{\"v\": 1, \"id\": \"msg_01M24BB8G0E87TVJX9GX248ADD\", \"type\": \"response\", \"schema\": \"direwolf.tool.previewed\", \"schema_version\": 1, \"ts\": \"2026-09-12T09:14:22.481Z\", \"causation_id\": \"msg_01M24BB8G1FQR94D2PF2XVQDV4\", \"payload\": {\"action\": {\"tool\": \"fs.read\", \"canonical_path\": \"/workspace/src/main.rs\", \"byte_count\": 4096, \"environment\": \"HOST\"}, \"decision\": {\"effect\": \"ALLOW\", \"reason\": \"ALLOWED_BY_RULE\", \"capability_result\": \"SATISFIED\", \"policy_result\": \"SATISFIED\", \"rule_id\": \"allow-workspace-read\", \"rule_source\": \"policy/balanced.toml:74\"}, \"resolution\": \"RESOLVED\"}}",
+   "code": "PROTOCOL_SCHEMA_VIOLATION",
+   "violation": "UNKNOWN_FIELD",
+   "path": "/payload/resolution"
   }
  ]
 }

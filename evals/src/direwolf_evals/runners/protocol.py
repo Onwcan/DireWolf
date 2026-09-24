@@ -163,11 +163,13 @@ def reserved_operations(_ctx: Context) -> Outcome:
     """A reserved operation has no wire form: naming one must be refused.
 
     Score: the fraction of reserved operations refused with
-    ``PROTOCOL_UNKNOWN_OPERATION``. M2's inventory reserves sixteen; each gains
-    a payload only in the milestone that owns it, with the second-path review.
+    ``PROTOCOL_UNKNOWN_OPERATION``. M2's inventory reserved sixteen; each gains
+    a payload only in the milestone that owns it, with the second-path review
+    (M4b defined ``ToolInvoke`` and ``CanonicalPreview``, ADR-0043, so a name
+    that spells another tool as an operation is among the invented ones).
     """
     reserved = [op for op in operations.OPERATIONS if op.status != "defined"]
-    invented = ["direwolf.exec.raw", "direwolf.tool.invoke", "direwolf.session.created"]
+    invented = ["direwolf.exec.raw", "direwolf.fs.write", "direwolf.session.created"]
     names = [_schema_name(op.name) for op in reserved] + invented
     failures = []
     for name in names:

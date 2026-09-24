@@ -71,6 +71,8 @@ mod policy_state;
 mod query;
 mod resolution;
 mod schema;
+mod scopes;
+mod tool;
 mod transport;
 pub mod wire;
 
@@ -80,12 +82,17 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use dwk_proto::dwkp::messages::Ack;
+use dwk_proto::dwkp::messages::FsReadCall;
 use dwk_proto::dwkp::{DwkpBody, DwkpMessage};
-use dwk_proto::wire::id::{CapId, RunId, SessionId};
-use dwk_proto::wire::scalar::{Epoch, RefusalReason, RefusedOperation};
+use dwk_proto::wire::id::{CapId, InvocationId, RunId, SessionId};
+use dwk_proto::wire::scalar::{
+    Epoch, RefusalReason, RefusedOperation, ToolOperation, ToolRefusalReason,
+};
 use rusqlite::{Connection, OptionalExtension as _, TransactionBehavior};
 
+use crate::broker::{BrokerFailure, EffectBroker, FsReadOrder};
 use crate::policy::{PolicyContext, TaintLevel};
+use crate::resource::fs::ResolvedResource;
 
 /// The operator configuration flags a [`StartupConfig`] carries, re-exported so
 /// the state API is self-contained for its callers (the DWKP server).
@@ -112,6 +119,7 @@ pub use lease::{DEFAULT_LEASE_TTL_MS, MAX_EPOCH, MAX_LEASE_TTL_MS, MIN_LEASE_TTL
 pub use policy_state::{MAX_CEILING_CAPABILITIES, MAX_POLICY_SOURCES, PolicySet, PolicySource};
 pub use query::{AuthorityAnswer, DecisionRecord, Proposal, TaintCause, Undecidable};
 pub use resolution::ResolutionRefused;
+pub use tool::{ToolDecision, ToolReply};
 pub use transport::{TransportClass, TransportEvent, Violation};
 pub use wire::WireGap;
 
@@ -156,13 +164,18 @@ impl StartupConfig {
     }
 }
 
-/// How to run: which clock, and whether a crash hook is consulted.
+/// How to run: which clock, whether a crash hook is consulted, and which
+/// broker performs authorised effects.
 #[derive(Clone)]
 pub struct StartOptions {
     /// Authority time.
     pub clock: Arc<dyn Clock>,
     /// Consulted at every [`CrashPoint`]. See [`crash`](self::crash).
     pub crash_hook: Option<CrashHook>,
+    /// The broker that performs an invocation both gates allowed (M4b). With
+    /// none, every allowed invocation fails `BROKER_UNAVAILABLE` after its
+    /// intent is recorded: this authority decides, and performs nothing.
+    pub broker: Option<Arc<dyn EffectBroker>>,
 }
 
 impl Default for StartOptions {
@@ -170,6 +183,7 @@ impl Default for StartOptions {
         Self {
             clock: Arc::new(SystemClock),
             crash_hook: None,
+            broker: None,
         }
     }
 }
@@ -179,6 +193,7 @@ impl fmt::Debug for StartOptions {
         f.debug_struct("StartOptions")
             .field("clock", &self.clock)
             .field("crash_hook", &self.crash_hook.is_some())
+            .field("broker", &self.broker)
             .finish()
     }
 }
@@ -196,6 +211,9 @@ pub struct StartReport {
     pub leases_invalidated: u64,
     /// Active runs the previous process left, now reaped.
     pub runs_reaped: u64,
+    /// Tool invocations the previous process authorised and never finished,
+    /// now recorded as interrupted (M4b).
+    pub invocations_interrupted: u64,
     /// Audit records already in `audit.log` above the flushed mark: reconciled,
     /// not appended again.
     pub audit_reconciled: u64,
@@ -251,6 +269,7 @@ struct Shared {
     audit: Mutex<Option<AuditWriter>>,
     active: OnceLock<ActiveAuthority>,
     lease_ttl_ms: u64,
+    broker: Option<Arc<dyn EffectBroker>>,
     // Held for the life of the process; the OS releases it on exit.
     _lock: std::fs::File,
 }
@@ -388,6 +407,17 @@ impl Work<'_> {
         CapId::from_uuid(self.next_uuid()?)
             .ok_or(AuthorityError::Invariant("a minted cap id is not a UUIDv7"))
     }
+
+    /// This process's incarnation.
+    pub(crate) fn incarnation(&self) -> u64 {
+        self.shared.incarnation.load(Ordering::SeqCst)
+    }
+
+    pub(crate) fn invocation_id(&self) -> Result<InvocationId, AuthorityError> {
+        InvocationId::from_uuid(self.next_uuid()?).ok_or(AuthorityError::Invariant(
+            "a minted invocation id is not a UUIDv7",
+        ))
+    }
 }
 
 /// The durable authority: one handle onto one state directory.
@@ -504,11 +534,12 @@ impl Authority {
             audit: Mutex::new(Some(writer)),
             active: OnceLock::new(),
             lease_ttl_ms: config.lease_ttl_ms,
+            broker: options.broker,
             _lock: lock,
         });
         let mut authority = Self { shared, conn };
 
-        let (incarnation, leases_invalidated, runs_reaped) =
+        let (incarnation, leases_invalidated, runs_reaped, invocations_interrupted) =
             authority.begin_incarnation(created, &recovered)?;
         let activation_id = authority.activate(&prepared, config.mode, config.flags, &ceiling)?;
         let revision = prepared.revision;
@@ -527,6 +558,7 @@ impl Authority {
             incarnation,
             leases_invalidated,
             runs_reaped,
+            invocations_interrupted,
             audit_reconciled: recovered.reconciled,
             audit_appended: recovered.appended,
             audit_torn_tail_bytes: recovered.torn_tail_bytes,
@@ -537,13 +569,14 @@ impl Authority {
     }
 
     /// A new incarnation: nothing the previous process held is still held.
-    /// Returns the incarnation and how many leases and runs it ended.
+    /// Returns the incarnation and how many leases, runs and tool invocations
+    /// it ended.
     fn begin_incarnation(
         &mut self,
         created: bool,
         recovered: &audit::Recovered,
-    ) -> Result<(u64, u64, u64), AuthorityError> {
-        let (incarnation, leases, runs) = self.transact(|work| {
+    ) -> Result<(u64, u64, u64, u64), AuthorityError> {
+        let (incarnation, leases, runs, interrupted) = self.transact(|work| {
             let incarnation: i64 = work.db(work.tx.query_row(
                 "UPDATE store_meta SET incarnation = incarnation + 1 WHERE singleton = 1                  RETURNING incarnation",
                 [],
@@ -552,6 +585,7 @@ impl Authority {
             let incarnation = u64::try_from(incarnation)
                 .map_err(|_| AuthorityError::Invariant("the incarnation is negative"))?;
             let (leases, runs) = lease::invalidate_all(work)?;
+            let interrupted = tool::interrupt_open(work)?;
             work.audit(
                 AuditEvent::StoreOpened,
                 Fields::new()
@@ -560,14 +594,15 @@ impl Authority {
                     .flag("created", created)
                     .int("leases_invalidated", leases)
                     .int("runs_reaped", runs)
+                    .int("invocations_interrupted", interrupted)
                     .int("audit_reconciled", recovered.reconciled)
                     .int("audit_appended", recovered.appended)
                     .int("audit_torn_tail_bytes", recovered.torn_tail_bytes),
             )?;
-            Ok((incarnation, leases, runs))
+            Ok((incarnation, leases, runs, interrupted))
         })?;
         self.shared.incarnation.store(incarnation, Ordering::SeqCst);
-        Ok((incarnation, leases, runs))
+        Ok((incarnation, leases, runs, interrupted))
     }
 
     /// Install the prepared policy revision if it is new, and make it, the
@@ -769,7 +804,24 @@ impl Authority {
     ) -> Result<Reply<Admission>, AuthorityError> {
         let shared = Arc::clone(&self.shared);
         let active = shared.active()?;
-        self.transact(|work| admission::admit(work, caller, message, active))
+        let mut resolved: Option<scopes::Resolutions> = None;
+        for pass in 1..=admission::PASSES {
+            let last = pass == admission::PASSES;
+            let answer = self.transact(|work| {
+                admission::admit(work, caller, message, active, resolved.as_ref(), last)
+            })?;
+            match answer {
+                admission::Pass::Answered(reply) => return Ok(reply),
+                // No transaction is open: the M4a resolver, beneath the
+                // session's pinned root (ADR-0043 §8).
+                admission::Pass::Resolve { binding, paths } => {
+                    resolved = Some(scopes::resolve_paths(&binding, &paths));
+                }
+            }
+        }
+        Err(AuthorityError::Invariant(
+            "an admission's last pass asked to resolve",
+        ))
     }
 
     /// `ReleaseRun`.
@@ -879,6 +931,195 @@ impl Authority {
             .map_err(ResolutionRefused::Resolve)
     }
 
+    /// `ToolInvoke` for one `fs.read` (M4b, ADR-0043), in the order
+    /// `state::tool` sets out: locate; resolve beneath the pinned root (`O_PATH`
+    /// only, no transaction); decide and — if both gates allow — record the
+    /// intent durably; **only then** open the checked object for reading; the
+    /// broker; the outcome and the taint, durably — and only then answer.
+    ///
+    /// # Errors
+    ///
+    /// [`AuthorityError`] when the authority cannot answer. A crash hook
+    /// stopping at a [`CrashPoint::TOOL`] point poisons the store, as a crash
+    /// would.
+    pub fn tool_invoke(
+        &mut self,
+        caller: &CallerContext,
+        session: &SessionId,
+        run: &RunId,
+        epoch: Epoch,
+        call: &FsReadCall,
+    ) -> Result<ToolReply, AuthorityError> {
+        let shared = Arc::clone(&self.shared);
+        let active = shared.active()?;
+        let operation = ToolOperation::ToolInvoke;
+        let resolved = match self.resolve_call(caller, operation, session, run, epoch, call)? {
+            Ok(resolved) => resolved,
+            Err(reason) => return Ok(ToolReply::Refused(operation, reason)),
+        };
+        let decided = self.transact(|work| {
+            tool::decide(
+                work,
+                caller,
+                operation,
+                session,
+                run,
+                epoch,
+                call.max_bytes,
+                &resolved,
+                active,
+            )
+        })?;
+        let (decision, invocation) = match decided {
+            tool::Decided::Refused(reason) => return Ok(ToolReply::Refused(operation, reason)),
+            tool::Decided::Denied(decision) => return Ok(ToolReply::Denied(decision)),
+            tool::Decided::Previewed(_) => {
+                return Err(AuthorityError::Invariant(
+                    "an invocation was answered as a preview",
+                ));
+            }
+            tool::Decided::Authorised {
+                decision,
+                invocation,
+            } => (decision, invocation),
+        };
+        // The intent is committed and its audit record fsynced. Until here
+        // nothing was open for reading: the resolver holds `O_PATH` handles.
+        shared.crash(CrashPoint::ToolAfterIntent)?;
+
+        // Only now: open the checked object for reading, relative to its
+        // retained parent, and prove it is the object resolved.
+        let handoff = match resolved.into_read_handoff() {
+            Ok(handoff) => handoff,
+            Err(error) => {
+                let reason =
+                    self.transact(|work| tool::record_open_failure(work, run, &invocation, error))?;
+                return Ok(ToolReply::Failed { invocation, reason });
+            }
+        };
+        shared.crash(CrashPoint::ToolAfterOpen)?;
+
+        // No transaction is open; the broker is told nothing the intent
+        // record does not already hold.
+        let order = FsReadOrder::new(invocation.clone(), decision.max_bytes(), handoff);
+        let outcome = if let Some(broker) = &shared.broker {
+            broker.fs_read(order)
+        } else {
+            drop(order);
+            Err(BrokerFailure::NotConfigured)
+        };
+        // Whatever carried it, a delivery longer than the bound both gates
+        // decided on is not a result: it is never recorded as one, never
+        // taints, never reaches the runtime.
+        let bound = usize::try_from(decision.max_bytes().get()).unwrap_or(usize::MAX);
+        let outcome = outcome.and_then(|delivery| {
+            if delivery.content.len() > bound {
+                Err(BrokerFailure::Protocol(
+                    "the broker returned more than was authorised",
+                ))
+            } else {
+                Ok(delivery)
+            }
+        });
+        shared.crash(CrashPoint::ToolAfterBroker)?;
+
+        self.transact(|work| tool::record_outcome(work, run, &invocation, &outcome))?;
+        shared.crash(CrashPoint::ToolAfterOutcome)?;
+        Ok(match outcome {
+            Ok(delivery) => ToolReply::Done {
+                invocation,
+                decision,
+                delivery,
+            },
+            Err(failure) => ToolReply::Failed {
+                invocation,
+                reason: tool::failure_reason(failure),
+            },
+        })
+    }
+
+    /// `CanonicalPreview` for one `fs.read` (M4b, ADR-0043): the same locate,
+    /// resolution and gates as [`Authority::tool_invoke`] — so a preview names
+    /// exactly the action an invocation would decide on — stopping there. No
+    /// invocation id, no intent, nothing opened for reading, no broker.
+    ///
+    /// # Errors
+    ///
+    /// [`AuthorityError`] when the authority cannot answer.
+    pub fn tool_preview(
+        &mut self,
+        caller: &CallerContext,
+        session: &SessionId,
+        run: &RunId,
+        epoch: Epoch,
+        call: &FsReadCall,
+    ) -> Result<ToolReply, AuthorityError> {
+        let shared = Arc::clone(&self.shared);
+        let active = shared.active()?;
+        let operation = ToolOperation::CanonicalPreview;
+        let resolved = match self.resolve_call(caller, operation, session, run, epoch, call)? {
+            Ok(resolved) => resolved,
+            Err(reason) => return Ok(ToolReply::Refused(operation, reason)),
+        };
+        let decided = self.transact(|work| {
+            tool::decide(
+                work,
+                caller,
+                operation,
+                session,
+                run,
+                epoch,
+                call.max_bytes,
+                &resolved,
+                active,
+            )
+        })?;
+        // The resolved object's `O_PATH` handles close here, unread.
+        drop(resolved);
+        Ok(match decided {
+            tool::Decided::Refused(reason) => ToolReply::Refused(operation, reason),
+            tool::Decided::Previewed(decision) => ToolReply::Previewed(decision),
+            tool::Decided::Denied(_) | tool::Decided::Authorised { .. } => {
+                return Err(AuthorityError::Invariant(
+                    "a preview was answered as an invocation",
+                ));
+            }
+        })
+    }
+
+    /// Steps 1 and 2 of a tool call: locate it (one transaction), then resolve
+    /// its path beneath the run's pinned root with **no transaction open** —
+    /// `O_PATH` descriptors only; nothing is opened for reading. A refusal at
+    /// either step is recorded and returned.
+    fn resolve_call(
+        &mut self,
+        caller: &CallerContext,
+        operation: ToolOperation,
+        session: &SessionId,
+        run: &RunId,
+        epoch: Epoch,
+        call: &FsReadCall,
+    ) -> Result<Result<ResolvedResource, ToolRefusalReason>, AuthorityError> {
+        let shared = Arc::clone(&self.shared);
+        let active = shared.active()?;
+        let located = self.transact(|work| {
+            tool::locate(work, caller, operation, session, run, epoch, call, active)
+        })?;
+        let (declared, binding) = match located {
+            tool::Located::Refused(reason) => return Ok(Err(reason)),
+            tool::Located::At { declared, binding } => (declared, binding),
+        };
+        match resolve_file(&binding, &declared) {
+            Ok(resolved) => Ok(Ok(resolved)),
+            Err(reason) => {
+                self.transact(|work| {
+                    tool::refuse(work, caller, operation, session, run, epoch, reason)
+                })?;
+                Ok(Err(reason))
+            }
+        }
+    }
+
     /// Answer one decoded DWKP request with the response body the M3e server
     /// sends.
     ///
@@ -962,6 +1203,20 @@ impl Authority {
                     Reply::Refused(reason) => refused(RefusedOperation::QueryAuthority, reason),
                 }
             }
+            DwkpBody::ToolInvoke(invoke) => {
+                let session = session.ok_or_else(missing)?;
+                let run = header.run_id.as_ref().ok_or_else(missing)?;
+                let epoch = header.epoch.ok_or_else(missing)?;
+                let reply = self.tool_invoke(caller, session, run, epoch, &invoke.fs_read)?;
+                wire::tool_reply(&reply).map_err(unrepresentable)
+            }
+            DwkpBody::CanonicalPreview(preview) => {
+                let session = session.ok_or_else(missing)?;
+                let run = header.run_id.as_ref().ok_or_else(missing)?;
+                let epoch = header.epoch.ok_or_else(missing)?;
+                let reply = self.tool_preview(caller, session, run, epoch, &preview.fs_read)?;
+                wire::tool_reply(&reply).map_err(unrepresentable)
+            }
             _ => Err(AuthorityError::NotAnAuthorityRequest),
         }
     }
@@ -989,6 +1244,20 @@ impl Authority {
     pub fn operator(&mut self) -> OperatorBootstrap<'_> {
         OperatorBootstrap { authority: self }
     }
+}
+
+/// Pin the run's root and resolve the call's path beneath it with the M4a
+/// resolver: the object must exist as a regular file. `O_PATH` descriptors
+/// only — nothing is opened for reading here.
+fn resolve_file(
+    binding: &config::RootBinding,
+    declared: &crate::capability::DeclaredPath,
+) -> Result<ResolvedResource, ToolRefusalReason> {
+    use crate::resource::fs::{Access, Expect, PinnedRoot};
+    PinnedRoot::reopen(&binding.host_path, &binding.fingerprint)
+        .map_err(tool::root_refusal)?
+        .resolve(declared, Access::Observe, Expect::RegularFile)
+        .map_err(tool::resolve_refusal)
 }
 
 /// Installs kernel-owned configuration: agent profiles, skills, workspaces and

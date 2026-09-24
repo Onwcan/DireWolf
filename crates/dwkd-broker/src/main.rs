@@ -9,74 +9,173 @@
 //! and containers — and **no long-lived key** ([ADR-0018]).
 //!
 //! It receives a *per-invocation authorisation* from `dwkd-authority`: one
-//! canonical action, an obligation set, and where one was granted, a one-shot
-//! secret injection. It performs exactly that.
+//! canonical action and what it needs to perform it. It performs exactly that.
 //!
 //! # What this process must never acquire
 //!
 //! It cannot mint a capability, create or match an approval, widen authority,
 //! evaluate policy, read `kernel.db` or the keychain, or write `audit.log`. It
 //! has no code for any of those and must never grow any: the boundary is
-//! asymmetric on purpose — compromising the broker yields the current
-//! invocation, compromising authority yields everything.
+//! asymmetric on purpose. Compromising the broker yields what the broker
+//! process can do with its own identity and the descriptors it is handed while
+//! it is compromised — which, in M4b, is reading files the authority has
+//! already authorised and opened — not the authority's decisions or records
+//! (ADR-0043 narrows ADR-0018's "the current invocation" to exactly this).
 //!
 //! There is no DWKP endpoint here. The broker is not addressable from the
-//! Cognition Plane at all.
+//! Cognition Plane: it reads only from a peer the kernel reports as the
+//! authority's uid, and it speaks only the private protocol
+//! ([`dwk_proto::brokerp`]), which no cognition-side code can name.
 //!
-//! By contrast, this crate is *expected* to carry the large dependencies
-//! authority must not: a container client, an HTTP/TLS stack, content parsers.
-//! That is the point of the split.
+//! # Status: M4b — one effect, `fs.read`
 //!
-//! # Status: not implemented
-//!
-//! M1 is the repository foundation. This crate exists so that the boundary
-//! between deciding and doing is a package boundary from the first commit. The
-//! filesystem, exec and secret brokers arrive at **M4**; the sandbox and egress
-//! proxy at **M5**.
+//! [ADR-0043]: one private Unix-domain listener (`listener`), one exchange per
+//! connection (`exchange`): a hello naming a fresh channel, one authorisation
+//! with exactly one descriptor for the file the authority checked and opened,
+//! identity and mode re-verified, at most `max_bytes` read from offset zero,
+//! one outcome. Linux only. `fs.write` and the other filesystem tools arrive at
+//! M4c, exec at M4d, secrets at M4e, the sandbox and egress at M5.
 //!
 //! [ADR-0018]: ../../../docs/adr/0018-authority-broker-split.md
+//! [ADR-0043]: ../../../docs/adr/0043-m4b-private-broker-channel-and-brokered-fs-read.md
 
 // Pedantic lints on the security crates, per docs/LANGUAGE_SELECTION.md §7.
 #![warn(clippy::pedantic)]
 
+mod config;
+#[cfg(target_os = "linux")]
+mod exchange;
+// Off Linux the broker does not serve, so nothing names the wire types; the
+// manifest edge is acknowledged here for `unused_crate_dependencies`.
+#[cfg(not(target_os = "linux"))]
+use dwk_proto as _;
+#[cfg(target_os = "linux")]
+mod listener;
+#[cfg(target_os = "linux")]
+mod nonce;
+
 use std::process::ExitCode;
+
+use config::Command;
 
 const NAME: &str = "dwkd-broker";
 
+/// One line of operator-facing text on stderr.
+fn log(text: &str) {
+    eprintln!("{NAME}: {text}");
+}
+
+/// One event line on stderr: what happened to a connection. Carries ids and
+/// counts, never file content.
+#[cfg(target_os = "linux")]
+fn event(text: &str) {
+    eprintln!("{NAME}: event={text}");
+}
+
 fn main() -> ExitCode {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    match args.first().map(String::as_str) {
-        Some("-V" | "--version") => {
+    let mut args = Vec::new();
+    for arg in std::env::args_os().skip(1) {
+        let Ok(arg) = arg.into_string() else {
+            log("arguments must be UTF-8");
+            return ExitCode::from(2);
+        };
+        args.push(arg);
+    }
+    match config::parse(&args) {
+        Ok(Command::Version) => {
             println!("{NAME} {}", env!("CARGO_PKG_VERSION"));
             ExitCode::SUCCESS
         }
-        Some("-h" | "--help") => {
+        Ok(Command::Help) => {
             print!("{}", help());
             ExitCode::SUCCESS
         }
-        _ => {
+        Ok(Command::Serve(serve_config)) => serve(&serve_config),
+        Err(error) => {
+            log(&error.to_string());
             eprint!("{}", help());
-            eprintln!();
-            eprintln!("{NAME} is not implemented. The filesystem, exec and secret brokers");
-            eprintln!("arrive at M4; the sandbox supervisor and egress proxy at M5.");
-            eprintln!("See docs/ROADMAP.md and docs/adr/0018-authority-broker-split.md.");
-            ExitCode::FAILURE
+            ExitCode::from(2)
         }
     }
+}
+
+#[cfg(target_os = "linux")]
+fn serve(config: &config::ServeConfig) -> ExitCode {
+    let (place, own_uid) = match listener::prepare(&config.socket) {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            log(&format!("cannot serve: {error}"));
+            return ExitCode::FAILURE;
+        }
+    };
+    if own_uid == 0 {
+        log(
+            "refusing to run as root: the broker is its own unprivileged identity, and a root \
+             broker would hold every file on the machine instead of only the ones it is handed",
+        );
+        return ExitCode::FAILURE;
+    }
+    if own_uid == config.authority_uid {
+        if !config.shared_uid_permitted {
+            log(&format!(
+                "the authority uid {} is the broker's own; run the broker as its own user, or \
+                 pass --allow-shared-authority-uid for development",
+                config.authority_uid
+            ));
+            return ExitCode::FAILURE;
+        }
+        log(&format!(
+            "REDUCED ASSURANCE: the broker shares uid {own_uid} with the authority \
+             (--allow-shared-authority-uid)"
+        ));
+    }
+    let bound = match listener::bind(&place) {
+        Ok(bound) => bound,
+        Err(error) => {
+            log(&format!("cannot serve: {error}"));
+            return ExitCode::FAILURE;
+        }
+    };
+    println!(
+        "{NAME}: serving the private broker channel at {} as uid {own_uid} for authority uid {} \
+         (pid {})",
+        place.path().display(),
+        config.authority_uid,
+        std::process::id()
+    );
+    let mut channels = nonce::Channels::new();
+    listener::serve(&bound, config.authority_uid, &mut channels);
+    ExitCode::SUCCESS
+}
+
+#[cfg(not(target_os = "linux"))]
+fn serve(_config: &config::ServeConfig) -> ExitCode {
+    log(
+        "the private broker channel runs only on Linux (ADR-0043): it needs SO_PEERCRED, \
+         SCM_RIGHTS and the authority's Linux resolver",
+    );
+    ExitCode::FAILURE
 }
 
 fn help() -> String {
     format!(
         "{NAME} {} - the DireWolf execution broker (does)\n\
          \n\
-         Performs filesystem, exec, sandbox and egress operations under a\n\
-         per-invocation authorisation from dwkd-authority. Decides nothing.\n\
-         Not addressable from the cognition plane.\n\
+         Performs exactly the effect dwkd-authority authorised, on the object\n\
+         dwkd-authority opened. Decides nothing. Reads only from the authority's\n\
+         uid; not addressable from the cognition plane.\n\
          \n\
          USAGE:\n    \
+             {NAME} serve --socket <PATH> --authority-uid <UID> [--allow-shared-authority-uid]\n    \
              {NAME} [-V | --version] [-h | --help]\n\
          \n\
-         STATUS: not implemented; arrives at milestones M4 and M5.\n",
+         OPTIONS:\n    \
+             --socket <PATH>                 absolute path of the private socket\n    \
+             --authority-uid <UID>           the only uid the broker reads from\n    \
+             --allow-shared-authority-uid    permit the authority to be the broker's own uid (development only)\n\
+         \n\
+         STATUS: M4b - fs.read only, Linux only. fs.write and the other filesystem\n\
+         tools arrive at M4c, exec at M4d, secrets at M4e, the sandbox at M5.\n",
         env!("CARGO_PKG_VERSION")
     )
 }
@@ -86,11 +185,12 @@ mod tests {
     use super::{NAME, help};
 
     #[test]
-    fn help_names_the_component_and_its_milestones() {
+    fn help_names_the_component_its_one_effect_and_what_comes_later() {
         let h = help();
         assert!(h.contains(NAME));
-        assert!(h.contains("M4") && h.contains("M5"));
-        assert!(h.contains("not implemented"));
+        assert!(h.contains("fs.read only"));
+        assert!(h.contains("M4c") && h.contains("M5"));
+        assert!(h.contains("--authority-uid"));
     }
 
     /// The broker's defining property, asserted as a test so that a future
