@@ -31,6 +31,11 @@ pub(crate) struct ServeConfig {
     /// own uid — one user, for development. Reduced assurance, stated at
     /// start-up; never implied.
     pub(crate) shared_uid_permitted: bool,
+    /// The operator's acknowledgement that the process may stay dumpable
+    /// (M4e): its memory readable by other processes of its uid, for a
+    /// development harness that reads its `/proc`. Reduced assurance, stated
+    /// at start-up; never implied. `RLIMIT_CORE` is 0 either way.
+    pub(crate) dumpable_permitted: bool,
 }
 
 /// A command line that does not describe a configuration.
@@ -93,6 +98,7 @@ pub(crate) fn parse(args: &[String]) -> Result<Command, UsageError> {
     let mut socket: Option<PathBuf> = None;
     let mut authority_uid: Option<u32> = None;
     let mut shared = false;
+    let mut dumpable = false;
     while let Some(flag) = rest.next() {
         let mut value = || {
             rest.next()
@@ -119,6 +125,12 @@ pub(crate) fn parse(args: &[String]) -> Result<Command, UsageError> {
                 }
                 shared = true;
             }
+            "--allow-dumpable" => {
+                if dumpable {
+                    return Err(UsageError::new("--allow-dumpable is given more than once"));
+                }
+                dumpable = true;
+            }
             other => {
                 return Err(UsageError::new(format!("unknown flag {}", bounded(other))));
             }
@@ -139,6 +151,7 @@ pub(crate) fn parse(args: &[String]) -> Result<Command, UsageError> {
         socket,
         authority_uid,
         shared_uid_permitted: shared,
+        dumpable_permitted: dumpable,
     }))
 }
 
@@ -184,6 +197,7 @@ mod tests {
                 socket: PathBuf::from(socket()),
                 authority_uid: 1001,
                 shared_uid_permitted: false,
+                dumpable_permitted: false,
             }))
         );
         for bad in [

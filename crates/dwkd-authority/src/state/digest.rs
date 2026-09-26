@@ -47,6 +47,8 @@ pub(crate) const SKILL: &str = "direwolf.config.skill.v1";
 pub(crate) const CEILING: &str = "direwolf.config.ceiling.v1";
 /// A store's own identity, fixed at creation.
 pub(crate) const STORE_ID: &str = "direwolf.store.id.v1";
+/// A secret's canonical, non-secret metadata (M4e): what a revision records.
+pub(crate) const SECRET_METADATA: &str = "direwolf.secret.metadata.v1";
 /// The bytes an `fs.read` returned, recorded in its outcome so an auditor can
 /// check what was delivered without the audit log holding the content (M4b).
 pub(crate) const TOOL_CONTENT: &str = "direwolf.tool.fs_read.content.v1";

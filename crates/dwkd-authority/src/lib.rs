@@ -36,6 +36,12 @@
 //! path, the opened object's identity and the checked descriptor; or refused
 //! ([ADR-0042]). The state layer calls it; nothing else may (TX011).
 //!
+//! [`secret`] (M4e): opaque handles and their metadata, the keychain and age
+//! backends, bounded zeroizing material, the one-shot pipe that hands a value
+//! to the broker, and return-path redaction ([ADR-0046]). No API returns a
+//! value (TX027), and each backend crate is named in its backend's file alone
+//! (TX025).
+//!
 //! # What is not here
 //!
 //! No brokered effect (M4b+), no `ToolInvoke` or `CanonicalPreview` (reserved
@@ -59,6 +65,7 @@
 //! [ADR-0039]: ../../../docs/adr/0039-durable-authority-state.md
 //! [ADR-0041]: ../../../docs/adr/0041-m3e-authenticated-dwkp-transport.md
 //! [ADR-0042]: ../../../docs/adr/0042-m4a-canonical-filesystem-resolution.md
+//! [ADR-0046]: ../../../docs/adr/0046-m4e-secret-handles-backends-injection-and-redaction.md
 
 // Pedantic lints on the security crates, per docs/LANGUAGE_SELECTION.md §7.
 #![warn(clippy::pedantic)]
@@ -67,6 +74,7 @@ pub mod broker;
 pub mod capability;
 pub mod policy;
 pub mod resource;
+pub mod secret;
 pub mod server;
 pub mod state;
 

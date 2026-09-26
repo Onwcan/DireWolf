@@ -51,7 +51,6 @@
 use std::path::Path;
 use std::process::ExitCode;
 
-use dwkd_authority::capability::Verb;
 use dwkd_authority::server::{self, SERVE_USAGE, ServeError, Stopped};
 use dwkd_authority::state::{AUDIT_LOG, KERNEL_DB, verify_audit_against_store, verify_audit_log};
 
@@ -66,6 +65,15 @@ use rustix as _;
 use sha2 as _;
 use toml as _;
 use unicode_normalization as _;
+// M4e's secret crates (ADR-0046), reached only through the library.
+use age as _;
+use getrandom as _;
+use hmac as _;
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+use keyring as _;
+#[cfg(target_os = "linux")]
+use linux_keyutils as _;
+use zeroize as _;
 
 // Dev-only, and the binary's test target inherits the manifest edge without
 // using it. Acknowledged rather than silenced with an `#[allow]`.
@@ -176,14 +184,12 @@ fn help() -> String {
          \n\
          SERVE FLAGS:\n{SERVE_USAGE}\
          \n\
-         STATUS: milestone M3. `serve` answers the six M3 authority requests over DWKP to\n\
-         peers whose kernel-reported uid the operator listed: one fresh lease holder per\n\
-         connection, handshake first. On macOS and Windows it refuses to start.\n\
-         Linked: the capability vocabulary ({verbs} verbs, M3b), the policy engine (M3c)\n\
-         and the durable authority state (M3d). Not yet: tool execution, canonical\n\
-         resources and CanonicalPreview (M4), approvals (M6), model providers (M7).\n",
-        env!("CARGO_PKG_VERSION"),
-        verbs = Verb::ALL.len()
+         `serve` answers DWKP requests from peers whose kernel-reported uid the\n\
+         operator listed: one fresh lease holder per connection, handshake first.\n\
+         On macOS and Windows it refuses to start.\n\
+         \n\
+         See docs/ROADMAP.md for the current milestone and implementation status.\n",
+        env!("CARGO_PKG_VERSION")
     )
 }
 
@@ -195,7 +201,16 @@ mod tests {
     fn help_names_the_component_and_what_it_does_now() {
         let h = help();
         assert!(h.contains(NAME));
-        assert!(h.contains("M3"), "help must name the milestone");
+        // No hard-coded milestone: it goes stale the day a milestone is
+        // accepted. The roadmap is where status lives.
+        assert!(
+            !h.contains("STATUS") && !h.contains("milestone M"),
+            "help must not hard-code a milestone"
+        );
+        assert!(
+            h.contains("docs/ROADMAP.md"),
+            "help must point at the roadmap for status"
+        );
         assert!(
             h.contains("serve"),
             "help must describe the server that exists"

@@ -129,6 +129,15 @@ pub struct ServeConfig {
     pub lease_ttl_ms: u64,
     /// The broker channel, if this authority performs effects.
     pub broker: Option<BrokerConfig>,
+    /// The operator's secret metadata file (M4e), if any secrets are
+    /// configured: handles and where their values live, never a value.
+    pub secrets_file: Option<PathBuf>,
+    /// The operator's acknowledgement that the process may stay dumpable
+    /// (M4e, ADR-0046 §9): its memory readable by other processes of its uid,
+    /// for a development harness that counts its descriptors. Reduced
+    /// assurance, stated at start-up; never implied. `RLIMIT_CORE` is 0
+    /// either way.
+    pub dumpable_permitted: bool,
 }
 
 /// A command line that does not describe a configuration.
@@ -165,6 +174,8 @@ pub const SERVE_USAGE: &str = "\
     --broker-socket <PATH>     absolute path of the broker's private socket (with --broker-uid)
     --broker-uid <UID>         the uid the kernel must report for the broker (with --broker-socket)
     --allow-shared-broker-uid  permit a broker uid that is the authority's or a peer's (development only)
+    --secrets-file <PATH>      the operator's secret metadata (absolute; handles, never values)
+    --allow-dumpable           leave the process dumpable, its memory readable by its uid (development only)
 ";
 
 /// Parse the arguments after `serve`.
@@ -198,6 +209,8 @@ struct Parsed {
     broker_socket: Option<PathBuf>,
     broker_uid: Option<u32>,
     shared_broker_uid: bool,
+    secrets_file: Option<PathBuf>,
+    dumpable: bool,
 }
 
 impl Parsed {
@@ -253,6 +266,8 @@ impl Parsed {
                 once(&mut self.broker_uid, flag, uid)
             }
             "--allow-shared-broker-uid" => switch(&mut self.shared_broker_uid, flag),
+            "--secrets-file" => once(&mut self.secrets_file, flag, PathBuf::from(value()?)),
+            "--allow-dumpable" => switch(&mut self.dumpable, flag),
             other => Err(UsageError::new(format!(
                 "unknown serve argument {}",
                 bounded(other)
@@ -337,7 +352,14 @@ impl Parsed {
                 ));
             }
         };
+        if let Some(path) = &self.secrets_file
+            && !path.is_absolute()
+        {
+            return Err(UsageError::new("--secrets-file must be an absolute path"));
+        }
         Ok(ServeConfig {
+            secrets_file: self.secrets_file,
+            dumpable_permitted: self.dumpable,
             state_dir,
             socket,
             peers: PeerPolicy::new(self.uids, self.authority_uid_permitted),

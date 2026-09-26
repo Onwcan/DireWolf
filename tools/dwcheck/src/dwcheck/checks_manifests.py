@@ -264,19 +264,35 @@ def check_lockfile_closure(config: ArchitectureConfig) -> list[Finding]:
     if not isinstance(packages, list):
         return []
 
-    edges: dict[str, list[str]] = {}
+    # Nodes are (name, version): a lockfile may hold two versions of one
+    # crate, and their dependencies are their own. M4e found the name-keyed
+    # graph attributing `getrandom 0.3`'s dependencies (pulled in by a
+    # dev-dependency) to the authority's `getrandom 0.2`. A dependency entry
+    # is "name" when the lockfile holds one version of it, and "name version"
+    # or "name version (source)" when it holds several; an entry that still
+    # names an ambiguous crate reaches every version -- a finding, never a
+    # silent drop.
+    versions: dict[str, list[str]] = {}
+    for entry in packages:
+        if isinstance(entry, dict) and isinstance(entry.get("name"), str):
+            versions.setdefault(entry["name"], []).append(str(entry.get("version", "")))
+
+    def resolve(dependency: str) -> list[tuple[str, str]]:
+        parts = dependency.split(" ")
+        name = parts[0]
+        if len(parts) >= 2:
+            return [(name, parts[1])]
+        return [(name, version) for version in versions.get(name, [])]
+
+    edges: dict[tuple[str, str], list[tuple[str, str]]] = {}
     for entry in packages:
         if not isinstance(entry, dict):
             continue
         name = entry.get("name")
         deps = entry.get("dependencies", [])
         if isinstance(name, str):
-            edges[name] = [
-                # Lock entries may be "name", "name version" or
-                # "name version (source)"; the name is the first token.
-                d.split(" ", 1)[0]
-                for d in deps
-                if isinstance(d, str)
+            edges[(name, str(entry.get("version", "")))] = [
+                node for d in deps if isinstance(d, str) for node in resolve(d)
             ]
 
     # Cargo.lock does not say which edges are dev-dependencies. For in-tree
@@ -285,8 +301,8 @@ def check_lockfile_closure(config: ArchitectureConfig) -> list[Finding]:
     # kept, so a missing manifest errs towards a finding. Registry packages'
     # lock entries never include their own dev-dependencies.
     for name, dev_only in _dev_only_dependencies(config).items():
-        if name in edges:
-            edges[name] = [d for d in edges[name] if d not in dev_only]
+        for node in [n for n in edges if n[0] == name]:
+            edges[node] = [d for d in edges[node] if d[0] not in dev_only]
 
     # Optional edges this workspace does not enable. Each one is reviewed and
     # named in architecture.toml; an optional dependency that is NOT named
@@ -294,7 +310,7 @@ def check_lockfile_closure(config: ArchitectureConfig) -> list[Finding]:
     excluded = {(e.parent, e.child) for e in config.authority_optional_edges}
     if excluded:
         edges = {
-            parent: [child for child in children if (parent, child) not in excluded]
+            parent: [child for child in children if (parent[0], child[0]) not in excluded]
             for parent, children in edges.items()
         }
 
@@ -311,9 +327,13 @@ def check_lockfile_closure(config: ArchitectureConfig) -> list[Finding]:
     )
     findings: list[Finding] = []
     for crate in config.authority_crates:
-        if crate not in edges:
+        roots = [node for node in edges if node[0] == crate]
+        if not roots:
             continue
-        for dependency in sorted(_closure(crate, edges) - {crate}):
+        reached: set[str] = set()
+        for node in roots:
+            reached |= {name for name, _ in _closure(node, edges)}
+        for dependency in sorted(reached - {crate}):
             if dependency in allowed:
                 continue
             findings.append(
@@ -360,8 +380,9 @@ def _dev_only_dependencies(config: ArchitectureConfig) -> dict[str, set[str]]:
     return out
 
 
-def _closure(root: str, edges: dict[str, list[str]]) -> set[str]:
-    seen: set[str] = set()
+def _closure[Node](root: Node, edges: dict[Node, list[Node]]) -> set[Node]:
+    """Everything reachable from `root`: crate names, or (name, version) nodes."""
+    seen: set[Node] = set()
     stack = [root]
     while stack:
         current = stack.pop()

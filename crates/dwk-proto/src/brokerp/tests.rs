@@ -175,23 +175,25 @@ fn an_outcome_carries_exactly_one_answer() {
     let mut both = BrokerOutcome::new(channel(), invocation(), OutcomeResult::done(done));
     both.refused = Some(BrokerRefusal::ReadFailed);
     assert!(encode_frame(&both).is_err());
-    let none = r#"{"channel":"0123456789abcdef0123456789abcdef","invocation_id":"inv_01M24BB8G3E0A851TRWE3M8FZF","kind":"broker.outcome","protocol":3}"#;
+    let none = r#"{"channel":"0123456789abcdef0123456789abcdef","invocation_id":"inv_01M24BB8G3E0A851TRWE3M8FZF","kind":"broker.outcome","protocol":4}"#;
     assert!(BrokerOutcome::decode_frame_body(none.as_bytes()).is_err());
     // A done names exactly one operation.
-    let two = r#"{"channel":"0123456789abcdef0123456789abcdef","done":{"fs_move":{},"fs_delete":{"debris":false}},"invocation_id":"inv_01M24BB8G3E0A851TRWE3M8FZF","kind":"broker.outcome","protocol":3}"#;
+    let two = r#"{"channel":"0123456789abcdef0123456789abcdef","done":{"fs_move":{},"fs_delete":{"debris":false}},"invocation_id":"inv_01M24BB8G3E0A851TRWE3M8FZF","kind":"broker.outcome","protocol":4}"#;
     assert!(BrokerOutcome::decode_frame_body(two.as_bytes()).is_err());
 }
 
 #[test]
 fn unknown_members_old_versions_and_second_spellings_are_refused() {
     for text in [
-        r#"{"channel":"0123456789abcdef0123456789abcdef","kind":"broker.hello","protocol":3,"extra":1}"#,
-        r#"{"channel":"0123456789ABCDEF0123456789ABCDEF","kind":"broker.hello","protocol":3}"#,
-        // Versions 1 and 2 are not half-understood (ADR-0045 made it 3).
+        r#"{"channel":"0123456789abcdef0123456789abcdef","kind":"broker.hello","protocol":4,"extra":1}"#,
+        r#"{"channel":"0123456789ABCDEF0123456789ABCDEF","kind":"broker.hello","protocol":4}"#,
+        // Versions 1 to 3 are not half-understood (ADR-0046 made it 4), and
+        // a later one is not guessed at.
         r#"{"channel":"0123456789abcdef0123456789abcdef","kind":"broker.hello","protocol":1}"#,
         r#"{"channel":"0123456789abcdef0123456789abcdef","kind":"broker.hello","protocol":2}"#,
-        r#"{"channel":"0123456789abcdef0123456789abcdef","kind":"broker.hello","protocol":4}"#,
-        r#"{"channel":"0123456789abcdef0123456789abcdef","kind":"broker.hello","kind":"broker.hello","protocol":3}"#,
+        r#"{"channel":"0123456789abcdef0123456789abcdef","kind":"broker.hello","protocol":3}"#,
+        r#"{"channel":"0123456789abcdef0123456789abcdef","kind":"broker.hello","protocol":5}"#,
+        r#"{"channel":"0123456789abcdef0123456789abcdef","kind":"broker.hello","kind":"broker.hello","protocol":4}"#,
     ] {
         assert!(
             BrokerHello::decode_frame_body(text.as_bytes()).is_err(),
@@ -199,7 +201,7 @@ fn unknown_members_old_versions_and_second_spellings_are_refused() {
         );
     }
     // An unknown kind is not an authorisation.
-    let unknown = r#"{"kind":"broker.fs_chmod","protocol":3}"#;
+    let unknown = r#"{"kind":"broker.fs_chmod","protocol":4}"#;
     assert!(Authorisation::decode_frame_body(unknown.as_bytes()).is_err());
     for (text, ok) in [
         ("0", true),
@@ -435,4 +437,215 @@ fn a_process_result_names_exactly_one_operation() {
         let decoded = BrokerOutcome::decode_frame_body(&bytes).map(|o| o.result());
         assert!(matches!(decoded, Ok(OutcomeResult::Done(ref d)) if d.kind() == kind));
     }
+}
+
+// ---------------------------------------------------------------------------
+// Version 4: the secret primitives (ADR-0046).
+// ---------------------------------------------------------------------------
+
+fn egress_spec() -> super::EgressSpec {
+    super::EgressSpec {
+        handle: super::SecretHandle::new("github-primary").unwrap_or_else(|| unreachable!()),
+        origin: super::SecretOrigin::new("api.github.com:443").unwrap_or_else(|| unreachable!()),
+        header_name: super::SecretHeaderName::new("Authorization")
+            .unwrap_or_else(|| unreachable!()),
+        header_prefix: super::SecretHeaderPrefix::new("Bearer "),
+    }
+}
+
+fn spawn_secret(delivery: super::SecretDelivery, env: Option<&str>) -> super::SpawnSecret {
+    super::SpawnSecret {
+        handle: super::SecretHandle::new("deploy-key").unwrap_or_else(|| unreachable!()),
+        delivery,
+        env_name: env.map(|name| super::SecretEnvName::new(name).unwrap_or_else(|| unreachable!())),
+    }
+}
+
+#[test]
+fn the_secret_operations_round_trip_and_carry_the_value_in_a_descriptor_only() {
+    use super::{SecretDelivery, SecretEgressAuthorisation, SecretProcessStartAuthorisation};
+    for (authorisation, kind, count) in [
+        (
+            Authorisation::SecretEgress(SecretEgressAuthorisation::new(common(), egress_spec())),
+            PrivateKind::SecretEgress,
+            1,
+        ),
+        (
+            Authorisation::SecretProcessStart(SecretProcessStartAuthorisation::new(
+                common(),
+                spec(&["fetch"]),
+                spawn_secret(SecretDelivery::FdAtSpawn, None),
+            )),
+            PrivateKind::SecretProcessStart,
+            3,
+        ),
+        (
+            Authorisation::SecretProcessStart(SecretProcessStartAuthorisation::new(
+                common(),
+                spec(&[]),
+                spawn_secret(SecretDelivery::EnvAtSpawn, Some("DEPLOY_TOKEN")),
+            )),
+            PrivateKind::SecretProcessStart,
+            3,
+        ),
+    ] {
+        let bytes = body(&authorisation.encode_frame().unwrap_or_default());
+        let decoded = Authorisation::decode_frame_body(&bytes);
+        assert_eq!(decoded.as_ref().map(Authorisation::kind), Ok(kind));
+        assert_eq!(
+            decoded.as_ref().map(Authorisation::declared_descriptors),
+            Ok(count)
+        );
+        assert_eq!(kind.descriptors(), Some(count));
+        assert_eq!(decoded, Ok(authorisation));
+    }
+    // A member for the value, its length or a mode is not part of the
+    // language: the strict decoder refuses each.
+    let egress = String::from_utf8(body(
+        &Authorisation::SecretEgress(SecretEgressAuthorisation::new(common(), egress_spec()))
+            .encode_frame()
+            .unwrap_or_default(),
+    ))
+    .unwrap_or_default();
+    for extra in [
+        r#""value":"x","#,
+        r#""secret_bytes":1,"#,
+        r#""injection_mode":"env","#,
+    ] {
+        let tampered = egress.replacen('{', &format!("{{{extra}"), 1);
+        assert!(
+            Authorisation::decode_frame_body(tampered.as_bytes()).is_err(),
+            "{extra}"
+        );
+    }
+}
+
+#[test]
+fn a_secret_launch_names_a_variable_exactly_for_the_environment_mode() {
+    use super::{DescriptorCount, SecretDelivery, SecretProcessStartAuthorisation};
+    let env_without_name = SecretProcessStartAuthorisation::new(
+        common(),
+        spec(&[]),
+        spawn_secret(SecretDelivery::EnvAtSpawn, None),
+    );
+    assert!(
+        Authorisation::SecretProcessStart(env_without_name)
+            .encode_frame()
+            .is_err()
+    );
+    let fd_with_name = SecretProcessStartAuthorisation::new(
+        common(),
+        spec(&[]),
+        spawn_secret(SecretDelivery::FdAtSpawn, Some("DEPLOY_TOKEN")),
+    );
+    assert!(
+        Authorisation::SecretProcessStart(fd_with_name)
+            .encode_frame()
+            .is_err()
+    );
+    // Three descriptors, never two: the launch without its secret is not
+    // this message.
+    let mut two = SecretProcessStartAuthorisation::new(
+        common(),
+        spec(&[]),
+        spawn_secret(SecretDelivery::FdAtSpawn, None),
+    );
+    two.descriptors = DescriptorCount::new(2).unwrap_or_else(|| unreachable!());
+    assert!(
+        Authorisation::SecretProcessStart(two)
+            .encode_frame()
+            .is_err()
+    );
+    // Its launch is exactly a `process_start`'s.
+    let start = SecretProcessStartAuthorisation::new(
+        common(),
+        spec(&["x"]),
+        spawn_secret(SecretDelivery::FdAtSpawn, None),
+    );
+    assert_eq!(
+        start.launch(),
+        super::ProcessStartAuthorisation::new(common(), spec(&["x"]))
+    );
+}
+
+#[test]
+fn the_secret_grammars_refuse_what_could_control_a_process_or_break_a_header() {
+    use super::{
+        SecretEnvName, SecretHandle, SecretHeaderName, SecretHeaderPrefix, SecretOrigin,
+        is_control_variable,
+    };
+    for name in [
+        "LD_PRELOAD",
+        "LD_LIBRARY_PATH",
+        "DYLD_INSERT_LIBRARIES",
+        "PYTHONPATH",
+        "RUSTC_WRAPPER",
+        "PATH",
+        "HOME",
+        "LANG",
+        "BASH_ENV",
+        "GIT_SSH_COMMAND",
+        "NODE_OPTIONS",
+        "GLIBC_TUNABLES",
+        "lower",
+        "1ABC",
+        "",
+        "A-B",
+    ] {
+        assert!(SecretEnvName::new(name).is_none(), "{name}");
+    }
+    assert!(is_control_variable("LD_AUDIT") && !is_control_variable("GITHUB_TOKEN"));
+    assert!(SecretEnvName::new("GITHUB_TOKEN").is_some());
+    let long = "a".repeat(65);
+    for bad in ["Author ization", "X:Y", "a\r\nb", "", long.as_str()] {
+        assert!(SecretHeaderName::new(bad).is_none(), "{bad:?}");
+    }
+    for bad in ["Bearer\r\n", "Bearer\n", "a\u{0}", "", "\u{e9}"] {
+        assert!(SecretHeaderPrefix::new(bad).is_none(), "{bad:?}");
+    }
+    for bad in [
+        "api.example.com",
+        "api.example.com:0",
+        "api.example.com:080",
+        "api.example.com:65536",
+        "user@api.example.com:443",
+        "API.example.com:443",
+        "api..example.com:443",
+        "https://api.example.com:443",
+        "api.example.com:443/x",
+        "-a.example.com:443",
+    ] {
+        assert!(SecretOrigin::new(bad).is_none(), "{bad}");
+    }
+    assert!(SecretOrigin::new("api.example.com:443").is_some());
+    for bad in ["Upper", "1x", "", "a/b", long.as_str()] {
+        assert!(SecretHandle::new(bad).is_none(), "{bad}");
+    }
+}
+
+#[test]
+fn a_secret_result_names_its_own_operation_and_says_nothing_of_the_value() {
+    use super::{ProcessStartDone, SecretEgressDone};
+    use crate::wire::scalar::ProcessState;
+    for done in [
+        BrokerDone::secret_egress(),
+        BrokerDone::secret_process_start(ProcessStartDone {
+            generation: generation(),
+            state: ProcessState::Running,
+            exit_code: None,
+            signal: None,
+        }),
+    ] {
+        let kind = done.kind();
+        let outcome = BrokerOutcome::new(channel(), invocation(), OutcomeResult::done(done));
+        let bytes = body(&encode_frame(&outcome).unwrap_or_default());
+        let decoded = BrokerOutcome::decode_frame_body(&bytes).map(|o| o.result());
+        assert!(matches!(decoded, Ok(OutcomeResult::Done(ref d)) if d.kind() == kind));
+    }
+    assert_eq!(
+        BrokerDone::secret_egress().secret_egress,
+        Some(SecretEgressDone {})
+    );
+    let text = r#"{"channel":"0123456789abcdef0123456789abcdef","done":{"secret_egress":{"length":8}},"invocation_id":"inv_01M24BB8G3E0A851TRWE3M8FZF","kind":"broker.outcome","protocol":4}"#;
+    assert!(BrokerOutcome::decode_frame_body(text.as_bytes()).is_err());
 }

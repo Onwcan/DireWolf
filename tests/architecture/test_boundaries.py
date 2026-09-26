@@ -706,11 +706,25 @@ def _tcb_linked_closure() -> set[str]:
     rules = tomllib.loads((REPO_ROOT / "architecture.toml").read_text(encoding="utf-8"))
     excluded = {(e["parent"], e["child"]) for e in rules["authority"].get("optional_edges", [])}
     lock = tomllib.loads((REPO_ROOT / "Cargo.lock").read_text(encoding="utf-8"))
+    # Keyed by (name, version): a lockfile may hold two versions of a crate
+    # whose dependencies differ, and one version's edges are not another's
+    # (M4e: getrandom 0.2 in the authority, 0.3 elsewhere).
+    versions: dict[str, list[str]] = {}
+    for package in lock.get("package", []):
+        versions.setdefault(str(package["name"]), []).append(str(package["version"]))
+
+    def resolve(dependency: str) -> list[tuple[str, str]]:
+        parts = dependency.split(" ")
+        if len(parts) >= 2:
+            return [(parts[0], parts[1])]
+        return [(parts[0], version) for version in versions.get(parts[0], [])]
+
     edges = {
-        str(p["name"]): [
-            str(d).split(" ", 1)[0]
+        (str(p["name"]), str(p["version"])): [
+            node
             for d in p.get("dependencies", [])
-            if (str(p["name"]), str(d).split(" ", 1)[0]) not in excluded
+            for node in resolve(str(d))
+            if (str(p["name"]), node[0]) not in excluded
         ]
         for p in lock.get("package", [])
     }
@@ -719,22 +733,33 @@ def _tcb_linked_closure() -> set[str]:
         "dwk-proto": REPO_ROOT / "crates/dwk-proto/Cargo.toml",
     }
     linked: set[str] = set()
+    seen: set[tuple[str, str]] = set()
     for crate, manifest in manifests.items():
         declared = tomllib.loads(manifest.read_text(encoding="utf-8"))
+        own = [node for node in edges if node[0] == crate]
+        assert own, f"{crate} is missing from Cargo.lock"
         # Target-specific tables count: `[target.'cfg(...)'.dependencies]` is
         # how M3e declares rustix, and a closure that skipped them would miss
         # the peer-credential syscall layer entirely -- a fail-open found by
         # this very test when rustix arrived.
         tables = [declared, *declared.get("target", {}).values()]
-        for table in tables:
-            for section in ("dependencies", "build-dependencies"):
-                stack = [name for name in table.get(section, {}) if name not in manifests]
-                while stack:
-                    name = stack.pop()
-                    if name not in linked:
-                        linked.add(name)
-                        stack.extend(edges.get(name, []))
-        assert crate in edges, f"{crate} is missing from Cargo.lock"
+        names = {
+            name
+            for table in tables
+            for section in ("dependencies", "build-dependencies")
+            for name in table.get(section, {})
+            if name not in manifests
+        }
+        # The crate's own lock entry says which VERSION each name is; its
+        # manifest says which names are linked (the lock entry lists
+        # dev-dependencies too).
+        stack = [dep for node in own for dep in edges[node] if dep[0] in names]
+        while stack:
+            node = stack.pop()
+            if node not in seen:
+                seen.add(node)
+                linked.add(node[0])
+                stack.extend(edges.get(node, []))
     return linked
 
 
@@ -764,11 +789,15 @@ def test_the_tcb_destined_closure_equals_the_reviewed_allowlist() -> None:
     )
 
 
-def test_the_tcb_closure_has_no_proc_macro_and_only_the_reviewed_native_code() -> None:
-    """ADR-0035 section 2 promises the policy parser arrives with "no
-    serde_derive, no syn, no quote, no proc-macro2". ADR-0038 records that the
-    resolver agreed, and M3d keeps it: the storage and hashing crates bring no
-    derive macro either.
+def test_the_tcb_closure_has_only_the_reviewed_proc_macros_and_native_code() -> None:
+    """ADR-0035 section 2 promised the policy parser arrives with "no
+    serde_derive, no syn, no quote, no proc-macro2", and until M4e the whole
+    closure had none. M4e changes that, and says so (ADR-0046 §25): age 0.11.5
+    formats its messages through i18n-embed, whose derive and embedding macros
+    bring serde, serde_derive, syn, quote and proc-macro2 -- run on the build
+    machine, never linked into the binary. The assertion is now that the
+    proc-macro set is EXACTLY the reviewed one: a new derive stack is a new
+    decision.
 
     Native code is a different sentence now. Until M3c this asserted there was
     NONE, and said M3d's SQLite would arrive "with its own ADR saying so". It
@@ -782,9 +811,39 @@ def test_the_tcb_closure_has_no_proc_macro_and_only_the_reviewed_native_code() -
     `#![forbid(unsafe_code)]` reaches none of it.
     """
     closure = _tcb_linked_closure()
-    proc_macro = {"serde", "serde_derive", "syn", "quote", "proc-macro2"}
-    gained = sorted(closure & proc_macro)
-    assert not gained, f"the authority's closure gained {gained}"
+    reviewed_proc_macro_stack = {
+        "serde",
+        "serde_derive",
+        "syn",
+        "quote",
+        "proc-macro2",
+        "curve25519-dalek-derive",
+        "displaydoc",
+        "futures-macro",
+        "i18n-embed-fl",
+        "i18n-embed-impl",
+        "pin-project-internal",
+        "proc-macro-error-attr2",
+        "proc-macro-error2",
+        "rust-embed-impl",
+        "rustversion",
+        "thiserror-impl",
+        "zeroize_derive",
+        "zerocopy-derive",
+    }
+    # A macro crate is spelled like one; the reviewed stack is named above.
+    derive_like = {n for n in closure if n.endswith(("-derive", "_derive", "-macro", "-macros"))}
+    derive_like |= closure & {"serde", "syn", "quote", "proc-macro2"}
+    unreviewed = sorted(derive_like - reviewed_proc_macro_stack)
+    assert not unreviewed, f"the authority's closure gained unreviewed macros: {unreviewed}"
+    assert reviewed_proc_macro_stack <= closure, (
+        "a reviewed macro left the closure: update ADR-0046"
+    )
+    # M4e's platform FFI: the kernel keyring (raw keyctl syscalls through
+    # libc) and, on macOS, Security.framework through its -sys crates. No C
+    # is compiled for either.
+    ffi = {"linux-keyutils", "core-foundation-sys", "security-framework-sys"}
+    assert closure & ffi == ffi, sorted(closure & ffi)
     native_or_compiler = {
         "cc",
         "libc",

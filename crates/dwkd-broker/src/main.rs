@@ -27,7 +27,7 @@
 //! authority's uid, and it speaks only the private protocol
 //! ([`dwk_proto::brokerp`]), which no cognition-side code can name.
 //!
-//! # Status: M4d — process execution, the filesystem tools
+//! # Status: M4e — secret handoff; M4d — process execution, the filesystem tools
 //!
 //! [ADR-0043]: one private Unix-domain listener (`listener`), one exchange per
 //! connection (`exchange`): a hello naming a fresh channel, one authorisation
@@ -51,11 +51,22 @@
 //! output drained and bounded, and supervised by pidfd. It runs **on the
 //! host**, with the broker's privileges: no sandbox exists until M5, and the
 //! authority performs a host launch only with a per-invocation approval,
-//! which no build has before M6. Secrets arrive at M4e, the sandbox and
-//! egress at M5.
+//! which no build has before M6.
+//!
+//! [ADR-0046] adds secrets, one value per invocation and never a store: the
+//! authority hands the broker the read end of a pipe it filled and closed
+//! (`secret`), which the broker reads once into a buffer it zeroes.
+//! `secret_egress` renders a mode A header and drops it — the consumer is
+//! M5's `net.http` — and `secret_process_start` injects the value into a
+//! launched target's environment or descriptor 3, a primitive no production
+//! authority issues before M5's sandbox. A secret launch's output is redacted
+//! while it is drained. The broker has no keychain, age or metadata code
+//! (TX028), and it dumps no core (`hardening`). The sandbox and egress arrive
+//! at M5.
 //!
 //! [ADR-0044]: ../../../docs/adr/0044-m4c-filesystem-operations-plans-and-atomic-mutation.md
 //! [ADR-0045]: ../../../docs/adr/0045-m4d-process-execution-broker.md
+//! [ADR-0046]: ../../../docs/adr/0046-m4e-secret-handles-backends-injection-and-redaction.md
 //!
 //! [ADR-0018]: ../../../docs/adr/0018-authority-broker-split.md
 //! [ADR-0043]: ../../../docs/adr/0043-m4b-private-broker-channel-and-brokered-fs-read.md
@@ -68,6 +79,8 @@ mod config;
 mod crash;
 #[cfg(target_os = "linux")]
 mod exchange;
+#[cfg(target_os = "linux")]
+mod hardening;
 // Off Linux the broker does not serve, so nothing names the wire types; the
 // manifest edge is acknowledged here for `unused_crate_dependencies`.
 #[cfg(not(target_os = "linux"))]
@@ -78,6 +91,8 @@ mod listener;
 mod nonce;
 #[cfg(target_os = "linux")]
 mod process;
+#[cfg(target_os = "linux")]
+mod secret;
 
 use std::process::ExitCode;
 
@@ -127,6 +142,17 @@ fn main() -> ExitCode {
 
 #[cfg(target_os = "linux")]
 fn serve(config: &config::ServeConfig) -> ExitCode {
+    // First: no core, and no same-uid reader of this memory (M4e).
+    if let Err(error) = hardening::apply(config.dumpable_permitted) {
+        log(&format!("cannot serve: {error}"));
+        return ExitCode::FAILURE;
+    }
+    if config.dumpable_permitted {
+        log(
+            "REDUCED ASSURANCE: the process stays dumpable (--allow-dumpable); its memory is \
+             readable by other processes of its uid. RLIMIT_CORE is 0",
+        );
+    }
     let (place, own_uid) = match listener::prepare(&config.socket) {
         Ok(prepared) => prepared,
         Err(error) => {
@@ -221,19 +247,22 @@ fn help() -> String {
          uid; not addressable from the cognition plane.\n\
          \n\
          USAGE:\n    \
-             {NAME} serve --socket <PATH> --authority-uid <UID> [--allow-shared-authority-uid]\n    \
+             {NAME} serve --socket <PATH> --authority-uid <UID> [--allow-shared-authority-uid] [--allow-dumpable]\n    \
              {NAME} [-V | --version] [-h | --help]\n\
          \n\
          OPTIONS:\n    \
              --socket <PATH>                 absolute path of the private socket\n    \
              --authority-uid <UID>           the only uid the broker reads from\n    \
-             --allow-shared-authority-uid    permit the authority to be the broker's own uid (development only)\n\
+             --allow-shared-authority-uid    permit the authority to be the broker's own uid (development only)\n    \
+             --allow-dumpable                leave the process dumpable, its memory readable by its uid (development only)\n\
          \n\
          STATUS: M4d - the filesystem tools (read, stat, list, search, write,\n\
          patch, move, delete) and process execution (start, status, kill) of the\n\
          executable the authority checked, by its descriptor, on the HOST with\n\
-         the broker's own privileges. Linux only. No sandbox: that is M5;\n\
-         secrets arrive at M4e.\n",
+         the broker's own privileges. M4e - one secret per invocation, handed\n\
+         over in a pipe: an egress header rendered and dropped, or a value\n\
+         injected into a launch; no secret store. Linux only. No sandbox and no\n\
+         egress consumer: that is M5.\n",
         env!("CARGO_PKG_VERSION")
     )
 }
@@ -248,7 +277,8 @@ mod tests {
         assert!(h.contains(NAME));
         assert!(h.contains("filesystem tools"));
         assert!(h.contains("process execution"));
-        assert!(h.contains("M4d") && h.contains("M5") && h.contains("HOST"));
+        assert!(h.contains("M4d") && h.contains("M4e") && h.contains("M5") && h.contains("HOST"));
+        assert!(h.contains("no secret store"));
         assert!(h.contains("--authority-uid"));
     }
 

@@ -106,6 +106,33 @@ experiment; and `fs_ops_foreign.rs` needs three identities and a write group
 evidence task selects it by name. Locally the three-identity half is NOT
 EXERCISED; CI's Linux job creates the broker user and the group.
 
+**Secret tests (M4e)** are the evidence behind `make secret-broker-evidence`
+([ADR-0046](../docs/adr/0046-m4e-secret-handles-backends-injection-and-redaction.md) §22), and each value
+they use is generated per run — never a committed token. **In-crate:** the
+metadata parser, the kernel keyring and age backends against a real keyring
+and real age files (`secret/backend/tests.rs`), redaction
+(`secret/redact/tests.rs`), and the authority's `secret.use` pipeline
+(`state/secret_use/tests.rs`: admission, gates, revisions, failures, the
+crash campaign R1–R10, output redaction) against an in-process broker stand-in
+that reads the pipe — labelled so. **Real broker:**
+`crates/dwkd-broker/tests/secret_primitives.rs` sends the released broker
+`secret_egress` and `secret_process_start` with real pipes and real targets,
+and reads its memory and the targets' `/proc` afterwards. **Real processes:**
+`crates/dwkd-authority/tests/secret_evidence.rs` re-executes its own test
+binary as a separate runtime that reads files holding live values through
+the released daemons, receives placeholders, and has its memory scanned, hosts the authority library in a
+child against the real broker for mode A, and checks the hardened daemons'
+core limit and dumpable flag; its three-identity and core-file tests are
+`#[ignore]`d unless the task selects them (`DW_BROKER_AS`, `DW_PEER_AS`,
+`DW_M4E_CORE_EVIDENCE`), and use `sudo` only to stage binaries, read memory
+as root and point `kernel.core_pattern` at a directory. **Contract:**
+`tests/protocol/test_no_secret_value_fields.py` over every schema, vector and
+binding, and `tests/architecture/test_no_committed_credentials.py` over the
+tree. Every case prints its `SECRET-EVIDENCE` line after its assertions held;
+the task requires every listed case and fails on zero. Locally the
+three-identity and core-file halves are NOT EXERCISED; CI's Linux job creates
+the broker user.
+
 **Process execution tests (M4d)** are the evidence behind
 `make process-broker-evidence` ([ADR-0045](../docs/adr/0045-m4d-process-execution-broker.md)), in four labelled
 kinds. **Production floor:** `crates/dwkd-authority/tests/process_production.rs`

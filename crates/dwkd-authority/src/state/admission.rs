@@ -172,6 +172,9 @@ impl WithheldCause {
             Self::NeedsCanonicalization(UnresolvedScope::ExecutableIdentity) => {
                 "NEEDS_EXECUTABLE_IDENTITY"
             }
+            Self::NeedsCanonicalization(UnresolvedScope::ConfiguredSecret) => {
+                "NEEDS_CONFIGURED_SECRET"
+            }
         }
     }
 
@@ -183,6 +186,7 @@ impl WithheldCause {
             Self::AboveProfileCeiling,
             Self::NeedsCanonicalization(UnresolvedScope::CanonicalPath),
             Self::NeedsCanonicalization(UnresolvedScope::ExecutableIdentity),
+            Self::NeedsCanonicalization(UnresolvedScope::ConfiguredSecret),
         ]
         .into_iter()
         .find(|cause| cause.code() == code)
@@ -581,7 +585,13 @@ pub(super) fn admit(
             },
         });
     };
-    let resolutions = fs_answers.with_executables(exec_answers);
+    // And every concrete secret handle, with the secret index's answer (M4e):
+    // a metadata read inside this transaction; no value is read.
+    let handles = concrete_secrets(request, &profile, &skills, active);
+    let secret_answers = super::secrets::answers(work, &handles)?;
+    let resolutions = fs_answers
+        .with_executables(exec_answers)
+        .with_secrets(secret_answers);
     let fs = FsTerms {
         paths,
         executables,
@@ -598,7 +608,45 @@ pub(super) fn admit(
     let admission = persist(
         work, &attempt, &profile, &skills, granted, withheld, &inputs, active, &fs,
     )?;
+    // Bind the run to the revision of every concrete handle it was granted:
+    // a later revision under the same spelling is a different secret.
+    for grant in &admission.granted {
+        let text = grant.capability.to_string();
+        if let Some(handle) = text.strip_prefix("secret.use:")
+            && let Some(revision) = fs.resolutions.secret(handle)
+        {
+            super::secrets::bind(work, admission.run_id.as_str(), handle, revision)?;
+        }
+    }
     Ok(Pass::Answered(Reply::Done(admission)))
+}
+
+/// Every concrete `secret.use` handle the request, the profile, the
+/// contributing skills and the mode ceiling name, once each (M4e).
+fn concrete_secrets(
+    request: &AdmitRun,
+    profile: &config::ProfileRecord,
+    skills: &[ActiveSkill],
+    active: &ActiveAuthority,
+) -> Vec<String> {
+    let requested: Vec<CapabilitySpec> = request
+        .requested_capabilities
+        .iter()
+        .filter_map(|text| capability::parse(text.as_str()).ok())
+        .collect();
+    let declared = skills.iter().filter_map(ActiveSkill::declaration).flatten();
+    let mut handles: BTreeSet<String> = BTreeSet::new();
+    for spec in requested
+        .iter()
+        .chain(&profile.declared)
+        .chain(declared)
+        .chain(&active.ceiling)
+    {
+        if let Some(handle) = scopes::concrete_secret(spec) {
+            handles.insert(handle.to_owned());
+        }
+    }
+    handles.into_iter().collect()
 }
 
 /// Every concrete filesystem path the request, the profile, the contributing

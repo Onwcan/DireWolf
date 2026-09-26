@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from direwolf_evals.model import Eval, Outcome
-from direwolf_evals.runners import authority, harness, protocol, replay
+from direwolf_evals.runners import authority, harness, m4, protocol, replay
 
 __all__ = ["RUNNERS", "Context", "Runner", "resolve"]
 
@@ -49,6 +49,12 @@ RUNNERS: dict[str, Runner] = {
     "authority.epoch_fencing": authority.epoch_fencing,
     "authority.policy_denies_by_default": authority.policy_denies_by_default,
     "authority.capability_attenuation": authority.capability_attenuation,
+    # M4: the filesystem, exec and secret boundaries -- the real resolver, the
+    # real broker and helper, the released daemons, the real keyring and a
+    # separate runtime process. Never a model of them.
+    "m4.path_traversal": m4.path_traversal,
+    "m4.exec_mediation": m4.exec_mediation,
+    "m4.secret_boundary": m4.secret_boundary,
     # The harness proving itself against a dummy process.
     "harness.checkpoint": harness.checkpoint,
     "harness.pause_resume": harness.pause_resume,

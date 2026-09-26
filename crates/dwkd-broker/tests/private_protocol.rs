@@ -26,6 +26,8 @@ use nix as _;
 // Linux-only, like the operations that digest with it.
 #[cfg(target_os = "linux")]
 use sha2 as _;
+#[cfg(target_os = "linux")]
+use zeroize as _;
 
 #[cfg(not(target_os = "linux"))]
 #[test]
@@ -190,6 +192,10 @@ mod linux {
             for (name, value) in variables {
                 command.env(name, value);
             }
+            // This harness reads the broker's `/proc/<pid>/{fd,io}` as the
+            // same uid, which a hardened broker refuses (M4e): every broker
+            // here is started `--allow-dumpable`. The hardened default is
+            // measured by the secret evidence.
             let mut child = command
                 .arg("serve")
                 .arg("--socket")
@@ -197,6 +203,7 @@ mod linux {
                 .arg("--authority-uid")
                 .arg(authority_uid.to_string())
                 .args(extra)
+                .arg("--allow-dumpable")
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
@@ -1000,8 +1007,8 @@ mod linux {
                 Box::new(move |c| {
                     let a = authorisation(c, 1, id, 7);
                     let text = String::from_utf8(a[5..].to_vec()).unwrap();
-                    assert!(text.contains(r#""protocol":3"#));
-                    json(&text.replace(r#""protocol":3"#, r#""protocol":1"#))
+                    assert!(text.contains(r#""protocol":4"#));
+                    json(&text.replace(r#""protocol":4"#, r#""protocol":1"#))
                 }),
             ),
             (
@@ -1010,7 +1017,17 @@ mod linux {
                 Box::new(move |c| {
                     let a = authorisation(c, 1, id, 7);
                     let text = String::from_utf8(a[5..].to_vec()).unwrap();
-                    json(&text.replace(r#""protocol":3"#, r#""protocol":2"#))
+                    json(&text.replace(r#""protocol":4"#, r#""protocol":2"#))
+                }),
+            ),
+            (
+                // M4d's protocol, which M4e's broker no longer speaks (the
+                // daemons ship together; ADR-0046).
+                "protocol-three",
+                Box::new(move |c| {
+                    let a = authorisation(c, 1, id, 7);
+                    let text = String::from_utf8(a[5..].to_vec()).unwrap();
+                    json(&text.replace(r#""protocol":4"#, r#""protocol":3"#))
                 }),
             ),
             (

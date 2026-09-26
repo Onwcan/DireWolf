@@ -27,6 +27,10 @@ Modes:
                                       two descriptors this user can open (M4d)
   run-helper <broker-binary>          run the launch helper directly, its
                                       stderr not the broker's control channel
+  keyring-search <description>        look for a `user` key by description in
+                                      this user's own kernel keyring (M4e): a
+                                      secret the authority's uid holds is not
+                                      in another uid's keyring
 
 This is a test harness, never product code: the authority switches no users
 and starts no processes (TX010).
@@ -221,6 +225,30 @@ def probe_authority(state_dir: str, kernel_socket: str, handshake_hex: str) -> d
     return {"attempts": attempts, "dwkp_received": received, "dwkp_eof": eof}
 
 
+def keyring_search(description: str) -> dict[str, object]:
+    """`keyctl(KEYCTL_SEARCH, KEY_SPEC_USER_KEYRING, "user", description)`."""
+    import ctypes
+
+    numbers = {"x86_64": 250, "aarch64": 219}
+    machine = os.uname().machine
+    if machine not in numbers:
+        return {"found": False, "errno": "UNSUPPORTED_ARCH"}
+    libc = ctypes.CDLL(None, use_errno=True)
+    keyctl_search, key_spec_user_keyring = 10, -4
+    result = libc.syscall(
+        numbers[machine],
+        keyctl_search,
+        key_spec_user_keyring,
+        b"user",
+        description.encode(),
+        0,
+    )
+    if result >= 0:
+        return {"found": True, "errno": None}
+    err = ctypes.get_errno()
+    return {"found": False, "errno": errno.errorcode.get(err, str(err))}
+
+
 def main(argv: list[str]) -> int:
     mode = argv[1]
     if mode == "hello":
@@ -243,6 +271,8 @@ def main(argv: list[str]) -> int:
         report = launch(argv[2], argv[3], argv[4], argv[5])
     elif mode == "run-helper":
         report = run_helper(argv[2])
+    elif mode == "keyring-search":
+        report = keyring_search(argv[2])
     else:
         print(json.dumps({"error": f"unknown mode {mode}"}))
         return 2

@@ -51,7 +51,7 @@ use rusqlite::Connection;
 pub(super) const APPLICATION_ID: i64 = 0x4457_4B44;
 
 /// The schema version this build creates and understands.
-pub(super) const CURRENT_VERSION: i64 = 5;
+pub(super) const CURRENT_VERSION: i64 = 6;
 
 /// Schema version 1, the first. Static text: nothing in it is assembled from a
 /// value, and every value the authority stores is bound as a parameter.
@@ -840,6 +840,125 @@ WHEN EXISTS (SELECT 1 FROM process_idempotency WHERE subject = NEW.subject
 BEGIN SELECT RAISE(ABORT, 'an idempotency key names one invocation'); END;
 ";
 
+/// Schema version 6 (M4e, ADR-0046 §20): the secret index — **handles and
+/// metadata, never a value** — and the ledger of secret injections.
+///
+/// * `secret_revision` is the append-only history of what each handle
+///   means: a new row whenever its metadata changes, is revoked or is
+///   removed. The current meaning of a handle is its highest revision. No
+///   column can hold a value, a prefix of one, or anything derived from one:
+///   `metadata` is the operator's description of the secret (backend, entry
+///   name or file path, origins, header name and prefix, modes, consumer
+///   identities, environment name, rotation, sensitivity), which is not
+///   secret and is designed not to be.
+/// * `secret_run_binding` records which revision of each handle a run was
+///   admitted with, so a handle replaced by different metadata fails closed
+///   for the run (`REPLACED`) instead of silently naming a different secret.
+/// * `secret_injection` is one row per logical injection: `INTENT`, durable
+///   before any value is read, then exactly one of `INJECTED`, `FAILED`,
+///   `UNKNOWN`. A key names one injection, ever.
+/// * `secret_use` counts completed injections per handle; it never falls.
+/// * `run_withheld` is rebuilt with one more cause, `NEEDS_CONFIGURED_SECRET`:
+///   a `secret.use` declaration naming no configured, unrevoked handle.
+pub(super) const SCHEMA_V6: &str = r"
+CREATE TABLE secret_revision (
+    handle           TEXT    NOT NULL CHECK (length(handle) BETWEEN 1 AND 64
+                                             AND handle NOT GLOB '*[^a-z0-9._-]*'),
+    revision         INTEGER NOT NULL CHECK (revision >= 1),
+    state            TEXT    NOT NULL CHECK (state IN ('CONFIGURED', 'REVOKED', 'REMOVED')),
+    backend          TEXT    CHECK (backend IS NULL OR backend IN ('keychain', 'age')),
+    metadata         TEXT    NOT NULL CHECK (length(CAST(metadata AS BLOB)) <= 16384),
+    metadata_sha256  TEXT    NOT NULL CHECK (length(metadata_sha256) = 64
+                                             AND metadata_sha256 NOT GLOB '*[^0-9a-f]*'),
+    recorded_ms      INTEGER NOT NULL,
+    CHECK ((state = 'REMOVED') = (backend IS NULL)),
+    PRIMARY KEY (handle, revision)
+) STRICT;
+CREATE TRIGGER secret_revision_no_update BEFORE UPDATE ON secret_revision
+BEGIN SELECT RAISE(ABORT, 'a secret revision is immutable'); END;
+CREATE TRIGGER secret_revision_no_delete BEFORE DELETE ON secret_revision
+BEGIN SELECT RAISE(ABORT, 'a secret revision is never deleted'); END;
+CREATE TRIGGER secret_revision_in_order BEFORE INSERT ON secret_revision
+WHEN NEW.revision != 1 + COALESCE((SELECT max(revision) FROM secret_revision
+                                   WHERE handle = NEW.handle), 0)
+BEGIN SELECT RAISE(ABORT, 'secret revisions are consecutive'); END;
+
+CREATE TABLE secret_run_binding (
+    run_id    TEXT    NOT NULL REFERENCES run(run_id) ON DELETE RESTRICT,
+    handle    TEXT    NOT NULL,
+    revision  INTEGER NOT NULL,
+    PRIMARY KEY (run_id, handle),
+    FOREIGN KEY (handle, revision) REFERENCES secret_revision(handle, revision)
+        ON DELETE RESTRICT
+) STRICT;
+CREATE TRIGGER secret_run_binding_no_update BEFORE UPDATE ON secret_run_binding
+BEGIN SELECT RAISE(ABORT, 'a secret binding is immutable'); END;
+CREATE TRIGGER secret_run_binding_no_delete BEFORE DELETE ON secret_run_binding
+BEGIN SELECT RAISE(ABORT, 'a secret binding is never deleted'); END;
+
+CREATE TABLE secret_injection (
+    invocation_id    TEXT    PRIMARY KEY CHECK (length(invocation_id) = 30
+                                               AND substr(invocation_id, 1, 4) = 'inv_'),
+    run_id           TEXT    NOT NULL REFERENCES run(run_id) ON DELETE RESTRICT,
+    subject          TEXT    NOT NULL,
+    session_id       TEXT    NOT NULL,
+    idempotency_key  TEXT    NOT NULL,
+    handle           TEXT    NOT NULL,
+    revision         INTEGER NOT NULL,
+    mode             TEXT    NOT NULL CHECK (mode IN ('egress', 'fd_at_spawn', 'env_at_spawn')),
+    consumer         TEXT    NOT NULL CHECK (length(CAST(consumer AS BLOB)) BETWEEN 1 AND 4200),
+    incarnation      INTEGER NOT NULL CHECK (incarnation >= 1),
+    state            TEXT    NOT NULL CHECK (state IN ('INTENT', 'INJECTED', 'FAILED', 'UNKNOWN')),
+    failure          TEXT    CHECK (failure IS NULL OR length(failure) BETWEEN 1 AND 64),
+    intent_ms        INTEGER NOT NULL,
+    ended_ms         INTEGER,
+    CHECK ((state = 'INTENT') = (ended_ms IS NULL)),
+    CHECK ((state = 'FAILED') = (failure IS NOT NULL)),
+    UNIQUE (subject, session_id, idempotency_key),
+    FOREIGN KEY (handle, revision) REFERENCES secret_revision(handle, revision)
+        ON DELETE RESTRICT
+) STRICT;
+CREATE TRIGGER secret_injection_no_delete BEFORE DELETE ON secret_injection
+BEGIN SELECT RAISE(ABORT, 'a secret injection record is never deleted'); END;
+CREATE TRIGGER secret_injection_ends_once BEFORE UPDATE ON secret_injection
+WHEN OLD.state != 'INTENT' OR NEW.state = 'INTENT'
+     OR NEW.invocation_id != OLD.invocation_id OR NEW.handle != OLD.handle
+     OR NEW.revision != OLD.revision OR NEW.mode != OLD.mode OR NEW.consumer != OLD.consumer
+BEGIN SELECT RAISE(ABORT, 'a secret injection ends once, from INTENT'); END;
+
+CREATE TABLE secret_use (
+    handle        TEXT    PRIMARY KEY,
+    uses          INTEGER NOT NULL CHECK (uses >= 0),
+    last_used_ms  INTEGER NOT NULL
+) STRICT;
+CREATE TRIGGER secret_use_never_falls BEFORE UPDATE ON secret_use
+WHEN NEW.uses < OLD.uses OR NEW.handle != OLD.handle
+BEGIN SELECT RAISE(ABORT, 'a use count never falls'); END;
+CREATE TRIGGER secret_use_no_delete BEFORE DELETE ON secret_use
+BEGIN SELECT RAISE(ABORT, 'a use count is never deleted'); END;
+
+CREATE TABLE run_withheld_v6 (
+    run_id      TEXT    NOT NULL REFERENCES run(run_id) ON DELETE RESTRICT,
+    ordinal     INTEGER NOT NULL CHECK (ordinal >= 0),
+    capability  TEXT    NOT NULL,
+    reason      TEXT    NOT NULL CHECK (reason IN ('NOT_IN_AGENT_PROFILE', 'NOT_IN_SKILL_SET',
+                    'NOT_IN_PARENT_GRANT', 'ABOVE_PROFILE_CEILING',
+                    'NEEDS_CANONICAL_PATH', 'NEEDS_EXECUTABLE_IDENTITY',
+                    'NEEDS_CONFIGURED_SECRET')),
+    PRIMARY KEY (run_id, ordinal)
+) STRICT;
+INSERT INTO run_withheld_v6 (run_id, ordinal, capability, reason)
+    SELECT run_id, ordinal, capability, reason FROM run_withheld;
+DROP TRIGGER run_withheld_no_update;
+DROP TRIGGER run_withheld_no_delete;
+DROP TABLE run_withheld;
+ALTER TABLE run_withheld_v6 RENAME TO run_withheld;
+CREATE TRIGGER run_withheld_no_update BEFORE UPDATE ON run_withheld
+BEGIN SELECT RAISE(ABORT, 'a withheld record is immutable'); END;
+CREATE TRIGGER run_withheld_no_delete BEFORE DELETE ON run_withheld
+BEGIN SELECT RAISE(ABORT, 'a withheld record is never deleted'); END;
+";
+
 /// One step from a version to the next.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct Migration {
@@ -870,6 +989,10 @@ pub(super) const MIGRATIONS: &[Migration] = &[
     Migration {
         to: 5,
         sql: SCHEMA_V5,
+    },
+    Migration {
+        to: 6,
+        sql: SCHEMA_V6,
     },
 ];
 
@@ -1025,7 +1148,7 @@ pub(super) fn foreign_key_check(conn: &Connection) -> rusqlite::Result<Result<()
 mod tests {
     use super::{
         APPLICATION_ID, CURRENT_VERSION, MIGRATIONS, Migration, SCHEMA_V1, SCHEMA_V2, SCHEMA_V3,
-        SCHEMA_V4, SCHEMA_V5, Shape, ShapeError, decide, migrate, verify_exact,
+        SCHEMA_V4, SCHEMA_V5, SCHEMA_V6, Shape, ShapeError, decide, migrate, verify_exact,
     };
     use rusqlite::Connection;
 
@@ -1089,6 +1212,7 @@ mod tests {
         assert!(conn.execute_batch(SCHEMA_V3).is_ok());
         assert!(conn.execute_batch(SCHEMA_V4).is_ok());
         assert!(conn.execute_batch(SCHEMA_V5).is_ok());
+        assert!(conn.execute_batch(SCHEMA_V6).is_ok());
         assert!(
             conn.execute_batch("DROP TRIGGER run_never_resurrects")
                 .is_ok()
@@ -1109,6 +1233,7 @@ mod tests {
         assert!(conn.execute_batch(SCHEMA_V3).is_ok());
         assert!(conn.execute_batch(SCHEMA_V4).is_ok());
         assert!(conn.execute_batch(SCHEMA_V5).is_ok());
+        assert!(conn.execute_batch(SCHEMA_V6).is_ok());
         assert!(
             conn.execute_batch("CREATE TABLE backdoor (x INTEGER)")
                 .is_ok()
@@ -1584,18 +1709,80 @@ mod tests {
     }
 
     #[test]
-    fn a_version_four_store_migrates_to_five_and_keeps_its_filesystem_ledger() {
+    fn a_version_four_store_migrates_to_the_current_version_and_keeps_its_filesystem_ledger() {
         let conn = v4_with_four();
         let before = v4_rows(&conn);
         {
             let Ok(tx) = conn.unchecked_transaction() else {
                 unreachable!("a transaction")
             };
-            assert_eq!(migrate(&tx, 4, MIGRATIONS).ok(), Some(5));
+            assert_eq!(migrate(&tx, 4, MIGRATIONS).ok(), Some(CURRENT_VERSION));
             assert!(tx.commit().is_ok());
         }
-        assert_eq!(verify_exact(&conn).ok(), Some(Ok(())), "exactly version 5");
+        assert_eq!(
+            verify_exact(&conn).ok(),
+            Some(Ok(())),
+            "exactly the current version"
+        );
         assert_eq!(v4_rows(&conn), before, "the filesystem ledger is untouched");
+    }
+
+    #[test]
+    fn a_version_five_store_migrates_to_six_keeping_its_ledgers_and_its_withheld_reasons() {
+        // M4e (ADR-0046 §20): v6 adds the secret tables and widens
+        // run_withheld's reasons by rebuilding the table. A v5 store's rows
+        // survive, in one transaction; the new tables start empty.
+        let conn = v5_with_a_launch();
+        let withheld = conn.execute(
+            "INSERT INTO run_withheld (run_id, ordinal, capability, reason) \
+             VALUES ('run_x', 0, 'process.exec:/usr/bin/git', 'NEEDS_EXECUTABLE_IDENTITY')",
+            [],
+        );
+        assert_eq!(withheld.ok(), Some(1));
+        let count = |sql: &str| conn.query_row(sql, [], |row| row.get::<_, i64>(0)).ok();
+        let before = (
+            count("SELECT count(*) FROM process_invocation"),
+            count("SELECT count(*) FROM tool_process"),
+            count("SELECT count(*) FROM run_withheld"),
+        );
+        {
+            let Ok(tx) = conn.unchecked_transaction() else {
+                unreachable!("a transaction")
+            };
+            assert_eq!(migrate(&tx, 5, MIGRATIONS).ok(), Some(CURRENT_VERSION));
+            assert!(tx.commit().is_ok());
+        }
+        assert_eq!(CURRENT_VERSION, 6);
+        assert_eq!(verify_exact(&conn).ok(), Some(Ok(())), "exactly version 6");
+        let after = (
+            count("SELECT count(*) FROM process_invocation"),
+            count("SELECT count(*) FROM tool_process"),
+            count("SELECT count(*) FROM run_withheld"),
+        );
+        assert_eq!(after, before, "every v5 row survives");
+        for sql in [
+            "SELECT count(*) FROM secret_revision",
+            "SELECT count(*) FROM secret_run_binding",
+            "SELECT count(*) FROM secret_injection",
+            "SELECT count(*) FROM secret_use",
+        ] {
+            assert_eq!(count(sql), Some(0), "{sql}");
+        }
+        // The widened reason is accepted now; an unknown one still is not.
+        let secret = conn.execute(
+            "INSERT INTO run_withheld (run_id, ordinal, capability, reason) \
+             VALUES ('run_x', 1, 'secret.use:api-token', 'NEEDS_CONFIGURED_SECRET')",
+            [],
+        );
+        assert_eq!(secret.ok(), Some(1));
+        let unknown = conn.execute(
+            "INSERT INTO run_withheld (run_id, ordinal, capability, reason) \
+             VALUES ('run_x', 2, 'secret.use:x', 'NEEDS_A_VALUE')",
+            [],
+        );
+        assert!(unknown.is_err());
+        // The rebuilt table keeps its immutability.
+        assert!(conn.execute("DELETE FROM run_withheld", []).is_err());
     }
 
     #[test]

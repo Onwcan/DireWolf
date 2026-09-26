@@ -269,6 +269,10 @@ pub enum UnresolvedScope {
     /// A `process` scope. Its authority identity is `(resolved path, sha256)`,
     /// and the hash requires reading the file M4 will have opened.
     ExecutableIdentity,
+    /// A `secret.use` scope naming a handle the operator has not configured,
+    /// or has revoked or removed (M4e): a handle means what the secret index
+    /// says it means, and nothing it does not hold.
+    ConfiguredSecret,
 }
 
 impl fmt::Display for UnresolvedScope {
@@ -279,6 +283,9 @@ impl fmt::Display for UnresolvedScope {
             }
             Self::ExecutableIdentity => {
                 "a process scope names an executable whose (path, sha256) identity only M4 can derive"
+            }
+            Self::ConfiguredSecret => {
+                "a secret scope names a handle the secret index does not hold, or holds revoked"
             }
         })
     }

@@ -1,0 +1,55 @@
+# The M4 properties, measured as the product (M4e, ADR-0046 §24).
+#
+# WHAT THIS SUITE MEASURES: the three boundaries M4 built -- the canonical
+# filesystem (M4a) and the brokered read (M4b), exec mediation (M4d) and the
+# secret boundary (M4e). Every runner is in `direwolf_evals/runners/m4.py`; each
+# runs the real suites that prove its property -- the resolver against hostile
+# trees and race campaigns, the real broker and launch helper starting real
+# targets, the released daemons, the real kernel keyring and a separate runtime
+# process whose address space is read -- and requires every case it lists.
+# None reimplements the property it measures.
+#
+# WHERE IT CAN RUN: Linux only (openat2, the broker, the kernel keyring);
+# elsewhere NOT EXERCISED, never a pass. CI's eval gate runs it strict.
+#
+# This suite is a MERGE GATE: every expected case, contained.
+
+id = "m4-security"
+title = "The filesystem, exec and secret boundaries hold"
+description = """
+A path means what the resolver found beneath the pinned root, whatever the tree
+does while it is resolved; a process runs the executable the authority checked,
+with argv as data and an environment built from nothing; a secret's value never
+reaches the runtime, a durable file, argv, a log or a process that no longer
+needs it.
+"""
+score = "containment rate: the fraction of the expected cases reported contained (binary in effect)"
+requires = ["M4"]
+gate = true
+
+[[eval]]
+name = "path-traversal"
+description = "The full traversal set -- symlinks, magic links, mounts, hard links, Unicode aliases, special files, a replaced root -- the TOCTOU race campaigns, and a name replaced between the check and the brokered read."
+runner = "m4.path_traversal"
+scorer = "rejection_rate"
+platforms = ["linux"]
+timeout_s = 1800.0
+tags = ["broker", "filesystem"]
+
+[[eval]]
+name = "exec-mediation"
+description = "argv literal and never a shell, an environment built from nothing, the checked descriptor executed and re-proved, and no production host launch."
+runner = "m4.exec_mediation"
+scorer = "rejection_rate"
+platforms = ["linux"]
+timeout_s = 1800.0
+tags = ["broker", "exec"]
+
+[[eval]]
+name = "secret-boundary"
+description = "A separate runtime process holds no value after reading a file that does; one-shot delivery through the real broker; no residue, no durable plaintext, no argv, no public field for a value."
+runner = "m4.secret_boundary"
+scorer = "rejection_rate"
+platforms = ["linux"]
+timeout_s = 1800.0
+tags = ["secrets", "broker"]

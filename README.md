@@ -22,7 +22,7 @@ compromised host.
 
 ---
 
-## Status: M3 complete; M4a, M4b and M4c complete; M4d — process execution, candidate; M4 incomplete
+## Status: M3 complete; M4a, M4b, M4c and M4d complete; M4e — secrets, implemented, candidate for acceptance; M4 incomplete, awaiting the M4e hosted final gate
 
 **None of the above is implemented yet.** This repository contains the Phase 0
 architecture package, the M1 foundation (the monorepo layout, the Rust and
@@ -156,8 +156,24 @@ and the M2 wire contract:
   must also keep untrusted writers out
   ([ADR-0044](docs/adr/0044-m4c-filesystem-operations-plans-and-atomic-mutation.md),
   `make filesystem-operations-evidence`). **Linux only.**
+- **secrets, by handle only** (M4e, the fifth part of M4; implemented,
+  candidate for acceptance): a secret is an opaque handle, and **nothing
+  returns a value** — no DWKP operation, no command, no diagnostic. A value is
+  read from the Linux kernel keyring or an age file only after
+  `secret.use:<handle>` passed both gates and its intent is durable, handed to
+  the broker once as the read end of a pipe, and zeroed in the authority.
+  Output that echoes a value, or a known credential shape, is redacted before
+  the runtime sees it. Mode A renders an HTTP header and drops it — the
+  consumer is M5's `net.http`; modes B and C are an injection primitive with
+  no production caller until M5's sandbox; mode D is unreachable until M6.
+  Both daemons refuse to dump core. The runtime's memory, every durable file
+  and both daemons after they handled a value are read afterwards and hold none
+  ([ADR-0046](docs/adr/0046-m4e-secret-handles-backends-injection-and-redaction.md),
+  `make secret-broker-evidence`). **Linux only** for serving; the Windows
+  Credential Manager backend is tested, the macOS Keychain backend is
+  compile-only.
 - **process execution, behind a floor nothing can yet pass** (M4d, the fourth
-  part of M4; implemented, a candidate for acceptance): `process.exec`,
+  part of M4; complete): `process.exec`,
   `process.status` and `process.kill`, as version 3 of the tool messages. The
   authority resolves an absolute executable path — no `PATH` search, symlinks
   followed to one native file that only root or the authority can change —
@@ -211,7 +227,9 @@ names — and M4b the first effect: reading at most 256 KiB of one checked file,
 through the broker, for a run both gates allow — and M4c the other
 filesystem tools, including the first that change files. M4d builds process
 execution end to end and refuses every production launch, because no approval
-can exist yet. There is still no secret, no sandbox (every action runs on the
+can exist yet. M4e adds secrets by handle — read only after both gates, handed
+over once, redacted on the way back — with no consumer yet, because the
+consumers are M5's. There is still no sandbox (every action runs on the
 host, and policy is told so), no approvals, no artifacts and no model provider
 (and so no Ollama). `QueryAuthority` still reports authority and
 refuses to decide a proposed action; `CanonicalPreview` is how a runtime asks
@@ -224,12 +242,12 @@ See [docs/PROTOCOL.md](docs/PROTOCOL.md),
 <dir>` checks an audit chain, read-only, everywhere; `dwkd-broker serve`
 serves the private channel (Linux) and performs the filesystem operations and
 — for an authorisation no production authority can yet issue — the process
-operations;
+operations and the secret injection primitive;
 `direwolf` supports `--version` and `doctor`, and nothing
 else, because a command that exists but cannot work invites callers, scripts
 and documentation to form around a shape nobody has designed yet.
 
-Secrets (M4e) complete **M4**, the sandbox at
+M4 is complete when M4e's required hosted gate passes; the sandbox arrives at
 **M5**, approvals at **M6**, and model providers — Ollama among them — at
 **M7**. See [docs/ROADMAP.md](docs/ROADMAP.md).
 

@@ -180,11 +180,36 @@ pub enum AuditEvent {
     /// the operator and M9's reconciliation, or found absent or not the
     /// broker's. Never the invocation performed again.
     ToolStagingSettled,
+    /// A secret's metadata was recorded as a new revision: configured, changed,
+    /// revoked or removed (M4e). Never its value.
+    SecretConfigured,
+    /// A handle became revoked: every later resolution fails closed (M4e).
+    SecretRevoked,
+    /// Start-up read each configured secret once to fingerprint it for the
+    /// redaction index (M4e): how many were indexed, and which failed and why.
+    SecretFingerprinted,
+    /// A secret use was refused before any value was read (M4e).
+    SecretDenied,
+    /// A secret use both gates allowed, recorded before its value is read (M4e).
+    SecretIntentRecorded,
+    /// A value was read from its backend for an authorised use (M4e).
+    SecretResolved,
+    /// A one-shot injection was consumed by the broker (M4e).
+    SecretInjected,
+    /// An authorised secret use produced no injection (M4e).
+    SecretFailed,
+    /// A secret use whose injection may have happened and nothing proves
+    /// (M4e). Never performed again.
+    SecretOutcomeUnknown,
+    /// A tool output crossing back towards cognition contained a live secret or
+    /// a known credential shape, and it was redacted (M4e): which handle or
+    /// class, how many times — never the bytes.
+    SecretRedactionHit,
 }
 
 impl AuditEvent {
     /// Every kind, in declaration order.
-    pub const ALL: [Self; 35] = [
+    pub const ALL: [Self; 45] = [
         Self::StoreCreated,
         Self::StoreOpened,
         Self::PolicyInstalled,
@@ -220,6 +245,16 @@ impl AuditEvent {
         Self::ToolInterrupted,
         Self::ToolOutcomeUnknown,
         Self::ToolStagingSettled,
+        Self::SecretConfigured,
+        Self::SecretRevoked,
+        Self::SecretFingerprinted,
+        Self::SecretDenied,
+        Self::SecretIntentRecorded,
+        Self::SecretResolved,
+        Self::SecretInjected,
+        Self::SecretFailed,
+        Self::SecretOutcomeUnknown,
+        Self::SecretRedactionHit,
     ];
 
     /// The spelling in a record's `event` field.
@@ -261,6 +296,16 @@ impl AuditEvent {
             Self::ToolInterrupted => "tool.interrupted",
             Self::ToolOutcomeUnknown => "tool.outcome_unknown",
             Self::ToolStagingSettled => "tool.staging_settled",
+            Self::SecretConfigured => "secret.configured",
+            Self::SecretRevoked => "secret.revoked",
+            Self::SecretFingerprinted => "secret.fingerprinted",
+            Self::SecretDenied => "secret.denied",
+            Self::SecretIntentRecorded => "secret.intent_recorded",
+            Self::SecretResolved => "secret.resolved",
+            Self::SecretInjected => "secret.injected",
+            Self::SecretFailed => "secret.failed",
+            Self::SecretOutcomeUnknown => "secret.outcome_unknown",
+            Self::SecretRedactionHit => "secret.redaction_hit",
         }
     }
 }

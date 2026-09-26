@@ -50,3 +50,8 @@ nix = { workspace = true }
 # its result the post revision, by SHA-256 -- the digest the runtime states
 # them by. The same pinned, pure-Rust crate and features the authority uses.
 sha2 = { workspace = true }
+# M4e (ADR-0046 §10): every buffer that holds a secret value -- the one-shot
+# pipe's contents, a mode A header, a launch's redaction needle, a mode B
+# assignment in the helper -- is `Zeroizing`. The same pinned crate and
+# features as the authority (`alloc`, no derive, no proc macro).
+zeroize = { workspace = true }

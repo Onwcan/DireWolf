@@ -21,6 +21,12 @@
 //!                 failure record IS the exec -- until then only the helper ran
 //!   supervise     pidfd; stdout and stderr drained concurrently, first N
 //!                 bytes kept, every byte counted; wall clock; reap
+//! secret_process_start (M4e, ADR-0046): the same, plus the secret pipe as a
+//!                 third descriptor. The value is read once, bounded; a fresh
+//!                 pipe carries it to the helper, which puts it in the target's
+//!                 environment (mode B) or hands the pipe over as fd 3 (mode
+//!                 C). Output is redacted of it while it is drained, and the
+//!                 broker's copy is zeroed when both streams end.
 //! process_status  no descriptor: the handle, and the generation that issued it
 //! process_kill    no descriptor: SIGKILL to the process and its process group,
 //!                 while it is unreaped (so neither id can be reused)
@@ -54,6 +60,7 @@ use dwk_proto::brokerp::{
     BrokerDone, BrokerGeneration, BrokerRefusal, Indeterminate, OutcomeResult,
     PROCESS_WALL_CLOCK_SECONDS, ProcessKillAuthorisation, ProcessKillDone,
     ProcessStartAuthorisation, ProcessStartDone, ProcessStatusAuthorisation, ProcessStatusDone,
+    SecretDelivery, SecretProcessStartAuthorisation,
 };
 use dwk_proto::wire::id::ProcessId;
 use dwk_proto::wire::scalar::{ProcessState, StreamContent};
@@ -178,21 +185,86 @@ impl Processes {
         executable: OwnedFd,
         cwd: OwnedFd,
     ) -> OutcomeResult {
+        match self.launch_supervised(start, executable, cwd, None) {
+            Ok(done) => OutcomeResult::done(BrokerDone::process_start(done)),
+            Err(result) => result,
+        }
+    }
+
+    /// `broker.secret_process_start` (M4e): the secret injection primitive.
+    /// Everything `start` proves, then the value — read once, bounded — goes
+    /// to the helper through a fresh pipe; the helper places it (mode B or
+    /// C); the output is redacted of it as it is drained.
+    ///
+    /// Not a sandbox: the target runs on the host, as `start`'s does.
+    pub(crate) fn start_with_secret(
+        &self,
+        start: &SecretProcessStartAuthorisation,
+        executable: OwnedFd,
+        cwd: OwnedFd,
+        secret: &OwnedFd,
+    ) -> OutcomeResult {
+        match self.launch_supervised(&start.launch(), executable, cwd, Some((start, secret))) {
+            Ok(done) => OutcomeResult::done(BrokerDone::secret_process_start(done)),
+            Err(result) => result,
+        }
+    }
+
+    /// Read a secret launch's value — only once its executable and working
+    /// directory are proved, so a launch refused for them never touches it —
+    /// and refuse one its delivery cannot carry.
+    fn secret_launch(
+        start: &SecretProcessStartAuthorisation,
+        fd: &OwnedFd,
+    ) -> Result<launch::SecretLaunch, BrokerRefusal> {
+        let value = crate::secret::read_value(fd)?;
+        crate::crash::point("secret_after_read");
+        if start.delivery == SecretDelivery::EnvAtSpawn && value.contains(&0) {
+            return Err(BrokerRefusal::SecretUnsafeBytes);
+        }
+        let needle =
+            crate::secret::Needle::new(value, &start.handle).ok_or(BrokerRefusal::SecretEmpty)?;
+        Ok(launch::SecretLaunch {
+            env_name: start
+                .env_name
+                .as_ref()
+                .map(|name| name.as_str().as_bytes().to_vec()),
+            needle,
+        })
+    }
+
+    /// Re-prove, launch, confirm, supervise: the answer to a launch, or the
+    /// outcome that is not one.
+    fn launch_supervised(
+        &self,
+        start: &ProcessStartAuthorisation,
+        executable: OwnedFd,
+        cwd: OwnedFd,
+        secret: Option<(&SecretProcessStartAuthorisation, &OwnedFd)>,
+    ) -> Result<ProcessStartDone, OutcomeResult> {
+        let refused = |refusal| Err(OutcomeResult::Refused(refusal));
         {
             let mut table = self.table();
             if table
                 .iter()
                 .any(|entry| entry.process_id == start.process_id)
             {
-                return OutcomeResult::Refused(BrokerRefusal::ProcessIdInUse);
+                return refused(BrokerRefusal::ProcessIdInUse);
             }
             if !Self::make_room(&mut table) {
-                return OutcomeResult::Refused(BrokerRefusal::ProcessTableFull);
+                return refused(BrokerRefusal::ProcessTableFull);
             }
         }
         if let Err(refusal) = verify::descriptors(start, &executable, &cwd, self.authority_uid) {
-            return OutcomeResult::Refused(refusal);
+            return refused(refusal);
         }
+        let secret = match secret {
+            None => None,
+            Some((authorisation, fd)) => match Self::secret_launch(authorisation, fd) {
+                Ok(secret) => Some(secret),
+                Err(refusal) => return refused(refusal),
+            },
+        };
         // Nothing this process holds may reach the target: refuse rather than
         // leak it (a descriptor inherited without FD_CLOEXEC cannot be closed
         // without `unsafe`, so it is found, not fixed).
@@ -200,35 +272,45 @@ impl Processes {
             Ok(found) if found.is_empty() => {}
             Ok(found) => {
                 crate::event(&format!("inherited_descriptors fds={found:?}"));
-                return OutcomeResult::Refused(BrokerRefusal::InheritedDescriptor);
+                return refused(BrokerRefusal::InheritedDescriptor);
             }
-            Err(_) => return OutcomeResult::Refused(BrokerRefusal::InheritedDescriptor),
+            Err(_) => return refused(BrokerRefusal::InheritedDescriptor),
         }
         crate::crash::point("process_before_helper");
-        let launched = match launch::launch(&self.helper, start, executable, cwd) {
+        let needle = secret.as_ref().map(|s| std::sync::Arc::clone(&s.needle));
+        let launched = match launch::launch(&self.helper, start, executable, cwd, secret) {
             Ok(launched) => launched,
-            Err(launch::Failure::Refused(refusal)) => return OutcomeResult::Refused(refusal),
+            Err(launch::Failure::Refused(refusal)) => return refused(refusal),
             Err(launch::Failure::Unconfirmed) => {
-                return OutcomeResult::Indeterminate(Indeterminate::LaunchUnconfirmed);
+                return Err(OutcomeResult::Indeterminate(
+                    Indeterminate::LaunchUnconfirmed,
+                ));
             }
         };
         crate::crash::point("process_after_exec");
         let limit = usize::try_from(start.stream_limit.get()).unwrap_or(usize::MAX);
-        let entry =
-            supervise::supervise(start.process_id.clone(), launched, limit, self.wall_clock);
+        let entry = supervise::supervise(
+            start.process_id.clone(),
+            launched,
+            limit,
+            self.wall_clock,
+            needle,
+        );
         match entry {
             Ok(entry) => {
                 self.table().push(entry);
-                OutcomeResult::done(BrokerDone::process_start(ProcessStartDone {
+                Ok(ProcessStartDone {
                     generation: self.generation.clone(),
                     state: ProcessState::Running,
                     exit_code: None,
                     signal: None,
-                }))
+                })
             }
             // The target runs and could not be supervised: the broker cannot
             // say what it does next.
-            Err(()) => OutcomeResult::Indeterminate(Indeterminate::LaunchUnconfirmed),
+            Err(()) => Err(OutcomeResult::Indeterminate(
+                Indeterminate::LaunchUnconfirmed,
+            )),
         }
     }
 
@@ -259,7 +341,7 @@ impl Processes {
             Some(dwk_proto::brokerp::ProcessStreamSnapshot {
                 content: StreamContent::from_bytes(&s.retained)?,
                 observed: dwk_proto::wire::scalar::ByteCount::new(s.observed)?,
-                truncated: s.observed > u64::try_from(s.retained.len()).unwrap_or(u64::MAX),
+                truncated: s.cut,
             })
         };
         let (Some(stdout), Some(stderr)) = (stream(&snapshot.stdout), stream(&snapshot.stderr))

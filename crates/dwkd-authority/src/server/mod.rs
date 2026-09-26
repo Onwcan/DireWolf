@@ -68,6 +68,8 @@ mod peer;
 mod connection;
 #[cfg(unix)]
 mod envelope;
+#[cfg(target_os = "linux")]
+mod hardening;
 #[cfg(unix)]
 mod protocol;
 #[cfg(unix)]
@@ -165,6 +167,19 @@ fn run(_config: &ServeConfig) -> Result<Stopped, ServeError> {
 fn run(config: &ServeConfig) -> Result<Stopped, ServeError> {
     use std::sync::Arc;
 
+    // Before anything is read -- the secret index reads every configured
+    // value once at start -- the process can dump no core, and no other
+    // process of its uid can read its memory (M4e, ADR-0046 §9).
+    #[cfg(target_os = "linux")]
+    {
+        hardening::apply(config.dumpable_permitted).map_err(ServeError::Io)?;
+        if config.dumpable_permitted {
+            log(
+                "REDUCED ASSURANCE: the process stays dumpable (--allow-dumpable); its memory is \
+                 readable by other processes of its uid. RLIMIT_CORE is 0",
+            );
+        }
+    }
     let (place, authority, report) = start(config)?;
     let bound = socket::bind(&place).map_err(|e| ServeError::Socket(e.to_string()))?;
     let path = place.path().to_path_buf();
@@ -285,12 +300,24 @@ fn start(
             Some(link)
         }
     };
+    let secrets = match &config.secrets_file {
+        None => crate::secret::metadata::SecretConfig::default(),
+        Some(path) => {
+            let text =
+                crate::secret::backend::read_metadata_file(&path.to_string_lossy(), authority_uid)
+                    .map_err(ServeError::Configuration)?;
+            crate::secret::metadata::parse(&text).map_err(|error| {
+                ServeError::Configuration(format!("--secrets-file {}: {error}", path.display()))
+            })?
+        }
+    };
     let startup = StartupConfig {
         policy,
         mode: config.mode,
         ceiling: config.ceiling.clone(),
         flags: config.flags,
         lease_ttl_ms: config.lease_ttl_ms,
+        secrets,
     };
     let options = StartOptions {
         broker,

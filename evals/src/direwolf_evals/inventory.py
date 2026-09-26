@@ -106,25 +106,29 @@ INVENTORY: Final[tuple[SecurityProperty, ...]] = (
         "Generated delegation chains over the real lattice; the 10^6 campaign is "
         "`make capability-evidence`.",
     ),
-    # --- pending: the mechanism does not exist yet -------------------------
+    # --- measurable now: M4 shipped the brokers and secrets (M4e, ADR-0046) --
     SecurityProperty(
         "Filesystem canonicalisation resists traversal and TOCTOU",
         "M4",
-        None,
-        "Needs the filesystem broker (openat2, inode identity).",
+        "m4-security",
+        "The M4a resolver against hostile trees and six race campaigns, and the "
+        "brokered read with the name replaced after the check.",
     ),
     SecurityProperty(
         "Exec mediation normalises argv and scrubs the environment",
         "M4",
-        None,
-        "Needs the exec broker.",
+        "m4-security",
+        "The real broker and launch helper starting real targets, and the released "
+        "daemons' production host floor.",
     ),
     SecurityProperty(
         "Secrets never reach the runtime's address space",
         "M4",
-        None,
-        "Needs the secret broker and injection modes.",
+        "m4-security",
+        "A separate runtime process's memory read after it reads a file holding a "
+        "live value; the real keyring, one-shot delivery, residue and durable state.",
     ),
+    # --- pending: the mechanism does not exist yet -------------------------
     SecurityProperty(
         "Sandbox and egress isolation (PROXY_ONLY)",
         "M5",

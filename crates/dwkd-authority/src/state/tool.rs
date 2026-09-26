@@ -413,7 +413,11 @@ pub(super) const fn failure_reason(failure: BrokerFailure) -> FsFailureReason {
             | BrokerRefusal::ProcessTableFull
             | BrokerRefusal::ProcessIdInUse
             | BrokerRefusal::UnknownProcess
-            | BrokerRefusal::StaleGeneration => FsFailureReason::BrokerExecutionError,
+            | BrokerRefusal::StaleGeneration
+            | BrokerRefusal::SecretDescriptor
+            | BrokerRefusal::SecretEmpty
+            | BrokerRefusal::SecretTooLarge
+            | BrokerRefusal::SecretUnsafeBytes => FsFailureReason::BrokerExecutionError,
         },
         BrokerFailure::Indeterminate(_) => FsFailureReason::BrokerExecutionError,
     }
@@ -1452,6 +1456,10 @@ fn stat_result(stat: &StatDelivery) -> Option<FsStatResult> {
     })
 }
 
+/// A classified answer: the ending, the broker failure behind it (and
+/// whether the authorisation was sent), and what redaction removed.
+pub(super) type Classified = (Ending, Option<(BrokerFailure, bool)>, super::secrets::Hits);
+
 /// Classify the broker's answer. Effect-free tools keep M4b's classes: any
 /// broker trouble is a failure, because a read cannot have changed anything.
 /// A tool with an effect is `FAILED` only when the broker provably changed
@@ -1461,9 +1469,29 @@ pub(super) fn classify(
     call: &Call,
     plan: &ToolPlan,
     result: Result<BrokerDelivery, BrokerError>,
-) -> Result<(Ending, Option<(BrokerFailure, bool)>), AuthorityError> {
+    secrets: &super::secrets::SecretsState,
+) -> Result<Classified, AuthorityError> {
     let effect = plan::has_effect(call.tool());
-    Ok(match result {
+    // Return-path redaction (M4e): file content is redacted as raw bytes,
+    // after the delivery is checked against the bound it was authorised with
+    // and before it is encoded for the wire; the raw buffer is zeroized.
+    let mut hits = super::secrets::Hits::new();
+    let result = match (call, result) {
+        (Call::Read { max_bytes, .. }, Ok(BrokerDelivery::Read(mut read))) => {
+            let limit = usize::try_from(max_bytes.get()).unwrap_or(usize::MAX);
+            if read.content.len() <= limit {
+                let redacted = secrets.redact_bounded(&mut read.content, limit);
+                read.content = redacted.bytes;
+                if redacted.cut {
+                    read.eof_observed = false;
+                }
+                hits = redacted.hits;
+            }
+            Ok(BrokerDelivery::Read(read))
+        }
+        (_, other) => other,
+    };
+    let (ending, detail) = match result {
         Ok(delivery) => match complete(call, plan, delivery)? {
             Ok(completion) => (Ending::Completed(Box::new(completion)), None),
             Err(why) => {
@@ -1486,7 +1514,8 @@ pub(super) fn classify(
                 (Ending::Failed(failure_reason(error.failure)), detail)
             }
         }
-    })
+    };
+    Ok((ending, detail, hits))
 }
 
 /// End an open invocation: exactly one row, from `INTENT`.

@@ -76,6 +76,14 @@
 >   identity**, canonical path and SHA-256, and covers only that file while
 >   it holds those bytes. A stored grant is re-read by grammar alone
 >   ([ADR-0045](adr/0045-m4d-process-execution-broker.md) §§5, 6, 21). `fs.exec_bit` stays `UNRESOLVED_RESOURCE`.
+> - **`secret.use` handles resolve (M4e).** A concrete `secret.use:<handle>`
+>   means what the secret index holds: a configured, unrevoked handle is
+>   admitted and bound to its current revision; any other is withheld
+>   `NEEDS_CONFIGURED_SECRET`. Admission reads metadata, never a value; a
+>   stored grant is re-read by grammar alone; a revoked or replaced handle
+>   fails at use whatever a grant says ([ADR-0046](adr/0046-m4e-secret-handles-backends-injection-and-redaction.md) §§2, 5, 20).
+>   Every shipped pack denies `secret.use` — SAFE by rule, BALANCED and POWER
+>   by default — until M6's approvals exist; the table in §6 is the target.
 > - **No policy preflight** (§4 step 7). `AdmitRun` carries no action for policy
 >   to decide, and inventing one would be deciding something nobody asked to
 >   do. Policy decides a *complete canonical action*, where both gates run

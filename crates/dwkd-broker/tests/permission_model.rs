@@ -35,6 +35,8 @@ use nix as _;
 // Linux-only, like the operations that digest with it.
 #[cfg(target_os = "linux")]
 use sha2 as _;
+#[cfg(target_os = "linux")]
+use zeroize as _;
 
 #[cfg(target_os = "linux")]
 mod linux {

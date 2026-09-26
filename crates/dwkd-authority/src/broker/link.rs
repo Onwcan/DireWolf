@@ -1,5 +1,5 @@
 //! The authority's end of the private broker channel, on Linux (M4b,
-//! ADR-0043; M4c, ADR-0044; M4d, ADR-0045).
+//! ADR-0043; M4c, ADR-0044; M4d, ADR-0045; M4e, ADR-0046).
 //!
 //! One of the three authority modules that may name `rustix` (TX008), and the
 //! only one that may send a descriptor or take one out of a handoff (TX014).
@@ -76,6 +76,7 @@ enum Sent {
         stream_limit: u32,
     },
     ProcessKill,
+    SecretEgress,
 }
 
 /// Perform one operation through the broker at `socket`, which must be served
@@ -171,6 +172,15 @@ fn authorise(common: Common, operation: Operation) -> Result<Prepared, BrokerFai
         Operation::ProcessStart { .. }
         | Operation::ProcessStatus { .. }
         | Operation::ProcessKill { .. } => process(common, operation),
+        // The value is the one descriptor; the message carries only the
+        // handle, the origin, the header and its prefix.
+        Operation::SecretEgress { spec, secret } => Ok((
+            Authorisation::SecretEgress(dwk_proto::brokerp::SecretEgressAuthorisation::new(
+                common, spec,
+            )),
+            vec![secret.into_transfer_descriptor()],
+            Sent::SecretEgress,
+        )),
         Operation::Reclaim { directory, staging } => {
             let leaf = LeafName::new(staging.leaf.as_str())
                 .ok_or(BrokerFailure::Protocol("a recorded name is not a leaf"))?;
@@ -553,6 +563,10 @@ fn deliver(sent: &Sent, done: BrokerDone) -> Result<BrokerDelivery, BrokerFailur
             status(&done.process_status.ok_or(wrong)?, *stream_limit)?
         }
         Sent::ProcessKill => BrokerDelivery::ProcessKilled(done.process_kill.ok_or(wrong)?.outcome),
+        Sent::SecretEgress => {
+            done.secret_egress.ok_or(wrong)?;
+            BrokerDelivery::SecretEgress
+        }
     })
 }
 

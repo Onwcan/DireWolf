@@ -385,7 +385,14 @@ pub(super) const fn failure_reason(failure: BrokerFailure) -> ToolFailureReasonV
             | BrokerRefusal::WriteDenied
             | BrokerRefusal::AttributesNotPreserved
             | BrokerRefusal::SharedDirectory
-            | BrokerRefusal::ProcessIdInUse => ToolFailureReasonV3::BrokerExecutionError,
+            | BrokerRefusal::ProcessIdInUse
+            // The secret refusals (M4e) answer a secret primitive, which no
+            // process tool sends: from a process operation they are the
+            // broker misbehaving.
+            | BrokerRefusal::SecretDescriptor
+            | BrokerRefusal::SecretEmpty
+            | BrokerRefusal::SecretTooLarge
+            | BrokerRefusal::SecretUnsafeBytes => ToolFailureReasonV3::BrokerExecutionError,
         },
         BrokerFailure::Indeterminate(_) => ToolFailureReasonV3::BrokerExecutionError,
     }
@@ -1611,10 +1618,32 @@ pub(super) fn classify(
     process: &ProcessId,
     stream_limit: Option<u32>,
     result: Result<BrokerDelivery, BrokerError>,
-) -> (Ending, Option<(BrokerFailure, bool)>) {
-    match result {
+    secrets: &super::secrets::SecretsState,
+) -> (Ending, Option<(BrokerFailure, bool)>, super::secrets::Hits) {
+    let mut hits = super::secrets::Hits::new();
+    let classified = match result {
         Ok(delivery) => match completed(tool, process, stream_limit, delivery) {
-            Ok(output) => (Ending::Completed(Box::new(output)), None),
+            Ok(mut output) => {
+                // Return-path redaction (M4e): each stream's raw bytes, after
+                // its counts were checked and before it is encoded; the raw
+                // buffers are zeroized. `observed` still counts what the
+                // process wrote; a stream redaction lengthened past its bound
+                // is cut and marked truncated.
+                if let ProcessOutput::Observed { stdout, stderr, .. } = &mut output {
+                    let limit =
+                        stream_limit.map_or(0, |l| usize::try_from(l).unwrap_or(usize::MAX));
+                    for stream in [stdout, stderr] {
+                        let redacted = secrets.redact_bounded(&mut stream.content, limit);
+                        stream.content = redacted.bytes;
+                        stream.truncated = stream.truncated || redacted.cut;
+                        for (kind, count) in redacted.hits {
+                            let total = hits.entry(kind).or_insert(0);
+                            *total = total.saturating_add(count);
+                        }
+                    }
+                }
+                (Ending::Completed(Box::new(output)), None)
+            }
             Err(why) => {
                 let detail = Some((BrokerFailure::Protocol(why), true));
                 if has_effect(tool) {
@@ -1643,7 +1672,8 @@ pub(super) fn classify(
                 (Ending::Failed(failure_reason(error.failure)), detail)
             }
         }
-    }
+    };
+    (classified.0, classified.1, hits)
 }
 
 /// The stored class of a completed output, and its retained output bytes.

@@ -24,6 +24,15 @@ use rustix as _;
 use sha2 as _;
 use toml as _;
 use unicode_normalization as _;
+// M4e's secret crates (ADR-0046), reached only through the library.
+use age as _;
+use getrandom as _;
+use hmac as _;
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+use keyring as _;
+#[cfg(target_os = "linux")]
+use linux_keyutils as _;
+use zeroize as _;
 
 mod state_support;
 
@@ -513,11 +522,15 @@ mod linux {
         // table and its two triggers and the tool-staging table, its index
         // and its four triggers, and schema 5 (M4d) adds the process ledger,
         // the process table and the process-idempotency table, whose
-        // triggers go with them.
+        // triggers go with them, and schema 6 (M4e) adds the secret index,
+        // run bindings, injection ledger and use counts (and widens
+        // run_withheld's reasons, which an older store's rows satisfy).
         {
             let conn = raw(&h.state());
             conn.execute_batch(
-                "DROP TABLE process_idempotency; DROP TABLE tool_process; \
+                "DROP TABLE secret_use; DROP TABLE secret_injection; \
+                 DROP TABLE secret_run_binding; DROP TABLE secret_revision; \
+                 DROP TABLE process_idempotency; DROP TABLE tool_process; \
                  DROP TABLE process_invocation; DROP TABLE tool_staging; \
                  DROP TABLE tool_idempotency; DROP TABLE tool_invocation; \
                  DROP TABLE workspace_root; PRAGMA user_version = 1;",
@@ -559,7 +572,7 @@ mod linux {
         {
             let conn = raw(&h.state());
             conn.execute_batch(
-                "DROP TABLE process_idempotency; DROP TABLE tool_process;                  DROP TABLE process_invocation; DROP TABLE tool_staging;                  DROP TABLE tool_idempotency; DROP TABLE tool_invocation;                  PRAGMA user_version = 2;",
+                "DROP TABLE secret_use; DROP TABLE secret_injection; DROP TABLE secret_run_binding;                  DROP TABLE secret_revision; DROP TABLE process_idempotency; DROP TABLE tool_process;                  DROP TABLE process_invocation; DROP TABLE tool_staging;                  DROP TABLE tool_idempotency; DROP TABLE tool_invocation;                  PRAGMA user_version = 2;",
             )
             .unwrap();
         }

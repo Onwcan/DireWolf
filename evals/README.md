@@ -148,6 +148,15 @@ properties that waited in `pending-kernel` moved to the gated
 the real-process Rust suites and the existing lattice and engine evidence
 rather than reimplementing any of them.
 
+M4e did it again: `"M4"` joined `AVAILABLE_MILESTONES` only once every M4
+property had a runner. The `m4-security` gate suite runs `path-traversal`
+(the resolver, the race campaigns and a brokered read after a name swap),
+`exec-mediation` (argv, environment and descriptor-bound exec, re-proof, the
+production floor) and `secret-boundary` (the runtime's address space, residue,
+durable state, redaction) from `runners/m4.py`, each over the real Rust suites
+and each requiring every case it lists; `path-traversal` left
+`pending-kernel` ([ADR-0046](../docs/adr/0046-m4e-secret-handles-backends-injection-and-redaction.md) §24).
+
 Step 2 is not optional. An eval whose milestone has arrived and which has **no
 runner, or an unknown one, reports ERROR** and fails the gate. That is
 deliberate: a security property that cannot run once its component exists is a

@@ -21,25 +21,19 @@
 id = "pending-kernel"
 title = "Authority properties waiting for the components that implement them"
 description = """
-Filesystem canonicalisation, sandbox isolation, approval binding and model
-egress. The M3 properties that used to wait here -- the hostile DWKP client,
-peer credentials, epoch fencing, default-deny policy and capability
-attenuation -- run now, in `authority-security`. M2.5 built the harness these
-will run in; it does not simulate the systems under test, because an eval
-against a simulation measures the simulation.
+Sandbox isolation, approval binding and model egress. The M3 properties that
+used to wait here -- the hostile DWKP client, peer credentials, epoch fencing,
+default-deny policy and capability attenuation -- run in `authority-security`,
+and the M4 ones -- path traversal, exec mediation, the secret boundary -- in
+`m4-security`. M2.5 built the harness these will run in; it does not simulate
+the systems under test, because an eval against a simulation measures the
+simulation.
 """
 score = "none yet: a pending eval has no score, by construction"
 # Per-eval, not suite-wide: each property waits for exactly one milestone, and
 # a suite-level floor would make an M7 property claim to be waiting for M3 too.
 requires = []
 gate = false
-
-[[eval]]
-name = "path-traversal"
-description = "The full traversal set, including Unicode normalisation and TOCTOU swaps."
-requires = ["M4"]
-pending_reason = "there is no filesystem broker and no canonicaliser."
-tags = ["broker", "filesystem"]
 
 [[eval]]
 name = "sandbox-egress"

@@ -6,7 +6,9 @@
 //! write end, stderr one end of a fresh socket pair — the control channel —
 //! and its own process group. Over the control channel it receives the
 //! launch: `argv`, `envp`, and three descriptors by `SCM_RIGHTS` — the
-//! executable, the working directory and the stderr pipe's write end.
+//! executable, the working directory and the stderr pipe's write end — and,
+//! for a secret launch (M4e), a fourth: the read end of a fresh pipe holding
+//! the value, already at end of file.
 //!
 //! **The handshake.** The helper's control descriptor is close-on-exec. It
 //! writes `X` immediately before `execveat`; a failure after that writes a
@@ -49,6 +51,26 @@ pub(super) struct Launched {
     pub(super) stderr: io::PipeReader,
 }
 
+/// A secret a launch delivers (M4e): the variable for mode B, none for mode
+/// C, and the value, which also redacts the launch's output.
+#[derive(Debug)]
+pub(super) struct SecretLaunch {
+    /// Mode B's variable name; `None` for mode C.
+    pub(super) env_name: Option<Vec<u8>>,
+    /// The value.
+    pub(super) needle: std::sync::Arc<crate::secret::Needle>,
+}
+
+/// A fresh pipe holding `value` and nothing else, its writer closed: the
+/// helper's copy of the secret. The value fits the pipe's buffer (64 KiB on
+/// Linux; the value is at most 32 KiB), so the write never waits.
+fn secret_pipe(value: &[u8]) -> io::Result<OwnedFd> {
+    let (reader, mut writer) = io::pipe()?;
+    writer.write_all(value)?;
+    drop(writer);
+    Ok(OwnedFd::from(reader))
+}
+
 /// Why nothing, or nothing provable, was launched.
 #[derive(Debug)]
 pub(super) enum Failure {
@@ -75,7 +97,14 @@ pub(super) fn launch(
     start: &ProcessStartAuthorisation,
     executable: OwnedFd,
     cwd: OwnedFd,
+    secret: Option<SecretLaunch>,
 ) -> Result<Launched, Failure> {
+    // The helper's copy of the value is made before the helper exists, so a
+    // failure here launches nothing.
+    let secret_fd = match &secret {
+        Some(s) => Some(secret_pipe(s.needle.value()).map_err(setup)?),
+        None => None,
+    };
     let (stdout_r, stdout_w) = io::pipe().map_err(setup)?;
     let (stderr_r, stderr_w) = io::pipe().map_err(setup)?;
     let (ours, theirs) = UnixStream::pair().map_err(setup)?;
@@ -104,13 +133,22 @@ pub(super) fn launch(
             .map(|(name, value)| format!("{name}={value}").into_bytes())
             .collect(),
         crash_before_exec: crate::crash::armed("process_helper_before_exec"),
+        secret: secret.map(|s| match s.env_name {
+            Some(name) => helper::SpecSecret::Env(name),
+            None => helper::SpecSecret::Fd,
+        }),
     };
     let payload = helper::encode(&spec);
-    let sent = send(
-        &ours,
-        &payload,
-        &[&executable, &cwd, &OwnedFd::from(stderr_w)],
-    );
+    let stderr_w = OwnedFd::from(stderr_w);
+    let mut descriptors = vec![&executable, &cwd, &stderr_w];
+    if let Some(fd) = &secret_fd {
+        descriptors.push(fd);
+    }
+    let sent = send(&ours, &payload, &descriptors);
+    drop(stderr_w);
+    // The broker's copy of the helper's pipe closes now: the helper holds
+    // the only one.
+    drop(secret_fd);
     // Ours close now: the helper holds the only copies it needs.
     drop(executable);
     drop(cwd);
@@ -162,7 +200,7 @@ pub(super) fn launch(
 fn send(stream: &UnixStream, payload: &[u8], descriptors: &[&OwnedFd]) -> io::Result<()> {
     stream.set_write_timeout(Some(HANDSHAKE))?;
     let fds: Vec<_> = descriptors.iter().map(|fd| fd.as_fd()).collect();
-    let mut space = [MaybeUninit::<u8>::uninit(); rustix::cmsg_space!(ScmRights(3))];
+    let mut space = [MaybeUninit::<u8>::uninit(); rustix::cmsg_space!(ScmRights(4))];
     let mut ancillary = SendAncillaryBuffer::new(&mut space);
     if !ancillary.push(SendAncillaryMessage::ScmRights(&fds)) {
         return Err(io::Error::other("the descriptors did not fit"));

@@ -21,6 +21,15 @@ use rustix as _;
 use sha2 as _;
 use toml as _;
 use unicode_normalization as _;
+// M4e's secret crates (ADR-0046), reached only through the library.
+use age as _;
+use getrandom as _;
+use hmac as _;
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+use keyring as _;
+#[cfg(target_os = "linux")]
+use linux_keyutils as _;
+use zeroize as _;
 
 mod state_support;
 
@@ -360,7 +369,9 @@ fn a_query_without_a_proposal_reports_authority_and_decides_nothing() {
     let mut h = Harness::new("report");
     let run = admit(
         &mut h,
-        &["model.call:*", "secret.use:x", "fs.write:/workspace"],
+        // `secret.use:*` needs no secret index, so it is withheld for the
+        // profile alone (a concrete handle would be resolved first; M4e).
+        &["model.call:*", "secret.use:*", "fs.write:/workspace"],
     );
     let DwkpBody::EffectiveAuthority(answer) = h
         .authority()

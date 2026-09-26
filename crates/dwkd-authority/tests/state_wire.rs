@@ -28,6 +28,15 @@ use rustix as _;
 use sha2 as _;
 use toml as _;
 use unicode_normalization as _;
+// M4e's secret crates (ADR-0046), reached only through the library.
+use age as _;
+use getrandom as _;
+use hmac as _;
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+use keyring as _;
+#[cfg(target_os = "linux")]
+use linux_keyutils as _;
+use zeroize as _;
 
 mod state_support;
 
@@ -151,7 +160,7 @@ fn every_state_response_round_trips_and_every_refusal_pair_is_reached() {
 
     let requested = [
         "model.call:anthropic/*",        // granted
-        "secret.use:github",             // NOT_IN_AGENT_PROFILE
+        "secret.use:*",                  // NOT_IN_AGENT_PROFILE (a wildcard needs no index; M4e)
         "memory.read:*",                 // NOT_IN_SKILL_SET (web does not declare it)
         "network.https:api.example.com", // ABOVE_PROFILE_CEILING
         "fs.write:/workspace",           // UNRESOLVED_RESOURCE (until M4c)

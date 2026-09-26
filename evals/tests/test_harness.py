@@ -125,8 +125,8 @@ def test_pending_evals_are_pending_not_passing() -> None:
 
 def test_an_eval_requiring_a_future_milestone_is_pending() -> None:
     """The mechanism that turns suites on: a milestone this build lacks."""
-    assert "M4" not in AVAILABLE_MILESTONES
-    suite, evaluation = next((s, e) for s, e in collect(EVALS_ROOT) if "M4" in e.requires)
+    assert "M5" not in AVAILABLE_MILESTONES
+    suite, evaluation = next((s, e) for s, e in collect(EVALS_ROOT) if "M5" in e.requires)
     results = run_eval(suite, evaluation, repo_root=REPO_ROOT, evals_root=EVALS_ROOT)
     assert [r.status for r in results] == [Status.PENDING]
 

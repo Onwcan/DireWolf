@@ -13,6 +13,15 @@ use rustix as _;
 use sha2 as _;
 use toml as _;
 use unicode_normalization as _;
+// M4e's secret crates (ADR-0046), reached only through the library.
+use age as _;
+use getrandom as _;
+use hmac as _;
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+use keyring as _;
+#[cfg(target_os = "linux")]
+use linux_keyutils as _;
+use zeroize as _;
 
 mod state_support;
 

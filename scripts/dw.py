@@ -1568,6 +1568,367 @@ def task_process_broker_evidence() -> None:
         )
 
 
+SECRET_EVIDENCE_PREFIX = "SECRET-EVIDENCE "  # noqa: S105 - a log prefix, not a credential
+
+# M4e's evidence (ADR-0046). Each (suite, case) is printed by exactly one test,
+# after its assertions held; a missing one -- or one whose outcome says it was
+# not exercised -- fails the task. The suites, and what they are:
+#   secret-metadata            the operator's metadata grammar: deferred
+#                              backends, mode D unreachable, header and
+#                              environment names refused, origin binding;
+#   secret-backend             the REAL kernel keyring and REAL age files, and
+#                              every hostile store;
+#   secret-redaction           exact-value and known-shape redaction, the
+#                              documented limitations, the scan bound;
+#   authority-secret-pipeline  the authority's mode A state machine against a
+#                              FAKE broker (backend reads counted, durable order,
+#                              gates, revisions, R1-R10 crash windows) and the
+#                              process-output return path. Not transport
+#                              evidence;
+#   broker-secret-primitives   the REAL broker binary: the one-shot descriptor,
+#                              every hostile descriptor and message, the mode
+#                              B/C injection primitive, output redaction while
+#                              drained, residue, the production hardening;
+#   authority-secret           the REAL daemons and a separate runtime process:
+#                              return-path redaction, the runtime's address
+#                              space, mode A through the real broker, residue,
+#                              durable state, audit, logs.
+SECRET_CASES = (
+    ("secret-metadata", "header-crlf"),
+    ("secret-metadata", "env-control-variable"),
+    ("secret-metadata", "mode-fields"),
+    ("secret-metadata", "origin-binding"),
+    ("secret-metadata", "handle-grammar"),
+    ("secret-metadata", "unknown-member"),
+    ("secret-metadata", "env-backend"),
+    ("secret-metadata", "exec-backend"),
+    ("secret-metadata", "mode-d-plaintext-to-model"),
+    ("secret-backend", "keyring-round-trip"),
+    ("secret-backend", "keyring-item-missing"),
+    ("secret-backend", "keyring-oversized-refused-by-kernel"),
+    ("secret-backend", "keyring-removed-fails-closed"),
+    ("secret-backend", "age-decrypt"),
+    ("secret-backend", "age-no-identity"),
+    ("secret-backend", "age-store-readable-by-others"),
+    ("secret-backend", "age-store-foreign-owner"),
+    ("secret-backend", "age-store-symlink"),
+    ("secret-backend", "age-truncated"),
+    ("secret-backend", "age-garbage"),
+    ("secret-backend", "age-oversized-file"),
+    ("secret-backend", "age-oversized-plaintext"),
+    ("secret-backend", "age-missing"),
+    ("secret-backend", "age-wrong-identity"),
+    ("secret-backend", "age-scrypt-passphrase"),
+    ("secret-redaction", "exact-value"),
+    ("secret-redaction", "transformed-hex"),
+    ("secret-redaction", "transformed-reversed"),
+    ("secret-redaction", "transformed-split"),
+    ("secret-redaction", "short-value-not-indexed"),
+    ("secret-redaction", "overlap-precedence"),
+    ("secret-redaction", "shape-github"),
+    ("secret-redaction", "shape-openai"),
+    ("secret-redaction", "shape-slack"),
+    ("secret-redaction", "shape-aws"),
+    ("secret-redaction", "shape-jwt"),
+    ("secret-redaction", "shape-pem-private-key"),
+    ("secret-redaction", "shape-bearer"),
+    ("secret-redaction", "shape-connection-string"),
+    ("secret-redaction", "shape-keyword"),
+    ("secret-redaction", "shape-near-misses"),
+    ("secret-redaction", "offset-sweep-64KiB"),
+    ("secret-redaction", "bound-64-secrets-256KiB"),
+    ("authority-secret-pipeline", "stored-grant-replaced"),
+    ("authority-secret-pipeline", "stored-grant-revoked"),
+    ("authority-secret-pipeline", "stored-grant-removed"),
+    ("authority-secret-pipeline", "admission-new-declaration"),
+    ("authority-secret-pipeline", "admission-unconfigured-or-revoked"),
+    ("authority-secret-pipeline", "admission-replay"),
+    ("authority-secret-pipeline", "backend-item-missing-after-intent"),
+    ("authority-secret-pipeline", "header-breaking-value"),
+    ("authority-secret-pipeline", "origin-suffix-attack"),
+    ("authority-secret-pipeline", "origin-prefix-attack"),
+    ("authority-secret-pipeline", "origin-parent-domain"),
+    ("authority-secret-pipeline", "origin-wrong-port"),
+    ("authority-secret-pipeline", "origin-userinfo"),
+    ("authority-secret-pipeline", "mode-downgrade-fd-only-to-egress"),
+    ("authority-secret-pipeline", "not-configured"),
+    ("authority-secret-pipeline", "revoked"),
+    ("authority-secret-pipeline", "capability-gate"),
+    ("authority-secret-pipeline", "broker-refused"),
+    ("authority-secret-pipeline", "broker-unreachable-before-send"),
+    ("authority-secret-pipeline", "broker-lost-after-send"),
+    ("authority-secret-pipeline", "broker-wrong-answer"),
+    ("authority-secret-pipeline", "use-count-only-injected"),
+    ("authority-secret-pipeline", "intent-durable-before-read"),
+    ("authority-secret-pipeline", "one-backend-read"),
+    ("authority-secret-pipeline", "one-shot-handoff"),
+    ("authority-secret-pipeline", "replay"),
+    ("authority-secret-pipeline", "use-count"),
+    ("authority-secret-pipeline", "durable-state"),
+    ("authority-secret-pipeline", "crash-R1-before-metadata"),
+    ("authority-secret-pipeline", "process-stdout-live-value"),
+    ("authority-secret-pipeline", "process-stderr-live-value"),
+    ("authority-secret-pipeline", "audit-redaction-hit-no-bytes"),
+    ("authority-secret-pipeline", "policy-gate"),
+    ("authority-secret-pipeline", "obligation-unenforceable"),
+    ("authority-secret-pipeline", "crash-R9-output-before-redaction"),
+    ("authority-secret-pipeline", "crash-R2-after-metadata"),
+    ("authority-secret-pipeline", "crash-R3-after-intent"),
+    ("authority-secret-pipeline", "crash-R4-backend-returned"),
+    ("authority-secret-pipeline", "crash-R5-redaction-registered"),
+    ("authority-secret-pipeline", "crash-R6-descriptor-created"),
+    ("authority-secret-pipeline", "crash-R8-broker-may-have-consumed"),
+    ("authority-secret-pipeline", "crash-R10-outcome-before-durable"),
+    ("authority-secret-pipeline", "crash-S9-durable-before-response"),
+    ("broker-secret-primitives", "broker-rlimit-core"),
+    ("broker-secret-primitives", "broker-not-dumpable"),
+    ("broker-secret-primitives", "crash-r7-broker-after-read"),
+    ("broker-secret-primitives", "egress-render-one-descriptor"),
+    ("broker-secret-primitives", "egress-descriptor-reused-after-consumption"),
+    ("broker-secret-primitives", "egress-replay-new-connection"),
+    ("broker-secret-primitives", "egress-broker-residue"),
+    ("broker-secret-primitives", "egress-hostile-missing"),
+    ("broker-secret-primitives", "egress-hostile-extra"),
+    ("broker-secret-primitives", "egress-hostile-directory"),
+    ("broker-secret-primitives", "egress-hostile-regular-file"),
+    ("broker-secret-primitives", "egress-hostile-writable"),
+    ("broker-secret-primitives", "egress-hostile-stalled-writer-open"),
+    ("broker-secret-primitives", "egress-hostile-zero-length"),
+    ("broker-secret-primitives", "egress-hostile-oversized"),
+    ("broker-secret-primitives", "egress-hostile-carriage-return"),
+    ("broker-secret-primitives", "egress-hostile-line-feed"),
+    ("broker-secret-primitives", "egress-hostile-nul"),
+    ("broker-secret-primitives", "egress-malformed-old-private-version"),
+    ("broker-secret-primitives", "egress-malformed-unknown-kind"),
+    ("broker-secret-primitives", "egress-malformed-header-with-space"),
+    ("broker-secret-primitives", "egress-malformed-value-field"),
+    ("broker-secret-primitives", "egress-malformed-mode-field"),
+    ("broker-secret-primitives", "spawn-missing-secret-descriptor"),
+    ("broker-secret-primitives", "spawn-descriptors-reversed"),
+    ("broker-secret-primitives", "egress-authority-disconnects"),
+    ("broker-secret-primitives", "spawn-env-nul"),
+    ("broker-secret-primitives", "spawn-env-ld-preload"),
+    ("broker-secret-primitives", "mode-b-target-environment-only"),
+    ("broker-secret-primitives", "mode-b-echo-redacted-across-writes"),
+    ("broker-secret-primitives", "mode-c-target-fd3"),
+    ("broker-secret-primitives", "mode-c-grandchild-inheritance"),
+    ("broker-secret-primitives", "mode-c-echo-redacted-while-drained"),
+    ("broker-secret-primitives", "mode-c-residue"),
+    ("broker-secret-primitives", "mode-b-residue"),
+    ("authority-secret", "authority-rlimit-core"),
+    ("authority-secret", "authority-not-dumpable"),
+    ("authority-secret", "mode-a-real-broker"),
+    ("authority-secret", "mode-a-one-shot"),
+    ("authority-secret", "mode-a-authority-residue"),
+    ("authority-secret", "mode-a-broker-residue"),
+    ("authority-secret", "mode-a-durable-state-scan"),
+    ("authority-secret", "return-path-fs-read-live-value"),
+    ("authority-secret", "return-path-binary-around-value"),
+    ("authority-secret", "return-path-across-read-boundary"),
+    ("authority-secret", "return-path-shape-github"),
+    ("authority-secret", "return-path-shape-openai"),
+    ("authority-secret", "return-path-shape-slack"),
+    ("authority-secret", "return-path-shape-aws"),
+    ("authority-secret", "return-path-shape-jwt"),
+    ("authority-secret", "return-path-shape-pem_private_key"),
+    ("authority-secret", "return-path-shape-connection_string"),
+    ("authority-secret", "return-path-shape-keyword"),
+    ("authority-secret", "return-path-transformed-value"),
+    ("authority-secret", "runtime-address-space"),
+    ("authority-secret", "authority-residue-after-redaction"),
+    ("authority-secret", "broker-residue-after-fs-read"),
+    ("authority-secret", "audit-redaction-hit"),
+    ("authority-secret", "daemon-logs-scan"),
+    ("authority-secret", "durable-state-scan"),
+)
+
+# The three-identity half and the core-dump contract: `#[ignore]`d, selected
+# BY NAME, required to run every test and report every case.
+SECRET_FOREIGN_TESTS = (
+    "linux::three_identities_keep_the_value_from_the_broker_store_and_the_runtime",
+    "linux::a_crashing_hardened_daemon_writes_no_core_where_a_dumpable_process_does",
+)
+SECRET_FOREIGN_CASES = (
+    ("authority-secret", "broker-uid-cannot-read-metadata"),
+    ("authority-secret", "broker-uid-cannot-read-age-store"),
+    ("authority-secret", "broker-uid-keyring-has-no-value"),
+    ("authority-secret", "runtime-uid-cannot-read-metadata"),
+    ("authority-secret", "runtime-uid-cannot-read-age-store"),
+    ("authority-secret", "runtime-uid-keyring-has-no-value"),
+    ("authority-secret", "runtime-uid-receives-placeholder"),
+    ("authority-secret", "runtime-memory-root-scan"),
+    ("authority-secret", "authority-memory-root-scan"),
+    ("authority-secret", "broker-memory-root-scan"),
+    ("authority-secret", "runtime-uid-cannot-reach-broker"),
+    ("authority-secret", "core-dump-control"),
+    ("authority-secret", "core-dump-hardened-broker-and-authority"),
+)
+
+
+def task_secret_broker_evidence() -> None:
+    """M4e's secret evidence (ADR-0046); the three-identity half needs
+    DW_BROKER_AS and DW_PEER_AS, and the core-dump contract DW_M4E_CORE_EVIDENCE=1.
+
+    The same-identity suites run first: the public protocol corpus (no member
+    for secret material), private protocol version 4, the metadata grammar,
+    the real keyring and age backends, redaction, the authority's mode A state
+    machine against a fake broker (labelled so), the broker's own secret unit
+    tests, the real broker binary's secret primitives, and the real daemons
+    with a separate runtime process. Every case must report; every suite must
+    have run at least one test. Then, selected by name, three genuine
+    identities -- the store and keyring closed to the broker's and the
+    runtime's uids, the runtime's placeholder, root reading the hardened
+    daemons' and the runtime's memory -- and the core-dump contract, which
+    changes kernel.core_pattern for its duration and so runs only where
+    DW_M4E_CORE_EVIDENCE=1 says it may.
+
+    Without the identities, or without the core opt-in, that half is NOT
+    EXERCISED and this task fails after running everything else. Linux only.
+    """
+    if not sys.platform.startswith("linux"):
+        raise TaskError(
+            "NOT EXERCISED: the secret evidence runs only on Linux (ADR-0046); use WSL2 on Windows"
+        )
+    broker_user = os.environ.get("DW_BROKER_AS", "").strip()
+    peer_user = os.environ.get("DW_PEER_AS", "").strip()
+    core = os.environ.get("DW_M4E_CORE_EVIDENCE", "").strip() == "1"
+    identities = bool(broker_user and peer_user)
+    if identities:
+        _, _, broker_uid = second_identity("DW_BROKER_AS")
+        _, _, peer_uid = second_identity("DW_PEER_AS")
+        if broker_uid == peer_uid:
+            raise TaskError(
+                f"DW_BROKER_AS={broker_user} and DW_PEER_AS={peer_user} are both uid {peer_uid}: "
+                "the broker and the hostile runtime must be two identities"
+            )
+    run("cargo", "build", "--locked", "-p", "dwkd-broker")
+    # The public protocol corpus: no member for secret material. A failure
+    # stops the task here (`uvrun` raises).
+    uvrun("pytest", "-q", "-p", "no:cacheprovider", "tests/protocol/test_no_secret_value_fields.py")
+    suites = [
+        run_captured(
+            "cargo", "test", "--locked", "-p", "dwk-proto", "--lib", "secret", "--", "--nocapture"
+        ),
+        run_captured(
+            "cargo",
+            "test",
+            "--locked",
+            "-p",
+            "dwkd-authority",
+            "--lib",
+            "secret::",
+            "--",
+            "--nocapture",
+        ),
+        run_captured(
+            "cargo",
+            "test",
+            "--locked",
+            "-p",
+            "dwkd-authority",
+            "--lib",
+            "state::secret_use",
+            "--",
+            "--nocapture",
+        ),
+        run_captured(
+            "cargo",
+            "test",
+            "--locked",
+            "-p",
+            "dwkd-broker",
+            "--bins",
+            "secret",
+            "--",
+            "--nocapture",
+        ),
+        run_captured(
+            "cargo",
+            "test",
+            "--locked",
+            "-p",
+            "dwkd-broker",
+            "--test",
+            "secret_primitives",
+            "--",
+            "--nocapture",
+        ),
+        run_captured(
+            "cargo",
+            "test",
+            "--locked",
+            "-p",
+            "dwkd-authority",
+            "--test",
+            "secret_evidence",
+            "--",
+            "--nocapture",
+            "--test-threads=1",
+        ),
+    ]
+    for output in suites:
+        require_tests_ran(output)
+    require_secret_evidence("\n".join(suites), SECRET_CASES)
+    if identities and core:
+        foreign = run_captured(
+            "cargo",
+            "test",
+            "--locked",
+            "-p",
+            "dwkd-authority",
+            "--test",
+            "secret_evidence",
+            "--",
+            "--ignored",
+            "--exact",
+            "--nocapture",
+            "--test-threads=1",
+            *SECRET_FOREIGN_TESTS,
+        )
+        summaries = [line for line in foreign.splitlines() if line.startswith("test result: ")]
+        expected = f"test result: ok. {len(SECRET_FOREIGN_TESTS)} passed; 0 failed; 0 ignored"
+        if len(summaries) != 1 or not summaries[0].startswith(expected):
+            raise TaskError(
+                f"the three-identity secret suite did not run all of its tests: expected "
+                f"`{expected}`, got {summaries or 'no summary'}"
+            )
+        require_secret_evidence(foreign, SECRET_FOREIGN_CASES)
+    uvrun("dwcheck", "closure", "--report")
+    if not (identities and core):
+        raise TaskError(
+            "NOT EXERCISED: the three-identity half needs DW_BROKER_AS (the broker's own user) and "
+            "DW_PEER_AS (a hostile local user), and the core-dump contract DW_M4E_CORE_EVIDENCE=1 "
+            "(it changes kernel.core_pattern); every same-identity suite above ran"
+        )
+
+
+def require_secret_evidence(output: str, cases: tuple[tuple[str, str], ...]) -> None:
+    """Every (suite, case) must have printed its SECRET-EVIDENCE line, exercised."""
+    if not cases:
+        raise TaskError("secret evidence: zero cases required")
+    reported: set[tuple[str, str]] = set()
+    for line in output.splitlines():
+        at = line.find(SECRET_EVIDENCE_PREFIX)
+        if at < 0:
+            continue
+        try:
+            record = json.loads(line[at + len(SECRET_EVIDENCE_PREFIX) :])
+        except json.JSONDecodeError as exc:
+            raise TaskError(f"unreadable evidence line: {line[:200]}") from exc
+        if not isinstance(record, dict) or not record.get("outcome") or not record.get("suite"):
+            raise TaskError(f"malformed evidence line: {line[:200]}")
+        if str(record["outcome"]).lower().startswith("not-exercised"):
+            continue
+        reported.add((str(record["suite"]), str(record.get("case"))))
+    if not reported:
+        raise TaskError("secret evidence: zero cases reported")
+    missing = [f"{suite}/{case}" for suite, case in cases if (suite, case) not in reported]
+    if missing:
+        raise TaskError(
+            f"{len(missing)} secret evidence case(s) did not report: " + ", ".join(missing[:40])
+        )
+
+
 def require_tests_ran(output: str) -> None:
     """Every `test result:` line passed, and at least one test ran in all."""
     summaries = [line for line in output.splitlines() if line.startswith("test result: ")]
@@ -1840,6 +2201,7 @@ TASKS = {
     "broker-fs-read-evidence": task_broker_fs_read_evidence,
     "filesystem-operations-evidence": task_filesystem_operations_evidence,
     "process-broker-evidence": task_process_broker_evidence,
+    "secret-broker-evidence": task_secret_broker_evidence,
     "fuzz-smoke": task_fuzz_smoke,
     "fuzz": task_fuzz,
     "security": task_security,

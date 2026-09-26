@@ -17,6 +17,14 @@
 //! blocks on a full pipe nor changes how it runs. The output is bytes;
 //! nothing decodes it.
 //!
+//! **A secret launch's output (M4e).** Each stream is redacted of the value
+//! the launch delivered **as it is drained**, by a streaming matcher that
+//! finds an occurrence split across reads: the retained bytes never hold the
+//! value, so the table does not keep an echoed credential until eviction.
+//! Once a stream's retention is full the rest is counted and discarded
+//! unscanned. The broker's copy of the value lives exactly as long as the
+//! drains -- until both streams reach end of file -- and is zeroed then.
+//!
 //! **The end.** When the leader exits, the rest of its process group is sent
 //! `SIGKILL` (the leader still unreaped, so the group id is still its own),
 //! then the leader is reaped. At the wall clock, the leader and its group
@@ -37,6 +45,7 @@ use dwk_proto::wire::scalar::{KillOutcome, ProcessState};
 use rustix::process::{Pid, PidfdFlags, Signal, WaitId, WaitIdOptions};
 
 use super::launch::Launched;
+use crate::secret::{Needle, Redactor};
 
 /// How often the reaper looks for an exit and at the wall clock.
 const TICK: Duration = Duration::from_millis(10);
@@ -47,6 +56,24 @@ struct Stream {
     retained: Vec<u8>,
     limit: usize,
     observed: u64,
+    /// Whether bytes were dropped at the bound.
+    cut: bool,
+}
+
+impl Stream {
+    /// Keep what fits of `bytes`; note a cut if anything does not.
+    fn keep(&mut self, bytes: &[u8]) {
+        let room = self.limit.saturating_sub(self.retained.len());
+        if bytes.len() > room {
+            self.cut = true;
+        }
+        let keep = bytes.get(..room.min(bytes.len())).unwrap_or_default();
+        self.retained.extend_from_slice(keep);
+    }
+
+    fn full(&self) -> bool {
+        self.retained.len() >= self.limit
+    }
 }
 
 /// A copy of one stream's state.
@@ -56,6 +83,8 @@ pub(super) struct StreamSnapshot {
     pub(super) retained: Vec<u8>,
     /// Every byte read so far.
     pub(super) observed: u64,
+    /// Whether bytes were dropped at the bound.
+    pub(super) cut: bool,
 }
 
 /// How a process ended.
@@ -133,24 +162,44 @@ fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 /// Read `reader` to end of file into `stream`: keep the first `limit` bytes,
-/// count every byte.
-fn drain(mut reader: impl std::io::Read, stream: &Mutex<Stream>) {
-    let mut chunk = vec![0u8; 64 * 1024];
+/// count every byte. With a `redactor` (a secret launch), the kept bytes are
+/// the redacted stream's, and the read buffer is zeroed on the way out.
+fn drain(mut reader: impl std::io::Read, stream: &Mutex<Stream>, redactor: Option<Redactor>) {
+    let mut chunk = zeroize::Zeroizing::new(vec![0u8; 64 * 1024]);
+    let mut redactor = redactor;
     loop {
         let read = match reader.read(&mut chunk) {
-            Ok(0) | Err(_) => return,
+            Ok(0) | Err(_) => break,
             Ok(n) => n,
         };
         let Some(bytes) = chunk.get(..read) else {
-            return;
+            break;
         };
         let mut stream = locked(stream);
         stream.observed = stream
             .observed
             .saturating_add(u64::try_from(read).unwrap_or(u64::MAX));
-        let room = stream.limit.saturating_sub(stream.retained.len());
-        let keep = bytes.get(..room.min(read)).unwrap_or_default();
-        stream.retained.extend_from_slice(keep);
+        match redactor.as_mut() {
+            // Retention full: the rest is counted, not scanned or kept.
+            Some(_) if stream.full() => {
+                if !bytes.is_empty() {
+                    stream.cut = true;
+                }
+            }
+            Some(redactor) => redactor.feed(bytes, &mut |out| stream.keep(out)),
+            None => stream.keep(bytes),
+        }
+    }
+    if let Some(mut redactor) = redactor {
+        let mut stream = locked(stream);
+        if stream.full() {
+            // Whatever the matcher still holds is past the bound.
+            let mut held = false;
+            redactor.finish(&mut |out| held |= !out.is_empty());
+            stream.cut |= held;
+        } else {
+            redactor.finish(&mut |out| stream.keep(out));
+        }
     }
 }
 
@@ -171,6 +220,7 @@ impl Entry {
             StreamSnapshot {
                 retained: stream.retained.clone(),
                 observed: stream.observed,
+                cut: stream.cut,
             }
         };
         Snapshot {
@@ -261,7 +311,8 @@ impl Entry {
 }
 
 /// Take a launched process under supervision: its pidfd, its drains, its
-/// reaper.
+/// reaper. `needle`, for a secret launch, redacts both streams; the drains
+/// hold the only references, so it is zeroed when both end.
 ///
 /// # Errors
 ///
@@ -272,6 +323,7 @@ pub(super) fn supervise(
     launched: Launched,
     stream_limit: usize,
     wall_clock: Duration,
+    needle: Option<Arc<Needle>>,
 ) -> Result<Arc<Entry>, ()> {
     let Launched {
         mut child,
@@ -304,19 +356,21 @@ pub(super) fn supervise(
         stderr: new_stream(),
     });
     let deadline = Instant::now() + wall_clock;
+    let stdout_redactor = needle.as_ref().map(|n| Redactor::new(Arc::clone(n)));
+    let stderr_redactor = needle.map(Redactor::new);
     let started = [
         {
             let stream = Arc::clone(&entry.stdout);
             thread::Builder::new()
                 .name("process-stdout".to_owned())
-                .spawn(move || drain(stdout, &stream))
+                .spawn(move || drain(stdout, &stream, stdout_redactor))
                 .is_ok()
         },
         {
             let stream = Arc::clone(&entry.stderr);
             thread::Builder::new()
                 .name("process-stderr".to_owned())
-                .spawn(move || drain(stderr, &stream))
+                .spawn(move || drain(stderr, &stream, stderr_redactor))
                 .is_ok()
         },
         {
@@ -352,21 +406,72 @@ mod tests {
             ..Stream::default()
         });
         let input: Vec<u8> = (0..=255u8).cycle().take(300_000).collect();
-        drain(input.as_slice(), &stream);
+        drain(input.as_slice(), &stream, None);
         let stream = stream
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         assert_eq!(stream.retained, vec![0, 1, 2, 3, 4]);
         assert_eq!(stream.observed, 300_000);
+        assert!(stream.cut);
         let empty = Mutex::new(Stream {
             limit: 5,
             ..Stream::default()
         });
-        drain(&b""[..], &empty);
+        drain(&b""[..], &empty, None);
         let empty = empty
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         assert!(empty.retained.is_empty());
         assert_eq!(empty.observed, 0);
+        assert!(!empty.cut);
+    }
+
+    /// A reader that returns one byte per call: every internal read boundary
+    /// falls inside the value.
+    struct Trickle<'a>(&'a [u8]);
+
+    impl std::io::Read for Trickle<'_> {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            match (self.0.split_first(), buf.first_mut()) {
+                (Some((byte, rest)), Some(slot)) => {
+                    *slot = *byte;
+                    self.0 = rest;
+                    Ok(1)
+                }
+                _ => Ok(0),
+            }
+        }
+    }
+
+    #[test]
+    fn a_secret_launch_keeps_its_output_redacted_across_read_boundaries_and_at_the_bound() {
+        use crate::secret::{Needle, Redactor};
+        use dwk_proto::brokerp::SecretHandle;
+        let handle = SecretHandle::new("deploy").unwrap_or_else(|| unreachable!());
+        let value = b"v4lue-0f-the-s3cret";
+        let needle = || {
+            Needle::new(zeroize::Zeroizing::new(value.to_vec()), &handle)
+                .unwrap_or_else(|| unreachable!())
+        };
+        let mut output = b"token=".to_vec();
+        output.extend_from_slice(value);
+        output.extend_from_slice(b"\n");
+        for limit in [4096usize, 10, 6, 7] {
+            let stream = Mutex::new(Stream {
+                limit,
+                ..Stream::default()
+            });
+            drain(Trickle(&output), &stream, Some(Redactor::new(needle())));
+            let stream = stream
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let whole = b"token=[redacted:deploy]\n";
+            let want = whole.get(..limit.min(whole.len())).unwrap_or_default();
+            assert_eq!(stream.retained, want, "limit {limit}");
+            assert_eq!(stream.observed, u64::try_from(output.len()).unwrap_or(0));
+            assert_eq!(stream.cut, limit < whole.len(), "limit {limit}");
+            // Never a byte run of the value, whole or in part past the prefix.
+            assert!(!stream.retained.windows(value.len()).any(|w| w == value));
+        }
     }
 }

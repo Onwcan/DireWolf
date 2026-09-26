@@ -879,8 +879,22 @@ fn a_file_the_kernel_will_not_execute_is_refused_after_the_helper_tried() {
 fn launches_leave_no_descriptor_or_thread_behind() {
     let _serial = serial();
     let dir = Scratch::new("leak");
-    let baseline = fdcheck::launch_resources().unwrap();
-    assert_eq!(baseline.1, 0, "no supervision thread before");
+    // An earlier test's last process may still be being reaped: its drains
+    // and reaper end moments after its test returns. Wait for them, bounded,
+    // so this test measures its own launches and nothing else.
+    let until = Instant::now() + Duration::from_secs(10);
+    let baseline = loop {
+        let now = fdcheck::launch_resources().unwrap();
+        if now.1 == 0 {
+            break now;
+        }
+        assert!(
+            Instant::now() < until,
+            "no supervision thread before: {} remain from earlier tests",
+            now.1
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    };
     {
         let p = processes(Duration::from_secs(60));
         for n in 0..(3 * MAX_PROCESSES) {

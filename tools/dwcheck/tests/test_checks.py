@@ -311,6 +311,56 @@ def test_the_reviewed_edges_match_the_crates_they_name(tmp_path: Path) -> None:
         assert edge.reason.strip(), f"{edge.parent} -> {edge.child} must say why"
 
 
+_TWO_VERSIONS_LOCK = """
+version = 4
+[[package]]
+name = "dwkd-authority"
+version = "0.0.0"
+dependencies = ["entropy 0.2.17"]
+[[package]]
+name = "dwkd-broker"
+version = "0.0.0"
+dependencies = ["entropy 0.3.4"]
+[[package]]
+name = "dwk-proto"
+version = "0.0.0"
+[[package]]
+name = "entropy"
+version = "0.2.17"
+dependencies = ["os-random"]
+[[package]]
+name = "entropy"
+version = "0.3.4"
+dependencies = ["efi-only", "os-random"]
+[[package]]
+name = "os-random"
+version = "0.2.0"
+[[package]]
+name = "efi-only"
+version = "5.3.0"
+"""
+
+
+def test_two_versions_of_one_crate_keep_their_own_dependencies(tmp_path: Path) -> None:
+    """The authority links `entropy` 0.2; something else links 0.3, which
+    alone depends on `efi-only`. Keyed by name, the closure attributed 0.3's
+    edges to 0.2 (found at M4e, with getrandom 0.2 and 0.3 and r-efi); keyed by
+    (name, version) it does not -- and the authority's own dependencies are
+    still every one counted."""
+    _tree(
+        tmp_path,
+        {
+            "Cargo.toml": _WORKSPACE,
+            "Cargo.lock": _TWO_VERSIONS_LOCK,
+            **_DAEMONS,
+            "crates/dwk-proto/Cargo.toml": NEWLINE.join(["[package]", 'name = "dwk-proto"', ""]),
+        },
+    )
+    named = {f.message.split("`")[1] for f in check_lockfile_closure(_config(tmp_path))}
+    assert "efi-only" not in named, "another version's dependency is not the authority's"
+    assert {"entropy", "os-random"} <= named, "the authority's own closure still counts"
+
+
 def test_a_build_dependency_is_inside_it(tmp_path: Path) -> None:
     """A build script runs on the build machine and can write the crate's code."""
     config = _proto_tree(tmp_path, "build-dependencies")

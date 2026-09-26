@@ -383,7 +383,8 @@ impl Broker {
         line.split_whitespace().nth(2).unwrap().parse().unwrap()
     }
 
-    /// Open descriptors, from `/proc` (same uid locally).
+    /// Open descriptors, from `/proc` (same uid locally, and only when the
+    /// broker was started `--allow-dumpable`).
     pub(crate) fn open_fds(&self) -> usize {
         std::fs::read_dir(format!("/proc/{}/fd", self.pid))
             .map(Iterator::count)
@@ -601,6 +602,20 @@ impl Setup {
             &["--allow-shared-authority-uid"],
         );
         let server = Server::start(&self.authority_args(Some(own_uid()), &[]));
+        (broker, server)
+    }
+
+    /// Both daemons, left dumpable (`--allow-dumpable`, M4e): a hardened
+    /// daemon's `/proc/<pid>/fd` is root's, and a harness that counts
+    /// descriptors as the same uid needs to read it. Reduced assurance, used
+    /// only where a test reads the daemons' `/proc`.
+    pub(crate) fn start_both_dumpable(&self) -> (Broker, Server) {
+        let broker = Broker::start(
+            &self.broker_socket(),
+            own_uid(),
+            &["--allow-shared-authority-uid", "--allow-dumpable"],
+        );
+        let server = Server::start(&self.authority_args(Some(own_uid()), &["--allow-dumpable"]));
         (broker, server)
     }
 

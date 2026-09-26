@@ -184,8 +184,29 @@ before and after any dependency change.
 M3, and `dwcheck` already checks it as TCB. Dev-dependencies are not linked and
 not counted, but they are still audited by `cargo deny`.
 
-*The dependency inventory.* **TCB (`dwkd-authority` and `dwk-proto`): twenty-five
-crates in the exact gate's union**, twenty-two linked on Linux x86_64. Since M3e
+*The dependency inventory.* **TCB (`dwkd-authority` and `dwk-proto`), since
+M4e: 147 crates in the exact gate's union and 8 build-only; 98 third-party
+crates linked on Linux x86_64 and aarch64, 100 on macOS, 101 on Windows**
+(counted by name; by name and version 106/106/108/110), where M4d's union was
+twenty-seven ([ADR-0046](docs/adr/0046-m4e-secret-handles-backends-injection-and-redaction.md) §25).
+What M4e added: `age` 0.11.5 with its cryptography (RustCrypto and dalek:
+X25519, ChaCha20-Poly1305, HKDF, scrypt, PBKDF2) and its localisation stack
+(i18n-embed, Fluent, rust-embed, futures, parking_lot — linked although
+DireWolf never formats an age error; a **debug** build's rust-embed reads
+age's `i18n/` files from the Cargo registry at run time, a release build
+embeds them); `zeroize`, `hmac` 0.13 and `getrandom` 0.2 for secret material
+and the redaction index; `linux-keyutils` (Linux) and `keyring` 3.6.3 (macOS,
+Windows) for the keychain; and the first **proc macros** in the closure —
+`serde_derive`, `thiserror-impl`, `zeroize_derive`, `displaydoc`,
+`futures-macro`, `pin-project-internal`, `i18n-embed-fl`, `i18n-embed-impl`,
+`rust-embed-impl`, `rustversion`, `proc-macro-error-attr2` and, on x86_64,
+`curve25519-dalek-derive`, pinned as an exact set by `test_boundaries`. age
+0.11.5 is on the previous RustCrypto generation, so `digest`, `sha2`, `hmac`,
+`block-buffer`, `crypto-common` and `cpufeatures` are each linked twice; every
+duplicate is a version-exact `skip` with its reason in `deny.toml`. Each new
+direct dependency is pinned `=` and may be named in one module (TX025). age
+0.12.1 was measured and rejected (138 linked crates, pre-release KEM crates).
+Before M4e, the list read as follows. Since M3e
 ([ADR-0041](docs/adr/0041-m3e-authenticated-dwkp-transport.md)), `rustix` and `linux-raw-sys` for peer
 credentials, declared for Linux only and usable in `server/peer.rs` alone
 (TX008); `errno`, which rustix's libc backend links on Linux targets without a
@@ -202,7 +223,7 @@ amalgamation**, compiled into the authority) with `bitflags`,
 `fallible-iterator`, `fallible-streaming-iterator` and `smallvec`; `sha2` with
 `digest`, `block-buffer`, `crypto-common`, `hybrid-array`, `typenum`,
 `cpufeatures` and `cfg-if`; and `libc`, which `cpufeatures` links on aarch64
-and loongarch64 only. No derive macro and no proc-macro. **Build-only, never
+and loongarch64 only. No derive macro and no proc-macro until M4e. **Build-only, never
 linked, reviewed in their own list:** `cc`, `find-msvc-tools` and `shlex`
 (which compile the amalgamation), and `pkg-config` and `vcpkg` (a default
 feature of `libsqlite3-sys` that `rusqlite` does not let a dependent disable;
@@ -226,6 +247,9 @@ That is the point of the split. Normal review applies. As of M4b it links
 a workspace build adds no feature to the authority's `rustix`; TX013 keeps any
 store, audit, key or DWKP-dispatch crate out of it
 ([ADR-0043](docs/adr/0043-m4b-private-broker-channel-and-brokered-fs-read.md)).
+M4e adds `zeroize` on Linux for the one value it holds per invocation, and
+TX028 keeps every secret backend and store out of it
+([ADR-0046](docs/adr/0046-m4e-secret-handles-backends-injection-and-redaction.md)).
 
 **Rust, anywhere** — declare it once in `[workspace.dependencies]` and inherit
 it with `{ workspace = true }`. One table lists everything in the tree; a
@@ -540,10 +564,32 @@ reasons, so the decision can be checked rather than trusted:
 - Adding one means a pinned third-party binary or action in CI, which this
   repository admits only with a concrete benefit.
 
-**Revisited at M4**, when the secret broker brings secret-shaped fixtures,
-redaction tests and DireWolf-specific key formats that push protection's
-provider patterns cannot know about. That is when a scanner with custom rules,
-a reviewed baseline and a planted-fake-secret fixture earns its place.
+**Revisited at M4e**, when the secret broker brought secret-shaped fixtures,
+redaction tests and a DireWolf-specific key format — the age identity that
+unlocks every age store — that push protection's provider patterns do not
+know. The review, and what it decided:
+
+- **Every secret-shaped fixture is assembled at run time.** The redaction
+  tests build each token from fragments (`"gh" + "p_" + …`), the age backend
+  generates its identities (`age::x25519::Identity::generate`), and the
+  evidence suites draw fresh values per run; nothing a test needs is a whole
+  token in a file, and no token-shaped value is ever a live credential.
+- **A third-party scanner was not added.** It would be a pinned binary or
+  action in CI for rules a few lines of Python express, and it could not know
+  the one DireWolf-specific format without custom rules anyway.
+- **A small in-repository check was.**
+  [`tests/architecture/test_no_committed_credentials.py`](tests/architecture/test_no_committed_credentials.py)
+  walks the working tree — no network, no upload, no tool to pin — for whole
+  GitHub, OpenAI-style, Slack, AWS, PEM private-key, JWT and **age identity**
+  tokens, and runs with every `pytest`. A planted synthetic leak of each kind,
+  built at run time, must be caught; documentation that names a prefix
+  (`ghp_`, `AKIA`, `AGE-SECRET-KEY-1…`) and the known near misses must not be;
+  and the tree itself must have no finding, so a fixture cannot trigger it
+  merely by existing. It is a tripwire for accidents: a credential with no
+  shape passes it.
+
+Push protection remains the control that stops a push; this check stops a
+shaped fixture from being written as a literal in the first place.
 
 If you do commit a secret by accident: rotate it first, then rewrite history —
 in that order, because the secret is compromised the moment it is pushed.

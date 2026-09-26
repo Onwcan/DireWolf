@@ -127,6 +127,19 @@ pub(super) fn names_executable(verb: Verb) -> bool {
         )
 }
 
+/// The concrete handle a `secret.use` declaration names, if it names one:
+/// `secret.use:*` names none (M4e).
+pub(super) fn concrete_secret(spec: &CapabilitySpec) -> Option<&str> {
+    match spec.scope() {
+        ScopeSpec::Syntactic(crate::capability::SyntacticScope::CredentialHandle(label))
+            if spec.verb().namespace() == Namespace::Secret =>
+        {
+            Some(label.as_str())
+        }
+        _ => None,
+    }
+}
+
 /// The concrete executable a process declaration names, if it names one:
 /// `process.exec:*` names none.
 pub(super) fn concrete_executable(spec: &CapabilitySpec) -> Option<&DeclaredPath> {
@@ -211,6 +224,9 @@ pub(super) struct Resolutions {
     /// The executable resolver's answers, by declared spelling. Independent
     /// of any binding: an executable is a host object.
     executables: Executables,
+    /// The secret index's answers (M4e), by handle: the configured,
+    /// unrevoked revision, or `None`. A metadata read; no value is touched.
+    secrets: BTreeMap<String, Option<i64>>,
 }
 
 /// The executable resolver's answers, by declared spelling: the identity and
@@ -225,6 +241,7 @@ impl Resolutions {
             binding: None,
             answers: BTreeMap::new(),
             executables: BTreeMap::new(),
+            secrets: BTreeMap::new(),
         }
     }
 
@@ -237,6 +254,7 @@ impl Resolutions {
                 .map(|p| (p.as_str().to_owned(), Err(why.clone())))
                 .collect(),
             executables: BTreeMap::new(),
+            secrets: BTreeMap::new(),
         }
     }
 
@@ -244,6 +262,18 @@ impl Resolutions {
     pub(super) fn with_executables(mut self, executables: Executables) -> Self {
         self.executables = executables;
         self
+    }
+
+    /// The same answers, with `secrets` as the secret index's (M4e).
+    pub(super) fn with_secrets(mut self, secrets: BTreeMap<String, Option<i64>>) -> Self {
+        self.secrets = secrets;
+        self
+    }
+
+    /// The revision the index holds for `handle`, if it is configured and
+    /// not revoked.
+    pub(super) fn secret(&self, handle: &str) -> Option<i64> {
+        self.secrets.get(handle).copied().flatten()
     }
 
     /// The executable resolver's answers.
@@ -356,6 +386,7 @@ pub(super) fn resolve_paths(
         binding: Some(binding.clone()),
         answers,
         executables: BTreeMap::new(),
+        secrets: BTreeMap::new(),
     }
 }
 
@@ -406,6 +437,15 @@ pub(super) fn declared(
             .executable(declared)
             .map_err(|_| UnresolvedScope::ExecutableIdentity)?;
         return spec.resolve_executable(identity.clone());
+    }
+    // A NEW `secret.use:<handle>` means what the secret index holds, and
+    // nothing it does not (M4e): an unconfigured, revoked or removed handle
+    // mints nothing. Its identity is its syntax once it is held.
+    if let Some(handle) = concrete_secret(spec) {
+        if resolutions.secret(handle).is_none() {
+            return Err(UnresolvedScope::ConfiguredSecret);
+        }
+        return spec.resolve();
     }
     match (concrete_path(spec), scope_rule(spec.verb())) {
         (Some(path), Some(vacant)) => {

@@ -30,6 +30,15 @@ use rustix as _;
 use sha2 as _;
 use toml as _;
 use unicode_normalization as _;
+// M4e's secret crates (ADR-0046), reached only through the library.
+use age as _;
+use getrandom as _;
+use hmac as _;
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+use keyring as _;
+#[cfg(target_os = "linux")]
+use linux_keyutils as _;
+use zeroize as _;
 
 mod state_support;
 
@@ -124,12 +133,22 @@ fn assert_recovered(state: &Path, point: CrashPoint, report: &StartReport) {
             assert_eq!(report.audit_reconciled, 0);
             assert_eq!(report.audit_torn_tail_bytes, 0);
         }
-        // Crossed only between the phases of a tool invocation (M4b), never by
-        // an admission: `CrashPoint::ALL` does not contain them.
+        // Crossed only between the phases of a tool invocation (M4b) or a
+        // secret use (M4e), never by an admission: `CrashPoint::ALL` does not
+        // contain them.
         CrashPoint::ToolAfterIntent
         | CrashPoint::ToolAfterOpen
         | CrashPoint::ToolAfterBroker
-        | CrashPoint::ToolAfterOutcome => {
+        | CrashPoint::ToolAfterOutcome
+        | CrashPoint::SecretBeforeMetadata
+        | CrashPoint::SecretAfterMetadata
+        | CrashPoint::SecretAfterIntent
+        | CrashPoint::SecretAfterBackend
+        | CrashPoint::SecretAfterRegister
+        | CrashPoint::SecretAfterHandoff
+        | CrashPoint::SecretAfterBroker
+        | CrashPoint::SecretBeforeOutcome
+        | CrashPoint::SecretAfterOutcome => {
             unreachable!("{point} is not a transaction crash point")
         }
     }

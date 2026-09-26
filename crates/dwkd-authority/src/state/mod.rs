@@ -76,6 +76,8 @@ mod query;
 mod resolution;
 mod schema;
 mod scopes;
+mod secret_use;
+pub(crate) mod secrets;
 mod staging;
 mod tool;
 mod transport;
@@ -129,6 +131,7 @@ pub use process::{
 };
 pub use query::{AuthorityAnswer, DecisionRecord, Proposal, TaintCause, Undecidable};
 pub use resolution::ResolutionRefused;
+pub use secret_use::{EgressReply, EgressRequest};
 pub use staging::{MAX_RECLAIMS_PER_SWEEP, Settled};
 pub use tool::{ToolReply, ToolRequest};
 pub use transport::{TransportClass, TransportEvent, Violation};
@@ -159,6 +162,9 @@ pub struct StartupConfig {
     pub flags: ConfigFlags,
     /// How long a lease lives without a heartbeat.
     pub lease_ttl_ms: u64,
+    /// The operator's secret metadata (M4e, ADR-0046): handles and where
+    /// their values live — never a value. Empty when no secret is configured.
+    pub secrets: crate::secret::metadata::SecretConfig,
 }
 
 impl StartupConfig {
@@ -171,6 +177,7 @@ impl StartupConfig {
             ceiling,
             flags: ConfigFlags::default(),
             lease_ttl_ms: DEFAULT_LEASE_TTL_MS,
+            secrets: crate::secret::metadata::SecretConfig::default(),
         }
     }
 }
@@ -312,6 +319,9 @@ struct Shared {
     /// start-up proved is the effective uid. With root, the only owner an
     /// executable's identity may rest on (ADR-0045 §5).
     authority_uid: u32,
+    /// The secret metadata, consumer identities and in-memory redaction index
+    /// (M4e): never persisted, never a retained plaintext.
+    secrets: secrets::SecretsState,
     // Held for the life of the process; the OS releases it on exit.
     _lock: std::fs::File,
 }
@@ -499,6 +509,39 @@ fn io_error(context: &'static str) -> impl Fn(std::io::Error) -> StartError {
     move |error| StartError::Io(format!("{context}: {error}"))
 }
 
+/// The state directory, ready to open: the resolved directory, its paths, the
+/// held lock and the layout found.
+///
+/// The configured directory is created if missing and checked as configured;
+/// then its ancestors are resolved, once, and every state path -- every
+/// SQLite open included -- is built from the resolved directory, which is
+/// checked again. `NOFOLLOW` refuses a path with a symlink in any component,
+/// and the state directory itself is never followed
+/// (`files::resolve_directory`).
+fn prepare_state_directory(
+    dir: &Path,
+) -> Result<(std::path::PathBuf, StatePaths, std::fs::File, Layout), StartError> {
+    files::prepare_directory(dir)?;
+    files::check_directory(dir)?;
+    let resolved = files::resolve_directory(dir)?;
+    files::check_directory(&resolved)?;
+    let paths = StatePaths::new(&resolved);
+    let lock = files::lock(&paths)?;
+    if let Some(marker) = files::quarantine_marker(&paths) {
+        return Err(StartError::Quarantined(marker.trim().to_owned()));
+    }
+    for path in [&paths.db, &paths.wal, &paths.shm, &paths.audit, &paths.lock] {
+        files::check_file(path)?;
+    }
+    let layout = files::layout(&paths)?;
+    if layout == Layout::Fresh {
+        files::create_private_file(&paths.db)?;
+        files::create_private_file(&paths.audit)?;
+        files::sync_directory(dir)?;
+    }
+    Ok((resolved, paths, lock, layout))
+}
+
 impl Authority {
     /// Start the authority on `dir`.
     ///
@@ -528,32 +571,14 @@ impl Authority {
             ));
         }
 
-        // The configured directory is created if missing and checked as
-        // configured; then its ancestors are resolved, once, and every state
-        // path below -- every SQLite open included -- is built from the
-        // resolved directory, which is checked again. `NOFOLLOW` refuses a
-        // path with a symlink in any component, and the state directory
-        // itself is never followed (`files::resolve_directory`).
-        files::prepare_directory(dir)?;
-        files::check_directory(dir)?;
-        let resolved = files::resolve_directory(dir)?;
-        files::check_directory(&resolved)?;
-        let paths = StatePaths::new(&resolved);
-        let lock = files::lock(&paths)?;
-        if let Some(marker) = files::quarantine_marker(&paths) {
-            return Err(StartError::Quarantined(marker.trim().to_owned()));
-        }
-        for path in [&paths.db, &paths.wal, &paths.shm, &paths.audit, &paths.lock] {
-            files::check_file(path)?;
-        }
-        let layout = files::layout(&paths)?;
-        if layout == Layout::Fresh {
-            files::create_private_file(&paths.db)?;
-            files::create_private_file(&paths.audit)?;
-            files::sync_directory(dir)?;
-        }
-
+        let (resolved, paths, lock, layout) = prepare_state_directory(dir)?;
         let authority_uid = files::owner_uid(&resolved)?;
+        // Secrets (M4e): consumer identities resolved and every configured
+        // value fingerprinted for the redaction index, outside any transaction
+        // and before the store is opened; each plaintext is dropped as soon as
+        // its fingerprint exists. What changed is recorded below.
+        let secret_state = secrets::SecretsState::prepare(&config.secrets, authority_uid)
+            .map_err(StartError::Configuration)?;
         let clock = Arc::clone(&options.clock);
         let Opened {
             conn,
@@ -587,6 +612,7 @@ impl Authority {
             lease_ttl_ms: config.lease_ttl_ms,
             broker: options.broker,
             authority_uid,
+            secrets: secret_state,
             _lock: lock,
         });
         let mut authority = Self { shared, conn };
@@ -598,6 +624,8 @@ impl Authority {
             (invocations_interrupted, invocations_unknown),
         ) = authority.begin_incarnation(created, &recovered)?;
         let activation_id = authority.activate(&prepared, config.mode, config.flags, &ceiling)?;
+        let shared = Arc::clone(&authority.shared);
+        authority.transact(|work| secrets::reconcile(work, &shared.secrets).map(|_| ()))?;
         // What a previous incarnation's invocations may have left in a
         // workspace is judged now; nothing is performed again.
         let staging = authority.reclaim_staging(None, MAX_RECLAIMS_PER_SWEEP)?;
@@ -648,8 +676,13 @@ impl Authority {
             let (leases, runs) = lease::invalidate_all(work)?;
             let (fs_interrupted, fs_unknown) = tool::reconcile_open(work)?;
             let (process_interrupted, process_unknown) = process::reconcile_open(work)?;
+            // An open secret use (M4e) may have reached the broker: UNKNOWN,
+            // never injected again.
+            let secret_unknown = secret_use::reconcile_open(work)?;
             let interrupted = fs_interrupted.saturating_add(process_interrupted);
-            let unknown = fs_unknown.saturating_add(process_unknown);
+            let unknown = fs_unknown
+                .saturating_add(process_unknown)
+                .saturating_add(secret_unknown);
             work.audit(
                 AuditEvent::StoreOpened,
                 Fields::new()
@@ -1101,7 +1134,7 @@ impl Authority {
         );
         // Whatever carried it, a delivery that does not fit what was decided
         // is not a result; an effect that is not proved is UNKNOWN.
-        let (ending, detail) = tool::classify(&decided_call, &plan, result)?;
+        let (ending, detail, hits) = tool::classify(&decided_call, &plan, result, &shared.secrets)?;
         let staging_clear =
             sent_nothing || (done_clean && matches!(ending, tool::Ending::Completed(_)));
         self.transact(|work| {
@@ -1112,6 +1145,13 @@ impl Authority {
                 plan.tool(),
                 (&ending, detail),
                 staging_clear,
+            )?;
+            secrets::audit_hits(
+                work,
+                run.as_str(),
+                invocation.as_str(),
+                plan.tool().as_str(),
+                &hits,
             )
         })?;
         shared.crash(CrashPoint::ToolAfterOutcome)?;
@@ -1348,7 +1388,8 @@ impl Authority {
             Ok(BrokerDelivery::ProcessStarted(started)) => Some(started.generation.clone()),
             _ => None,
         };
-        let (ending, detail) = process::classify(tool, &process_id, stream_limit, result);
+        let (ending, detail, hits) =
+            process::classify(tool, &process_id, stream_limit, result, &shared.secrets);
         self.transact(|work| {
             process::record_outcome(
                 work,
@@ -1357,6 +1398,13 @@ impl Authority {
                 (tool, &process_id),
                 (&ending, detail),
                 generation.as_ref(),
+            )?;
+            secrets::audit_hits(
+                work,
+                run.as_str(),
+                invocation.as_str(),
+                tool.as_str(),
+                &hits,
             )
         })?;
         shared.crash(CrashPoint::ToolAfterOutcome)?;
@@ -1371,6 +1419,88 @@ impl Authority {
                 invocation,
                 reason: dwk_proto::wire::scalar::ToolFailureReasonV3::OutcomeUnknown,
             },
+        })
+    }
+
+    /// One mode A secret use (M4e, ADR-0046 §§11–12, 17): the secret side of
+    /// a containing egress invocation, whose tool (`net.http`) is M5's. An
+    /// in-process API with **no DWKP route**: nothing on the wire reaches it.
+    ///
+    /// `state::secret_use` sets out the order: decide — the fence, the
+    /// metadata, the mode, `secret.use:<handle>` through both gates — and
+    /// record the intent durably; **only then** read the value, outside any
+    /// transaction; teach the redaction index; move it into a one-shot pipe
+    /// and zero the authority's copy; hand the pipe to the broker; record the
+    /// outcome, durably — and only then answer. The value itself is never
+    /// returned, by this or any other API.
+    ///
+    /// # Errors
+    ///
+    /// [`AuthorityError`] when the authority cannot answer. A crash hook at a
+    /// [`CrashPoint::SECRET`] point poisons the store, as a crash would.
+    pub fn secret_egress(
+        &mut self,
+        caller: &CallerContext,
+        session: &SessionId,
+        run: &RunId,
+        epoch: Epoch,
+        request: &EgressRequest,
+    ) -> Result<EgressReply, AuthorityError> {
+        let shared = Arc::clone(&self.shared);
+        let active = shared.active()?;
+        shared.crash(CrashPoint::SecretBeforeMetadata)?;
+        let asked = secret_use::Asked {
+            caller,
+            session,
+            run,
+            epoch,
+            request,
+        };
+        let after_metadata = || shared.crash(CrashPoint::SecretAfterMetadata);
+        let decided = self.transact(|work| {
+            secret_use::decide(work, &asked, &shared.secrets, active, &after_metadata)
+        })?;
+        let authorised = match decided {
+            secret_use::Decided::Refused(reason) => return Ok(EgressReply::Refused(reason)),
+            secret_use::Decided::Denied(reason) => return Ok(EgressReply::Denied(reason)),
+            secret_use::Decided::Replayed {
+                invocation,
+                state,
+                failure,
+            } => {
+                return Ok(EgressReply::Replayed {
+                    invocation,
+                    state,
+                    failure,
+                });
+            }
+            secret_use::Decided::Authorised(authorised) => *authorised,
+        };
+        // The intent is committed and audited. Until here no backend was
+        // touched.
+        shared.crash(CrashPoint::SecretAfterIntent)?;
+        let invocation = authorised.invocation.clone();
+
+        // 10. The value, with no transaction open.
+        let material = crate::secret::backend::read(
+            &authorised.metadata.storage,
+            shared.secrets.config().age.as_ref(),
+            shared.authority_uid,
+        );
+        let (ending, resolved) = match material {
+            Err(error) => (secret_use::Ending::Failed(error.code()), false),
+            Ok(material) => (
+                hand_over(&shared, &authorised, &invocation, material)?,
+                true,
+            ),
+        };
+        shared.crash(CrashPoint::SecretBeforeOutcome)?;
+        self.transact(|work| secret_use::record_outcome(work, &authorised, run, ending, resolved))?;
+        shared.crash(CrashPoint::SecretAfterOutcome)?;
+        Ok(match ending {
+            secret_use::Ending::Injected => EgressReply::Injected { invocation },
+            secret_use::Ending::Failed(reason) => EgressReply::Failed { invocation, reason },
+            secret_use::Ending::Unknown => EgressReply::Unknown { invocation },
         })
     }
 
@@ -1675,6 +1805,50 @@ impl Authority {
     pub fn operator(&mut self) -> OperatorBootstrap<'_> {
         OperatorBootstrap { authority: self }
     }
+}
+
+/// Steps 11–13 of a secret use, after the backend read: the return path
+/// learns the value; a value that would break a header is refused here as
+/// well as in the broker, and never leaves; the value moves into a one-shot
+/// pipe and the authority's copy is zeroed; the broker consumes it, once.
+fn hand_over(
+    shared: &Shared,
+    authorised: &secret_use::Authorised,
+    invocation: &InvocationId,
+    material: crate::secret::material::SecretMaterial,
+) -> Result<secret_use::Ending, AuthorityError> {
+    shared.crash(CrashPoint::SecretAfterBackend)?;
+    // 11. The return path learns it before it can go anywhere.
+    shared.secrets.register(&authorised.handle, &material);
+    shared.crash(CrashPoint::SecretAfterRegister)?;
+    if !crate::secret::handoff::header_safe(&material) {
+        drop(material);
+        return Ok(secret_use::Ending::Failed(
+            crate::secret::SecretError::MaterialInvalid.code(),
+        ));
+    }
+    // 12. The one-shot pipe; the authority's copy is zeroed.
+    let pipe = match crate::secret::handoff::one_shot(material) {
+        Ok(pipe) => pipe,
+        Err(error) => return Ok(secret_use::Ending::Failed(error.code())),
+    };
+    shared.crash(CrashPoint::SecretAfterHandoff)?;
+    // 13. The broker consumes it, once.
+    let order = BrokerOrder::new(
+        invocation.clone(),
+        crate::broker::Operation::SecretEgress {
+            spec: authorised.spec.clone(),
+            secret: pipe,
+        },
+    );
+    let result = if let Some(broker) = &shared.broker {
+        broker.perform(order)
+    } else {
+        drop(order);
+        Err(BrokerError::before_sending(BrokerFailure::NotConfigured))
+    };
+    shared.crash(CrashPoint::SecretAfterBroker)?;
+    Ok(secret_use::classify(&result))
 }
 
 /// What step 3 of a process call decides from.

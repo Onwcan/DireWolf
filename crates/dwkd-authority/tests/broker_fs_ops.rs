@@ -26,6 +26,15 @@ use rustix as _;
 use sha2 as _;
 use toml as _;
 use unicode_normalization as _;
+// M4e's secret crates (ADR-0046), reached only through the library.
+use age as _;
+use getrandom as _;
+use hmac as _;
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+use keyring as _;
+#[cfg(target_os = "linux")]
+use linux_keyutils as _;
+use zeroize as _;
 
 #[cfg(target_os = "linux")]
 mod broker_support;
@@ -1102,7 +1111,11 @@ reason = "NO_MATCHING_RULE"
 
     #[test]
     fn no_descriptor_outlives_its_invocation() {
-        let (setup, broker, server, mut rt) = start("m4c-leaks");
+        // Counting a daemon's descriptors reads its `/proc/<pid>/fd`, which a
+        // hardened (non-dumpable) daemon keeps from its own uid (M4e).
+        let setup = Setup::fsops("m4c-leaks");
+        let (broker, server) = setup.start_both_dumpable();
+        let mut rt = Runtime::admit_as(&setup.kernel_socket(), 1, "maintainer", FSOPS_CAPABILITIES);
         let root = setup.root.clone();
         // Warm both daemons up, then measure.
         let _ = rt.invoke_v2(&stat("/workspace/a.txt"), "warm");

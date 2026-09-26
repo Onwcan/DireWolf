@@ -86,6 +86,29 @@ FSOPS_SUITES = (
     REPO_ROOT / "crates" / "dwkd-broker" / "src" / "exchange" / "tests.rs",
     FSOPS_FOREIGN_SUITE,
 )
+# M4e's secret evidence, and the tests that print it.
+SECRET_JOB = "secret-broker"  # noqa: S105 - a CI job name, not a credential
+SECRET_EVIDENCE = "make secret-broker-evidence"  # noqa: S105 - a command, not a credential
+SECRET_SUITES = (
+    REPO_ROOT / "crates" / "dwkd-authority" / "src" / "secret" / "backend" / "tests.rs",
+    REPO_ROOT / "crates" / "dwkd-authority" / "src" / "secret" / "redact" / "tests.rs",
+    REPO_ROOT / "crates" / "dwkd-authority" / "src" / "secret" / "metadata" / "tests.rs",
+    REPO_ROOT / "crates" / "dwkd-authority" / "src" / "state" / "secret_use" / "tests.rs",
+    REPO_ROOT / "crates" / "dwkd-broker" / "tests" / "secret_primitives.rs",
+    REPO_ROOT / "crates" / "dwkd-authority" / "tests" / "secret_evidence.rs",
+)
+# The jobs the FINAL M4 GATE is made of (ADR-0046 §24): M3's authority, each
+# M4 sub-milestone's evidence job, and the eval gate with M4 active.
+FINAL_M4_JOBS = (
+    "authority-transport",
+    "filesystem-canonicalization",
+    "broker-fs-read",
+    "filesystem-operations",
+    "process-broker",
+    "secret-broker",
+    "evals",
+)
+
 # M4d's process-execution evidence, and the tests that print it.
 PROC_JOB = "process-broker"
 PROC_EVIDENCE = "make process-broker-evidence"
@@ -254,6 +277,7 @@ def test_every_job_is_required_by_the_aggregate_check() -> None:
     needs = set(_needs())
     assert EVIDENCE_JOB in needs and EVAL_JOB in needs and FILESYSTEM_JOB in needs
     assert BROKER_JOB in needs and FSOPS_JOB in needs and PROC_JOB in needs
+    assert SECRET_JOB in needs
     assert jobs == needs, f"not required: {sorted(jobs - needs)}; unknown: {sorted(needs - jobs)}"
 
 
@@ -1267,4 +1291,205 @@ def test_the_process_task_off_linux_is_not_exercised_and_runs_nothing(
     _proc_env(monkeypatch, recorder)
     with pytest.raises(dw.TaskError, match="NOT EXERCISED"):
         dw.task_process_broker_evidence()
+    assert recorder.commands == []
+
+
+# --- M4e: the secret evidence and the final M4 gate ---------------------------
+
+
+def _secret_evidence_step() -> list[str]:
+    found = [s for s in _steps(_jobs()[SECRET_JOB]) if _run(s) == SECRET_EVIDENCE]
+    assert len(found) == 1, f"{SECRET_JOB} must run `{SECRET_EVIDENCE}` exactly once"
+    return found[0]
+
+
+def test_the_secret_broker_job_exists_on_linux_and_is_unconditional() -> None:
+    job = _jobs().get(SECRET_JOB)
+    assert job is not None, f"no `{SECRET_JOB}` job: M4e's secret boundary is measured nowhere"
+    text = "\n".join(_uncommented(line) for line in job)
+    assert re.search(r"^    runs-on:\s*ubuntu-latest\s*$", text, re.MULTILINE), "Linux only"
+    assert re.search(
+        r"^    name:\s*secret broker \(make secret-broker-evidence\)\s*$", text, re.MULTILINE
+    ), "the required check keeps its name"
+    for forbidden in ("strategy:", "matrix", "continue-on-error", "secrets."):
+        assert forbidden not in text, f"`{forbidden}` in {SECRET_JOB}"
+    assert not re.search(r"^\s+if:", text, re.MULTILINE), f"{SECRET_JOB} has a condition"
+
+
+def test_the_secret_broker_job_has_three_identities_and_the_core_contract() -> None:
+    step = _secret_evidence_step()
+    env = _env(step)
+    broker, peer = env.get("DW_BROKER_AS"), env.get("DW_PEER_AS")
+    _second_identity(broker)
+    _second_identity(peer)
+    assert broker != peer, "the broker and the hostile runtime must be two identities"
+    assert env.get("DW_M4E_CORE_EVIDENCE") == "1", "the core-dump contract must run in CI"
+    steps = _steps(_jobs()[SECRET_JOB])
+    created = [
+        i
+        for i, s in enumerate(steps)
+        if (_run(s) or "").startswith("sudo useradd") and (_run(s) or "").split()[-1] == broker
+    ]
+    assert len(created) == 1 and created[0] < steps.index(step)
+    assert "sudo" not in (_run(step) or ""), "the evidence runs as the runner, not through sudo"
+
+
+def test_the_final_m4_gate_requires_every_m4_job_and_the_eval_gate() -> None:
+    """No one job substitutes for another: the aggregate needs each of them,
+    and the eval gate runs the M4 suite now that M4 is available."""
+    needs = set(_needs())
+    missing = sorted(set(FINAL_M4_JOBS) - needs)
+    assert not missing, f"the final M4 gate does not require {missing}"
+    from direwolf_evals.runner import AVAILABLE_MILESTONES, collect
+
+    assert "M4" in AVAILABLE_MILESTONES
+    m4 = [e for _, e in collect(REPO_ROOT / "evals") if e.suite == "m4-security"]
+    assert {e.name for e in m4} == {"path-traversal", "exec-mediation", "secret-boundary"}
+    assert all(e.gate for e in m4), "every M4 eval gates"
+
+
+def test_the_secret_foreign_tests_are_ignored_by_default_and_selected_by_name() -> None:
+    source = SECRET_SUITES[-1].read_text(encoding="utf-8")
+    assert len(dw.SECRET_FOREIGN_TESTS) == 2
+    for name in dw.SECRET_FOREIGN_TESTS:
+        module, function = name.split("::")
+        assert module == "linux"
+        assert re.search(r"#\[ignore = [^\]]*\]\s*fn " + re.escape(function) + r"\(\)", source), (
+            f"{function} is not an #[ignore]d test in {SECRET_SUITES[-1].name}"
+        )
+
+
+def test_the_secret_task_names_what_the_tests_print() -> None:
+    """A renamed case would otherwise fail only in CI."""
+    source = "\n".join(path.read_text(encoding="utf-8") for path in SECRET_SUITES)
+    for suite, case in (*dw.SECRET_CASES, *dw.SECRET_FOREIGN_CASES):
+        printed = (
+            f'"{suite}"' in source
+            or f'\\"suite\\":\\"{suite}\\"' in source
+            or f'const SUITE: &str = "{suite}"' in source
+        )
+        assert printed, f"no test prints suite `{suite}`"
+        # A family's cases are printed through `format!`: the stem is spelled.
+        stems = {
+            case,
+            case.removeprefix("egress-hostile-"),
+            case.removeprefix("egress-malformed-"),
+            case.removeprefix("return-path-shape-"),
+        }
+        spelled = any(f'"{stem}"' in source for stem in stems)
+        assert spelled, f"no test prints `{case}`"
+
+
+def test_fake_broker_secret_evidence_is_never_transport_evidence() -> None:
+    """The authority's pipeline runs against a fake broker; its suite is named
+    for what it is, and no broker-secret-primitives case comes from it."""
+    fake = SECRET_SUITES[3].read_text(encoding="utf-8")
+    assert '"authority-secret-pipeline"' in fake
+    assert "broker-secret-primitives" not in fake
+    suites = {suite for suite, _ in dw.SECRET_CASES}
+    assert {"broker-secret-primitives", "authority-secret"} <= suites, "real processes are required"
+
+
+def _secret_line(suite: str, case: str, outcome: str = "ok") -> str:
+    return f'SECRET-EVIDENCE {{"suite":"{suite}","case":"{case}","outcome":"{outcome}","count":1}}'
+
+
+def _secret_complete(cases: tuple[tuple[str, str], ...]) -> str:
+    return "\n".join(_secret_line(s, c) for s, c in cases)
+
+
+def test_secret_evidence_requires_every_case_exercised() -> None:
+    dw.require_secret_evidence(_secret_complete(dw.SECRET_CASES), dw.SECRET_CASES)
+    lines = _secret_complete(dw.SECRET_CASES).splitlines()
+    with pytest.raises(dw.TaskError, match="authority-secret/runtime-address-space"):
+        dw.require_secret_evidence(
+            "\n".join(line for line in lines if '"runtime-address-space"' not in line),
+            dw.SECRET_CASES,
+        )
+    not_exercised = [
+        _secret_line("secret-backend", "keyring-round-trip", "not-exercised: no keyring")
+        if '"keyring-round-trip"' in line
+        else line
+        for line in lines
+    ]
+    with pytest.raises(dw.TaskError, match="secret-backend/keyring-round-trip"):
+        dw.require_secret_evidence("\n".join(not_exercised), dw.SECRET_CASES)
+    with pytest.raises(dw.TaskError, match="unreadable"):
+        dw.require_secret_evidence("SECRET-EVIDENCE {nope", dw.SECRET_CASES)
+    with pytest.raises(dw.TaskError, match="malformed"):
+        dw.require_secret_evidence('SECRET-EVIDENCE {"suite":"x","case":"y"}', dw.SECRET_CASES)
+    with pytest.raises(dw.TaskError, match="zero cases"):
+        dw.require_secret_evidence(_secret_complete(dw.SECRET_CASES), ())
+    with pytest.raises(dw.TaskError, match="zero cases reported"):
+        dw.require_secret_evidence("", dw.SECRET_CASES)
+
+
+class _SecretRecorder(_Recorder):
+    def captured(self, *command: str) -> str:
+        self.commands.append(command)
+        if "--ignored" in command:
+            return "\n".join(
+                [
+                    _secret_complete(dw.SECRET_FOREIGN_CASES),
+                    f"test result: ok. {len(dw.SECRET_FOREIGN_TESTS)} passed; 0 failed; "
+                    "0 ignored; 0 measured; 6 filtered out; finished in 1.00s",
+                ]
+            )
+        return "\n".join(
+            [
+                _secret_complete(dw.SECRET_CASES),
+                "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out",
+            ]
+        )
+
+
+def _secret_env(monkeypatch: pytest.MonkeyPatch, recorder: _SecretRecorder) -> None:
+    monkeypatch.setenv("DW_BROKER_AS", "dwbroker")
+    monkeypatch.setenv("DW_PEER_AS", "nobody")
+    monkeypatch.setenv("DW_M4E_CORE_EVIDENCE", "1")
+    monkeypatch.setattr(dw, "run", recorder.run)
+    monkeypatch.setattr(dw, "run_captured", recorder.captured)
+    monkeypatch.setattr(dw, "uvrun", recorder.uvrun)
+    monkeypatch.setattr(dw, "second_identity", lambda v: (v, 1001, 998 if "BROKER" in v else 65534))
+
+
+@pytest.mark.skipif(not LINUX, reason="the task runs only where the secret evidence does")
+def test_the_secret_task_runs_every_suite_and_selects_the_ignored_tests(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    recorder = _SecretRecorder()
+    _secret_env(monkeypatch, recorder)
+    dw.task_secret_broker_evidence()
+    for selector in ("secret::", "state::secret_use", "secret_primitives", "secret_evidence"):
+        assert [c for c in recorder.commands if selector in c], f"{selector} did not run"
+    foreign = [c for c in recorder.commands if "--ignored" in c]
+    assert len(foreign) == 1
+    for flag in ("--exact", *dw.SECRET_FOREIGN_TESTS):
+        assert flag in foreign[0], f"the three-identity run lacks {flag}"
+    capsys.readouterr()
+
+
+@pytest.mark.skipif(not LINUX, reason="the task runs only where the secret evidence does")
+@pytest.mark.parametrize("missing", ["DW_BROKER_AS", "DW_PEER_AS", "DW_M4E_CORE_EVIDENCE"])
+def test_the_secret_task_without_its_identities_or_core_opt_in_is_not_exercised(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], missing: str
+) -> None:
+    recorder = _SecretRecorder()
+    _secret_env(monkeypatch, recorder)
+    monkeypatch.delenv(missing)
+    with pytest.raises(dw.TaskError, match="NOT EXERCISED"):
+        dw.task_secret_broker_evidence()
+    assert not [c for c in recorder.commands if "--ignored" in c]
+    assert [c for c in recorder.commands if "secret_evidence" in c], "the same-uid half ran"
+    capsys.readouterr()
+
+
+def test_the_secret_task_off_linux_is_not_exercised_and_runs_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recorder = _SecretRecorder()
+    monkeypatch.setattr(sys, "platform", "darwin")
+    _secret_env(monkeypatch, recorder)
+    with pytest.raises(dw.TaskError, match="NOT EXERCISED"):
+        dw.task_secret_broker_evidence()
     assert recorder.commands == []

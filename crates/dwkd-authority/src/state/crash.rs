@@ -62,6 +62,27 @@ pub enum CrashPoint {
     /// Tool window F (M4b): the outcome is durable and the runtime has not been
     /// answered.
     ToolAfterOutcome,
+    /// Secret R1 (M4e): before the use's metadata is resolved.
+    SecretBeforeMetadata,
+    /// Secret R2: the metadata is resolved, inside the deciding transaction;
+    /// nothing is committed.
+    SecretAfterMetadata,
+    /// Secret R3 (S2): the intent is durable; no backend has been read.
+    SecretAfterIntent,
+    /// Secret R4 (S3): the backend returned the value.
+    SecretAfterBackend,
+    /// Secret R5 (S4): the redaction index knows the value.
+    SecretAfterRegister,
+    /// Secret R6 (S5): the one-shot pipe exists and the authority's copy is
+    /// zeroed; nothing has been sent.
+    SecretAfterHandoff,
+    /// Secret R8 (S6, S7): the broker has answered — it may have consumed the
+    /// value — and the ending is not classified.
+    SecretAfterBroker,
+    /// Secret R10 (S8): the ending is classified and not yet durable.
+    SecretBeforeOutcome,
+    /// Secret S9: the outcome is durable and the caller has not been answered.
+    SecretAfterOutcome,
 }
 
 impl CrashPoint {
@@ -91,6 +112,15 @@ impl CrashPoint {
             Self::ToolAfterOpen => 'c',
             Self::ToolAfterBroker => 'e',
             Self::ToolAfterOutcome => 'f',
+            Self::SecretBeforeMetadata => '1',
+            Self::SecretAfterMetadata => '2',
+            Self::SecretAfterIntent => '3',
+            Self::SecretAfterBackend => '4',
+            Self::SecretAfterRegister => '5',
+            Self::SecretAfterHandoff => '6',
+            Self::SecretAfterBroker => '8',
+            Self::SecretBeforeOutcome => '0',
+            Self::SecretAfterOutcome => '9',
         }
     }
 }
@@ -105,6 +135,22 @@ impl CrashPoint {
         Self::ToolAfterOpen,
         Self::ToolAfterBroker,
         Self::ToolAfterOutcome,
+    ];
+
+    /// The points of one secret use (M4e, ADR-0046 §19), in order. R7 is the
+    /// broker's own (`secret_after_read`), and R9 — output holding a value
+    /// before it is redacted — is a process invocation's
+    /// [`CrashPoint::ToolAfterBroker`].
+    pub const SECRET: [Self; 9] = [
+        Self::SecretBeforeMetadata,
+        Self::SecretAfterMetadata,
+        Self::SecretAfterIntent,
+        Self::SecretAfterBackend,
+        Self::SecretAfterRegister,
+        Self::SecretAfterHandoff,
+        Self::SecretAfterBroker,
+        Self::SecretBeforeOutcome,
+        Self::SecretAfterOutcome,
     ];
 }
 

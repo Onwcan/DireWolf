@@ -1,5 +1,6 @@
 //! One exchange on one connection from the authority (M4b, ADR-0043; the M4c
-//! operations, ADR-0044).
+//! operations, ADR-0044; the M4d process operations, ADR-0045; the M4e secret
+//! primitives, ADR-0046).
 //!
 //! | step | refusal, before anything is read or changed |
 //! |---|---|
@@ -13,9 +14,9 @@
 //!
 //! **Exactly the kind's descriptors, or none is used.** Too few, too many —
 //! or truncated control data — is `DESCRIPTOR_COUNT`: every descriptor that
-//! arrived is closed and nothing is done through any of them. At most two are
-//! ever held while the count is judged; any beyond that is closed the moment
-//! it arrives.
+//! arrived is closed and nothing is done through any of them. At most three
+//! are ever held while the count is judged; any beyond that is closed the
+//! moment it arrives.
 //!
 //! Then one `BrokerOutcome` — `done`, `refused` (no persistent change) or
 //! `indeterminate` (something may have been, and the broker cannot prove
@@ -55,8 +56,8 @@ pub(crate) const DEADLINE: Duration = Duration::from_secs(10);
 /// The largest authorisation frame, header included.
 const MAX_AUTHORISATION_FRAME: usize = HEADER_LEN + MAX_AUTHORISATION_BODY;
 
-/// The most descriptors any authorisation carries.
-const MAX_DESCRIPTORS: usize = 2;
+/// The most descriptors any authorisation carries: a secret launch's three.
+const MAX_DESCRIPTORS: usize = 3;
 
 /// Serve one connection the kernel says the authority made. `own_uid` is the
 /// broker's effective uid, which its staging directories must be owned by;
@@ -207,7 +208,7 @@ fn receive(stream: &UnixStream, until: Instant) -> Result<Received, &'static str
     let mut filled = 0usize;
     let mut want = HEADER_LEN;
     let mut descriptors = Descriptors::default();
-    let mut space = [MaybeUninit::<u8>::uninit(); rustix::cmsg_space!(ScmRights(2))];
+    let mut space = [MaybeUninit::<u8>::uninit(); rustix::cmsg_space!(ScmRights(3))];
     loop {
         if filled == want {
             if want == HEADER_LEN {
@@ -297,6 +298,23 @@ fn execute(
         }
         Authorisation::ProcessStatus(status) => return processes.status(status),
         Authorisation::ProcessKill(kill) => return processes.kill(kill),
+        // The secret primitives (M4e): the value is always the last
+        // descriptor. A render carries only it; a secret launch carries the
+        // executable, the working directory, then it.
+        Authorisation::SecretEgress(egress) => {
+            return match (fds.next(), fds.next()) {
+                (Some(secret), None) => crate::secret::egress(egress, &secret),
+                _ => OutcomeResult::Refused(BrokerRefusal::DescriptorCount),
+            };
+        }
+        Authorisation::SecretProcessStart(start) => {
+            return match (fds.next(), fds.next(), fds.next(), fds.next()) {
+                (Some(executable), Some(cwd), Some(secret), None) => {
+                    processes.start_with_secret(start, executable, cwd, &secret)
+                }
+                _ => OutcomeResult::Refused(BrokerRefusal::DescriptorCount),
+            };
+        }
         _ => {}
     }
     let (Some(first), second) = (fds.next(), fds.next()) else {

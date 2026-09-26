@@ -56,6 +56,15 @@ sha2 = { workspace = true }
 # may name it (TX012).
 unicode-normalization = { workspace = true }
 
+# The secret broker's authority half (M4e, ADR-0046): the age file backend,
+# secret material scrubbed on drop, and the redaction index's in-memory keyed
+# fingerprints. Only `crate::secret` may name `age`, `hmac` or `getrandom`
+# (TX025); `zeroize` is the secret material type's.
+age = { workspace = true }
+zeroize = { workspace = true }
+hmac = { workspace = true }
+getrandom = { workspace = true }
+
 # Peer credentials for the DWKP server (M3e) and the canonical filesystem
 # resolver (M4a): `SO_PEERCRED`, and `openat2` relative to held descriptors,
 # through a maintained safe wrapper, so the crate keeps `forbid(unsafe_code)`.
@@ -64,8 +73,23 @@ unicode-normalization = { workspace = true }
 # (ADR-0042); elsewhere the server refuses to start, the resolver refuses to
 # resolve, and nothing here is linked. Only `crate::server::peer` and
 # `crate::resource::fs::linux` may use it (TX008).
+#
+# M4e (ADR-0046 §9) adds `process` for `setrlimit(RLIMIT_CORE)` and
+# `prctl(PR_SET_DUMPABLE)` at serve start (`server/hardening.rs`): code, not
+# crates, and the same feature the broker already enables, so a workspace
+# build links the same rustix as before.
 [target.'cfg(target_os = "linux")'.dependencies]
-rustix = { workspace = true }
+rustix = { workspace = true, features = ["process"] }
+# The Linux keychain backend (M4e): the kernel keyring. Only
+# `crate::secret::backend` may use it (TX025).
+linux-keyutils = { workspace = true }
+
+# The keychain backend's macOS and Windows natives (M4e, ADR-0046 §6). Only
+# `crate::secret::backend` may use them (TX025).
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { workspace = true, features = ["apple-native"] }
+[target.'cfg(target_os = "windows")'.dependencies]
+keyring = { workspace = true, features = ["windows-native"] }
 
 # Dev-only. Never linked into the shipped binary, and excluded from the TCB
 # closure `dwcheck` computes; the capability algebra's eight documented

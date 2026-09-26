@@ -38,12 +38,13 @@ MAX_REASON_CHARS: Final = 1000
 """An error detail is diagnostics, not a channel. Bounded, like everything else
 that reaches a result file."""
 
-AVAILABLE_MILESTONES: Final[frozenset[str]] = frozenset({"M1", "M2", "M2.5", "M3"})
+AVAILABLE_MILESTONES: Final[frozenset[str]] = frozenset({"M1", "M2", "M2.5", "M3", "M4"})
 """What this build has. An eval requiring anything else is pending.
 
 Extending this set is how a milestone turns its suites on: "M3" joined it in
-the commit that made M3 real (M3e, ADR-0041), and every suite that had been
-waiting for it started running and must pass. Nothing else gates them — in
+the commit that made M3 real (M3e, ADR-0041), and "M4" in M4e's (ADR-0046),
+once every M4 eval had a real runner; every suite that had been waiting for
+either started running and must pass. Nothing else gates them — in
 particular a ``pending_reason`` left in a suite file does not keep an eval
 dormant, and an eval with no runner reports ERROR once its milestone is here.
 """

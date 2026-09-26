@@ -364,6 +364,8 @@ exempt_paths = [
     "crates/dwkd-authority/src/resource/fs/linux/tests.rs",
     "crates/dwkd-authority/src/resource/exec/linux.rs",
     "crates/dwkd-authority/src/broker/link.rs",
+    "crates/dwkd-authority/src/secret/backend/trusted_file.rs",
+    "crates/dwkd-authority/src/server/hardening.rs",
 ]
 suffixes = [".rs"]
 # The binary's `use rustix as _;` acknowledges the manifest edge for
@@ -399,6 +401,15 @@ resolver's Linux half -- `openat` walks relative to held descriptors,
 `security.capability` and `pread` for the hash, all read-only. The
 portable half (`resource/exec/mod.rs`) and the argv classifier stay under the
 rule, and none of it starts anything (TX020).
+
+M4e (ADR-0046) adds two. `secret/backend/trusted_file.rs` opens an age store
+or the secret metadata file by walking from `/` with `O_PATH | O_NOFOLLOW`,
+checking each directory's owner and mode, then `fstat`s and reads the file:
+read-only, bounded, nothing else. `server/hardening.rs` sets `RLIMIT_CORE` to
+0 and `PR_SET_DUMPABLE` to 0 on the authority itself at serve start
+(`rustix::process`, the feature the broker already enables): two calls on
+the process's own state, none on another process. The rest of `secret/` and
+`server/` stays under the rule.
 """
 
 [[text_rules]]
@@ -589,6 +600,8 @@ exempt_paths = [
     "crates/dwkd-authority/src/resource/fs/mod.rs",
     "crates/dwkd-authority/src/resource/exec/mod.rs",
     "crates/dwkd-authority/src/resource/exec/tests.rs",
+    "crates/dwkd-authority/src/secret/handoff.rs",
+    "crates/dwkd-authority/src/state/secret_use/tests.rs",
 ]
 suffixes = [".rs"]
 patterns = [
@@ -609,6 +622,13 @@ check never looked at.
 M4d (ADR-0045): `resource/exec/mod.rs` defines the method that releases an
 `ExecHandoff`'s two descriptors (the executable and the working directory),
 and its test module checks the release; the link is still the only sender.
+
+M4e (ADR-0046): `secret/handoff.rs` defines the method that releases a
+`SecretPipe` -- the read end of the one-shot pipe holding a value -- and
+`state/secret_use/tests.rs` is the pipeline's unit test, whose fake broker
+reads the pipe it is handed to prove it held exactly the value. The link is
+still the only sender, and a secret pipe leaves only as the last descriptor
+of a `broker.secret_egress` authorisation.
 
 Hygiene, not containment.
 """
@@ -878,7 +898,12 @@ Hygiene, not containment.
 [[text_rules]]
 id = "TX023-only-the-launch-helper-executes"
 paths = ["crates/dwkd-broker/src"]
-exempt_paths = ["crates/dwkd-broker/src/process/helper.rs"]
+# `hardening.rs` sets RLIMIT_CORE on the broker ITSELF at serve start (M4e,
+# ADR-0046 §9): no launch, no target, before the listener exists.
+exempt_paths = [
+    "crates/dwkd-broker/src/process/helper.rs",
+    "crates/dwkd-broker/src/hardening.rs",
+]
 suffixes = [".rs"]
 # The binary's `use nix as _;` acknowledgement is not a finding.
 patterns = [
@@ -926,6 +951,184 @@ The constructor is visible only inside `crate::resource`; this is the second
 lock on it.
 
 Hygiene, not containment: the resolver's own refusals are the control.
+"""
+
+# ===========================================================================
+# M4e: secrets (ADR-0046). Each rule is hygiene over the source; the controls
+# are the kernel keyring's per-uid isolation, the store's DAC, the one-shot
+# pipe, the gates and the durable intent -- measured by
+# `make secret-broker-evidence` on real processes.
+# ===========================================================================
+
+[[text_rules]]
+id = "TX025-secret-backends-are-confined-to-their-module"
+paths = ["crates/dwkd-authority/src"]
+# The backends that read a value, and the exact index that keys one. The
+# binary's `use age as _;` acknowledgements are not findings.
+exempt_paths = [
+    "crates/dwkd-authority/src/secret/backend/age_file.rs",
+    "crates/dwkd-authority/src/secret/backend/keychain.rs",
+    "crates/dwkd-authority/src/secret/backend/tests.rs",
+    "crates/dwkd-authority/src/secret/backend/windows_tests.rs",
+    "crates/dwkd-authority/src/secret/redact/exact.rs",
+]
+suffixes = [".rs"]
+patterns = [
+    '^(?!\s*//)(?!\s*use\s+(age|hmac|getrandom|linux_keyutils|keyring)\s+as\s+_\s*;).*\b(age|hmac|getrandom|linux_keyutils|keyring)\s*::',
+    '^(?!\s*//)(?!\s*use\s+(age|hmac|getrandom|linux_keyutils|keyring)\s+as\s+_\s*;)\s*(pub(\([a-z]+\))?\s+)?use\s+(age|hmac|getrandom|linux_keyutils|keyring)\b',
+]
+reason = """
+The OS keychain (the kernel keyring on Linux, `keyring` on macOS and Windows),
+age decryption and the keyed fingerprint of the redaction index are the only
+places a value is read or a key is held (ADR-0046 §§6-8, 21). One file each.
+A second caller -- the state layer, the server, the policy engine reaching a
+keychain -- would be a value read outside the order the pipeline enforces:
+after both gates and a durable intent, never at admission, never for a replay.
+
+Hygiene, not containment.
+"""
+
+[[text_rules]]
+id = "TX026-a-secret-value-leaves-its-type-in-four-places"
+paths = ["crates/dwkd-authority/src"]
+# The handoff (the pipe, the header check), the exact index (its keyed
+# fingerprint), the age backend (the identity text it parses) and the
+# backends' own tests (Linux, and the Windows Credential Manager's).
+exempt_paths = [
+    "crates/dwkd-authority/src/secret/handoff.rs",
+    "crates/dwkd-authority/src/secret/redact/exact.rs",
+    "crates/dwkd-authority/src/secret/backend/age_file.rs",
+    "crates/dwkd-authority/src/secret/backend/tests.rs",
+    "crates/dwkd-authority/src/secret/backend/windows_tests.rs",
+]
+suffixes = [".rs"]
+patterns = [
+    '^(?!\s*//).*\.\s*expose\s*\(',
+]
+reason = """
+`SecretMaterial` holds a value in a zeroizing buffer and prints as
+`SecretMaterial(..)`; `expose()` is the only way to its bytes (ADR-0046 §10).
+It is called where the bytes must go -- into the one-shot pipe, into the keyed
+fingerprint, into age's identity parser -- and nowhere else. An `expose()` in
+the state layer, the audit writer or the server would be a value somewhere it
+can be logged, stored or answered.
+
+Hygiene, not containment.
+"""
+
+[[text_rules]]
+id = "TX027-no-secret-returning-api"
+paths = ["crates", "runtime/src"]
+# `keychain.rs` calls the `keyring` crate's own `get_secret`, the backend
+# read itself.
+exempt_paths = ["crates/dwkd-authority/src/secret/backend/keychain.rs"]
+suffixes = [".rs", ".py"]
+patterns = [
+    '(?i)^(?!\s*(//|#)).*\b(secret|credential)[._](export|get|read|value|values|resolve|reveal|dump|list[_-]?values?)\b',
+    '(?i)^(?!\s*(//|#)).*\b(export|get|read|reveal|dump)_(secret|credential)s?\b',
+]
+reason = """
+There is no API -- public or private-to-runtime, at any privilege level --
+that returns a secret's value: not over DWKP, not for the CLI, not for a
+diagnostic, a backup or an export (SECRETS.md §4, ADR-0046 §4). `secret.use`
+is a capability a containing tool's action needs, never a tool. These names
+are how such an API would be spelled.
+
+Hygiene, not containment: the control is that no operation reads a value for
+anyone but the injector, which the runtime-address-space evidence measures.
+"""
+
+[[text_rules]]
+id = "TX028-the-broker-reaches-no-secret-store"
+paths = ["crates/dwkd-broker/src"]
+exempt_paths = []
+suffixes = [".rs"]
+patterns = [
+    '^(?!\s*//)(?!\s*use\s+(age|linux_keyutils|keyring|secrecy)\s+as\s+_\s*;).*\b(age|linux_keyutils|keyring|secrecy)\b',
+    '^(?!\s*//).*\b(keyctl|KEY_SPEC_[A-Z_]+|add_key|request_key)\b',
+    '^(?!\s*//).*"[^"]*\.age"',
+    '^(?!\s*//).*\bsecrets\.toml\b',
+]
+reason = """
+The broker holds no long-lived key and reaches no secret store (ADR-0018,
+ADR-0046 §11): every value it ever holds arrived as the read end of a pipe the
+authority filled for one invocation. A keychain call, an age decryptor, a path
+to a store or to the metadata file here would be a second resolver -- one the
+gates never ran for. TX013 already keeps key libraries out; this names the
+secret stores themselves. On a three-identity deployment the kernel keyring
+is per uid and the store's DAC excludes the broker's uid, which the hosted
+evidence measures.
+
+Hygiene, not containment.
+"""
+
+[[text_rules]]
+id = "TX029-a-secret-reaches-a-launch-only-through-its-pipe"
+paths = ["crates/dwkd-broker/src"]
+# `launch.rs` writes the value into the helper's fresh pipe, the only place a
+# broker-held value is handed on.
+exempt_paths = ["crates/dwkd-broker/src/process/launch.rs"]
+suffixes = [".rs"]
+patterns = [
+    '^(?!\s*//).*\bneedle\s*\.\s*value\s*\(',
+]
+reason = """
+A secret launch's value is in the broker's memory as a redaction needle for
+the target's lifetime (ADR-0046 §16). It leaves it once: into a fresh pipe the
+launch helper reads (mode B) or hands over (mode C). Never into argv, the
+helper's launch message, the broker's environment or a log line. A second
+`needle.value()` would be a second way out.
+
+Hygiene, not containment: /proc/<target>/cmdline, the broker's environ and a
+sibling's environ are measured by the secret evidence.
+"""
+
+[[text_rules]]
+id = "TX030-the-wire-the-server-and-the-audit-hold-no-secret-material"
+paths = [
+    "crates/dwk-proto/src",
+    "crates/dwkd-authority/src/server",
+    "crates/dwkd-authority/src/state/audit.rs",
+    "crates/dwkd-authority/src/state/wire.rs",
+]
+exempt_paths = []
+suffixes = [".rs"]
+patterns = [
+    '^(?!\s*//).*\bSecretMaterial\b',
+    '^(?!\s*//).*\bZeroizing\b',
+    '^(?!\s*//).*\bSecretPipe\b',
+    '^(?!\s*//).*\.\s*expose\s*\(',
+]
+reason = """
+The public wire contract, the DWKP server, the audit writer and the wire
+mapping carry handles, never values (ADR-0046 §§4, 21). A value type named in
+any of them is the first step of a value on the wire, in an answer or in
+`audit.log`. The public corpus is also checked by member name
+(tests/protocol/test_no_secret_value_fields.py), and the audit log and the
+store are byte-scanned for a live value by the secret evidence.
+
+Hygiene, not containment.
+"""
+
+[[text_rules]]
+id = "TX031-the-cognition-side-names-no-secret-backend"
+paths = ["runtime/src", "crates/direwolf-cli/src"]
+exempt_paths = []
+suffixes = [".py", ".rs"]
+patterns = [
+    '^\s*(import|from)\s+(keyring|secretstorage|pyrage|age|keyutils|nacl)\b',
+    '^(?!\s*(//|#)).*\b(keyring|linux_keyutils|keyutils|secretstorage)\s*(::|\.)',
+    '^(?!\s*(//|#)).*\bdwkd_authority\s*::\s*secret\b',
+    '^(?!\s*(//|#)).*\bSecretMaterial\b',
+]
+reason = """
+The cognition plane never receives a plaintext long-lived credential (I3). The
+runtime and the CLI name handles; they import no keychain, no age library and
+no authority secret module, so there is no local path from cognition to a
+value either (ADR-0046 §4). The runtime's address space is measured to hold no
+value by the secret evidence.
+
+Hygiene, not containment.
 """
 
 # ===========================================================================
@@ -1220,6 +1423,149 @@ allowed_third_party = [
     # M4a: the NFC check on filesystem names (ADR-0042; TX012, RS016).
     "unicode-normalization",
     "tinyvec",
+    # ---------------------------------------------------------------------
+    # M4e (ADR-0046 §25, amending ADR-0019): the secret backends. MEASURED,
+    # `cargo tree -e normal,no-proc-macro`: the binary links 98 third-party
+    # crates on Linux x86_64 and aarch64, 100 on macOS, 101 on Windows
+    # (M4d's reviewed list: 27, union). This list is the union over every
+    # target Cargo resolved, proc macros included: 147.
+    # ---------------------------------------------------------------------
+    # M4e direct: the secret module (ADR-0046 §§6-8, 10, 21; TX025).
+    "age",
+    "zeroize",
+    "hmac",
+    "getrandom",
+    "linux-keyutils",
+    "keyring",
+    # age 0.11.5: its cryptography -- X25519, ChaCha20-Poly1305 STREAM, HKDF, scrypt
+    # (RustCrypto and dalek), and its format and parsing helpers.
+    "age-core",
+    "aead",
+    "base64",
+    "bech32",
+    "chacha20",
+    "chacha20poly1305",
+    "cipher",
+    "cmov",
+    "const-oid",
+    "cookie-factory",
+    "ctutils",
+    "curve25519-dalek",
+    "fiat-crypto",
+    "generic-array",
+    "hkdf",
+    "inout",
+    "io_tee",
+    "minimal-lexical",
+    "nom",
+    "opaque-debug",
+    "pbkdf2",
+    "poly1305",
+    "ppv-lite86",
+    "rand",
+    "rand_chacha",
+    "rand_core",
+    "salsa20",
+    "scrypt",
+    "secrecy",
+    "subtle",
+    "universal-hash",
+    "x25519-dalek",
+    "zerocopy",
+    "byteorder",
+    "lazy_static",
+    "arc-swap",
+    # age 0.11.5: its localised messages -- i18n-embed with Fluent, rust-embed for
+    # the translation files, and what they pull in. DireWolf never formats an age
+    # error (every one becomes a typed SecretError), but the code is linked.
+    # In a DEBUG build rust-embed reads age's `i18n/` folder from the Cargo
+    # registry at run time; a release build embeds it (ADR-0046 §25).
+    "i18n-embed",
+    "i18n-config",
+    "fluent",
+    "fluent-bundle",
+    "fluent-langneg",
+    "fluent-syntax",
+    "intl-memoizer",
+    "intl_pluralrules",
+    "type-map",
+    "unic-langid",
+    "unic-langid-impl",
+    "tinystr",
+    "self_cell",
+    "rustc-hash",
+    "rust-embed",
+    "rust-embed-utils",
+    "walkdir",
+    "same-file",
+    "winapi-util",
+    "mime",
+    "mime_guess",
+    "unicase",
+    "log",
+    "parking_lot",
+    "parking_lot_core",
+    "lock_api",
+    "scopeguard",
+    "futures",
+    "futures-channel",
+    "futures-core",
+    "futures-executor",
+    "futures-io",
+    "futures-sink",
+    "futures-task",
+    "futures-util",
+    "pin-project",
+    "pin-project-lite",
+    "slab",
+    "memchr",
+    "thiserror",
+    "basic-toml",
+    "serde",
+    "serde_core",
+    # Proc macros and their host-only dependencies: compiled for and run on the
+    # BUILD machine, never linked into the binary; counted here because the exact
+    # gate follows normal edges, and they execute with the builder's privileges.
+    "curve25519-dalek-derive",
+    "displaydoc",
+    "futures-macro",
+    "i18n-embed-fl",
+    "i18n-embed-impl",
+    "pin-project-internal",
+    "proc-macro-error-attr2",
+    "proc-macro-error2",
+    "rust-embed-impl",
+    "rustversion",
+    "serde_derive",
+    "thiserror-impl",
+    "zeroize_derive",
+    "zerocopy-derive",
+    "proc-macro2",
+    "quote",
+    "syn",
+    "unicode-ident",
+    "strsim",
+    "find-crate",
+    # keyring 3.6.3's platform natives: macOS (Security.framework through
+    # security-framework) and Windows (the Credential Manager through windows-sys).
+    # Not built on Linux, where the keychain is the kernel keyring.
+    "core-foundation",
+    "core-foundation-sys",
+    "security-framework",
+    "security-framework-sys",
+    "windows-targets",
+    "windows_aarch64_gnullvm",
+    "windows_aarch64_msvc",
+    "windows_i686_gnu",
+    "windows_i686_gnullvm",
+    "windows_i686_msvc",
+    "windows_x86_64_gnu",
+    "windows_x86_64_gnullvm",
+    "windows_x86_64_msvc",
+    # In the union only: target-conditional dependencies of the crates above for
+    # targets DireWolf does not build (WASI, Redox).
+    "wasi",
+    "redox_syscall",
 ]
 
 # Crates that are NOT linked into the authority and DO execute while it is
@@ -1249,6 +1595,12 @@ allowed_build_third_party = [
     "shlex",
     "pkg-config",
     "vcpkg",
+    # M4e (ADR-0046 §25): build-script dependencies -- `rustc_version` and
+    # `semver` of curve25519-dalek's (it picks a backend from the compiler
+    # version), `version_check` of generic-array's.
+    "rustc_version",
+    "semver",
+    "version_check",
 ]
 
 # ---------------------------------------------------------------------------
@@ -1297,6 +1649,17 @@ serde_spanned declares serde_core behind its own `serde` feature.  The policy
 loader walks toml::de::DeTable, which is gated on toml's `parse` feature alone
 and needs only the Spanned type, so DireWolf does not enable toml's `serde`
 feature and this edge is never taken.  ADR-0038 records the measurement.
+"""
+
+[[authority.optional_edges]]
+parent = "tinystr"
+child = "zerovec"
+reason = """
+M4e (ADR-0046 §25): age's localisation reaches `tinystr` through
+unic-langid, which uses it for language subtags without its `zerovec`
+feature. `zerovec` -- and `zerofrom` beneath it -- is in Cargo.lock because the
+lockfile records the optional edge, not because anything links it; the exact
+gate (RS010/RS012) measures it inactive.
 """
 
 [[authority.optional_edges]]

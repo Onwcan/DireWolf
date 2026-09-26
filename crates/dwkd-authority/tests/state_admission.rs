@@ -14,6 +14,15 @@ use rustix as _;
 use sha2 as _;
 use toml as _;
 use unicode_normalization as _;
+// M4e's secret crates (ADR-0046), reached only through the library.
+use age as _;
+use getrandom as _;
+use hmac as _;
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+use keyring as _;
+#[cfg(target_os = "linux")]
+use linux_keyutils as _;
+use zeroize as _;
 
 mod state_support;
 
@@ -81,9 +90,13 @@ fn a_first_admission_grants_exactly_what_was_asked_and_covered() {
                 "network.https:evil.test".to_owned(),
                 WithheldCause::NotInAgentProfile
             ),
+            // Since M4e a concrete handle means what the secret index holds,
+            // and like any resource scope it is resolved before coverage is
+            // asked: this harness configures no secrets, so `github` is
+            // withheld as unconfigured (ADR-0046 §5).
             (
                 "secret.use:github".to_owned(),
-                WithheldCause::NotInAgentProfile
+                WithheldCause::NeedsCanonicalization(UnresolvedScope::ConfiguredSecret)
             ),
         ]
     );
@@ -128,9 +141,11 @@ fn a_first_admission_grants_exactly_what_was_asked_and_covered() {
     assert_eq!(grant.withheld.len(), 2);
     assert_eq!(
         grant.withheld.iter().map(|w| w.reason).collect::<Vec<_>>(),
+        // An unconfigured handle crosses the wire as the existing
+        // `UNRESOLVED_RESOURCE`, as an unresolvable path does (M4e).
         [
             WithheldReason::NotInAgentProfile,
-            WithheldReason::NotInAgentProfile
+            WithheldReason::UnresolvedResource
         ]
     );
 }
@@ -1049,6 +1064,8 @@ fn the_admission_record_binds_what_an_investigator_needs() {
     assert!(text(record, "request_digest").is_some());
     let line = state_support::audit_lines(&h.state()).join("\n");
     assert!(line.contains(run.granted()[0].cap_id().as_str()));
-    assert!(line.contains("NOT_IN_AGENT_PROFILE"));
+    // The withheld `secret.use:x` and why: no secret is configured here, and a
+    // concrete handle is resolved before coverage (M4e, ADR-0046 §5).
+    assert!(line.contains("NEEDS_CONFIGURED_SECRET"));
     let _ = query_msg(&s, run.run_id(), epoch(e.get()), None);
 }

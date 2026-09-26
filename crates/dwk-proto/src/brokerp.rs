@@ -1,6 +1,7 @@
 //! The private authority → broker protocol (M4b, ADR-0043; version 2 for the
 //! M4c filesystem operations, ADR-0044; version 3 for the M4d process
-//! operations, ADR-0045). **Not DWKP.**
+//! operations, ADR-0045; version 4 for the M4e secret primitives, ADR-0046).
+//! **Not DWKP.**
 //!
 //! One exchange on one connection, and nothing else:
 //!
@@ -59,6 +60,15 @@
 //! the broker holds none, and no spent-authorisation table exists, so none
 //! grows (ADR-0043).
 //!
+//! # A secret travels in a descriptor, never in a message
+//!
+//! Version 4 (ADR-0046) adds two authorisations that deliver a secret. The
+//! message carries only what is not secret — the handle, the origin, the
+//! header name and prefix, the delivery mode, the variable name — and the
+//! value arrives as the **last descriptor**: the read end of a pipe the
+//! authority filled and closed before sending it. No field of any private
+//! message can hold a value, and none carries its length.
+//!
 //! This module is wire types and nothing else: no socket, no descriptor, no
 //! file. The two daemons do the I/O.
 
@@ -83,10 +93,12 @@ use crate::wire::scalar::{
 use crate::wire::{Cx, WireType, expect_integer, expect_string};
 
 /// The protocol version this build speaks. Version 2 (ADR-0044) added the M4c
-/// operations and the `indeterminate` answer; version 3 (ADR-0045) adds the
-/// process operations and authorisations that carry no descriptor. An older
-/// peer is refused by its hello, never half-understood.
-pub const PROTOCOL: u16 = 3;
+/// operations and the `indeterminate` answer; version 3 (ADR-0045) the process
+/// operations and authorisations that carry no descriptor; version 4
+/// (ADR-0046) the secret primitives. The daemons ship together, so 4 is the
+/// only version either accepts: an older peer is refused by its hello, never
+/// half-understood.
+pub const PROTOCOL: u16 = 4;
 
 /// The largest authorisation body the broker reads: one DWKP frame, because an
 /// `fs.write` carries its content and an `fs.patch` its edits. Read from the
@@ -110,6 +122,172 @@ pub const FS_READ_DESCRIPTORS: u8 = 1;
 /// never an execute bit (ADR-0044 §5). A replacement keeps the replaced file's
 /// permission bits instead.
 pub const CREATED_FILE_MODE: u32 = 0o660;
+
+// ---------------------------------------------------------------------------
+// The secret primitives (ADR-0046). Fixed here, in the crate both daemons
+// link: the bound, the descriptor a target reads, and the grammars of the
+// operator's names -- checked by the authority when it loads the metadata and
+// again by the broker, so neither trusts the other's spelling.
+// ---------------------------------------------------------------------------
+
+/// The largest secret value either daemon accepts, in bytes. A larger value
+/// is refused, never truncated: a cut credential is a different credential.
+pub const MAX_SECRET_BYTES: usize = 32 * 1024;
+
+/// The descriptor number a `FD_AT_SPAWN` target reads its secret from: the
+/// read end of a pipe, already at end of file after the value.
+pub const SECRET_TARGET_FD: i32 = 3;
+
+/// Variables that change how a process — its loader, its interpreter, its
+/// shell, git — behaves. A secret injected as one of them would be an
+/// execution-control primitive, not a credential, so none may be a mode B
+/// target. Prefix families end in `*`.
+pub const CONTROL_VARIABLES: &[&str] = &[
+    "LD_*",
+    "DYLD_*",
+    "PATH",
+    "HOME",
+    "LANG",
+    "LC_*",
+    "SHELL",
+    "ENV",
+    "BASH_ENV",
+    "BASH_FUNC_*",
+    "SHELLOPTS",
+    "BASHOPTS",
+    "IFS",
+    "PS4",
+    "PROMPT_COMMAND",
+    "PYTHON*",
+    "PERL5*",
+    "PERLLIB",
+    "RUBY*",
+    "GEM_*",
+    "NODE_*",
+    "NPM_CONFIG_*",
+    "RUSTC*",
+    "RUSTFLAGS",
+    "RUSTDOC*",
+    "CARGO_*",
+    "GIT_*",
+    "SSH_ASKPASS",
+    "EDITOR",
+    "VISUAL",
+    "PAGER",
+    "TMPDIR",
+    "MALLOC_*",
+    "GLIBC_TUNABLES",
+    "JAVA_TOOL_OPTIONS",
+    "_JAVA_OPTIONS",
+    "CLASSPATH",
+    "GCONV_PATH",
+    "NLSPATH",
+    "LOCPATH",
+    "HOSTALIASES",
+    "RES_OPTIONS",
+    "LOCALDOMAIN",
+    "OPENSSL_*",
+    "SSL_CERT_*",
+];
+
+/// Whether `name` is a process-control variable ([`CONTROL_VARIABLES`]).
+#[must_use]
+pub fn is_control_variable(name: &str) -> bool {
+    CONTROL_VARIABLES
+        .iter()
+        .any(|pattern| match pattern.strip_suffix('*') {
+            Some(family) => name.starts_with(family),
+            None => name == *pattern,
+        })
+}
+
+/// A secret handle: `[a-z][a-z0-9._-]{0,63}`.
+#[must_use]
+pub fn valid_secret_handle(text: &str) -> bool {
+    let mut bytes = text.bytes();
+    bytes.next().is_some_and(|b| b.is_ascii_lowercase())
+        && text.len() <= 64
+        && bytes.all(|b| {
+            b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'.' | b'_' | b'-')
+        })
+}
+
+/// An HTTP header name: an RFC 9110 token of 1 to 64 bytes.
+#[must_use]
+pub fn valid_header_name(text: &str) -> bool {
+    !text.is_empty()
+        && text.len() <= 64
+        && text.bytes().all(|b| {
+            b.is_ascii_alphanumeric()
+                || matches!(
+                    b,
+                    b'!' | b'#'
+                        | b'$'
+                        | b'%'
+                        | b'&'
+                        | b'\''
+                        | b'*'
+                        | b'+'
+                        | b'-'
+                        | b'.'
+                        | b'^'
+                        | b'_'
+                        | b'`'
+                        | b'|'
+                        | b'~'
+                )
+        })
+}
+
+/// What precedes the value in a header: 1 to 64 bytes of printable ASCII or
+/// space. Never CR, LF or NUL — nothing that could end the header.
+#[must_use]
+pub fn valid_header_prefix(text: &str) -> bool {
+    !text.is_empty() && text.len() <= 64 && text.bytes().all(|b| b == b' ' || b.is_ascii_graphic())
+}
+
+/// A mode B variable: `[A-Z_][A-Z0-9_]{0,63}`, not a process-control variable
+/// and not one of the base environment's.
+#[must_use]
+pub fn valid_secret_env_name(text: &str) -> bool {
+    let mut bytes = text.bytes();
+    let shaped = bytes
+        .next()
+        .is_some_and(|b| b.is_ascii_uppercase() || b == b'_')
+        && text.len() <= 64
+        && bytes.all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_');
+    shaped
+        && !is_control_variable(text)
+        && !PROCESS_BASE_ENVIRONMENT
+            .iter()
+            .any(|(name, _)| *name == text)
+}
+
+/// A concrete origin: a lowercase DNS name, `:`, and a port 1–65535 without a
+/// leading zero. What an egress injection is bound to; never a pattern.
+#[must_use]
+pub fn valid_secret_origin(text: &str) -> bool {
+    let Some((host, port)) = text.rsplit_once(':') else {
+        return false;
+    };
+    let host_ok = !host.is_empty()
+        && host.len() <= 253
+        && host.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+                && label
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        });
+    let port_ok = !port.is_empty()
+        && port.len() <= 5
+        && !port.starts_with('0')
+        && port.bytes().all(|b| b.is_ascii_digit())
+        && port.parse::<u16>().is_ok_and(|p| p > 0);
+    host_ok && port_ok
+}
 
 // ---------------------------------------------------------------------------
 // The process profile (ADR-0045 §10). Fixed here, in the crate both daemons
@@ -148,13 +326,13 @@ pub const PROCESS_BASE_ENVIRONMENT: &[(&str, &str)] = &[
 
 wire_int! {
     /// The private protocol's version.
-    ProtocolVersion(u16), min = 3, max = 3
+    ProtocolVersion(u16), min = 4, max = 4
 }
 
 wire_int! {
-    /// How many descriptors accompany an authorisation: none, one or two,
-    /// fixed by its kind.
-    DescriptorCount(u8), min = 0, max = 2
+    /// How many descriptors accompany an authorisation: none to three, fixed
+    /// by its kind.
+    DescriptorCount(u8), min = 0, max = 3
 }
 
 wire_int! {
@@ -253,6 +431,70 @@ wire_text! {
     validate = |s| !s.is_empty() && s.len() % 2 == 0 && s.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
+wire_text! {
+    /// A secret's handle (ADR-0046): the operator's name for it, never its
+    /// value. [`valid_secret_handle`].
+    SecretHandle,
+    max_chars = 64,
+    pattern = Some("^[a-z][a-z0-9._-]{0,63}$"),
+    format = None,
+    validate = valid_secret_handle
+}
+
+wire_text! {
+    /// The concrete origin an egress injection is bound to:
+    /// [`valid_secret_origin`].
+    SecretOrigin,
+    max_chars = 259,
+    pattern = Some("^[a-z0-9.-]{1,253}:[1-9][0-9]{0,4}$"),
+    format = None,
+    validate = valid_secret_origin
+}
+
+wire_text! {
+    /// The header an egress injection sets, from the operator's metadata:
+    /// [`valid_header_name`].
+    SecretHeaderName,
+    max_chars = 64,
+    pattern = Some("^[!#$%&'*+.^_`|~0-9A-Za-z-]{1,64}$"),
+    format = None,
+    validate = valid_header_name
+}
+
+wire_text! {
+    /// What precedes the value in that header, from the operator's metadata:
+    /// [`valid_header_prefix`].
+    SecretHeaderPrefix,
+    max_chars = 64,
+    pattern = Some("^[ -~]{1,64}$"),
+    format = None,
+    validate = valid_header_prefix
+}
+
+wire_text! {
+    /// The variable a mode B injection sets, from the operator's metadata:
+    /// [`valid_secret_env_name`].
+    SecretEnvName,
+    max_chars = 64,
+    pattern = Some("^[A-Z_][A-Z0-9_]{0,63}$"),
+    format = None,
+    validate = valid_secret_env_name
+}
+
+wire_enum! {
+    /// How a launch receives its secret (ADR-0046 §§13, 16). The authority
+    /// chose it from the operator's metadata; no field of any request names
+    /// it.
+    SecretDelivery {
+        /// Mode B: `NAME=value` in the target's environment, built by the
+        /// launch helper from the descriptor.
+        EnvAtSpawn = "ENV_AT_SPAWN",
+        /// Mode C: the pipe itself, as descriptor [`SECRET_TARGET_FD`] of the
+        /// target.
+        FdAtSpawn = "FD_AT_SPAWN",
+    }
+}
+
 impl RawName {
     /// Spell a name's bytes, or `None` if empty or over 255 bytes.
     #[must_use]
@@ -297,6 +539,11 @@ wire_enum! {
         ProcessStatus = "broker.process_status",
         /// A `process.kill` authorisation.
         ProcessKill = "broker.process_kill",
+        /// A mode A secret render (ADR-0046): compose one header, once.
+        SecretEgress = "broker.secret_egress",
+        /// A launch that receives one secret (ADR-0046): the secret
+        /// injection primitive for modes B and C.
+        SecretProcessStart = "broker.secret_process_start",
         /// The broker's outcome for an authorisation.
         Outcome = "broker.outcome",
     }
@@ -317,6 +564,8 @@ impl PrivateKind {
     /// | `fs_reclaim` | the directory the staging directory is in, open for reading |
     /// | `process_start` | the executable, open for reading; the working directory, open for reading |
     /// | `process_status`, `process_kill` | none: the process is the broker's own child, named by its handle |
+    /// | `secret_egress` | the secret: a pipe's read end, at end of file after the value |
+    /// | `secret_process_start` | the executable; the working directory; the secret pipe |
     ///
     /// `None` for the hello and the outcome, which are not authorisations.
     #[must_use]
@@ -329,8 +578,10 @@ impl PrivateKind {
             | Self::FsSearch
             | Self::FsWrite
             | Self::FsDelete
-            | Self::FsReclaim => Some(1),
+            | Self::FsReclaim
+            | Self::SecretEgress => Some(1),
             Self::FsPatch | Self::FsMove | Self::ProcessStart => Some(2),
+            Self::SecretProcessStart => Some(3),
             Self::Hello | Self::Outcome => None,
         }
     }
@@ -410,6 +661,16 @@ wire_enum! {
         /// The handle names another broker generation: this broker did not
         /// launch it and supervises nothing of it.
         StaleGeneration = "STALE_GENERATION",
+        /// The secret descriptor is not the read end of a pipe, open for
+        /// reading only, whose writer has closed. Nothing was read into use.
+        SecretDescriptor = "SECRET_DESCRIPTOR",
+        /// The secret descriptor held no bytes.
+        SecretEmpty = "SECRET_EMPTY",
+        /// The secret descriptor held more than [`MAX_SECRET_BYTES`].
+        SecretTooLarge = "SECRET_TOO_LARGE",
+        /// The value cannot be delivered this way without ambiguity: CR, LF
+        /// or NUL in a header value, NUL in an environment value.
+        SecretUnsafeBytes = "SECRET_UNSAFE_BYTES",
     }
 }
 
@@ -877,6 +1138,83 @@ wire_struct! {
     }
 }
 
+wire_struct! {
+    /// One mode A render (ADR-0046 §12): read the secret from the one
+    /// descriptor, refuse a value that would break the header, compose
+    /// `header_name: header_prefix value` for `origin`, and drop it —
+    /// zeroized — at the end of this exchange. M4e has no egress consumer:
+    /// the render is the secret side of the contract, delivered to nothing
+    /// until M5's `net.http` exists, and it proves the handoff is one-shot.
+    SecretEgressAuthorisation: reject {
+        /// Always `broker.secret_egress`.
+        required kind: PrivateKind,
+        /// The protocol version.
+        required protocol: ProtocolVersion,
+        /// The channel from this connection's hello.
+        required channel: ChannelNonce,
+        /// The authority's id for the invocation.
+        required invocation_id: InvocationId,
+        /// The handle whose value the descriptor holds.
+        required handle: SecretHandle,
+        /// The origin the header is for.
+        required origin: SecretOrigin,
+        /// The header, from the operator's metadata.
+        required header_name: SecretHeaderName,
+        /// What precedes the value, from the operator's metadata.
+        optional header_prefix: SecretHeaderPrefix,
+        /// One: the secret pipe.
+        required descriptors: DescriptorCount,
+    }
+}
+
+wire_struct! {
+    /// A launch that receives one secret (ADR-0046 §§13, 16): everything a
+    /// `process_start` is, plus the handle and how the value is delivered.
+    /// **The secret injection primitive, not a sandbox**: the target runs on
+    /// the host with the broker's privileges, exactly as `process_start`'s,
+    /// and the authority never sends this before M5 gives it a sandboxed
+    /// consumer.
+    SecretProcessStartAuthorisation: reject {
+        /// Always `broker.secret_process_start`.
+        required kind: PrivateKind,
+        /// The protocol version.
+        required protocol: ProtocolVersion,
+        /// The channel from this connection's hello.
+        required channel: ChannelNonce,
+        /// The authority's id for the invocation.
+        required invocation_id: InvocationId,
+        /// The handle the authority minted for the process.
+        required process_id: ProcessId,
+        /// The executable's device.
+        required executable_device: KernelNumber,
+        /// The executable's inode.
+        required executable_inode: KernelNumber,
+        /// The SHA-256 the authority computed from the file it opened.
+        required executable_sha256: ContentDigest,
+        /// The working directory's device.
+        required cwd_device: KernelNumber,
+        /// The working directory's inode.
+        required cwd_inode: KernelNumber,
+        /// `argv[0]`: the executable's canonical path.
+        required argv0: HostPath,
+        /// The arguments after `argv[0]`.
+        required args: ProcessArgs,
+        /// The environment profile.
+        required environment: ExecEnvironment,
+        /// How many bytes of each output stream to retain.
+        required stream_limit: StreamLimit,
+        /// The handle whose value the secret descriptor holds: the name the
+        /// broker's output redaction reports.
+        required handle: SecretHandle,
+        /// Mode B or mode C.
+        required delivery: SecretDelivery,
+        /// For mode B: the variable. Absent for mode C.
+        optional env_name: SecretEnvName,
+        /// Three: the executable, the working directory, the secret pipe.
+        required descriptors: DescriptorCount,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Outcomes.
 // ---------------------------------------------------------------------------
@@ -1039,6 +1377,13 @@ wire_struct! {
 }
 
 wire_struct! {
+    /// A mode A render completed: the value was read to its end, accepted and
+    /// composed, and the composition is gone. Nothing about the value — not
+    /// its length, not a digest — comes back.
+    SecretEgressDone: reject {}
+}
+
+wire_struct! {
     /// A completed operation's result: exactly one member, the operation's own.
     BrokerDone: reject {
         /// An `fs.read`'s bytes.
@@ -1065,10 +1410,14 @@ wire_struct! {
         optional process_status: ProcessStatusDone,
         /// A kill's acknowledgement.
         optional process_kill: ProcessKillDone,
+        /// A mode A render's acknowledgement.
+        optional secret_egress: SecretEgressDone,
+        /// A secret launch's confirmation.
+        optional secret_process_start: ProcessStartDone,
     }
     exactly_one(
         fs_read, fs_stat, fs_list, fs_search, fs_write, fs_patch, fs_move, fs_delete, fs_reclaim,
-        process_start, process_status, process_kill
+        process_start, process_status, process_kill, secret_egress, secret_process_start
     )
 }
 
@@ -1263,6 +1612,10 @@ pub enum Authorisation {
     ProcessStatus(ProcessStatusAuthorisation),
     /// `broker.process_kill`.
     ProcessKill(ProcessKillAuthorisation),
+    /// `broker.secret_egress`.
+    SecretEgress(SecretEgressAuthorisation),
+    /// `broker.secret_process_start`.
+    SecretProcessStart(SecretProcessStartAuthorisation),
 }
 
 impl Authorisation {
@@ -1323,6 +1676,12 @@ impl Authorisation {
             PrivateKind::ProcessKill => {
                 Self::ProcessKill(ProcessKillAuthorisation::decode(value, cx)?)
             }
+            PrivateKind::SecretEgress => {
+                Self::SecretEgress(SecretEgressAuthorisation::decode(value, cx)?)
+            }
+            PrivateKind::SecretProcessStart => {
+                Self::SecretProcessStart(SecretProcessStartAuthorisation::decode(value, cx)?)
+            }
             PrivateKind::Hello | PrivateKind::Outcome => {
                 return Err(ProtocolError::schema(
                     Violation::Inconsistent,
@@ -1351,6 +1710,8 @@ impl Authorisation {
             Self::ProcessStart(_) => PrivateKind::ProcessStart,
             Self::ProcessStatus(_) => PrivateKind::ProcessStatus,
             Self::ProcessKill(_) => PrivateKind::ProcessKill,
+            Self::SecretEgress(_) => PrivateKind::SecretEgress,
+            Self::SecretProcessStart(_) => PrivateKind::SecretProcessStart,
         }
     }
 
@@ -1370,6 +1731,8 @@ impl Authorisation {
             Self::ProcessStart(a) => &a.channel,
             Self::ProcessStatus(a) => &a.channel,
             Self::ProcessKill(a) => &a.channel,
+            Self::SecretEgress(a) => &a.channel,
+            Self::SecretProcessStart(a) => &a.channel,
         }
     }
 
@@ -1389,6 +1752,8 @@ impl Authorisation {
             Self::ProcessStart(a) => &a.invocation_id,
             Self::ProcessStatus(a) => &a.invocation_id,
             Self::ProcessKill(a) => &a.invocation_id,
+            Self::SecretEgress(a) => &a.invocation_id,
+            Self::SecretProcessStart(a) => &a.invocation_id,
         }
     }
 
@@ -1408,11 +1773,13 @@ impl Authorisation {
             Self::ProcessStart(a) => a.descriptors.get(),
             Self::ProcessStatus(a) => a.descriptors.get(),
             Self::ProcessKill(a) => a.descriptors.get(),
+            Self::SecretEgress(a) => a.descriptors.get(),
+            Self::SecretProcessStart(a) => a.descriptors.get(),
         }
     }
 
     fn check(&self) -> Result<(), ProtocolError> {
-        // The protocol version is checked by its type on decode (3 and only 3).
+        // The protocol version is checked by its type on decode (4 and only 4).
         let descriptors = DescriptorCount::new(self.declared_descriptors()).ok_or_else(|| {
             ProtocolError::schema(Violation::OutOfRange, "/descriptors", "no such count")
         })?;
@@ -1471,6 +1838,27 @@ impl Authorisation {
                     "the arguments hold more than one launch may carry",
                 ));
             }
+            Self::SecretProcessStart(start) => {
+                if process_argv_bytes(&start.args) > MAX_PROCESS_ARGV_BYTES {
+                    return Err(ProtocolError::schema(
+                        Violation::TooLong,
+                        "/args",
+                        "the arguments hold more than one launch may carry",
+                    ));
+                }
+                // A variable exactly for mode B, and none for mode C.
+                let consistent = match start.delivery {
+                    SecretDelivery::EnvAtSpawn => start.env_name.is_some(),
+                    SecretDelivery::FdAtSpawn => start.env_name.is_none(),
+                };
+                if !consistent {
+                    return Err(ProtocolError::schema(
+                        Violation::Inconsistent,
+                        "/delivery",
+                        "an environment delivery names its variable and a descriptor delivery none",
+                    ));
+                }
+            }
             _ => {}
         }
         Ok(())
@@ -1496,6 +1884,8 @@ impl Authorisation {
             Self::ProcessStart(a) => encode_frame(a),
             Self::ProcessStatus(a) => encode_frame(a),
             Self::ProcessKill(a) => encode_frame(a),
+            Self::SecretEgress(a) => encode_frame(a),
+            Self::SecretProcessStart(a) => encode_frame(a),
         }
     }
 }
@@ -1861,6 +2251,102 @@ impl ProcessKillAuthorisation {
     }
 }
 
+/// What a mode A render names, besides its common fields: nothing secret.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EgressSpec {
+    /// The handle.
+    pub handle: SecretHandle,
+    /// The origin.
+    pub origin: SecretOrigin,
+    /// The header.
+    pub header_name: SecretHeaderName,
+    /// Its prefix, if the metadata has one.
+    pub header_prefix: Option<SecretHeaderPrefix>,
+}
+
+impl SecretEgressAuthorisation {
+    /// A render of `spec`.
+    #[must_use]
+    pub fn new(common: Common, spec: EgressSpec) -> Self {
+        let (kind, protocol, channel, invocation_id, descriptors) =
+            authorisation_head!(PrivateKind::SecretEgress, common);
+        Self {
+            kind,
+            protocol,
+            channel,
+            invocation_id,
+            handle: spec.handle,
+            origin: spec.origin,
+            header_name: spec.header_name,
+            header_prefix: spec.header_prefix,
+            descriptors,
+        }
+    }
+}
+
+/// How a secret launch receives its value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SpawnSecret {
+    /// The handle.
+    pub handle: SecretHandle,
+    /// Mode B or mode C.
+    pub delivery: SecretDelivery,
+    /// For mode B, the variable.
+    pub env_name: Option<SecretEnvName>,
+}
+
+impl SecretProcessStartAuthorisation {
+    /// A launch of `spec` that receives `secret`.
+    #[must_use]
+    pub fn new(common: Common, spec: ProcessSpec, secret: SpawnSecret) -> Self {
+        let (kind, protocol, channel, invocation_id, descriptors) =
+            authorisation_head!(PrivateKind::SecretProcessStart, common);
+        Self {
+            kind,
+            protocol,
+            channel,
+            invocation_id,
+            process_id: spec.process_id,
+            executable_device: KernelNumber::from_u64(spec.executable.0),
+            executable_inode: KernelNumber::from_u64(spec.executable.1),
+            executable_sha256: spec.executable_sha256,
+            cwd_device: KernelNumber::from_u64(spec.cwd.0),
+            cwd_inode: KernelNumber::from_u64(spec.cwd.1),
+            argv0: spec.argv0,
+            args: spec.args,
+            environment: spec.environment,
+            stream_limit: spec.stream_limit,
+            handle: secret.handle,
+            delivery: secret.delivery,
+            env_name: secret.env_name,
+            descriptors,
+        }
+    }
+
+    /// The launch it describes, without the secret: what `process_start`
+    /// would carry.
+    #[must_use]
+    pub fn launch(&self) -> ProcessStartAuthorisation {
+        ProcessStartAuthorisation {
+            kind: PrivateKind::ProcessStart,
+            protocol: self.protocol,
+            channel: self.channel.clone(),
+            invocation_id: self.invocation_id.clone(),
+            process_id: self.process_id.clone(),
+            executable_device: self.executable_device.clone(),
+            executable_inode: self.executable_inode.clone(),
+            executable_sha256: self.executable_sha256.clone(),
+            cwd_device: self.cwd_device.clone(),
+            cwd_inode: self.cwd_inode.clone(),
+            argv0: self.argv0.clone(),
+            args: self.args.clone(),
+            environment: self.environment,
+            stream_limit: self.stream_limit,
+            descriptors: DescriptorCount(2),
+        }
+    }
+}
+
 /// What an outcome says, once its shape is checked.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OutcomeResult {
@@ -1950,6 +2436,8 @@ impl BrokerDone {
             process_start: None,
             process_status: None,
             process_kill: None,
+            secret_egress: None,
+            secret_process_start: None,
         }
     }
 
@@ -2052,6 +2540,24 @@ impl BrokerDone {
         }
     }
 
+    /// A mode A render's acknowledgement.
+    #[must_use]
+    pub fn secret_egress() -> Self {
+        Self {
+            secret_egress: Some(SecretEgressDone {}),
+            ..Self::empty()
+        }
+    }
+
+    /// A secret launch's confirmation.
+    #[must_use]
+    pub fn secret_process_start(done: ProcessStartDone) -> Self {
+        Self {
+            secret_process_start: Some(done),
+            ..Self::empty()
+        }
+    }
+
     /// Which operation this result is for.
     #[must_use]
     pub const fn kind(&self) -> Option<PrivateKind> {
@@ -2079,6 +2585,10 @@ impl BrokerDone {
             PrivateKind::ProcessStatus
         } else if self.process_kill.is_some() {
             PrivateKind::ProcessKill
+        } else if self.secret_egress.is_some() {
+            PrivateKind::SecretEgress
+        } else if self.secret_process_start.is_some() {
+            PrivateKind::SecretProcessStart
         } else {
             return None;
         })

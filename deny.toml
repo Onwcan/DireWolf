@@ -71,7 +71,21 @@ wildcards = "deny"
 # M3d made it depend on dwk-proto, dwkd-authority.  A
 # version-less registry or git dependency is still a wildcard and still denied.
 allow-wildcard-paths = true
-skip = []
+# M4e (ADR-0046 §25) is the first milestone whose TCB carries duplicate versions:
+# age 0.11.5 and keyring 3.6.3 bring their own, and each is listed below
+# with its reason, version-exact, so a third copy or a changed version fails.
+skip = [
+    { crate = "digest@0.10.7", reason = "age 0.11.5 (ADR-0046 §25) is built on the previous RustCrypto generation (digest 0.10); the workspace's sha2 and hmac, and age's own rust-embed-utils, are on digest 0.11. Both copies are linked into the authority and are reviewed as two" },
+    { crate = "block-buffer@0.10.4", reason = "age 0.11.5 (ADR-0046 §25) is built on the previous RustCrypto generation (digest 0.10); the workspace's sha2 and hmac, and age's own rust-embed-utils, are on digest 0.11. Both copies are linked into the authority and are reviewed as two" },
+    { crate = "crypto-common@0.1.7", reason = "age 0.11.5 (ADR-0046 §25) is built on the previous RustCrypto generation (digest 0.10); the workspace's sha2 and hmac, and age's own rust-embed-utils, are on digest 0.11. Both copies are linked into the authority and are reviewed as two" },
+    { crate = "cpufeatures@0.2.17", reason = "age 0.11.5 (ADR-0046 §25) is built on the previous RustCrypto generation (digest 0.10); the workspace's sha2 and hmac, and age's own rust-embed-utils, are on digest 0.11. Both copies are linked into the authority and are reviewed as two" },
+    { crate = "sha2@0.10.9", reason = "age 0.11.5 (ADR-0046 §25) is built on the previous RustCrypto generation (digest 0.10); the workspace's sha2 and hmac, and age's own rust-embed-utils, are on digest 0.11. Both copies are linked into the authority and are reviewed as two" },
+    { crate = "hmac@0.12.1", reason = "age 0.11.5, hkdf and pbkdf2 use hmac 0.12 (digest 0.10); the redaction index's HMAC-SHA-256 uses hmac 0.13 over the workspace's sha2 0.11 (ADR-0046 §21), rather than a second sha2" },
+    { crate = "rustc-hash@1.1.0", reason = "inside age's localisation stack: fluent-bundle 0.15 takes rustc-hash 1, its own intl-memoizer's type-map takes 2 (ADR-0046 §25)" },
+    { crate = "syn@2.0.119", reason = "proc macros only, never linked: dalek's, zeroize's and age's localisation derives use syn 2; serde_derive, displaydoc and futures-macro use syn 3 (ADR-0046 §25)" },
+    { crate = "toml@0.5.11", reason = "build time only: find-crate, which i18n-embed's proc macros use to read Cargo.toml, takes toml 0.5; the policy and secret-metadata loaders use toml 1" },
+    { crate = "windows-sys@0.60.2", reason = "keyring 3.6.3 (the Windows Credential Manager backend, ADR-0046 §6) takes 0.60; rustix, errno and winapi-util take 0.61. Windows only, and the authority serves nothing there" },
+]
 skip-tree = []
 
 deny = [

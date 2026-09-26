@@ -1,5 +1,6 @@
 //! The authority's side of the private broker channel (M4b, [ADR-0043]; the
-//! M4c operations, [ADR-0044]; the M4d process operations, [ADR-0045]).
+//! M4c operations, [ADR-0044]; the M4d process operations, [ADR-0045]; the
+//! M4e mode A render, [ADR-0046]).
 //!
 //! The authority decides; `dwkd-broker` does ([ADR-0018]). This module is the
 //! one place an authorised effect crosses from the first to the second: the
@@ -33,6 +34,7 @@
 //! [ADR-0043]: ../../../../docs/adr/0043-m4b-private-broker-channel-and-brokered-fs-read.md
 //! [ADR-0044]: ../../../../docs/adr/0044-m4c-filesystem-operations-plans-and-atomic-mutation.md
 //! [ADR-0045]: ../../../../docs/adr/0045-m4d-process-execution-broker.md
+//! [ADR-0046]: ../../../../docs/adr/0046-m4e-secret-handles-backends-injection-and-redaction.md
 
 #[cfg(target_os = "linux")]
 mod link;
@@ -165,6 +167,15 @@ pub enum Operation {
         /// The broker instance that launched it.
         generation: BrokerGeneration,
     },
+    /// Render one mode A header (M4e, ADR-0046 §12): the handle, the origin
+    /// and the operator's header and prefix, and the value as the one
+    /// descriptor. Nothing about the value is in the message.
+    SecretEgress {
+        /// What is not secret.
+        spec: dwk_proto::brokerp::EgressSpec,
+        /// The value: a pipe's read end, at end of file after it.
+        secret: crate::secret::handoff::SecretPipe,
+    },
 }
 
 /// What a staging directory was made for: the operation, the one name it
@@ -196,6 +207,7 @@ impl Operation {
             Self::ProcessStart { .. } => "process.start",
             Self::ProcessStatus { .. } => "process.status",
             Self::ProcessKill { .. } => "process.kill",
+            Self::SecretEgress { .. } => "secret.egress",
         }
     }
 }
@@ -235,7 +247,7 @@ impl BrokerOrder {
     /// The identity of the object it names first: the file, directory or
     /// object for the read family, the target (or, for a creation, the parent
     /// directory), the executable of a launch. `None` for a status or a kill,
-    /// which name a process, not an object.
+    /// which name a process, not an object, and for a secret render.
     #[must_use]
     pub fn identity(&self) -> Option<FileIdentity> {
         Some(match &self.operation {
@@ -253,7 +265,9 @@ impl BrokerOrder {
                 .target()
                 .map_or_else(|| source.directory_identity(), |(identity, _)| identity),
             Operation::ProcessStart { executable, .. } => executable.object(),
-            Operation::ProcessStatus { .. } | Operation::ProcessKill { .. } => return None,
+            Operation::ProcessStatus { .. }
+            | Operation::ProcessKill { .. }
+            | Operation::SecretEgress { .. } => return None,
         })
     }
 
@@ -407,6 +421,9 @@ pub enum BrokerDelivery {
     ProcessStatus(ProcessStatusDelivery),
     /// A kill's acknowledgement.
     ProcessKilled(KillOutcome),
+    /// A mode A render completed: the value was read and accepted, and the
+    /// broker's copy is gone. Nothing about the value comes back.
+    SecretEgress,
 }
 
 /// Why no connection could be used.

@@ -50,6 +50,18 @@
    "status": "pass",
    "min_score": 1.0
   },
+  "m4-security/exec-mediation": {
+   "status": "pass",
+   "min_score": 1.0
+  },
+  "m4-security/path-traversal": {
+   "status": "pass",
+   "min_score": 1.0
+  },
+  "m4-security/secret-boundary": {
+   "status": "pass",
+   "min_score": 1.0
+  },
   "pending-kernel/approval-binding-drift": {
    "status": "pending",
    "pending_reason": "requires M6: there is no approval registry and no binding hash."
@@ -57,10 +69,6 @@
   "pending-kernel/model-egress-privacy": {
    "status": "pending",
    "pending_reason": "requires M7: there is no provider path, and evals make no live model call."
-  },
-  "pending-kernel/path-traversal": {
-   "status": "pending",
-   "pending_reason": "requires M4: there is no filesystem broker and no canonicaliser."
   },
   "pending-kernel/sandbox-egress": {
    "status": "pending",

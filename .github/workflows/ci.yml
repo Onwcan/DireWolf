@@ -135,7 +135,12 @@ jobs:
       # nothing here rewrites that file. Pending suites are reported as pending,
       # which is neither a pass nor a skip.
       #
-      # The M3 authority suite runs the real `dwkd-authority` process here.
+      # The M3 authority suite runs the real `dwkd-authority` process here,
+      # and since M4e the M4 suite (`m4-security`) runs the real resolver, the
+      # real broker and launch helper, the released daemons, the kernel
+      # keyring and a separate runtime process whose memory is read: path
+      # traversal, exec mediation and the secret boundary are no longer
+      # pending, and a regression in any of them fails this gate.
       # Strict (ADR-0041): an eval this job cannot exercise FAILS the gate
       # rather than being listed as not exercised -- and `scripts/dw.py` makes
       # the gate strict under GitHub Actions even without the line below.
@@ -298,6 +303,37 @@ jobs:
           DW_BROKER_AS: dwbroker
           DW_PEER_AS: nobody
 
+  # M4e's secret evidence (ADR-0046): the real kernel keyring and real age
+  # files and every hostile store; the authority's mode A pipeline (against a
+  # fake broker, and labelled so: backend reads counted, gates, durable order,
+  # revisions, the R1-R10 crash windows); the real broker binary's one-shot
+  # descriptor, every hostile descriptor and message, the mode B/C injection
+  # PRIMITIVE (not a sandbox), output redaction while drained and residue;
+  # the released daemons with a separate runtime process whose address space
+  # is read; the public protocol corpus. Then THREE genuine identities -- the
+  # runner as the authority, a broker user created here, `nobody` as the
+  # hostile runtime -- with the store and keyring closed to both, and root
+  # reading the hardened daemons' and the runtime's memory; and the core-dump
+  # contract, which sets kernel.core_pattern for its duration
+  # (DW_M4E_CORE_EVIDENCE=1) and proves a crashing hardened daemon writes no
+  # core where a dumpable process does. The harness switches users; the
+  # authority never does. Nothing here is conditional, and the `ci` job
+  # requires it: with the other M4 jobs and the eval gate, it is the FINAL M4
+  # GATE.
+  secret-broker:
+    name: secret broker (make secret-broker-evidence)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v5.0.1
+      - uses: ./.github/actions/setup
+      - name: Create the broker's own identity
+        run: sudo useradd --system --no-create-home --shell /usr/sbin/nologin dwbroker
+      - run: make secret-broker-evidence
+        env:
+          DW_BROKER_AS: dwbroker
+          DW_PEER_AS: nobody
+          DW_M4E_CORE_EVIDENCE: "1"
+
   supply-chain:
     name: dependencies (make security)
     runs-on: ubuntu-latest
@@ -339,7 +375,7 @@ jobs:
   ci:
     name: CI
     runs-on: ubuntu-latest
-    needs: [format, lint, typecheck, architecture, schema, evals, test, authority-transport, filesystem-canonicalization, broker-fs-read, filesystem-operations, process-broker, supply-chain, build]
+    needs: [format, lint, typecheck, architecture, schema, evals, test, authority-transport, filesystem-canonicalization, broker-fs-read, filesystem-operations, process-broker, secret-broker, supply-chain, build]
     if: always()
     steps:
       - name: Fail unless every required job succeeded

@@ -220,7 +220,7 @@ This is what makes principle 7 true rather than aspirational — `dwkd-authority
 - *Capability Broker* — mints, attenuates and verifies capability tokens; enforces the ⊑ lattice. The lattice is M3b's; minting at admission, recorded durably with a kernel-assigned `cap_id` per grant, is M3d's ([ADR-0039](adr/0039-durable-authority-state.md)).
 - *Approval Registry* — stores, matches, expires and burns human approvals bound to canonical actions.
 - *Budget Ledger* — hierarchical reservations for time, tokens, money, calls, bytes.
-- *Secret Broker* — resolves credential handles and injects values at the last possible moment.
+- *Secret Broker* — resolves credential handles and injects values at the last possible moment. **M4e implements its resolution side** ([ADR-0046](adr/0046-m4e-secret-handles-backends-injection-and-redaction.md)): the authority reads a value from the kernel keyring or an age file only after both gates and a durable intent, and hands it to the broker once, as the read end of a pipe on the private channel; the broker renders a mode A header and drops it (the egress consumer is M5's), or injects it into a launched target's environment or descriptor 3 (a primitive with no production caller until M5's sandbox). Output is redacted before it crosses back.
 - *Provenance Tracker* — derives and owns `taint_level`, artifact trust labels and memory provenance. The kernel sees **every** byte crossing TB1→TB2 (it performs every tool call and creates every artifact), so it has strictly more information than the Context Engine does, and unlike the Context Engine it cannot be asked to lie.
 - *Audit Log* — append-only, hash-chained security record. Written by authority only; the broker returns outcomes and never writes it. Implemented at M3d as `audit.log` beside `kernel.db` in the authority's private state directory, written through a transactional outbox so that a record is `fsync`ed before the authority it describes is returned ([ADR-0039](adr/0039-durable-authority-state.md) §13).
 
@@ -570,7 +570,7 @@ Injection modes:
 Return path:           all tool output passes the redaction index before crossing TB1 -> TB2
 ```
 
-Mode (A) is strongest: the secret never exists in any process the agent can influence. [SECRETS.md](SECRETS.md) covers the honest limits of output redaction.
+Mode (A) is strongest: the secret never exists in any process the agent can influence. [SECRETS.md](SECRETS.md) covers the honest limits of output redaction. As implemented at M4e ([ADR-0046](adr/0046-m4e-secret-handles-backends-injection-and-redaction.md)), the Linux keychain is the kernel keyring; mode (A) is rendered and dropped with no proxy yet (M5); (B) and (C) run on the host as an injection primitive the production selector never chooses, and (C) is a pipe on descriptor 3, which a grandchild can inherit; (D) is unreachable until M6.
 
 ---
 
