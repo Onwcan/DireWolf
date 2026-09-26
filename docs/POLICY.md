@@ -183,6 +183,11 @@ reason = "HOST_EXECUTION_DISABLED"
 when.verb        = "process.exec"
 when.environment = "host"
 unless.config    = "security.allow_host_execution"
+# As built at M4d (ADR-0045 §2): the kernel enforces this floor itself, whatever
+# policy says -- and a host launch ALSO needs a per-invocation approval, which
+# no build has before M6. `workspace_exec_hygiene` cannot be enforced on the
+# host and denies (OBLIGATION_UNENFORCEABLE); `max_output_bytes` is the combined
+# stdout+stderr bound.
 
 # ---------------------------------------------------------------- taint
 

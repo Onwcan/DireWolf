@@ -34,8 +34,18 @@ dwk-proto = { workspace = true }
 # through the same maintained safe wrapper and the same features the authority
 # already uses -- so a workspace build unifies to exactly the authority's
 # rustix, and the broker adds no feature to it. Linux only, like the channel.
+#
+# M4d (ADR-0045 §20) adds the broker's own features, never the authority's:
+# `process` (`pidfd_open`, `pidfd_send_signal`, `kill_process_group`,
+# `waitid`, `setrlimit`, `fchdir`, the parent-death signal) and `thread`
+# (`set_no_new_privs`). Both add code, not crates (`linux-raw-sys/prctl`). In
+# a build of the whole workspace Cargo unifies them into the one `rustix` the
+# authority also links; the authority names none of them (TX008, TX010), and
+# ADR-0045 records the delta.
 [target.'cfg(target_os = "linux")'.dependencies]
-rustix = { workspace = true }
+rustix = { workspace = true, features = ["process", "thread"] }
+# The launch helper's `execveat` (ADR-0045 §9): see the workspace manifest.
+nix = { workspace = true }
 # M4c (ADR-0044 §12): `fs.patch` proves a file holds its base revision, and
 # its result the post revision, by SHA-256 -- the digest the runtime states
 # them by. The same pinned, pure-Rust crate and features the authority uses.

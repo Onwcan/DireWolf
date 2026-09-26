@@ -110,6 +110,10 @@ mod tests;
 
 use core::fmt;
 
+/// One component, by the same name checker a workspace path's components pass
+/// (NFC, no control, bidi or invisible character, at most `NAME_MAX`): the
+/// executable resolver's grammar for host names (M4d, ADR-0045).
+pub(in crate::resource) use grammar::single_component;
 pub use grammar::{MAX_DEPTH, PathError};
 
 use super::{CanonicalPath, PathComponent};

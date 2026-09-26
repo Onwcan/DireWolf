@@ -516,7 +516,164 @@ def _payload_v2(rng: random.Random, schema: str) -> object:
     raise AssertionError(f"no version-2 generator for {schema}")
 
 
+def _host_path(rng: random.Random) -> str:
+    return "/" + "/".join(_kebab(rng, 20) for _ in range(rng.randint(1, 4)))
+
+
+def _process_arg(rng: random.Random) -> str:
+    # Shell text is data here: nothing between the runtime and execve parses it.
+    return rng.choice(
+        ["", "--", "$HOME", "a b", "; rm -rf /", "`id`", "*", _text(rng, 40)]
+    ).replace("\0", "")
+
+
+def _tool_call_v3(rng: random.Random) -> dwkp.ToolCallV3:
+    """Version 3: exactly one of the eleven typed members."""
+    member = rng.randrange(11)
+    if member == 8:
+        return dwkp.ToolCallV3(
+            process_exec=dwkp.ProcessExecCall(
+                executable=_host_path(rng),
+                args=[
+                    _process_arg(rng) for _ in range(rng.choice([0, 1, rng.randrange(0, 8), 128]))
+                ],
+                cwd=rng.choice([None, _workspace_path(rng)]),
+            )
+        )
+    if member == 9:
+        return dwkp.ToolCallV3(process_status=dwkp.ProcessStatusCall(process_id=_id(rng, "prc")))
+    if member == 10:
+        return dwkp.ToolCallV3(process_kill=dwkp.ProcessKillCall(process_id=_id(rng, "prc")))
+    fs = _tool_call(rng)
+    return dwkp.ToolCallV3(
+        **{name: getattr(fs, name) for name in fs.__slots__ if getattr(fs, name) is not None}
+    )
+
+
+def _process_action(rng: random.Random) -> dwkp.PlannedProcessAction:
+    launch = rng.random() < 0.5
+    return dwkp.PlannedProcessAction(
+        role="TARGET",
+        verb=rng.choice(["process.exec", "process.inspect", "process.signal"]),
+        executable=dwkp.ExecutableRef(path=_host_path(rng), sha256=_digest(rng)),
+        process_id=None if launch else _id(rng, "prc"),
+        cwd=_workspace_path(rng) if launch else None,
+        arg_count=rng.randint(0, 128) if launch else None,
+        argv_sha256=_digest(rng) if launch else None,
+        argv_safety=rng.choice(["SAFE", "REINTERPRETING"]) if launch else None,
+        decision=dwkp.ProcessActionDecision(
+            effect=rng.choice(["ALLOW", "DENY"]),
+            reason=rng.choice(
+                [
+                    "ALLOWED_BY_RULE",
+                    "DENIED_BY_RULE",
+                    "DEFAULT_DENY",
+                    "NO_CAPABILITY",
+                    "UNRESOLVED_POLICY_INPUT",
+                    "OBLIGATION_UNENFORCEABLE",
+                    "HOST_EXECUTION_DISABLED",
+                    "APPROVAL_REQUIRED",
+                ]
+            ),
+            capability_result=rng.choice(["SATISFIED", "NOT_SATISFIED"]),
+            policy_result=rng.choice(["SATISFIED", "NOT_SATISFIED"]),
+            rule_id=_kebab(rng, 63),
+            rule_source=_rule_source(rng),
+        ),
+    )
+
+
+def _tool_plan_v3(rng: random.Random) -> dwkp.ToolPlanV3:
+    fs = _tool_plan(rng)
+    actions = [
+        dwkp.PlannedActionV3(process=_process_action(rng))
+        if rng.random() < 0.5
+        else dwkp.PlannedActionV3(fs=action)
+        for action in fs.actions
+    ]
+    tool = rng.choice([fs.tool, "process.exec", "process.status", "process.kill"])
+    return dwkp.ToolPlanV3(tool=tool, environment=fs.environment, effect=fs.effect, actions=actions)
+
+
+def _stream(rng: random.Random) -> dwkp.ProcessStreamSnapshot:
+    content = _hex(rng, 0, rng.choice([0, 16, 256]))
+    observed = rng.randint(len(content) // 2, MAX_SAFE_INTEGER)
+    return dwkp.ProcessStreamSnapshot(
+        content=content, observed=observed, truncated=observed > len(content) // 2
+    )
+
+
+def _tool_output_v3(rng: random.Random) -> dwkp.ToolOutputV3:
+    member = rng.randrange(11)
+    exit_code = rng.choice([None, rng.randint(0, 255)])
+    signal = rng.choice([None, rng.randint(1, 64)])
+    state = rng.choice(["RUNNING", "EXITED", "SIGNALED", "UNOBSERVABLE"])
+    if member == 8:
+        return dwkp.ToolOutputV3(
+            process_exec=dwkp.ProcessExecResult(
+                process_id=_id(rng, "prc"), state=state, exit_code=exit_code, signal=signal
+            )
+        )
+    if member == 9:
+        return dwkp.ToolOutputV3(
+            process_status=dwkp.ProcessStatusResult(
+                process_id=_id(rng, "prc"),
+                state=state,
+                exit_code=exit_code,
+                signal=signal,
+                timed_out=rng.random() < 0.5,
+                stdout=_stream(rng),
+                stderr=_stream(rng),
+            )
+        )
+    if member == 10:
+        return dwkp.ToolOutputV3(
+            process_kill=dwkp.ProcessKillResult(
+                process_id=_id(rng, "prc"), outcome=rng.choice(["SIGNALED", "ALREADY_EXITED"])
+            )
+        )
+    fs = _tool_output(rng)
+    return dwkp.ToolOutputV3(
+        **{name: getattr(fs, name) for name in fs.__slots__ if getattr(fs, name) is not None}
+    )
+
+
+def _payload_v3(rng: random.Random, schema: str) -> object:
+    if schema in ("direwolf.tool.invoke", "direwolf.tool.preview"):
+        return _tool_call_v3(rng)
+    if schema == "direwolf.tool.result":
+        return dwkp.ToolResultV3(
+            invocation_id=_id(rng, "inv"), plan=_tool_plan_v3(rng), output=_tool_output_v3(rng)
+        )
+    if schema == "direwolf.tool.denied":
+        return dwkp.ToolDenialV3(plan=_tool_plan_v3(rng))
+    if schema == "direwolf.tool.previewed":
+        return dwkp.CanonicalPreviewResultV3(plan=_tool_plan_v3(rng))
+    if schema == "direwolf.tool.refused":
+        operation = rng.choice(sorted(dwkp._TOOLREFUSALV3_PAIRING))
+        return dwkp.ToolRefusalV3(
+            operation=operation, reason=rng.choice(dwkp._TOOLREFUSALV3_PAIRING[operation])
+        )
+    if schema == "direwolf.tool.failed":
+        return dwkp.ToolFailureV3(
+            invocation_id=_id(rng, "inv"),
+            reason=rng.choice(
+                [
+                    "OUTCOME_UNKNOWN",
+                    "EXECUTABLE_CHANGED",
+                    "EXEC_FAILED",
+                    "PROCESS_TABLE_FULL",
+                    "BROKER_ENVIRONMENT_UNSAFE",
+                    "PROCESS_UNOBSERVABLE",
+                ]
+            ),
+        )
+    raise AssertionError(f"no version-3 generator for {schema}")
+
+
 def _payload(rng: random.Random, schema: str, version: int = 1) -> object:
+    if version == 3 and schema.startswith("direwolf.tool."):
+        return _payload_v3(rng, schema)
     if version == 2 and schema.startswith("direwolf.tool."):
         return _payload_v2(rng, schema)
     if schema == "direwolf.tool.invoke":

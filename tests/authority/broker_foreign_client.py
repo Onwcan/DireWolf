@@ -22,6 +22,11 @@ Modes:
   probe-authority <state-dir> <kernel-socket> <handshake-hex>
                                       everything the broker identity must not
                                       be able to do to the authority
+  launch <socket> <frame-hex> <exe> <cwd>
+                                      send a process_start authorisation with
+                                      two descriptors this user can open (M4d)
+  run-helper <broker-binary>          run the launch helper directly, its
+                                      stderr not the broker's control channel
 
 This is a test harness, never product code: the authority switches no users
 and starts no processes (TX010).
@@ -88,6 +93,43 @@ def authorise(path: str, frame_hex: str) -> dict[str, object]:
     received, eof = _read_all(sock, 3.0)
     sock.close()
     return {"connected": True, "sent": sent, "received": received, "eof": eof}
+
+
+def launch(path: str, frame_hex: str, exe: str, cwd: str) -> dict[str, object]:
+    frame = bytes.fromhex(frame_hex)
+    try:
+        sock = _connect(path)
+    except OSError as exc:
+        return {"connected": False, "errno": _errno_name(exc)}
+    fds = [os.open(exe, os.O_RDONLY), os.open(cwd, os.O_RDONLY | os.O_DIRECTORY)]
+    sent = True
+    try:
+        socket.send_fds(sock, [frame], fds)
+    except OSError:
+        sent = False
+    finally:
+        for fd in fds:
+            os.close(fd)
+    received, eof = _read_all(sock, 3.0)
+    sock.close()
+    return {"connected": True, "sent": sent, "received": received, "eof": eof}
+
+
+def run_helper(binary: str) -> dict[str, object]:
+    import subprocess
+
+    done = subprocess.run(
+        [binary, "exec-helper"],
+        capture_output=True,
+        timeout=10,
+        check=False,
+        env={},
+    )
+    return {
+        "exit": done.returncode,
+        "stdout": len(done.stdout),
+        "stderr": len(done.stderr),
+    }
 
 
 def flood(path: str, count: int) -> dict[str, object]:
@@ -197,6 +239,10 @@ def main(argv: list[str]) -> int:
         report = remove_path(argv[2])
     elif mode == "probe-authority":
         report = probe_authority(argv[2], argv[3], argv[4])
+    elif mode == "launch":
+        report = launch(argv[2], argv[3], argv[4], argv[5])
+    elif mode == "run-helper":
+        report = run_helper(argv[2])
     else:
         print(json.dumps({"error": f"unknown mode {mode}"}))
         return 2

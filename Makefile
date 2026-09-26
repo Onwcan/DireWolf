@@ -17,7 +17,7 @@ DW := $(PY) scripts/dw.py
         eval eval-check eval-one capability-evidence policy-benchmark \
         authority-state-evidence filesystem-canonicalization-evidence \
         authority-transport-evidence authority-write-probe broker-fs-read-evidence \
-        filesystem-operations-evidence fuzz-smoke \
+        filesystem-operations-evidence process-broker-evidence fuzz-smoke \
         fuzz security docs \
         preflight tools hooks clean
 
@@ -86,6 +86,9 @@ broker-fs-read-evidence: ## M4b real-process brokered fs.read evidence; three id
 
 filesystem-operations-evidence: ## M4c filesystem tools: plans, atomicity, races, crashes; three identities need DW_BROKER_AS, DW_PEER_AS, DW_WRITE_GROUP
 	@$(DW) filesystem-operations-evidence
+
+process-broker-evidence: ## M4d process execution: re-proof, races, output, kill, crashes; three identities need DW_BROKER_AS, DW_PEER_AS
+	@$(DW) process-broker-evidence
 
 fuzz-smoke:      ## Stable mutation fuzzing of dwk-proto (not coverage-guided)
 	@$(DW) fuzz-smoke

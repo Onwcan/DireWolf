@@ -144,3 +144,97 @@ pub const MAX_SEARCH_NEEDLE_BYTES: usize = 1024;
 /// The most canonical actions one tool plan holds (`fs.patch` and a creating
 /// `fs.write` need two, `fs.move` two; four leaves room and no more).
 pub const MAX_PLAN_ACTIONS: usize = 4;
+
+// ---------------------------------------------------------------------------
+// M4d process execution (ADR-0045). Arguments travel inline as JSON strings;
+// output travels inline as hexadecimal. Both are derived from the unchanged
+// 1 MiB frame, like M4c's bounds: a request or a result the transport cannot
+// carry is refused, never truncated.
+// ---------------------------------------------------------------------------
+
+/// The longest executable path a request or a declaration may state, in bytes:
+/// `PATH_MAX`. The resolver bounds the canonical path it derives the same way.
+pub const MAX_EXECUTABLE_PATH_BYTES: usize = 4096;
+
+/// The most arguments one `process.exec` may carry after `argv[0]`, which the
+/// authority constructs (ADR-0045 §7).
+pub const MAX_PROCESS_ARGS: usize = 128;
+
+/// The longest one argument may be, in UTF-8 bytes.
+pub const MAX_PROCESS_ARG_BYTES: usize = 8192;
+
+/// The most bytes all of one `process.exec`'s arguments may hold together.
+///
+/// **Derived from the frame.** Canonical JSON escapes a control character to
+/// six bytes, so 65 536 bytes of arguments encode to at most 393 216 bytes;
+/// the rest of the largest request (the envelope, a 4 096-byte executable path
+/// at six bytes a byte, a working directory, 128 arguments' quotes and commas)
+/// is bounded at [`MAX_PROCESS_REQUEST_OVERHEAD_BYTES`]. A test
+/// (`tests/dwkp_v3.rs`) builds that request and encodes the whole envelope.
+pub const MAX_PROCESS_ARGV_BYTES: usize = 65_536;
+
+/// Everything in the largest `process.exec` request that is not argument
+/// content, bounded above: the envelope (under 1 KiB), the executable path
+/// (4 096 bytes at six each: 24 578 with its quotes), a working directory (384
+/// characters at six bytes: 2 306), and 128 arguments' quotes and separators
+/// (384). 64 KiB is more than twice their sum.
+pub const MAX_PROCESS_REQUEST_OVERHEAD_BYTES: usize = 64 * 1024;
+
+/// The largest a valid `process.exec` request can encode to, frame header
+/// included.
+pub const MAX_PROCESS_REQUEST_ENCODED_BYTES: usize =
+    6 * MAX_PROCESS_ARGV_BYTES + MAX_PROCESS_REQUEST_OVERHEAD_BYTES;
+
+/// How much of the frame the largest `process.exec` request leaves unused.
+pub const PROCESS_REQUEST_FRAME_MARGIN_BYTES: usize =
+    MAX_FRAME_BODY - MAX_PROCESS_REQUEST_ENCODED_BYTES;
+
+/// The most bytes of one stream (`stdout` or `stderr`) a process status may
+/// return, inline: its **first** bytes, in order. Two streams at two hex
+/// characters a byte are 524 288 characters — the same budget as
+/// [`MAX_FS_READ_BYTES`].
+pub const MAX_PROCESS_STREAM_BYTES: usize = 128 * 1024;
+
+/// The most output bytes a process retains for its caller: both streams
+/// together. A `max_output_bytes=N` obligation narrows it to `N` — each stream
+/// then retains its first `N / 2` bytes — and never widens it.
+pub const MAX_PROCESS_OUTPUT_BYTES: usize = 2 * MAX_PROCESS_STREAM_BYTES;
+
+/// The most one process action in a plan can encode to: a 4 096-byte canonical
+/// executable path at six bytes a byte (24 578 with its quotes), a working
+/// directory (384 characters at six: 2 306), two digests, a process id, and a
+/// decision whose rule id and source are at their longest (under 1 KiB). The
+/// authority plans one process action; the wire admits [`MAX_PLAN_ACTIONS`],
+/// and the bound below covers what the wire admits.
+pub const MAX_PROCESS_PLAN_ACTION_ENCODED_BYTES: usize = 32 * 1024;
+
+const _: () = assert!(
+    6 * MAX_EXECUTABLE_PATH_BYTES + 2 + 6 * 384 + 2 + 4 * 1024
+        <= MAX_PROCESS_PLAN_ACTION_ENCODED_BYTES
+);
+
+/// Everything in the largest process-status response that is not output
+/// content: a plan of [`MAX_PLAN_ACTIONS`] process actions at their largest,
+/// and 64 KiB for the envelope, the state and both streams' counts and flags
+/// (under 2 KiB together).
+pub const MAX_PROCESS_RESULT_OVERHEAD_BYTES: usize =
+    MAX_PLAN_ACTIONS * MAX_PROCESS_PLAN_ACTION_ENCODED_BYTES + 64 * 1024;
+
+/// The largest a process-status response can encode to, frame header included:
+/// both streams' retained bytes as hexadecimal, and the overhead above.
+pub const MAX_PROCESS_RESULT_ENCODED_BYTES: usize =
+    2 * MAX_PROCESS_OUTPUT_BYTES + MAX_PROCESS_RESULT_OVERHEAD_BYTES;
+
+/// How much of the frame the largest process-status response leaves unused.
+pub const PROCESS_RESULT_FRAME_MARGIN_BYTES: usize =
+    MAX_FRAME_BODY - MAX_PROCESS_RESULT_ENCODED_BYTES;
+
+const _: () = assert!(MAX_PROCESS_REQUEST_ENCODED_BYTES < MAX_FRAME_BODY);
+const _: () = assert!(PROCESS_REQUEST_FRAME_MARGIN_BYTES >= MAX_FRAME_BODY >> 3);
+const _: () = assert!(MAX_PROCESS_RESULT_ENCODED_BYTES < MAX_FRAME_BODY);
+const _: () = assert!(PROCESS_RESULT_FRAME_MARGIN_BYTES >= MAX_FRAME_BODY >> 3);
+const _: () = assert!(MAX_PROCESS_ARGS * MAX_PROCESS_ARG_BYTES >= MAX_PROCESS_ARGV_BYTES);
+
+/// The largest executable the authority hashes and the broker re-hashes, in
+/// bytes. A bound on work: a larger file is refused, never hashed in part.
+pub const MAX_EXECUTABLE_BYTES: u64 = 512 * 1024 * 1024;

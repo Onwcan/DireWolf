@@ -384,6 +384,24 @@ pub(super) fn sync_directory(dir: &Path) -> Result<(), StartError> {
     Ok(())
 }
 
+/// The owner of the (checked) state directory: the authority's effective uid,
+/// which [`check_directory`] has already proved it is. `0` where there are no
+/// uids (not Unix), where no executable resolves either.
+pub(super) fn owner_uid(dir: &Path) -> Result<u32, StartError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        fs::metadata(dir)
+            .map(|meta| meta.uid())
+            .map_err(|e| io("reading the state directory's owner", &e))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = dir;
+        Ok(0)
+    }
+}
+
 /// The authority's effective uid, without `libc`.
 ///
 /// The standard library does not expose `geteuid`. A file created with

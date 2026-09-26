@@ -1214,6 +1214,344 @@ wire_enum! {
     }
 }
 
+// ---------------------------------------------------------------------------
+// M4d: process execution (ADR-0045).
+// ---------------------------------------------------------------------------
+
+wire_text! {
+    /// An absolute path in the **host's** filesystem, as a `process.exec`
+    /// states its executable or as the authority reports an executable's
+    /// canonical path: at most `PATH_MAX` bytes, no NUL.
+    ///
+    /// **Lexical bounds only.** What it names is the executable resolver's
+    /// question (ADR-0045): this type admits `/usr/bin/../bin/git`, and the
+    /// resolver refuses it.
+    HostPath,
+    max_chars = 4096,
+    pattern = Some("^/[^\\u0000]{0,4095}$"),
+    format = None,
+    validate = |s| s.starts_with('/') && s.len() <= crate::limits::MAX_EXECUTABLE_PATH_BYTES && !s.contains('\0')
+}
+
+wire_text! {
+    /// One argument of a `process.exec`, after `argv[0]`: text, at most
+    /// [`crate::limits::MAX_PROCESS_ARG_BYTES`] bytes of UTF-8, no NUL.
+    ///
+    /// **Data, not shell.** It reaches the executable as exactly these bytes:
+    /// no quoting language, no splitting, no expansion exists between the
+    /// runtime and `execve`. `$`, `;`, `|`, `*` are ordinary bytes unless the
+    /// executable itself gives them meaning.
+    ProcessArg,
+    max_chars = 8192,
+    pattern = Some("^[^\\u0000]*$"),
+    format = None,
+    validate = |s| s.len() <= crate::limits::MAX_PROCESS_ARG_BYTES && !s.contains('\0')
+}
+
+wire_text! {
+    /// The retained bytes of one process output stream, as lowercase
+    /// hexadecimal (the one spelling [`HexContent`] uses): at most
+    /// [`crate::limits::MAX_PROCESS_STREAM_BYTES`] bytes. The wire refuses a
+    /// stream past the bound; it is never the reader's to trust.
+    StreamContent,
+    max_chars = 262_144,
+    pattern = Some("^(?:[0-9a-f]{2})*$"),
+    format = None,
+    validate = valid_hex_content
+}
+
+const _: () = assert!(262_144 == 2 * crate::limits::MAX_PROCESS_STREAM_BYTES);
+
+impl StreamContent {
+    /// Encode `bytes`, or `None` if they exceed the bound.
+    #[must_use]
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        Self::new(HexContent::from_bytes(bytes)?.as_str())
+    }
+
+    /// The bytes this value spells.
+    #[must_use]
+    pub fn to_bytes(&self) -> Vec<u8> {
+        HexContent::new(self.as_str()).map_or_else(Vec::new, |hex| hex.to_bytes())
+    }
+
+    /// How many bytes this value spells.
+    #[must_use]
+    pub fn byte_len(&self) -> usize {
+        self.as_str().len().checked_div(2).unwrap_or(0)
+    }
+}
+
+wire_enum! {
+    /// A tool of the canonical inventory that has a wire form (version 3):
+    /// the eight filesystem tools and the three process tools. A name, not a
+    /// dispatch key: each has its own typed call.
+    CoreTool {
+        /// Read bytes from one regular file.
+        FsRead = "fs.read",
+        /// List one directory, not recursively.
+        FsList = "fs.list",
+        /// Search one regular file for a literal byte string.
+        FsSearch = "fs.search",
+        /// Report one object's metadata.
+        FsStat = "fs.stat",
+        /// Replace or create one regular file, atomically.
+        FsWrite = "fs.write",
+        /// Apply typed edits to one regular file, atomically, against a base revision.
+        FsPatch = "fs.patch",
+        /// Rename one regular file to a vacant name.
+        FsMove = "fs.move",
+        /// Remove one regular file or empty directory.
+        FsDelete = "fs.delete",
+        /// Launch one checked native executable with typed arguments.
+        ProcessExec = "process.exec",
+        /// Report the state and retained output of a process this run launched.
+        ProcessStatus = "process.status",
+        /// Terminate a process this run launched.
+        ProcessKill = "process.kill",
+    }
+}
+
+wire_enum! {
+    /// A process **capability verb** (CAPABILITIES.md §2): what a process
+    /// tool's action requires. `process.status` requires `process.inspect`
+    /// and `process.kill` requires `process.signal`, each on the executable
+    /// identity the process was launched as (ADR-0045 §6).
+    ProcessVerb {
+        /// Launch the executable.
+        ProcessExec = "process.exec",
+        /// Observe a process launched as the executable.
+        ProcessInspect = "process.inspect",
+        /// Signal a process launched as the executable.
+        ProcessSignal = "process.signal",
+    }
+}
+
+wire_enum! {
+    /// Whether a process's arguments would be **reinterpreted** by what runs
+    /// them — the kernel's classification, never the runtime's (ADR-0045 §8).
+    /// Not "contains a metacharacter": the arguments reach no shell.
+    ArgvSafetyClass {
+        /// Nothing in the arguments is a command, an exec-style option or
+        /// another program to run.
+        Safe = "SAFE",
+        /// The executable is a shell, an interpreter or a program runner, or
+        /// an argument is an exec-style option or names one.
+        Reinterpreting = "REINTERPRETING",
+    }
+}
+
+wire_enum! {
+    /// Why a process action was decided as it was.
+    ProcessDecisionReason {
+        /// A rule allowed it, a held capability covers it, every obligation is
+        /// enforceable, and — for a launch — it was approved.
+        AllowedByRule = "ALLOWED_BY_RULE",
+        /// A rule denied it, or required an approval.
+        DeniedByRule = "DENIED_BY_RULE",
+        /// No rule matched.
+        DefaultDeny = "DEFAULT_DENY",
+        /// No held capability covers it.
+        NoCapability = "NO_CAPABILITY",
+        /// A rule could not be evaluated for want of a canonical input.
+        UnresolvedPolicyInput = "UNRESOLVED_POLICY_INPUT",
+        /// A rule allowed it with an obligation this build cannot enforce.
+        ObligationUnenforceable = "OBLIGATION_UNENFORCEABLE",
+        /// A launch on the host, and the operator has not opted in to host
+        /// execution (`--allow-host-execution`, SANDBOX.md §4).
+        HostExecutionDisabled = "HOST_EXECUTION_DISABLED",
+        /// A launch on the host needs a per-invocation approval (SANDBOX.md
+        /// §4), and there is none: approvals arrive at M6.
+        ApprovalRequired = "APPROVAL_REQUIRED",
+    }
+}
+
+wire_enum! {
+    /// What a process launched through the broker is, as last observed.
+    ProcessState {
+        /// Running under the broker's supervision.
+        Running = "RUNNING",
+        /// It exited, with a code.
+        Exited = "EXITED",
+        /// It was ended by a signal.
+        Signaled = "SIGNALED",
+        /// The broker that launched it no longer supervises it — it restarted
+        /// — so nothing about it can be observed through DireWolf. It may still
+        /// be running on the host (ADR-0045 §15).
+        Unobservable = "UNOBSERVABLE",
+    }
+}
+
+wire_enum! {
+    /// What a `process.kill` did.
+    KillOutcome {
+        /// The process was running, and the kill signal was sent to its
+        /// process group.
+        Signaled = "SIGNALED",
+        /// It had already ended: nothing was signalled.
+        AlreadyExited = "ALREADY_EXITED",
+    }
+}
+
+wire_int! {
+    /// A process's exit code.
+    ExitCode(u8), min = 0, max = 255
+}
+
+wire_int! {
+    /// The number of the signal that ended a process.
+    SignalNumber(u8), min = 1, max = 64
+}
+
+wire_int! {
+    /// How many arguments a launch carries after `argv[0]`: at most
+    /// [`crate::limits::MAX_PROCESS_ARGS`].
+    ArgCount(u16), min = 0, max = 128
+}
+
+wire_enum! {
+    /// Why a version-3 tool operation was refused before any effect was
+    /// authorised. Version 2's filesystem classes, and the process classes.
+    ToolRefusalReasonV3 {
+        /// The epoch presented is not the session's current epoch.
+        StaleEpoch = "STALE_EPOCH",
+        /// The run named is not a live admission of this caller.
+        UnknownRun = "UNKNOWN_RUN",
+        /// The idempotency key is already bound to an invocation.
+        IdempotencyKeyReused = "IDEMPOTENCY_KEY_REUSED",
+        /// The run's workspace has no bound root.
+        WorkspaceUnbound = "WORKSPACE_UNBOUND",
+        /// The bound root's path now names another directory.
+        RootReplaced = "ROOT_REPLACED",
+        /// The bound root could not be opened.
+        RootUnavailable = "ROOT_UNAVAILABLE",
+        /// This platform has no resolver or no process broker.
+        UnsupportedPlatform = "UNSUPPORTED_PLATFORM",
+        /// A workspace path is outside `/workspace`.
+        PathOutsideWorkspace = "PATH_OUTSIDE_WORKSPACE",
+        /// A workspace path traverses with `.` or `..`.
+        PathTraversal = "PATH_TRAVERSAL",
+        /// A workspace path is not in canonical form.
+        PathNotCanonical = "PATH_NOT_CANONICAL",
+        /// Nothing is at a workspace path.
+        NotFound = "NOT_FOUND",
+        /// A component that must be a directory is not.
+        NotADirectory = "NOT_A_DIRECTORY",
+        /// A workspace path crosses a symlink.
+        Symlink = "SYMLINK",
+        /// A path crosses a magic link.
+        MagicLink = "MAGIC_LINK",
+        /// A workspace path crosses a mount.
+        MountCrossing = "MOUNT_CROSSING",
+        /// A name is not spelled as its directory holds it.
+        NameMismatch = "NAME_MISMATCH",
+        /// A name is canonically equivalent to another in its directory.
+        NormalizationAmbiguity = "NORMALIZATION_AMBIGUITY",
+        /// The object is neither a regular file nor a directory.
+        SpecialFile = "SPECIAL_FILE",
+        /// The object is not the kind the tool needs.
+        WrongKind = "WRONG_KIND",
+        /// A file to modify has more than one name.
+        MultiplyLinked = "MULTIPLY_LINKED",
+        /// The workspace root itself was named where it cannot be acted on.
+        WorkspaceRoot = "WORKSPACE_ROOT",
+        /// A move's destination exists.
+        DestinationExists = "DESTINATION_EXISTS",
+        /// A patch's edits do not transform its base into its post revision.
+        PatchInconsistent = "PATCH_INCONSISTENT",
+        /// A patch inserts more than an inline patch may carry.
+        PatchTooLarge = "PATCH_TOO_LARGE",
+        /// Something changed while a path was being resolved.
+        Race = "RACE",
+        /// The authority's own identity may not look there.
+        PermissionDenied = "PERMISSION_DENIED",
+        /// A directory holds more entries than may be examined.
+        DirectoryTooLarge = "DIRECTORY_TOO_LARGE",
+        /// Another operating-system error.
+        IoError = "IO_ERROR",
+        /// The executable path is not an absolute canonical spelling: empty
+        /// components, `.`, `..`, a control, bidi or invisible character, a
+        /// name that is not NFC or too long.
+        ExecutablePathInvalid = "EXECUTABLE_PATH_INVALID",
+        /// Nothing is at the executable path, or a symlink on it leads nowhere.
+        ExecutableNotFound = "EXECUTABLE_NOT_FOUND",
+        /// The executable resolves to something other than a regular file.
+        ExecutableNotRegular = "EXECUTABLE_NOT_REGULAR",
+        /// The executable has no execute bit.
+        ExecutableNotExecutable = "EXECUTABLE_NOT_EXECUTABLE",
+        /// Resolving the executable met more symlinks than it follows, or a
+        /// loop.
+        ExecutableSymlinkLimit = "EXECUTABLE_SYMLINK_LIMIT",
+        /// The executable could change under the authority's feet: owned by an
+        /// identity other than root's or the authority's, writable by group or
+        /// other, setuid or setgid, holding file capabilities, or on a
+        /// filesystem whose permission bits do not describe who can change it.
+        ExecutableUntrusted = "EXECUTABLE_UNTRUSTED",
+        /// The executable is larger than the authority hashes.
+        ExecutableTooLarge = "EXECUTABLE_TOO_LARGE",
+        /// The executable is a `#!` script: another program — its interpreter —
+        /// would run, which no identity was derived for.
+        ScriptUnsupported = "SCRIPT_UNSUPPORTED",
+        /// The executable is not a native ELF executable.
+        NotNativeExecutable = "NOT_NATIVE_EXECUTABLE",
+        /// The executable changed while it was being resolved and hashed.
+        ExecutableRace = "EXECUTABLE_RACE",
+        /// The arguments are more, or longer, than one request may carry.
+        ArgvTooLarge = "ARGV_TOO_LARGE",
+        /// No process this run launched has that id.
+        UnknownProcess = "UNKNOWN_PROCESS",
+    }
+}
+
+wire_enum! {
+    /// Why a version-3 invocation that was authorised and recorded produced no
+    /// result. Version 2's filesystem classes, and the process classes.
+    ToolFailureReasonV3 {
+        /// The object is no longer the one checked.
+        ObjectChanged = "OBJECT_CHANGED",
+        /// The object could not be opened for the handoff.
+        ObjectUnreadable = "OBJECT_UNREADABLE",
+        /// A name to create is occupied.
+        TargetOccupied = "TARGET_OCCUPIED",
+        /// A patch's file holds neither revision.
+        Conflict = "CONFLICT",
+        /// A directory to delete is not empty.
+        DirectoryNotEmpty = "DIRECTORY_NOT_EMPTY",
+        /// The broker's identity may not change names there.
+        WriteDenied = "WRITE_DENIED",
+        /// A replacement could not keep the replaced file's group.
+        AttributesNotPreserved = "ATTRIBUTES_NOT_PRESERVED",
+        /// A directory every user may write.
+        SharedDirectory = "SHARED_DIRECTORY",
+        /// The broker could not be reached, or is not configured.
+        BrokerUnavailable = "BROKER_UNAVAILABLE",
+        /// The broker's answer broke the protocol.
+        BrokerProtocolError = "BROKER_PROTOCOL_ERROR",
+        /// The broker refused for a reason of its own.
+        BrokerExecutionError = "BROKER_EXECUTION_ERROR",
+        /// An effect may have happened, and nothing proves what.
+        OutcomeUnknown = "OUTCOME_UNKNOWN",
+        /// The executable is no longer the object that was hashed: another
+        /// object, other bytes, or attributes that no longer make it stable.
+        /// Nothing was launched.
+        ExecutableChanged = "EXECUTABLE_CHANGED",
+        /// The launch was prepared and the executable could not be started —
+        /// the limits, the working directory or `execve` failed. The target
+        /// never ran.
+        ExecFailed = "EXEC_FAILED",
+        /// The broker supervises as many processes as it may. Nothing was
+        /// launched.
+        ProcessTableFull = "PROCESS_TABLE_FULL",
+        /// The broker holds a descriptor it could not keep from a target: it
+        /// launches nothing until it is started with only its standard streams
+        /// open (ADR-0045 §12).
+        BrokerEnvironmentUnsafe = "BROKER_ENVIRONMENT_UNSAFE",
+        /// The broker that launched the process no longer supervises it:
+        /// nothing was signalled.
+        ProcessUnobservable = "PROCESS_UNOBSERVABLE",
+    }
+}
+
 fn valid_schema_name(s: &str) -> bool {
     let Some(rest) = s.strip_prefix("direwolf.") else {
         return false;

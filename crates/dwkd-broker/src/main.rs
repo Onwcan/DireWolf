@@ -27,7 +27,7 @@
 //! authority's uid, and it speaks only the private protocol
 //! ([`dwk_proto::brokerp`]), which no cognition-side code can name.
 //!
-//! # Status: M4c — the filesystem tools
+//! # Status: M4d — process execution, the filesystem tools
 //!
 //! [ADR-0043]: one private Unix-domain listener (`listener`), one exchange per
 //! connection (`exchange`): a hello naming a fresh channel, one authorisation
@@ -41,10 +41,21 @@
 //! removing an object it did not prove to be the one authorised. Changing a
 //! name needs directory write permission for the broker's **own** uid on that
 //! directory — ambient authority the operator grants on a write-enabled
-//! workspace, stated in ADR-0044 §3. Exec arrives at M4d, secrets at M4e, the
-//! sandbox and egress at M5.
+//! workspace, stated in ADR-0044 §3.
+//!
+//! [ADR-0045] adds `process` (`process_start`, `process_status`,
+//! `process_kill`): the executable the authority resolved and hashed is
+//! re-proved and executed **by its descriptor** (`execveat`, `AT_EMPTY_PATH`)
+//! from a launch helper — this binary, `exec-helper` — with an environment
+//! built from nothing, fixed resource limits, `/dev/null` for stdin, its
+//! output drained and bounded, and supervised by pidfd. It runs **on the
+//! host**, with the broker's privileges: no sandbox exists until M5, and the
+//! authority performs a host launch only with a per-invocation approval,
+//! which no build has before M6. Secrets arrive at M4e, the sandbox and
+//! egress at M5.
 //!
 //! [ADR-0044]: ../../../docs/adr/0044-m4c-filesystem-operations-plans-and-atomic-mutation.md
+//! [ADR-0045]: ../../../docs/adr/0045-m4d-process-execution-broker.md
 //!
 //! [ADR-0018]: ../../../docs/adr/0018-authority-broker-split.md
 //! [ADR-0043]: ../../../docs/adr/0043-m4b-private-broker-channel-and-brokered-fs-read.md
@@ -65,6 +76,8 @@ use dwk_proto as _;
 mod listener;
 #[cfg(target_os = "linux")]
 mod nonce;
+#[cfg(target_os = "linux")]
+mod process;
 
 use std::process::ExitCode;
 
@@ -103,6 +116,7 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Ok(Command::Serve(serve_config)) => serve(&serve_config),
+        Ok(Command::ExecHelper) => exec_helper(),
         Err(error) => {
             log(&error.to_string());
             eprint!("{}", help());
@@ -157,8 +171,36 @@ fn serve(config: &config::ServeConfig) -> ExitCode {
     );
     let mut channels = nonce::Channels::new();
     crash::init();
-    listener::serve(&bound, config.authority_uid, own_uid, &mut channels);
+    let processes = match process::Processes::new(config.authority_uid) {
+        Ok(processes) => processes,
+        Err(error) => {
+            log(&format!("cannot serve: {error}"));
+            return ExitCode::FAILURE;
+        }
+    };
+    crate::event(&format!(
+        "process_generation generation={}",
+        processes.generation().as_str()
+    ));
+    listener::serve(
+        &bound,
+        config.authority_uid,
+        own_uid,
+        &mut channels,
+        &processes,
+    );
     ExitCode::SUCCESS
+}
+
+/// The launch helper: see `process::helper`.
+#[cfg(target_os = "linux")]
+fn exec_helper() -> ExitCode {
+    process::helper::run()
+}
+
+#[cfg(not(target_os = "linux"))]
+fn exec_helper() -> ExitCode {
+    ExitCode::from(2)
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -187,9 +229,11 @@ fn help() -> String {
              --authority-uid <UID>           the only uid the broker reads from\n    \
              --allow-shared-authority-uid    permit the authority to be the broker's own uid (development only)\n\
          \n\
-         STATUS: M4c - the filesystem tools (read, stat, list, search, write,\n\
-         patch, move, delete), Linux only. Exec arrives at M4d, secrets at M4e,\n\
-         the sandbox at M5.\n",
+         STATUS: M4d - the filesystem tools (read, stat, list, search, write,\n\
+         patch, move, delete) and process execution (start, status, kill) of the\n\
+         executable the authority checked, by its descriptor, on the HOST with\n\
+         the broker's own privileges. Linux only. No sandbox: that is M5;\n\
+         secrets arrive at M4e.\n",
         env!("CARGO_PKG_VERSION")
     )
 }
@@ -203,7 +247,8 @@ mod tests {
         let h = help();
         assert!(h.contains(NAME));
         assert!(h.contains("filesystem tools"));
-        assert!(h.contains("M4d") && h.contains("M5"));
+        assert!(h.contains("process execution"));
+        assert!(h.contains("M4d") && h.contains("M5") && h.contains("HOST"));
         assert!(h.contains("--authority-uid"));
     }
 

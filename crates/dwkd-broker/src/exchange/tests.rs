@@ -23,6 +23,16 @@ use sha2::{Digest as _, Sha256};
 use super::observe::{read_bounded, read_within};
 use super::staging::{self, Record, Staging};
 use super::{Descriptors, execute};
+
+/// A process table no filesystem test uses: it cannot start anything (its
+/// helper does not exist).
+fn no_processes() -> crate::process::Processes {
+    crate::process::Processes::for_tests(
+        PathBuf::from("/nonexistent/dwkd-broker"),
+        0,
+        std::time::Duration::from_secs(1),
+    )
+}
 use crate::crash::Step;
 
 /// This process's effective uid, the way the broker learns it: the owner of a
@@ -156,7 +166,13 @@ fn one(fd: OwnedFd) -> Descriptors {
 fn run(authorisation: &Authorisation, fds: Vec<OwnedFd>) -> OutcomeResult {
     let uid = own_uid();
     let from = crate::crash::steps().len();
-    let got = execute(&channel('a'), authorisation, descriptors(fds), uid);
+    let got = execute(
+        &channel('a'),
+        authorisation,
+        descriptors(fds),
+        uid,
+        &no_processes(),
+    );
     durable_in_order(crate::crash::steps().get(from..).unwrap_or_default(), &got);
     got
 }
@@ -249,6 +265,7 @@ fn every_mismatch_is_refused_before_reading() {
                 &read_authorisation('b', id, 6),
                 one(open(&file)),
                 own,
+                &no_processes(),
             ),
             BrokerRefusal::ChannelMismatch,
         ),
@@ -258,6 +275,7 @@ fn every_mismatch_is_refused_before_reading() {
                 &read_authorisation('a', id, 6),
                 Descriptors::default(),
                 own,
+                &no_processes(),
             ),
             BrokerRefusal::DescriptorCount,
         ),
@@ -267,6 +285,7 @@ fn every_mismatch_is_refused_before_reading() {
                 &read_authorisation('a', (id.0, id.1.wrapping_add(1)), 6),
                 one(open(&file)),
                 own,
+                &no_processes(),
             ),
             BrokerRefusal::IdentityMismatch,
         ),
@@ -290,7 +309,8 @@ fn every_mismatch_is_refused_before_reading() {
             &channel('a'),
             &read_authorisation('a', id, 6),
             truncated,
-            own
+            own,
+            &no_processes(),
         ),
         OutcomeResult::Refused(BrokerRefusal::DescriptorCount)
     );

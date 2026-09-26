@@ -511,11 +511,15 @@ mod linux {
         // the tool-invocation table, its index and its three triggers, and
         // schema 4 (M4c) rebuilds that table and adds the tool-idempotency
         // table and its two triggers and the tool-staging table, its index
-        // and its four triggers.
+        // and its four triggers, and schema 5 (M4d) adds the process ledger,
+        // the process table and the process-idempotency table, whose
+        // triggers go with them.
         {
             let conn = raw(&h.state());
             conn.execute_batch(
-                "DROP TABLE tool_staging; DROP TABLE tool_idempotency; DROP TABLE tool_invocation; \
+                "DROP TABLE process_idempotency; DROP TABLE tool_process; \
+                 DROP TABLE process_invocation; DROP TABLE tool_staging; \
+                 DROP TABLE tool_idempotency; DROP TABLE tool_invocation; \
                  DROP TABLE workspace_root; PRAGMA user_version = 1;",
             )
             .unwrap();
@@ -540,7 +544,10 @@ mod linux {
             .operator()
             .install_workspace_root(&id, host(&root))
             .unwrap();
-        evidence("m3-store-migrates", "migrated:1-to-4");
+        evidence(
+            "m3-store-migrates",
+            &format!("migrated:1-to-{KERNEL_SCHEMA_VERSION}"),
+        );
     }
 
     #[test]
@@ -552,7 +559,7 @@ mod linux {
         {
             let conn = raw(&h.state());
             conn.execute_batch(
-                "DROP TABLE tool_staging; DROP TABLE tool_idempotency; DROP TABLE tool_invocation;                  PRAGMA user_version = 2;",
+                "DROP TABLE process_idempotency; DROP TABLE tool_process;                  DROP TABLE process_invocation; DROP TABLE tool_staging;                  DROP TABLE tool_idempotency; DROP TABLE tool_invocation;                  PRAGMA user_version = 2;",
             )
             .unwrap();
         }

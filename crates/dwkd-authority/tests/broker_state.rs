@@ -226,7 +226,7 @@ mod linux {
             self.orders.lock().unwrap().push((
                 order.invocation().as_str().to_owned(),
                 max_bytes.get(),
-                order.identity().inode(),
+                order.identity().unwrap().inode(),
             ));
             Ok(BrokerDelivery::Read(
                 self.reply
@@ -1010,7 +1010,7 @@ mod linux {
             }
             let authorisation = FsReadAuthorisation::decode_frame_body(&body).unwrap();
             let done = |bytes: &[u8]| {
-                OutcomeResult::Done(BrokerDone::read(FsReadDone {
+                OutcomeResult::done(BrokerDone::read(FsReadDone {
                     content: HexContent::from_bytes(bytes).unwrap(),
                     eof_observed: true,
                 }))

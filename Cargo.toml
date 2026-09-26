@@ -101,6 +101,21 @@ rustix = { version = "=1.1.5", default-features = false, features = ["std", "net
 # No default features: `std` adds nothing the checks use.
 unicode-normalization = { version = "=0.1.25", default-features = false }
 
+# --- the broker only: never reachable from the TCB --------------------------
+# `dwkd-broker` alone may name these; `architecture.toml [authority]
+# .allowed_third_party` keeps them out of the authority's closure.
+#
+# `nix` (M4d, ADR-0045 §§9, 20): the one call the broker's launch helper makes that
+# no safe API in `std` or `rustix` offers -- `execveat(fd, "", argv, envp,
+# AT_EMPTY_PATH)`, which executes the very descriptor the broker re-proved,
+# with no path walk (no `/proc/self/fd`, no reopen). `nix::unistd::execveat`
+# is a safe fn over `libc::syscall(SYS_execveat, ...)`: no glibc `fexecve`,
+# so no `/proc` fallback either. Default features off; `process` for exec,
+# `fs` for `AtFlags`. It links `libc` (bindings only, no C) and builds with
+# `cfg_aliases`. Pinned exactly: an exec primitive is not a version anyone
+# should move without a reviewer.
+nix = { version = "=0.31.3", default-features = false, features = ["process", "fs"] }
+
 # --- dev-only: tests, property tests, differential oracles ------------------
 # Never linked into a shipped binary. dwcheck excludes dev-only edges from the
 # TCB closure and a fixture proves it does not exclude normal ones.

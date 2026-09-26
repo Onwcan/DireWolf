@@ -30,6 +30,8 @@
 )]
 
 use dwk_proto as _;
+#[cfg(target_os = "linux")]
+use nix as _;
 // Linux-only, like the operations that digest with it.
 #[cfg(target_os = "linux")]
 use sha2 as _;

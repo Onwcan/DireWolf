@@ -307,6 +307,13 @@ impl Fields {
         self
     }
 
+    pub(crate) fn maybe_int(self, key: &'static str, value: Option<u64>) -> Self {
+        match value {
+            Some(value) => self.int(key, value),
+            None => self,
+        }
+    }
+
     pub(crate) fn maybe_text(self, key: &'static str, value: Option<String>) -> Self {
         match value {
             Some(text) => self.text(key, text),

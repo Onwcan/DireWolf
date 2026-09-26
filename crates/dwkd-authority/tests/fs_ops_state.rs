@@ -740,13 +740,14 @@ mod linux {
             );
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
-        assert!(
-            broker
-                .stderr()
-                .contains(&format!("crash_point point={point}")),
-            "{}",
-            broker.stderr()
-        );
+        // The broker wrote the line before it aborted, but its stderr reaches
+        // this process through a reader thread that may not have taken the
+        // last line yet: wait for it, bounded, then require it.
+        let expected = format!("crash_point point={point}");
+        while !broker.stderr().contains(&expected) && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(broker.stderr().contains(&expected), "{}", broker.stderr());
         reply
     }
 

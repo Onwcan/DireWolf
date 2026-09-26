@@ -12,6 +12,11 @@ pub(crate) enum Command {
     Help,
     /// Serve the private channel.
     Serve(ServeConfig),
+    /// The launch helper (M4d, ADR-0045 §12): one launch, handed over by the
+    /// parent broker on the control channel it was spawned with. Takes no
+    /// arguments and is not listed in the usage: nothing but the broker
+    /// starts it, and started any other way it does nothing.
+    ExecHelper,
 }
 
 /// How to serve.
@@ -75,6 +80,7 @@ pub(crate) fn parse(args: &[String]) -> Result<Command, UsageError> {
     match rest.next().map(String::as_str) {
         Some("-V" | "--version") if args.len() == 1 => return Ok(Command::Version),
         Some("-h" | "--help") if args.len() == 1 => return Ok(Command::Help),
+        Some("exec-helper") if args.len() == 1 => return Ok(Command::ExecHelper),
         Some("serve") => {}
         Some(other) => {
             return Err(UsageError::new(format!(

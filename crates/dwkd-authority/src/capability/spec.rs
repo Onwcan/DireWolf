@@ -20,7 +20,7 @@ use super::constraint::ConstraintSet;
 use super::error::{CapabilityError, UnresolvedScope};
 use super::scope::{Scope, ScopeSpec};
 use super::verb::Verb;
-use crate::resource::CanonicalPath;
+use crate::resource::{CanonicalPath, ExecutableIdentity};
 
 /// A capability as declared: verb, declared scope, constraints.
 ///
@@ -160,6 +160,33 @@ impl CapabilitySpec {
         }
         Capability::new(self.verb, Scope::Path(canonical), self.constraints.clone())
             .map_err(|_: CapabilityError| UnresolvedScope::CanonicalPath)
+    }
+
+    /// Promote an executable declaration, given the [`ExecutableIdentity`] the
+    /// resource layer derived **for this declaration's path** (M4d, ADR-0045):
+    /// the executable resolver's answer for a new declaration, or the stored
+    /// identity of a grant the authority itself resolved.
+    ///
+    /// Like [`Self::resolve_path`], this assembles a capability from a value it
+    /// could not have forged; it canonicalises nothing. Crate-internal.
+    ///
+    /// # Errors
+    ///
+    /// [`UnresolvedScope::ExecutableIdentity`] when the scope is not a
+    /// declared executable.
+    pub(crate) fn resolve_executable(
+        &self,
+        identity: ExecutableIdentity,
+    ) -> Result<Capability, UnresolvedScope> {
+        if !matches!(self.scope, ScopeSpec::DeclaredExecutable(_)) {
+            return Err(UnresolvedScope::ExecutableIdentity);
+        }
+        Capability::new(
+            self.verb,
+            Scope::Executable(identity),
+            self.constraints.clone(),
+        )
+        .map_err(|_: CapabilityError| UnresolvedScope::ExecutableIdentity)
     }
 
     /// The canonical text of this specification.

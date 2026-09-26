@@ -28,7 +28,7 @@
 //! the object named. It does not canonicalise, resolve, evaluate policy or
 //! record anything; the authority does all of that, before and after.
 
-mod checks;
+pub(crate) mod checks;
 mod mutate;
 mod observe;
 mod search;
@@ -59,8 +59,14 @@ const MAX_AUTHORISATION_FRAME: usize = HEADER_LEN + MAX_AUTHORISATION_BODY;
 const MAX_DESCRIPTORS: usize = 2;
 
 /// Serve one connection the kernel says the authority made. `own_uid` is the
-/// broker's effective uid, which its staging directories must be owned by.
-pub(crate) fn serve_one(stream: &UnixStream, channel: Option<ChannelNonce>, own_uid: u32) {
+/// broker's effective uid, which its staging directories must be owned by;
+/// `processes` is this broker instance's process table.
+pub(crate) fn serve_one(
+    stream: &UnixStream,
+    channel: Option<ChannelNonce>,
+    own_uid: u32,
+    processes: &crate::process::Processes,
+) {
     let Some(channel) = channel else {
         crate::event("channels_exhausted");
         return;
@@ -87,7 +93,13 @@ pub(crate) fn serve_one(stream: &UnixStream, channel: Option<ChannelNonce>, own_
     };
     let invocation = authorisation.invocation_id().clone();
     let operation = authorisation.kind().as_str();
-    let result = execute(&channel, &authorisation, received.descriptors, own_uid);
+    let result = execute(
+        &channel,
+        &authorisation,
+        received.descriptors,
+        own_uid,
+        processes,
+    );
     match &result {
         OutcomeResult::Done(done) => {
             let detail = done.fs_read.as_ref().map_or_else(String::new, |read| {
@@ -260,6 +272,7 @@ fn execute(
     authorisation: &Authorisation,
     descriptors: Descriptors,
     own_uid: u32,
+    processes: &crate::process::Processes,
 ) -> OutcomeResult {
     if authorisation.channel() != channel {
         return OutcomeResult::Refused(BrokerRefusal::ChannelMismatch);
@@ -272,6 +285,20 @@ fn execute(
         Err(refusal) => return OutcomeResult::Refused(refusal),
     };
     let mut fds = fds.into_iter();
+    // The process operations (M4d): a launch carries exactly the executable
+    // and the working directory, in that order; a status or a kill carries
+    // none, and `exactly` has already closed any that arrived.
+    match authorisation {
+        Authorisation::ProcessStart(start) => {
+            return match (fds.next(), fds.next(), fds.next()) {
+                (Some(executable), Some(cwd), None) => processes.start(start, executable, cwd),
+                _ => OutcomeResult::Refused(BrokerRefusal::DescriptorCount),
+            };
+        }
+        Authorisation::ProcessStatus(status) => return processes.status(status),
+        Authorisation::ProcessKill(kill) => return processes.kill(kill),
+        _ => {}
+    }
     let (Some(first), second) = (fds.next(), fds.next()) else {
         return OutcomeResult::Refused(BrokerRefusal::DescriptorCount);
     };

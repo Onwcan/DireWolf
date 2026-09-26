@@ -42,8 +42,30 @@
 //! whose meaning is unstable — an ambiguous name, a missing parent — covers
 //! nothing (fail closed).
 //!
-//! `fs.exec_bit` and `process` stay `UNRESOLVED_RESOURCE` until M4d and later
-//! define what their targets mean.
+//! `fs.exec_bit` stays `UNRESOLVED_RESOURCE`: ADR-0045 §19 decides it is not
+//! resolved in M4d.
+//!
+//! # Executables (M4d, ADR-0045 §21)
+//!
+//! A `process.exec`, `process.inspect` or `process.signal` declaration names
+//! an executable. The same two paths hold:
+//!
+//! 1. **A NEW declaration** is resolved by the executable resolver
+//!    ([`resolve_executables`], outside any transaction): its identity is the
+//!    canonical path of the object found and the digest of the bytes hashed
+//!    through the descriptor that was checked. `process.exec:/usr/bin/git`
+//!    means whatever `/usr/bin/git` **is** at admission; a declaration that
+//!    pins a digest (`process.exec:/usr/bin/git@<sha256>`) means it only if
+//!    the file still has that digest, and covers nothing otherwise.
+//! 2. **A STORED grant** — rendered `process.exec:<canonical path>@<digest>` —
+//!    is read back by grammar alone ([`rehydrate`]), with no lookup. A package
+//!    update that changes the file changes its digest, so the stored grant no
+//!    longer covers the executable an invocation resolves: an old grant never
+//!    silently covers new bytes.
+//!
+//! An identity whose rendering does not fit a declaration's bound (a canonical
+//! path so long that `<path>@<digest>` exceeds 384 characters) cannot be
+//! stored and read back exactly, so it is not granted: it covers nothing.
 //!
 //! [ADR-0043]: ../../../../../docs/adr/0043-m4b-private-broker-channel-and-brokered-fs-read.md
 
@@ -52,8 +74,9 @@ use std::collections::BTreeMap;
 use crate::capability::{
     Action, Capability, CapabilitySpec, DeclaredPath, Namespace, ScopeSpec, UnresolvedScope, Verb,
 };
+use crate::resource::exec::{self, ExecError};
 use crate::resource::fs::{Access, Expect, PinnedRoot, ResolveError, RootError, Target};
-use crate::resource::{CanonicalPath, FileIdentity};
+use crate::resource::{CanonicalPath, ExecutableIdentity, FileIdentity};
 
 use super::config::RootBinding;
 use super::tool;
@@ -93,6 +116,42 @@ pub(super) fn concrete_path(spec: &CapabilitySpec) -> Option<&DeclaredPath> {
     }
 }
 
+/// Whether a verb names an executable the resolver gives a meaning to: the
+/// three process verbs (M4d).
+#[must_use]
+pub(super) fn names_executable(verb: Verb) -> bool {
+    verb.namespace() == Namespace::Process
+        && matches!(
+            verb.action(),
+            Action::Exec | Action::Inspect | Action::Signal
+        )
+}
+
+/// The concrete executable a process declaration names, if it names one:
+/// `process.exec:*` names none.
+pub(super) fn concrete_executable(spec: &CapabilitySpec) -> Option<&DeclaredPath> {
+    match spec.scope() {
+        ScopeSpec::DeclaredExecutable(declared) if names_executable(spec.verb()) => Some(declared),
+        _ => None,
+    }
+}
+
+/// A declared executable's path and, if it pins one, its digest:
+/// `<path>@<64 lowercase hex>` pins, anything else does not.
+fn pinned(declared: &str) -> (&str, Option<&str>) {
+    match declared.rsplit_once('@') {
+        Some((path, digest))
+            if digest.len() == 64
+                && digest
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) =>
+        {
+            (path, Some(digest))
+        }
+        _ => (declared, None),
+    }
+}
+
 /// What the resolver found at a declared path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Found {
@@ -118,6 +177,12 @@ pub(super) enum Unresolved {
     NotAttempted,
     /// Nothing exists at the path, and the verb acts only on what exists.
     Vacant,
+    /// The executable resolver refused the declared executable.
+    Executable(ExecError),
+    /// The declaration pins a digest the file no longer has.
+    DigestMismatch,
+    /// The identity is too long to be stored and read back exactly.
+    IdentityTooLong,
 }
 
 impl Unresolved {
@@ -129,6 +194,9 @@ impl Unresolved {
             Self::Resolve(error) => tool::resolve_refusal(*error).as_str(),
             Self::NotAttempted => "NOT_ATTEMPTED",
             Self::Vacant => "NOT_FOUND",
+            Self::Executable(error) => super::process::exec_refusal(*error).as_str(),
+            Self::DigestMismatch => "EXECUTABLE_DIGEST_MISMATCH",
+            Self::IdentityTooLong => "EXECUTABLE_PATH_INVALID",
         }
     }
 }
@@ -140,7 +208,15 @@ pub(super) struct Resolutions {
     /// The binding they were resolved beneath; `None` when there was none.
     binding: Option<RootBinding>,
     answers: BTreeMap<String, Result<(CanonicalPath, Found), Unresolved>>,
+    /// The executable resolver's answers, by declared spelling. Independent
+    /// of any binding: an executable is a host object.
+    executables: Executables,
 }
+
+/// The executable resolver's answers, by declared spelling: the identity and
+/// the object it names, or why there is none.
+pub(super) type Executables =
+    BTreeMap<String, Result<(ExecutableIdentity, FileIdentity), Unresolved>>;
 
 impl Resolutions {
     /// Nothing to resolve.
@@ -148,6 +224,7 @@ impl Resolutions {
         Self {
             binding: None,
             answers: BTreeMap::new(),
+            executables: BTreeMap::new(),
         }
     }
 
@@ -159,6 +236,38 @@ impl Resolutions {
                 .iter()
                 .map(|p| (p.as_str().to_owned(), Err(why.clone())))
                 .collect(),
+            executables: BTreeMap::new(),
+        }
+    }
+
+    /// The same answers, with `executables` as the executable resolver's.
+    pub(super) fn with_executables(mut self, executables: Executables) -> Self {
+        self.executables = executables;
+        self
+    }
+
+    /// The executable resolver's answers.
+    pub(super) const fn executables(&self) -> &Executables {
+        &self.executables
+    }
+
+    /// Whether every one of `executables` has an answer here.
+    pub(super) fn covers_executables(&self, executables: &[DeclaredPath]) -> bool {
+        executables
+            .iter()
+            .all(|e| self.executables.contains_key(e.as_str()))
+    }
+
+    /// The identity the resolver derived for a declared executable, and the
+    /// object it names, or why none.
+    pub(super) fn executable(
+        &self,
+        declared: &DeclaredPath,
+    ) -> Result<(&ExecutableIdentity, FileIdentity), Unresolved> {
+        match self.executables.get(declared.as_str()) {
+            Some(Ok((identity, object))) => Ok((identity, *object)),
+            Some(Err(why)) => Err(why.clone()),
+            None => Err(Unresolved::NotAttempted),
         }
     }
 
@@ -246,7 +355,42 @@ pub(super) fn resolve_paths(
     Resolutions {
         binding: Some(binding.clone()),
         answers,
+        executables: BTreeMap::new(),
     }
+}
+
+/// Resolve every declared executable with the production executable resolver
+/// an invocation uses. `trusted_owner` is the authority's uid. Call with no
+/// SQLite transaction open: it hashes files. The resolved objects' handles
+/// close here: an admission keeps an identity, never a descriptor.
+pub(super) fn resolve_executables(declared: &[DeclaredPath], trusted_owner: u32) -> Executables {
+    declared
+        .iter()
+        .map(|text| {
+            (
+                text.as_str().to_owned(),
+                resolve_one(text.as_str(), trusted_owner),
+            )
+        })
+        .collect()
+}
+
+fn resolve_one(
+    declared: &str,
+    trusted_owner: u32,
+) -> Result<(ExecutableIdentity, FileIdentity), Unresolved> {
+    let (path, pin) = pinned(declared);
+    let resolved = exec::resolve(path, trusted_owner).map_err(Unresolved::Executable)?;
+    let identity = resolved.identity().clone();
+    if pin.is_some_and(|digest| identity.digest().to_string() != digest) {
+        return Err(Unresolved::DigestMismatch);
+    }
+    // A grant is stored as its canonical text and read back by the grammar;
+    // an identity that would not fit a declaration cannot be read back.
+    if identity.to_string().chars().count() > DeclaredPath::MAX_CHARS {
+        return Err(Unresolved::IdentityTooLong);
+    }
+    Ok((identity, resolved.object()))
 }
 
 /// A NEW declaration in authority-comparable form, or which identity is
@@ -257,6 +401,12 @@ pub(super) fn declared(
     spec: &CapabilitySpec,
     resolutions: &Resolutions,
 ) -> Result<Capability, UnresolvedScope> {
+    if let Some(declared) = concrete_executable(spec) {
+        let (identity, _) = resolutions
+            .executable(declared)
+            .map_err(|_| UnresolvedScope::ExecutableIdentity)?;
+        return spec.resolve_executable(identity.clone());
+    }
     match (concrete_path(spec), scope_rule(spec.verb())) {
         (Some(path), Some(vacant)) => {
             let canonical = resolutions
@@ -273,6 +423,16 @@ pub(super) fn declared(
 /// consulted) and the caller requires it to render to exactly itself. Never
 /// for a new declaration.
 pub(super) fn rehydrate(spec: &CapabilitySpec) -> Result<Capability, UnresolvedScope> {
+    if let Some(declared) = concrete_executable(spec) {
+        // A stored grant always carries its digest: it was rendered from an
+        // identity. One without is not a grant this authority wrote.
+        let (path, Some(digest)) = pinned(declared.as_str()) else {
+            return Err(UnresolvedScope::ExecutableIdentity);
+        };
+        let identity =
+            stored_identity(path, digest).map_err(|_| UnresolvedScope::ExecutableIdentity)?;
+        return spec.resolve_executable(identity);
+    }
     match concrete_path(spec) {
         Some(path) => {
             let canonical = crate::resource::fs::stored_canonical_path(path)
@@ -281,6 +441,17 @@ pub(super) fn rehydrate(spec: &CapabilitySpec) -> Result<Capability, UnresolvedS
         }
         None => spec.resolve(),
     }
+}
+
+/// The identity a stored record spells — a process the authority launched, a
+/// grant it resolved — by grammar alone, with no lookup. The one module that
+/// may name the stored-identity reader (ADR-0045 §21).
+///
+/// # Errors
+///
+/// [`ExecError::PathInvalid`] for a path or digest the grammar refuses.
+pub(super) fn stored_identity(path: &str, sha256: &str) -> Result<ExecutableIdentity, ExecError> {
+    exec::stored_executable_identity(path, sha256)
 }
 
 #[cfg(test)]
@@ -366,9 +537,102 @@ mod tests {
             );
         }
         assert_eq!(super::concrete_path(&spec("fs.exec_bit:/workspace")), None);
+        // A new process declaration is nothing without the executable
+        // resolver's answer either.
+        for text in [
+            "process.exec:/usr/bin/git",
+            "process.inspect:/usr/bin/git",
+            "process.signal:/usr/bin/git",
+        ] {
+            assert_eq!(
+                declared(&spec(text), &Resolutions::empty()).map(|c| c.to_canonical_string()),
+                Err(UnresolvedScope::ExecutableIdentity),
+                "{text}"
+            );
+        }
         assert_eq!(
-            declared(&spec("process.exec:/usr/bin/git"), &Resolutions::empty())
+            declared(&spec("process.exec:*"), &Resolutions::empty())
                 .map(|c| c.to_canonical_string()),
+            Ok("process.exec:*".to_owned())
+        );
+    }
+
+    #[test]
+    fn a_stored_process_grant_rehydrates_by_its_digest_and_only_with_one() {
+        let digest = "9f".repeat(32);
+        for text in [
+            format!("process.exec:/usr/bin/git@{digest}"),
+            format!("process.exec:/usr/bin/git@{digest}?argv_allowlist=diff,status"),
+            format!("process.inspect:/usr/lib/cargo/bin/coreutils/ls@{digest}"),
+        ] {
+            assert_eq!(
+                rehydrate(&spec(&text)).map(|c| c.to_canonical_string()),
+                Ok(text.clone())
+            );
+        }
+        for text in [
+            "process.exec:/usr/bin/git".to_owned(),
+            format!("process.exec:/usr/bin/../git@{digest}"),
+            format!("process.exec:/usr/bin/git@{}", "9F".repeat(32)),
+        ] {
+            assert_eq!(
+                rehydrate(&spec(&text)).map(|c| c.to_canonical_string()),
+                Err(UnresolvedScope::ExecutableIdentity),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_new_declaration_means_what_the_executable_resolver_found_and_a_pin_must_hold() {
+        use crate::resource::exec;
+        // /bin/sh resolves on every supported Linux; its identity is the
+        // final object's.
+        let uid = {
+            let scratch = crate::scratch::Scratch::new("scopes-exec");
+            let probe = scratch.path().join("p");
+            std::fs::write(&probe, b"").unwrap_or_else(|_| unreachable!("a probe"));
+            std::os::unix::fs::MetadataExt::uid(
+                &std::fs::metadata(&probe).unwrap_or_else(|_| unreachable!("metadata")),
+            )
+        };
+        let Ok(resolved) = exec::resolve("/bin/sh", uid) else {
+            unreachable!("/bin/sh resolves")
+        };
+        let identity = resolved.identity().to_string();
+        let good = DeclaredPath::new("/bin/sh").unwrap_or_else(|| unreachable!("a path"));
+        let pinned_right = DeclaredPath::new(&format!("/bin/sh@{}", resolved.identity().digest()))
+            .unwrap_or_else(|| unreachable!("a path"));
+        let pinned_wrong = DeclaredPath::new(&format!("/bin/sh@{}", "0".repeat(64)))
+            .unwrap_or_else(|| unreachable!("a path"));
+        let answers = super::resolve_executables(
+            &[good.clone(), pinned_right.clone(), pinned_wrong.clone()],
+            uid,
+        );
+        let resolutions = Resolutions::empty().with_executables(answers);
+        assert_eq!(
+            declared(&spec("process.exec:/bin/sh"), &resolutions).map(|c| c.to_canonical_string()),
+            Ok(format!("process.exec:{identity}"))
+        );
+        assert_eq!(
+            declared(
+                &spec(&format!("process.exec:{}", pinned_right.as_str())),
+                &resolutions
+            )
+            .map(|c| c.to_canonical_string()),
+            Ok(format!("process.exec:{identity}"))
+        );
+        assert_eq!(
+            resolutions.executable(&pinned_wrong).err(),
+            Some(Unresolved::DigestMismatch)
+        );
+        assert_eq!(
+            declared(
+                &spec(&format!("process.exec:{}", pinned_wrong.as_str())),
+                &resolutions
+            )
+            .map(|c| c.to_canonical_string()),
             Err(UnresolvedScope::ExecutableIdentity)
         );
     }

@@ -67,11 +67,21 @@ fn version_one_is_kept_exactly_and_version_two_beside_it() {
     let write = r#"{"fs_write":{"path":"/workspace/a","content":"00"}}"#;
     assert!(dwkp::decode_body(request("direwolf.tool.invoke", 1, "", write).as_bytes()).is_err());
     assert!(dwkp::decode_body(request("direwolf.tool.invoke", 2, KEY, write).as_bytes()).is_ok());
+    // A process call is not a version-2 message, whatever it is called
+    // (ADR-0045): to version 2 it is an undeclared member. Version 3 has it.
+    let exec = r#"{"process_exec":{"executable":"/usr/bin/git","args":["status"]}}"#;
+    assert!(dwkp::decode_body(request("direwolf.tool.invoke", 2, KEY, exec).as_bytes()).is_err());
+    assert!(matches!(
+        dwkp::decode_body(request("direwolf.tool.invoke", 3, KEY, exec).as_bytes())
+            .unwrap()
+            .body,
+        DwkpBody::ToolInvokeV3(_)
+    ));
     // A version this build does not know names the range it does.
-    let v3 = request("direwolf.tool.invoke", 3, KEY, READ);
-    let err = dwkp::decode_body(v3.as_bytes()).unwrap_err();
+    let v4 = request("direwolf.tool.invoke", 4, KEY, READ);
+    let err = dwkp::decode_body(v4.as_bytes()).unwrap_err();
     assert_eq!(err.code, ErrorCode::VersionUnsupported);
-    assert_eq!(err.supported.map(|r| (r.min, r.max)), Some((1, 2)));
+    assert_eq!(err.supported.map(|r| (r.min, r.max)), Some((1, 3)));
 }
 
 #[test]

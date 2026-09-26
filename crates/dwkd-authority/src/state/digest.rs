@@ -54,9 +54,14 @@ pub(crate) const TOOL_CONTENT: &str = "direwolf.tool.fs_read.content.v1";
 /// bound to (M4c).
 pub(crate) const TOOL_REQUEST: &str = "direwolf.dwkp.tool_invoke.request.v2";
 
+/// The arguments of a `process.exec` (M4d, ADR-0045 §7): their count, then
+/// each, length-prefixed — what the process row and the plan name instead of
+/// the arguments themselves.
+pub(crate) const PROCESS_ARGV: &str = "direwolf.process.argv.v1";
+
 /// Every domain, for the test that they are pairwise distinct.
 #[cfg(test)]
-const ALL_DOMAINS: [&str; 10] = [
+const ALL_DOMAINS: [&str; 11] = [
     POLICY_REVISION,
     ADMIT_REQUEST,
     AUDIT_RECORD,
@@ -67,6 +72,7 @@ const ALL_DOMAINS: [&str; 10] = [
     STORE_ID,
     TOOL_CONTENT,
     TOOL_REQUEST,
+    PROCESS_ARGV,
 ];
 
 /// A full 256-bit SHA-256 value. Never truncated.

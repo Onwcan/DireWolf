@@ -24,6 +24,10 @@ So is M4b's brokered `fs.read` evidence (ADR-0043), with THREE identities: the
 job creates the broker's own user, names it and a hostile runtime user, and the
 task proves both by their numbers before anything runs, requires every
 same-identity case, and selects the three-identity tests by name.
+
+M4c's filesystem operations (ADR-0044) and M4d's process execution (ADR-0045)
+are held to the same structure; M4d's task also fails when any suite it runs
+ran zero tests, and its fake-broker suite is never counted as execution.
 """
 
 from __future__ import annotations
@@ -81,6 +85,20 @@ FSOPS_SUITES = (
     REPO_ROOT / "crates" / "dwkd-broker" / "tests" / "permission_model.rs",
     REPO_ROOT / "crates" / "dwkd-broker" / "src" / "exchange" / "tests.rs",
     FSOPS_FOREIGN_SUITE,
+)
+# M4d's process-execution evidence, and the tests that print it.
+PROC_JOB = "process-broker"
+PROC_EVIDENCE = "make process-broker-evidence"
+PROC_FOREIGN_SUITE = REPO_ROOT / "crates" / "dwkd-authority" / "tests" / "process_foreign.rs"
+PROC_SUITES = (
+    REPO_ROOT / "crates" / "dwk-proto" / "tests" / "dwkp_v3.rs",
+    REPO_ROOT / "crates" / "dwkd-authority" / "src" / "state" / "process" / "tests.rs",
+    REPO_ROOT / "crates" / "dwkd-authority" / "src" / "resource" / "exec" / "argv.rs",
+    REPO_ROOT / "crates" / "dwkd-authority" / "tests" / "process_production.rs",
+    REPO_ROOT / "crates" / "dwkd-authority" / "tests" / "hygiene_override.rs",
+    REPO_ROOT / "crates" / "dwkd-broker" / "src" / "process" / "tests.rs",
+    REPO_ROOT / "crates" / "dwkd-broker" / "tests" / "private_protocol.rs",
+    PROC_FOREIGN_SUITE,
 )
 
 
@@ -204,7 +222,15 @@ def test_nothing_around_the_evidence_may_fail_quietly() -> None:
     """No `continue-on-error`, no shell escape hatch, and no step condition --
     except the evals job's upload of its results when it has already failed,
     which cannot change the job's outcome."""
-    for name in (EVIDENCE_JOB, EVAL_JOB, FILESYSTEM_JOB, BROKER_JOB, FSOPS_JOB, AGGREGATE_JOB):
+    for name in (
+        EVIDENCE_JOB,
+        EVAL_JOB,
+        FILESYSTEM_JOB,
+        BROKER_JOB,
+        FSOPS_JOB,
+        PROC_JOB,
+        AGGREGATE_JOB,
+    ):
         text = "\n".join(_uncommented(line) for line in _jobs()[name])
         for hatch in ("continue-on-error", "|| true", "|| :", "set +e", "exit 0"):
             assert hatch not in text, f"`{hatch}` in job {name}"
@@ -227,7 +253,7 @@ def test_every_job_is_required_by_the_aggregate_check() -> None:
     jobs = set(_jobs()) - {AGGREGATE_JOB}
     needs = set(_needs())
     assert EVIDENCE_JOB in needs and EVAL_JOB in needs and FILESYSTEM_JOB in needs
-    assert BROKER_JOB in needs and FSOPS_JOB in needs
+    assert BROKER_JOB in needs and FSOPS_JOB in needs and PROC_JOB in needs
     assert jobs == needs, f"not required: {sorted(jobs - needs)}; unknown: {sorted(needs - jobs)}"
 
 
@@ -987,4 +1013,258 @@ def test_the_fsops_task_off_linux_is_not_exercised_and_runs_nothing(
     _fsop_env(monkeypatch, recorder)
     with pytest.raises(dw.TaskError, match="NOT EXERCISED"):
         dw.task_filesystem_operations_evidence()
+    assert recorder.commands == []
+
+
+# --- M4d: process execution --------------------------------------------------
+
+
+def _proc_evidence_step() -> list[str]:
+    found = [s for s in _steps(_jobs()[PROC_JOB]) if _run(s) == PROC_EVIDENCE]
+    assert len(found) == 1, f"{PROC_JOB} must run `{PROC_EVIDENCE}` exactly once"
+    return found[0]
+
+
+def test_the_process_broker_job_exists_on_linux_and_is_unconditional() -> None:
+    job = _jobs().get(PROC_JOB)
+    assert job is not None, f"no `{PROC_JOB}` job: M4d's process execution is measured nowhere"
+    text = "\n".join(_uncommented(line) for line in job)
+    assert re.search(r"^    runs-on:\s*ubuntu-latest\s*$", text, re.MULTILINE), "Linux only"
+    assert re.search(
+        r"^    name:\s*process broker \(make process-broker-evidence\)\s*$", text, re.MULTILINE
+    ), "the required check keeps its name"
+    for forbidden in ("strategy:", "matrix", "continue-on-error", "secrets."):
+        assert forbidden not in text, f"`{forbidden}` in {PROC_JOB}"
+    assert not re.search(r"^\s+if:", text, re.MULTILINE), f"{PROC_JOB} has a condition"
+
+
+def test_the_process_broker_job_runs_with_three_distinct_ordinary_identities() -> None:
+    step = _proc_evidence_step()
+    env = _env(step)
+    broker, peer = env.get("DW_BROKER_AS"), env.get("DW_PEER_AS")
+    _second_identity(broker)
+    _second_identity(peer)
+    assert broker != peer, "the broker and the hostile runtime must be two identities"
+    # The broker's user is created in the job, before the evidence; the
+    # evidence itself runs as the runner, never as root.
+    steps = _steps(_jobs()[PROC_JOB])
+    created = [
+        i
+        for i, s in enumerate(steps)
+        if (_run(s) or "").startswith("sudo useradd") and (_run(s) or "").split()[-1] == broker
+    ]
+    assert len(created) == 1 and created[0] < steps.index(step)
+    assert "sudo" not in (_run(step) or ""), "the evidence runs as the runner, not through sudo"
+
+
+def test_the_process_foreign_test_is_ignored_by_default_and_selected_by_name() -> None:
+    source = PROC_FOREIGN_SUITE.read_text(encoding="utf-8")
+    assert len(dw.PROC_FOREIGN_TESTS) == 1
+    for name in dw.PROC_FOREIGN_TESTS:
+        module, function = name.split("::")
+        assert module == "linux"
+        assert re.search(r"#\[ignore = [^\]]*\]\s*fn " + re.escape(function) + r"\(\)", source), (
+            f"{function} is not an #[ignore]d test in {PROC_FOREIGN_SUITE.name}"
+        )
+
+
+def test_the_process_task_names_what_the_tests_print() -> None:
+    """A renamed case would otherwise fail only in CI."""
+    source = "\n".join(path.read_text(encoding="utf-8") for path in PROC_SUITES)
+    for suite, case in (*dw.PROC_CASES, *dw.PROC_FOREIGN_CASES):
+        assert f'\\"suite\\":\\"{suite}\\"' in source or f'"{suite}"' in source, (
+            f"no test prints suite `{suite}`"
+        )
+        # A family's cases are printed through `format!`: the stem is spelled.
+        stems = {
+            case,
+            case.removeprefix("crash-"),
+            case.removeprefix("output-"),
+            case.removeprefix("shipped-"),
+            case.removeprefix("launch-").removesuffix("-descriptors"),
+        }
+        spelled = any(f'"{stem}"' in source for stem in stems)
+        assert spelled, f"no test prints `{case}`"
+
+
+def test_fake_broker_evidence_is_never_process_execution_evidence() -> None:
+    """The authority's state machine runs against a fake broker; its suite is
+    named for what it is, and no broker-process case comes from it."""
+    fake = PROC_SUITES[1].read_text(encoding="utf-8")
+    assert '\\"suite\\":\\"authority-process\\"' in fake
+    assert "broker-process" not in fake
+    suites = {suite for suite, _ in dw.PROC_CASES}
+    assert {"broker-process", "broker-private-protocol"} <= suites, "real execution is required"
+
+
+def _proc_line(suite: str, case: str, outcome: str = "ok") -> str:
+    return f'PROC-EVIDENCE {{"suite":"{suite}","case":"{case}","outcome":"{outcome}","count":1}}'
+
+
+def _proc_complete(cases: tuple[tuple[str, str], ...]) -> str:
+    return "\n".join(_proc_line(suite, case) for suite, case in cases)
+
+
+def _proc_libtest(passed: int, cases: tuple[tuple[str, str], ...], total: int = 1) -> str:
+    return "\n".join(
+        [
+            f"running {total} tests",
+            _proc_complete(cases),
+            f"test result: ok. {passed} passed; 0 failed; 0 ignored; 0 measured; "
+            f"{total - passed} filtered out; finished in 1.00s",
+        ]
+    )
+
+
+def test_process_evidence_requires_every_case_exercised(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    dw.require_proc_evidence(_proc_complete(dw.PROC_CASES), dw.PROC_CASES)
+    lines = _proc_complete(dw.PROC_CASES).splitlines()
+    with pytest.raises(dw.TaskError, match="broker-process/R4-executable-rewritten-in-place"):
+        dw.require_proc_evidence(
+            "\n".join(line for line in lines if '"R4-executable-rewritten-in-place"' not in line),
+            dw.PROC_CASES,
+        )
+    skipped = [
+        _proc_line("hygiene-override", "git-repository-hook-despite-env", "not-exercised:no-git")
+        if '"git-repository-hook-despite-env"' in line
+        else line
+        for line in lines
+    ]
+    with pytest.raises(dw.TaskError, match="hygiene-override/git-repository-hook-despite-env"):
+        dw.require_proc_evidence("\n".join(skipped), dw.PROC_CASES)
+    with pytest.raises(dw.TaskError, match="unreadable"):
+        dw.require_proc_evidence("PROC-EVIDENCE {nope", dw.PROC_CASES)
+    with pytest.raises(dw.TaskError, match="malformed"):
+        dw.require_proc_evidence('PROC-EVIDENCE {"suite":"x","case":"y"}', dw.PROC_CASES)
+    with pytest.raises(dw.TaskError, match="zero cases"):
+        dw.require_proc_evidence(_proc_complete(dw.PROC_CASES), ())
+    with pytest.raises(dw.TaskError, match="not reported"):
+        dw.require_proc_evidence("", dw.PROC_CASES)
+    capsys.readouterr()
+
+
+def test_a_suite_that_ran_no_test_or_failed_one_is_not_evidence() -> None:
+    dw.require_tests_ran(_proc_libtest(3, (), total=3))
+    with pytest.raises(dw.TaskError, match="zero tests"):
+        dw.require_tests_ran(_proc_libtest(0, (), total=3))
+    with pytest.raises(dw.TaskError, match="zero tests"):
+        dw.require_tests_ran("no libtest output at all")
+    with pytest.raises(dw.TaskError, match="did not pass"):
+        dw.require_tests_ran("test result: FAILED. 2 passed; 1 failed; 0 ignored")
+
+
+def test_a_process_three_identity_run_that_selected_nothing_is_not_evidence(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with pytest.raises(dw.TaskError, match="did not run all"):
+        dw.require_proc_foreign_evidence(_proc_libtest(0, ()))
+    with pytest.raises(dw.TaskError, match="runtime-uid-cannot-launch"):
+        dw.require_proc_foreign_evidence(
+            _proc_libtest(
+                1, tuple(c for c in dw.PROC_FOREIGN_CASES if c[1] != "runtime-uid-cannot-launch")
+            )
+        )
+    dw.require_proc_foreign_evidence(_proc_libtest(1, dw.PROC_FOREIGN_CASES))
+    capsys.readouterr()
+
+
+class _ProcRecorder(_Recorder):
+    def captured(self, *command: str) -> str:
+        self.commands.append(command)
+        if "process_foreign" in command:
+            return _proc_libtest(1, dw.PROC_FOREIGN_CASES)
+        return _proc_libtest(1, dw.PROC_CASES)
+
+
+def _proc_env(monkeypatch: pytest.MonkeyPatch, recorder: _ProcRecorder) -> None:
+    monkeypatch.setenv("DW_BROKER_AS", "dwbroker")
+    monkeypatch.setenv("DW_PEER_AS", "nobody")
+    monkeypatch.setattr(dw, "run", recorder.run)
+    monkeypatch.setattr(dw, "run_captured", recorder.captured)
+    monkeypatch.setattr(dw, "uvrun", recorder.uvrun)
+
+
+@pytest.mark.skipif(not LINUX, reason="the task runs only where process execution does")
+def test_the_process_task_proves_both_identities_first_and_selects_the_ignored_test(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    recorder = _ProcRecorder()
+    proven: list[tuple[str, int]] = []
+    uids = {"DW_BROKER_AS": 998, "DW_PEER_AS": 65534}
+
+    def second_identity(variable: str) -> tuple[str, int, int]:
+        proven.append((variable, len(recorder.commands)))
+        return variable.lower(), 1001, uids[variable]
+
+    _proc_env(monkeypatch, recorder)
+    monkeypatch.setattr(dw, "second_identity", second_identity)
+    dw.task_process_broker_evidence()
+    assert proven == [("DW_BROKER_AS", 0), ("DW_PEER_AS", 0)], "proven before anything runs"
+    assert recorder.commands[0][:4] == ("cargo", "build", "--locked", "-p")
+    for selector in ("dwkp_v3", "state::process", "resource::exec", "process_production"):
+        assert [c for c in recorder.commands if selector in c], f"{selector} did not run"
+    assert [c for c in recorder.commands if "hygiene_override" in c]
+    assert [c for c in recorder.commands if "private_protocol" in c and "--bins" in c]
+    foreign = [c for c in recorder.commands if "process_foreign" in c]
+    assert len(foreign) == 1
+    for flag in ("--ignored", "--exact", *dw.PROC_FOREIGN_TESTS):
+        assert flag in foreign[0], f"the three-identity run lacks {flag}"
+    capsys.readouterr()
+
+
+@pytest.mark.skipif(not LINUX, reason="the task runs only where process execution does")
+@pytest.mark.parametrize("missing", ["DW_BROKER_AS", "DW_PEER_AS"])
+def test_the_process_task_without_the_identities_is_not_exercised(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], missing: str
+) -> None:
+    recorder = _ProcRecorder()
+    _proc_env(monkeypatch, recorder)
+    monkeypatch.delenv(missing)
+    with pytest.raises(dw.TaskError, match="NOT EXERCISED"):
+        dw.task_process_broker_evidence()
+    assert not [c for c in recorder.commands if "process_foreign" in c]
+    assert [c for c in recorder.commands if "private_protocol" in c], "the same-uid half ran"
+    capsys.readouterr()
+
+
+@pytest.mark.skipif(not LINUX, reason="the task runs only where process execution does")
+def test_the_process_task_refuses_one_identity_in_two_roles(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recorder = _ProcRecorder()
+    _proc_env(monkeypatch, recorder)
+    monkeypatch.setattr(dw, "second_identity", lambda _variable: ("nobody", 1001, 65534))
+    with pytest.raises(dw.TaskError, match="two identities"):
+        dw.task_process_broker_evidence()
+    assert recorder.commands == []
+
+
+@pytest.mark.skipif(not LINUX, reason="the task runs only where process execution does")
+def test_the_process_task_fails_when_a_suite_ran_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _Empty(_ProcRecorder):
+        def captured(self, *command: str) -> str:
+            self.commands.append(command)
+            if "hygiene_override" in command:
+                return _proc_libtest(0, dw.PROC_CASES, total=0)
+            return _proc_libtest(1, dw.PROC_CASES)
+
+    recorder = _Empty()
+    _proc_env(monkeypatch, recorder)
+    monkeypatch.setattr(dw, "second_identity", lambda v: (v, 1001, 998 if "BROKER" in v else 65534))
+    with pytest.raises(dw.TaskError, match="zero tests"):
+        dw.task_process_broker_evidence()
+
+
+def test_the_process_task_off_linux_is_not_exercised_and_runs_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recorder = _ProcRecorder()
+    monkeypatch.setattr(sys, "platform", "darwin")
+    _proc_env(monkeypatch, recorder)
+    with pytest.raises(dw.TaskError, match="NOT EXERCISED"):
+        dw.task_process_broker_evidence()
     assert recorder.commands == []

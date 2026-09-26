@@ -22,7 +22,7 @@ compromised host.
 
 ---
 
-## Status: M3 complete; M4a and M4b complete; M4c — the filesystem tools; M4 incomplete
+## Status: M3 complete; M4a, M4b and M4c complete; M4d — process execution, candidate; M4 incomplete
 
 **None of the above is implemented yet.** This repository contains the Phase 0
 architecture package, the M1 foundation (the monorepo layout, the Rust and
@@ -156,6 +156,24 @@ and the M2 wire contract:
   must also keep untrusted writers out
   ([ADR-0044](docs/adr/0044-m4c-filesystem-operations-plans-and-atomic-mutation.md),
   `make filesystem-operations-evidence`). **Linux only.**
+- **process execution, behind a floor nothing can yet pass** (M4d, the fourth
+  part of M4; implemented, a candidate for acceptance): `process.exec`,
+  `process.status` and `process.kill`, as version 3 of the tool messages. The
+  authority resolves an absolute executable path — no `PATH` search, symlinks
+  followed to one native file that only root or the authority can change —
+  hashes it, and decides on that identity, with `argv[0]` its canonical path
+  and every argument passed as exactly its bytes; the broker re-proves the
+  descriptor the authority opened and executes **that descriptor**
+  (`execveat`), through a helper with an empty environment, resource limits,
+  its own process group and no inherited descriptor, drains both streams to a
+  bound, and kills by pidfd and process group. **Every process would run on
+  the host with the broker's privileges, so a launch needs the operator's
+  opt-in and a per-invocation approval — and approvals are M6's: no build a
+  user runs launches anything.** The launch path is proven by the real
+  broker starting real targets, and the authority's side after the floor
+  against a fake broker, labelled as such
+  ([ADR-0045](docs/adr/0045-m4d-process-execution-broker.md),
+  `make process-broker-evidence`). **Linux only.**
 - **one brokered effect: `fs.read`** (M4b, the second part of M4).
   `ToolInvoke` and `CanonicalPreview` have their first wire forms — one typed
   call, `fs_read{path, max_bytes}`, and no tool name or argument map a second
@@ -191,10 +209,11 @@ can now reach the authority, and cannot choose who it is when it does. M4a
 adds the first thing that looks at a filesystem — deciding which object a path
 names — and M4b the first effect: reading at most 256 KiB of one checked file,
 through the broker, for a run both gates allow — and M4c the other
-filesystem tools, including the first that change files. There is still no
-execution, no secret, no sandbox (every action runs on the host, and policy is
-told so), no approvals, no artifacts and no model provider (and so no
-Ollama). `QueryAuthority` still reports authority and
+filesystem tools, including the first that change files. M4d builds process
+execution end to end and refuses every production launch, because no approval
+can exist yet. There is still no secret, no sandbox (every action runs on the
+host, and policy is told so), no approvals, no artifacts and no model provider
+(and so no Ollama). `QueryAuthority` still reports authority and
 refuses to decide a proposed action; `CanonicalPreview` is how a runtime asks
 what a read would be decided.
 See [docs/PROTOCOL.md](docs/PROTOCOL.md),
@@ -203,12 +222,14 @@ See [docs/PROTOCOL.md](docs/PROTOCOL.md),
 
 `dwkd-authority serve` serves DWKP (Linux); `dwkd-authority verify-audit
 <dir>` checks an audit chain, read-only, everywhere; `dwkd-broker serve`
-serves the private channel (Linux) and performs `fs.read` and nothing else;
+serves the private channel (Linux) and performs the filesystem operations and
+— for an authorisation no production authority can yet issue — the process
+operations;
 `direwolf` supports `--version` and `doctor`, and nothing
 else, because a command that exists but cannot work invites callers, scripts
 and documentation to form around a shape nobody has designed yet.
 
-The remaining filesystem operations, exec and secrets complete **M4**, the sandbox at
+Secrets (M4e) complete **M4**, the sandbox at
 **M5**, approvals at **M6**, and model providers — Ollama among them — at
 **M7**. See [docs/ROADMAP.md](docs/ROADMAP.md).
 

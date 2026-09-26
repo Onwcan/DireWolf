@@ -14,5 +14,5 @@ from direwolf.proto import dwcp, dwkp, events, operations
 
 __all__ = ["SCHEMA_DIGEST", "dwcp", "dwkp", "events", "operations"]
 
-SCHEMA_DIGEST: Final = "sha256:286a8845b4c576060ab936b9d5b8f1296993199110fc0af8a4d41ce75cee0c71"
+SCHEMA_DIGEST: Final = "sha256:57dc50413d6a6ba304a1b4d7e93a7cf6d84879ebf4528571f4e6f2f8b8c4cfcd"
 """Digest of every schema these bindings were generated from."""

@@ -1,5 +1,5 @@
 //! The authority's end of the private broker channel, on Linux (M4b,
-//! ADR-0043; M4c, ADR-0044).
+//! ADR-0043; M4c, ADR-0044; M4d, ADR-0045).
 //!
 //! One of the three authority modules that may name `rustix` (TX008), and the
 //! only one that may send a descriptor or take one out of a handoff (TX014).
@@ -34,16 +34,19 @@ use dwk_proto::brokerp::{
     FsListAuthorisation, FsMoveAuthorisation, FsPatchAuthorisation, FsReadAuthorisation,
     FsReclaimAuthorisation, FsReclaimDone, FsSearchAuthorisation, FsStatAuthorisation,
     FsWriteAuthorisation, LeafName, MAX_HELLO_BODY, MAX_OUTCOME_BODY, MoveSide, OutcomeResult,
-    ReclaimState, StagingHolds,
+    ProcessArgs, ProcessKillAuthorisation, ProcessSpec, ProcessStartAuthorisation,
+    ProcessStartDone, ProcessStatusAuthorisation, ProcessStatusDone, ProcessStreamSnapshot,
+    ReclaimState, StagingHolds, StreamLimit,
 };
 use dwk_proto::frame::FrameDecoder;
-use dwk_proto::wire::scalar::{HexContent, StatKind};
+use dwk_proto::wire::scalar::{ExitCode, HexContent, HostPath, ProcessArg, SignalNumber, StatKind};
 use rustix::fd::AsFd;
 use rustix::net::{SendAncillaryBuffer, SendAncillaryMessage, SendFlags};
 
 use super::{
     BrokerDelivery, BrokerError, BrokerFailure, BrokerOrder, FsReadDelivery, ListDelivery,
-    Operation, RawListEntry, SearchDelivery, StatDelivery, Unreachable,
+    Operation, ProcessStartDelivery, ProcessStatusDelivery, RawListEntry, SearchDelivery,
+    StatDelivery, StreamDelivery, Unreachable,
 };
 use crate::resource::{FileIdentity, ParentHandoff, ResourceKind};
 
@@ -68,6 +71,11 @@ enum Sent {
     Move,
     Delete,
     Reclaim,
+    ProcessStart,
+    ProcessStatus {
+        stream_limit: u32,
+    },
+    ProcessKill,
 }
 
 /// Perform one operation through the broker at `socket`, which must be served
@@ -123,7 +131,7 @@ pub(super) fn perform(
         )));
     }
     match outcome.result() {
-        OutcomeResult::Done(done) => deliver(&sent, done).map_err(after),
+        OutcomeResult::Done(done) => deliver(&sent, *done).map_err(after),
         OutcomeResult::Refused(why) => Err(after(BrokerFailure::Refused(why))),
         OutcomeResult::Indeterminate(why) => Err(after(BrokerFailure::Indeterminate(why))),
     }
@@ -160,6 +168,9 @@ fn authorise(common: Common, operation: Operation) -> Result<Prepared, BrokerFai
         | Operation::Patch { .. }
         | Operation::Move { .. }
         | Operation::Delete { .. } => change(common, operation),
+        Operation::ProcessStart { .. }
+        | Operation::ProcessStatus { .. }
+        | Operation::ProcessKill { .. } => process(common, operation),
         Operation::Reclaim { directory, staging } => {
             let leaf = LeafName::new(staging.leaf.as_str())
                 .ok_or(BrokerFailure::Protocol("a recorded name is not a leaf"))?;
@@ -252,11 +263,7 @@ fn observation(common: Common, operation: Operation) -> Result<Prepared, BrokerF
                 },
             )
         }
-        Operation::Write { .. }
-        | Operation::Patch { .. }
-        | Operation::Move { .. }
-        | Operation::Delete { .. }
-        | Operation::Reclaim { .. } => {
+        _ => {
             // Never reached: `authorise` routes by kind. Refused rather than
             // asserted, before anything is sent.
             return Err(BrokerFailure::Protocol("a change is not an observation"));
@@ -358,13 +365,100 @@ fn change(common: Common, operation: Operation) -> Result<Prepared, BrokerFailur
                 Sent::Delete,
             )
         }
-        Operation::Read { .. }
-        | Operation::Stat { .. }
-        | Operation::List { .. }
-        | Operation::Search { .. }
-        | Operation::Reclaim { .. } => {
+        _ => {
             return Err(BrokerFailure::Protocol("an observation is not a change"));
         }
+    })
+}
+
+/// A process operation (M4d): a launch carries the executable and the
+/// working directory, in that order; a status or a kill carries none.
+fn process(common: Common, operation: Operation) -> Result<Prepared, BrokerFailure> {
+    let unfit = |why| BrokerFailure::Protocol(why);
+    Ok(match operation {
+        Operation::ProcessStart {
+            process_id,
+            executable,
+            cwd,
+            args,
+            environment,
+            stream_limit,
+        } => {
+            let argv0 = HostPath::new(executable.identity().path().to_string())
+                .ok_or(unfit("a canonical path does not fit argv[0]"))?;
+            let sha256 = dwk_proto::wire::scalar::ContentDigest::new(
+                executable.identity().digest().to_string(),
+            )
+            .ok_or(unfit("a digest does not fit the wire"))?;
+            let args: Option<Vec<ProcessArg>> = args.into_iter().map(ProcessArg::new).collect();
+            let args = args
+                .and_then(ProcessArgs::new)
+                .ok_or(unfit("the arguments do not fit a launch"))?;
+            let stream_limit =
+                StreamLimit::new(stream_limit).ok_or(unfit("the output bound is out of range"))?;
+            let (exe_fd, exe) = executable.into_transfer_descriptor();
+            let (cwd_fd, cwd) = cwd.into_transfer_descriptor();
+            (
+                Authorisation::ProcessStart(ProcessStartAuthorisation::new(
+                    common,
+                    ProcessSpec {
+                        process_id,
+                        executable: pair(exe),
+                        executable_sha256: sha256,
+                        cwd: pair(cwd),
+                        argv0,
+                        args,
+                        environment,
+                        stream_limit,
+                    },
+                )),
+                vec![exe_fd, cwd_fd],
+                Sent::ProcessStart,
+            )
+        }
+        Operation::ProcessStatus {
+            process_id,
+            generation,
+        } => (
+            Authorisation::ProcessStatus(ProcessStatusAuthorisation::new(
+                common, process_id, generation,
+            )),
+            Vec::new(),
+            // The per-stream bound is the launch's; the state layer checks
+            // the content against it. The wire's own bound applies here.
+            Sent::ProcessStatus {
+                stream_limit: u32::try_from(dwk_proto::limits::MAX_PROCESS_STREAM_BYTES)
+                    .unwrap_or(u32::MAX),
+            },
+        ),
+        Operation::ProcessKill {
+            process_id,
+            generation,
+        } => (
+            Authorisation::ProcessKill(ProcessKillAuthorisation::new(
+                common, process_id, generation,
+            )),
+            Vec::new(),
+            Sent::ProcessKill,
+        ),
+        _ => return Err(unfit("not a process operation")),
+    })
+}
+
+/// A retained stream, if it is within the bound and its counts agree.
+fn stream(snapshot: &ProcessStreamSnapshot, limit: u32) -> Result<StreamDelivery, BrokerFailure> {
+    let content = snapshot.content.to_bytes();
+    let kept = u64::try_from(content.len()).unwrap_or(u64::MAX);
+    let observed = snapshot.observed.get();
+    if kept > u64::from(limit) || observed < kept || snapshot.truncated != (observed > kept) {
+        return Err(BrokerFailure::Protocol(
+            "a stream's retained bytes do not agree with its bound or its counts",
+        ));
+    }
+    Ok(StreamDelivery {
+        content,
+        observed,
+        truncated: snapshot.truncated,
     })
 }
 
@@ -454,7 +548,34 @@ fn deliver(sent: &Sent, done: BrokerDone) -> Result<BrokerDelivery, BrokerFailur
             }
         }
         Sent::Reclaim => reclamation(&done.fs_reclaim.ok_or(wrong)?)?,
+        Sent::ProcessStart => started(done.process_start.ok_or(wrong)?),
+        Sent::ProcessStatus { stream_limit } => {
+            status(&done.process_status.ok_or(wrong)?, *stream_limit)?
+        }
+        Sent::ProcessKill => BrokerDelivery::ProcessKilled(done.process_kill.ok_or(wrong)?.outcome),
     })
+}
+
+/// A launch's answer.
+fn started(started: ProcessStartDone) -> BrokerDelivery {
+    BrokerDelivery::ProcessStarted(ProcessStartDelivery {
+        generation: started.generation,
+        state: started.state,
+        exit_code: started.exit_code.map(ExitCode::get),
+        signal: started.signal.map(SignalNumber::get),
+    })
+}
+
+/// A status answer, if both streams are within the bound it was decided on.
+fn status(status: &ProcessStatusDone, stream_limit: u32) -> Result<BrokerDelivery, BrokerFailure> {
+    Ok(BrokerDelivery::ProcessStatus(ProcessStatusDelivery {
+        state: status.state,
+        exit_code: status.exit_code.map(ExitCode::get),
+        signal: status.signal.map(SignalNumber::get),
+        timed_out: status.timed_out,
+        stdout: stream(&status.stdout, stream_limit)?,
+        stderr: stream(&status.stderr, stream_limit)?,
+    }))
 }
 
 /// A reclamation's answer, if its parts agree: a reason exactly when the
@@ -600,7 +721,9 @@ fn send_with_descriptors(
     let fds: Vec<_> = descriptors.iter().map(AsFd::as_fd).collect();
     let mut space = [MaybeUninit::<u8>::uninit(); rustix::cmsg_space!(ScmRights(2))];
     let mut control = SendAncillaryBuffer::new(&mut space);
-    if !control.push(SendAncillaryMessage::ScmRights(&fds)) {
+    // An operation with no descriptor (a process status or kill) sends no
+    // control message at all, not an empty one.
+    if !fds.is_empty() && !control.push(SendAncillaryMessage::ScmRights(&fds)) {
         return Err(BrokerFailure::Protocol(
             "the descriptors did not fit their control message",
         ));

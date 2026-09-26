@@ -18,23 +18,23 @@ use dwk_proto::brokerp::{BrokerRefusal, KernelNumber};
 use rustix::fs::{FileType, OFlags, Stat};
 
 /// Widen a kernel integer without a lossy cast.
-pub(super) fn widen<T: Into<u64>>(value: T) -> u64 {
+pub(crate) fn widen<T: Into<u64>>(value: T) -> u64 {
     value.into()
 }
 
 /// A stat's `(device, inode)`.
-pub(super) fn identity(st: &Stat) -> (u64, u64) {
+pub(crate) fn identity(st: &Stat) -> (u64, u64) {
     (widen(st.st_dev), widen(st.st_ino))
 }
 
 /// The pair an authorisation names.
-pub(super) fn named(device: &KernelNumber, inode: &KernelNumber) -> (u64, u64) {
+pub(crate) fn named(device: &KernelNumber, inode: &KernelNumber) -> (u64, u64) {
     (device.value(), inode.value())
 }
 
 /// The kinds a read-only descriptor may be.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum Kind {
+pub(crate) enum Kind {
     /// A regular file.
     File,
     /// A directory.
@@ -43,7 +43,7 @@ pub(super) enum Kind {
 
 /// A descriptor open for reading, and only reading, on the object `want` of
 /// kind `kind`.
-pub(super) fn readable(fd: &OwnedFd, kind: Kind, want: (u64, u64)) -> Result<Stat, BrokerRefusal> {
+pub(crate) fn readable(fd: &OwnedFd, kind: Kind, want: (u64, u64)) -> Result<Stat, BrokerRefusal> {
     let flags = rustix::fs::fcntl_getfl(fd).map_err(|_| BrokerRefusal::DescriptorNotReadable)?;
     if flags.contains(OFlags::PATH) || flags & OFlags::RWMODE != OFlags::RDONLY {
         return Err(BrokerRefusal::DescriptorNotReadable);

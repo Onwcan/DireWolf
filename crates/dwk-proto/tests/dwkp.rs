@@ -413,7 +413,7 @@ fn every_operation_that_can_be_refused_lists_the_refusal_as_a_response() {
 }
 
 #[test]
-fn only_admission_and_a_version_two_invocation_carry_an_idempotency_key() {
+fn only_admission_and_a_version_two_or_three_invocation_carry_an_idempotency_key() {
     // Admission mints authority, so a retry that is not deduplicated mints a
     // second grant. The key is Required rather than Optional because an
     // optional one leaves the kernel two paths and a retry takes the
@@ -431,8 +431,10 @@ fn only_admission_and_a_version_two_invocation_carry_an_idempotency_key() {
     // pure, so a replay has nothing to duplicate. A key on any of them would
     // be a field with no meaning, which is a field that can acquire one.
     for spec in MESSAGES {
+        // Version 3 (ADR-0045) keeps version 2's rule: process.exec and
+        // process.kill are not retry-safe either.
         let keyed = spec.schema == "direwolf.run.admit"
-            || (spec.schema == "direwolf.tool.invoke" && spec.versions.min == 2);
+            || (spec.schema == "direwolf.tool.invoke" && spec.versions.min >= 2);
         let expected = if keyed {
             Presence::Required
         } else {

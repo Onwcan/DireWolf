@@ -119,7 +119,7 @@ use dwk_proto::wire::scalar::{
 };
 use rusqlite::OptionalExtension as _;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::capability::{
     self, Capability, CapabilitySet, CapabilitySpec, DeclaredPath, PrivacyClass, UnresolvedScope,
@@ -471,20 +471,25 @@ pub(super) enum Pass {
     /// The answer: refused, replayed or admitted — recorded.
     Answered(Reply<Admission>),
     /// Nothing was written: these concrete filesystem paths must first be
-    /// resolved beneath `binding`, with no transaction open.
+    /// resolved beneath `binding`, and these executables by the executable
+    /// resolver, with no transaction open.
     Resolve {
-        /// The session's workspace root binding.
-        binding: RootBinding,
+        /// The session's workspace root binding, when paths need it.
+        binding: Option<RootBinding>,
         /// Every concrete filesystem path the admission's terms name, and
         /// whether any declaration naming it may name a vacant one.
         paths: Vec<(DeclaredPath, VacantScope)>,
+        /// Every concrete executable the admission's terms name (M4d).
+        executables: Vec<DeclaredPath>,
     },
 }
 
-/// The concrete filesystem paths an admission names, and what the resolver
-/// said about each: the input to minting, and to its audit record.
+/// The concrete filesystem paths and executables an admission names, and
+/// what the resolvers said about each: the input to minting, and to its audit
+/// record.
 struct FsTerms {
     paths: Vec<DeclaredPath>,
+    executables: Vec<DeclaredPath>,
     resolutions: Resolutions,
 }
 
@@ -546,20 +551,42 @@ pub(super) fn admit(
 
     // 5. Every concrete fs.read path any term names, with the M4a resolver's
     //    answer for it -- or, first, a pass that asks for them.
+    //    And every concrete executable, with the executable resolver's
+    //    answer (M4d).
     let probes = concrete_paths(request, &profile, &skills, active);
     let paths: Vec<DeclaredPath> = probes.iter().map(|(path, _)| path.clone()).collect();
-    let Some(resolutions) = fs_resolutions(work, session, &paths, resolved, last)? else {
-        let Some(binding) = session_root(work, session)? else {
-            return Err(AuthorityError::Invariant(
-                "a pass asked to resolve with no root to resolve beneath",
-            ));
+    let executables = concrete_executables(request, &profile, &skills, active);
+    let fs_answers = fs_resolutions(work, session, &paths, resolved, last)?;
+    let exec_answers = exec_resolutions(&executables, resolved, last);
+    let (Some(fs_answers), Some(exec_answers)) = (fs_answers.clone(), exec_answers.clone()) else {
+        let binding = match fs_answers {
+            Some(_) => None,
+            None => Some(
+                session_root(work, session)?.ok_or(AuthorityError::Invariant(
+                    "a pass asked to resolve with no root to resolve beneath",
+                ))?,
+            ),
         };
         return Ok(Pass::Resolve {
             binding,
-            paths: probes,
+            paths: if fs_answers.is_some() {
+                Vec::new()
+            } else {
+                probes
+            },
+            executables: if exec_answers.is_some() {
+                Vec::new()
+            } else {
+                executables
+            },
         });
     };
-    let fs = FsTerms { paths, resolutions };
+    let resolutions = fs_answers.with_executables(exec_answers);
+    let fs = FsTerms {
+        paths,
+        executables,
+        resolutions,
+    };
 
     // 6. Mint.
     let (granted, withheld) = mint_all(request, &profile, &skills, active, &fs.resolutions);
@@ -609,6 +636,54 @@ fn concrete_paths(
         }
     }
     paths.into_iter().collect()
+}
+
+/// Every concrete executable the request, the profile, the contributing
+/// skills and the mode ceiling name, once each, in order (M4d).
+fn concrete_executables(
+    request: &AdmitRun,
+    profile: &config::ProfileRecord,
+    skills: &[ActiveSkill],
+    active: &ActiveAuthority,
+) -> Vec<DeclaredPath> {
+    let requested: Vec<CapabilitySpec> = request
+        .requested_capabilities
+        .iter()
+        .filter_map(|text| capability::parse(text.as_str()).ok())
+        .collect();
+    let declared = skills.iter().filter_map(ActiveSkill::declaration).flatten();
+    let mut executables: BTreeSet<DeclaredPath> = BTreeSet::new();
+    for spec in requested
+        .iter()
+        .chain(&profile.declared)
+        .chain(declared)
+        .chain(&active.ceiling)
+    {
+        if let Some(executable) = scopes::concrete_executable(spec) {
+            executables.insert(executable.clone());
+        }
+    }
+    executables.into_iter().collect()
+}
+
+/// The executable resolver's answers for `executables`, or `None` when they
+/// must first be resolved (never on the last pass, where an executable with no
+/// answer is `NOT_ATTEMPTED` and covers nothing).
+fn exec_resolutions(
+    executables: &[DeclaredPath],
+    resolved: Option<&Resolutions>,
+    last: bool,
+) -> Option<scopes::Executables> {
+    if executables.is_empty() {
+        return Some(scopes::Executables::new());
+    }
+    match resolved {
+        Some(answers) if last || answers.covers_executables(executables) => {
+            Some(answers.executables().clone())
+        }
+        _ if last => Some(scopes::Executables::new()),
+        _ => None,
+    }
 }
 
 /// The session's workspace root binding, if it has one.
@@ -913,6 +988,7 @@ fn persist(
         &recorded_grant,
     );
     fields.extend(fs_path_fields(fs));
+    fields.extend(executable_fields(fs));
     work.audit(AuditEvent::RunAdmitted, fields)?;
     Ok(admission)
 }
@@ -1090,6 +1166,41 @@ fn fs_path_fields(fs: &FsTerms) -> Fields {
             u64::try_from(fs.paths.len()).unwrap_or(u64::MAX),
         )
         .int("fs_paths_unresolved", unresolved)
+}
+
+/// What the executable resolver said about each concrete executable, for the
+/// audit: the class of every refusal, and the identity of every executable
+/// resolved (M4d).
+fn executable_fields(terms: &FsTerms) -> Fields {
+    let mut unresolved: u64 = 0;
+    let mut listed = Vec::new();
+    for declared in &terms.executables {
+        let answer = terms.resolutions.executable(declared);
+        if answer.is_err() {
+            unresolved += 1;
+        }
+        if listed.len() == MAX_AUDITED_PATHS {
+            continue;
+        }
+        let mut entry = vec![("declared", Field::Text(declared.as_str().to_owned()))];
+        match answer {
+            Ok((identity, object)) => {
+                entry.push(("outcome", Field::Text("RESOLVED".to_owned())));
+                entry.push(("identity", Field::Text(identity.to_string())));
+                entry.push(("device", Field::Text(object.device().to_string())));
+                entry.push(("inode", Field::Text(object.inode().to_string())));
+            }
+            Err(why) => entry.push(("outcome", Field::Text(why.class().to_owned()))),
+        }
+        listed.push(Field::Object(entry));
+    }
+    Fields::new()
+        .list("executables", listed)
+        .int(
+            "executables_total",
+            u64::try_from(terms.executables.len()).unwrap_or(u64::MAX),
+        )
+        .int("executables_unresolved", unresolved)
 }
 
 /// Reconstruct an admission from its immutable rows.

@@ -1,0 +1,501 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:direwolf:schema:dwkp:direwolf.tool.preview:3",
+  "title": "direwolf.tool.preview v3",
+  "description": "Ask what a filesystem or process tool call's complete plan would be, without performing it.",
+  "type": "object",
+  "properties": {
+    "v": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1,
+      "x-direwolf-type": "Version"
+    },
+    "id": {
+      "type": "string",
+      "minLength": 30,
+      "maxLength": 30,
+      "pattern": "^msg_[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+      "x-direwolf-type": "MessageId",
+      "x-direwolf-format": "uuid7-id",
+      "x-direwolf-id-prefix": "msg"
+    },
+    "type": {
+      "const": "request",
+      "x-direwolf-type": "MessageType"
+    },
+    "schema": {
+      "const": "direwolf.tool.preview",
+      "x-direwolf-type": "SchemaName"
+    },
+    "schema_version": {
+      "type": "integer",
+      "minimum": 3,
+      "maximum": 3,
+      "x-direwolf-type": "Version"
+    },
+    "ts": {
+      "type": "string",
+      "maxLength": 24,
+      "x-direwolf-type": "Timestamp",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$",
+      "x-direwolf-format": "rfc3339-utc-millis"
+    },
+    "correlation_id": {
+      "type": "string",
+      "maxLength": 35,
+      "pattern": "^[a-z]{2,8}_[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+      "x-direwolf-type": "AnyId",
+      "x-direwolf-format": "uuid7-id"
+    },
+    "causation_id": {
+      "type": "string",
+      "maxLength": 35,
+      "pattern": "^[a-z]{2,8}_[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+      "x-direwolf-type": "AnyId",
+      "x-direwolf-format": "uuid7-id"
+    },
+    "session_id": {
+      "type": "string",
+      "minLength": 30,
+      "maxLength": 30,
+      "pattern": "^ses_[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+      "x-direwolf-type": "SessionId",
+      "x-direwolf-format": "uuid7-id",
+      "x-direwolf-id-prefix": "ses"
+    },
+    "run_id": {
+      "type": "string",
+      "minLength": 30,
+      "maxLength": 30,
+      "pattern": "^run_[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+      "x-direwolf-type": "RunId",
+      "x-direwolf-format": "uuid7-id",
+      "x-direwolf-id-prefix": "run"
+    },
+    "epoch": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991,
+      "x-direwolf-type": "Epoch"
+    },
+    "payload": {
+      "$ref": "#/$defs/ToolCallV3"
+    }
+  },
+  "required": ["v", "id", "type", "schema", "schema_version", "ts", "session_id", "run_id", "epoch", "payload"],
+  "additionalProperties": false,
+  "not": {
+    "anyOf": [
+      {
+        "required": ["idempotency_key"]
+      }
+    ]
+  },
+  "dependentRequired": {
+    "epoch": ["session_id"]
+  },
+  "x-direwolf-family": "dwkp",
+  "x-direwolf-message-type": "request",
+  "x-direwolf-schema": "direwolf.tool.preview",
+  "x-direwolf-schema-versions": {
+    "min": 3,
+    "max": 3
+  },
+  "x-direwolf-envelope-versions": {
+    "min": 1,
+    "max": 1
+  },
+  "x-direwolf-envelope": {
+    "correlation_id": "optional",
+    "causation_id": "optional",
+    "session_id": "required",
+    "run_id": "required",
+    "epoch": "required",
+    "idempotency_key": "forbidden"
+  },
+  "x-direwolf-id-prefix": "msg",
+  "x-direwolf-unknown-fields": "reject",
+  "x-direwolf-payload": "ToolCallV3",
+  "$defs": {
+    "ContentRevision": {
+      "type": "object",
+      "description": "A file revision, stated exactly: the SHA-256 of its whole content and\nits length. Objectively checkable; no timestamp, no version-control\nsystem, no claim the file cannot confirm.",
+      "properties": {
+        "sha256": {
+          "type": "string",
+          "maxLength": 64,
+          "x-direwolf-type": "ContentDigest",
+          "pattern": "^[0-9a-f]{64}$",
+          "description": "SHA-256 of the whole content."
+        },
+        "length": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1048576,
+          "x-direwolf-type": "PatchLength",
+          "description": "Its length in bytes."
+        }
+      },
+      "required": ["sha256", "length"],
+      "additionalProperties": false,
+      "x-direwolf-unknown-fields": "reject"
+    },
+    "FsDeleteCall": {
+      "type": "object",
+      "description": "An `fs.delete`: remove one regular file, or one empty directory.\nNever recursive.",
+      "properties": {
+        "path": {
+          "type": "string",
+          "maxLength": 384,
+          "x-direwolf-type": "WorkspacePath",
+          "pattern": "^/[^\\u0000]{0,383}$",
+          "description": "The object, in the logical namespace."
+        }
+      },
+      "required": ["path"],
+      "additionalProperties": false,
+      "x-direwolf-unknown-fields": "reject"
+    },
+    "FsListCall": {
+      "type": "object",
+      "description": "An `fs.list`: the names in one directory, not recursively.",
+      "properties": {
+        "path": {
+          "type": "string",
+          "maxLength": 384,
+          "x-direwolf-type": "WorkspacePath",
+          "pattern": "^/[^\\u0000]{0,383}$",
+          "description": "The directory, in the logical namespace."
+        },
+        "max_entries": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 512,
+          "x-direwolf-type": "ListLimit",
+          "description": "The most entries to examine, in byte order of their names."
+        }
+      },
+      "required": ["path", "max_entries"],
+      "additionalProperties": false,
+      "x-direwolf-unknown-fields": "reject"
+    },
+    "FsMoveCall": {
+      "type": "object",
+      "description": "An `fs.move`: rename one regular file to a name that does not exist,\nwithin the run's workspace. Never replaces; never copies.",
+      "properties": {
+        "source": {
+          "type": "string",
+          "maxLength": 384,
+          "x-direwolf-type": "WorkspacePath",
+          "pattern": "^/[^\\u0000]{0,383}$",
+          "description": "The file's current name."
+        },
+        "destination": {
+          "type": "string",
+          "maxLength": 384,
+          "x-direwolf-type": "WorkspacePath",
+          "pattern": "^/[^\\u0000]{0,383}$",
+          "description": "Its new name. Its parent must exist; the name itself must not."
+        }
+      },
+      "required": ["source", "destination"],
+      "additionalProperties": false,
+      "x-direwolf-unknown-fields": "reject"
+    },
+    "FsPatchCall": {
+      "type": "object",
+      "description": "An `fs.patch`: transform one regular file from its base revision to its\npost revision by typed edits, atomically. **One file**: a multi-file\npatch would need a transaction a sequence of renames is not\n(ADR-0044 §7).\n\nIf the file holds the base revision, the edits are applied and the\nresult must be the post revision. If it already holds the post\nrevision, nothing is done and the answer says so — which is what makes\na retry safe. Anything else is a conflict, never a merge.",
+      "properties": {
+        "path": {
+          "type": "string",
+          "maxLength": 384,
+          "x-direwolf-type": "WorkspacePath",
+          "pattern": "^/[^\\u0000]{0,383}$",
+          "description": "The file, in the logical namespace."
+        },
+        "base": {
+          "$ref": "#/$defs/ContentRevision",
+          "description": "What the file must hold for the edits to apply."
+        },
+        "post": {
+          "$ref": "#/$defs/ContentRevision",
+          "description": "What it holds afterwards."
+        },
+        "edits": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PatchEdit"
+          },
+          "maxItems": 64,
+          "x-direwolf-type": "BoundedList",
+          "description": "The edits."
+        }
+      },
+      "required": ["path", "base", "post", "edits"],
+      "additionalProperties": false,
+      "x-direwolf-unknown-fields": "reject"
+    },
+    "FsReadCall": {
+      "type": "object",
+      "description": "An `fs.read`: read at most `max_bytes` from the start of one regular\nfile in the run's workspace.",
+      "properties": {
+        "path": {
+          "type": "string",
+          "maxLength": 384,
+          "x-direwolf-type": "WorkspacePath",
+          "pattern": "^/[^\\u0000]{0,383}$",
+          "description": "The file, in the logical namespace: `/workspace/...`. The authority\ncanonicalises it (ADR-0042); nothing here is trusted."
+        },
+        "max_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 262144,
+          "x-direwolf-type": "ReadLimit",
+          "description": "The most bytes to read. The authority decides on this bound before\nanything is read: it is the `max_bytes` of the capability the read\nrequires and the `byte_count` policy evaluates."
+        }
+      },
+      "required": ["path", "max_bytes"],
+      "additionalProperties": false,
+      "x-direwolf-unknown-fields": "reject"
+    },
+    "FsSearchCall": {
+      "type": "object",
+      "description": "An `fs.search`: the offsets at which a literal byte string occurs in\nthe first `max_scan_bytes` of one regular file.",
+      "properties": {
+        "path": {
+          "type": "string",
+          "maxLength": 384,
+          "x-direwolf-type": "WorkspacePath",
+          "pattern": "^/[^\\u0000]{0,383}$",
+          "description": "The file, in the logical namespace."
+        },
+        "needle": {
+          "type": "string",
+          "maxLength": 2048,
+          "x-direwolf-type": "Needle",
+          "pattern": "^(?:[0-9a-f]{2})+$",
+          "description": "The bytes to find."
+        },
+        "max_scan_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 16777216,
+          "x-direwolf-type": "ScanLimit",
+          "description": "The most bytes to scan from the start of the file: the `max_bytes`\nof the `fs.read` the search requires."
+        },
+        "max_matches": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1024,
+          "x-direwolf-type": "MatchLimit",
+          "description": "The most offsets to return."
+        }
+      },
+      "required": ["path", "needle", "max_scan_bytes", "max_matches"],
+      "additionalProperties": false,
+      "x-direwolf-unknown-fields": "reject"
+    },
+    "FsStatCall": {
+      "type": "object",
+      "description": "An `fs.stat`: one object's kind, size and link count.",
+      "properties": {
+        "path": {
+          "type": "string",
+          "maxLength": 384,
+          "x-direwolf-type": "WorkspacePath",
+          "pattern": "^/[^\\u0000]{0,383}$",
+          "description": "The object, in the logical namespace."
+        }
+      },
+      "required": ["path"],
+      "additionalProperties": false,
+      "x-direwolf-unknown-fields": "reject"
+    },
+    "FsWriteCall": {
+      "type": "object",
+      "description": "An `fs.write`: replace one regular file's content, or create it, with\nexactly these bytes — atomically.",
+      "properties": {
+        "path": {
+          "type": "string",
+          "maxLength": 384,
+          "x-direwolf-type": "WorkspacePath",
+          "pattern": "^/[^\\u0000]{0,383}$",
+          "description": "The file, in the logical namespace. If it does not exist, its parent\nmust, and the plan requires `fs.create` too."
+        },
+        "content": {
+          "type": "string",
+          "maxLength": 524288,
+          "x-direwolf-type": "HexContent",
+          "pattern": "^(?:[0-9a-f]{2})*$",
+          "description": "The complete new content. Lossless bytes; at most\n`MAX_FS_WRITE_BYTES`."
+        }
+      },
+      "required": ["path", "content"],
+      "additionalProperties": false,
+      "x-direwolf-unknown-fields": "reject"
+    },
+    "PatchEdit": {
+      "type": "object",
+      "description": "One edit of an `fs.patch`, against the **base** revision's bytes:\nremove `delete` bytes at `offset` and put `insert` in their place.",
+      "properties": {
+        "offset": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1048576,
+          "x-direwolf-type": "PatchLength",
+          "description": "Where, in the base revision."
+        },
+        "delete": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1048576,
+          "x-direwolf-type": "PatchLength",
+          "description": "How many base bytes to remove."
+        },
+        "insert": {
+          "type": "string",
+          "maxLength": 524288,
+          "x-direwolf-type": "HexContent",
+          "pattern": "^(?:[0-9a-f]{2})*$",
+          "description": "The bytes that replace them."
+        }
+      },
+      "required": ["offset", "delete", "insert"],
+      "additionalProperties": false,
+      "x-direwolf-unknown-fields": "reject"
+    },
+    "ProcessExecCall": {
+      "type": "object",
+      "description": "A `process.exec`: launch one native executable with these arguments.\n\nThe request names the executable by an absolute host path. The\nauthority resolves it — following a bounded chain of symlinks to the\nfinal object — hashes the file it opened, and decides on that identity;\n`argv[0]` is the canonical path it resolved to, never a runtime choice\n(ADR-0045 §§4, 7).",
+      "properties": {
+        "executable": {
+          "type": "string",
+          "maxLength": 4096,
+          "x-direwolf-type": "HostPath",
+          "pattern": "^/[^\\u0000]{0,4095}$",
+          "description": "The executable, as an absolute host path."
+        },
+        "args": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 8192,
+            "x-direwolf-type": "ProcessArg",
+            "pattern": "^[^\\u0000]*$"
+          },
+          "maxItems": 128,
+          "x-direwolf-type": "BoundedList",
+          "description": "The arguments after `argv[0]`, each passed as exactly its bytes."
+        },
+        "cwd": {
+          "type": "string",
+          "maxLength": 384,
+          "x-direwolf-type": "WorkspacePath",
+          "pattern": "^/[^\\u0000]{0,383}$",
+          "description": "The working directory, in the logical workspace namespace. The\nworkspace root when absent."
+        }
+      },
+      "required": ["executable", "args"],
+      "additionalProperties": false,
+      "x-direwolf-unknown-fields": "reject"
+    },
+    "ProcessKillCall": {
+      "type": "object",
+      "description": "A `process.kill`: end one process this run launched.",
+      "properties": {
+        "process_id": {
+          "type": "string",
+          "minLength": 30,
+          "maxLength": 30,
+          "pattern": "^prc_[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+          "x-direwolf-type": "ProcessId",
+          "x-direwolf-format": "uuid7-id",
+          "x-direwolf-id-prefix": "prc",
+          "description": "The handle its launch returned."
+        }
+      },
+      "required": ["process_id"],
+      "additionalProperties": false,
+      "x-direwolf-unknown-fields": "reject"
+    },
+    "ProcessStatusCall": {
+      "type": "object",
+      "description": "A `process.status`: the state and retained output of one process this\nrun launched.",
+      "properties": {
+        "process_id": {
+          "type": "string",
+          "minLength": 30,
+          "maxLength": 30,
+          "pattern": "^prc_[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+          "x-direwolf-type": "ProcessId",
+          "x-direwolf-format": "uuid7-id",
+          "x-direwolf-id-prefix": "prc",
+          "description": "The handle its launch returned."
+        }
+      },
+      "required": ["process_id"],
+      "additionalProperties": false,
+      "x-direwolf-unknown-fields": "reject"
+    },
+    "ToolCallV3": {
+      "type": "object",
+      "description": "A tool call: **exactly one** of the eleven typed members. The payload\nof `direwolf.tool.invoke` and `direwolf.tool.preview` at version 3.",
+      "properties": {
+        "fs_read": {
+          "$ref": "#/$defs/FsReadCall",
+          "description": "Read bytes from one regular file."
+        },
+        "fs_list": {
+          "$ref": "#/$defs/FsListCall",
+          "description": "List one directory."
+        },
+        "fs_search": {
+          "$ref": "#/$defs/FsSearchCall",
+          "description": "Search one regular file for a literal byte string."
+        },
+        "fs_stat": {
+          "$ref": "#/$defs/FsStatCall",
+          "description": "Report one object's metadata."
+        },
+        "fs_write": {
+          "$ref": "#/$defs/FsWriteCall",
+          "description": "Replace or create one regular file."
+        },
+        "fs_patch": {
+          "$ref": "#/$defs/FsPatchCall",
+          "description": "Apply typed edits to one regular file."
+        },
+        "fs_move": {
+          "$ref": "#/$defs/FsMoveCall",
+          "description": "Rename one regular file to a vacant name."
+        },
+        "fs_delete": {
+          "$ref": "#/$defs/FsDeleteCall",
+          "description": "Remove one regular file or empty directory."
+        },
+        "process_exec": {
+          "$ref": "#/$defs/ProcessExecCall",
+          "description": "Launch one checked native executable."
+        },
+        "process_status": {
+          "$ref": "#/$defs/ProcessStatusCall",
+          "description": "Observe one process this run launched."
+        },
+        "process_kill": {
+          "$ref": "#/$defs/ProcessKillCall",
+          "description": "End one process this run launched."
+        }
+      },
+      "required": [],
+      "additionalProperties": false,
+      "x-direwolf-unknown-fields": "reject",
+      "minProperties": 1,
+      "maxProperties": 1,
+      "x-direwolf-check": {
+        "kind": "exactly-one",
+        "members": ["fs_read", "fs_list", "fs_search", "fs_stat", "fs_write", "fs_patch", "fs_move", "fs_delete", "process_exec", "process_status", "process_kill"]
+      }
+    }
+  }
+}

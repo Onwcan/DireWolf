@@ -625,7 +625,7 @@ fn reclaimed(
     holds: Option<StagingHolds>,
     held: Option<(u64, u64)>,
 ) -> OutcomeResult {
-    OutcomeResult::Done(BrokerDone::reclaim(FsReclaimDone {
+    OutcomeResult::done(BrokerDone::reclaim(FsReclaimDone {
         state,
         holds,
         held_device: held.map(|h| KernelNumber::from_u64(h.0)),

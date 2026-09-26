@@ -142,6 +142,38 @@ impl ToolRequest {
         }
     }
 
+    /// A version-3 call naming a filesystem tool (M4d), or `None` if it names
+    /// a process tool. The call is version 2's, member for member.
+    #[must_use]
+    pub fn v3(
+        call: &dwk_proto::dwkp::procops::ToolCallV3,
+        key: Option<IdempotencyKey>,
+    ) -> Option<Self> {
+        let fs = ToolCall {
+            fs_read: call.fs_read.clone(),
+            fs_list: call.fs_list.clone(),
+            fs_search: call.fs_search.clone(),
+            fs_stat: call.fs_stat.clone(),
+            fs_write: call.fs_write.clone(),
+            fs_patch: call.fs_patch.clone(),
+            fs_move: call.fs_move.clone(),
+            fs_delete: call.fs_delete.clone(),
+        };
+        let named = fs.fs_read.is_some()
+            || fs.fs_list.is_some()
+            || fs.fs_search.is_some()
+            || fs.fs_stat.is_some()
+            || fs.fs_write.is_some()
+            || fs.fs_patch.is_some()
+            || fs.fs_move.is_some()
+            || fs.fs_delete.is_some();
+        named.then_some(Self {
+            version: ToolVersion::V3,
+            call: fs,
+            key,
+        })
+    }
+
     /// The version it arrived in.
     #[must_use]
     pub const fn version(&self) -> ToolVersion {
@@ -360,6 +392,8 @@ pub(super) const fn failure_reason(failure: BrokerFailure) -> FsFailureReason {
             BrokerRefusal::WriteDenied => FsFailureReason::WriteDenied,
             BrokerRefusal::AttributesNotPreserved => FsFailureReason::AttributesNotPreserved,
             BrokerRefusal::SharedDirectory => FsFailureReason::SharedDirectory,
+            // The process refusals (M4d) answer a process operation; for a
+            // filesystem operation they are the broker misbehaving.
             BrokerRefusal::ChannelMismatch
             | BrokerRefusal::DescriptorCount
             | BrokerRefusal::DescriptorNotRegular
@@ -370,7 +404,16 @@ pub(super) const fn failure_reason(failure: BrokerFailure) -> FsFailureReason {
             | BrokerRefusal::ReadFailed
             | BrokerRefusal::Unsupported
             | BrokerRefusal::DirectoryTooLarge
-            | BrokerRefusal::IoError => FsFailureReason::BrokerExecutionError,
+            | BrokerRefusal::IoError
+            | BrokerRefusal::DigestMismatch
+            | BrokerRefusal::ExecutableUntrusted
+            | BrokerRefusal::ExecSetupFailed
+            | BrokerRefusal::ExecFailed
+            | BrokerRefusal::InheritedDescriptor
+            | BrokerRefusal::ProcessTableFull
+            | BrokerRefusal::ProcessIdInUse
+            | BrokerRefusal::UnknownProcess
+            | BrokerRefusal::StaleGeneration => FsFailureReason::BrokerExecutionError,
         },
         BrokerFailure::Indeterminate(_) => FsFailureReason::BrokerExecutionError,
     }
@@ -422,16 +465,36 @@ fn run_is_live(
     asked: &Asked<'_>,
     active: &ActiveAuthority,
 ) -> Result<bool, AuthorityError> {
+    run_is_held(
+        work,
+        asked.caller,
+        asked.session,
+        asked.run,
+        asked.epoch,
+        active,
+    )
+}
+
+/// Whether `caller` holds `run`: active, theirs, this session's and fenced to
+/// `epoch`, under the activation in force. The process tools' check too.
+pub(super) fn run_is_held(
+    work: &Work<'_>,
+    caller: &CallerContext,
+    session: &SessionId,
+    run: &RunId,
+    epoch: Epoch,
+    active: &ActiveAuthority,
+) -> Result<bool, AuthorityError> {
     let activation: Option<i64> = work.db(work
         .tx
         .query_row(
             "SELECT activation_id FROM run WHERE run_id = ?1 AND session_id = ?2 \
                  AND subject = ?3 AND epoch = ?4 AND state = 'ACTIVE'",
             rusqlite::params![
-                asked.run.as_str(),
-                asked.session.as_str(),
-                asked.caller.subject().storage_key(),
-                to_sql(asked.epoch.get())?
+                run.as_str(),
+                session.as_str(),
+                caller.subject().storage_key(),
+                to_sql(epoch.get())?
             ],
             |row| row.get(0),
         )
@@ -455,7 +518,8 @@ fn key_bound(
         .tx
         .query_row(
             "SELECT invocation_id FROM tool_idempotency WHERE subject = ?1 AND session_id = ?2 \
-             AND idempotency_key = ?3",
+             AND idempotency_key = ?3 UNION ALL SELECT invocation_id FROM process_idempotency \
+             WHERE subject = ?1 AND session_id = ?2 AND idempotency_key = ?3 LIMIT 1",
             rusqlite::params![
                 asked.caller.subject().storage_key(),
                 asked.session.as_str(),
@@ -480,7 +544,7 @@ fn standing(
     if !run_is_live(work, asked, active)? {
         return Ok(Some(FsRefusalReason::UnknownRun));
     }
-    if asked.operation == ToolOperation::ToolInvoke && asked.request.version() == ToolVersion::V2 {
+    if asked.operation == ToolOperation::ToolInvoke && asked.request.version() != ToolVersion::V1 {
         let Some(key) = asked.request.key() else {
             return Err(AuthorityError::Invariant(
                 "a version-2 invocation arrived without an idempotency key",
@@ -503,6 +567,7 @@ fn base_fields(asked: &Asked<'_>, tool: FsTool) -> Fields {
             match asked.request.version() {
                 ToolVersion::V1 => 1,
                 ToolVersion::V2 => 2,
+                ToolVersion::V3 => 3,
             },
         )
         .text("subject", asked.caller.subject().storage_key())

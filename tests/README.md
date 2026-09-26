@@ -106,6 +106,34 @@ experiment; and `fs_ops_foreign.rs` needs three identities and a write group
 evidence task selects it by name. Locally the three-identity half is NOT
 EXERCISED; CI's Linux job creates the broker user and the group.
 
+**Process execution tests (M4d)** are the evidence behind
+`make process-broker-evidence` ([ADR-0045](../docs/adr/0045-m4d-process-execution-broker.md)), in four labelled
+kinds. **Production floor:** `crates/dwkd-authority/tests/process_production.rs`
+drives the released daemons and every shipped profile: every launch is denied,
+zero broker connections, no process rows. **Real execution:**
+`crates/dwkd-broker/src/process/tests.rs` drives the broker's process module
+and the real launch helper against real targets — argv literal, the empty
+environment, limits, descriptors, stdin, `no_new_privs`, every re-proof
+refusal, the race campaign (R1–R9, R12), output bounds and deadlock, kill,
+the wall clock, the table, leaks — and
+`crates/dwkd-broker/tests/private_protocol.rs` the released broker over its
+socket: descriptor counts and order, crash points around the launch,
+restart and generations. **Fake broker:**
+`crates/dwkd-authority/src/state/process/tests.rs` drives the authority after
+the floor (a `#[cfg(test)]` approval stand-in) against an in-process fake —
+durable order, idempotency, `UNKNOWN`, lookups, `argv_allowlist`, R10–R11 and
+the crash campaigns E1–E8, K1–K6, S1–S3; it executes nothing and says so.
+**Hygiene override:** `crates/dwkd-authority/tests/hygiene_override.rs` runs the
+real `git` and `python3` to show the environment form of
+`workspace_exec_hygiene` is bypassed. `resource/exec/argv.rs` prints the argv
+classifier's cases; `crates/dwk-proto/tests/dwkp_v3.rs` fits the largest
+frames. `process_foreign.rs` needs three identities (`DW_BROKER_AS`,
+`DW_PEER_AS`) and is `#[ignore]`d unless the task selects it by name. Every
+case must print its `PROC-EVIDENCE` line, and a suite that ran no test fails
+the task. The broker's tests need a clean descriptor table — run them through
+`make`, which closes inherited descriptors. Locally the three-identity half is
+NOT EXERCISED; CI's Linux job creates the broker user.
+
 **Brokered `fs.read` tests (M4b)** are real-process evidence for the private
 channel ([ADR-0043](../docs/adr/0043-m4b-private-broker-channel-and-brokered-fs-read.md)):
 `crates/dwkd-authority/tests/broker_fs_read.rs` drives the released authority and

@@ -154,7 +154,7 @@ pub(super) fn search(authorisation: &FsSearchAuthorisation, file: &OwnedFd) -> O
     match scan(&matcher, bound, max, |window, offset| {
         rustix::io::pread(file, window, offset)
     }) {
-        Some(done) => OutcomeResult::Done(BrokerDone::search(done)),
+        Some(done) => OutcomeResult::done(BrokerDone::search(done)),
         None => OutcomeResult::Refused(BrokerRefusal::ReadFailed),
     }
 }

@@ -432,6 +432,35 @@ impl Setup {
         Self::fsops_with(tag, FSOPS_POLICY)
     }
 
+    /// The M4d fixture (ADR-0045): the M4b tree, `policy_text` as the
+    /// operator policy, an `operator` agent profile declaring the three
+    /// process verbs for every executable, and a mode ceiling that allows
+    /// them.
+    pub(crate) fn process(tag: &str, policy_text: &str) -> Self {
+        let mut ceiling = ceiling();
+        for verb in ["process.exec", "process.inspect", "process.signal"] {
+            ceiling.push(format!("{verb}:*"));
+        }
+        Self::build(tag, policy_text, "m4d", ceiling, |authority| {
+            authority
+                .operator()
+                .install_agent_profile(&super::state_support::profile(
+                    "operator",
+                    &["process.exec:*", "process.inspect:*", "process.signal:*"],
+                    &[],
+                    dwkd_authority::capability::PrivacyClass::Any,
+                ))
+                .expect("operator installs");
+        })
+    }
+
+    /// The same fixture, its policy file composed as `profile` (a shipped
+    /// pack's `meta.name`).
+    pub(crate) fn with_profile_name(mut self, profile: &'static str) -> Self {
+        self.profile = profile;
+        self
+    }
+
     /// The M4c fixture under another policy.
     pub(crate) fn fsops_with(tag: &str, policy_text: &str) -> Self {
         Self::build(tag, policy_text, "m4c", fsops_ceiling(), |authority| {
@@ -683,6 +712,28 @@ impl Runtime {
             run = self.run.as_str(),
             epoch = self.epoch,
         )
+    }
+
+    /// A version-3 tool request (M4d): `payload` is the `ToolCallV3`
+    /// object's JSON text; an invocation carries `key`.
+    pub(crate) fn v3_json(&mut self, schema: &str, payload: &str, key: Option<&str>) -> String {
+        self.v2_json(schema, payload, key).replacen(
+            r#""schema_version":2"#,
+            r#""schema_version":3"#,
+            1,
+        )
+    }
+
+    /// Version-3 `ToolInvoke` with idempotency key `key`.
+    pub(crate) fn invoke_v3(&mut self, payload: &str, key: &str) -> DwkpMessage {
+        let text = self.v3_json("direwolf.tool.invoke", payload, Some(key));
+        self.client.call(&decode(&text))
+    }
+
+    /// Version-3 `CanonicalPreview`.
+    pub(crate) fn preview_v3(&mut self, payload: &str) -> DwkpMessage {
+        let text = self.v3_json("direwolf.tool.preview", payload, None);
+        self.client.call(&decode(&text))
     }
 
     /// Version-2 `ToolInvoke` with idempotency key `key`.

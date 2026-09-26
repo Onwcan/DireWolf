@@ -273,9 +273,11 @@ def test_only_the_state_layer_reaches_the_filesystem_resolver(
     assert rule in violation_rules
     findings = [f for f in check_text(load(VIOLATIONS, RULES)) if f.rule == rule]
     assert sorted((f.path, f.line) for f in findings) == [
+        ("crates/dwkd-authority/src/policy/exec_lookup.rs", 5),
+        ("crates/dwkd-authority/src/policy/exec_lookup.rs", 8),
         ("crates/dwkd-authority/src/policy/resolve.rs", 6),
         ("crates/dwkd-authority/src/policy/resolve.rs", 9),
-    ], "the import and the call; never the doc comment naming them"
+    ], "the imports and the calls, of both resolvers; never the doc comments naming them"
 
 
 def test_the_nfc_crate_is_confined_to_the_name_checker(violation_rules: list[str]) -> None:
@@ -329,19 +331,20 @@ def test_a_second_listener_is_rejected(violation_rules: list[str]) -> None:
 
 
 def test_the_broker_grows_no_authority_and_no_other_input(violation_rules: list[str]) -> None:
-    """TX013 (M4b): DWKP dispatch, a store, a key library, `kernel.db`, a
-    process and a TCP socket in the broker are each findings -- and the
-    broker's reviewed listener is not."""
+    """TX013 (M4b): DWKP dispatch, a store, a key library, `kernel.db`, `unsafe`
+    and a TCP socket in the broker are each findings -- and the broker's
+    reviewed listener is not. Starting a process is TX021-TX023's (M4d)."""
     rule = "TX013-the-broker-decides-nothing-records-nothing-and-reaches-nothing"
     assert rule in violation_rules
     findings = [f for f in check_text(load(VIOLATIONS, RULES)) if f.rule == rule]
     texts = " ".join(f.message for f in findings)
-    for needle in ("dwkp", "rusqlite", "kernel", "Command", "TcpListener", "hmac"):
+    for needle in ("dwkp", "rusqlite", "kernel", "unsafe", "TcpListener", "hmac"):
         assert needle in texts, needle
     assert {f.path for f in findings} == {
         "crates/dwkd-broker/src/dispatch.rs",
         "crates/dwkd-broker/src/tcp.rs",
         "crates/dwkd-broker/src/hash.rs",
+        "crates/dwkd-broker/src/process/shell.rs",
     }
     # A digest is TX018's, not TX013's.
     assert not any("sha2" in f.message for f in findings)
@@ -406,13 +409,17 @@ def test_the_broker_changes_names_only_relative_to_held_directories(
 
 def test_the_cognition_side_cannot_name_the_private_channel(violation_rules: list[str]) -> None:
     """TX016 (M4b): the runtime or the CLI naming the private protocol's module
-    or its message kinds is a finding."""
+    or its message kinds is a finding -- and (M4d) its process messages and the
+    broker's launch-helper mode."""
     rule = "TX016-the-cognition-side-cannot-name-the-private-channel"
     assert rule in violation_rules
     assert _paths(rule) == {
         "crates/direwolf-cli/src/helper.rs",
         "runtime/src/direwolf/broker_reach.py",
     }
+    texts = " ".join(m for p, _, m in _findings(rule) if p.endswith("broker_reach.py"))
+    for needle in ("broker.fs_read", "broker.process_start", "exec-helper"):
+        assert needle in texts, needle
 
 
 def test_a_new_declaration_means_only_what_the_resolver_found(
@@ -429,11 +436,114 @@ def test_a_new_declaration_means_only_what_the_resolver_found(
 
 
 def test_the_authority_starts_no_process(violation_rules: list[str]) -> None:
-    """TX010: no `Command`, and no user switching, anywhere in the authority."""
+    """TX010: no `Command`, and no user switching, anywhere in the authority --
+    but the argv classifier, which spells runner names as data, is exempt by
+    name, and TX020 binds it instead."""
     rule = "TX010-the-authority-executes-nothing"
     assert rule in violation_rules
     findings = [f for f in check_text(load(VIOLATIONS, RULES)) if f.rule == rule]
     assert all("FIXTURE" not in f.message for f in findings)
+    assert _paths(rule) == {
+        "crates/dwkd-authority/src/escalate.rs",
+        "crates/dwkd-authority/src/signal.rs",
+        "crates/dwkd-authority/src/resource/exec/run.rs",
+    }, sorted(_paths(rule))
+    signal = {line for p, line, _ in _findings(rule) if p.endswith("signal.rs")}
+    assert signal == {5, 10, 13}, sorted(signal)
+
+
+# --- M4d: process execution (ADR-0045) --------------------------------------
+
+
+def _findings(rule: str) -> list[tuple[str, int, str]]:
+    return sorted(
+        (f.path, f.line, f.message) for f in check_text(load(VIOLATIONS, RULES)) if f.rule == rule
+    )
+
+
+def test_the_executable_module_runs_nothing(violation_rules: list[str]) -> None:
+    """TX020: `Command`, `spawn` or a raw exec anywhere in the authority's
+    executable module is a finding -- including the argv classifier, which
+    TX010 exempts for the runner names it spells."""
+    rule = "TX020-the-authority-resolves-an-executable-and-runs-nothing"
+    assert rule in violation_rules
+    assert _paths(rule) == {
+        "crates/dwkd-authority/src/resource/exec/run.rs",
+        "crates/dwkd-authority/src/resource/exec/argv.rs",
+    }, sorted(_paths(rule))
+    assert all("FIXTURE" not in m for _, _, m in _findings(rule))
+
+
+def test_the_broker_starts_a_process_only_in_its_launch_module(
+    violation_rules: list[str],
+) -> None:
+    """TX021: `Command` anywhere in the broker but `process/launch.rs` is a
+    finding; the fixture's `launch.rs`, which spawns the helper, is not."""
+    rule = "TX021-the-broker-starts-a-process-in-one-place"
+    assert rule in violation_rules
+    assert _paths(rule) == {
+        "crates/dwkd-broker/src/dispatch.rs",
+        "crates/dwkd-broker/src/process/shell.rs",
+    }, sorted(_paths(rule))
+
+
+def test_no_shell_no_pre_exec_no_raw_exec_no_inherited_environment(
+    violation_rules: list[str],
+) -> None:
+    """TX022: a shell literal, `pre_exec`, `libc`, a hand-rolled `fork`, an
+    exec through `/proc/self/fd/<n>` and an inherited environment are each
+    findings, line by line; `clone()` and the `use nix as _;` beside them are
+    not, and neither is the doc comment that names them all."""
+    rule = "TX022-no-shell-no-pre-exec-no-raw-exec-no-inherited-environment"
+    assert rule in violation_rules
+    shell = "crates/dwkd-broker/src/process/shell.rs"
+    findings = [(p, line, m) for p, line, m in _findings(rule) if p == shell]
+    lines = {line for _, line, _ in findings}
+    assert lines == {8, 13, 17, 21, 25}, sorted(lines)
+    texts = " ".join(m for _, _, m in findings)
+    for needle in ("/bin/sh", "pre_exec", "libc", "/proc/self/fd/", "envs"):
+        assert needle in texts, needle
+    assert _paths(rule) == {"crates/dwkd-broker/src/dispatch.rs", shell}, sorted(_paths(rule))
+
+
+def test_only_the_launch_helper_executes(violation_rules: list[str]) -> None:
+    """TX023: `execveat` or `nix` outside the launch helper is a finding; the
+    fixture's `process/helper.rs`, which does both, is not, and a `use nix as
+    _;` acknowledgement is not."""
+    rule = "TX023-only-the-launch-helper-executes"
+    assert rule in violation_rules
+    findings = _findings(rule)
+    assert {(p, line) for p, line, _ in findings} == {
+        ("crates/dwkd-broker/src/process/shell.rs", 29),
+    }
+    texts = " ".join(m for _, _, m in findings)
+    assert "execveat" in texts and "nix" in texts
+
+
+def test_a_stored_executable_identity_is_read_in_one_module(
+    violation_rules: list[str],
+) -> None:
+    """TX024: naming the grammar-only reader of a stored executable identity
+    outside `state/scopes.rs`, or minting an identity outside the resolver,
+    is a finding; the resolver's own file and the one re-reader are not."""
+    rule = "TX024-an-executable-identity-is-minted-by-the-resolver"
+    assert rule in violation_rules
+    assert [(p, line) for p, line, _ in _findings(rule)] == [
+        ("crates/dwkd-authority/src/state/stored_exec.rs", 6),
+        ("crates/dwkd-authority/src/state/stored_exec.rs", 13),
+    ]
+
+
+def test_the_m4d_exemptions_name_files_not_directories() -> None:
+    """The reviewed M4d files are exempt by name; a sibling dropped beside
+    them is not reviewed by being there."""
+    import tomllib
+
+    raw = tomllib.loads(RULES.read_text(encoding="utf-8"))
+    for rule in raw["text_rules"]:
+        for exempt in rule.get("exempt_paths", []):
+            if "/process/" in exempt or "/resource/exec/" in exempt:
+                assert exempt.endswith(".rs"), (rule["id"], exempt)
 
 
 def test_a_helper_crate_shared_by_both_daemons_is_rejected(violation_rules: list[str]) -> None:

@@ -18,6 +18,9 @@ use crate::dwkp::messages::{
     LeaseRelease, ProtocolErrorPayload, ReleaseRun, RunGrant, ToolDenial, ToolFailure, ToolInvoke,
     ToolRefusal, ToolResult,
 };
+use crate::dwkp::procops::{
+    CanonicalPreviewResultV3, ToolCallV3, ToolDenialV3, ToolFailureV3, ToolRefusalV3, ToolResultV3,
+};
 use crate::dwkp::registry::{self, OPERATIONS};
 use crate::envelope::{EnvelopeRules, MessageType, Presence, field_schema};
 use crate::events::{self, LeaseAcquired};
@@ -87,6 +90,12 @@ pub fn payload_schema(name: &str, defs: &mut Defs) -> Option<Value> {
         "CanonicalPreviewResultV2" => CanonicalPreviewResultV2::schema(defs),
         "ToolRefusalV2" => ToolRefusalV2::schema(defs),
         "ToolFailureV2" => ToolFailureV2::schema(defs),
+        "ToolCallV3" => ToolCallV3::schema(defs),
+        "ToolResultV3" => ToolResultV3::schema(defs),
+        "ToolDenialV3" => ToolDenialV3::schema(defs),
+        "CanonicalPreviewResultV3" => CanonicalPreviewResultV3::schema(defs),
+        "ToolRefusalV3" => ToolRefusalV3::schema(defs),
+        "ToolFailureV3" => ToolFailureV3::schema(defs),
         "Ack" => Ack::schema(defs),
         "ProtocolErrorPayload" => ProtocolErrorPayload::schema(defs),
         "ClientError" => dwcp::ClientError::schema(defs),

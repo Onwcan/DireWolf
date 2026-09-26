@@ -59,19 +59,33 @@
 //! [`PathComponent`] and a [`CanonicalPath`], and it does so as a submodule, so
 //! the constructors below stay `pub(in crate::resource)`.
 //!
-//! The executable half — `(resolved path, sha256)` — is M4d's; nothing
-//! constructs an [`ExecutableIdentity`] yet.
+//! # The executable resolver (M4d)
+//!
+//! [`exec`] is the canonicaliser for executables
+//! ([ADR-0045](../../../../../docs/adr/0045-m4d-process-execution-broker.md)):
+//! an absolute host path walked from `/` one component at a time, symbolic
+//! links followed to a bounded depth and spliced, the final object required to
+//! be a trusted regular ELF file, hashed through the descriptor that was
+//! checked, and the canonical path re-walked following nothing. It is the only
+//! production code that constructs an [`ExecutableIdentity`] from a resource,
+//! and it does so as a submodule, so that constructor stays
+//! `pub(in crate::resource)` too.
 //!
 //! # What this module deliberately does not do
 //!
-//! This file touches no filesystem; the I/O lives in [`fs`], and only there.
+//! This file touches no filesystem; the I/O lives in [`fs`] and [`exec`], and
+//! only there.
 //! TX003 covers `capability/`, TX005 keeps the store out of everything here,
 //! and TX011 lets only `crate::state` name the resolver.
 //!
 //! [`CAPABILITIES.md`]: ../../../../../docs/CAPABILITIES.md
 
+pub mod exec;
 pub mod fs;
 
+/// The checked executable and working directory a `process.exec` hands the
+/// broker (M4d), re-exported for the same reason.
+pub use exec::ExecHandoff;
 /// The checked, readable file an `fs.read` hands the broker (M4b). Re-exported
 /// here so the broker channel can hold one without naming the resolver
 /// (TX011): it receives a result, never the means to produce one.
@@ -251,26 +265,19 @@ impl fmt::Display for CanonicalPath {
 ///
 /// Constructors are in-module for the same reason the rest are: a digest is
 /// half of an executable's identity, and nothing in M3b's production code needs
-/// to make one. M4 will, when it has hashed a file it opened.
+/// to make one. M4d's executable resolver does, when it has hashed a file it
+/// opened.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Sha256Digest([u8; 32]);
 
 impl Sha256Digest {
-    /// From raw bytes.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "M4's canonicaliser is the first caller")
-    )]
+    /// From raw bytes: the digest the executable resolver computed.
     pub(in crate::resource) const fn from_bytes(bytes: [u8; 32]) -> Self {
         Self(bytes)
     }
 
     /// From sixty-four lowercase hex characters. Uppercase is refused: one
-    /// digest, one spelling.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "M4's canonicaliser is the first caller")
-    )]
+    /// digest, one spelling. The stored-identity reader's (M4d).
     pub(in crate::resource) fn parse_hex(text: &str) -> Option<Self> {
         if text.len() != 64 {
             return None;
@@ -295,10 +302,6 @@ impl Sha256Digest {
 /// One lowercase hex digit, as a nibble. Operates on bytes: hex is ASCII by
 /// definition, so there is no character to convert and no conversion to get
 /// wrong.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "reached only through parse_hex")
-)]
 fn hex_digit(byte: u8) -> Option<u8> {
     match byte {
         b'0'..=b'9' => Some(byte - b'0'),
@@ -371,10 +374,8 @@ pub struct ExecutableIdentity {
 impl ExecutableIdentity {
     /// Pair a resolved path with the hash of what was found there. In-module
     /// only: pairing two values is exactly the forgery this visibility stops.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "M4's canonicaliser is the first caller")
-    )]
+    /// Its callers are the executable resolver and the stored-identity reader
+    /// ([`exec`]).
     pub(in crate::resource) const fn new(path: CanonicalPath, digest: Sha256Digest) -> Self {
         Self { path, digest }
     }
@@ -413,7 +414,7 @@ impl fmt::Display for ExecutableIdentity {
 ///
 /// Everything here is **synthetic**. It shows the comparison is right given an
 /// identity. It shows nothing whatever about deriving one from a real resource,
-/// which is M4's and does not exist.
+/// which is [`super::exec`]'s and is tested there against real files.
 #[cfg(test)]
 pub(crate) mod synthetic {
     use super::{CanonicalPath, ExecutableIdentity, Sha256Digest};

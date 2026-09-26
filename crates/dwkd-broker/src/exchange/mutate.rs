@@ -99,7 +99,7 @@ use crate::crash;
 
 fn outcome(result: Result<BrokerDone, Stop>) -> OutcomeResult {
     match result {
-        Ok(done) => OutcomeResult::Done(done),
+        Ok(done) => OutcomeResult::done(done),
         Err(Stop::Refused(why)) => OutcomeResult::Refused(why),
         Err(Stop::Indeterminate(why)) => OutcomeResult::Indeterminate(why),
     }
@@ -528,7 +528,7 @@ pub(super) fn patch(
         return OutcomeResult::Refused(BrokerRefusal::Conflict);
     };
     if is(&current, &authorisation.post) {
-        return OutcomeResult::Done(BrokerDone::patch(FsPatchDone {
+        return OutcomeResult::done(BrokerDone::patch(FsPatchDone {
             outcome: PatchOutcome::AlreadyApplied,
             debris: false,
         }));

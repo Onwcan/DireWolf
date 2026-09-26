@@ -51,7 +51,7 @@ use rusqlite::Connection;
 pub(super) const APPLICATION_ID: i64 = 0x4457_4B44;
 
 /// The schema version this build creates and understands.
-pub(super) const CURRENT_VERSION: i64 = 4;
+pub(super) const CURRENT_VERSION: i64 = 5;
 
 /// Schema version 1, the first. Static text: nothing in it is assembled from a
 /// value, and every value the authority stores is bound as a parameter.
@@ -655,6 +655,191 @@ CREATE TRIGGER tool_staging_no_delete BEFORE DELETE ON tool_staging
 BEGIN SELECT RAISE(ABORT, 'a staging record is never deleted'); END;
 ";
 
+/// Schema version 5 (M4d, ADR-0045 §16): the process tools' own ledger, the
+/// processes the authority launched, and one idempotency namespace across
+/// both ledgers.
+///
+/// **The filesystem ledger is not touched.** `tool_invocation`,
+/// `tool_idempotency` and `tool_staging` keep their version-4 definitions
+/// byte for byte: rebuilding a table other tables reference would make the
+/// migrated schema's text depend on how SQLite rewrites references, and the
+/// store's schema is verified exactly. The process tools get their own tables
+/// instead.
+///
+/// * `process_invocation` — one row per `process.exec`, `process.status` or
+///   `process.kill` whose plan was allowed, written with the **intent**,
+///   before any descriptor that could launch or signal exists. Its rules are
+///   the filesystem ledger's: the intent is fixed, it ends once, and the two
+///   ambiguous endings are kept apart — `INTERRUPTED` only for
+///   `process.status`, which has no effect; `UNKNOWN` only for `process.exec`
+///   and `process.kill`, which do. `process.exec` and `process.kill` are
+///   `NON_RETRYABLE`, `process.status` `RETRY_SAFE`, and a `CHECK` ties the
+///   class to the tool.
+/// * `tool_process` — one row per launch, written in the launch intent's
+///   transaction (`LAUNCHING`): the stored executable identity (canonical
+///   path, digest, device, inode), the working directory, the argument count
+///   and digest — never the arguments themselves — the argv classification,
+///   the environment profile and the output bound. The identity is immutable;
+///   the broker generation is written once, when a launch is confirmed; the
+///   state moves only forward (`LAUNCHING` to `RUNNING`, `EXITED`,
+///   `SIGNALED`, `FAILED` or `UNKNOWN`; `RUNNING` to `EXITED`, `SIGNALED` or
+///   `UNOBSERVABLE`); nothing is deleted. A status or a kill may name only a
+///   process of its own run, and a launch only a process id nobody holds.
+/// * `process_idempotency` — a version-3 process invocation's key, as
+///   `tool_idempotency` binds a filesystem invocation's. A key is one
+///   namespace across both: a trigger on each table refuses a key the other
+///   already holds, so a key names one invocation, ever, whichever ledger it
+///   is in.
+pub(super) const SCHEMA_V5: &str = r"
+CREATE TABLE process_invocation (
+    invocation_id   TEXT    PRIMARY KEY CHECK (length(invocation_id) = 30
+                                               AND substr(invocation_id, 1, 4) = 'inv_'),
+    run_id          TEXT    NOT NULL REFERENCES run(run_id) ON DELETE RESTRICT,
+    tool            TEXT    NOT NULL CHECK (tool IN ('process.exec', 'process.status',
+                                                     'process.kill')),
+    retry_class     TEXT    NOT NULL CHECK (retry_class IN ('RETRY_SAFE', 'NON_RETRYABLE')),
+    process_id      TEXT    NOT NULL CHECK (length(process_id) = 30
+                                            AND substr(process_id, 1, 4) = 'prc_'),
+    incarnation     INTEGER NOT NULL CHECK (incarnation >= 1),
+    state           TEXT    NOT NULL CHECK (state IN ('INTENT', 'COMPLETED', 'FAILED',
+                                                      'INTERRUPTED', 'UNKNOWN')),
+    failure         TEXT    CHECK (failure IS NULL OR failure IN ('EXECUTABLE_CHANGED',
+                                   'EXEC_FAILED', 'PROCESS_TABLE_FULL',
+                                   'BROKER_ENVIRONMENT_UNSAFE', 'PROCESS_UNOBSERVABLE',
+                                   'OBJECT_CHANGED', 'OBJECT_UNREADABLE', 'BROKER_UNAVAILABLE',
+                                   'BROKER_PROTOCOL_ERROR', 'BROKER_EXECUTION_ERROR')),
+    completion      TEXT,
+    output_bytes    INTEGER CHECK (output_bytes IS NULL OR output_bytes BETWEEN 0 AND 262144),
+    intent_ms       INTEGER NOT NULL,
+    ended_ms        INTEGER,
+    CHECK ((retry_class = 'NON_RETRYABLE') = (tool IN ('process.exec', 'process.kill'))),
+    CHECK ((state = 'INTENT') = (ended_ms IS NULL)),
+    CHECK ((state = 'FAILED') = (failure IS NOT NULL)),
+    CHECK ((state = 'COMPLETED') = (completion IS NOT NULL)),
+    CHECK ((completion IS NULL) = (output_bytes IS NULL)),
+    CHECK (output_bytes IS NULL OR output_bytes = 0 OR tool = 'process.status'),
+    CHECK (state != 'INTERRUPTED' OR tool = 'process.status'),
+    CHECK (state != 'UNKNOWN' OR tool IN ('process.exec', 'process.kill')),
+    CHECK (completion IS NULL
+           OR (tool = 'process.exec' AND completion = 'LAUNCHED')
+           OR (tool = 'process.status' AND completion = 'OBSERVED')
+           OR (tool = 'process.kill' AND completion IN ('SIGNALED', 'ALREADY_EXITED')))
+) STRICT;
+CREATE INDEX process_invocation_by_state ON process_invocation(state);
+CREATE TRIGGER process_invocation_intent_fixed BEFORE UPDATE OF invocation_id, run_id, tool,
+    retry_class, process_id, incarnation, intent_ms ON process_invocation
+BEGIN SELECT RAISE(ABORT, 'an invocation''s intent is immutable'); END;
+CREATE TRIGGER process_invocation_ends_once BEFORE UPDATE OF state, failure, completion,
+    output_bytes, ended_ms ON process_invocation
+WHEN OLD.state != 'INTENT'
+BEGIN SELECT RAISE(ABORT, 'an invocation ends once'); END;
+CREATE TRIGGER process_invocation_no_delete BEFORE DELETE ON process_invocation
+BEGIN SELECT RAISE(ABORT, 'an invocation record is never deleted'); END;
+CREATE TRIGGER process_invocation_launches_a_new_process BEFORE INSERT ON process_invocation
+WHEN NEW.tool = 'process.exec'
+     AND EXISTS (SELECT 1 FROM process_invocation WHERE process_id = NEW.process_id)
+BEGIN SELECT RAISE(ABORT, 'a launch names a process nobody holds'); END;
+CREATE TRIGGER process_invocation_names_its_runs_process BEFORE INSERT ON process_invocation
+WHEN NEW.tool != 'process.exec'
+     AND NOT EXISTS (SELECT 1 FROM tool_process
+                     WHERE process_id = NEW.process_id AND run_id = NEW.run_id)
+BEGIN SELECT RAISE(ABORT, 'a status or a kill names a process of its own run'); END;
+
+CREATE TABLE tool_process (
+    process_id           TEXT    PRIMARY KEY CHECK (length(process_id) = 30
+                                                    AND substr(process_id, 1, 4) = 'prc_'),
+    launch_invocation_id TEXT    NOT NULL UNIQUE REFERENCES process_invocation(invocation_id)
+                                                 ON DELETE RESTRICT,
+    run_id               TEXT    NOT NULL REFERENCES run(run_id) ON DELETE RESTRICT,
+    executable_path      TEXT    NOT NULL CHECK (length(CAST(executable_path AS BLOB))
+                                                 BETWEEN 2 AND 4096
+                                                 AND substr(executable_path, 1, 1) = '/'),
+    executable_sha256    TEXT    NOT NULL CHECK (length(executable_sha256) = 64
+                                                 AND executable_sha256 NOT GLOB '*[^0-9a-f]*'),
+    executable_device    TEXT    NOT NULL CHECK (length(executable_device) BETWEEN 1 AND 20
+                                                 AND executable_device NOT GLOB '*[^0-9]*'),
+    executable_inode     TEXT    NOT NULL CHECK (length(executable_inode) BETWEEN 1 AND 20
+                                                 AND executable_inode NOT GLOB '*[^0-9]*'),
+    cwd_path             TEXT    NOT NULL CHECK (length(CAST(cwd_path AS BLOB)) BETWEEN 10 AND 4096
+                                                 AND substr(cwd_path, 1, 10) = '/workspace'),
+    arg_count            INTEGER NOT NULL CHECK (arg_count BETWEEN 0 AND 128),
+    argv_sha256          TEXT    NOT NULL CHECK (length(argv_sha256) = 64
+                                                 AND argv_sha256 NOT GLOB '*[^0-9a-f]*'),
+    argv_safety          TEXT    NOT NULL CHECK (argv_safety IN ('SAFE', 'REINTERPRETING')),
+    environment          TEXT    NOT NULL CHECK (environment = 'BASE'),
+    stream_limit         INTEGER NOT NULL CHECK (stream_limit BETWEEN 1 AND 131072),
+    broker_generation    TEXT    CHECK (broker_generation IS NULL
+                                        OR (length(broker_generation) = 32
+                                            AND broker_generation NOT GLOB '*[^0-9a-f]*')),
+    state                TEXT    NOT NULL CHECK (state IN ('LAUNCHING', 'FAILED', 'UNKNOWN',
+                                                           'RUNNING', 'EXITED', 'SIGNALED',
+                                                           'UNOBSERVABLE')),
+    exit_code            INTEGER CHECK (exit_code IS NULL OR exit_code BETWEEN 0 AND 255),
+    signal               INTEGER CHECK (signal IS NULL OR signal BETWEEN 1 AND 64),
+    timed_out            INTEGER NOT NULL CHECK (timed_out IN (0, 1)),
+    created_ms           INTEGER NOT NULL,
+    updated_ms           INTEGER NOT NULL,
+    CHECK ((state IN ('LAUNCHING', 'FAILED', 'UNKNOWN')) = (broker_generation IS NULL)),
+    CHECK ((state = 'EXITED') = (exit_code IS NOT NULL)),
+    CHECK ((state = 'SIGNALED') = (signal IS NOT NULL)),
+    CHECK (timed_out = 0 OR state = 'SIGNALED')
+) STRICT;
+CREATE INDEX tool_process_by_run ON tool_process(run_id);
+CREATE TRIGGER tool_process_is_a_launch BEFORE INSERT ON tool_process
+WHEN NEW.state != 'LAUNCHING'
+     OR NOT EXISTS (SELECT 1 FROM process_invocation
+                    WHERE invocation_id = NEW.launch_invocation_id AND tool = 'process.exec'
+                      AND run_id = NEW.run_id AND process_id = NEW.process_id
+                      AND state = 'INTENT')
+BEGIN SELECT RAISE(ABORT, 'a process is recorded by its own launch intent'); END;
+CREATE TRIGGER tool_process_identity_fixed BEFORE UPDATE OF process_id, launch_invocation_id,
+    run_id, executable_path, executable_sha256, executable_device, executable_inode, cwd_path,
+    arg_count, argv_sha256, argv_safety, environment, stream_limit, created_ms ON tool_process
+BEGIN SELECT RAISE(ABORT, 'a process''s identity is immutable'); END;
+CREATE TRIGGER tool_process_generation_once BEFORE UPDATE OF broker_generation ON tool_process
+WHEN OLD.broker_generation IS NOT NULL AND NEW.broker_generation IS NOT OLD.broker_generation
+BEGIN SELECT RAISE(ABORT, 'a process''s broker generation is written once'); END;
+CREATE TRIGGER tool_process_moves_forward BEFORE UPDATE OF state ON tool_process
+WHEN NOT ((OLD.state = 'LAUNCHING' AND NEW.state IN ('RUNNING', 'EXITED', 'SIGNALED',
+                                                      'FAILED', 'UNKNOWN'))
+          OR (OLD.state = 'RUNNING' AND NEW.state IN ('RUNNING', 'EXITED', 'SIGNALED',
+                                                      'UNOBSERVABLE'))
+          OR (OLD.state = NEW.state AND OLD.state IN ('EXITED', 'SIGNALED', 'UNOBSERVABLE')))
+BEGIN SELECT RAISE(ABORT, 'a process''s state moves only forward'); END;
+CREATE TRIGGER tool_process_ending_fixed BEFORE UPDATE OF exit_code, signal, timed_out
+    ON tool_process
+WHEN OLD.state IN ('EXITED', 'SIGNALED')
+     AND (NEW.exit_code IS NOT OLD.exit_code OR NEW.signal IS NOT OLD.signal
+          OR NEW.timed_out IS NOT OLD.timed_out)
+BEGIN SELECT RAISE(ABORT, 'a process ends once'); END;
+CREATE TRIGGER tool_process_no_delete BEFORE DELETE ON tool_process
+BEGIN SELECT RAISE(ABORT, 'a process record is never deleted'); END;
+
+CREATE TABLE process_idempotency (
+    subject          TEXT    NOT NULL,
+    session_id       TEXT    NOT NULL,
+    idempotency_key  TEXT    NOT NULL,
+    request_digest   TEXT    NOT NULL CHECK (length(request_digest) = 64
+                                             AND request_digest NOT GLOB '*[^0-9a-f]*'),
+    invocation_id    TEXT    NOT NULL UNIQUE REFERENCES process_invocation(invocation_id)
+                                             ON DELETE RESTRICT,
+    recorded_ms      INTEGER NOT NULL,
+    PRIMARY KEY (subject, session_id, idempotency_key)
+) STRICT;
+CREATE TRIGGER process_idempotency_no_update BEFORE UPDATE ON process_idempotency
+BEGIN SELECT RAISE(ABORT, 'an idempotency record is immutable'); END;
+CREATE TRIGGER process_idempotency_no_delete BEFORE DELETE ON process_idempotency
+BEGIN SELECT RAISE(ABORT, 'an idempotency record is never deleted'); END;
+CREATE TRIGGER process_idempotency_one_namespace BEFORE INSERT ON process_idempotency
+WHEN EXISTS (SELECT 1 FROM tool_idempotency WHERE subject = NEW.subject
+             AND session_id = NEW.session_id AND idempotency_key = NEW.idempotency_key)
+BEGIN SELECT RAISE(ABORT, 'an idempotency key names one invocation'); END;
+CREATE TRIGGER tool_idempotency_one_namespace BEFORE INSERT ON tool_idempotency
+WHEN EXISTS (SELECT 1 FROM process_idempotency WHERE subject = NEW.subject
+             AND session_id = NEW.session_id AND idempotency_key = NEW.idempotency_key)
+BEGIN SELECT RAISE(ABORT, 'an idempotency key names one invocation'); END;
+";
+
 /// One step from a version to the next.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct Migration {
@@ -681,6 +866,10 @@ pub(super) const MIGRATIONS: &[Migration] = &[
     Migration {
         to: 4,
         sql: SCHEMA_V4,
+    },
+    Migration {
+        to: 5,
+        sql: SCHEMA_V5,
     },
 ];
 
@@ -836,7 +1025,7 @@ pub(super) fn foreign_key_check(conn: &Connection) -> rusqlite::Result<Result<()
 mod tests {
     use super::{
         APPLICATION_ID, CURRENT_VERSION, MIGRATIONS, Migration, SCHEMA_V1, SCHEMA_V2, SCHEMA_V3,
-        SCHEMA_V4, Shape, ShapeError, decide, migrate, verify_exact,
+        SCHEMA_V4, SCHEMA_V5, Shape, ShapeError, decide, migrate, verify_exact,
     };
     use rusqlite::Connection;
 
@@ -899,6 +1088,7 @@ mod tests {
         assert!(conn.execute_batch(SCHEMA_V2).is_ok());
         assert!(conn.execute_batch(SCHEMA_V3).is_ok());
         assert!(conn.execute_batch(SCHEMA_V4).is_ok());
+        assert!(conn.execute_batch(SCHEMA_V5).is_ok());
         assert!(
             conn.execute_batch("DROP TRIGGER run_never_resurrects")
                 .is_ok()
@@ -918,6 +1108,7 @@ mod tests {
         assert!(conn.execute_batch(SCHEMA_V2).is_ok());
         assert!(conn.execute_batch(SCHEMA_V3).is_ok());
         assert!(conn.execute_batch(SCHEMA_V4).is_ok());
+        assert!(conn.execute_batch(SCHEMA_V5).is_ok());
         assert!(
             conn.execute_batch("CREATE TABLE backdoor (x INTEGER)")
                 .is_ok()
@@ -1155,10 +1346,10 @@ mod tests {
             let Ok(tx) = conn.unchecked_transaction() else {
                 unreachable!("a transaction")
             };
-            assert_eq!(migrate(&tx, 3, MIGRATIONS).ok(), Some(4));
+            let four: Vec<Migration> = MIGRATIONS.iter().copied().filter(|m| m.to <= 4).collect();
+            assert_eq!(migrate(&tx, 3, &four).ok(), Some(4));
             assert!(tx.commit().is_ok());
         }
-        assert_eq!(verify_exact(&conn).ok(), Some(Ok(())), "exactly version 4");
         let head = |n: u8| format!("{} fs.read RETRY_SAFE EXISTING", inv(n));
         assert_eq!(
             v4_rows(&conn),
@@ -1352,6 +1543,236 @@ mod tests {
                 .is_err()
         );
         assert!(conn.execute("DELETE FROM tool_idempotency", []).is_err());
+    }
+
+    /// A version-5 store holding one launch intent — `process.exec`,
+    /// invocation 0, process `prc(0)` — and its `LAUNCHING` process row.
+    fn prc(n: u8) -> String {
+        format!("prc_01M24BB8G3E0A851TRWE3M8FZ{}", char::from(b'A' + n))
+    }
+
+    fn process_intent(
+        conn: &Connection,
+        n: u8,
+        (tool, class, process): (&str, &str, &str),
+    ) -> rusqlite::Result<usize> {
+        conn.execute(
+            "INSERT INTO process_invocation (invocation_id, run_id, tool, retry_class, \
+             process_id, incarnation, state, failure, completion, output_bytes, intent_ms, \
+             ended_ms) VALUES (?1, 'run_x', ?2, ?3, ?4, 1, 'INTENT', NULL, NULL, NULL, 0, NULL)",
+            rusqlite::params![inv(n), tool, class, process],
+        )
+    }
+
+    fn process_row(conn: &Connection, n: u8, run: &str, state: &str) -> rusqlite::Result<usize> {
+        conn.execute(
+            "INSERT INTO tool_process (process_id, launch_invocation_id, run_id, \
+             executable_path, executable_sha256, executable_device, executable_inode, cwd_path, \
+             arg_count, argv_sha256, argv_safety, environment, stream_limit, broker_generation, \
+             state, exit_code, signal, timed_out, created_ms, updated_ms) VALUES (?1, ?2, ?3, \
+             '/usr/bin/git', ?4, '2049', '77', '/workspace', 1, ?4, 'SAFE', 'BASE', 131072, NULL, \
+             ?5, NULL, NULL, 0, 0, 0)",
+            rusqlite::params![prc(n), inv(n), run, "ab".repeat(32), state],
+        )
+    }
+
+    fn v5_with_a_launch() -> Connection {
+        let conn = store_at(5);
+        assert!(process_intent(&conn, 0, ("process.exec", "NON_RETRYABLE", &prc(0))).is_ok());
+        assert!(process_row(&conn, 0, "run_x", "LAUNCHING").is_ok());
+        conn
+    }
+
+    #[test]
+    fn a_version_four_store_migrates_to_five_and_keeps_its_filesystem_ledger() {
+        let conn = v4_with_four();
+        let before = v4_rows(&conn);
+        {
+            let Ok(tx) = conn.unchecked_transaction() else {
+                unreachable!("a transaction")
+            };
+            assert_eq!(migrate(&tx, 4, MIGRATIONS).ok(), Some(5));
+            assert!(tx.commit().is_ok());
+        }
+        assert_eq!(verify_exact(&conn).ok(), Some(Ok(())), "exactly version 5");
+        assert_eq!(v4_rows(&conn), before, "the filesystem ledger is untouched");
+    }
+
+    #[test]
+    fn a_process_intent_binds_its_class_its_process_and_its_run() {
+        let conn = v5_with_a_launch();
+        for (n, row, why) in [
+            (
+                1,
+                ("process.exec", "RETRY_SAFE", prc(1)),
+                "a launch is never retry-safe",
+            ),
+            (
+                2,
+                ("process.kill", "RETRY_SAFE", prc(0)),
+                "a kill is never retry-safe",
+            ),
+            (
+                3,
+                ("process.status", "NON_RETRYABLE", prc(0)),
+                "a status is retry-safe",
+            ),
+            (
+                4,
+                ("process.spawn", "NON_RETRYABLE", prc(4)),
+                "no such tool",
+            ),
+            (
+                5,
+                ("process.exec", "NON_RETRYABLE", prc(0)),
+                "a launch names a new process",
+            ),
+            (
+                6,
+                ("process.status", "RETRY_SAFE", prc(6)),
+                "a status names a known process",
+            ),
+            (
+                7,
+                ("process.kill", "NON_RETRYABLE", "pid_1234".to_owned()),
+                "a handle, never a pid",
+            ),
+        ] {
+            assert!(
+                process_intent(&conn, n, (row.0, row.1, &row.2)).is_err(),
+                "{why}"
+            );
+        }
+        assert!(process_intent(&conn, 8, ("process.status", "RETRY_SAFE", &prc(0))).is_ok());
+        assert!(process_intent(&conn, 9, ("process.kill", "NON_RETRYABLE", &prc(0))).is_ok());
+        // Another run's process is not this run's to observe.
+        let other = conn.execute(
+            "INSERT INTO process_invocation (invocation_id, run_id, tool, retry_class, \
+             process_id, incarnation, state, intent_ms) VALUES (?1, 'run_y', 'process.status', \
+             'RETRY_SAFE', ?2, 1, 'INTENT', 0)",
+            rusqlite::params![inv(10), prc(0)],
+        );
+        assert!(other.is_err(), "a status names a process of its own run");
+    }
+
+    #[test]
+    fn a_process_is_recorded_by_its_own_launch_and_moves_only_forward() {
+        let conn = v5_with_a_launch();
+        assert!(
+            process_row(&conn, 0, "run_x", "LAUNCHING").is_err(),
+            "one process per launch"
+        );
+        assert!(process_intent(&conn, 1, ("process.status", "RETRY_SAFE", &prc(0))).is_ok());
+        assert!(
+            process_row(&conn, 1, "run_x", "LAUNCHING").is_err(),
+            "a status intent records no process"
+        );
+        let update = |sql: &str| conn.execute(sql, []);
+        assert!(update("UPDATE tool_process SET executable_sha256 = '00'").is_err());
+        assert!(update("UPDATE tool_process SET argv_sha256 = argv_sha256").is_err());
+        assert!(
+            update("UPDATE tool_process SET state = 'RUNNING'").is_err(),
+            "a running process has a generation"
+        );
+        let generation = "0123456789abcdef0123456789abcdef";
+        assert!(
+            conn.execute(
+                "UPDATE tool_process SET state = 'RUNNING', broker_generation = ?1",
+                [generation],
+            )
+            .is_ok()
+        );
+        assert!(
+            update(
+                "UPDATE tool_process SET broker_generation = 'ffffffffffffffffffffffffffffffff'"
+            )
+            .is_err(),
+            "the generation is written once"
+        );
+        assert!(
+            update("UPDATE tool_process SET state = 'LAUNCHING', broker_generation = NULL")
+                .is_err()
+        );
+        assert!(update("UPDATE tool_process SET state = 'EXITED', exit_code = 3").is_ok());
+        assert!(
+            update("UPDATE tool_process SET exit_code = 4").is_err(),
+            "it ends once"
+        );
+        assert!(update("UPDATE tool_process SET state = 'RUNNING', exit_code = NULL").is_err());
+        assert!(update("DELETE FROM tool_process").is_err());
+    }
+
+    #[test]
+    fn a_process_ending_is_bound_to_its_tool_and_written_once() {
+        let conn = v5_with_a_launch();
+        assert!(process_intent(&conn, 1, ("process.status", "RETRY_SAFE", &prc(0))).is_ok());
+        let end = |n: u8,
+                   (state, failure, completion, bytes): (
+            &str,
+            Option<&str>,
+            Option<&str>,
+            Option<i64>,
+        )| {
+            conn.execute(
+                "UPDATE process_invocation SET state = ?2, failure = ?3, completion = ?4, \
+                 output_bytes = ?5, ended_ms = 1 WHERE invocation_id = ?1",
+                rusqlite::params![inv(n), state, failure, completion, bytes],
+            )
+        };
+        assert!(
+            end(0, ("INTERRUPTED", None, None, None)).is_err(),
+            "a launch has an effect"
+        );
+        assert!(
+            end(1, ("UNKNOWN", None, None, None)).is_err(),
+            "a status has none"
+        );
+        assert!(end(0, ("COMPLETED", None, Some("OBSERVED"), Some(0))).is_err());
+        assert!(
+            end(0, ("COMPLETED", None, Some("LAUNCHED"), Some(7))).is_err(),
+            "no output"
+        );
+        assert!(end(1, ("COMPLETED", None, Some("OBSERVED"), Some(262_145))).is_err());
+        assert!(end(1, ("COMPLETED", None, Some("OBSERVED"), Some(262_144))).is_ok());
+        assert!(end(0, ("FAILED", Some("EXEC_FAILED"), None, None)).is_ok());
+        assert!(
+            end(0, ("UNKNOWN", None, None, None)).is_err(),
+            "an ending is never rewritten"
+        );
+        assert!(conn.execute("DELETE FROM process_invocation", []).is_err());
+    }
+
+    #[test]
+    fn an_idempotency_key_is_one_namespace_across_both_ledgers() {
+        let conn = v5_with_a_launch();
+        assert!(v4_insert(&conn, 5, ("fs.delete", "NON_RETRYABLE", "EXISTING"), None).is_ok());
+        let bind = |table: &str, key: &str, n: u8| {
+            let sql = match table {
+                "tool" => {
+                    "INSERT INTO tool_idempotency (subject, session_id, idempotency_key, \
+                     request_digest, invocation_id, recorded_ms) VALUES ('uid:1000', 'ses_x', \
+                     ?1, ?2, ?3, 0)"
+                }
+                _ => {
+                    "INSERT INTO process_idempotency (subject, session_id, idempotency_key, \
+                     request_digest, invocation_id, recorded_ms) VALUES ('uid:1000', 'ses_x', \
+                     ?1, ?2, ?3, 0)"
+                }
+            };
+            conn.execute(sql, rusqlite::params![key, "ab".repeat(32), inv(n)])
+        };
+        assert!(bind("process", "k1", 0).is_ok());
+        assert!(
+            bind("tool", "k1", 5).is_err(),
+            "a process key is not free for a file"
+        );
+        assert!(bind("tool", "k2", 5).is_ok());
+        assert!(bind("process", "k2", 0).is_err(), "and the reverse");
+        assert!(
+            conn.execute("UPDATE process_idempotency SET idempotency_key = 'k9'", [])
+                .is_err()
+        );
+        assert!(conn.execute("DELETE FROM process_idempotency", []).is_err());
     }
 
     #[test]

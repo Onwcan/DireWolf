@@ -271,6 +271,33 @@ jobs:
           DW_PEER_AS: nobody
           DW_WRITE_GROUP: dwwrite
 
+  # M4d's process execution (ADR-0045): the real broker and its launch helper
+  # starting real targets -- the descriptor re-proof, the race campaign (R1-R12),
+  # argv literal, the empty environment, descriptor hygiene, limits, output
+  # bounds, kill, the table, crash points and restarts -- the authority's
+  # state machine and crash windows (against a fake broker, and labelled so),
+  # the released daemons launching nothing, the hygiene override attacks with
+  # the real git and python3, and then THREE genuine identities: the runner as
+  # the authority, a broker user created here, and `nobody` as the hostile
+  # runtime, each proven by its numeric uid before anything runs. The broker's
+  # user executes a descriptor it cannot reach by name; the hostile runtime
+  # gets nothing from the broker's socket or its helper. The harness starts
+  # the broker as its user through `sudo -n -u`; the authority switches no
+  # users. No production launch is reachable. Nothing here is conditional, and
+  # the `ci` job requires it.
+  process-broker:
+    name: process broker (make process-broker-evidence)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v5.0.1
+      - uses: ./.github/actions/setup
+      - name: Create the broker's own identity
+        run: sudo useradd --system --no-create-home --shell /usr/sbin/nologin dwbroker
+      - run: make process-broker-evidence
+        env:
+          DW_BROKER_AS: dwbroker
+          DW_PEER_AS: nobody
+
   supply-chain:
     name: dependencies (make security)
     runs-on: ubuntu-latest
@@ -312,7 +339,7 @@ jobs:
   ci:
     name: CI
     runs-on: ubuntu-latest
-    needs: [format, lint, typecheck, architecture, schema, evals, test, authority-transport, filesystem-canonicalization, broker-fs-read, filesystem-operations, supply-chain, build]
+    needs: [format, lint, typecheck, architecture, schema, evals, test, authority-transport, filesystem-canonicalization, broker-fs-read, filesystem-operations, process-broker, supply-chain, build]
     if: always()
     steps:
       - name: Fail unless every required job succeeded

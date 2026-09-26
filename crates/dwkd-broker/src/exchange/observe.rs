@@ -26,7 +26,7 @@ pub(super) fn read(authorisation: &FsReadAuthorisation, file: &OwnedFd) -> Outco
         return OutcomeResult::Refused(refusal);
     }
     match read_bounded(file, authorisation.max_bytes.get()) {
-        Some(done) => OutcomeResult::Done(BrokerDone::read(done)),
+        Some(done) => OutcomeResult::done(BrokerDone::read(done)),
         None => OutcomeResult::Refused(BrokerRefusal::ReadFailed),
     }
 }
@@ -101,7 +101,7 @@ pub(super) fn stat(authorisation: &FsStatAuthorisation, object: &OwnedFd) -> Out
         })
     })();
     match done {
-        Some(done) => OutcomeResult::Done(BrokerDone::stat(done)),
+        Some(done) => OutcomeResult::done(BrokerDone::stat(done)),
         None => OutcomeResult::Refused(BrokerRefusal::IoError),
     }
 }
@@ -162,7 +162,7 @@ pub(super) fn list(authorisation: &FsListAuthorisation, directory: OwnedFd) -> O
         })
         .collect();
     match entries.and_then(BoundedList::new) {
-        Some(entries) => OutcomeResult::Done(BrokerDone::list(FsListDone { entries, complete })),
+        Some(entries) => OutcomeResult::done(BrokerDone::list(FsListDone { entries, complete })),
         None => OutcomeResult::Refused(BrokerRefusal::IoError),
     }
 }

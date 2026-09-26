@@ -75,6 +75,9 @@ pub enum ToolVersion {
     V1,
     /// Version 2 (M4c): the eight filesystem tools.
     V2,
+    /// Version 3 (M4d): the same eight, beside the process tools, in version
+    /// 3's shapes. The filesystem semantics are version 2's.
+    V3,
 }
 
 /// Whether running an invocation twice is the same as running it once

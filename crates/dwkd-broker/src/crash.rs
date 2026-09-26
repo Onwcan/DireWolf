@@ -110,6 +110,22 @@ pub(crate) fn step(step: Step) {
     STEPS.with(|steps| steps.borrow_mut().push(step));
 }
 
+/// Whether `name` is the configured crash point (debug builds): for a point
+/// another process reaches — the launch helper's, immediately before
+/// `execveat`, which the broker arms through the launch message. Always
+/// `false` in a release build.
+pub(crate) fn armed(name: &'static str) -> bool {
+    #[cfg(debug_assertions)]
+    {
+        AT.get().and_then(Option::as_deref) == Some(name)
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        let _ = name;
+        false
+    }
+}
+
 /// Abort here if this is the configured crash point (debug builds), or run
 /// this thread's races registered here (unit tests).
 #[cfg_attr(not(debug_assertions), allow(clippy::missing_const_for_fn))]

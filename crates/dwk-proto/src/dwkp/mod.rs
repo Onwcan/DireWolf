@@ -21,6 +21,7 @@
 
 pub mod fsops;
 pub mod messages;
+pub mod procops;
 pub mod registry;
 
 use crate::envelope::{Header, MessageType, decode_header, read_preamble};
@@ -37,6 +38,9 @@ use messages::{
     EffectiveAuthority, Handshake, HandshakeAccepted, HeartbeatPayload, LeaseAcquire, LeaseGrant,
     LeaseRelease, ProtocolErrorPayload, ReleaseRun, RunGrant, ToolDenial, ToolFailure, ToolInvoke,
     ToolRefusal, ToolResult,
+};
+use procops::{
+    CanonicalPreviewResultV3, ToolCallV3, ToolDenialV3, ToolFailureV3, ToolRefusalV3, ToolResultV3,
 };
 
 /// A decoded DWKP message body.
@@ -94,6 +98,20 @@ pub enum DwkpBody {
     ToolRefusedV2(ToolRefusalV2),
     /// `direwolf.tool.failed` version 2.
     ToolFailedV2(ToolFailureV2),
+    /// `direwolf.tool.invoke` version 3 (ADR-0045).
+    ToolInvokeV3(ToolCallV3),
+    /// `direwolf.tool.preview` version 3.
+    CanonicalPreviewV3(ToolCallV3),
+    /// `direwolf.tool.result` version 3.
+    ToolResultV3(ToolResultV3),
+    /// `direwolf.tool.denied` version 3.
+    ToolDeniedV3(ToolDenialV3),
+    /// `direwolf.tool.previewed` version 3.
+    ToolPreviewedV3(CanonicalPreviewResultV3),
+    /// `direwolf.tool.refused` version 3.
+    ToolRefusedV3(ToolRefusalV3),
+    /// `direwolf.tool.failed` version 3.
+    ToolFailedV3(ToolFailureV3),
     /// `direwolf.ack`
     Ack(Ack),
     /// `direwolf.protocol.error`
@@ -142,6 +160,13 @@ impl DwkpBody {
             Self::ToolPreviewedV2(_) => (MessageType::Response, "direwolf.tool.previewed", 2),
             Self::ToolRefusedV2(_) => (MessageType::Response, "direwolf.tool.refused", 2),
             Self::ToolFailedV2(_) => (MessageType::Response, "direwolf.tool.failed", 2),
+            Self::ToolInvokeV3(_) => (MessageType::Request, "direwolf.tool.invoke", 3),
+            Self::CanonicalPreviewV3(_) => (MessageType::Request, "direwolf.tool.preview", 3),
+            Self::ToolResultV3(_) => (MessageType::Response, "direwolf.tool.result", 3),
+            Self::ToolDeniedV3(_) => (MessageType::Response, "direwolf.tool.denied", 3),
+            Self::ToolPreviewedV3(_) => (MessageType::Response, "direwolf.tool.previewed", 3),
+            Self::ToolRefusedV3(_) => (MessageType::Response, "direwolf.tool.refused", 3),
+            Self::ToolFailedV3(_) => (MessageType::Response, "direwolf.tool.failed", 3),
             Self::Ack(_) => (MessageType::Response, "direwolf.ack", 1),
             Self::ProtocolError(_) => (MessageType::Response, "direwolf.protocol.error", 1),
         }
@@ -163,6 +188,15 @@ impl DwkpBody {
             ("direwolf.tool.previewed", 2) => Self::ToolPreviewedV2(WireType::decode(payload, cx)?),
             ("direwolf.tool.refused", 2) => Self::ToolRefusedV2(WireType::decode(payload, cx)?),
             ("direwolf.tool.failed", 2) => Self::ToolFailedV2(WireType::decode(payload, cx)?),
+            ("direwolf.tool.invoke", 3) => Self::ToolInvokeV3(WireType::decode(payload, cx)?),
+            ("direwolf.tool.preview", 3) => {
+                Self::CanonicalPreviewV3(WireType::decode(payload, cx)?)
+            }
+            ("direwolf.tool.result", 3) => Self::ToolResultV3(WireType::decode(payload, cx)?),
+            ("direwolf.tool.denied", 3) => Self::ToolDeniedV3(WireType::decode(payload, cx)?),
+            ("direwolf.tool.previewed", 3) => Self::ToolPreviewedV3(WireType::decode(payload, cx)?),
+            ("direwolf.tool.refused", 3) => Self::ToolRefusedV3(WireType::decode(payload, cx)?),
+            ("direwolf.tool.failed", 3) => Self::ToolFailedV3(WireType::decode(payload, cx)?),
             (schema, _) => Self::decode_single_version(schema, payload, cx)?,
         })
     }
@@ -236,6 +270,12 @@ impl DwkpBody {
             Self::ToolPreviewedV2(p) => p.encode(),
             Self::ToolRefusedV2(p) => p.encode(),
             Self::ToolFailedV2(p) => p.encode(),
+            Self::ToolInvokeV3(p) | Self::CanonicalPreviewV3(p) => p.encode(),
+            Self::ToolResultV3(p) => p.encode(),
+            Self::ToolDeniedV3(p) => p.encode(),
+            Self::ToolPreviewedV3(p) => p.encode(),
+            Self::ToolRefusedV3(p) => p.encode(),
+            Self::ToolFailedV3(p) => p.encode(),
             Self::Ack(p) => p.encode(),
             Self::ProtocolError(p) => p.encode(),
         }

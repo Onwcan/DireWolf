@@ -57,6 +57,12 @@ use dwk_proto::dwkp::messages::{
     EffectiveAuthority, GrantSet, LeaseGrant, RunGrant, ToolAction, ToolDecision, ToolDenial,
     ToolFailure, ToolRefusal, ToolResult, WithheldCapability, WithheldSet,
 };
+use dwk_proto::dwkp::procops::{
+    CanonicalPreviewResultV3, ExecutableRef, PlannedActionV3, PlannedActionsV3,
+    PlannedProcessAction, ProcessActionDecision, ProcessExecResult, ProcessKillResult,
+    ProcessStatusResult, ProcessStreamSnapshot, ToolDenialV3, ToolFailureV3, ToolOutputV3,
+    ToolPlanV3, ToolRefusalV3, ToolResultV3,
+};
 use dwk_proto::wire::id::SessionId;
 use dwk_proto::wire::scalar::{
     ActionEnvironment, ByteCount, CapabilityText, DecisionEffect, DecisionReason, Epoch,
@@ -69,6 +75,7 @@ use crate::policy::{Effect, SourceLocation, Unevaluable};
 
 use super::admission::Admission;
 use super::plan::{PlannedAction, ToolPlan};
+use super::process::{ProcessOutput, ProcessPlan, ProcessReply, StreamSnapshot};
 use super::query::{AuthorityAnswer, DecisionRecord};
 use super::tool::ToolReply;
 
@@ -423,6 +430,278 @@ fn wire_plan(plan: &ToolPlan) -> Result<WirePlan, WireGap> {
 /// [`WireGap::Unrepresentable`] only for a value that does not fit its wire
 /// type -- a bug.
 pub fn tool_reply_v2(reply: &ToolReply) -> Result<DwkpBody, WireGap> {
+    tool_reply_v2_inner(reply)
+}
+
+/// A filesystem plan on the version-3 wire: the version-2 actions, each
+/// wrapped as `{"fs": ...}` beside the process actions version 3 adds.
+fn wire_plan_v3(plan: &ToolPlan) -> Result<ToolPlanV3, WireGap> {
+    let v2 = wire_plan(plan)?;
+    let actions: Vec<PlannedActionV3> = v2
+        .actions
+        .into_iter()
+        .map(|action| PlannedActionV3 {
+            fs: Some(action),
+            process: None,
+        })
+        .collect();
+    Ok(ToolPlanV3 {
+        tool: dwk_proto::wire::scalar::CoreTool::ALL
+            .iter()
+            .copied()
+            .find(|t| t.as_str() == v2.tool.as_str())
+            .ok_or(WireGap::Unrepresentable("a filesystem tool"))?,
+        environment: v2.environment,
+        effect: v2.effect,
+        actions: PlannedActionsV3::new(actions).ok_or(WireGap::Unrepresentable("a plan"))?,
+    })
+}
+
+/// A filesystem output on the version-3 wire: the same member.
+fn wire_output_v3(output: &dwk_proto::dwkp::fsops::ToolOutput) -> ToolOutputV3 {
+    ToolOutputV3 {
+        fs_read: output.fs_read.clone(),
+        fs_list: output.fs_list.clone(),
+        fs_search: output.fs_search.clone(),
+        fs_stat: output.fs_stat.clone(),
+        fs_write: output.fs_write.clone(),
+        fs_patch: output.fs_patch.clone(),
+        fs_move: output.fs_move.clone(),
+        fs_delete: output.fs_delete.clone(),
+        process_exec: None,
+        process_status: None,
+        process_kill: None,
+    }
+}
+
+/// The response body for a filesystem tool operation asked at version 3
+/// (M4d): version 2's answer, in version 3's shapes. Nothing about the
+/// operation differs.
+///
+/// # Errors
+///
+/// [`WireGap::Unrepresentable`] only for a value that does not fit its wire
+/// type -- a bug.
+pub fn tool_reply_v3(reply: &ToolReply) -> Result<DwkpBody, WireGap> {
+    use super::process::{widen_failure, widen_refusal};
+    Ok(match reply {
+        ToolReply::Done {
+            invocation,
+            plan,
+            output,
+        } => DwkpBody::ToolResultV3(ToolResultV3 {
+            invocation_id: invocation.clone(),
+            plan: wire_plan_v3(plan)?,
+            output: wire_output_v3(output),
+        }),
+        ToolReply::Denied(plan) => DwkpBody::ToolDeniedV3(ToolDenialV3 {
+            plan: wire_plan_v3(plan)?,
+        }),
+        ToolReply::Previewed(plan) => DwkpBody::ToolPreviewedV3(CanonicalPreviewResultV3 {
+            plan: wire_plan_v3(plan)?,
+        }),
+        ToolReply::Refused(operation, reason) => DwkpBody::ToolRefusedV3(ToolRefusalV3 {
+            operation: *operation,
+            reason: widen_refusal(*reason),
+        }),
+        ToolReply::Failed { invocation, reason } => DwkpBody::ToolFailedV3(ToolFailureV3 {
+            invocation_id: invocation.clone(),
+            reason: widen_failure(*reason),
+        }),
+    })
+}
+
+/// A process plan on the version-3 wire: its one action, with both gates, the
+/// host floor's reason, and — for a launch — the argv's count, digest and
+/// classification. Never the arguments: those are in the audit record.
+fn wire_process_plan(plan: &ProcessPlan) -> Result<ToolPlanV3, WireGap> {
+    use dwk_proto::wire::scalar::{ArgCount, ArgvSafetyClass, ContentDigest, HostPath};
+    let action = plan.action();
+    let policy = action.record().policy();
+    let (rule_id, rule_source) = rule(policy.rule_id().as_str(), policy.rule_source())?;
+    let executable = ExecutableRef {
+        path: HostPath::new(action.executable().path().to_string())
+            .ok_or(WireGap::Unrepresentable("an executable path"))?,
+        sha256: ContentDigest::new(action.executable().digest().to_string())
+            .ok_or(WireGap::Unrepresentable("an executable digest"))?,
+    };
+    let launch = action.launch();
+    let wire = PlannedProcessAction {
+        role: dwk_proto::wire::scalar::ActionRole::Target,
+        verb: action.verb(),
+        executable,
+        process_id: action.process().cloned(),
+        cwd: launch
+            .map(|l| {
+                WorkspacePath::new(l.cwd().to_string())
+                    .ok_or(WireGap::Unrepresentable("a working directory"))
+            })
+            .transpose()?,
+        arg_count: launch
+            .map(|l| {
+                u16::try_from(l.arg_count())
+                    .ok()
+                    .and_then(ArgCount::new)
+                    .ok_or(WireGap::Unrepresentable("an argument count"))
+            })
+            .transpose()?,
+        argv_sha256: launch
+            .map(|l| {
+                ContentDigest::new(l.argv_sha256().to_hex())
+                    .ok_or(WireGap::Unrepresentable("an argv digest"))
+            })
+            .transpose()?,
+        argv_safety: launch.map(|l| {
+            if l.reinterpreting() {
+                ArgvSafetyClass::Reinterpreting
+            } else {
+                ArgvSafetyClass::Safe
+            }
+        }),
+        decision: ProcessActionDecision {
+            effect: if action.permits() {
+                DecisionEffect::Allow
+            } else {
+                DecisionEffect::Deny
+            },
+            reason: action.reason(),
+            capability_result: gate(action.record().capability_satisfied()),
+            policy_result: gate(action.policy_satisfied()),
+            rule_id,
+            rule_source,
+        },
+    };
+    Ok(ToolPlanV3 {
+        tool: plan.tool(),
+        environment: ActionEnvironment::Host,
+        effect: if plan.permits() {
+            DecisionEffect::Allow
+        } else {
+            DecisionEffect::Deny
+        },
+        actions: PlannedActionsV3::new(vec![PlannedActionV3 {
+            fs: None,
+            process: Some(wire),
+        }])
+        .ok_or(WireGap::Unrepresentable("a plan"))?,
+    })
+}
+
+fn wire_stream(stream: &StreamSnapshot) -> Result<ProcessStreamSnapshot, WireGap> {
+    Ok(ProcessStreamSnapshot {
+        content: dwk_proto::wire::scalar::StreamContent::from_bytes(&stream.content)
+            .ok_or(WireGap::Unrepresentable("a stream"))?,
+        observed: ByteCount::new(stream.observed)
+            .ok_or(WireGap::Unrepresentable("a stream's count"))?,
+        truncated: stream.truncated,
+    })
+}
+
+fn wire_process_output(output: &ProcessOutput) -> Result<ToolOutputV3, WireGap> {
+    use dwk_proto::wire::scalar::{ExitCode, SignalNumber};
+    let exit = |code: Option<u8>| {
+        code.map(|c| ExitCode::new(c).ok_or(WireGap::Unrepresentable("an exit code")))
+            .transpose()
+    };
+    let signal = |number: Option<u8>| {
+        number
+            .map(|n| SignalNumber::new(n).ok_or(WireGap::Unrepresentable("a signal")))
+            .transpose()
+    };
+    let mut out = ToolOutputV3 {
+        fs_read: None,
+        fs_list: None,
+        fs_search: None,
+        fs_stat: None,
+        fs_write: None,
+        fs_patch: None,
+        fs_move: None,
+        fs_delete: None,
+        process_exec: None,
+        process_status: None,
+        process_kill: None,
+    };
+    match output {
+        ProcessOutput::Launched {
+            process_id,
+            state,
+            exit_code,
+            signal: sig,
+        } => {
+            out.process_exec = Some(ProcessExecResult {
+                process_id: process_id.clone(),
+                state: *state,
+                exit_code: exit(*exit_code)?,
+                signal: signal(*sig)?,
+            });
+        }
+        ProcessOutput::Observed {
+            process_id,
+            state,
+            exit_code,
+            signal: sig,
+            timed_out,
+            stdout,
+            stderr,
+        } => {
+            out.process_status = Some(ProcessStatusResult {
+                process_id: process_id.clone(),
+                state: *state,
+                exit_code: exit(*exit_code)?,
+                signal: signal(*sig)?,
+                timed_out: *timed_out,
+                stdout: wire_stream(stdout)?,
+                stderr: wire_stream(stderr)?,
+            });
+        }
+        ProcessOutput::Killed {
+            process_id,
+            outcome,
+        } => {
+            out.process_kill = Some(ProcessKillResult {
+                process_id: process_id.clone(),
+                outcome: *outcome,
+            });
+        }
+    }
+    Ok(out)
+}
+
+/// The response body for a process tool operation (M4d, ADR-0045).
+///
+/// # Errors
+///
+/// [`WireGap::Unrepresentable`] only for a value that does not fit its wire
+/// type -- a bug.
+pub fn process_reply(reply: &ProcessReply) -> Result<DwkpBody, WireGap> {
+    Ok(match reply {
+        ProcessReply::Done {
+            invocation,
+            plan,
+            output,
+        } => DwkpBody::ToolResultV3(ToolResultV3 {
+            invocation_id: invocation.clone(),
+            plan: wire_process_plan(plan)?,
+            output: wire_process_output(output)?,
+        }),
+        ProcessReply::Denied(plan) => DwkpBody::ToolDeniedV3(ToolDenialV3 {
+            plan: wire_process_plan(plan)?,
+        }),
+        ProcessReply::Previewed(plan) => DwkpBody::ToolPreviewedV3(CanonicalPreviewResultV3 {
+            plan: wire_process_plan(plan)?,
+        }),
+        ProcessReply::Refused(operation, reason) => DwkpBody::ToolRefusedV3(ToolRefusalV3 {
+            operation: *operation,
+            reason: *reason,
+        }),
+        ProcessReply::Failed { invocation, reason } => DwkpBody::ToolFailedV3(ToolFailureV3 {
+            invocation_id: invocation.clone(),
+            reason: *reason,
+        }),
+    })
+}
+
+fn tool_reply_v2_inner(reply: &ToolReply) -> Result<DwkpBody, WireGap> {
     Ok(match reply {
         ToolReply::Done {
             invocation,

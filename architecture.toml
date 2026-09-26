@@ -362,6 +362,7 @@ exempt_paths = [
     "crates/dwkd-authority/src/server/peer.rs",
     "crates/dwkd-authority/src/resource/fs/linux/mod.rs",
     "crates/dwkd-authority/src/resource/fs/linux/tests.rs",
+    "crates/dwkd-authority/src/resource/exec/linux.rs",
     "crates/dwkd-authority/src/broker/link.rs",
 ]
 suffixes = [".rs"]
@@ -391,6 +392,13 @@ authority's end of the private broker channel -- `SO_PEERCRED` on the
 connection it makes, and `sendmsg` with `SCM_RIGHTS` for the one descriptor it
 hands over. The rest of `broker/`, including the trait and the failure types,
 stays under the rule.
+
+M4d (ADR-0045) adds a fourth: `resource/exec/linux.rs`, the executable
+resolver's Linux half -- `openat` walks relative to held descriptors,
+`readlinkat`, `fstat`, `fstatfs` for the filesystem type, `fgetxattr` for
+`security.capability` and `pread` for the hash, all read-only. The
+portable half (`resource/exec/mod.rs`) and the argv classifier stay under the
+rule, and none of it starts anything (TX020).
 """
 
 [[text_rules]]
@@ -429,12 +437,18 @@ exempts exactly the one file it lives in.
 [[text_rules]]
 id = "TX010-the-authority-executes-nothing"
 paths = ["crates/dwkd-authority/src"]
-exempt_paths = []
+# The argv classifier spells `sudo`, `su`, `runuser`... as the names of runners
+# it classifies as reinterpreting (ADR-0045 §13): data, never a command. It is
+# exempt from this rule and bound instead by TX020, which bans every way of
+# starting a process in the whole executable module, the classifier included.
+exempt_paths = ["crates/dwkd-authority/src/resource/exec/argv.rs"]
 suffixes = [".rs"]
 patterns = [
     '^(?!\s*//).*\bCommand\s*::\s*new\b',
-    '^(?!\s*//).*\bstd\s*::\s*process\s*::\s*(Command|Stdio)\b',
+    '^(?!\s*//).*\bstd\s*::\s*process\s*::\s*(Command|Stdio|Child)\b',
     '^(?!\s*//).*"(sudo|su|runuser|doas|pkexec|setpriv)"',
+    # Nor does it signal one (M4d): `process.kill` is the broker's, by handle.
+    '^(?!\s*//).*\b(kill_process|kill_process_group|kill_current_process_group|pidfd_send_signal|pidfd_open|test_kill_process)\b',
 ]
 reason = """
 The authority decides; it executes nothing (ADR-0018). In M3 it does not even
@@ -442,6 +456,14 @@ spawn a helper: the cross-uid evidence runs a client as another user from the
 TEST HARNESS, through `sudo -n -u`, and the authority never switches users,
 never runs a shell and never starts a process. M4's broker is where execution
 lives, behind a per-invocation authorisation.
+
+M4d (ADR-0045) keeps it so: the authority resolves an executable, hashes it,
+decides and records -- and the broker starts it. The only file exempt is the
+argv classifier, whose privilege-switch names are strings it compares argv
+against; TX020 still forbids it, and its module, from starting anything. Nor
+does the authority signal, reap or open a pidfd for any process: a
+`process.kill` reaches the broker as an opaque handle and a generation, and
+the broker alone holds the process.
 
 Hygiene, not containment.
 """
@@ -457,6 +479,8 @@ suffixes = [".rs"]
 patterns = [
     '^(?!\s*//).*\bresource\s*::\s*fs\b',
     '^(?!\s*//).*\bresource\s*::\s*\{[^}]*\bfs\b',
+    '^(?!\s*//).*\bresource\s*::\s*exec\b',
+    '^(?!\s*//).*\bresource\s*::\s*\{[^}]*\bexec\b',
 ]
 reason = """
 `resource::fs` is the one module in the authority that looks at the host
@@ -472,6 +496,12 @@ So a call to the resolver from `policy`, `capability` or `server` is the
 mistake ADR-0037 exists to prevent -- authority decided by looking at the
 world at the moment somebody asked -- arriving through a module that is
 allowed to look. TX003 and TX004 ban `std::fs`; this bans the back door.
+
+M4d (ADR-0045) adds `resource::exec`, the executable resolver, under the same
+terms: the state layer resolves and hashes an executable; the policy engine
+receives its canonical path and digest as values. The broker channel holds the
+checked `ExecHandoff` through its re-export beside the filesystem hand-offs,
+never by naming the resolver.
 
 Hygiene, not containment.
 """
@@ -525,9 +555,9 @@ patterns = [
     # patch's revisions, is TX018's, and confined to one file.)
     '^(?!\s*//).*\b(rusqlite|hmac|ring|ed25519_dalek|aws_lc_rs|keyring)\b',
     '^(?!\s*//).*(kernel\.db|audit\.log)',
-    # No execution until M4d designs it.
-    '^(?!\s*//).*\bCommand\s*::\s*new\b',
-    '^(?!\s*//).*\bstd\s*::\s*process\s*::\s*(Command|Stdio)\b',
+    # Starting a process is TX021's, TX022's and TX023's (M4d). No `unsafe`,
+    # anywhere, ever: `unsafe_code = "forbid"` is the workspace lint, and this
+    # is the second lock on it.
     '^(?!\s*//).*\bunsafe\b',
     '^(?!\s*//).*\b(allow|expect)\s*\(\s*unsafe_code\b',
 ]
@@ -541,8 +571,9 @@ it reachable, or makes it reach, beyond the authority. DWKP dispatch in it is a
 second authority engine the runtime could aim at. A database, an audit log or
 a MAC library is state and key material the split exists to keep in the
 authority -- "the broker holds no long-lived key" is true because there is
-nothing here to hold one with. Starting a process is M4d's to design, behind
-its own authorisation.
+nothing here to hold one with. Starting a process was M4d's to design, behind
+its own authorisation; ADR-0045 did, and TX021-TX023 confine it to the launch
+module and its helper.
 
 Hygiene, not containment: the real controls are the kernel's peer check on
 both ends of the channel and the broker's own identity.
@@ -556,6 +587,8 @@ paths = ["crates/dwkd-authority/src"]
 exempt_paths = [
     "crates/dwkd-authority/src/broker/link.rs",
     "crates/dwkd-authority/src/resource/fs/mod.rs",
+    "crates/dwkd-authority/src/resource/exec/mod.rs",
+    "crates/dwkd-authority/src/resource/exec/tests.rs",
 ]
 suffixes = [".rs"]
 patterns = [
@@ -572,6 +605,10 @@ broker has issued a channel -- and it is taken out of its `ReadHandoff` in
 exactly one place. A second caller of `into_transfer_descriptor`, or a second
 `SCM_RIGHTS` send, would be a way for a descriptor to reach someone the peer
 check never looked at.
+
+M4d (ADR-0045): `resource/exec/mod.rs` defines the method that releases an
+`ExecHandoff`'s two descriptors (the executable and the working directory),
+and its test module checks the release; the link is still the only sender.
 
 Hygiene, not containment.
 """
@@ -594,6 +631,8 @@ exempt_paths = [
     "crates/dwkd-broker/src/exchange/tests.rs",
     "crates/dwkd-broker/src/exchange/mutate.rs",
     "crates/dwkd-broker/src/exchange/staging.rs",
+    "crates/dwkd-broker/src/process/fdcheck.rs",
+    "crates/dwkd-broker/src/process/tests.rs",
 ]
 suffixes = [".rs"]
 patterns = [
@@ -615,6 +654,13 @@ be a second canonicaliser -- one outside the authority -- and would read
 whatever the name pointed at by then, which is precisely the TOCTOU the
 hand-off exists to close.
 
+M4d (ADR-0045): `process/fdcheck.rs` lists the broker's OWN descriptor table
+-- `/proc/self/fd`, `/proc/self/fdinfo/<n>` -- to refuse a launch that would
+leak an inheritable descriptor to the target. It reads the process's view of
+itself, never a workspace name, and never executes through procfs (TX022).
+`process/tests.rs` is the launch's own test module, compiled only under
+`cfg(test)`: it creates the executables and directories it hands over.
+
 Hygiene, not containment.
 """
 
@@ -630,7 +676,9 @@ exempt_paths = []
 suffixes = [".py", ".rs"]
 patterns = [
     '^(?!\s*(//|#)).*\bbrokerp\b',
-    '^(?!\s*(//|#)).*\bbroker\.(hello|fs_[a-z]+|outcome)\b',
+    '^(?!\s*(//|#)).*\bbroker\.(hello|fs_[a-z]+|process_[a-z]+|outcome)\b',
+    # The broker's launch helper (M4d) is its own binary's private mode.
+    '^(?!\s*(//|#)).*\bexec-helper\b',
 ]
 reason = """
 The authority-to-broker protocol is private (ADR-0043): no envelope, no
@@ -638,7 +686,10 @@ registry entry, no emitted schema, no Python binding. The runtime cannot reach
 the broker as a peer the broker reads from; it should not be able to name its
 messages either, and neither should the tools that generate the cognition
 side's bindings, or the CLI a user runs. A reference here is the first step
-of a second path from cognition to effect.
+of a second path from cognition to effect. M4d (ADR-0045) adds the process
+messages and the launch helper's `exec-helper` mode, which refuses any caller
+but a broker parent handing it a launch -- and which nothing on this side may
+name.
 
 Hygiene, not containment.
 """
@@ -676,6 +727,8 @@ paths = ["crates/dwkd-broker/src"]
 exempt_paths = [
     "crates/dwkd-broker/src/exchange/mutate.rs",
     "crates/dwkd-broker/src/exchange/tests.rs",
+    "crates/dwkd-broker/src/process/verify.rs",
+    "crates/dwkd-broker/src/process/tests.rs",
 ]
 suffixes = [".rs"]
 patterns = [
@@ -687,6 +740,10 @@ the first step towards one that is -- a MAC over authorisations, a token cache
 -- which TX013 exists to keep out. The broker hashes for exactly one reason:
 to prove, before and after a replacement, that a file holds the revision the
 runtime stated (ADR-0044). That is one file's business.
+
+M4d (ADR-0045) adds the second and last: `process/verify.rs` hashes the
+executable through the very descriptor it will execute, to prove it is the
+object the authority decided on. Its test module checks it.
 
 Hygiene, not containment.
 """
@@ -726,6 +783,149 @@ non-atomic operation).
 
 Hygiene, not containment: the broker's identity checks before and after every
 change are the control.
+"""
+
+[[text_rules]]
+id = "TX020-the-authority-resolves-an-executable-and-runs-nothing"
+paths = ["crates/dwkd-authority/src/resource/exec"]
+exempt_paths = []
+suffixes = [".rs"]
+patterns = [
+    '^(?!\s*//).*\bCommand\s*::\s*new\b',
+    '^(?!\s*//).*\bstd\s*::\s*process\s*::\s*(Command|Stdio)\b',
+    '^(?!\s*//).*\bstd\s*::\s*process\s*::\s*\{[^}]*\b(Command|Stdio)\b',
+    '^(?!\s*//).*\.\s*spawn\s*\(',
+    '^(?!\s*//).*\b(fork|vfork|execve|execveat|fexecve|posix_spawn\w*|pre_exec)\b',
+]
+reason = """
+The executable module (M4d, ADR-0045) resolves a path, proves the file's trust
+attributes, hashes it and classifies an argv. It answers WHICH object and
+WHAT the arguments would make it do; it never starts it. TX010 keeps the rest
+of the authority from executing; this keeps the one module whose whole
+subject is executables -- including the argv classifier, which TX010 exempts
+for the runner names it spells -- from ever growing a way to run one. The
+broker starts the process, from the descriptor this module checked.
+
+Hygiene, not containment.
+"""
+
+[[text_rules]]
+id = "TX021-the-broker-starts-a-process-in-one-place"
+paths = ["crates/dwkd-broker/src"]
+# `process/launch.rs` spawns the launch helper -- this binary, `exec-helper`,
+# with an empty environment -- and nothing else. `process/tests.rs` runs the
+# helper directly to show that, unhanded a launch, it refuses and does nothing.
+exempt_paths = [
+    "crates/dwkd-broker/src/process/launch.rs",
+    "crates/dwkd-broker/src/process/tests.rs",
+]
+suffixes = [".rs"]
+patterns = [
+    '^(?!\s*//).*\bCommand\s*::\s*new\b',
+    '^(?!\s*//).*\bstd\s*::\s*process\s*::\s*(Command|Stdio)\b',
+    '^(?!\s*//).*\bstd\s*::\s*process\s*::\s*\{[^}]*\b(Command|Stdio)\b',
+]
+reason = """
+The broker starts a process in exactly one place (ADR-0045): the launch module
+spawns its own binary as the launch helper, with an empty environment, stdin
+`/dev/null`, stdout the drained pipe and its own process group; the helper
+receives the checked descriptors and `execveat`s the executable one. A second
+`Command` anywhere in the broker would be a launch with none of the re-proof,
+descriptor hygiene or supervision in front of it -- or a wrapper (`sh`,
+`env`, `timeout`) between the authorisation and the target.
+
+Hygiene, not containment.
+"""
+
+[[text_rules]]
+id = "TX022-no-shell-no-pre-exec-no-raw-exec-no-inherited-environment"
+paths = ["crates/dwkd-broker/src"]
+# The launch's own test module: its Python fixtures fork a child into the
+# target's process group to show that kill reaches the group. `unsafe` is
+# still banned there (TX013).
+exempt_paths = ["crates/dwkd-broker/src/process/tests.rs"]
+suffixes = [".rs"]
+patterns = [
+    # No closure between fork and exec: it is `unsafe` code in disguise.
+    '^(?!\s*//).*\bpre_exec\b',
+    # No hand-rolled process creation or libc exec.
+    '^(?!\s*//).*\b(fork|vfork|execve|execv|execvp|execvpe|execl\w*|fexecve|posix_spawn\w*|clone3)\s*\(',
+    '^(?!\s*//)(?!\s*use\s+libc\s+as\s+_\s*;).*\blibc\b',
+    # No shell, by any spelling.
+    '^(?!\s*//).*"(/usr)?(/bin/)?(sh|bash|dash|zsh|ksh|busybox)"',
+    # Never execute through procfs: the descriptor itself is executed.
+    '^(?!\s*//).*/proc/self/fd/',
+    '^(?!\s*//).*/dev/fd/',
+    # Never pass the broker's environment on.
+    '^(?!\s*//).*\benv\s*::\s*(vars|vars_os)\b',
+    '^(?!\s*//).*\.\s*envs\s*\(',
+]
+reason = """
+What M4d's launch must never become (ADR-0045 §§9, 10, 12). `pre_exec` runs
+arbitrary code in a forked child before exec and is `unsafe` -- the invariant
+`unsafe_code = "forbid"` exists to keep that out. A hand-rolled `fork`,
+`execve` or `posix_spawn` would bypass the helper that re-checks descriptors,
+applies limits, sets `no_new_privs` and executes the checked descriptor. A
+shell reinterprets argv, which the authority decided on literally. Executing
+`/proc/self/fd/<n>` would put procfs between the checked object and the exec
+(ADR-0045 §5: not used; `execveat(fd, "", AT_EMPTY_PATH)` is). And the
+target's environment is built from nothing: the broker's own is never
+inherited.
+
+Hygiene, not containment.
+"""
+
+[[text_rules]]
+id = "TX023-only-the-launch-helper-executes"
+paths = ["crates/dwkd-broker/src"]
+exempt_paths = ["crates/dwkd-broker/src/process/helper.rs"]
+suffixes = [".rs"]
+# The binary's `use nix as _;` acknowledgement is not a finding.
+patterns = [
+    '^(?!\s*//).*\bexecveat\b',
+    '^(?!\s*//)(?!\s*use\s+nix\s+as\s+_\s*;).*\bnix\b',
+    '^(?!\s*//).*\b(setrlimit|set_no_new_privs|set_parent_process_death_signal|dup2_stderr)\b',
+]
+reason = """
+`nix` is linked by the broker for two safe functions, `execveat` and
+`dup2_stderr` (ADR-0045 §7), and only the launch helper calls them, after it
+has installed the stderr pipe, applied the limits, changed to the checked
+working directory, armed the parent-death signal, set `no_new_privs` and
+re-audited its descriptors. Those steps, and the exec, live in one file: a
+second caller would be an exec without them.
+
+Hygiene, not containment.
+"""
+
+[[text_rules]]
+id = "TX024-an-executable-identity-is-minted-by-the-resolver"
+paths = ["crates/dwkd-authority/src"]
+# `resource/exec/mod.rs` is the resolver, which mints an identity from what it
+# found and hashed, and defines the grammar-only reader of a stored one;
+# `resource/mod.rs` defines the type (and its test-only synthetic
+# constructor); `state/scopes.rs` is the one module that re-reads a stored
+# grant or a launched process's identity.
+exempt_paths = [
+    "crates/dwkd-authority/src/resource/exec/mod.rs",
+    "crates/dwkd-authority/src/resource/mod.rs",
+    "crates/dwkd-authority/src/state/scopes.rs",
+]
+suffixes = [".rs"]
+patterns = [
+    '^(?!\s*//).*\bstored_executable_identity\b',
+    '^(?!\s*//).*\bExecutableIdentity\s*::\s*new\b',
+]
+reason = """
+An executable in a NEW declaration -- a request, a profile, a policy match --
+means what the M4d resolver finds and hashes, and nothing else (ADR-0045 §21).
+The grammar-only reader exists to re-read an identity the authority itself
+resolved and stored -- a grant, a launched process -- without looking at the
+filesystem again. One module may use it. A second caller would mint an
+executable identity nobody resolved or hashed: TX017's rule, for executables.
+The constructor is visible only inside `crate::resource`; this is the second
+lock on it.
+
+Hygiene, not containment: the resolver's own refusals are the control.
 """
 
 # ===========================================================================

@@ -69,6 +69,13 @@
 >   scope whose meaning is unstable — a missing parent, an ambiguous name — is
 >   withheld. `fs.exec_bit` and `process` stay `UNRESOLVED_RESOURCE`
 >   ([ADR-0044](adr/0044-m4c-filesystem-operations-plans-and-atomic-mutation.md) §6).
+> - **`process` scopes resolve (M4d).** A concrete `process` scope's
+>   executable path is resolved by the executable resolver — absolute, no
+>   `PATH` search, symlinks followed to one native file only root or the
+>   authority can change — and hashed: the scope is that **executable
+>   identity**, canonical path and SHA-256, and covers only that file while
+>   it holds those bytes. A stored grant is re-read by grammar alone
+>   ([ADR-0045](adr/0045-m4d-process-execution-broker.md) §§5, 6, 21). `fs.exec_bit` stays `UNRESOLVED_RESOURCE`.
 > - **No policy preflight** (§4 step 7). `AdmitRun` carries no action for policy
 >   to decide, and inventing one would be deciding something nobody asked to
 >   do. Policy decides a *complete canonical action*, where both gates run

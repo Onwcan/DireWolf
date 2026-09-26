@@ -21,6 +21,8 @@
 )]
 
 use dwk_proto as _;
+#[cfg(target_os = "linux")]
+use nix as _;
 // Linux-only, like the operations that digest with it.
 #[cfg(target_os = "linux")]
 use sha2 as _;
@@ -145,14 +147,56 @@ mod linux {
         }
 
         fn try_start(socket: &Path, authority_uid: u32, extra: &[&str]) -> Result<Self, String> {
-            let mut child = Command::new(BIN)
+            Self::try_start_with(socket, authority_uid, extra, None, &[])
+        }
+
+        /// A shared-uid broker that aborts at crash point `point` (debug
+        /// builds: `DWKD_BROKER_CRASH_AT`).
+        fn crashing_at(socket: &Path, point: &str) -> Self {
+            Self::try_start_with(
+                socket,
+                own_uid(),
+                &["--allow-shared-authority-uid"],
+                Some(point),
+                &[],
+            )
+            .unwrap_or_else(|text| panic!("the broker did not start:\n{text}"))
+        }
+
+        /// A shared-uid broker whose own environment holds `variables`.
+        fn with_environment(socket: &Path, variables: &[(&str, &str)]) -> Self {
+            Self::try_start_with(
+                socket,
+                own_uid(),
+                &["--allow-shared-authority-uid"],
+                None,
+                variables,
+            )
+            .unwrap_or_else(|text| panic!("the broker did not start:\n{text}"))
+        }
+
+        fn try_start_with(
+            socket: &Path,
+            authority_uid: u32,
+            extra: &[&str],
+            crash: Option<&str>,
+            variables: &[(&str, &str)],
+        ) -> Result<Self, String> {
+            let mut command = Command::new(BIN);
+            command.env_clear();
+            if let Some(point) = crash {
+                command.env("DWKD_BROKER_CRASH_AT", point);
+            }
+            for (name, value) in variables {
+                command.env(name, value);
+            }
+            let mut child = command
                 .arg("serve")
                 .arg("--socket")
                 .arg(socket)
                 .arg("--authority-uid")
                 .arg(authority_uid.to_string())
                 .args(extra)
-                .env_clear()
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
@@ -625,6 +669,10 @@ mod linux {
                 "DESCRIPTOR_COUNT-unread-closed",
             );
         }
+        // The broker logs before it answers, but its stderr reaches this
+        // process through a reader thread: wait for the lines, then count
+        // them exactly.
+        broker.wait_for("executed", 4);
         assert_eq!(broker.count("executed"), 4);
         evidence("descriptor-count-refused-closed", "exactly-one-or-nothing");
     }
@@ -952,8 +1000,17 @@ mod linux {
                 Box::new(move |c| {
                     let a = authorisation(c, 1, id, 7);
                     let text = String::from_utf8(a[5..].to_vec()).unwrap();
-                    assert!(text.contains(r#""protocol":2"#));
-                    json(&text.replace(r#""protocol":2"#, r#""protocol":1"#))
+                    assert!(text.contains(r#""protocol":3"#));
+                    json(&text.replace(r#""protocol":3"#, r#""protocol":1"#))
+                }),
+            ),
+            (
+                // M4c's protocol, which M4d's broker no longer speaks.
+                "protocol-two",
+                Box::new(move |c| {
+                    let a = authorisation(c, 1, id, 7);
+                    let text = String::from_utf8(a[5..].to_vec()).unwrap();
+                    json(&text.replace(r#""protocol":3"#, r#""protocol":2"#))
                 }),
             ),
             (
@@ -1125,5 +1182,439 @@ mod linux {
             .unwrap();
         assert_eq!(tcp.status.code(), Some(2));
         evidence("refuses-untrusted-configuration", "refused");
+    }
+
+    // ---- M4d: process execution (ADR-0045) ----------------------------------
+
+    mod process {
+        use std::os::fd::AsFd as _;
+        use std::path::{Path, PathBuf};
+        use std::time::{Duration, Instant};
+
+        use dwk_proto::brokerp::{
+            self, BrokerGeneration, BrokerRefusal, ChannelNonce, Common, ExecEnvironment,
+            OutcomeResult, ProcessArgs, ProcessKillAuthorisation, ProcessSpec,
+            ProcessStartAuthorisation, ProcessStatusAuthorisation, StreamLimit,
+        };
+        use dwk_proto::wire::id::ProcessId;
+        use dwk_proto::wire::scalar::{
+            ContentDigest, HostPath, KillOutcome, ProcessArg, ProcessState,
+        };
+        use sha2::{Digest as _, Sha256};
+
+        use super::{Broker, Peer, Scratch, identity, invocation, open};
+
+        const PYTHON: &str = "/usr/bin/python3";
+
+        fn proc_evidence(case: &str, outcome: &str) {
+            println!(
+                "PROC-EVIDENCE {{\"suite\":\"broker-private-protocol\",\"case\":\"{case}\",\
+                 \"outcome\":\"{outcome}\",\"count\":1}}"
+            );
+        }
+
+        fn process_id(n: u64) -> ProcessId {
+            let ts = u128::from(1_758_000_000_000u64);
+            let n = u128::from(n);
+            ProcessId::from_uuid((ts << 80) | (0x7 << 76) | ((n & 0x0fff) << 64) | (0b10 << 62) | n)
+                .unwrap()
+        }
+
+        /// A marker no other process on the machine has in its argv.
+        fn marker(tag: &str) -> String {
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos());
+            format!("dwp-marker-{tag}-{}-{nanos}", std::process::id())
+        }
+
+        /// Every live process whose argv holds `marker`.
+        fn running(marker: &str) -> Vec<u32> {
+            std::fs::read_dir("/proc")
+                .unwrap()
+                .filter_map(Result::ok)
+                .filter_map(|e| e.file_name().to_str()?.parse::<u32>().ok())
+                .filter(|pid| {
+                    std::fs::read(format!("/proc/{pid}/cmdline"))
+                        .is_ok_and(|cmd| cmd.windows(marker.len()).any(|w| w == marker.as_bytes()))
+                })
+                .collect()
+        }
+
+        fn wait_gone(marker: &str) {
+            let until = Instant::now() + Duration::from_secs(10);
+            while !running(marker).is_empty() {
+                assert!(Instant::now() < until, "{marker} still runs");
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
+
+        fn python_bytes() -> (PathBuf, String) {
+            let path = std::fs::canonicalize(PYTHON).unwrap();
+            let digest = Sha256::digest(std::fs::read(&path).unwrap())
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect();
+            (path, digest)
+        }
+
+        /// A launch of python with `args`, working in `cwd`.
+        fn start_frame(channel: &ChannelNonce, n: u64, cwd: &Path, args: &[&str]) -> Vec<u8> {
+            let (path, digest) = python_bytes();
+            let args: Vec<ProcessArg> = args
+                .iter()
+                .map(|a| ProcessArg::new((*a).to_owned()).unwrap())
+                .collect();
+            let a = ProcessStartAuthorisation::new(
+                Common::new(channel.clone(), invocation(1)),
+                ProcessSpec {
+                    process_id: process_id(n),
+                    executable: identity(&path),
+                    executable_sha256: ContentDigest::new(digest).unwrap(),
+                    cwd: identity(cwd),
+                    argv0: HostPath::new(path.display().to_string()).unwrap(),
+                    args: ProcessArgs::new(args).unwrap(),
+                    environment: ExecEnvironment::Base,
+                    stream_limit: StreamLimit::new(4096).unwrap(),
+                },
+            );
+            brokerp::encode_frame(&a).unwrap()
+        }
+
+        fn status_frame(channel: &ChannelNonce, n: u64, generation: &BrokerGeneration) -> Vec<u8> {
+            let a = ProcessStatusAuthorisation::new(
+                Common::new(channel.clone(), invocation(2)),
+                process_id(n),
+                generation.clone(),
+            );
+            brokerp::encode_frame(&a).unwrap()
+        }
+
+        fn kill_frame(channel: &ChannelNonce, n: u64, generation: &BrokerGeneration) -> Vec<u8> {
+            let a = ProcessKillAuthorisation::new(
+                Common::new(channel.clone(), invocation(3)),
+                process_id(n),
+                generation.clone(),
+            );
+            brokerp::encode_frame(&a).unwrap()
+        }
+
+        /// Launch: the generation, or the refusal.
+        fn launch(
+            broker_socket: &Path,
+            n: u64,
+            cwd: &Path,
+            args: &[&str],
+        ) -> Result<BrokerGeneration, BrokerRefusal> {
+            let mut peer = Peer::connect(broker_socket);
+            let hello = peer.hello();
+            let (path, _) = python_bytes();
+            let (exe, dir) = (open(&path), open(cwd));
+            peer.send(
+                &start_frame(&hello.channel, n, cwd, args),
+                &[exe.as_fd(), dir.as_fd()],
+            );
+            match peer.outcome().expect("an outcome").result() {
+                OutcomeResult::Done(done) => Ok(done.process_start.expect("a launch").generation),
+                OutcomeResult::Refused(why) => Err(why),
+                OutcomeResult::Indeterminate(why) => panic!("indeterminate {why:?}"),
+            }
+        }
+
+        fn status(
+            socket: &Path,
+            n: u64,
+            generation: &BrokerGeneration,
+        ) -> Result<(ProcessState, Option<u8>, Vec<u8>), BrokerRefusal> {
+            let mut peer = Peer::connect(socket);
+            let hello = peer.hello();
+            peer.send(&status_frame(&hello.channel, n, generation), &[]);
+            match peer.outcome().expect("an outcome").result() {
+                OutcomeResult::Done(done) => {
+                    let s = done.process_status.expect("a status");
+                    Ok((
+                        s.state,
+                        s.signal.map(|x| x.get()),
+                        s.stdout.content.to_bytes(),
+                    ))
+                }
+                OutcomeResult::Refused(why) => Err(why),
+                OutcomeResult::Indeterminate(why) => panic!("indeterminate {why:?}"),
+            }
+        }
+
+        fn kill(
+            socket: &Path,
+            n: u64,
+            generation: &BrokerGeneration,
+        ) -> Result<KillOutcome, BrokerRefusal> {
+            let mut peer = Peer::connect(socket);
+            let hello = peer.hello();
+            peer.send(&kill_frame(&hello.channel, n, generation), &[]);
+            match peer.outcome().expect("an outcome").result() {
+                OutcomeResult::Done(done) => Ok(done.process_kill.expect("a kill").outcome),
+                OutcomeResult::Refused(why) => Err(why),
+                OutcomeResult::Indeterminate(why) => panic!("indeterminate {why:?}"),
+            }
+        }
+
+        #[test]
+        fn a_launch_takes_exactly_its_two_descriptors_and_status_and_kill_take_none() {
+            let scratch = Scratch::new("proc-descriptors");
+            let broker = Broker::shared(&scratch.socket());
+            let socket = scratch.socket();
+            let mark = marker("descriptors");
+            let sleeper = [
+                "-I",
+                "-c",
+                "import sys, time; print('up', flush=True); time.sleep(60)",
+                &mark,
+            ];
+            let generation = launch(&socket, 1, &scratch.0, &sleeper).unwrap();
+            let until = Instant::now() + Duration::from_secs(10);
+            loop {
+                let (state, _, out) = status(&socket, 1, &generation).unwrap();
+                assert_eq!(state, ProcessState::Running);
+                if out == b"up\n" {
+                    break;
+                }
+                assert!(Instant::now() < until);
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            assert_eq!(running(&mark).len(), 1);
+            proc_evidence("launch-two-descriptors", "RUNNING");
+
+            // Every wrong count: refused, and nothing more is started.
+            let (path, _) = python_bytes();
+            for (case, fds) in [
+                ("none", vec![]),
+                ("one", vec![open(&path)]),
+                ("three", vec![open(&path), open(&scratch.0), open(&path)]),
+            ] {
+                let mut peer = Peer::connect(&socket);
+                let hello = peer.hello();
+                let borrowed: Vec<_> = fds.iter().map(|fd| fd.as_fd()).collect();
+                let other = marker(case);
+                peer.send(
+                    &start_frame(
+                        &hello.channel,
+                        50,
+                        &scratch.0,
+                        &["-I", "-c", "pass", &other],
+                    ),
+                    &borrowed,
+                );
+                assert_eq!(
+                    super::refused(peer.outcome()),
+                    BrokerRefusal::DescriptorCount,
+                    "{case}"
+                );
+                assert!(running(&other).is_empty(), "{case}");
+                proc_evidence(
+                    &format!("launch-{case}-descriptors"),
+                    "DESCRIPTOR_COUNT-zero-exec",
+                );
+            }
+            // Reversed.
+            let mut peer = Peer::connect(&socket);
+            let hello = peer.hello();
+            let (exe, dir) = (open(&path), open(&scratch.0));
+            peer.send(
+                &start_frame(&hello.channel, 51, &scratch.0, &["-I", "-c", "pass"]),
+                &[dir.as_fd(), exe.as_fd()],
+            );
+            assert_eq!(
+                super::refused(peer.outcome()),
+                BrokerRefusal::DescriptorNotRegular
+            );
+            proc_evidence("launch-descriptors-reversed", "DESCRIPTOR_NOT_REGULAR");
+            // A status or a kill with a descriptor.
+            for frame in [
+                status_frame(&ChannelNonce::new("0".repeat(32)).unwrap(), 1, &generation),
+                kill_frame(&ChannelNonce::new("0".repeat(32)).unwrap(), 1, &generation),
+            ] {
+                let mut peer = Peer::connect(&socket);
+                let hello = peer.hello();
+                let text = String::from_utf8(frame[5..].to_vec())
+                    .unwrap()
+                    .replace(&"0".repeat(32), hello.channel.as_str());
+                let bytes =
+                    dwk_proto::frame::encode(dwk_proto::frame::ContentType::Json, text.as_bytes())
+                        .unwrap();
+                let stray = open(&path);
+                peer.send(&bytes, &[stray.as_fd()]);
+                assert_eq!(
+                    super::refused(peer.outcome()),
+                    BrokerRefusal::DescriptorCount
+                );
+            }
+            assert_eq!(
+                status(&socket, 1, &generation).unwrap().0,
+                ProcessState::Running
+            );
+            proc_evidence("status-kill-with-descriptor", "DESCRIPTOR_COUNT-no-signal");
+
+            // Another generation, and a handle never issued.
+            let stale = BrokerGeneration::new("f".repeat(32)).unwrap();
+            assert_eq!(
+                status(&socket, 1, &stale).err(),
+                Some(BrokerRefusal::StaleGeneration)
+            );
+            assert_eq!(
+                kill(&socket, 1, &stale).err(),
+                Some(BrokerRefusal::StaleGeneration)
+            );
+            assert_eq!(
+                status(&socket, 999, &generation).err(),
+                Some(BrokerRefusal::UnknownProcess)
+            );
+            assert_eq!(running(&mark).len(), 1, "no refused request touched it");
+            proc_evidence("stale-generation", "STALE_GENERATION-no-signal");
+
+            // The kill: this process, and it is gone.
+            assert_eq!(kill(&socket, 1, &generation), Ok(KillOutcome::Signaled));
+            wait_gone(&mark);
+            let until = Instant::now() + Duration::from_secs(10);
+            loop {
+                let (state, signal, _) = status(&socket, 1, &generation).unwrap();
+                if state == ProcessState::Signaled {
+                    assert_eq!(signal, Some(9));
+                    break;
+                }
+                assert!(Instant::now() < until);
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            assert_eq!(
+                kill(&socket, 1, &generation),
+                Ok(KillOutcome::AlreadyExited)
+            );
+            proc_evidence("kill-then-status", "SIGNALED-9");
+            drop(broker);
+        }
+
+        #[test]
+        fn a_target_inherits_nothing_of_the_brokers_environment() {
+            let scratch = Scratch::new("proc-environment");
+            let socket = scratch.socket();
+            let canary = marker("canary");
+            let _broker = Broker::with_environment(
+                &socket,
+                &[
+                    ("DW_M4D_SECRET_TOKEN", canary.as_str()),
+                    ("AWS_SECRET_ACCESS_KEY", canary.as_str()),
+                    ("PATH", "/canary/bin"),
+                    ("LD_PRELOAD", "/canary/lib.so"),
+                ],
+            );
+            let report = "import os, sys; sys.stdout.write(repr(sorted(os.environ.items())))";
+            let generation = launch(&socket, 1, &scratch.0, &["-I", "-c", report]).unwrap();
+            let until = Instant::now() + Duration::from_secs(20);
+            let out = loop {
+                let (state, _, out) = status(&socket, 1, &generation).unwrap();
+                if state != ProcessState::Running {
+                    break out;
+                }
+                assert!(Instant::now() < until, "the report did not finish");
+                std::thread::sleep(Duration::from_millis(20));
+            };
+            let text = String::from_utf8(out).unwrap();
+            assert_eq!(
+                text,
+                "[('HOME', '/nonexistent'), ('LANG', 'C.UTF-8'), ('PATH', \
+                 '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin')]"
+            );
+            assert!(!text.contains(&canary) && !text.contains("canary"));
+            proc_evidence("environment-not-inherited", "BASE-only-canary-absent");
+        }
+
+        #[test]
+        fn a_broker_that_dies_takes_its_processes_with_it_and_its_successor_knows_none() {
+            let scratch = Scratch::new("proc-restart");
+            let socket = scratch.socket();
+            let mark = marker("restart");
+            let mut first = Broker::shared(&socket);
+            let generation = launch(
+                &socket,
+                1,
+                &scratch.0,
+                &["-I", "-c", "import time; time.sleep(60)", &mark],
+            )
+            .unwrap();
+            assert_eq!(running(&mark).len(), 1);
+            first.kill();
+            // The parent-death signal: no orphan outlives the broker.
+            wait_gone(&mark);
+            let _second = Broker::shared(&socket);
+            assert_eq!(
+                status(&socket, 1, &generation).err(),
+                Some(BrokerRefusal::StaleGeneration)
+            );
+            assert_eq!(
+                kill(&socket, 1, &generation).err(),
+                Some(BrokerRefusal::StaleGeneration)
+            );
+            proc_evidence("broker-restart-orphans", "none");
+            proc_evidence("broker-restart-generation", "STALE_GENERATION");
+        }
+
+        #[test]
+        fn a_crash_at_any_launch_point_leaves_no_target_running() {
+            // E4-E6 on the broker's side. The authority's record of each is
+            // the authority's crash campaign; what this proves is that the
+            // host is left with no process whichever point the broker stops at.
+            for (point, outcome) in [
+                ("process_before_helper", "closed-no-helper"),
+                ("process_helper_spawned", "closed-helper-exits"),
+                ("process_helper_before_exec", "EXEC_SETUP_FAILED"),
+                (
+                    "process_exec_confirmed",
+                    "closed-target-killed-by-death-signal",
+                ),
+            ] {
+                let scratch = Scratch::new("proc-crash");
+                let socket = scratch.socket();
+                let mut broker = Broker::crashing_at(&socket, point);
+                let mark = marker(point);
+                let mut peer = Peer::connect(&socket);
+                let hello = peer.hello();
+                let (path, _) = python_bytes();
+                let (exe, dir) = (open(&path), open(&scratch.0));
+                peer.send(
+                    &start_frame(
+                        &hello.channel,
+                        1,
+                        &scratch.0,
+                        &["-I", "-c", "import time; time.sleep(60)", &mark],
+                    ),
+                    &[exe.as_fd(), dir.as_fd()],
+                );
+                match peer.outcome() {
+                    Some(outcome) => assert!(
+                        matches!(
+                            outcome.result(),
+                            OutcomeResult::Refused(BrokerRefusal::ExecSetupFailed)
+                        ),
+                        "{point}"
+                    ),
+                    None => assert_ne!(point, "process_helper_before_exec", "{point}"),
+                }
+                broker.kill();
+                wait_gone(&mark);
+                // The helper, too, is gone.
+                let helpers = running("exec-helper");
+                assert!(
+                    helpers.iter().all(|pid| {
+                        std::fs::read_to_string(format!("/proc/{pid}/stat"))
+                            .map_or(true, |stat| !stat.contains(&broker_pid_marker(&broker)))
+                    }),
+                    "{point}"
+                );
+                proc_evidence(&format!("crash-{point}"), outcome);
+            }
+        }
+
+        fn broker_pid_marker(broker: &Broker) -> String {
+            format!(" {} ", broker.pid)
+        }
     }
 }

@@ -25,6 +25,7 @@ import hashlib
 import json
 import os
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -1275,6 +1276,355 @@ def require_fsop_foreign_evidence(output: str) -> None:
     require_fsop_evidence(output, FSOP_FOREIGN_CASES)
 
 
+PROC_EVIDENCE_PREFIX = "PROC-EVIDENCE "
+
+# M4d's evidence (ADR-0045). Each (suite, case) is printed by exactly one test,
+# after its assertions held; a missing one -- or one whose outcome says it was
+# not exercised -- fails the task. The suites, and what they are:
+#   process-frame            the private-protocol frames at their bounds;
+#   argv-classifier          argv literal, and every argv_safe rule;
+#   authority-process        the authority's state machine against a FAKE
+#                            broker: decisions, durable order, idempotency,
+#                            UNKNOWN, lookups, argv_allowlist, crash windows.
+#                            Not process-execution evidence;
+#   production-floor         the released daemons: no process can be launched;
+#   hygiene-override         real git and python3 undoing the environment form
+#                            of workspace_exec_hygiene (why it is denied);
+#   broker-process           the REAL broker module and helper starting real
+#                            targets: re-proof, races, output, kill, table;
+#   broker-private-protocol  the real broker binary over its socket: descriptor
+#                            counts, crash points, restart and generations.
+PROC_CASES = (
+    ("process-frame", "largest-valid-launch-request"),
+    ("process-frame", "largest-status-result"),
+    ("argv-classifier", "argv-literal-shell-text-is-data"),
+    ("argv-classifier", "argv-safe-interpreter"),
+    ("argv-classifier", "argv-safe-runner"),
+    ("argv-classifier", "argv-safe-exec-style-option"),
+    ("argv-classifier", "argv-safe-git-config-alias-external"),
+    ("argv-classifier", "argv-safe-cargo-external"),
+    ("argv-classifier", "argv-safe-names-a-program"),
+    ("authority-process", "new-process-declaration"),
+    ("authority-process", "admission-replay"),
+    ("authority-process", "stored-process-grant"),
+    ("authority-process", "launch-lookup"),
+    ("authority-process", "changed-hash"),
+    ("authority-process", "deleted-executable"),
+    ("authority-process", "preview-zero-effect"),
+    ("authority-process", "preview-hash-drift"),
+    ("authority-process", "wrong-run-status"),
+    ("authority-process", "wrong-run-kill"),
+    ("authority-process", "R10-process-handle-substituted"),
+    ("authority-process", "R11-process-of-another-run"),
+    ("authority-process", "stale-generation"),
+    ("authority-process", "argv-allowlist-positive"),
+    ("authority-process", "argv-allowlist-negative"),
+    ("authority-process", "durable-intent-before-exec"),
+    ("authority-process", "status-output-taints"),
+    ("authority-process", "status-retry-safe"),
+    ("authority-process", "exec-key-reuse"),
+    ("authority-process", "kill-key-reuse"),
+    ("authority-process", "launch-unconfirmed"),
+    ("authority-process", "kill-unconfirmed"),
+    ("authority-process", "launch-refused"),
+    ("authority-process", "restart-open-launch"),
+    ("authority-process", "restart-running-process"),
+    ("authority-process", "production-floor-opted-out"),
+    ("authority-process", "production-floor-opted-in"),
+    ("authority-process", "no-capability"),
+    ("authority-process", "inspect-gate"),
+    ("authority-process", "signal-gate"),
+    ("authority-process", "policy-deny"),
+    ("authority-process", "policy-approval"),
+    ("authority-process", "network-deny-obligation"),
+    ("authority-process", "workspace-exec-hygiene-obligation"),
+    ("authority-process", "max-output-bytes-1024"),
+    ("authority-process", "crash-E1-before-intent"),
+    ("authority-process", "crash-E2-after-intent"),
+    ("authority-process", "crash-E3-broker-accepted-then-lost"),
+    ("authority-process", "crash-E4-helper-created-broker-lost"),
+    ("authority-process", "crash-E5-before-target-exec"),
+    ("authority-process", "crash-E6-exec-handshake-lost"),
+    ("authority-process", "crash-E7-result-before-outcome"),
+    ("authority-process", "crash-E8-outcome-before-response"),
+    ("authority-process", "crash-K1-before-intent"),
+    ("authority-process", "crash-K2-after-intent"),
+    ("authority-process", "crash-K3-broker-accepted-then-lost"),
+    ("authority-process", "crash-K4-before-signal-broker-lost"),
+    ("authority-process", "crash-K5-signal-may-have-happened"),
+    ("authority-process", "crash-K6-result-before-outcome"),
+    ("authority-process", "crash-S1-after-validation"),
+    ("authority-process", "crash-S2-broker-inspection-lost"),
+    ("authority-process", "crash-S3-result-before-outcome"),
+    ("production-floor", "released-opted-out"),
+    ("production-floor", "released-opted-in"),
+    ("production-floor", "released-preview"),
+    ("production-floor", "released-status-kill-no-process"),
+    ("production-floor", "shipped-balanced"),
+    ("production-floor", "shipped-power"),
+    ("production-floor", "shipped-safe"),
+    ("hygiene-override", "git-repository-hook-despite-env"),
+    ("hygiene-override", "git-argv-config-runs-a-command"),
+    ("hygiene-override", "python-argv-restores-cwd-import"),
+    ("broker-process", "argv-literal"),
+    ("broker-process", "env-built-from-nothing"),
+    ("broker-process", "rlimits-applied"),
+    ("broker-process", "fd-hygiene-target"),
+    ("broker-process", "stdin"),
+    ("broker-process", "no-new-privs"),
+    ("broker-process", "digest-mismatch"),
+    ("broker-process", "rewritten-after-hash"),
+    ("broker-process", "truncated-after-hash"),
+    ("broker-process", "group-writable"),
+    ("broker-process", "setuid"),
+    ("broker-process", "script"),
+    ("broker-process", "foreign-owner"),
+    ("broker-process", "path-replaced-after-handoff"),
+    ("broker-process", "R1-executable-path-replaced"),
+    ("broker-process", "R2-executable-renamed"),
+    ("broker-process", "R3-executable-deleted"),
+    ("broker-process", "R4-executable-rewritten-in-place"),
+    ("broker-process", "R5-executable-truncated"),
+    ("broker-process", "R6-executable-chmod"),
+    ("broker-process", "cwd-replaced-after-handoff"),
+    ("broker-process", "R7-cwd-path-replaced"),
+    ("broker-process", "descriptors-reversed"),
+    ("broker-process", "executable-identity-mismatch"),
+    ("broker-process", "R8-executable-descriptor-substituted"),
+    ("broker-process", "cwd-not-a-directory"),
+    ("broker-process", "cwd-identity-mismatch"),
+    ("broker-process", "R9-cwd-descriptor-substituted"),
+    ("broker-process", "executable-o-path"),
+    ("broker-process", "inherited-descriptor"),
+    ("broker-process", "exec-failure"),
+    ("broker-process", "leak-24-launches"),
+    ("broker-process", "status-running"),
+    ("broker-process", "kill-signals-process-and-group"),
+    ("broker-process", "kill-after-exit"),
+    ("broker-process", "wall-clock"),
+    ("broker-process", "stale-generation"),
+    ("broker-process", "R12-broker-generation-stale"),
+    ("broker-process", "unknown-handle"),
+    ("broker-process", "handle-reuse"),
+    ("broker-process", "helper-direct-invocation"),
+    ("broker-process", "output-none"),
+    ("broker-process", "output-stdout-only"),
+    ("broker-process", "output-stderr-only"),
+    ("broker-process", "output-binary"),
+    ("broker-process", "output-exact-cap"),
+    ("broker-process", "output-cap-plus-one"),
+    ("broker-process", "output-close-stdout-early"),
+    ("broker-process", "output-write-then-sleep"),
+    ("broker-process", "output-12MiB-both-streams"),
+    ("broker-process", "table-bound"),
+    ("broker-private-protocol", "launch-none-descriptors"),
+    ("broker-private-protocol", "launch-one-descriptors"),
+    ("broker-private-protocol", "launch-two-descriptors"),
+    ("broker-private-protocol", "launch-three-descriptors"),
+    ("broker-private-protocol", "launch-descriptors-reversed"),
+    ("broker-private-protocol", "status-kill-with-descriptor"),
+    ("broker-private-protocol", "stale-generation"),
+    ("broker-private-protocol", "kill-then-status"),
+    ("broker-private-protocol", "environment-not-inherited"),
+    ("broker-private-protocol", "broker-restart-orphans"),
+    ("broker-private-protocol", "broker-restart-generation"),
+    ("broker-private-protocol", "crash-process_before_helper"),
+    ("broker-private-protocol", "crash-process_helper_spawned"),
+    ("broker-private-protocol", "crash-process_helper_before_exec"),
+    ("broker-private-protocol", "crash-process_exec_confirmed"),
+)
+
+# The three-identity half: `#[ignore]`d, selected BY NAME, required to run every
+# test and report every case, each line carrying the three numeric uids.
+PROC_FOREIGN_TESTS = ("linux::the_broker_identity_executes_a_descriptor_it_cannot_reach_by_name",)
+PROC_FOREIGN_CASES = (
+    ("process-foreign", "broker-uid-cannot-name-the-executable"),
+    ("process-foreign", "descriptor-bound-exec-cross-uid"),
+    ("process-foreign", "path-replaced-after-handoff-cross-uid"),
+    ("process-foreign", "runtime-uid-cannot-launch"),
+    ("process-foreign", "runtime-uid-cannot-status-or-kill"),
+    ("process-foreign", "runtime-uid-helper-does-nothing"),
+)
+
+
+def task_process_broker_evidence() -> None:
+    """M4d's process-execution evidence (ADR-0045); the three-identity half needs
+    DW_BROKER_AS and DW_PEER_AS.
+
+    With both set, the two users are proven first -- by numbers, distinct from
+    this process, from root and from each other. Then the broker binary is
+    built and the same-identity suites run: the private-protocol frames at
+    their bounds; the argv classifier; the authority's process state machine
+    against a fake broker (decisions, durable order, idempotency, UNKNOWN,
+    lookups, crash windows -- labelled as such, never counted as execution);
+    the released daemons, which launch nothing; the hygiene override attacks
+    with the real git and python3; the real broker module and launch helper
+    starting real targets (re-proof, the race campaign, output, kill, the
+    table); and the real broker binary over its socket (descriptor counts,
+    crash points, restart). Every case must report, every suite must have run
+    at least one test. Then the three-identity suite, selected by name: the
+    broker as its own user executes a descriptor it cannot reach by name, and
+    a hostile runtime user gets nothing from its socket or its helper.
+
+    Without the identities that half is NOT EXERCISED and this task fails after
+    running everything else. CI's Linux job creates the broker user. Linux
+    only.
+    """
+    if not sys.platform.startswith("linux"):
+        raise TaskError(
+            "NOT EXERCISED: process execution runs only on Linux (ADR-0045); use WSL2 on Windows"
+        )
+    broker_user = os.environ.get("DW_BROKER_AS", "").strip()
+    peer_user = os.environ.get("DW_PEER_AS", "").strip()
+    identities = bool(broker_user and peer_user)
+    if identities:
+        _, _, broker_uid = second_identity("DW_BROKER_AS")
+        _, _, peer_uid = second_identity("DW_PEER_AS")
+        if broker_uid == peer_uid:
+            raise TaskError(
+                f"DW_BROKER_AS={broker_user} and DW_PEER_AS={peer_user} are both uid {peer_uid}: "
+                "the broker and the hostile runtime must be two identities"
+            )
+    # The suites spawn the broker binary Cargo builds beside the authority.
+    run("cargo", "build", "--locked", "-p", "dwkd-broker")
+    suites = [
+        run_captured(
+            "cargo", "test", "--locked", "-p", "dwk-proto", "--test", "dwkp_v3", "--", "--nocapture"
+        ),
+        # The lookup counter and the fake broker exist only in the authority's
+        # own unit tests, so the state machine and the classifier run there.
+        run_captured(
+            "cargo",
+            "test",
+            "--locked",
+            "-p",
+            "dwkd-authority",
+            "--lib",
+            "state::process",
+            "--",
+            "--nocapture",
+        ),
+        run_captured(
+            "cargo",
+            "test",
+            "--locked",
+            "-p",
+            "dwkd-authority",
+            "--lib",
+            "resource::exec",
+            "--",
+            "--nocapture",
+        ),
+        run_captured(
+            "cargo",
+            "test",
+            "--locked",
+            "-p",
+            "dwkd-authority",
+            "--test",
+            "process_production",
+            "--test",
+            "hygiene_override",
+            "--",
+            "--nocapture",
+        ),
+        run_captured(
+            "cargo",
+            "test",
+            "--locked",
+            "-p",
+            "dwkd-broker",
+            "--bins",
+            "--test",
+            "private_protocol",
+            "--",
+            "--nocapture",
+        ),
+    ]
+    for output in suites:
+        require_tests_ran(output)
+    require_proc_evidence("\n".join(suites), PROC_CASES)
+    if identities:
+        foreign = run_captured(
+            "cargo",
+            "test",
+            "--locked",
+            "-p",
+            "dwkd-authority",
+            "--test",
+            "process_foreign",
+            "--",
+            "--ignored",
+            "--exact",
+            "--nocapture",
+            *PROC_FOREIGN_TESTS,
+        )
+        require_proc_foreign_evidence(foreign)
+    uvrun("dwcheck", "closure", "--report")
+    if not identities:
+        raise TaskError(
+            "NOT EXERCISED: the three-identity half needs DW_BROKER_AS (the broker's own user) "
+            "and DW_PEER_AS (a hostile local user); every same-identity suite above ran"
+        )
+
+
+def require_tests_ran(output: str) -> None:
+    """Every `test result:` line passed, and at least one test ran in all."""
+    summaries = [line for line in output.splitlines() if line.startswith("test result: ")]
+    passed = 0
+    for summary in summaries:
+        match = re.match(r"test result: ok\. (\d+) passed; 0 failed;", summary)
+        if match is None:
+            raise TaskError(f"a suite did not pass: {summary}")
+        passed += int(match.group(1))
+    if passed == 0:
+        raise TaskError(f"a suite ran zero tests: {summaries or 'no summary'}")
+
+
+def _proc_evidence(output: str) -> set[tuple[str, str]]:
+    """Every (suite, case) a PROC-EVIDENCE line reported as exercised."""
+    reported: set[tuple[str, str]] = set()
+    for line in output.splitlines():
+        at = line.find(PROC_EVIDENCE_PREFIX)
+        if at < 0:
+            continue
+        try:
+            record = json.loads(line[at + len(PROC_EVIDENCE_PREFIX) :])
+        except json.JSONDecodeError as exc:
+            raise TaskError(f"unreadable evidence line: {line[:200]}") from exc
+        if not isinstance(record, dict) or not record.get("outcome") or not record.get("suite"):
+            raise TaskError(f"malformed evidence line: {line[:200]}")
+        if str(record["outcome"]).startswith("not-exercised"):
+            continue
+        reported.add((str(record["suite"]), str(record.get("case"))))
+    return reported
+
+
+def require_proc_evidence(output: str, cases: tuple[tuple[str, str], ...]) -> None:
+    """Every (suite, case) must have printed its evidence line, exercised."""
+    if not cases:
+        raise TaskError("process-execution evidence: zero cases required")
+    reported = _proc_evidence(output)
+    missing = [f"{suite}/{case}" for suite, case in cases if (suite, case) not in reported]
+    if missing:
+        raise TaskError(
+            "process-execution evidence incomplete, not reported: " + ", ".join(missing)
+        )
+    print(f"{GREEN}process-execution evidence: {len(cases)} cases reported{OFF}")
+
+
+def require_proc_foreign_evidence(output: str) -> None:
+    """The three-identity suite counts only if every test ran and every case reported."""
+    summaries = [line for line in output.splitlines() if line.startswith("test result: ")]
+    expected = f"test result: ok. {len(PROC_FOREIGN_TESTS)} passed; 0 failed; 0 ignored"
+    if len(summaries) != 1 or not summaries[0].startswith(expected):
+        raise TaskError(
+            f"the three-identity suite did not run all of its tests: expected `{expected}`, "
+            f"got {summaries or 'no summary'}"
+        )
+    require_proc_evidence(output, PROC_FOREIGN_CASES)
+
+
 def task_authority_write_probe() -> None:
     """Attempt the runtime's forbidden writes as a SECOND operating-system user.
 
@@ -1489,6 +1839,7 @@ TASKS = {
     "authority-write-probe": task_authority_write_probe,
     "broker-fs-read-evidence": task_broker_fs_read_evidence,
     "filesystem-operations-evidence": task_filesystem_operations_evidence,
+    "process-broker-evidence": task_process_broker_evidence,
     "fuzz-smoke": task_fuzz_smoke,
     "fuzz": task_fuzz,
     "security": task_security,

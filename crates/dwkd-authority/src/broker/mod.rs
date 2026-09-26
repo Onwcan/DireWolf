@@ -1,5 +1,5 @@
 //! The authority's side of the private broker channel (M4b, [ADR-0043]; the
-//! M4c operations, [ADR-0044]).
+//! M4c operations, [ADR-0044]; the M4d process operations, [ADR-0045]).
 //!
 //! The authority decides; `dwkd-broker` does ([ADR-0018]). This module is the
 //! one place an authorised effect crosses from the first to the second: the
@@ -32,6 +32,7 @@
 //! [ADR-0018]: ../../../../docs/adr/0018-authority-broker-split.md
 //! [ADR-0043]: ../../../../docs/adr/0043-m4b-private-broker-channel-and-brokered-fs-read.md
 //! [ADR-0044]: ../../../../docs/adr/0044-m4c-filesystem-operations-plans-and-atomic-mutation.md
+//! [ADR-0045]: ../../../../docs/adr/0045-m4d-process-execution-broker.md
 
 #[cfg(target_os = "linux")]
 mod link;
@@ -41,15 +42,17 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use dwk_proto::brokerp::{
-    BrokerRefusal, Indeterminate, ReclaimState, StagingHolds, StagingOperation,
+    BrokerGeneration, BrokerRefusal, ExecEnvironment, Indeterminate, ReclaimState, StagingHolds,
+    StagingOperation,
 };
 use dwk_proto::dwkp::fsops::{ContentRevision, PatchEdits};
-use dwk_proto::wire::id::InvocationId;
+use dwk_proto::wire::id::{InvocationId, ProcessId};
 use dwk_proto::wire::scalar::{
-    EntryKind, ListLimit, MatchLimit, Needle, PatchOutcome, ReadLimit, ScanLimit, StatKind,
+    EntryKind, KillOutcome, ListLimit, MatchLimit, Needle, PatchOutcome, ProcessState, ReadLimit,
+    ScanLimit, StatKind,
 };
 
-use crate::resource::{FileIdentity, ObjectHandoff, ParentHandoff, ReadHandoff};
+use crate::resource::{ExecHandoff, FileIdentity, ObjectHandoff, ParentHandoff, ReadHandoff};
 
 /// How long one broker exchange may take, end to end: connect, hello,
 /// authorisation, the operation, outcome. A bound, not a target — every
@@ -129,6 +132,39 @@ pub enum Operation {
         /// What the staging directory was made for.
         staging: StagingSpec,
     },
+    /// Start a process (M4d, ADR-0045): the checked executable, open for
+    /// reading and proved to be the object hashed; the checked working
+    /// directory, open for reading; and the launch's arguments, environment
+    /// profile and output bound. `argv[0]` is the executable's canonical path.
+    ProcessStart {
+        /// The authority's handle for the process.
+        process_id: ProcessId,
+        /// The executable.
+        executable: ExecHandoff,
+        /// The working directory.
+        cwd: ObjectHandoff,
+        /// The arguments after `argv[0]`: data, never a command line.
+        args: Vec<String>,
+        /// The environment profile.
+        environment: ExecEnvironment,
+        /// Each stream's retained bytes.
+        stream_limit: u32,
+    },
+    /// Observe a process this broker instance launched. No descriptor.
+    ProcessStatus {
+        /// The handle.
+        process_id: ProcessId,
+        /// The broker instance that launched it.
+        generation: BrokerGeneration,
+    },
+    /// Kill a process this broker instance launched, and its process group.
+    /// No descriptor.
+    ProcessKill {
+        /// The handle.
+        process_id: ProcessId,
+        /// The broker instance that launched it.
+        generation: BrokerGeneration,
+    },
 }
 
 /// What a staging directory was made for: the operation, the one name it
@@ -157,6 +193,9 @@ impl Operation {
             Self::Move { .. } => "fs.move",
             Self::Delete { .. } => "fs.delete",
             Self::Reclaim { .. } => "staging.reclaim",
+            Self::ProcessStart { .. } => "process.start",
+            Self::ProcessStatus { .. } => "process.status",
+            Self::ProcessKill { .. } => "process.kill",
         }
     }
 }
@@ -195,10 +234,11 @@ impl BrokerOrder {
 
     /// The identity of the object it names first: the file, directory or
     /// object for the read family, the target (or, for a creation, the parent
-    /// directory) otherwise.
+    /// directory), the executable of a launch. `None` for a status or a kill,
+    /// which name a process, not an object.
     #[must_use]
-    pub fn identity(&self) -> FileIdentity {
-        match &self.operation {
+    pub fn identity(&self) -> Option<FileIdentity> {
+        Some(match &self.operation {
             Operation::Read { file, .. } | Operation::Search { file, .. } => file.identity(),
             Operation::Stat { object } => object.identity(),
             Operation::List { directory, .. } | Operation::Reclaim { directory, .. } => {
@@ -212,7 +252,9 @@ impl BrokerOrder {
             Operation::Move { source, .. } => source
                 .target()
                 .map_or_else(|| source.directory_identity(), |(identity, _)| identity),
-        }
+            Operation::ProcessStart { executable, .. } => executable.object(),
+            Operation::ProcessStatus { .. } | Operation::ProcessKill { .. } => return None,
+        })
     }
 
     #[cfg(target_os = "linux")]
@@ -276,6 +318,48 @@ pub struct SearchDelivery {
     pub matches_truncated: bool,
 }
 
+/// A launch the broker confirmed: the helper replaced itself with the
+/// executable, and the broker supervises it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProcessStartDelivery {
+    /// The broker instance that launched it.
+    pub generation: BrokerGeneration,
+    /// Its state when the launch was confirmed.
+    pub state: ProcessState,
+    /// Its exit code, if it had already exited.
+    pub exit_code: Option<u8>,
+    /// The signal that ended it, if one already had.
+    pub signal: Option<u8>,
+}
+
+/// One stream as the broker retained it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StreamDelivery {
+    /// The retained bytes.
+    pub content: Vec<u8>,
+    /// Every byte written so far.
+    pub observed: u64,
+    /// Whether more was written than retained.
+    pub truncated: bool,
+}
+
+/// What the broker observed of a process.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProcessStatusDelivery {
+    /// Its state.
+    pub state: ProcessState,
+    /// Its exit code, once it exited.
+    pub exit_code: Option<u8>,
+    /// The signal that ended it, once one did.
+    pub signal: Option<u8>,
+    /// Whether the broker's wall clock ended it.
+    pub timed_out: bool,
+    /// `stdout`.
+    pub stdout: StreamDelivery,
+    /// `stderr`.
+    pub stderr: StreamDelivery,
+}
+
 /// What the broker did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BrokerDelivery {
@@ -317,6 +401,12 @@ pub enum BrokerDelivery {
         /// For a retained object: its `(device, inode)`.
         held: Option<(u64, u64)>,
     },
+    /// A launch, confirmed.
+    ProcessStarted(ProcessStartDelivery),
+    /// A process's state and output.
+    ProcessStatus(ProcessStatusDelivery),
+    /// A kill's acknowledgement.
+    ProcessKilled(KillOutcome),
 }
 
 /// Why no connection could be used.

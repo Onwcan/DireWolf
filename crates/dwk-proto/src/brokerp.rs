@@ -1,5 +1,6 @@
 //! The private authority → broker protocol (M4b, ADR-0043; version 2 for the
-//! M4c filesystem operations, ADR-0044). **Not DWKP.**
+//! M4c filesystem operations, ADR-0044; version 3 for the M4d process
+//! operations, ADR-0045). **Not DWKP.**
 //!
 //! One exchange on one connection, and nothing else:
 //!
@@ -62,26 +63,30 @@
 //! file. The two daemons do the I/O.
 
 pub use crate::dwkp::fsops::{ContentRevision, PatchEdit, PatchEdits};
+pub use crate::dwkp::procops::{ProcessArgs, ProcessStreamSnapshot};
 use crate::error::{ErrorCode, ProtocolError, Violation};
 use crate::frame::{self, ContentType};
 use crate::json::{self, Number, ParseOptions, Value};
 use crate::limits::{
-    MAX_LIST_ENTRIES, MAX_PATCH_INSERT_BYTES_TOTAL, MAX_SAFE_INTEGER, MAX_SEARCH_MATCHES,
+    MAX_LIST_ENTRIES, MAX_PATCH_INSERT_BYTES_TOTAL, MAX_PROCESS_ARGV_BYTES, MAX_SAFE_INTEGER,
+    MAX_SEARCH_MATCHES,
 };
 use crate::schema::{Defs, int, obj, string};
-use crate::wire::id::InvocationId;
+use crate::wire::id::{InvocationId, ProcessId};
 use crate::wire::list::BoundedList;
 use crate::wire::macros::wire_struct;
 use crate::wire::scalar::{
-    ByteCount, EntryKind, HexContent, LinkCount, ListLimit, MatchLimit, Needle, ObjectState,
-    PatchOutcome, ReadLimit, ScanLimit, StatKind, wire_enum, wire_int, wire_text,
+    ByteCount, ContentDigest, EntryKind, ExitCode, HexContent, HostPath, KillOutcome, LinkCount,
+    ListLimit, MatchLimit, Needle, ObjectState, PatchOutcome, ProcessState, ReadLimit, ScanLimit,
+    SignalNumber, StatKind, wire_enum, wire_int, wire_text,
 };
 use crate::wire::{Cx, WireType, expect_integer, expect_string};
 
-/// The protocol version this build speaks. Version 2 (ADR-0044) adds the M4c
-/// operations and the `indeterminate` answer; a version-1 peer is refused by
-/// its hello, never half-understood.
-pub const PROTOCOL: u16 = 2;
+/// The protocol version this build speaks. Version 2 (ADR-0044) added the M4c
+/// operations and the `indeterminate` answer; version 3 (ADR-0045) adds the
+/// process operations and authorisations that carry no descriptor. An older
+/// peer is refused by its hello, never half-understood.
+pub const PROTOCOL: u16 = 3;
 
 /// The largest authorisation body the broker reads: one DWKP frame, because an
 /// `fs.write` carries its content and an `fs.patch` its edits. Read from the
@@ -106,15 +111,68 @@ pub const FS_READ_DESCRIPTORS: u8 = 1;
 /// permission bits instead.
 pub const CREATED_FILE_MODE: u32 = 0o660;
 
+// ---------------------------------------------------------------------------
+// The process profile (ADR-0045 §10). Fixed here, in the crate both daemons
+// link, so that the authority states — and the audit records — exactly what
+// the broker applies. Nothing on either wire can change a value.
+// ---------------------------------------------------------------------------
+
+/// `RLIMIT_NOFILE` for every launched process, soft and hard.
+pub const PROCESS_RLIMIT_NOFILE: u64 = 1024;
+/// `RLIMIT_CORE`: no core file, ever — a core is a copy of the process's
+/// memory in the workspace.
+pub const PROCESS_RLIMIT_CORE: u64 = 0;
+/// `RLIMIT_FSIZE`: the largest file a launched process may write, 1 GiB.
+pub const PROCESS_RLIMIT_FSIZE: u64 = 1 << 30;
+/// `RLIMIT_CPU`, in seconds.
+pub const PROCESS_RLIMIT_CPU_SECONDS: u64 = 600;
+/// `RLIMIT_AS`, 16 GiB of address space: a bound on runaway allocation, not
+/// a memory limit (that is M5's cgroup).
+pub const PROCESS_RLIMIT_AS: u64 = 16 << 30;
+/// How long a launched process may run, wall clock, before the broker kills
+/// its process group.
+pub const PROCESS_WALL_CLOCK_SECONDS: u64 = 600;
+
+/// The environment every launched process starts with — built from nothing,
+/// never inherited: a search path the kernel fixes, a home directory that
+/// does not exist (so no one's configuration or credentials are read from
+/// one), and a locale. Sorted by name.
+pub const PROCESS_BASE_ENVIRONMENT: &[(&str, &str)] = &[
+    ("HOME", "/nonexistent"),
+    ("LANG", "C.UTF-8"),
+    (
+        "PATH",
+        "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+    ),
+];
+
 wire_int! {
     /// The private protocol's version.
-    ProtocolVersion(u16), min = 2, max = 2
+    ProtocolVersion(u16), min = 3, max = 3
 }
 
 wire_int! {
-    /// How many descriptors accompany an authorisation: one or two, fixed by
-    /// its kind.
-    DescriptorCount(u8), min = 1, max = 2
+    /// How many descriptors accompany an authorisation: none, one or two,
+    /// fixed by its kind.
+    DescriptorCount(u8), min = 0, max = 2
+}
+
+wire_int! {
+    /// How many bytes of each output stream a launched process retains for its
+    /// caller: its first bytes, at most [`crate::limits::MAX_PROCESS_STREAM_BYTES`].
+    StreamLimit(u32), min = 1, max = 131_072
+}
+
+wire_text! {
+    /// One broker process's generation: 128 bits it chose at start-up, as 32
+    /// lowercase hexadecimal characters. A process handle is valid only for the
+    /// generation that launched it; a restarted broker has another, and
+    /// supervises nothing it did not launch.
+    BrokerGeneration,
+    max_chars = 32,
+    pattern = Some("^[0-9a-f]{32}$"),
+    format = None,
+    validate = |s| s.len() == 32 && s.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
 wire_int! {
@@ -233,6 +291,12 @@ wire_enum! {
         FsDelete = "broker.fs_delete",
         /// An authorisation to reclaim one invocation's staging directory.
         FsReclaim = "broker.fs_reclaim",
+        /// A `process.exec` authorisation.
+        ProcessStart = "broker.process_start",
+        /// A `process.status` authorisation.
+        ProcessStatus = "broker.process_status",
+        /// A `process.kill` authorisation.
+        ProcessKill = "broker.process_kill",
         /// The broker's outcome for an authorisation.
         Outcome = "broker.outcome",
     }
@@ -251,11 +315,14 @@ impl PrivateKind {
     /// | `fs_patch` | the parent directory; the file, open for reading |
     /// | `fs_move` | the source's parent directory; the destination's |
     /// | `fs_reclaim` | the directory the staging directory is in, open for reading |
+    /// | `process_start` | the executable, open for reading; the working directory, open for reading |
+    /// | `process_status`, `process_kill` | none: the process is the broker's own child, named by its handle |
     ///
-    /// `None` for the hello and the outcome, which carry none.
+    /// `None` for the hello and the outcome, which are not authorisations.
     #[must_use]
     pub const fn descriptors(self) -> Option<u8> {
         match self {
+            Self::ProcessStatus | Self::ProcessKill => Some(0),
             Self::FsRead
             | Self::FsStat
             | Self::FsList
@@ -263,7 +330,7 @@ impl PrivateKind {
             | Self::FsWrite
             | Self::FsDelete
             | Self::FsReclaim => Some(1),
-            Self::FsPatch | Self::FsMove => Some(2),
+            Self::FsPatch | Self::FsMove | Self::ProcessStart => Some(2),
             Self::Hello | Self::Outcome => None,
         }
     }
@@ -318,6 +385,31 @@ wire_enum! {
         DirectoryTooLarge = "DIRECTORY_TOO_LARGE",
         /// Another operating-system error, before anything was changed.
         IoError = "IO_ERROR",
+        /// The executable's bytes are not the ones the authority hashed.
+        /// Nothing was launched.
+        DigestMismatch = "DIGEST_MISMATCH",
+        /// The executable could be changed by an identity outside the trusted
+        /// set, or is setuid, setgid or capability-bearing, or is not a native
+        /// executable. Nothing was launched.
+        ExecutableUntrusted = "EXECUTABLE_UNTRUSTED",
+        /// The launch helper could not apply the limits, enter the working
+        /// directory, set `no_new_privs`, or found a descriptor it could not
+        /// keep from the target. The target never ran.
+        ExecSetupFailed = "EXEC_SETUP_FAILED",
+        /// `execve` of the executable failed. The target never ran.
+        ExecFailed = "EXEC_FAILED",
+        /// The broker holds a descriptor it cannot keep from a target, so it
+        /// launches nothing (ADR-0045 §12). Nothing was launched.
+        InheritedDescriptor = "INHERITED_DESCRIPTOR",
+        /// The broker supervises as many processes as it may.
+        ProcessTableFull = "PROCESS_TABLE_FULL",
+        /// A launch named a process id the broker already supervises.
+        ProcessIdInUse = "PROCESS_ID_IN_USE",
+        /// No process this broker launched has that id.
+        UnknownProcess = "UNKNOWN_PROCESS",
+        /// The handle names another broker generation: this broker did not
+        /// launch it and supervises nothing of it.
+        StaleGeneration = "STALE_GENERATION",
     }
 }
 
@@ -333,6 +425,39 @@ wire_enum! {
         /// A namespace system call failed in a way that does not prove it did
         /// nothing.
         EffectUnconfirmed = "EFFECT_UNCONFIRMED",
+        /// The launch helper was started and the broker cannot prove whether
+        /// the target executable ran: it may be running unsupervised.
+        LaunchUnconfirmed = "LAUNCH_UNCONFIRMED",
+        /// Sending the kill signal failed in a way that does not prove it was
+        /// not delivered.
+        SignalUnconfirmed = "SIGNAL_UNCONFIRMED",
+    }
+}
+
+wire_enum! {
+    /// Which fixed environment a launched process gets (ADR-0045 §10). A
+    /// profile, never a list: the broker builds it from the constants above,
+    /// so no authorisation can carry a variable it names.
+    ///
+    /// M4d has one. `workspace_exec_hygiene`'s environment knobs
+    /// (`GIT_CONFIG_*`, `PYTEST_ADDOPTS`, `npm_config_ignore_scripts`,
+    /// `CARGO_NET_OFFLINE`) are overridden by the arguments of the very
+    /// programs they target and do not reach a repository's own hooks or
+    /// configuration, so on the host they enforce nothing and are not a
+    /// profile here: the obligation is unenforceable in M4d (ADR-0045 §11).
+    ExecEnvironment {
+        /// [`PROCESS_BASE_ENVIRONMENT`].
+        Base = "BASE",
+    }
+}
+
+impl ExecEnvironment {
+    /// Every variable of the profile, sorted by name.
+    #[must_use]
+    pub fn variables(self) -> Vec<(&'static str, &'static str)> {
+        match self {
+            Self::Base => PROCESS_BASE_ENVIRONMENT.to_vec(),
+        }
     }
 }
 
@@ -665,6 +790,93 @@ wire_struct! {
     }
 }
 
+wire_struct! {
+    /// One `process.exec`: launch the executable whose readable descriptor
+    /// accompanies it, in the directory whose descriptor accompanies it, with
+    /// exactly this argv and the fixed environment and limits (ADR-0045).
+    ///
+    /// The broker re-proves the executable before anything runs — the
+    /// descriptor's identity, a regular file, the owner and mode that keep its
+    /// bytes stable, and the SHA-256 of its whole content — and executes that
+    /// **descriptor**, never a path. `argv0` is display and dispatch text for
+    /// the program; it is never opened.
+    ProcessStartAuthorisation: reject {
+        /// Always `broker.process_start`.
+        required kind: PrivateKind,
+        /// The protocol version.
+        required protocol: ProtocolVersion,
+        /// The channel from this connection's hello.
+        required channel: ChannelNonce,
+        /// The authority's id for the invocation.
+        required invocation_id: InvocationId,
+        /// The handle the authority minted for the process.
+        required process_id: ProcessId,
+        /// The executable's device.
+        required executable_device: KernelNumber,
+        /// The executable's inode.
+        required executable_inode: KernelNumber,
+        /// The SHA-256 the authority computed from the file it opened.
+        required executable_sha256: ContentDigest,
+        /// The working directory's device.
+        required cwd_device: KernelNumber,
+        /// The working directory's inode.
+        required cwd_inode: KernelNumber,
+        /// `argv[0]`: the executable's canonical path.
+        required argv0: HostPath,
+        /// The arguments after `argv[0]`.
+        required args: ProcessArgs,
+        /// The environment profile.
+        required environment: ExecEnvironment,
+        /// How many bytes of each output stream to retain.
+        required stream_limit: StreamLimit,
+        /// Two: the executable, then the working directory, both open for
+        /// reading.
+        required descriptors: DescriptorCount,
+    }
+}
+
+wire_struct! {
+    /// One `process.status`: report the state and retained output of a process
+    /// this broker generation launched.
+    ProcessStatusAuthorisation: reject {
+        /// Always `broker.process_status`.
+        required kind: PrivateKind,
+        /// The protocol version.
+        required protocol: ProtocolVersion,
+        /// The channel from this connection's hello.
+        required channel: ChannelNonce,
+        /// The authority's id for this invocation.
+        required invocation_id: InvocationId,
+        /// The process.
+        required process_id: ProcessId,
+        /// The generation that launched it.
+        required generation: BrokerGeneration,
+        /// None.
+        required descriptors: DescriptorCount,
+    }
+}
+
+wire_struct! {
+    /// One `process.kill`: send `SIGKILL` to the process group of a process
+    /// this broker generation launched, if it has not ended.
+    ProcessKillAuthorisation: reject {
+        /// Always `broker.process_kill`.
+        required kind: PrivateKind,
+        /// The protocol version.
+        required protocol: ProtocolVersion,
+        /// The channel from this connection's hello.
+        required channel: ChannelNonce,
+        /// The authority's id for this invocation.
+        required invocation_id: InvocationId,
+        /// The process.
+        required process_id: ProcessId,
+        /// The generation that launched it.
+        required generation: BrokerGeneration,
+        /// None.
+        required descriptors: DescriptorCount,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Outcomes.
 // ---------------------------------------------------------------------------
@@ -786,6 +998,47 @@ wire_struct! {
 }
 
 wire_struct! {
+    /// A launch completed: the target executable replaced the helper and the
+    /// broker supervises it.
+    ProcessStartDone: reject {
+        /// This broker's generation: the handle is valid only for it.
+        required generation: BrokerGeneration,
+        /// What the process was when the launch was confirmed.
+        required state: ProcessState,
+        /// Its exit code, if it had already exited.
+        optional exit_code: ExitCode,
+        /// The signal that ended it, if one already had.
+        optional signal: SignalNumber,
+    }
+}
+
+wire_struct! {
+    /// What the broker observes of a process it launched.
+    ProcessStatusDone: reject {
+        /// Its state.
+        required state: ProcessState,
+        /// Its exit code, when it exited.
+        optional exit_code: ExitCode,
+        /// The signal that ended it, when one did.
+        optional signal: SignalNumber,
+        /// Whether the broker ended it at the wall-clock bound.
+        required timed_out: bool,
+        /// Its standard output so far.
+        required stdout: ProcessStreamSnapshot,
+        /// Its standard error so far.
+        required stderr: ProcessStreamSnapshot,
+    }
+}
+
+wire_struct! {
+    /// What a kill did.
+    ProcessKillDone: reject {
+        /// Whether the signal was sent.
+        required outcome: KillOutcome,
+    }
+}
+
+wire_struct! {
     /// A completed operation's result: exactly one member, the operation's own.
     BrokerDone: reject {
         /// An `fs.read`'s bytes.
@@ -806,9 +1059,16 @@ wire_struct! {
         optional fs_delete: FsDeleteDone,
         /// A staging directory's reclamation.
         optional fs_reclaim: FsReclaimDone,
+        /// A launch's confirmation.
+        optional process_start: ProcessStartDone,
+        /// A process's state and output.
+        optional process_status: ProcessStatusDone,
+        /// A kill's acknowledgement.
+        optional process_kill: ProcessKillDone,
     }
     exactly_one(
-        fs_read, fs_stat, fs_list, fs_search, fs_write, fs_patch, fs_move, fs_delete, fs_reclaim
+        fs_read, fs_stat, fs_list, fs_search, fs_write, fs_patch, fs_move, fs_delete, fs_reclaim,
+        process_start, process_status, process_kill
     )
 }
 
@@ -997,6 +1257,12 @@ pub enum Authorisation {
     FsDelete(FsDeleteAuthorisation),
     /// `broker.fs_reclaim`.
     FsReclaim(FsReclaimAuthorisation),
+    /// `broker.process_start`.
+    ProcessStart(ProcessStartAuthorisation),
+    /// `broker.process_status`.
+    ProcessStatus(ProcessStatusAuthorisation),
+    /// `broker.process_kill`.
+    ProcessKill(ProcessKillAuthorisation),
 }
 
 impl Authorisation {
@@ -1048,6 +1314,15 @@ impl Authorisation {
             PrivateKind::FsMove => Self::FsMove(FsMoveAuthorisation::decode(value, cx)?),
             PrivateKind::FsDelete => Self::FsDelete(FsDeleteAuthorisation::decode(value, cx)?),
             PrivateKind::FsReclaim => Self::FsReclaim(FsReclaimAuthorisation::decode(value, cx)?),
+            PrivateKind::ProcessStart => {
+                Self::ProcessStart(ProcessStartAuthorisation::decode(value, cx)?)
+            }
+            PrivateKind::ProcessStatus => {
+                Self::ProcessStatus(ProcessStatusAuthorisation::decode(value, cx)?)
+            }
+            PrivateKind::ProcessKill => {
+                Self::ProcessKill(ProcessKillAuthorisation::decode(value, cx)?)
+            }
             PrivateKind::Hello | PrivateKind::Outcome => {
                 return Err(ProtocolError::schema(
                     Violation::Inconsistent,
@@ -1073,6 +1348,9 @@ impl Authorisation {
             Self::FsMove(_) => PrivateKind::FsMove,
             Self::FsDelete(_) => PrivateKind::FsDelete,
             Self::FsReclaim(_) => PrivateKind::FsReclaim,
+            Self::ProcessStart(_) => PrivateKind::ProcessStart,
+            Self::ProcessStatus(_) => PrivateKind::ProcessStatus,
+            Self::ProcessKill(_) => PrivateKind::ProcessKill,
         }
     }
 
@@ -1089,6 +1367,9 @@ impl Authorisation {
             Self::FsMove(a) => &a.channel,
             Self::FsDelete(a) => &a.channel,
             Self::FsReclaim(a) => &a.channel,
+            Self::ProcessStart(a) => &a.channel,
+            Self::ProcessStatus(a) => &a.channel,
+            Self::ProcessKill(a) => &a.channel,
         }
     }
 
@@ -1105,6 +1386,9 @@ impl Authorisation {
             Self::FsMove(a) => &a.invocation_id,
             Self::FsDelete(a) => &a.invocation_id,
             Self::FsReclaim(a) => &a.invocation_id,
+            Self::ProcessStart(a) => &a.invocation_id,
+            Self::ProcessStatus(a) => &a.invocation_id,
+            Self::ProcessKill(a) => &a.invocation_id,
         }
     }
 
@@ -1121,11 +1405,14 @@ impl Authorisation {
             Self::FsMove(a) => a.descriptors.get(),
             Self::FsDelete(a) => a.descriptors.get(),
             Self::FsReclaim(a) => a.descriptors.get(),
+            Self::ProcessStart(a) => a.descriptors.get(),
+            Self::ProcessStatus(a) => a.descriptors.get(),
+            Self::ProcessKill(a) => a.descriptors.get(),
         }
     }
 
     fn check(&self) -> Result<(), ProtocolError> {
-        // The protocol version is checked by its type on decode (2 and only 2).
+        // The protocol version is checked by its type on decode (3 and only 3).
         let descriptors = DescriptorCount::new(self.declared_descriptors()).ok_or_else(|| {
             ProtocolError::schema(Violation::OutOfRange, "/descriptors", "no such count")
         })?;
@@ -1173,6 +1460,17 @@ impl Authorisation {
                     ));
                 }
             }
+            // Defence in depth: the authority refused a larger argv already
+            // (`ARGV_TOO_LARGE`).
+            Self::ProcessStart(start)
+                if process_argv_bytes(&start.args) > MAX_PROCESS_ARGV_BYTES =>
+            {
+                return Err(ProtocolError::schema(
+                    Violation::TooLong,
+                    "/args",
+                    "the arguments hold more than one launch may carry",
+                ));
+            }
             _ => {}
         }
         Ok(())
@@ -1195,6 +1493,9 @@ impl Authorisation {
             Self::FsMove(a) => encode_frame(a),
             Self::FsDelete(a) => encode_frame(a),
             Self::FsReclaim(a) => encode_frame(a),
+            Self::ProcessStart(a) => encode_frame(a),
+            Self::ProcessStatus(a) => encode_frame(a),
+            Self::ProcessKill(a) => encode_frame(a),
         }
     }
 }
@@ -1469,15 +1770,115 @@ impl FsReclaimAuthorisation {
     }
 }
 
+/// How many bytes a launch's arguments hold, together.
+#[must_use]
+pub fn process_argv_bytes(args: &ProcessArgs) -> usize {
+    args.iter()
+        .map(|arg| arg.as_str().len())
+        .fold(0usize, usize::saturating_add)
+}
+
+/// What a `process_start` names, besides its common fields.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProcessSpec {
+    /// The handle the authority minted.
+    pub process_id: ProcessId,
+    /// The executable's `(device, inode)`.
+    pub executable: (u64, u64),
+    /// Its SHA-256.
+    pub executable_sha256: ContentDigest,
+    /// The working directory's `(device, inode)`.
+    pub cwd: (u64, u64),
+    /// `argv[0]`.
+    pub argv0: HostPath,
+    /// The arguments after it.
+    pub args: ProcessArgs,
+    /// The environment profile.
+    pub environment: ExecEnvironment,
+    /// How many bytes of each stream to retain.
+    pub stream_limit: StreamLimit,
+}
+
+impl ProcessStartAuthorisation {
+    /// A launch of `spec`.
+    #[must_use]
+    pub fn new(common: Common, spec: ProcessSpec) -> Self {
+        let (kind, protocol, channel, invocation_id, descriptors) =
+            authorisation_head!(PrivateKind::ProcessStart, common);
+        Self {
+            kind,
+            protocol,
+            channel,
+            invocation_id,
+            process_id: spec.process_id,
+            executable_device: KernelNumber::from_u64(spec.executable.0),
+            executable_inode: KernelNumber::from_u64(spec.executable.1),
+            executable_sha256: spec.executable_sha256,
+            cwd_device: KernelNumber::from_u64(spec.cwd.0),
+            cwd_inode: KernelNumber::from_u64(spec.cwd.1),
+            argv0: spec.argv0,
+            args: spec.args,
+            environment: spec.environment,
+            stream_limit: spec.stream_limit,
+            descriptors,
+        }
+    }
+}
+
+impl ProcessStatusAuthorisation {
+    /// A status of `process_id`, launched by `generation`.
+    #[must_use]
+    pub fn new(common: Common, process_id: ProcessId, generation: BrokerGeneration) -> Self {
+        let (kind, protocol, channel, invocation_id, descriptors) =
+            authorisation_head!(PrivateKind::ProcessStatus, common);
+        Self {
+            kind,
+            protocol,
+            channel,
+            invocation_id,
+            process_id,
+            generation,
+            descriptors,
+        }
+    }
+}
+
+impl ProcessKillAuthorisation {
+    /// A kill of `process_id`, launched by `generation`.
+    #[must_use]
+    pub fn new(common: Common, process_id: ProcessId, generation: BrokerGeneration) -> Self {
+        let (kind, protocol, channel, invocation_id, descriptors) =
+            authorisation_head!(PrivateKind::ProcessKill, common);
+        Self {
+            kind,
+            protocol,
+            channel,
+            invocation_id,
+            process_id,
+            generation,
+            descriptors,
+        }
+    }
+}
+
 /// What an outcome says, once its shape is checked.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OutcomeResult {
-    /// The operation completed.
-    Done(BrokerDone),
+    /// The operation completed (boxed: a process status holds up to 256 KiB
+    /// of output behind it, which a refusal need not carry the size of).
+    Done(Box<BrokerDone>),
     /// Nothing was changed.
     Refused(BrokerRefusal),
     /// Something may have changed; the broker cannot prove what.
     Indeterminate(Indeterminate),
+}
+
+impl OutcomeResult {
+    /// The operation completed with `done`.
+    #[must_use]
+    pub fn done(done: BrokerDone) -> Self {
+        Self::Done(Box::new(done))
+    }
 }
 
 impl BrokerOutcome {
@@ -1485,7 +1886,7 @@ impl BrokerOutcome {
     #[must_use]
     pub fn new(channel: ChannelNonce, invocation_id: InvocationId, result: OutcomeResult) -> Self {
         let (done, refused, indeterminate) = match result {
-            OutcomeResult::Done(done) => (Some(done), None, None),
+            OutcomeResult::Done(done) => (Some(*done), None, None),
             OutcomeResult::Refused(why) => (None, Some(why), None),
             OutcomeResult::Indeterminate(why) => (None, None, Some(why)),
         };
@@ -1515,7 +1916,7 @@ impl BrokerOutcome {
     #[must_use]
     pub fn result(&self) -> OutcomeResult {
         match (&self.done, self.refused, self.indeterminate) {
-            (Some(done), _, _) => OutcomeResult::Done(done.clone()),
+            (Some(done), _, _) => OutcomeResult::done(done.clone()),
             (None, Some(why), _) => OutcomeResult::Refused(why),
             (None, None, Some(why)) => OutcomeResult::Indeterminate(why),
             // Unreachable for a decoded outcome; fail closed if constructed.
@@ -1546,6 +1947,9 @@ impl BrokerDone {
             fs_move: None,
             fs_delete: None,
             fs_reclaim: None,
+            process_start: None,
+            process_status: None,
+            process_kill: None,
         }
     }
 
@@ -1621,6 +2025,33 @@ impl BrokerDone {
         }
     }
 
+    /// A launch's confirmation.
+    #[must_use]
+    pub fn process_start(done: ProcessStartDone) -> Self {
+        Self {
+            process_start: Some(done),
+            ..Self::empty()
+        }
+    }
+
+    /// A process's state and output.
+    #[must_use]
+    pub fn process_status(done: ProcessStatusDone) -> Self {
+        Self {
+            process_status: Some(done),
+            ..Self::empty()
+        }
+    }
+
+    /// A kill's acknowledgement.
+    #[must_use]
+    pub fn process_kill(done: ProcessKillDone) -> Self {
+        Self {
+            process_kill: Some(done),
+            ..Self::empty()
+        }
+    }
+
     /// Which operation this result is for.
     #[must_use]
     pub const fn kind(&self) -> Option<PrivateKind> {
@@ -1642,6 +2073,12 @@ impl BrokerDone {
             PrivateKind::FsDelete
         } else if self.fs_reclaim.is_some() {
             PrivateKind::FsReclaim
+        } else if self.process_start.is_some() {
+            PrivateKind::ProcessStart
+        } else if self.process_status.is_some() {
+            PrivateKind::ProcessStatus
+        } else if self.process_kill.is_some() {
+            PrivateKind::ProcessKill
         } else {
             return None;
         })

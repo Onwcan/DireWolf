@@ -166,6 +166,18 @@ wire_id! {
     InvocationId, "inv"
 }
 
+wire_id! {
+    /// Identifies one process a `process.exec` launched (M4d, ADR-0045).
+    ///
+    /// An opaque handle, not an operating-system process id: the authority
+    /// mints it with the launch's intent, stores which run, invocation and
+    /// executable identity it belongs to, and resolves it for
+    /// `process.status` and `process.kill` — only within the run that
+    /// launched it. A guessed or reused numeric pid authorises nothing,
+    /// because nothing on the wire carries one.
+    ProcessId, "prc"
+}
+
 /// Any DireWolf identifier: a lowercase prefix of two to eight letters and a
 /// UUIDv7 body. Used where the corpus permits any entity to be referenced —
 /// `correlation_id` (`PROTOCOL.md` §1 uses a run id) and `causation_id` (a

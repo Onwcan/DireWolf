@@ -400,7 +400,13 @@ pub(crate) fn bind(place: &SocketPlace) -> Result<Bound, SocketError> {
 }
 
 /// Serve connections, one at a time, for as long as the process lives.
-pub(crate) fn serve(bound: &Bound, authority_uid: u32, own_uid: u32, channels: &mut Channels) {
+pub(crate) fn serve(
+    bound: &Bound,
+    authority_uid: u32,
+    own_uid: u32,
+    channels: &mut Channels,
+    processes: &crate::process::Processes,
+) {
     for incoming in bound.listener.incoming() {
         let stream = match incoming {
             Ok(stream) => stream,
@@ -422,7 +428,7 @@ pub(crate) fn serve(bound: &Bound, authority_uid: u32, own_uid: u32, channels: &
             continue;
         }
         crate::event(&format!("connection peer_uid={peer}"));
-        exchange::serve_one(&stream, channels.issue(), own_uid);
+        exchange::serve_one(&stream, channels.issue(), own_uid, processes);
         crate::event("closed");
     }
 }

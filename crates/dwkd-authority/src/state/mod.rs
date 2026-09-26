@@ -71,6 +71,7 @@ mod lease;
 mod lookup_tests;
 mod plan;
 mod policy_state;
+mod process;
 mod query;
 mod resolution;
 mod schema;
@@ -87,7 +88,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use dwk_proto::dwkp::messages::Ack;
 use dwk_proto::dwkp::{DwkpBody, DwkpMessage};
-use dwk_proto::wire::id::{CapId, InvocationId, RunId, SessionId};
+use dwk_proto::wire::id::{CapId, InvocationId, ProcessId, RunId, SessionId};
 use dwk_proto::wire::scalar::{
     Epoch, FsFailureReason, FsRefusalReason, RefusalReason, RefusedOperation, ToolOperation,
 };
@@ -122,6 +123,10 @@ pub use identity::{AuthenticatedSubject, CallerContext, LeaseHolder};
 pub use lease::{DEFAULT_LEASE_TTL_MS, MAX_EPOCH, MAX_LEASE_TTL_MS, MIN_LEASE_TTL_MS};
 pub use plan::{PlannedAction, RetryClass, ToolPlan, ToolVersion};
 pub use policy_state::{MAX_CEILING_CAPABILITIES, MAX_POLICY_SOURCES, PolicySet, PolicySource};
+pub use process::{
+    Floor, Launch, ProcessAction, ProcessOutput, ProcessPlan, ProcessReply, ProcessRequest,
+    StreamSnapshot,
+};
 pub use query::{AuthorityAnswer, DecisionRecord, Proposal, TaintCause, Undecidable};
 pub use resolution::ResolutionRefused;
 pub use staging::{MAX_RECLAIMS_PER_SWEEP, Settled};
@@ -303,6 +308,10 @@ struct Shared {
     active: OnceLock<ActiveAuthority>,
     lease_ttl_ms: u64,
     broker: Option<Arc<dyn EffectBroker>>,
+    /// The authority's own uid: the owner of its state directory, which
+    /// start-up proved is the effective uid. With root, the only owner an
+    /// executable's identity may rest on (ADR-0045 §5).
+    authority_uid: u32,
     // Held for the life of the process; the OS releases it on exit.
     _lock: std::fs::File,
 }
@@ -451,6 +460,14 @@ impl Work<'_> {
             "a minted invocation id is not a UUIDv7",
         ))
     }
+
+    /// A process handle (M4d): opaque, minted with the launch intent, never a
+    /// pid.
+    pub(crate) fn process_id(&self) -> Result<ProcessId, AuthorityError> {
+        ProcessId::from_uuid(self.next_uuid()?).ok_or(AuthorityError::Invariant(
+            "a minted process id is not a UUIDv7",
+        ))
+    }
 }
 
 /// The durable authority: one handle onto one state directory.
@@ -536,6 +553,7 @@ impl Authority {
             files::sync_directory(dir)?;
         }
 
+        let authority_uid = files::owner_uid(&resolved)?;
         let clock = Arc::clone(&options.clock);
         let Opened {
             conn,
@@ -568,6 +586,7 @@ impl Authority {
             active: OnceLock::new(),
             lease_ttl_ms: config.lease_ttl_ms,
             broker: options.broker,
+            authority_uid,
             _lock: lock,
         });
         let mut authority = Self { shared, conn };
@@ -627,7 +646,10 @@ impl Authority {
             let incarnation = u64::try_from(incarnation)
                 .map_err(|_| AuthorityError::Invariant("the incarnation is negative"))?;
             let (leases, runs) = lease::invalidate_all(work)?;
-            let (interrupted, unknown) = tool::reconcile_open(work)?;
+            let (fs_interrupted, fs_unknown) = tool::reconcile_open(work)?;
+            let (process_interrupted, process_unknown) = process::reconcile_open(work)?;
+            let interrupted = fs_interrupted.saturating_add(process_interrupted);
+            let unknown = fs_unknown.saturating_add(process_unknown);
             work.audit(
                 AuditEvent::StoreOpened,
                 Fields::new()
@@ -857,8 +879,24 @@ impl Authority {
                 admission::Pass::Answered(reply) => return Ok(reply),
                 // No transaction is open: the M4a resolver, beneath the
                 // session's pinned root (ADR-0043 §8).
-                admission::Pass::Resolve { binding, paths } => {
-                    resolved = Some(scopes::resolve_paths(&binding, &paths));
+                admission::Pass::Resolve {
+                    binding,
+                    paths,
+                    executables,
+                } => {
+                    // Keep what an earlier pass already resolved: a pass asks
+                    // only for what it has no answer to.
+                    let previous = resolved.take();
+                    let fs = match binding {
+                        Some(binding) => scopes::resolve_paths(&binding, &paths),
+                        None => previous.clone().unwrap_or_else(scopes::Resolutions::empty),
+                    };
+                    let answers = if executables.is_empty() {
+                        previous.map_or_else(scopes::Executables::new, |p| p.executables().clone())
+                    } else {
+                        scopes::resolve_executables(&executables, shared.authority_uid)
+                    };
+                    resolved = Some(fs.with_executables(answers));
                 }
             }
         }
@@ -1219,6 +1257,240 @@ impl Authority {
         }
     }
 
+    /// `ToolInvoke` of a process tool (M4d, ADR-0045), in the order
+    /// `state::process` sets out: locate; for a launch, resolve the
+    /// executable and the working directory (no transaction); decide — the
+    /// plan, both gates, the obligations and the **host floor** — and, if
+    /// every one of them passes, record the intent durably; **only then** the
+    /// executable descriptor; the broker; the outcome, durably — and only then
+    /// answer.
+    ///
+    /// In every production build the floor refuses a host launch: no approval
+    /// exists before M6 (`state::process`).
+    ///
+    /// # Errors
+    ///
+    /// [`AuthorityError`] when the authority cannot answer. A crash hook at a
+    /// [`CrashPoint::TOOL`] point poisons the store, as a crash would.
+    pub fn process_invoke(
+        &mut self,
+        caller: &CallerContext,
+        session: &SessionId,
+        run: &RunId,
+        epoch: Epoch,
+        request: &ProcessRequest,
+    ) -> Result<ProcessReply, AuthorityError> {
+        let shared = Arc::clone(&self.shared);
+        let active = shared.active()?;
+        let asked = process::Asked {
+            caller,
+            operation: ToolOperation::ToolInvoke,
+            session,
+            run,
+            epoch,
+            request,
+        };
+        let (call, resolved, stored) = match self.locate_process(&asked)? {
+            Ok(found) => found,
+            Err(reason) => return Ok(ProcessReply::Refused(asked.operation, reason)),
+        };
+        let decided = self.transact(|work| {
+            let located = located_ref(&call, resolved.as_ref(), stored.as_ref())?;
+            process::decide(work, &asked, &located, active)
+        })?;
+        let (plan, invocation, process_id) = match decided {
+            process::Decided::Refused(reason) => {
+                return Ok(ProcessReply::Refused(asked.operation, reason));
+            }
+            process::Decided::Denied(plan) => return Ok(ProcessReply::Denied(plan)),
+            process::Decided::Previewed(_) => {
+                return Err(AuthorityError::Invariant(
+                    "an invocation was answered as a preview",
+                ));
+            }
+            process::Decided::Authorised {
+                plan,
+                invocation,
+                process,
+            } => (plan, invocation, process),
+        };
+        // The intent is committed and its audit record fsynced. Until here
+        // nothing could launch: the resolver holds `O_PATH` handles.
+        shared.crash(CrashPoint::ToolAfterIntent)?;
+
+        let tool = plan.tool();
+        let stream_limit = plan
+            .action()
+            .launch()
+            .map(process::Launch::stream_limit)
+            .or_else(|| stored.as_ref().map(process::StoredProcess::stream_limit));
+        let operation = match process::handoff(call, resolved, &plan, &process_id, stored.as_ref())
+        {
+            Ok(operation) => operation,
+            Err(failure) => {
+                let reason =
+                    self.process_handoff_failed(tool, run, &invocation, &process_id, failure)?;
+                return Ok(ProcessReply::Failed { invocation, reason });
+            }
+        };
+        shared.crash(CrashPoint::ToolAfterOpen)?;
+
+        let order = BrokerOrder::new(invocation.clone(), operation);
+        let result = if let Some(broker) = &shared.broker {
+            broker.perform(order)
+        } else {
+            drop(order);
+            Err(BrokerError::before_sending(BrokerFailure::NotConfigured))
+        };
+        shared.crash(CrashPoint::ToolAfterBroker)?;
+
+        let generation = match &result {
+            Ok(BrokerDelivery::ProcessStarted(started)) => Some(started.generation.clone()),
+            _ => None,
+        };
+        let (ending, detail) = process::classify(tool, &process_id, stream_limit, result);
+        self.transact(|work| {
+            process::record_outcome(
+                work,
+                run,
+                &invocation,
+                (tool, &process_id),
+                (&ending, detail),
+                generation.as_ref(),
+            )
+        })?;
+        shared.crash(CrashPoint::ToolAfterOutcome)?;
+        Ok(match ending {
+            process::Ending::Completed(output) => ProcessReply::Done {
+                invocation,
+                plan,
+                output,
+            },
+            process::Ending::Failed(reason) => ProcessReply::Failed { invocation, reason },
+            process::Ending::Unknown => ProcessReply::Failed {
+                invocation,
+                reason: dwk_proto::wire::scalar::ToolFailureReasonV3::OutcomeUnknown,
+            },
+        })
+    }
+
+    /// A process tool's hand-off could not be built after its intent was
+    /// recorded: the invocation ends `FAILED`, durably, and nothing reached the
+    /// broker. A launch's process record fails with it.
+    fn process_handoff_failed(
+        &mut self,
+        tool: dwk_proto::wire::scalar::CoreTool,
+        run: &RunId,
+        invocation: &InvocationId,
+        process_id: &ProcessId,
+        failure: (dwk_proto::wire::scalar::ToolFailureReasonV3, &'static str),
+    ) -> Result<dwk_proto::wire::scalar::ToolFailureReasonV3, AuthorityError> {
+        if tool == dwk_proto::wire::scalar::CoreTool::ProcessExec {
+            return self.transact(|work| {
+                process::record_handoff_failure(work, run, invocation, process_id, failure)
+            });
+        }
+        let ending = process::Ending::Failed(failure.0);
+        self.transact(|work| {
+            process::record_outcome(
+                work,
+                run,
+                invocation,
+                (tool, process_id),
+                (&ending, None),
+                None,
+            )
+        })?;
+        Ok(failure.0)
+    }
+
+    /// `CanonicalPreview` of a process tool (M4d): the same locate, resolution
+    /// and plan as [`Authority::process_invoke`], stopping there. No invocation
+    /// id, no process id, no key, no intent, no descriptor, no broker.
+    ///
+    /// # Errors
+    ///
+    /// [`AuthorityError`] when the authority cannot answer.
+    pub fn process_preview(
+        &mut self,
+        caller: &CallerContext,
+        session: &SessionId,
+        run: &RunId,
+        epoch: Epoch,
+        request: &ProcessRequest,
+    ) -> Result<ProcessReply, AuthorityError> {
+        let shared = Arc::clone(&self.shared);
+        let active = shared.active()?;
+        let asked = process::Asked {
+            caller,
+            operation: ToolOperation::CanonicalPreview,
+            session,
+            run,
+            epoch,
+            request,
+        };
+        let (call, resolved, stored) = match self.locate_process(&asked)? {
+            Ok(found) => found,
+            Err(reason) => return Ok(ProcessReply::Refused(asked.operation, reason)),
+        };
+        let decided = self.transact(|work| {
+            let located = located_ref(&call, resolved.as_ref(), stored.as_ref())?;
+            process::decide(work, &asked, &located, active)
+        })?;
+        // The resolved handles close here, unused.
+        drop(resolved);
+        Ok(match decided {
+            process::Decided::Refused(reason) => ProcessReply::Refused(asked.operation, reason),
+            process::Decided::Previewed(plan) => ProcessReply::Previewed(plan),
+            process::Decided::Denied(_) | process::Decided::Authorised { .. } => {
+                return Err(AuthorityError::Invariant(
+                    "a preview was answered as an invocation",
+                ));
+            }
+        })
+    }
+
+    /// Steps 1 and 2 of a process call: locate it (one transaction), then —
+    /// for a launch — resolve the executable and the working directory with
+    /// **no transaction open**. A refusal at either step is recorded.
+    #[expect(
+        clippy::type_complexity,
+        reason = "the three parts are consumed separately by the caller"
+    )]
+    fn locate_process(
+        &mut self,
+        asked: &process::Asked<'_>,
+    ) -> Result<
+        Result<
+            (
+                process::Call,
+                Option<process::Resolved>,
+                Option<process::StoredProcess>,
+            ),
+            dwk_proto::wire::scalar::ToolRefusalReasonV3,
+        >,
+        AuthorityError,
+    > {
+        let shared = Arc::clone(&self.shared);
+        let active = shared.active()?;
+        let located = self.transact(|work| process::locate(work, asked, active))?;
+        match located {
+            process::Located::Refused(reason) => Ok(Err(reason)),
+            process::Located::Handle { call, stored } => Ok(Ok((call, None, Some(stored)))),
+            process::Located::Launch { call, binding } => {
+                match process::resolve_launch(&binding, &call, shared.authority_uid) {
+                    Ok(resolved) => Ok(Ok((call, Some(resolved), None))),
+                    Err((reason, detail)) => {
+                        self.transact(|work| {
+                            process::refuse_resolution(work, asked, reason, detail)
+                        })?;
+                        Ok(Err(reason))
+                    }
+                }
+            }
+        }
+    }
+
     /// Answer one decoded DWKP request with the response body the M3e server
     /// sends.
     ///
@@ -1335,8 +1607,49 @@ impl Authority {
                 let reply = self.tool_preview(caller, session, run, epoch, &request)?;
                 wire::tool_reply_v2(&reply).map_err(unrepresentable)
             }
+            DwkpBody::ToolInvokeV3(call) => self.dispatch_v3(caller, message, call, true),
+            DwkpBody::CanonicalPreviewV3(call) => self.dispatch_v3(caller, message, call, false),
             _ => Err(AuthorityError::NotAnAuthorityRequest),
         }
+    }
+
+    /// `tool.invoke` (`invoke`) or `canonical.preview` at version 3: a process
+    /// tool reaches the process layer (M4d), any other the tool layer.
+    fn dispatch_v3(
+        &mut self,
+        caller: &CallerContext,
+        message: &DwkpMessage,
+        call: &dwk_proto::dwkp::procops::ToolCallV3,
+        invoke: bool,
+    ) -> Result<DwkpBody, AuthorityError> {
+        let header = &message.header;
+        let missing = || AuthorityError::Invariant("a decoded request lacks an envelope field");
+        let unrepresentable = |_: WireGap| {
+            AuthorityError::Invariant("a stored value does not fit the wire type that carries it")
+        };
+        let session = header.session_id.as_ref().ok_or_else(missing)?;
+        let run = header.run_id.as_ref().ok_or_else(missing)?;
+        let epoch = header.epoch.ok_or_else(missing)?;
+        let key = if invoke {
+            Some(header.idempotency_key.clone().ok_or_else(missing)?)
+        } else {
+            None
+        };
+        if let Some(request) = ProcessRequest::new(call.clone(), key.clone()) {
+            let reply = if invoke {
+                self.process_invoke(caller, session, run, epoch, &request)?
+            } else {
+                self.process_preview(caller, session, run, epoch, &request)?
+            };
+            return wire::process_reply(&reply).map_err(unrepresentable);
+        }
+        let request = ToolRequest::v3(call, key).ok_or_else(missing)?;
+        let reply = if invoke {
+            self.tool_invoke(caller, session, run, epoch, &request)?
+        } else {
+            self.tool_preview(caller, session, run, epoch, &request)?
+        };
+        wire::tool_reply_v3(&reply).map_err(unrepresentable)
     }
 
     /// Record a security-significant transport event (M3e): a refused peer,
@@ -1361,6 +1674,21 @@ impl Authority {
     /// operation reaches it. See [`OperatorBootstrap`].
     pub fn operator(&mut self) -> OperatorBootstrap<'_> {
         OperatorBootstrap { authority: self }
+    }
+}
+
+/// What step 3 of a process call decides from.
+fn located_ref<'a>(
+    call: &'a process::Call,
+    resolved: Option<&'a process::Resolved>,
+    stored: Option<&'a process::StoredProcess>,
+) -> Result<process::LocatedRef<'a>, AuthorityError> {
+    match (resolved, stored) {
+        (Some(resolved), None) => Ok(process::LocatedRef::Launch { call, resolved }),
+        (None, Some(stored)) => Ok(process::LocatedRef::Handle { call, stored }),
+        _ => Err(AuthorityError::Invariant(
+            "a process call is neither a launch nor a handle",
+        )),
     }
 }
 
