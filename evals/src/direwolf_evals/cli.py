@@ -1,7 +1,8 @@
 """``python -m direwolf_evals`` — run, list, check, inventory.
 
     run        run suites (optionally the gate subset) and write results
-    check      the merge gate: gate subset + baseline comparison
+    check      the merge gate: gate subset + baseline comparison (optionally
+               scoped to named suites with --suite)
     list       what exists, without running it
     inventory  which security properties can be measured yet, and which cannot
     baseline   record the current run as the expected outcome (deliberate)
@@ -50,6 +51,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     check.add_argument("--baseline", type=Path, default=None)
     check.add_argument("--out", type=Path, default=None)
     check.add_argument("--all", action="store_true", help="every suite, not only the gate subset")
+    check.add_argument(
+        "--suite",
+        action="append",
+        default=[],
+        help="only this suite (repeatable); other suites' baseline entries are out of scope",
+    )
     check.add_argument(
         "--require-exercised",
         action="store_true",
@@ -119,7 +126,22 @@ def _run(args: argparse.Namespace, repo_root: Path, evals_root: Path) -> int:
 
 
 def _check(args: argparse.Namespace, repo_root: Path, evals_root: Path) -> int:
-    report = run_suites(repo_root, evals_root, gate_only=not args.all)
+    # A suite-scoped gate (`--suite`) compares only what it ran. A suite that
+    # does not exist, or a selection that runs nothing, is a usage error --
+    # never a green gate over zero results. Baseline entries for evals that
+    # exist but are outside the selection are out of scope; an eval deleted
+    # from the repository is still missing, because `known` stays global.
+    unknown = sorted(set(args.suite) - {suite.id for suite in discover(evals_root)})
+    if unknown:
+        print(f"direwolf_evals: no suite with id {', '.join(unknown)}", file=sys.stderr)
+        return 2
+    report = run_suites(repo_root, evals_root, suites=args.suite, gate_only=not args.all)
+    if args.suite and not report.results:
+        print(
+            f"direwolf_evals: the selection {', '.join(args.suite)} ran no eval",
+            file=sys.stderr,
+        )
+        return 2
     out = args.out or (repo_root / DEFAULT_RESULTS)
     write_jsonl(out, report.results)
     print(report_module.render(report))
@@ -145,9 +167,10 @@ def _check(args: argparse.Namespace, repo_root: Path, evals_root: Path) -> int:
         return 1
     counts = report.counts()
     unexercised_count = len(comparison.not_exercised)
+    scope = f" for {', '.join(args.suite)}" if args.suite else ""
     print(
-        f"\ndirewolf_evals: gate ok ({counts['pass']} passed, {counts['pending']} pending, "
-        f"{counts['skip']} skipped, {unexercised_count} not exercised here) against "
+        f"\ndirewolf_evals: gate ok{scope} ({counts['pass']} passed, {counts['pending']} "
+        f"pending, {counts['skip']} skipped, {unexercised_count} not exercised here) against "
         f"{_display(path, repo_root)}"
     )
     return 0

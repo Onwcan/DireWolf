@@ -62,6 +62,17 @@ consumers     = ["/usr/bin/ssh", "/usr/bin/git"]
 
 A Linux `user` key holds at most 32 767 bytes, and a non-root user's keys share a quota (`/proc/sys/kernel/keys/maxbytes`); a value of any size up to the 32 KiB bound belongs in an age file.
 
+**Provisioning a Linux keyring secret.** The authority runs as a service, and a service does not *possess* its user keyring (a systemd service gets a private session keyring; so does a CI runner), so only the key's **owner** bits decide whether it can read the key — and the kernel's default mask for a new key lets the owner only view it. A key for the authority must be owned by the authority's uid, sit in that uid's user keyring (`@u`), and carry exactly this mask, `0x3f0b0000`: the possessor may do anything; the owning uid may view, read and search; its group and everyone else, nothing. Setting a mask needs the right to change attributes, which under the default mask only a possessor has, so stage the key in the provisioning shell's own session keyring, set the mask, then move it into `@u` — as the authority's user, with the value on **stdin, never in argv**:
+
+```bash
+id=$(keyctl padd user <entry> @s)
+keyctl setperm "$id" 0x3f0b0000
+keyctl link "$id" @u
+keyctl unlink "$id" @s
+```
+
+The authority never changes a key's permissions: a key provisioned without the owner's read (or search) permission fails closed, `BACKEND_DENIED`. The broker's and the runtime's uids have their own user keyrings, and with no group or other bits they cannot read this key even by its serial — measured on three identities in CI ([ADR-0046](adr/0046-m4e-secret-handles-backends-injection-and-redaction.md) §§6, 23).
+
 **We invent no cryptography.** `age` for file encryption, OS APIs for keychains, `rustls` for transport. If a construction is not available from a reviewed library, we do not build it.
 
 **Plaintext state, stated explicitly:** the secrets *index* (handle names, types, origins, metadata) is plaintext in `kernel.db`. Only values are protected. Handle names are not secret and are designed not to be.

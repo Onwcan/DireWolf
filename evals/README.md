@@ -47,12 +47,21 @@ Underneath, all of them are one module:
 ```bash
 uv run --frozen python -m direwolf_evals list
 uv run --frozen python -m direwolf_evals run --suite protocol-security --seed 1234
+uv run --frozen python -m direwolf_evals check --suite authority-security --require-exercised
 uv run --frozen python -m direwolf_evals inventory
 uv run --frozen python -m direwolf_evals baseline     # deliberate; review the diff
 ```
 
 Exit codes: `0` nothing failed, `1` a failure or a baseline regression, `2` a
 usage or configuration error.
+
+`check --suite` scopes the gate to named suites: only they run, they are
+compared with the same reviewed baseline, and other suites' entries are out of
+scope rather than missing. An unknown suite, or a selection that runs nothing,
+is a usage error, never a green gate; an eval deleted from the repository is
+still missing. CI's `authority-transport` job uses it for the M3
+`authority-security` suite with its second user; the full gate is the `evals`
+job's `make eval-check`.
 
 ## Adding an eval
 
@@ -106,7 +115,7 @@ Two gates, deliberately different:
 |---|---|---|
 | when | the default | `DW_EVAL_REQUIRE_EXERCISED` set to anything but `0`, **or** running under GitHub Actions at all |
 | an eval this machine cannot exercise | listed under "NOT EXERCISED on this machine", counted as skipped — never passed; the gate still passes | a **regression**: the gate fails |
-| where | a one-user workstation, macOS, Windows | the `evals` and `authority-transport` jobs: Linux, `DW_PEER_AS=nobody` |
+| where | a one-user workstation, macOS, Windows | the `evals` job (every suite) and the `authority-transport` job (`authority-security`): Linux, `DW_PEER_AS=nobody` |
 
 The baseline records what the **strict** gate must see — `pass` for
 `peer-credential-check` too — and is an expectation, not an observation: the

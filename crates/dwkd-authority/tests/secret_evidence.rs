@@ -70,7 +70,7 @@ mod linux {
         Authority, EgressReply, EgressRequest, ManualClock, Mode, PolicySet, PolicySource, Reply,
         StartOptions, StartupConfig, WorkspaceId, WorkspaceSensitivity,
     };
-    use linux_keyutils::{KeyRing, KeyRingIdentifier};
+    use linux_keyutils::{Key, KeyPermissionsBuilder, KeyRing, KeyRingIdentifier, Permission};
     use sha2::{Digest as _, Sha256};
 
     use super::broker_support::{Broker, Runtime, Setup};
@@ -121,24 +121,46 @@ mod linux {
         out
     }
 
-    /// A kernel-keyring entry, removed when dropped.
-    struct Seeded(String);
+    /// A kernel-keyring entry and its key, removed when dropped.
+    struct Seeded(String, Key);
 
     impl Seeded {
+        /// Provisioned as the keychain backend's contract requires of an
+        /// operator (`secret/backend/keychain.rs`): staged in this process's
+        /// own keyring, linked into `@u` and given `0x3f0b0000` -- the owner
+        /// may view, read and search it, its group and everyone else nothing
+        /// -- then unlinked from the staging keyring. The daemons this test
+        /// starts do not possess `@u` when it runs as a service does, so the
+        /// owner's bits are what they read with.
         fn new(tag: &str, value: &[u8]) -> Option<Self> {
             let name = format!("direwolf-evidence/{tag}-{}", std::process::id());
-            let ring = KeyRing::from_special_id(KeyRingIdentifier::User, true).ok()?;
-            ring.add_key(&name, value).ok()?;
-            Some(Self(name))
+            let staging = KeyRing::from_special_id(KeyRingIdentifier::Process, true).ok()?;
+            let user = KeyRing::from_special_id(KeyRingIdentifier::User, true).ok()?;
+            let key = staging.add_key(&name, value).ok()?;
+            let perms = KeyPermissionsBuilder::builder()
+                .posessor(Permission::ALL)
+                .user(Permission::VIEW | Permission::READ | Permission::SEARCH)
+                .build();
+            let placed = user.link_key(key).and_then(|()| key.set_perms(perms));
+            let _ = staging.unlink_key(key);
+            if placed.is_err() {
+                let _ = user.unlink_key(key);
+                return None;
+            }
+            Some(Self(name, key))
+        }
+
+        /// The key's serial: an identifier, not a secret.
+        fn serial(&self) -> String {
+            self.1.get_id().as_raw_id().to_string()
         }
     }
 
     impl Drop for Seeded {
         fn drop(&mut self) {
-            if let Ok(ring) = KeyRing::from_special_id(KeyRingIdentifier::User, false)
-                && let Ok(key) = ring.search(&self.0)
-            {
-                let _ = key.invalidate();
+            let _ = self.1.invalidate();
+            if let Ok(ring) = KeyRing::from_special_id(KeyRingIdentifier::User, false) {
+                let _ = ring.unlink_key(self.1);
             }
         }
     }
@@ -899,13 +921,14 @@ M4E:DONE"
         .unwrap();
 
         // The store and the backend, from the other identities.
-        for (user, [metadata, age_store, keyring]) in [
+        for (user, [metadata, age_store, keyring, by_serial]) in [
             (
                 &broker_user,
                 [
                     "broker-uid-cannot-read-metadata",
                     "broker-uid-cannot-read-age-store",
                     "broker-uid-keyring-has-no-value",
+                    "broker-uid-cannot-read-the-key-by-serial",
                 ],
             ),
             (
@@ -914,6 +937,7 @@ M4E:DONE"
                     "runtime-uid-cannot-read-metadata",
                     "runtime-uid-cannot-read-age-store",
                     "runtime-uid-keyring-has-no-value",
+                    "runtime-uid-cannot-read-the-key-by-serial",
                 ],
             ),
         ] {
@@ -928,6 +952,14 @@ M4E:DONE"
             let report = probe_as(user, &stage, &["keyring-search", &seeded.0]);
             assert!(report.contains("\"found\": false"), "{keyring}: {report}");
             evidence(keyring, "not-found");
+            // Even knowing the key's serial, another uid reads nothing: the
+            // key gives its group and everyone else no permission at all.
+            let report = probe_as(user, &stage, &["keyring-read", &seeded.serial()]);
+            assert!(
+                report.contains("\"read\": false") && report.contains("EACCES"),
+                "{by_serial}: {report}"
+            );
+            evidence(by_serial, "EACCES");
         }
 
         // The hardened daemons, each its own identity.

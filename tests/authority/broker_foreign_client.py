@@ -249,6 +249,27 @@ def keyring_search(description: str) -> dict[str, object]:
     return {"found": False, "errno": errno.errorcode.get(err, str(err))}
 
 
+def keyring_read(serial: str) -> dict[str, object]:
+    """`keyctl(KEYCTL_READ, serial, buffer, len)` on another uid's key, by its
+    serial. Reports only whether anything was read and why not: the buffer is
+    discarded unprinted, and its contents never reach the report."""
+    import ctypes
+
+    numbers = {"x86_64": 250, "aarch64": 219}
+    machine = os.uname().machine
+    if machine not in numbers:
+        return {"read": False, "errno": "UNSUPPORTED_ARCH"}
+    libc = ctypes.CDLL(None, use_errno=True)
+    keyctl_read = 11
+    buffer = ctypes.create_string_buffer(64)
+    result = libc.syscall(numbers[machine], keyctl_read, int(serial), buffer, 64)
+    ctypes.memset(buffer, 0, 64)
+    if result >= 0:
+        return {"read": True, "errno": None}
+    err = ctypes.get_errno()
+    return {"read": False, "errno": errno.errorcode.get(err, str(err))}
+
+
 def main(argv: list[str]) -> int:
     mode = argv[1]
     if mode == "hello":
@@ -273,6 +294,8 @@ def main(argv: list[str]) -> int:
         report = run_helper(argv[2])
     elif mode == "keyring-search":
         report = keyring_search(argv[2])
+    elif mode == "keyring-read":
+        report = keyring_read(argv[2])
     else:
         print(json.dumps({"error": f"unknown mode {mode}"}))
         return 2

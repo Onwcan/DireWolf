@@ -54,6 +54,10 @@ LINUX = sys.platform.startswith("linux")
 # The jobs that carry the M3 authority evidence, and the aggregate that gates.
 EVIDENCE_JOB = "authority-transport"
 EVAL_JOB = "evals"
+AUTHORITY_SUITE = "authority-security"
+AUTHORITY_EVAL = (
+    "uv run --frozen python -m direwolf_evals check --suite authority-security --require-exercised"
+)
 AGGREGATE_JOB = "ci"
 # M4a's canonical filesystem evidence, and the tests that print it.
 FILESYSTEM_JOB = "filesystem-canonicalization"
@@ -226,19 +230,39 @@ def test_the_evidence_job_runs_the_cross_uid_suite_as_a_real_second_user() -> No
     _second_identity(_env(probe).get("DW_PROBE_AS"))
 
 
-def test_the_evidence_job_runs_the_eval_gate_strictly_with_the_second_user() -> None:
-    step = _step_running(EVIDENCE_JOB, "make eval-check")
-    env = _env(step)
-    assert env.get("DW_EVAL_REQUIRE_EXERCISED") == "1"
-    _second_identity(env.get("DW_PEER_AS"))
+def test_the_evidence_job_checks_the_authority_suite_strictly_with_the_second_user() -> None:
+    """The M3 authority properties, strict -- `--require-exercised`, so an eval
+    this job cannot exercise fails -- with the real second user, against the
+    reviewed baseline. Scoped to their own suite: the full M3 + M4 gate is the
+    `evals` job's, and this job is not a second M4 aggregate."""
+    step = _step_running(EVIDENCE_JOB, AUTHORITY_EVAL)
+    _second_identity(_env(step).get("DW_PEER_AS"))
+    commands = [_run(step) or "" for step in _steps(_jobs()[EVIDENCE_JOB])]
+    gates = [c for c in commands if "eval-check" in c or "direwolf_evals" in c]
+    assert gates == [AUTHORITY_EVAL], f"{EVIDENCE_JOB} runs another eval gate: {gates}"
+    text = "\n".join(_uncommented(line) for line in _jobs()[EVIDENCE_JOB])
+    assert "m4-security" not in text, f"{EVIDENCE_JOB} runs the M4 suite"
+    from direwolf_evals.discovery import discover
+
+    suite = next(s for s in discover(REPO_ROOT / "evals") if s.id == AUTHORITY_SUITE)
+    assert suite.gate and suite.evals, "the authority suite exists, gates and has evals"
+    assert all("M4" not in e.requires for e in suite.evals), "it is M3's suite, not M4's"
 
 
-def test_the_eval_job_is_strict_too() -> None:
+def test_the_eval_job_runs_the_full_gate_strictly() -> None:
+    """The dedicated `evals` job owns the full baseline comparison: every
+    active suite, M3 and M4, strict, with the real second user."""
     job = "\n".join(_uncommented(line) for line in _jobs()[EVAL_JOB])
     assert re.search(r"^    runs-on:\s*ubuntu-latest\s*$", job, re.MULTILINE)
     env = _env(_step_running(EVAL_JOB, "make eval-check"))
     assert env.get("DW_EVAL_REQUIRE_EXERCISED") == "1"
     _second_identity(env.get("DW_PEER_AS"))
+    assert "--suite" not in job, "the full gate is not scoped"
+    import inspect
+
+    source = inspect.getsource(dw.task_eval_check)
+    assert "--suite" not in source, "`make eval-check` must run every suite"
+    assert '"--require-exercised"' in source
 
 
 def test_nothing_around_the_evidence_may_fail_quietly() -> None:
@@ -1425,8 +1449,14 @@ def test_secret_evidence_requires_every_case_exercised() -> None:
 
 
 class _SecretRecorder(_Recorder):
-    def captured(self, *command: str) -> str:
+    def __init__(self) -> None:
+        super().__init__()
+        self.fresh_keyring: list[tuple[str, ...]] = []
+
+    def captured(self, *command: str, fresh_keyring: bool = False) -> str:
         self.commands.append(command)
+        if fresh_keyring:
+            self.fresh_keyring.append(command)
         if "--ignored" in command:
             return "\n".join(
                 [
@@ -1466,6 +1496,12 @@ def test_the_secret_task_runs_every_suite_and_selects_the_ignored_tests(
     assert len(foreign) == 1
     for flag in ("--exact", *dw.SECRET_FOREIGN_TESTS):
         assert flag in foreign[0], f"the three-identity run lacks {flag}"
+    # The authority's suites run as a service does: in a fresh session
+    # keyring, possessing no user keyring, so a keychain key is read with its
+    # owner's bits alone and the cases only such a process observes run.
+    authority = [c for c in recorder.commands if "dwkd-authority" in c and "test" in c]
+    assert authority and all(c in recorder.fresh_keyring for c in authority), authority
+    assert not [c for c in recorder.fresh_keyring if "dwkd-broker" in c]
     capsys.readouterr()
 
 

@@ -29,7 +29,7 @@ import re
 import shutil
 import subprocess
 import sys
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -703,9 +703,34 @@ def second_identity(variable: str) -> tuple[str, int, int]:
     return user, own, peer
 
 
-def run_captured(*command: str) -> str:
+def fresh_session_keyring() -> Callable[[], None]:
+    """What a child runs before exec to join a new, empty session keyring
+    (Linux): afterwards it possesses no keyring it did not create -- not the
+    user keyring -- exactly as a service with a private keyring, or a CI
+    runner, does not. The secret suites then observe what the authority
+    observes (`secret/backend/keychain.rs`, the provisioning contract).
+    """
+    import ctypes
+
+    numbers = {"x86_64": 250, "aarch64": 219}
+    number = numbers.get(platform.machine())
+    if number is None:
+        raise TaskError(f"no keyctl syscall number for {platform.machine()}")
+    keyctl_join_session_keyring = 1
+
+    def join() -> None:
+        libc = ctypes.CDLL(None, use_errno=True)
+        if libc.syscall(number, keyctl_join_session_keyring, None) < 0:
+            raise OSError(ctypes.get_errno(), "keyctl(KEYCTL_JOIN_SESSION_KEYRING)")
+
+    return join
+
+
+def run_captured(*command: str, fresh_keyring: bool = False) -> str:
     """`run`, also returning everything the command printed -- stdout and
-    stderr, interleaved as it happened -- which is echoed as it arrives."""
+    stderr, interleaved as it happened -- which is echoed as it arrives.
+    With `fresh_keyring`, the command runs in a new, empty session keyring
+    (`fresh_session_keyring`)."""
     printable = " ".join(command)
     print(f"{DIM}$ {printable}{OFF}", flush=True)
     lines: list[str] = []
@@ -716,6 +741,7 @@ def run_captured(*command: str) -> str:
         stderr=subprocess.STDOUT,
         text=True,
         errors="replace",
+        preexec_fn=fresh_session_keyring() if fresh_keyring else None,
     ) as process:
         if process.stdout is None:
             raise TaskError(f"`{printable}`: no output stream")
@@ -1607,6 +1633,11 @@ SECRET_CASES = (
     ("secret-backend", "keyring-item-missing"),
     ("secret-backend", "keyring-oversized-refused-by-kernel"),
     ("secret-backend", "keyring-removed-fails-closed"),
+    ("secret-backend", "keyring-provisioning-mask"),
+    ("secret-backend", "keyring-owner-bits-suffice"),
+    ("secret-backend", "keyring-owner-view-only"),
+    ("secret-backend", "keyring-default-mask-unpossessed"),
+    ("secret-backend", "keyring-owner-read-missing-unpossessed"),
     ("secret-backend", "age-decrypt"),
     ("secret-backend", "age-no-identity"),
     ("secret-backend", "age-store-readable-by-others"),
@@ -1752,9 +1783,11 @@ SECRET_FOREIGN_CASES = (
     ("authority-secret", "broker-uid-cannot-read-metadata"),
     ("authority-secret", "broker-uid-cannot-read-age-store"),
     ("authority-secret", "broker-uid-keyring-has-no-value"),
+    ("authority-secret", "broker-uid-cannot-read-the-key-by-serial"),
     ("authority-secret", "runtime-uid-cannot-read-metadata"),
     ("authority-secret", "runtime-uid-cannot-read-age-store"),
     ("authority-secret", "runtime-uid-keyring-has-no-value"),
+    ("authority-secret", "runtime-uid-cannot-read-the-key-by-serial"),
     ("authority-secret", "runtime-uid-receives-placeholder"),
     ("authority-secret", "runtime-memory-root-scan"),
     ("authority-secret", "authority-memory-root-scan"),
@@ -1775,7 +1808,11 @@ def task_secret_broker_evidence() -> None:
     machine against a fake broker (labelled so), the broker's own secret unit
     tests, the real broker binary's secret primitives, and the real daemons
     with a separate runtime process. Every case must report; every suite must
-    have run at least one test. Then, selected by name, three genuine
+    have run at least one test. The authority's suites run in a fresh session
+    keyring (`fresh_session_keyring`): like a service, or a CI runner, they
+    possess no user keyring, so a keychain key is read with its owner's bits
+    alone -- the provisioning contract -- on every machine, and the cases that
+    only a non-possessing process can observe always run. Then, selected by name, three genuine
     identities -- the store and keyring closed to the broker's and the
     runtime's uids, the runtime's placeholder, root reading the hardened
     daemons' and the runtime's memory -- and the core-dump contract, which
@@ -1819,6 +1856,7 @@ def task_secret_broker_evidence() -> None:
             "secret::",
             "--",
             "--nocapture",
+            fresh_keyring=True,
         ),
         run_captured(
             "cargo",
@@ -1830,6 +1868,7 @@ def task_secret_broker_evidence() -> None:
             "state::secret_use",
             "--",
             "--nocapture",
+            fresh_keyring=True,
         ),
         run_captured(
             "cargo",
@@ -1864,6 +1903,7 @@ def task_secret_broker_evidence() -> None:
             "--",
             "--nocapture",
             "--test-threads=1",
+            fresh_keyring=True,
         ),
     ]
     for output in suites:
@@ -1884,6 +1924,7 @@ def task_secret_broker_evidence() -> None:
             "--nocapture",
             "--test-threads=1",
             *SECRET_FOREIGN_TESTS,
+            fresh_keyring=True,
         )
         summaries = [line for line in foreign.splitlines() if line.startswith("test result: ")]
         expected = f"test result: ok. {len(SECRET_FOREIGN_TESTS)} passed; 0 failed; 0 ignored"

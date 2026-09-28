@@ -181,8 +181,9 @@ jobs:
   # Unix-domain socket, a client in another process -- and a client running as
   # a genuinely different uid, which is the only evidence that the server's
   # subject comes from the kernel. Then M3d's runtime-write probe under the
-  # same second identity (ADR-0039 section 14), then the M3 eval gate, strict.
-  # Linux: where the server runs.
+  # same second identity (ADR-0039 section 14), then the M3 eval suite
+  # (`authority-security`), strict, against the reviewed baseline -- not the
+  # full gate, which is the `evals` job's. Linux: where the server runs.
   #
   # Fail-closed, by construction rather than by care: `nobody` is proven to be
   # a second identity by its numeric uid before anything runs (it must differ
@@ -202,9 +203,12 @@ jobs:
       - run: make authority-write-probe
         env:
           DW_PROBE_AS: nobody
-      - run: make eval-check
+      # M3's authority properties, strictly and with the real second user:
+      # this job's own suite, compared with the reviewed baseline. The full
+      # M3 + M4 gate is the dedicated `evals` job's; running it here too made
+      # this job a second, redundant M4 aggregate.
+      - run: uv run --frozen python -m direwolf_evals check --suite authority-security --require-exercised
         env:
-          DW_EVAL_REQUIRE_EXERCISED: "1"
           DW_PEER_AS: nobody
 
   # M4a's canonical filesystem evidence (ADR-0042): the production resolver

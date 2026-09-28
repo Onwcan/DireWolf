@@ -3,11 +3,40 @@
 //! **Linux: the kernel keyring.** A secret is a key of type `user` whose
 //! description is the configured entry name, in the authority uid's **user
 //! keyring** (`@u`). It lives in kernel memory, never on disk, and survives
-//! until reboot; the operator loads it with `keyctl padd user <entry> @u` as
-//! the authority's user. The value is read into a zeroizing buffer the
-//! authority allocated, so no intermediate copy is made on the way. There is
-//! no D-Bus and no native library, so it works on a headless host, which the
-//! desktop Secret Service does not.
+//! until reboot. The value is read into a zeroizing buffer the authority
+//! allocated, so no intermediate copy is made on the way. There is no D-Bus
+//! and no native library, so it works on a headless host, which the desktop
+//! Secret Service does not.
+//!
+//! **Provisioning contract.** The authority reads a key by searching `@u` and
+//! then reading the key by its serial. A service does not *possess* `@u` (a
+//! systemd service gets a private session keyring, and so does a CI runner),
+//! so only the key's **owner** bits apply to that read — and the kernel's
+//! default mask for a new key, `0x3f010000`, gives the owner VIEW alone. A key
+//! for the authority must therefore be created by (or `chown`ed to) the
+//! authority's uid with exactly this mask:
+//!
+//! | class | permissions |
+//! |---|---|
+//! | possessor | all |
+//! | owning uid | view, read, search |
+//! | group | none |
+//! | others | none |
+//!
+//! that is `0x3f0b0000`. Setting a mask needs SETATTR, which under the default
+//! mask only a possessor has, so the key is staged in a keyring the
+//! provisioning shell possesses and then linked into `@u` — with the value on
+//! stdin, never in argv:
+//!
+//! ```text
+//! id=$(keyctl padd user <entry> @s)        # the value on stdin
+//! keyctl setperm "$id" 0x3f0b0000
+//! keyctl link "$id" @u && keyctl unlink "$id" @s
+//! ```
+//!
+//! The reader never changes a key's permissions: a key provisioned without
+//! the owner's READ fails closed, `BACKEND_DENIED`. Other uids have their own
+//! `@u` and, with no group or other bits, cannot read this key even by serial.
 //!
 //! **macOS and Windows**: the Keychain and the Credential Manager through
 //! `keyring`'s native backends, service `direwolf`, account = the entry name.
@@ -72,25 +101,98 @@ pub(super) fn read(_entry: &KeychainEntry) -> Result<SecretMaterial, SecretError
     Err(SecretError::BackendUnavailable)
 }
 
-/// Test support: seed and remove kernel-keyring keys in this process's user
-/// keyring, the way an operator's `keyctl padd` would. **`#[cfg(test)]`**.
+/// Test support: provision and remove kernel-keyring keys in this process's
+/// user keyring exactly as the module's provisioning contract requires of an
+/// operator — so a test passes where the authority would, whether or not the
+/// test's session possesses `@u`. **`#[cfg(test)]`**.
 #[cfg(all(test, target_os = "linux"))]
 pub(crate) mod test_support {
-    use linux_keyutils::{KeyRing, KeyRingIdentifier};
+    use linux_keyutils::{
+        Key, KeyPermissions, KeyPermissionsBuilder, KeyRing, KeyRingIdentifier, Permission,
+    };
 
-    /// Add (or replace) `entry` with `value`. `None` where the host has no
-    /// usable keyring, so the caller can report it NOT EXERCISED.
-    pub(crate) fn seed(entry: &str, value: &[u8]) -> Option<()> {
-        let ring = KeyRing::from_special_id(KeyRingIdentifier::User, true).ok()?;
-        ring.add_key(entry, value).ok().map(|_| ())
+    use crate::secret::material::MAX_SECRET_BYTES;
+
+    /// The provisioning contract's mask, `0x3f0b0000`: the possessor may do
+    /// anything; the owning uid may view, read and search; its group and
+    /// everyone else, nothing.
+    pub(crate) fn authority_permissions() -> KeyPermissions {
+        KeyPermissionsBuilder::builder()
+            .posessor(Permission::ALL)
+            .user(Permission::VIEW | Permission::READ | Permission::SEARCH)
+            .group(Permission::empty())
+            .world(Permission::empty())
+            .build()
     }
 
-    /// Remove `entry`, if present.
+    /// Add (or replace) `entry` with `value` under `perms`, as an operator
+    /// must: staged in this process's own keyring, which it possesses, linked
+    /// into `@u` and given `perms` while still possessed (setting a mask needs
+    /// SETATTR, which the default mask gives only a possessor), then unlinked
+    /// from the staging keyring. `None` where the host has no usable keyring,
+    /// so the caller can report it NOT EXERCISED.
+    pub(crate) fn seed_with(entry: &str, value: &[u8], perms: KeyPermissions) -> Option<Key> {
+        let staging = KeyRing::from_special_id(KeyRingIdentifier::Process, true).ok()?;
+        let user = KeyRing::from_special_id(KeyRingIdentifier::User, true).ok()?;
+        let key = staging.add_key(entry, value).ok()?;
+        let placed = user.link_key(key).and_then(|()| key.set_perms(perms));
+        let _ = staging.unlink_key(key);
+        if placed.is_err() {
+            let _ = user.unlink_key(key);
+            return None;
+        }
+        Some(key)
+    }
+
+    /// [`seed_with`] under the provisioning contract.
+    pub(crate) fn seed(entry: &str, value: &[u8]) -> Option<()> {
+        seed_with(entry, value, authority_permissions()).map(|_| ())
+    }
+
+    /// Remove `entry`, if present and searchable.
     pub(crate) fn remove(entry: &str) {
         if let Ok(ring) = KeyRing::from_special_id(KeyRingIdentifier::User, false)
             && let Ok(key) = ring.search(entry)
         {
             let _ = key.invalidate();
+        }
+    }
+
+    /// Remove `key` by its serial: unlinking needs no permission on the key,
+    /// so this also removes a key its owner may not search.
+    pub(crate) fn remove_key(key: Key) {
+        let _ = key.invalidate();
+        if let Ok(ring) = KeyRing::from_special_id(KeyRingIdentifier::User, false) {
+            let _ = ring.unlink_key(key);
+        }
+    }
+
+    /// Whether this process possesses `entry` — whether its session keyring
+    /// links `@u`, as a login session's usually does and a service's does not.
+    /// A possessor that may search can read a key without its READ bit
+    /// (`keyctl_read(2)`), so a denial by the owner's bits is only observable
+    /// where the key is not possessed.
+    pub(crate) fn possessed(entry: &str) -> bool {
+        KeyRing::from_special_id(KeyRingIdentifier::Session, false)
+            .and_then(|session| session.search(entry))
+            .is_ok()
+    }
+
+    /// Which step of the production path — `search` in `@u`, then `read` by
+    /// serial — refuses `entry`, for an assertion message: `search: <error>`,
+    /// `read: <error>` or `none`. The error's name only: never the value, a
+    /// prefix of it or its length.
+    pub(crate) fn refused_stage(entry: &str) -> String {
+        let key = match KeyRing::from_special_id(KeyRingIdentifier::User, false)
+            .and_then(|ring| ring.search(entry))
+        {
+            Ok(key) => key,
+            Err(error) => return format!("search: {error:?}"),
+        };
+        let mut probe = zeroize::Zeroizing::new(vec![0u8; MAX_SECRET_BYTES + 1]);
+        match key.read(&mut *probe) {
+            Ok(_) => "none".to_owned(),
+            Err(error) => format!("read: {error:?}"),
         }
     }
 }

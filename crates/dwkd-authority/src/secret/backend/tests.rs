@@ -13,6 +13,7 @@ use std::io::Write as _;
 use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _, symlink};
 
 use age::secrecy::ExposeSecret as _;
+use linux_keyutils::{Key, KeyPermissions, KeyPermissionsBuilder, Permission};
 use sha2::{Digest as _, Sha256};
 
 use super::keychain::test_support;
@@ -42,23 +43,31 @@ fn value(seed: u8, len: usize) -> Vec<u8> {
         .collect()
 }
 
-/// A unique entry name, removed when dropped (even when the test fails).
-struct Seeded(String);
+/// A unique entry name and its key, removed when dropped (even when the test
+/// fails, and whatever its mask allows its owner).
+struct Seeded(String, Key);
 
 impl Seeded {
+    /// Provisioned under the contract's mask, as an operator must.
     fn new(tag: &str, bytes: &[u8]) -> Option<Self> {
+        Self::with(tag, bytes, test_support::authority_permissions())
+    }
+    fn with(tag: &str, bytes: &[u8], perms: KeyPermissions) -> Option<Self> {
         let name = format!("direwolf-test/{tag}-{}", std::process::id());
-        test_support::seed(&name, bytes)?;
-        Some(Self(name))
+        let key = test_support::seed_with(&name, bytes, perms)?;
+        Some(Self(name, key))
     }
     fn entry(&self) -> KeychainEntry {
         KeychainEntry::new(&self.0).unwrap()
+    }
+    fn mask(&self) -> u32 {
+        self.1.metadata().unwrap().get_perms().bits()
     }
 }
 
 impl Drop for Seeded {
     fn drop(&mut self) {
-        test_support::remove(&self.0);
+        test_support::remove_key(self.1);
     }
 }
 
@@ -78,7 +87,12 @@ fn the_kernel_keyring_round_trips_a_value_and_answers_missing_and_oversized_by_t
         return;
     };
     let got = read(&Storage::Keychain(seeded.entry()), None, 0);
-    assert_eq!(exposed_digest(&got), Some(digest(&secret)));
+    assert_eq!(
+        exposed_digest(&got),
+        Some(digest(&secret)),
+        "the keyring refused at {}",
+        test_support::refused_stage(&seeded.0)
+    );
 
     let missing = KeychainEntry::new("direwolf-test/never-seeded").unwrap();
     assert_eq!(
@@ -114,6 +128,136 @@ fn the_kernel_keyring_round_trips_a_value_and_answers_missing_and_oversized_by_t
         "refused",
     );
     evidence("secret-backend", "keyring-removed-fails-closed", "error");
+}
+
+/// The provisioning contract, read back from the kernel: `0x3f0b0000` on a key
+/// the authority's uid owns — its owner may view, read and search it, its
+/// group and everyone else nothing — and the owner's bits alone are enough for
+/// the production read, so the authority does not depend on possessing `@u`.
+#[test]
+fn a_provisioned_key_gives_its_owner_view_read_and_search_and_nobody_else_anything() {
+    let secret = value(5, 40);
+    let Some(seeded) = Seeded::new("mask", &secret) else {
+        println!("NOT EXERCISED: no usable kernel keyring on this host");
+        return;
+    };
+    let scratch = Scratch::new("keyring-owner");
+    let metadata = seeded.1.metadata().unwrap();
+    assert_eq!(metadata.get_perms().bits(), 0x3f0b_0000);
+    assert_eq!(
+        metadata.get_perms().bits() & 0xffff,
+        0,
+        "no group or other bits"
+    );
+    assert_eq!(
+        metadata.get_uid(),
+        own_uid(scratch.path()),
+        "owned by this uid"
+    );
+    let got = read(&Storage::Keychain(seeded.entry()), None, 0);
+    assert_eq!(
+        exposed_digest(&got),
+        Some(digest(&secret)),
+        "the keyring refused at {}",
+        test_support::refused_stage(&seeded.0)
+    );
+    evidence("secret-backend", "keyring-provisioning-mask", "0x3f0b0000");
+
+    // A possessor that may do nothing adds nothing: the owner's view, read and
+    // search are what the read uses, whether or not this session possesses @u.
+    let owner_only = Seeded::with(
+        "owner-only",
+        &secret,
+        KeyPermissionsBuilder::builder()
+            .user(Permission::VIEW | Permission::READ | Permission::SEARCH)
+            .build(),
+    )
+    .unwrap();
+    assert_eq!(owner_only.mask(), 0x000b_0000);
+    let got = read(&Storage::Keychain(owner_only.entry()), None, 0);
+    assert_eq!(
+        exposed_digest(&got),
+        Some(digest(&secret)),
+        "the keyring refused at {}",
+        test_support::refused_stage(&owner_only.0)
+    );
+    evidence(
+        "secret-backend",
+        "keyring-owner-bits-suffice",
+        "read-without-possession",
+    );
+}
+
+/// A key provisioned without its owner's READ fails closed, `BACKEND_DENIED`,
+/// and the reader never widens its mask to make it work.
+#[test]
+fn a_key_its_owner_may_not_read_is_denied_and_its_mask_is_never_widened() {
+    let secret = value(6, 40);
+    // The owner may only view it, and a possessor may do nothing: refused
+    // wherever this runs.
+    let Some(view_only) = Seeded::with(
+        "view-only",
+        &secret,
+        KeyPermissionsBuilder::builder()
+            .user(Permission::VIEW)
+            .build(),
+    ) else {
+        println!("NOT EXERCISED: no usable kernel keyring on this host");
+        return;
+    };
+    assert_eq!(
+        read(&Storage::Keychain(view_only.entry()), None, 0).err(),
+        Some(SecretError::BackendDenied)
+    );
+    assert_eq!(view_only.mask(), 0x0001_0000, "the reader changed no bit");
+    evidence(
+        "secret-backend",
+        "keyring-owner-view-only",
+        "BACKEND_DENIED",
+    );
+
+    // The kernel's default mask, which `add_key` alone leaves -- the owner may
+    // only view, so a process that does not possess @u (a service, a CI
+    // runner) is refused at `search` -- and a mask that lets the owner search
+    // but not read, refused at `read`. A possessor that may search reads
+    // either anyway (keyctl_read(2)), so in a login session that links @u
+    // they are NOT EXERCISED; `make secret-broker-evidence` runs this suite in
+    // a fresh session keyring, which possesses nothing.
+    for (tag, mask, case, stage) in [
+        (
+            "default-mask",
+            0x3f01_0000,
+            "keyring-default-mask-unpossessed",
+            "search",
+        ),
+        (
+            "no-owner-read",
+            0x3f09_0000,
+            "keyring-owner-read-missing-unpossessed",
+            "read",
+        ),
+    ] {
+        let seeded = Seeded::with(tag, &secret, KeyPermissions::from_u32(mask)).unwrap();
+        if test_support::possessed(&seeded.0) {
+            println!("NOT EXERCISED: this session possesses @u, so {case} cannot be observed here");
+            continue;
+        }
+        assert_eq!(
+            read(&Storage::Keychain(seeded.entry()), None, 0).err(),
+            Some(SecretError::BackendDenied)
+        );
+        let refused = test_support::refused_stage(&seeded.0);
+        assert!(
+            refused.starts_with(&format!("{stage}: AccessDenied")),
+            "{case}: refused at {refused}"
+        );
+        assert_eq!(seeded.mask(), mask, "the reader changed no bit");
+        evidence(
+            "secret-backend",
+            case,
+            &format!("BACKEND_DENIED-at-{stage}"),
+        );
+    }
 }
 
 struct AgeFixture {
