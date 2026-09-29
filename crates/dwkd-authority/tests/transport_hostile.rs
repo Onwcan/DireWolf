@@ -772,3 +772,180 @@ mod linux {
         let _ = a.stream().flush();
     }
 }
+
+/// The harness reads `audit.log` while the authority appends to it
+/// (`transport_support::read_live`). Proved here against real chains, through
+/// the unchanged production verifier: a torn tail the writer finishes is waited
+/// out; one nobody finishes fails at a bounded deadline; a broken chain or a
+/// malformed complete record fails on the first read, whatever follows it.
+#[cfg(target_os = "linux")]
+mod live_audit_reader {
+    use std::io::Write as _;
+    use std::path::{Path, PathBuf};
+    use std::time::{Duration, Instant};
+
+    use dwkd_authority::state::{AuditLogFault, RecordFault, read_audit_log};
+
+    use super::transport_support::{Fixture, LiveAuditFault, PROMPT, Server, read_live};
+
+    /// A real chain of at least two records — the fixture's and a served
+    /// authority's — and a scratch path beside it.
+    fn chain(tag: &str) -> (Fixture, Vec<Vec<u8>>, PathBuf) {
+        let fx = Fixture::new(tag);
+        drop(Server::start(&fx.args(&[])));
+        let log = std::fs::read(fx.state().join("audit.log")).unwrap();
+        assert_eq!(log.last(), Some(&b'\n'), "a quiescent chain ends whole");
+        let lines: Vec<Vec<u8>> = log
+            .split(|byte| *byte == b'\n')
+            .filter(|line| !line.is_empty())
+            .map(<[u8]>::to_vec)
+            .collect();
+        assert!(lines.len() >= 2, "a chain of at least two records");
+        let copy = fx.dir.path().join("live-copy.log");
+        (fx, lines, copy)
+    }
+
+    /// `lines`, each ending in a newline, then `tail`, which does not.
+    fn write(path: &Path, lines: &[Vec<u8>], tail: &[u8]) {
+        let mut bytes = Vec::new();
+        for line in lines {
+            bytes.extend_from_slice(line);
+            bytes.push(b'\n');
+        }
+        bytes.extend_from_slice(tail);
+        std::fs::write(path, bytes).unwrap();
+    }
+
+    fn append(path: &Path, bytes: &[u8]) {
+        let mut file = std::fs::OpenOptions::new().append(true).open(path).unwrap();
+        file.write_all(bytes).unwrap();
+        file.sync_all().unwrap();
+    }
+
+    /// A read that counts itself, so "never retried" is a count, not a time.
+    fn counted(path: &Path, reads: &mut u32) -> Result<usize, LiveAuditFault> {
+        read_live(PROMPT, || {
+            *reads += 1;
+            read_audit_log(path)
+        })
+        .map(|records| records.len())
+    }
+
+    #[test]
+    fn a_torn_tail_the_writer_finishes_is_waited_out_and_the_whole_chain_verified() {
+        let (_fx, lines, path) = chain("h-live-torn");
+        let (last, whole) = lines.split_last().unwrap();
+        // As the authority writes a record: in two halves.
+        let (first, second) = last.split_at(last.len() >> 1);
+        write(&path, whole, first);
+        assert!(
+            matches!(read_audit_log(&path), Err(AuditLogFault::TornTail { .. })),
+            "the tail starts torn"
+        );
+        let rest = [second, &b"\n"[..]].concat();
+        let writer = {
+            let path = path.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(150));
+                append(&path, &rest);
+            })
+        };
+        let records =
+            read_live(PROMPT, || read_audit_log(&path)).unwrap_or_else(|fault| panic!("{fault}"));
+        writer.join().unwrap();
+        assert_eq!(
+            records.len(),
+            lines.len(),
+            "every record, the finished one too"
+        );
+
+        // The same decision without timing: torn, torn, then whole.
+        let mut reads = 0u32;
+        let records = read_live(PROMPT, || {
+            reads += 1;
+            if reads < 3 {
+                Err(AuditLogFault::TornTail {
+                    after_records: 1,
+                    bytes: 1,
+                })
+            } else {
+                read_audit_log(&path)
+            }
+        })
+        .unwrap_or_else(|fault| panic!("{fault}"));
+        assert_eq!((reads, records.len()), (3, lines.len()));
+    }
+
+    #[test]
+    fn a_torn_tail_nobody_finishes_fails_at_a_bounded_deadline() {
+        let (_fx, lines, path) = chain("h-live-stuck");
+        let (last, whole) = lines.split_last().unwrap();
+        write(&path, whole, &last[..last.len() >> 1]);
+        let grace = Duration::from_millis(300);
+        let started = Instant::now();
+        let fault = read_live(grace, || read_audit_log(&path)).unwrap_err();
+        let waited = started.elapsed();
+        assert!(
+            matches!(
+                fault,
+                LiveAuditFault::TailTimeout {
+                    fault: AuditLogFault::TornTail { .. },
+                    ..
+                }
+            ),
+            "{fault}"
+        );
+        assert!(
+            fault.to_string().starts_with("AUDIT_LIVE_TAIL_TIMEOUT"),
+            "{fault}"
+        );
+        assert!(waited >= grace, "not before the deadline: {waited:?}");
+        assert!(waited < PROMPT, "and not unbounded: {waited:?}");
+    }
+
+    #[test]
+    fn a_broken_chain_fails_on_the_first_read_even_with_a_torn_tail_after_it() {
+        let (_fx, lines, path) = chain("h-live-broken");
+        let mut broken = lines.clone();
+        let at = broken[0]
+            .windows(8)
+            .position(|w| w == b"\"hash\":\"")
+            .expect("a hash field")
+            + 8;
+        broken[0][at] = if broken[0][at] == b'0' { b'1' } else { b'0' };
+        let torn = &lines[1][..lines[1].len() >> 1];
+        for tail in [&b""[..], torn] {
+            write(&path, &broken, tail);
+            let mut reads = 0u32;
+            let fault = counted(&path, &mut reads).unwrap_err();
+            assert_eq!(reads, 1, "never retried: {fault}");
+            assert!(
+                matches!(
+                    fault,
+                    LiveAuditFault::Corruption(AuditLogFault::Record {
+                        line: 1,
+                        fault: RecordFault::HashMismatch,
+                    })
+                ),
+                "{fault}"
+            );
+            assert!(fault.to_string().starts_with("AUDIT_CORRUPTION"), "{fault}");
+        }
+    }
+
+    #[test]
+    fn a_malformed_complete_record_fails_on_the_first_read() {
+        let (_fx, mut lines, path) = chain("h-live-malformed");
+        let line = u64::try_from(lines.len()).unwrap();
+        *lines.last_mut().unwrap() = br#"{"v":1,"seq":"#.to_vec();
+        write(&path, &lines, b"");
+        let mut reads = 0u32;
+        let fault = counted(&path, &mut reads).unwrap_err();
+        assert_eq!(reads, 1, "never retried: {fault}");
+        assert!(
+            matches!(&fault, LiveAuditFault::Corruption(AuditLogFault::Record { line: l, .. }) if *l == line),
+            "{fault}"
+        );
+        assert!(fault.to_string().starts_with("AUDIT_CORRUPTION"), "{fault}");
+    }
+}

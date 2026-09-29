@@ -220,6 +220,46 @@ mod linux {
             self.stderr().matches(needle).count()
         }
 
+        /// The events so far, by kind only (`closed`, `refused`, ...): a
+        /// diagnostic that carries no field of any line.
+        fn kinds(&self) -> String {
+            self.stderr()
+                .lines()
+                .filter_map(|line| line.split_once("event=").map(|(_, event)| event))
+                .map(|event| event.split(' ').next().unwrap_or(""))
+                .collect::<Vec<_>>()
+                .join(",")
+        }
+
+        /// Require exactly `n` lines holding `needle` once this harness has
+        /// read everything the broker wrote through its `exchanges`-th
+        /// connection. Its stderr is drained by another thread, so a count
+        /// taken when the last outcome arrives can be short. Each exchange's
+        /// events precede its `closed` in the one stream, so `exchanges`
+        /// closings seen means every line of those exchanges is here: fewer
+        /// than `n` then, or more, is the broker's count, not the reader's lag.
+        fn expect_logged(&self, needle: &str, n: usize, exchanges: usize) {
+            let deadline = Instant::now() + PROMPT;
+            while self.count("event=closed\n") < exchanges {
+                assert!(
+                    Instant::now() < deadline,
+                    "SECRET_LOG_COUNT_TIMEOUT: {} of {exchanges} exchanges closed and {} of {n} \
+                     `{needle}` lines read after {PROMPT:?}; events: {}",
+                    self.count("event=closed\n"),
+                    self.count(needle),
+                    self.kinds()
+                );
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            let seen = self.count(needle);
+            assert_eq!(
+                seen,
+                n,
+                "SECRET_LOG_COUNT_MISMATCH: `{needle}` after {exchanges} exchanges; events: {}",
+                self.kinds()
+            );
+        }
+
         fn rchar(&self) -> u64 {
             let io = std::fs::read_to_string(format!("/proc/{}/io", self.pid)).unwrap();
             io.lines()
@@ -561,7 +601,8 @@ mod linux {
             evidence(&format!("egress-hostile-{case}"), want.as_str());
         }
         drop(kept_writer);
-        assert_eq!(broker.count("op=broker.secret_egress"), 11);
+        // Eleven exchanges, each refused and logged once, and read in full.
+        broker.expect_logged("op=broker.secret_egress", 11, 11);
         assert_eq!(
             broker.count("executed invocation"),
             0,

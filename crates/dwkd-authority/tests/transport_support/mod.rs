@@ -12,7 +12,10 @@
 //! as an operator's own tooling would. No wire operation does it.
 //!
 //! Audit assertions read `audit.log` through `read_audit_log`, which verifies
-//! the whole chain before it returns a record.
+//! the whole chain before it returns a record. The log is read **live**, while
+//! the authority process may be appending to it, so the read goes through
+//! [`read_live`]: a torn tail — a record the writer has not finished — is
+//! waited out for a bounded time, and every other fault fails at once.
 
 #![allow(
     dead_code,
@@ -23,6 +26,7 @@
     clippy::missing_panics_doc
 )]
 
+use std::fmt;
 use std::io::{BufRead as _, BufReader, ErrorKind, Read as _, Write as _};
 use std::os::unix::fs::MetadataExt as _;
 use std::os::unix::net::UnixStream;
@@ -34,7 +38,7 @@ use std::time::{Duration, Instant};
 
 use dwk_proto::dwkp::{self, DwkpBody, DwkpMessage};
 use dwk_proto::frame::{ContentType, FrameDecoder, encode};
-use dwkd_authority::state::{AuditRecord, read_audit_log};
+use dwkd_authority::state::{AuditLogFault, AuditRecord, read_audit_log};
 
 use super::state_support::{TempDir, balanced, ceiling, decode, id, install_fixtures, start};
 
@@ -47,6 +51,82 @@ pub(crate) const PROMPT: Duration = Duration::from_secs(10);
 /// This process's effective uid, as the kernel will report it to the server.
 pub(crate) fn own_uid() -> u32 {
     std::fs::metadata("/proc/self").expect("procfs").uid()
+}
+
+/// How often a live read looks again while the log ends in a partial record.
+const LIVE_TAIL_POLL: Duration = Duration::from_millis(5);
+
+/// Why a live `audit.log` could not be read as one wholly verified chain.
+#[derive(Debug)]
+pub(crate) enum LiveAuditFault {
+    /// The log still ended in a partial record when the grace ran out: a
+    /// writer that never finished, or damage a verifier cannot tell from one.
+    TailTimeout {
+        grace: Duration,
+        reads: u32,
+        fault: AuditLogFault,
+    },
+    /// Any other fault, reported by the first read that saw it and never
+    /// retried: a complete record that does not verify is damage, however
+    /// long one waits.
+    Corruption(AuditLogFault),
+}
+
+impl fmt::Display for LiveAuditFault {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::TailTimeout {
+                grace,
+                reads,
+                fault,
+            } => write!(
+                f,
+                "AUDIT_LIVE_TAIL_TIMEOUT: still torn after {reads} reads over {grace:?}: {fault}"
+            ),
+            Self::Corruption(fault) => write!(f, "AUDIT_CORRUPTION: {fault}"),
+        }
+    }
+}
+
+/// `read` — a verifying read of a log another process may be appending to —
+/// until it verifies whole, waiting out a torn tail for at most `grace`.
+///
+/// The authority writes each record in two halves and syncs after both
+/// (`audit.rs`, the `MidAuditRecord` crash point sits between them), so a
+/// reader that lands between the halves sees `TornTail` for a moment. The
+/// production verifier is right to report it — alone, it cannot tell a
+/// partial write from damage — and a live reader is right to look again. Only
+/// `TornTail` is retried; a success is the whole observed log, verified.
+pub(crate) fn read_live<F>(grace: Duration, mut read: F) -> Result<Vec<AuditRecord>, LiveAuditFault>
+where
+    F: FnMut() -> Result<Vec<AuditRecord>, AuditLogFault>,
+{
+    let deadline = Instant::now() + grace;
+    let mut reads = 0u32;
+    loop {
+        reads = reads.saturating_add(1);
+        match read() {
+            Ok(records) => return Ok(records),
+            Err(fault @ AuditLogFault::TornTail { .. }) => {
+                if Instant::now() >= deadline {
+                    return Err(LiveAuditFault::TailTimeout {
+                        grace,
+                        reads,
+                        fault,
+                    });
+                }
+                std::thread::sleep(LIVE_TAIL_POLL);
+            }
+            Err(fault) => return Err(LiveAuditFault::Corruption(fault)),
+        }
+    }
+}
+
+/// Every verified record of the live `audit.log` at `path`; a panic naming
+/// the fault when the chain does not verify.
+pub(crate) fn live_audit(path: &Path) -> Vec<AuditRecord> {
+    read_live(PROMPT, || read_audit_log(path))
+        .unwrap_or_else(|fault| panic!("{fault} ({})", path.display()))
 }
 
 /// A state directory with the fixture profiles installed, and a socket path.
@@ -110,9 +190,9 @@ impl Fixture {
         self.args_for(&[own_uid()], &extra)
     }
 
-    /// Every verified record in the fixture's `audit.log`.
+    /// Every verified record in the fixture's `audit.log`, read live.
     pub(crate) fn audit(&self) -> Vec<AuditRecord> {
-        read_audit_log(&self.state().join("audit.log")).expect("the audit chain verifies")
+        live_audit(&self.state().join("audit.log"))
     }
 
     pub(crate) fn events(&self, event: &str) -> Vec<AuditRecord> {

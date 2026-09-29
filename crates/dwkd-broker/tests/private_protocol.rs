@@ -80,6 +80,15 @@ mod linux {
     /// exchange deadline, so a test can wait out a stalled exchange.
     const PEER_WAIT: Duration = Duration::from_secs(20);
 
+    /// The broker's exchange deadline (`exchange::DEADLINE`, ADR-0043): how
+    /// long a peer that took the hello and says nothing may hold the broker.
+    const EXCHANGE_DEADLINE: Duration = Duration::from_secs(10);
+
+    /// What a shared runner may add to that deadline before the cut-off is
+    /// observed: room for scheduling, and still a bound that a broker which
+    /// never cuts a stalled peer off, or does so far past its deadline, fails.
+    const SCHEDULING_MARGIN: Duration = Duration::from_secs(5);
+
     /// Builds one malformed frame for a connection's channel.
     type Make = Box<dyn Fn(&ChannelNonce) -> Vec<u8>>;
 
@@ -249,6 +258,29 @@ mod linux {
             self.stderr.lock().unwrap().clone()
         }
 
+        /// The end of the broker's stderr, bounded, for a failure message:
+        /// what it did last is what a timing failure needs to show.
+        fn tail(&self) -> String {
+            let text = self.stderr();
+            let from = text.len().saturating_sub(1200);
+            let from = (from..text.len())
+                .find(|&i| text.is_char_boundary(i))
+                .unwrap_or(text.len());
+            text[from..].to_owned()
+        }
+
+        /// The broker process's scheduler state (`/proc/<pid>/stat`), or
+        /// `gone`: whether it is still there to serve anyone.
+        fn liveness(&self) -> String {
+            std::fs::read_to_string(format!("/proc/{}/stat", self.pid))
+                .ok()
+                .and_then(|stat| {
+                    let (_, after) = stat.rsplit_once(") ")?;
+                    after.split(' ').next().map(str::to_owned)
+                })
+                .unwrap_or_else(|| "gone".to_owned())
+        }
+
         fn count(&self, kind: &str) -> usize {
             self.stderr()
                 .lines()
@@ -300,8 +332,9 @@ mod linux {
             while self.open_fds() != n {
                 assert!(
                     Instant::now() < deadline,
-                    "the broker holds {} descriptors, not {n}",
-                    self.open_fds()
+                    "FD_BASELINE_NOT_RESTORED: the broker holds {} descriptors, not {n}\n{}",
+                    self.open_fds(),
+                    self.tail()
                 );
                 std::thread::sleep(Duration::from_millis(10));
             }
@@ -317,6 +350,19 @@ mod linux {
         fn drop(&mut self) {
             self.kill();
         }
+    }
+
+    /// Why a peer's read produced no frame.
+    #[derive(Debug, PartialEq, Eq)]
+    enum NoFrame {
+        /// The broker ended the stream.
+        Closed,
+        /// Nothing arrived before the read deadline.
+        Deadline,
+        /// The read failed otherwise.
+        Failed(std::io::ErrorKind),
+        /// A frame arrived where the end of the stream was expected.
+        AnotherFrame,
     }
 
     /// The authority's end of one connection, as this test plays it.
@@ -339,24 +385,60 @@ mod linux {
 
         /// One frame body, or `None` when the broker closed.
         fn frame(&mut self) -> Option<Vec<u8>> {
+            self.next_frame().ok()
+        }
+
+        /// One frame body, or why none arrived — three different failures.
+        fn next_frame(&mut self) -> Result<Vec<u8>, NoFrame> {
             loop {
                 if !self.pending.is_empty() {
                     let (used, frame) = self.decoder.feed(&self.pending).unwrap();
                     self.pending.drain(..used);
                     if let Some(frame) = frame {
-                        return Some(frame.body);
+                        return Ok(frame.body);
                     }
                 }
                 let mut chunk = [0u8; 64 * 1024];
                 match self.stream.read(&mut chunk) {
-                    Ok(0) | Err(_) => return None,
+                    Ok(0) => return Err(NoFrame::Closed),
                     Ok(n) => self.pending.extend_from_slice(&chunk[..n]),
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                    Err(e)
+                        if matches!(
+                            e.kind(),
+                            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                        ) =>
+                    {
+                        return Err(NoFrame::Deadline);
+                    }
+                    Err(e) => return Err(NoFrame::Failed(e.kind())),
                 }
             }
         }
 
         fn hello(&mut self) -> BrokerHello {
             BrokerHello::decode_frame_body(&self.frame().expect("a hello")).unwrap()
+        }
+
+        /// The hello, if it arrives within `within`.
+        fn hello_within(&mut self, within: Duration) -> Result<BrokerHello, NoFrame> {
+            self.stream.set_read_timeout(Some(within)).unwrap();
+            let frame = self.next_frame();
+            self.stream.set_read_timeout(Some(PEER_WAIT)).unwrap();
+            Ok(BrokerHello::decode_frame_body(&frame?).unwrap())
+        }
+
+        /// Whether the broker ends the stream within `within`: end of file —
+        /// not a read deadline, and not another frame.
+        fn end_within(&mut self, within: Duration) -> Result<(), NoFrame> {
+            self.stream.set_read_timeout(Some(within)).unwrap();
+            let read = self.next_frame();
+            self.stream.set_read_timeout(Some(PEER_WAIT)).unwrap();
+            match read {
+                Err(NoFrame::Closed) => Ok(()),
+                Err(why) => Err(why),
+                Ok(_) => Err(NoFrame::AnotherFrame),
+            }
         }
 
         /// `bytes` with `fds` attached to the first byte.
@@ -1149,25 +1231,72 @@ mod linux {
                 assert!(!read.eof_observed);
             }
         }
-        std::thread::sleep(Duration::from_millis(100));
-        assert_eq!(broker.open_fds(), baseline, "{}", broker.stderr());
+        // Every exchange's descriptors are closed with it: back to exactly
+        // the baseline, and a descriptor that stayed open never gets there.
+        broker.settle_fds(baseline);
 
         // A peer that takes the hello and says nothing holds the broker for
-        // at most its deadline; the next exchange is then served.
+        // at most its deadline. Observed where it happens -- the broker's own
+        // record of the cut-off -- and only then is the next peer connected,
+        // so its hello does not race the stalled exchange's timer.
+        let timeouts = broker.count("malformed reason=timeout");
         let started = Instant::now();
         let mut stalled = Peer::connect(&scratch.socket());
-        let _ = stalled.hello();
+        stalled.hello_within(PROMPT).unwrap_or_else(|why| {
+            panic!(
+                "STALLED_PEER_NO_HELLO: {why:?}; broker {}:\n{}",
+                broker.liveness(),
+                broker.tail()
+            )
+        });
+        let limit = EXCHANGE_DEADLINE + SCHEDULING_MARGIN;
+        while broker.count("malformed reason=timeout") == timeouts {
+            let waited = started.elapsed();
+            assert!(
+                waited < limit,
+                "BROKER_TIMEOUT_EVENT_MISSING: no cut-off recorded {waited:?} after a stalled \
+                 peer connected (deadline {EXCHANGE_DEADLINE:?}, margin {SCHEDULING_MARGIN:?}); \
+                 broker {}:\n{}",
+                broker.liveness(),
+                broker.tail()
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let cut_off = started.elapsed();
+        assert_eq!(
+            broker.count("malformed reason=timeout"),
+            timeouts + 1,
+            "one stalled exchange, one cut-off"
+        );
+        assert!(
+            cut_off >= EXCHANGE_DEADLINE - Duration::from_secs(1),
+            "held until the deadline, not cut off at once: {cut_off:?}"
+        );
+        stalled.end_within(PROMPT).unwrap_or_else(|why| {
+            panic!(
+                "STALLED_PEER_NOT_CLOSED: {why:?}; broker {}:\n{}",
+                broker.liveness(),
+                broker.tail()
+            )
+        });
+        broker.settle_fds(baseline);
+
+        // The broker is free again: the next honest exchange is served at
+        // once and completes.
         let mut next = Peer::connect(&scratch.socket());
-        let hello = next.hello();
-        let waited = started.elapsed();
-        assert!(waited >= Duration::from_secs(9), "{waited:?}");
-        assert!(waited < Duration::from_secs(15), "{waited:?}");
+        let hello = next.hello_within(PROMPT).unwrap_or_else(|why| {
+            panic!(
+                "NEXT_PEER_NOT_SERVED: {why:?}; broker {}:\n{}",
+                broker.liveness(),
+                broker.tail()
+            )
+        });
         next.send(
             &authorisation(&hello.channel, 99, id, 1),
             &[open(&file).as_fd()],
         );
         assert_eq!(done(next.outcome()).0, [7]);
-        broker.wait_for("malformed reason=timeout", 1);
+        broker.settle_fds(baseline);
         evidence("descriptor-pressure", "no-leak");
         evidence("stalled-peer", "cut-off-at-deadline");
     }

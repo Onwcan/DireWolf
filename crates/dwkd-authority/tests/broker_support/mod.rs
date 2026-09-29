@@ -32,13 +32,13 @@ use std::time::{Duration, Instant};
 
 use dwk_proto::dwkp::{DwkpBody, DwkpMessage};
 use dwk_proto::wire::id::{RunId, SessionId};
-use dwkd_authority::state::{AuditRecord, WorkspaceId, WorkspaceSensitivity, read_audit_log};
+use dwkd_authority::state::{AuditRecord, WorkspaceId, WorkspaceSensitivity};
 
 use super::state_support::{
     START_MS, TempDir, acquire_msg, admit_msg, ceiling, decode, id, install_fixtures, session,
     start,
 };
-use super::transport_support::{BIN, Client, PROMPT, Server, own_uid};
+use super::transport_support::{BIN, Client, PROMPT, Server, live_audit, own_uid};
 
 /// The broker binary: built beside the authority by `cargo test --workspace`
 /// (the broker's own integration tests make Cargo build it) and by the
@@ -619,9 +619,10 @@ impl Setup {
         (broker, server)
     }
 
-    /// Every verified record in `audit.log`.
+    /// Every verified record in `audit.log`, read live: the authority may be
+    /// appending, so a torn tail is waited out and nothing else is.
     pub(crate) fn audit(&self) -> Vec<AuditRecord> {
-        read_audit_log(&self.state().join("audit.log")).expect("the audit chain verifies")
+        live_audit(&self.state().join("audit.log"))
     }
 
     pub(crate) fn events(&self, event: &str) -> Vec<AuditRecord> {
