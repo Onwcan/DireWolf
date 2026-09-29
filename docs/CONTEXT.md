@@ -58,7 +58,7 @@ Consequences that follow, and are enforced by a test:
               only compaction moves this line
 ```
 
-*(Invariant adopted from Hermes Agent; see [COMPETITIVE_ANALYSIS.md](COMPETITIVE_ANALYSIS.md) §5.)*
+*(Invariant adopted from Hermes Agent; see [COMPETITIVE_ANALYSIS.md](COMPETITIVE_ANALYSIS.md) §15.)*
 
 A test asserts that across a 50-turn synthetic run with no compaction, the SHA-256 of the rendered prefix is constant.
 

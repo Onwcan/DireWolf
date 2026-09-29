@@ -72,7 +72,7 @@ Every tool definition is sent on every model call. A tool is not free; it costs 
 4. Can it be a **plugin** (V2)?
 5. Only then: a core tool, with an ADR note justifying it.
 
-*(Pattern adapted from Hermes Agent's "narrow waist" doctrine — see [COMPETITIVE_ANALYSIS.md](COMPETITIVE_ANALYSIS.md) §5.)*
+*(Pattern adapted from Hermes Agent's "narrow waist" doctrine — see [COMPETITIVE_ANALYSIS.md](COMPETITIVE_ANALYSIS.md) §15.)*
 
 ### The canonical V1 tool inventory — **18 tools**
 

@@ -134,6 +134,15 @@ else: (USER_TRUSTED / SYSTEM_TRUSTED / LOCAL_TRUSTED)
 
 An untrusted web page cannot become a durable fact about you without you seeing it. Episodic memory can record "the page said X" — that is history, and it is true — but "X" never becomes a belief.
 
+### Recall loops and unattended sessions (M13, planned)
+
+Two laundering paths the provenance rule alone does not close, recorded from a comparable system that closes them ([COMPETITIVE_ANALYSIS.md](COMPETITIVE_ANALYSIS.md) §17 G6):
+
+- **Recall loops.** Content the context engine recalled from memory is never re-extracted as a new candidate. Otherwise an untrusted item, recalled and restated by the model, returns as a "new" observation whose provenance chain begins at the model's own output.
+- **Unattended sessions.** Scheduled runs and subagent sessions produce no semantic-scope candidate without approval.
+
+Both are decided from the provenance the authority recorded, never from a session label or a flag the runtime supplies. Acceptance: zero untrusted promotions without approval under recall amplification, re-extraction laundering and a scheduled run writing memory.
+
 ### The structural backstop
 
 Even a perfectly-injected memory is bounded, because **memory cannot alter authority**:

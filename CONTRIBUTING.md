@@ -262,6 +262,17 @@ can silently disagree.
 `cargo deny check` enforces licences, advisories, banned crates, duplicate
 versions and source registries. `pip-audit` covers the Python side.
 
+**A licence check is not attribution.** `cargo deny` answers whether a
+dependency's licence is on the allowlist; it does not produce, check or ship the
+notices those licences require when a binary is distributed. The project
+distributes source only. Before its first binary release, M18's release
+integrity work generates third-party notices per binary and per platform from
+the locked, linked closure, alongside an SBOM, provenance and signatures
+([NOTICE](NOTICE); [docs/ROADMAP.md](docs/ROADMAP.md) M18). Say in the pull
+request when a new dependency brings a licence family the tree does not have
+yet, ships an Apache-2.0 `NOTICE` file of its own, or publishes its crate
+without its licence text.
+
 ## Security-sensitive changes
 
 These rules come from the Phase 0 decisions, and they are the reason the

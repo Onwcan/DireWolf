@@ -4,8 +4,11 @@
 
 The agent works with opaque handles. The kernel resolves them at the last possible moment, into the narrowest possible place, for the shortest possible time.
 
-> **Implementation status (M4e — implemented, candidate for acceptance;
+> **Implementation status (M4e — COMPLETE;
 > [ADR-0046](adr/0046-m4e-secret-handles-backends-injection-and-redaction.md)).**
+> M4e's required hosted gate, which was also the final M4 gate, passed in CI run
+> [36390815504](https://github.com/Onwcan/DireWolf/actions/runs/36390815504) (attempt 2).
+> Completing M4e did not remove any limitation listed here.
 > This document was written before any of it existed; where M4e measured
 > something different, the text below is corrected and marked. In short:
 > handles, metadata, the Linux **kernel keyring** and **age** backends,

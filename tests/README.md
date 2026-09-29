@@ -12,7 +12,7 @@ Where a test goes is decided by *what it needs*, not by what it is about.
 | `tools/dwcheck/tests/` | Unit tests for the boundary checker itself | the package importable |
 | `tests/architecture/` | Repository-level checks: the boundary rules, the quality gates, and the CI wiring that carries evidence only CI can produce (`test_ci_authority_gate.py`) | the tools installed |
 | `tests/authority/` | Deployment verification run **as a different operating-system user**: `runtime_write_probe.py` attempts the runtime's forbidden writes to authority state (`make authority-write-probe`); `foreign_peer_client.py` is the M3e cross-uid DWKP client the transport evidence runs through `sudo -n -u $DW_PEER_AS` | a second identity; otherwise it reports NOT EXERCISED and fails |
-| `tests/integration/` | Cross-process tests: runtime ↔ authority ↔ broker | **M3+**; does not exist yet |
+| `tests/integration/` | Cross-process tests with the real runtime: runtime ↔ authority ↔ broker | Does not exist yet: there is no runtime before M9. Authority ↔ broker cross-process tests live with the crates (`crates/dwkd-authority/tests/`, `crates/dwkd-broker/tests/`) and the foreign-identity clients in `tests/authority/` |
 | `evals/` | The evaluation harness, its suites, fixtures and baseline | the harness installed (`make eval`) |
 
 `tests/integration/` is deliberately absent rather than empty. An empty

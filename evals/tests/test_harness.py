@@ -27,8 +27,11 @@ from direwolf_evals.scoring import score_outcome
 from direwolf_evals.statistics import wilson_interval
 
 EVALS_ROOT = Path(__file__).resolve().parents[1]
-# Every suite but the M3 authority suite, which builds and launches the real
-# authority: these tests check the harness, and `make eval` measures the product.
+# These tests check the harness, so they use its deterministic harness and
+# protocol suites only. The product's security properties -- M3's
+# `authority-security`, M4's `m4-security` -- launch the real authority,
+# broker and evidence campaigns; they belong to their dedicated gates
+# (`make eval-check`, the evidence targets), not to the harness's unit tests.
 FAST_SUITES = ("harness-selftest", "pending-kernel", "protocol-compat", "protocol-security")
 REPO_ROOT = EVALS_ROOT.parent
 
@@ -247,12 +250,18 @@ def test_the_repository_baseline_matches_a_real_run() -> None:
 
 
 def test_the_gate_command_passes_and_writes_results(tmp_path: Path) -> None:
+    """`check` end to end on the harness's own suite: it passes, writes
+    results, and writes nothing else. Scoped so that this smoke test can never
+    grow back into the product's security campaign, which `make eval-check`
+    runs, unscoped, as its own gate."""
     out = tmp_path / "results.jsonl"
-    code = main(["--evals-root", str(EVALS_ROOT), "check", "--out", str(out)])
+    argv = ["--evals-root", str(EVALS_ROOT), "check", "--suite", "harness-selftest"]
+    code = main([*argv, "--out", str(out)])
     assert code == 0
     records = list(read_jsonl(out))
     assert records
     assert {r["result_version"] for r in records} == {RESULT_VERSION}
+    assert {r["suite"] for r in records} == {"harness-selftest"}
 
 
 def test_a_runner_that_raises_is_an_error_and_fails_the_gate() -> None:

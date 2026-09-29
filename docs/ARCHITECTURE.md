@@ -1,6 +1,6 @@
 # DireWolf Architecture
 
-**Status:** Phase 0 — accepted design, not yet implemented.
+**Status:** accepted design, implemented through M4: the authority plane — the authority process, policy, capabilities, durable state and audit, and the filesystem, process and secret brokers. The sandbox, approvals, model egress, the runtime and everything above it are planned ([ROADMAP.md](ROADMAP.md)). Where this document describes a component in the present tense, the roadmap says whether it exists.
 **Audience:** implementers, security reviewers, contributors.
 
 ---
@@ -385,6 +385,13 @@ one proved against a deliberately-invalid fixture tree in
 > identity, and the absence of any credential in the runtime's address space.**
 > These rules stop the architecture eroding through ordinary development, which
 > is a real and different job. An earlier draft had the two the wrong way round.
+>
+> *Status:* the process boundary and the credential rule are implemented on the
+> authority's side (M3e, M4e). The runtime's network confinement had no owning
+> milestone until the 2026-09-28 re-baseline assigned it to **M9**, which must
+> verify it from the real runtime identity
+> ([COMPETITIVE_ANALYSIS.md](COMPETITIVE_ANALYSIS.md) §17 G1); until then there is
+> no runtime to confine, and nothing may describe the control as present.
 
 
 ---

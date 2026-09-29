@@ -19,24 +19,39 @@ specific language governing permissions and limitations under the License.
 
 Third-party software
 
-This repository does not vendor or redistribute third-party source code.
-Third-party packages are fetched by Cargo and uv from their public registries,
-pinned in Cargo.lock, fuzz/Cargo.lock and uv.lock, and remain under their own
-licences. No third-party attribution notice is therefore required in this file
-at present.
+This file is DireWolf's own NOTICE under section 4(d) of the Apache License. It
+is not a list of third-party packages and it does not reproduce their licences.
 
-As of the M2 closeout:
+Source. The DireWolf project distributes source code. This repository does not
+vendor third-party source: dependencies are fetched by Cargo and uv from their
+public registries, pinned in Cargo.lock, fuzz/Cargo.lock and uv.lock, and
+remain under their own licences.
 
-- The binaries built from this workspace (`direwolf`, `dwkd-authority`,
-  `dwkd-broker`) link no third-party crate, and neither does the `dwk-proto`
-  library they will link from M3.
-- Development, test and fuzzing tools only: `proptest`, `serde_json` and their
-  dependencies (Rust dev-dependencies), `libfuzzer-sys` and its build
-  dependencies (fuzz/), and the Python development environment in uv.lock. The
-  `direwolf` Python package declares no runtime dependency.
+Binaries. The binaries built from this workspace (`direwolf`, `dwkd-authority`,
+`dwkd-broker`) may link third-party crates, and the set each one links differs
+by target platform. `dwkd-authority` compiles in the SQLite C amalgamation,
+which is in the public domain. Development, test and fuzzing dependencies are
+never linked into a binary. The Python packages declare their runtime
+dependencies, if any, in their pyproject.toml files, locked in uv.lock.
 
-If a distributed artifact comes to include third-party code, the conditions of
-the licence chosen for each included package (for example, reproducing its
-copyright and permission notice) must be met for that artifact, and any
-required notices belong here. `cargo deny check licenses` restricts dependencies
-to the licence allowlist in deny.toml; it does not produce notices.
+Obligations. Whoever distributes a binary, or any other artifact that includes
+third-party code, distributes that code too, and must meet the conditions of
+each included package's licence for that artifact and platform:
+
+- MIT, BSD-2-Clause, BSD-3-Clause, Zlib, Unicode-3.0 and Apache-2.0 require
+  their copyright and licence notices to accompany binary copies;
+- where a package offers a choice of licences, the licence relied on is one on
+  the allowlist in deny.toml -- never a copyleft alternative such as
+  GPL-2.0-only;
+- a package that ships its own Apache-2.0 NOTICE file must have that notice
+  reproduced with the artifact;
+- where a package's published crate omits its licence text, the text is taken
+  from the upstream project and reviewed before distribution.
+
+The project generates these notices per binary and per platform from the
+locked, linked dependency closure before it distributes any binary (release
+integrity, docs/ROADMAP.md M18). It has not distributed binaries so far.
+
+A licence check is not attribution. `cargo deny check licenses` restricts
+dependencies to the allowlist in deny.toml. It does not produce, verify or ship
+any attribution notice.

@@ -6,7 +6,7 @@
 
 ## 1. Non-negotiables
 
-These are stated first because every one of them is a place where comparable systems have been compromised (see [COMPETITIVE_ANALYSIS.md](COMPETITIVE_ANALYSIS.md) §4).
+These are stated first because every one of them is a place where comparable systems have been compromised (see [COMPETITIVE_ANALYSIS.md](COMPETITIVE_ANALYSIS.md) §11–§12).
 
 1. **The policy engine is deterministic code.** No model, no heuristic, no "risk assessment by an auxiliary LLM." A language model may *summarise* a request to help a human decide; it may never produce the decision. An LLM in the authorization path is an injectable authorization path.
 2. **It runs in the kernel process**, not in the runtime, and its rule files are not writable by the runtime user.
@@ -269,8 +269,8 @@ read as "did not match".
 > so nothing here establishes that the address policy judged is the address the broker
 > connects to. That invariant — *IP evaluated by policy == IP used for the
 > authorised connection*, with no re-resolution in between, and a fresh
-> decision on any reconnect — belongs to M4's network canonicalisation and the
-> broker's execution path
+> decision on any reconnect — belongs to the network path, which M4 did not
+> build: M5's CONNECT proxy and kernel-performed `net.http`
 > ([ADR-0038](adr/0038-policy-evaluation-phases-and-composition.md) §7,
 > [NETWORK_SECURITY.md](NETWORK_SECURITY.md) §1). What M3d adds is the
 > evidence M4 will need: a decision about an action carrying a destination
@@ -445,6 +445,8 @@ $ direwolf policy simulate --run run_01J8X... --profile safe
 ```
 
 Policy changes are testable before deployment, and past runs can be replayed against a candidate policy. This makes tightening policy an evidence-based decision rather than a guess about what will break.
+
+**`direwolf policy diff` (M17, planned).** A text diff of two rule files hides what matters: under first-match evaluation a reorder can change a decision without changing a rule, and an `extends` change can change every rule that inherits it. `policy diff` reports the rule-level changes **and** the decision delta — every fixture and every recorded canonical action whose decision, matched rule or obligations differ between the two policies — computed by the same evaluator the authority runs, with no grant minted. It must catch a reorder-only change that alters a first match, an `extends` change and a removed obligation ([COMPETITIVE_ANALYSIS.md](COMPETITIVE_ANALYSIS.md) §17 G4).
 
 Rule files ship with a fixture suite; CI fails if a shipped profile's fixtures fail. Every hard-denial rule has at least one test asserting it denies, and — more importantly — at least one test asserting it does *not* deny a legitimate neighbouring case, because a rule that denies everything passes the first test.
 

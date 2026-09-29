@@ -22,6 +22,8 @@ enum AssuranceLevel { None, ProcessIsolation, ContainerIsolation, VmIsolation }
 
 `assurance()` is a first-class, policy-visible value. A rule can say "this action requires at least `ContainerIsolation`," and an environment that cannot provide it is refused rather than silently accepted. This is how we keep isolation and authorization orthogonal instead of letting one disable the other.
 
+**Declared is not enough (M5, planned).** `assurance()` is what an environment *says* it provides. M5 adds a **measured** value: an authority-provided, read-only, digest-checked probe runs inside each prepared environment and checks every hard rule of §2 — no container socket, not privileged, no shared host namespace, no added capability, the seccomp profile applied, a read-only root — each as PASS or FAIL. The effective assurance is the lower of declared and measured; a failed required invariant refuses the environment and is audited. There is deliberately **no weighted score**: a weighted sum lets one failed invariant be averaged away by several passing ones. `direwolf doctor --sandbox` reports the same measurement (M17). ([COMPETITIVE_ANALYSIS.md](COMPETITIVE_ANALYSIS.md) §17 G2.)
+
 ### Implementations
 
 | Implementation | Assurance | Status |
@@ -206,3 +208,5 @@ The security eval suite ([EVALS.md](EVALS.md)) includes, at minimum:
 - persistence attempts across container lifecycles
 
 Acceptance: **all contained, each with an audit record naming the denial.** Silent containment is insufficient — an escape attempt that is blocked but not recorded means an operator has no signal that they are under attack.
+
+**The gate must be shown able to fail.** For each hard rule of §2, a meta-test runs the suite against a deliberately weakened profile — a bridge network, a writable root, an added capability, unconfined seccomp, a mounted container socket — and the gate must fail. A containment suite that passes a weakened sandbox measures nothing. A case that cannot run reports NOT EXERCISED, which fails the gate rather than skipping it.

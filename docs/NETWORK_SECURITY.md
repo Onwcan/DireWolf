@@ -48,9 +48,11 @@ The sandbox gets a minimal private network namespace: a veth pair, no default ro
 
 **The tunnel is opaque, and we say so.** For proxied traffic the kernel enforces the destination host (from the CONNECT target and the TLS SNI, which must agree), the resolved IP (§3 guard), the port, byte budgets and connection counts. It does **not** see paths, headers, bodies or responses, and it injects no credentials. That is a real reduction in visibility compared with the original design, and it is the price of the original design being impossible. Credential-bearing requests go through `net.http`, where the kernel is the client and therefore sees everything.
 
+**Residual: domain fronting.** Because the kernel sees the SNI and not the request inside the tunnel, a process in the sandbox can reach any origin served from the same front as an allowlisted host — a CDN or a large shared platform — by naming the allowed host in the SNI and another in the encrypted `Host` header. An allowlist entry for a broad shared host is therefore an allowlist entry for everything behind it. The mitigations are narrow allowlist entries, the tunnel's byte budget and connection count, and keeping every credential-bearing request on `net.http`; M5's egress evidence shows the budget bounding such a tunnel. (Recorded from the limits another sandbox documents for itself: [COMPETITIVE_ANALYSIS.md](COMPETITIVE_ANALYSIS.md) §17 G7.)
+
 This also resolves a product problem: `npm install`, `pip install` and `cargo fetch` work against allowlisted registry hosts, which the earlier "all allowlisted executables get `network_deny`" rule made impossible.
 
-The runtime process likewise has no sockets (enforced by banned-import lint *and* by running it under a network-restricted profile where the platform supports it).
+The runtime process likewise has no sockets (enforced by banned-import lint *and* by running it under a network-restricted profile where the platform supports it). The lint is development hygiene; the launch profile is the control, and it is **M9's**: the runtime is started with no network route — on Linux, Unix-domain sockets only, or an empty network namespace — and a CI job verifies from the real runtime identity that TCP, UDP, raw and packet sockets and DNS all fail while the authority socket connects ([COMPETITIVE_ANALYSIS.md](COMPETITIVE_ANALYSIS.md) §17 G1). Not implemented yet: no runtime exists.
 
 ## 2. Decision pipeline per connection
 

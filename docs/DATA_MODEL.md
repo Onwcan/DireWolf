@@ -32,7 +32,7 @@ It is not sufficient for capability *tokens* to be unforgeable. Every field the 
 
 | Field | Stored as | Derived today | Real producer |
 |---|---|---|---|
-| `taint_level` | `run_policy_input.taint`, a trigger forbids it falling | `none` at admission; raised only through one audited, monotonic kernel interface | tool results (M4), artifacts (M12), memory (M13) — nothing calls the interface yet |
+| `taint_level` | `run_policy_input.taint`, a trigger forbids it falling | `none` at admission; raised only through one audited, monotonic kernel interface | filesystem tool results (M4b, M4c) and process output (M4d) raise it to `LOCAL_UNVERIFIED`; network results (M5), artifacts (M12) and memory (M13) are planned |
 | `origin` | `run_policy_input.origin`, fixed by trigger | `api` for every run: unattended, because no attended channel exists | gateway, scheduler, M6's approval channel |
 | `privacy_class` | `run_policy_input.privacy`, fixed by trigger | the stricter of the agent profile's default and the workspace's ceiling; no kernel-recorded workspace reads as `LOCAL_ONLY` | operator records exist; runtime-path workspace binding is M4/M8 |
 | `workspace.sensitivity` | `workspace`, `session_workspace`; only ever made stricter | operator configuration | exists (operator, in process) |

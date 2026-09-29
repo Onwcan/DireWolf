@@ -20,13 +20,13 @@ The one-line pitch: *an agent you can give real access to, because you can see a
 
 **Secondary — the local-first user.** Air-gapped or privacy-constrained; runs local models; unwilling to send content to a vendor.
 
-**Explicitly not the target — the user who wants maximum capability today with minimum friction.** That user is well served by existing projects with broad channel and plugin ecosystems, and [COMPETITIVE_ANALYSIS.md](COMPETITIVE_ANALYSIS.md) §6 says so plainly. Building for them would mean permissive defaults, which is the thing we are specifically not doing.
+**Explicitly not the target — the user who wants maximum capability today with minimum friction.** That user is well served by existing projects with broad channel and plugin ecosystems, and [COMPETITIVE_ANALYSIS.md](COMPETITIVE_ANALYSIS.md) §14 says so plainly. Building for them would mean permissive defaults, which is the thing we are specifically not doing.
 
 ## 2a. What DireWolf ships as
 
 **DireWolf is a complete autonomous agent runtime.** The first-party runtime is the flagship and the reference consumer of the authority plane. Phase 1 does not pivot to a standalone security-daemon product.
 
-Phase 0 review raised the alternative sharply: the genuinely novel artifact is the authority plane, while the cognitive runtime scores "B (planned)" against two mature competitors with ~630 k combined stars — both of which state in their own documentation that only the OS is a real boundary, and neither of which has built one. Shipping `dwkd` standalone would turn competitors into distribution.
+Phase 0 review raised the alternative sharply: the genuinely novel artifact is the authority plane, while the cognitive runtime scored "B (planned)" against two mature competitors with ~630 k combined GitHub stars at the time (a 2026-09 snapshot; stars measure attention, not quality) — both of which state in their own documentation that only the OS is a real boundary, and neither of which has built one. The wider landscape re-baselined on 2026-09-28 includes projects that *have* built forms of that boundary ([COMPETITIVE_ANALYSIS.md](COMPETITIVE_ANALYSIS.md) §5), which narrows what is distinctive about DireWolf's authority plane without changing this decision. Shipping `dwkd` standalone would turn competitors into distribution.
 
 We are not doing that, for two reasons: a security daemon with no first-party consumer has no forcing function for correctness, and there is currently zero evidence of external demand. But we are **keeping the option open at low cost** ([ADR-0029](adr/0029-packaging-runtime-first-decoupled-authority.md)) via three testable constraints:
 
@@ -107,12 +107,13 @@ $ direwolf run authority run_01J8...
 | **Runtime (Python)** | Agent loop + run state machine, wait sets, context engine + manifests + compaction, tool registry (18 core tools — [TOOL_SYSTEM.md](TOOL_SYSTEM.md) §3), subagents with attenuation, task DAG (sequence/fan-out/join), memory (episodic + semantic, FTS5), artifacts, event log |
 | **Providers** | Anthropic; OpenAI-compatible (covers OpenRouter, Ollama, vLLM, LM Studio) |
 | **Routing** | Rule-based, policy-constrained, cost/health aware |
-| **Interface** | `direwolf` CLI — chat, run, agent, policy, grant, audit, memory, artifact, doctor, export |
+| **Interface** | `direwolf` CLI — chat, run, agent, policy (including `policy diff`), grant, audit, memory, artifact, doctor (including `doctor --sandbox`), `security demo`, export |
 | **Detached runs** | `direwolf run --detach` with a pending-approval queue (`direwolf approve --list`), local desktop notification, and unattended policy semantics. The minimum viable unattended path, without the channel surface. |
 | **MCP** | Client, stdio, kernel-spawned and sandboxed, toolset-hash rug-pull detection |
 | **Storage** | SQLite (two stores), migrations, backup, corruption quarantine |
 | **Observability** | OTel traces/metrics, structured logs, `doctor` |
 | **Evaluation** | Eval harness + the security eval suite as a merge gate |
+| **Release** | Per-platform binaries with generated third-party notices, an SBOM, build provenance and signatures; a reproducibility check (M18) |
 
 ### The V1 core tool set
 
@@ -143,7 +144,7 @@ The brief's candidate V1 was roughly twice this. Each cut has a reason beyond "l
 | # | Criterion | Measure |
 |---|---|---|
 | 1 | The boundary holds | 100 % of the security eval suite contained, each with an audit record |
-| 2 | No second path | Static and dynamic verification that every side effect traverses the kernel |
+| 2 | No second path | Static and dynamic verification that every side effect traverses the kernel — including, from the real runtime identity, that the runtime has no network route (M9) |
 | 3 | Delegation cannot escalate | 10⁶ generated chains, zero escalations |
 | 4 | Authority is inspectable | `run authority` and `policy explain` answer correctly for every run in the eval corpus |
 | 5 | Recoverable | Every crash-injection point resumes correctly or fails closed with a specific question |
@@ -204,4 +205,4 @@ Secrets never appear in configuration; only handles. Configuration is schema-val
 
 ## 10. Licence and governance
 
-Apache-2.0 is the leading candidate (patent grant, permissive adoption, compatible with a security-tooling ecosystem). Decided at M1. Security-relevant changes require review by someone other than the author, and kernel interface changes require an ADR.
+Apache-2.0, decided at M1 ([ADR-0030](adr/0030-licence-apache-2.0.md)) for its patent grant, permissive adoption and compatibility with a security-tooling ecosystem. Security-relevant changes require review by someone other than the author, and kernel interface changes require an ADR.

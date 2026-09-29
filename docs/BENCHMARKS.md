@@ -1,6 +1,6 @@
 # Competitive Benchmark Methodology
 
-How DireWolf may be compared to Hermes Agent and OpenClaw, and the rules that keep the comparison honest.
+How DireWolf may be compared to other agent systems, and the rules that keep the comparison honest. The landscape and each project's category are in [COMPETITIVE_ANALYSIS.md](COMPETITIVE_ANALYSIS.md) §3–§4; no comparison is possible until DireWolf can run a task (M9–M10), and none is published before V2.x.
 
 ---
 
@@ -12,7 +12,7 @@ This document exists to constrain us before we have results, so that when result
 
 ## 2. Binding rules
 
-1. **Configuration disclosure.** Every result states the exact configuration of every system, including version, model, policy profile and any hardening applied. Comparing DireWolf-hardened against a competitor's default is dishonest; both competitors ship permissive defaults *and* document hardened postures, so **every security comparison reports both** — competitor-default and competitor-hardened — and says which is which.
+1. **Configuration disclosure.** Every result states the exact configuration of every system, including version, model, policy profile and any hardening applied. Comparing DireWolf-hardened against a competitor's default is dishonest; most projects in this space ship a convenient default *and* document a hardened posture, so **every security comparison reports both** — competitor-default and competitor-hardened — and says which is which.
 2. **Same model, same day.** All systems use the same model version, run within the same 24 hours. Comparing across model generations measures the model.
 3. **N ≥ 5, distributions not points.** Median and IQR. A single run is an anecdote.
 4. **Task sets are published before results.** Tasks, fixtures and scoring rubrics are committed first, with a commit hash, so they cannot be adjusted after we see the numbers.
@@ -21,12 +21,14 @@ This document exists to constrain us before we have results, so that when result
 7. **"Not applicable" is a valid result** and must never be scored as a win. Where a system cannot run a task because it lacks the feature, report `N/A` with a note — do not award ourselves a point for a browser benchmark our competitors run and we cannot.
 8. **No metric invented after seeing results.** The metric set is fixed with the task set.
 9. **Architecture is not benchmarked.** Design arguments are labelled as design arguments. There is no measurement that proves an architecture is better, and we do not manufacture one.
+10. **Compare within a category.** A coding agent's command sandbox, a sandbox service, an enforcement layer and a personal agent runtime answer different questions ([COMPETITIVE_ANALYSIS.md](COMPETITIVE_ANALYSIS.md) §3). A probe is run against a system only where that system claims the property; otherwise the result is `N/A`, never a win.
+11. **Every probe must be proved able to fail.** Before a probe's result counts, it is run once against a deliberately weakened configuration of the system under test and must report the effect. A probe that cannot fail measures nothing, and a probe that cannot run reports NOT EXERCISED, never contained.
 
 ## 3. What can and cannot be compared
 
 | Category | Comparable? | Why |
 |---|---|---|
-| Task success on shared tasks | **Yes** | All three take a natural-language task and produce a result |
+| Task success on shared tasks | **Yes** | Every agent runtime compared takes a natural-language task and produces a result |
 | Token and monetary cost per success | **Yes** | Measurable from provider usage |
 | Latency | **Yes** | Wall clock |
 | Security containment | **Yes, with care** | Probes are runnable against any system; see §5 |
@@ -39,7 +41,7 @@ This document exists to constrain us before we have results, so that when result
 
 ## 4. Capability-parity task set
 
-Tasks all three can attempt, drawn from real repositories with committed fixture states.
+Tasks every compared system can attempt, drawn from real repositories with committed fixture states.
 
 | Group | Examples | Scoring |
 |---|---|---|
@@ -58,7 +60,9 @@ Tasks all three can attempt, drawn from real repositories with committed fixture
 
 The probes from [EVALS.md](EVALS.md) §3, packaged to run against any system exposing a CLI or API.
 
-Reported per system as: **contained** (attack failed), **contained + audited** (failed *and* recorded), **partial** (some effect), **uncontained**, or **N/A** (feature absent).
+Reported per system as: **contained** (attack failed), **contained + audited** (failed *and* recorded), **partial** (some effect), **uncontained**, **N/A** (feature absent) or **NOT EXERCISED** (could not run — never counted as contained).
+
+Probe classes added by the 2026-09-28 re-baseline ([COMPETITIVE_ANALYSIS.md](COMPETITIVE_ANALYSIS.md) §17): the reasoning process opening a network socket or resolving a name directly; a sandbox whose running state differs from its configuration; approval scope drifting to a new directory, file or endpoint after it was granted; a credential sent to an endpoint other than its origin; memory recalled and re-extracted as new; and exfiltration through an allowlisted shared host.
 
 Ethical rules, non-negotiable:
 
@@ -67,7 +71,7 @@ Ethical rules, non-negotiable:
 - Novel exploitable findings against a competitor go to that project's security process **first**, under their disclosure policy, and are excluded from published comparisons until fixed or the disclosure window closes.
 - We never publish a working exploit for an unpatched third-party system to make a competitive point.
 
-**Expectation, stated in advance:** DireWolf should win decisively on containment when all systems run at their documented hardened postures, because that is the one thing it is built for. If it does not, the architecture has failed and the honest response is to publish that and reconsider — not to re-tune the probes.
+**Expectation, stated in advance:** DireWolf is expected to contain more of the probe set than systems without an authority boundary when all systems run at their documented hardened postures, because that is the one thing it is built for. Some compared systems already contain what the agent runs in a sandbox DireWolf does not yet have, so the expectation is per probe class, not overall. If it does not hold, the architecture has failed that class and the honest response is to publish that and reconsider — not to re-tune the probes.
 
 Conversely, we should expect to **lose** on false-denial rate: strict defaults will block some legitimate actions competitors permit. That number gets published with equal prominence.
 
@@ -82,7 +86,7 @@ benchmarks/results/2026-11-15/
   caveats.md        every reason a comparison is imperfect
 ```
 
-`caveats.md` is mandatory and written **before** `summary.md`. Known caveats already: DireWolf lacks browser/channels/plugins, so whole categories are `N/A`; competitors have vastly more real-world hardening; our task set will unconsciously reflect our design; competitor defaults differ from their hardened postures in ways that make a single number misleading; and a kernel round trip per tool call is a real latency cost that will show up in interactive tasks.
+`caveats.md` is mandatory and written **before** `summary.md`. Known caveats already: DireWolf lacks browser/channels/plugins, so whole categories are `N/A`; competitors have far more real-world hardening; our task set will unconsciously reflect our design; competitor defaults differ from their hardened postures in ways that make a single number misleading; and a kernel round trip per tool call is a real latency cost that will show up in interactive tasks.
 
 ## 7. The claim ladder
 
