@@ -32,14 +32,26 @@ use zeroize as _;
 mod state_support;
 
 use std::sync::{Arc, Barrier};
+use std::time::{Duration, Instant};
 
 use dwk_proto::wire::scalar::RefusalReason;
-use dwkd_authority::state::{Admission, Reply};
+use dwkd_authority::state::{Admission, AuthorityError, Reply};
 use state_support::{Harness, admit_msg, count, raw, session};
 
 const THREADS: usize = 16;
 const ROUNDS: u64 = 12;
 
+/// How long a racer may keep being told `Busy` before the test fails: four
+/// of the store's 5-second busy windows. A writer that is genuinely stuck
+/// fails the round in well under a minute.
+const BUSY_DEADLINE: Duration = Duration::from_secs(20);
+/// The pause before a racer sends a request the store answered `Busy` again.
+const BUSY_BACKOFF: Duration = Duration::from_millis(10);
+
+/// Not retried on `Busy`, unlike the admission races below: `AcquireLease`
+/// has no idempotency key. A `Busy` from the audit flush after the commit can
+/// mean the racer already holds the lease, and the holder acquiring again is a
+/// reissue at the next epoch (`lease::acquire`), not a replay.
 #[test]
 fn exactly_one_of_many_racing_acquirers_wins() {
     let mut h = Harness::new("race-acquire");
@@ -95,24 +107,80 @@ fn exactly_one_of_many_racing_acquirers_wins() {
     }
 }
 
-fn run_race(
+/// One racer's final answer, and how many `Busy` answers it was given.
+struct Answer {
+    worker: usize,
+    busy: u32,
+    elapsed: Duration,
+    reply: Result<Reply<Admission>, AuthorityError>,
+}
+
+/// Release one `AdmitRun` racer per message at once, each on its own handle.
+/// A racer the store answered `Busy` sends **the same message** again, until
+/// an answer that is not `Busy` or until [`BUSY_DEADLINE`] has passed since
+/// the barrier released it.
+///
+/// `Busy` means a transaction waited past the store's busy timeout and did not
+/// happen (`AuthorityError::Busy`, `db.rs`). That bound is a product setting,
+/// not the property under test, and a runner with slow `fsync` can queue
+/// sixteen serialised admissions past it. Sending the message again is safe
+/// because admission is idempotent: the record is scoped by subject, session
+/// and key, and the request digest leaves out `id`, `ts` and `correlation_id`
+/// (`admission.rs`). So the same message gets what a later arrival would --
+/// admitted if nothing is recorded, the same-response replay if its digest is
+/// recorded, `IDEMPOTENCY_CONFLICT` if another is -- also when a `Busy` came
+/// from the audit flush after its own transaction had committed. Only `Busy`
+/// is retried; any other answer, error or not, is returned at once.
+fn run_race_retrying_busy(
     h: &mut Harness,
     messages: Vec<dwk_proto::dwkp::DwkpMessage>,
     caller: dwkd_authority::state::CallerContext,
-) -> Vec<Result<Reply<Admission>, dwkd_authority::state::AuthorityError>> {
+) -> Vec<Answer> {
     let barrier = Arc::new(Barrier::new(messages.len()));
     let workers: Vec<_> = messages
         .into_iter()
-        .map(|message| {
+        .enumerate()
+        .map(|(worker, message)| {
             let mut handle = h.authority().handle().unwrap();
             let barrier = barrier.clone();
             std::thread::spawn(move || {
                 barrier.wait();
-                handle.admit_run(&caller, &message)
+                let start = Instant::now();
+                let mut busy = 0u32;
+                loop {
+                    let reply = handle.admit_run(&caller, &message);
+                    let is_busy = matches!(reply, Err(AuthorityError::Busy));
+                    busy += u32::from(is_busy);
+                    let elapsed = start.elapsed();
+                    if !is_busy || elapsed >= BUSY_DEADLINE {
+                        return Answer {
+                            worker,
+                            busy,
+                            elapsed,
+                            reply,
+                        };
+                    }
+                    std::thread::sleep(BUSY_BACKOFF);
+                }
             })
         })
         .collect();
     workers.into_iter().map(|w| w.join().unwrap()).collect()
+}
+
+/// Each racer's final reply, failing the round loudly if one was still `Busy`
+/// at the deadline.
+fn settled(round: u64, answers: Vec<Answer>) -> Vec<Result<Reply<Admission>, AuthorityError>> {
+    answers
+        .into_iter()
+        .map(|a| match a.reply {
+            Err(AuthorityError::Busy) => panic!(
+                "round {round}, worker {}: still Busy after {} Busy answers over {:?} (deadline {BUSY_DEADLINE:?})",
+                a.worker, a.busy, a.elapsed
+            ),
+            reply => reply,
+        })
+        .collect()
 }
 
 #[test]
@@ -136,7 +204,7 @@ fn racing_identical_admissions_are_one_admission() {
                 )
             })
             .collect();
-        let results = run_race(&mut h, messages, caller);
+        let results = settled(round, run_race_retrying_busy(&mut h, messages, caller));
         let admissions: Vec<Admission> = results
             .into_iter()
             .map(|r| match r {
@@ -200,7 +268,7 @@ fn racing_conflicting_admissions_under_one_key_let_exactly_one_win() {
                 )
             })
             .collect();
-        let results = run_race(&mut h, messages, caller);
+        let results = settled(round, run_race_retrying_busy(&mut h, messages, caller));
         let admissions: Vec<&Admission> = results
             .iter()
             .filter_map(|r| match r {
