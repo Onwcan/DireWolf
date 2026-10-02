@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from direwolf_evals.model import Eval, Outcome
-from direwolf_evals.runners import authority, harness, m4, protocol, replay
+from direwolf_evals.runners import authority, harness, m4, m5a, protocol, replay
 
 __all__ = ["RUNNERS", "Context", "Runner", "resolve"]
 
@@ -55,6 +55,10 @@ RUNNERS: dict[str, Runner] = {
     "m4.path_traversal": m4.path_traversal,
     "m4.exec_mediation": m4.exec_mediation,
     "m4.secret_boundary": m4.secret_boundary,
+    # M5a: the execution-environment foundation -- a real OCI runtime, real
+    # containers, the digest-pinned probe, the released broker and the real
+    # authority. Never a model of them.
+    "m5a.sandbox_foundation": m5a.sandbox_foundation,
     # The harness proving itself against a dummy process.
     "harness.checkpoint": harness.checkpoint,
     "harness.pause_resume": harness.pause_resume,

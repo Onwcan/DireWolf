@@ -749,6 +749,7 @@ exempt_paths = [
     "crates/dwkd-broker/src/exchange/tests.rs",
     "crates/dwkd-broker/src/process/verify.rs",
     "crates/dwkd-broker/src/process/tests.rs",
+    "crates/dwkd-broker/src/sandbox/digest.rs",
 ]
 suffixes = [".rs"]
 patterns = [
@@ -761,9 +762,16 @@ the first step towards one that is -- a MAC over authorisations, a token cache
 to prove, before and after a replacement, that a file holds the revision the
 runtime stated (ADR-0044). That is one file's business.
 
-M4d (ADR-0045) adds the second and last: `process/verify.rs` hashes the
-executable through the very descriptor it will execute, to prove it is the
-object the authority decided on. Its test module checks it.
+M4d (ADR-0045) adds the second: `process/verify.rs` hashes the executable
+through the very descriptor it will execute, to prove it is the object the
+authority decided on. Its test module checks it.
+
+M5a (ADR-0047 §8) adds the third: `sandbox/digest.rs` hashes the probe's bytes
+as the container runtime copies them out of the environment's own root, to
+prove the probe is the one the authority pinned before anything it prints is
+read. It holds no key, keeps no digest beyond one comparison, and is not a
+second effect path: it only reads a stream the runtime hands back. One file,
+and its own test module.
 
 Hygiene, not containment.
 """
@@ -1129,6 +1137,139 @@ value either (ADR-0046 §4). The runtime's address space is measured to hold no
 value by the secret evidence.
 
 Hygiene, not containment.
+"""
+
+# ===========================================================================
+# M5a: the execution-environment foundation (ADR-0047). Hygiene over the
+# source; the controls are the broker's measurement from two vantages, the
+# digest-pinned probe and the authority's judgement -- measured by
+# `make sandbox-foundation-evidence` against a real OCI runtime.
+# ===========================================================================
+
+[[text_rules]]
+id = "TX032-the-sandbox-plan-spells-no-weakening"
+paths = ["crates/dwkd-broker/src/sandbox/plan.rs"]
+# The plan's own tests name every banned word, to assert none is in a plan.
+exempt_paths = []
+suffixes = [".rs"]
+patterns = [
+    # Privilege, capabilities, devices, and namespaces the host shares.
+    '^(?!\s*//).*"--(privileged|cap-add|device|device-cgroup-rule|group-add|pid|uts|userns|volumes-from|add-host|init)\b',
+    # A second filesystem path in: every bind but the workspace's one mount.
+    '^(?!\s*//).*"(-v|--volume)"',
+    # An unconfined or disabled security profile, by any spelling.
+    '^(?!\s*//).*(unconfined|label=disable|label:disable|systempaths)',
+    # The host's network, IPC or PID namespace; a runtime control socket.
+    '^(?!\s*//).*=host\b',
+    '^(?!\s*//).*"host"',
+    '^(?!\s*//).*(docker|containerd|podman|crio|buildkitd)\.sock',
+    # A pull, of any policy but `never`.
+    '^(?!\s*//).*"--pull=(always|missing)"',
+]
+reason = """
+`plan.rs` is the one place the broker spells the container runtime's command
+lines (ADR-0047 §4), and it spells exactly one profile: oci-strict, whose hard
+rules have no parameter that turns one off (SANDBOX.md §2). A weakening word
+here is a weaker profile in the product. The weakened profiles the evidence
+measures are built by test code only (`tests/sandbox_foundation.rs`), which no
+product path reaches.
+
+Hygiene, not containment: the broker measures every environment it prepares,
+from the runtime's record and from inside, and removes one that is not clean.
+"""
+
+[[text_rules]]
+id = "TX033-the-probe-reports-and-reaches-nothing"
+paths = ["crates/dwk-sandbox-probe/src"]
+exempt_paths = []
+suffixes = [".rs"]
+patterns = [
+    '^(?!\s*//).*\bstd\s*::\s*net\b',
+    '^(?!\s*//).*\b(TcpStream|TcpListener|UdpSocket|UnixStream|UnixListener)\b',
+    '^(?!\s*//).*\b(sha2|rusqlite|hmac|age|keyring)\s*::',
+    '^(?!\s*//).*\benv\s*::\s*(var|vars|var_os|vars_os)\b',
+    '^(?!\s*//).*\bbrokerp\s*::\s*(Authorisation|BrokerOutcome|BrokerHello|OutcomeResult)\b',
+]
+reason = """
+The probe runs inside the environment and is believed only because its bytes
+are the ones the authority pinned (ADR-0047 §8). It must stay small and closed:
+it reads what the kernel reports about its own process and attempts what an
+escaping workload would, and prints one closed report. It connects to nothing,
+hashes nothing, reads no configuration from its environment, and speaks no
+protocol message -- a probe that could would be a channel out of the sandbox,
+or a way for the environment to steer what it reports.
+
+The test fixture that stands in for a tampered probe lives in `examples/`,
+outside this rule's scope, and is never part of the probe's image.
+
+Hygiene, not containment.
+"""
+
+[[text_rules]]
+id = "TX034-the-sandbox-profile-is-data"
+paths = ["crates/dwk-sandbox-profile/src"]
+exempt_paths = []
+suffixes = [".rs"]
+patterns = [
+    '^(?!\s*//).*\bstd\s*::\s*(fs|net|process|env)\b',
+    '^(?!\s*//).*\bstd\s*::\s*\{[^}]*\b(fs|net|process|env)\b',
+    '^(?!\s*//).*\bunsafe\b',
+]
+reason = """
+`dwk-sandbox-profile` holds the oci-strict values the broker applies and the
+probe checks: numbers, names and one JSON rendering (ADR-0047 §5). It is linked
+by both, so it must never do anything: a profile crate that read a file, an
+environment variable or a socket would be configuration of the profile by the
+back door, and a shared place for effect code to grow.
+
+Hygiene, not containment.
+"""
+
+[[text_rules]]
+id = "TX035-no-public-path-reaches-an-execution-environment"
+paths = [
+    "crates/dwkd-authority/src/server",
+    "crates/dwkd-authority/src/main.rs",
+    "crates/direwolf-cli/src",
+    "runtime/src",
+]
+exempt_paths = []
+suffixes = [".rs", ".py"]
+patterns = [
+    '^(?!\s*(//|#)).*\b(attach_sandbox|environment_prepare|environment_measure|environment_destroy|environment_reconcile)\b',
+    '^(?!\s*(//|#)).*\bSandboxConfig\b',
+    '^(?!\s*(//|#)).*\b(broker\.environment_[a-z]+|EnvironmentPrepare|EnvironmentDestroy)\b',
+]
+reason = """
+M5a's execution environments are an in-process authority API with no DWKP
+route (ADR-0047 §3): the evidence harness attaches a sandbox and drives the
+lifecycle; nothing a runtime, a CLI user or the DWKP server can reach does.
+A reference here would be the first step of production sandbox execution --
+M5d's, behind its own ADR -- arriving without one.
+
+Hygiene, not containment: the DWKP registry has no operation that names an
+environment, which the protocol corpus checks.
+"""
+
+[[text_rules]]
+id = "TX036-no-runtime-flag-crosses-the-private-wire"
+paths = ["crates/dwk-proto/src/brokerp.rs", "crates/dwk-proto/src/brokerp"]
+# The private protocol's own tests smuggle these very names into a message to
+# prove the decoder refuses them.
+exempt_paths = ["crates/dwk-proto/src/brokerp/tests.rs"]
+suffixes = [".rs"]
+patterns = [
+    '^(?!\s*//).*\b(docker_args|extra_flags|runtime_options|runtime_flags|raw_args|security_opt|security_opts|cap_add|host_pid|host_ipc|host_network|seccomp_unconfined|runtime_socket_mount|writable_root|extra_mounts)\b',
+]
+reason = """
+An environment is described on the private wire by typed facts -- its id, run,
+store, profile, topology, image digest, probe digest and workspace -- and the
+broker builds every runtime command line from those and the profile's
+constants (ADR-0047 §4). A field that carried a runtime flag, an option map or
+a mount specification would let the authority's message, and whatever reached
+it, choose the sandbox's shape.
+
+Hygiene, not containment: the wire types reject every undeclared member.
 """
 
 # ===========================================================================

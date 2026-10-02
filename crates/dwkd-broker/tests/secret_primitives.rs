@@ -34,6 +34,8 @@
 
 use dwk_proto as _;
 #[cfg(target_os = "linux")]
+use dwk_sandbox_profile as _;
+#[cfg(target_os = "linux")]
 use nix as _;
 #[cfg(target_os = "linux")]
 use rustix as _;
@@ -611,7 +613,7 @@ mod linux {
 
         // Messages the language does not have: closed, unanswered.
         for (case, edit) in [
-            ("old-private-version", ("\"protocol\":4", "\"protocol\":3")),
+            ("old-private-version", ("\"protocol\":5", "\"protocol\":4")),
             (
                 "unknown-kind",
                 ("broker.secret_egress", "broker.secret_fetch"),

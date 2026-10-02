@@ -22,6 +22,8 @@
 
 use dwk_proto as _;
 #[cfg(target_os = "linux")]
+use dwk_sandbox_profile as _;
+#[cfg(target_os = "linux")]
 use nix as _;
 // Linux-only, like the operations that digest with it.
 #[cfg(target_os = "linux")]
@@ -1089,8 +1091,8 @@ mod linux {
                 Box::new(move |c| {
                     let a = authorisation(c, 1, id, 7);
                     let text = String::from_utf8(a[5..].to_vec()).unwrap();
-                    assert!(text.contains(r#""protocol":4"#));
-                    json(&text.replace(r#""protocol":4"#, r#""protocol":1"#))
+                    assert!(text.contains(r#""protocol":5"#));
+                    json(&text.replace(r#""protocol":5"#, r#""protocol":1"#))
                 }),
             ),
             (
@@ -1099,7 +1101,7 @@ mod linux {
                 Box::new(move |c| {
                     let a = authorisation(c, 1, id, 7);
                     let text = String::from_utf8(a[5..].to_vec()).unwrap();
-                    json(&text.replace(r#""protocol":4"#, r#""protocol":2"#))
+                    json(&text.replace(r#""protocol":5"#, r#""protocol":2"#))
                 }),
             ),
             (
@@ -1109,7 +1111,16 @@ mod linux {
                 Box::new(move |c| {
                     let a = authorisation(c, 1, id, 7);
                     let text = String::from_utf8(a[5..].to_vec()).unwrap();
-                    json(&text.replace(r#""protocol":4"#, r#""protocol":3"#))
+                    json(&text.replace(r#""protocol":5"#, r#""protocol":3"#))
+                }),
+            ),
+            (
+                // M4e's protocol, which M5a's broker no longer speaks (ADR-0047).
+                "protocol-four",
+                Box::new(move |c| {
+                    let a = authorisation(c, 1, id, 7);
+                    let text = String::from_utf8(a[5..].to_vec()).unwrap();
+                    json(&text.replace(r#""protocol":5"#, r#""protocol":4"#))
                 }),
             ),
             (

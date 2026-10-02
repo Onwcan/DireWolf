@@ -128,6 +128,16 @@ INVENTORY: Final[tuple[SecurityProperty, ...]] = (
         "A separate runtime process's memory read after it reads a file holding a "
         "live value; the real keyring, one-shot delivery, residue and durable state.",
     ),
+    # --- measurable now: M5a shipped the execution-environment foundation --
+    # (ADR-0047). M5 is in progress; its egress properties stay pending.
+    SecurityProperty(
+        "An oci-strict environment is usable only at its measured level",
+        "M5a",
+        "m5a-sandbox-foundation",
+        "Every hard rule measured on a real container from both vantages; every "
+        "weakened profile detected; tampered probes refused; foreign containers "
+        "spared; exact orphan reaping; no persistence across environments.",
+    ),
     # --- pending: the mechanism does not exist yet -------------------------
     SecurityProperty(
         "Sandbox and egress isolation (PROXY_ONLY)",

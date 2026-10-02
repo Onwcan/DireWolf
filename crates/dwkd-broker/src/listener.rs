@@ -399,13 +399,83 @@ pub(crate) fn bind(place: &SocketPlace) -> Result<Bound, SocketError> {
     Ok(bound)
 }
 
+/// The name of the `oci-strict` seccomp profile in the socket directory.
+const SECCOMP_PROFILE_NAME: &str = "oci-strict.seccomp.json";
+
+/// The name of the container runtime client's home in the socket directory.
+const RUNTIME_CLIENT_NAME: &str = "runtime-client";
+
+/// Write the sandbox's files into the broker's own socket directory (M5a,
+/// ADR-0047 §7): the `oci-strict` seccomp profile — exactly the profile
+/// `dwk-proto` spells, which the runtime client reads and embeds — and the
+/// runtime client's home, an empty private directory, so that no user
+/// configuration, credential helper or context of the broker's user is ever
+/// read. Only the broker's uid can write either: the directory is checked as
+/// the socket's is. The profile is replaced whole (a fresh file, renamed over
+/// the name) every time the broker starts.
+///
+/// # Errors
+///
+/// [`SocketError`], naming what could not be written or what is not the
+/// broker's.
+pub(crate) fn sandbox_files(
+    place: &SocketPlace,
+    owner: u32,
+) -> Result<crate::sandbox::SandboxFiles, SocketError> {
+    let profile = dwk_sandbox_profile::seccomp_profile_json();
+    let seccomp = place.dir.join(SECCOMP_PROFILE_NAME);
+    let fresh = place
+        .dir
+        .join(format!("{SECCOMP_PROFILE_NAME}.{}", std::process::id()));
+    let _ = fs::remove_file(&fresh);
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&fresh)
+        .map_err(|e| io("creating", &fresh, &e))?;
+    {
+        use std::io::Write as _;
+        file.write_all(profile.as_bytes())
+            .and_then(|()| file.sync_all())
+            .map_err(|e| io("writing", &fresh, &e))?;
+    }
+    drop(file);
+    fs::rename(&fresh, &seccomp).map_err(|e| io("installing", &seccomp, &e))?;
+
+    let client = place.dir.join(RUNTIME_CLIENT_NAME);
+    match fs::symlink_metadata(&client) {
+        Err(error) if error.kind() == ErrorKind::NotFound => fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&client)
+            .map_err(|e| io("creating", &client, &e))?,
+        Err(error) => return Err(io("inspecting", &client, &error)),
+        Ok(meta) => {
+            if meta.file_type().is_symlink()
+                || !meta.is_dir()
+                || meta.uid() != owner
+                || meta.permissions().mode() & 0o077 != 0
+            {
+                return Err(SocketError::new(format!(
+                    "{} must be the broker's own private directory",
+                    client.display()
+                )));
+            }
+        }
+    }
+    Ok(crate::sandbox::SandboxFiles {
+        seccomp,
+        client_config: client,
+    })
+}
+
 /// Serve connections, one at a time, for as long as the process lives.
 pub(crate) fn serve(
     bound: &Bound,
     authority_uid: u32,
     own_uid: u32,
     channels: &mut Channels,
-    processes: &crate::process::Processes,
+    effects: exchange::Effects<'_>,
 ) {
     for incoming in bound.listener.incoming() {
         let stream = match incoming {
@@ -428,7 +498,7 @@ pub(crate) fn serve(
             continue;
         }
         crate::event(&format!("connection peer_uid={peer}"));
-        exchange::serve_one(&stream, channels.issue(), own_uid, processes);
+        exchange::serve_one(&stream, channels.issue(), own_uid, effects);
         crate::event("closed");
     }
 }

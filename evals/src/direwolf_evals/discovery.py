@@ -44,7 +44,10 @@ EVAL_KEYS: Final = frozenset(
 
 
 _RESTATES_REQUIREMENT: Final = re.compile(r"^\s*requires\s+M[0-9]", re.IGNORECASE)
-_MILESTONE: Final = re.compile(r"M[0-9]+(?:\.[0-9]+)?")
+# A milestone (`M4`), a half-step (`M2.5`) or a sub-milestone (`M5a`): one
+# lowercase letter names a slice of a milestone that ships on its own, which
+# makes its suites run without claiming the whole milestone exists.
+_MILESTONE: Final = re.compile(r"M[0-9]+(?:\.[0-9]+|[a-z])?")
 
 
 class DiscoveryError(Exception):
@@ -156,7 +159,7 @@ def _milestones(source: str, name: str, values: set[str]) -> tuple[str, ...]:
         if not _MILESTONE.fullmatch(value):
             raise DiscoveryError(
                 f"{source}: {name}: {value!r} is not a milestone; expected a form like "
-                f"'M3' or 'M2.5'"
+                f"'M3', 'M2.5' or 'M5a'"
             )
     return tuple(sorted(values))
 

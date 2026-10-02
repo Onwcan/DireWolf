@@ -38,7 +38,7 @@ MAX_REASON_CHARS: Final = 1000
 """An error detail is diagnostics, not a channel. Bounded, like everything else
 that reaches a result file."""
 
-AVAILABLE_MILESTONES: Final[frozenset[str]] = frozenset({"M1", "M2", "M2.5", "M3", "M4"})
+AVAILABLE_MILESTONES: Final[frozenset[str]] = frozenset({"M1", "M2", "M2.5", "M3", "M4", "M5a"})
 """What this build has. An eval requiring anything else is pending.
 
 Extending this set is how a milestone turns its suites on: "M3" joined it in
@@ -47,6 +47,12 @@ once every M4 eval had a real runner; every suite that had been waiting for
 either started running and must pass. Nothing else gates them — in
 particular a ``pending_reason`` left in a suite file does not keep an eval
 dormant, and an eval with no runner reports ERROR once its milestone is here.
+
+"M5a" is a SLICE of M5 (ADR-0047): the execution-environment foundation and
+its measured assurance. It turns on exactly the suite that requires it. "M5"
+itself is not here -- M5 is in progress, not complete -- so every property
+waiting for the whole milestone (a PROXY_ONLY sandbox's egress, above all)
+stays pending.
 """
 
 

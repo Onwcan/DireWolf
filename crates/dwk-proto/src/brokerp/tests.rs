@@ -175,25 +175,26 @@ fn an_outcome_carries_exactly_one_answer() {
     let mut both = BrokerOutcome::new(channel(), invocation(), OutcomeResult::done(done));
     both.refused = Some(BrokerRefusal::ReadFailed);
     assert!(encode_frame(&both).is_err());
-    let none = r#"{"channel":"0123456789abcdef0123456789abcdef","invocation_id":"inv_01M24BB8G3E0A851TRWE3M8FZF","kind":"broker.outcome","protocol":4}"#;
+    let none = r#"{"channel":"0123456789abcdef0123456789abcdef","invocation_id":"inv_01M24BB8G3E0A851TRWE3M8FZF","kind":"broker.outcome","protocol":5}"#;
     assert!(BrokerOutcome::decode_frame_body(none.as_bytes()).is_err());
     // A done names exactly one operation.
-    let two = r#"{"channel":"0123456789abcdef0123456789abcdef","done":{"fs_move":{},"fs_delete":{"debris":false}},"invocation_id":"inv_01M24BB8G3E0A851TRWE3M8FZF","kind":"broker.outcome","protocol":4}"#;
+    let two = r#"{"channel":"0123456789abcdef0123456789abcdef","done":{"fs_move":{},"fs_delete":{"debris":false}},"invocation_id":"inv_01M24BB8G3E0A851TRWE3M8FZF","kind":"broker.outcome","protocol":5}"#;
     assert!(BrokerOutcome::decode_frame_body(two.as_bytes()).is_err());
 }
 
 #[test]
 fn unknown_members_old_versions_and_second_spellings_are_refused() {
     for text in [
-        r#"{"channel":"0123456789abcdef0123456789abcdef","kind":"broker.hello","protocol":4,"extra":1}"#,
-        r#"{"channel":"0123456789ABCDEF0123456789ABCDEF","kind":"broker.hello","protocol":4}"#,
-        // Versions 1 to 3 are not half-understood (ADR-0046 made it 4), and
+        r#"{"channel":"0123456789abcdef0123456789abcdef","kind":"broker.hello","protocol":5,"extra":1}"#,
+        r#"{"channel":"0123456789ABCDEF0123456789ABCDEF","kind":"broker.hello","protocol":5}"#,
+        // Versions 1 to 4 are not half-understood (ADR-0047 made it 5), and
         // a later one is not guessed at.
         r#"{"channel":"0123456789abcdef0123456789abcdef","kind":"broker.hello","protocol":1}"#,
         r#"{"channel":"0123456789abcdef0123456789abcdef","kind":"broker.hello","protocol":2}"#,
         r#"{"channel":"0123456789abcdef0123456789abcdef","kind":"broker.hello","protocol":3}"#,
-        r#"{"channel":"0123456789abcdef0123456789abcdef","kind":"broker.hello","protocol":5}"#,
-        r#"{"channel":"0123456789abcdef0123456789abcdef","kind":"broker.hello","kind":"broker.hello","protocol":4}"#,
+        r#"{"channel":"0123456789abcdef0123456789abcdef","kind":"broker.hello","protocol":4}"#,
+        r#"{"channel":"0123456789abcdef0123456789abcdef","kind":"broker.hello","protocol":6}"#,
+        r#"{"channel":"0123456789abcdef0123456789abcdef","kind":"broker.hello","kind":"broker.hello","protocol":5}"#,
     ] {
         assert!(
             BrokerHello::decode_frame_body(text.as_bytes()).is_err(),
@@ -201,7 +202,7 @@ fn unknown_members_old_versions_and_second_spellings_are_refused() {
         );
     }
     // An unknown kind is not an authorisation.
-    let unknown = r#"{"kind":"broker.fs_chmod","protocol":4}"#;
+    let unknown = r#"{"kind":"broker.fs_chmod","protocol":5}"#;
     assert!(Authorisation::decode_frame_body(unknown.as_bytes()).is_err());
     for (text, ok) in [
         ("0", true),
@@ -646,6 +647,192 @@ fn a_secret_result_names_its_own_operation_and_says_nothing_of_the_value() {
         BrokerDone::secret_egress().secret_egress,
         Some(SecretEgressDone {})
     );
-    let text = r#"{"channel":"0123456789abcdef0123456789abcdef","done":{"secret_egress":{"length":8}},"invocation_id":"inv_01M24BB8G3E0A851TRWE3M8FZF","kind":"broker.outcome","protocol":4}"#;
+    let text = r#"{"channel":"0123456789abcdef0123456789abcdef","done":{"secret_egress":{"length":8}},"invocation_id":"inv_01M24BB8G3E0A851TRWE3M8FZF","kind":"broker.outcome","protocol":5}"#;
     assert!(BrokerOutcome::decode_frame_body(text.as_bytes()).is_err());
+}
+
+// ---- M5a: the execution environment (ADR-0047) ------------------------------
+
+fn runtime_spec() -> super::RuntimeSpec {
+    super::RuntimeSpec {
+        socket: crate::wire::scalar::HostPath::new("/var/run/docker.sock")
+            .unwrap_or_else(|| unreachable!()),
+        argv0: crate::wire::scalar::HostPath::new("/usr/bin/docker")
+            .unwrap_or_else(|| unreachable!()),
+        executable: (2049, 77),
+        sha256: crate::wire::scalar::ContentDigest::new("b".repeat(64))
+            .unwrap_or_else(|| unreachable!()),
+        cwd: (2049, 2),
+    }
+}
+
+fn environment_spec() -> super::EnvironmentSpec {
+    use super::sandbox::{EnvironmentProfile, ImageId, NetworkTopology, StoreInstance};
+    super::EnvironmentSpec {
+        environment_id: crate::wire::id::EnvironmentId::parse("env_01M24BB8G3E0A851TRWE3M8FZF")
+            .unwrap_or_else(|| unreachable!()),
+        run_id: crate::wire::id::RunId::parse("run_01M24BB8G3E0A851TRWE3M8FZF")
+            .unwrap_or_else(|| unreachable!()),
+        store: StoreInstance::new("0a1b").unwrap_or_else(|| unreachable!()),
+        profile: EnvironmentProfile::OciStrict,
+        network: NetworkTopology::NoNetwork,
+        image: ImageId::new(format!("sha256:{}", "c".repeat(64))).unwrap_or_else(|| unreachable!()),
+        probe_sha256: crate::wire::scalar::ContentDigest::new("d".repeat(64))
+            .unwrap_or_else(|| unreachable!()),
+        workspace_path: crate::wire::scalar::HostPath::new("/srv/ws")
+            .unwrap_or_else(|| unreachable!()),
+        workspace: (2049, 131),
+    }
+}
+
+#[test]
+fn the_environment_operations_round_trip_with_two_descriptors_and_a_longer_deadline() {
+    use super::sandbox::ContainerRef;
+    let container = ContainerRef::new("e".repeat(64)).unwrap_or_else(|| unreachable!());
+    let spec = environment_spec();
+    let ids = (
+        spec.environment_id.clone(),
+        spec.run_id.clone(),
+        spec.store.clone(),
+    );
+    for (authorisation, kind) in [
+        (
+            Authorisation::EnvironmentPrepare(super::EnvironmentPrepareAuthorisation::new(
+                common(),
+                environment_spec(),
+                runtime_spec(),
+            )),
+            PrivateKind::EnvironmentPrepare,
+        ),
+        (
+            Authorisation::EnvironmentMeasure(super::EnvironmentMeasureAuthorisation::new(
+                common(),
+                environment_spec(),
+                container.clone(),
+                runtime_spec(),
+            )),
+            PrivateKind::EnvironmentMeasure,
+        ),
+        (
+            Authorisation::EnvironmentDestroy(super::EnvironmentDestroyAuthorisation::new(
+                common(),
+                ids.clone(),
+                Some(container.clone()),
+                runtime_spec(),
+            )),
+            PrivateKind::EnvironmentDestroy,
+        ),
+        (
+            Authorisation::EnvironmentDestroy(super::EnvironmentDestroyAuthorisation::new(
+                common(),
+                ids.clone(),
+                None,
+                runtime_spec(),
+            )),
+            PrivateKind::EnvironmentDestroy,
+        ),
+        (
+            Authorisation::EnvironmentList(super::EnvironmentListAuthorisation::new(
+                common(),
+                spec.store.clone(),
+                runtime_spec(),
+            )),
+            PrivateKind::EnvironmentList,
+        ),
+    ] {
+        let bytes = body(&authorisation.encode_frame().unwrap_or_default());
+        let decoded = Authorisation::decode_frame_body(&bytes);
+        assert_eq!(decoded.as_ref().map(Authorisation::kind), Ok(kind));
+        assert_eq!(decoded, Ok(authorisation));
+        assert_eq!(kind.descriptors(), Some(2));
+        assert!(kind.deadline_seconds() > PrivateKind::FsRead.deadline_seconds());
+        // No runtime flag, option map or free-form argument has a field to
+        // ride in: an unknown member is refused.
+        let text = String::from_utf8(bytes).unwrap_or_default();
+        for smuggled in [
+            r#""docker_args":["--privileged"],"#,
+            r#""extra_flags":"--pid=host","#,
+            r#""runtime_options":{"privileged":true},"#,
+        ] {
+            let bad = text.replacen('{', &format!("{{{smuggled}"), 1);
+            assert!(
+                Authorisation::decode_frame_body(bad.as_bytes()).is_err(),
+                "{smuggled}"
+            );
+        }
+    }
+    // A tag, a short container id or a profile nobody defined is not a value.
+    let prepare = String::from_utf8(body(
+        &Authorisation::EnvironmentPrepare(super::EnvironmentPrepareAuthorisation::new(
+            common(),
+            environment_spec(),
+            runtime_spec(),
+        ))
+        .encode_frame()
+        .unwrap_or_default(),
+    ))
+    .unwrap_or_default();
+    for (from, to) in [
+        (
+            format!("sha256:{}", "c".repeat(64)),
+            "busybox:latest".to_owned(),
+        ),
+        ("OCI_STRICT".to_owned(), "OCI_PRIVILEGED".to_owned()),
+        ("NO_NETWORK".to_owned(), "HOST".to_owned()),
+    ] {
+        let bad = prepare.replace(&from, &to);
+        assert!(
+            Authorisation::decode_frame_body(bad.as_bytes()).is_err(),
+            "{to}"
+        );
+    }
+}
+
+#[test]
+fn an_environment_result_names_exactly_one_operation() {
+    use super::sandbox::{
+        ContainerRef, InvariantCheck, InvariantChecks, Milliseconds, SandboxInvariant, Verdict,
+    };
+    let checks = InvariantChecks::new(vec![InvariantCheck {
+        invariant: SandboxInvariant::HostRunning,
+        verdict: Verdict::Unobservable,
+    }])
+    .unwrap_or_else(|| unreachable!());
+    let measurement = super::EnvironmentMeasurement {
+        checks,
+        runtime_version: None,
+        measure_ms: Milliseconds::new(5).unwrap_or_else(|| unreachable!()),
+    };
+    let done = BrokerDone::environment_prepare(super::EnvironmentPrepareDone {
+        container: ContainerRef::new("e".repeat(64)),
+        retained: false,
+        measurement: Some(measurement),
+        prepare_ms: Milliseconds::new(9).unwrap_or_else(|| unreachable!()),
+    });
+    assert_eq!(done.kind(), Some(PrivateKind::EnvironmentPrepare));
+    let outcome = BrokerOutcome::new(channel(), invocation(), OutcomeResult::done(done.clone()));
+    let bytes = body(&encode_frame(&outcome).unwrap_or_default());
+    assert_eq!(
+        BrokerOutcome::decode_frame_body(&bytes).map(|o| o.result()),
+        Ok(OutcomeResult::done(done))
+    );
+    for refusal in [
+        BrokerRefusal::RuntimeUnavailable,
+        BrokerRefusal::ImageMissing,
+        BrokerRefusal::TopologyUnavailable,
+        BrokerRefusal::ForeignEnvironment,
+    ] {
+        let outcome = BrokerOutcome::new(channel(), invocation(), OutcomeResult::Refused(refusal));
+        let bytes = body(&encode_frame(&outcome).unwrap_or_default());
+        assert_eq!(
+            BrokerOutcome::decode_frame_body(&bytes).map(|o| o.result()),
+            Ok(OutcomeResult::Refused(refusal))
+        );
+    }
+    let unknown = BrokerOutcome::new(
+        channel(),
+        invocation(),
+        OutcomeResult::Indeterminate(Indeterminate::EnvironmentUnconfirmed),
+    );
+    assert!(encode_frame(&unknown).is_ok());
 }

@@ -3,6 +3,8 @@ resolver = "3"
 members = [
     "crates/direwolf-cli",
     "crates/dwk-proto",
+    "crates/dwk-sandbox-probe",
+    "crates/dwk-sandbox-profile",
     "crates/dwkd-authority",
     "crates/dwkd-broker",
     "tools/protogen",
@@ -40,6 +42,9 @@ authors = ["The DireWolf authors"]
 [workspace.dependencies]
 # --- in-tree ---------------------------------------------------------------
 dwk-proto = { path = "crates/dwk-proto" }
+# The oci-strict profile (M5a, ADR-0047 §5): linked by the broker and the
+# sandbox probe, never by the authority.
+dwk-sandbox-profile = { path = "crates/dwk-sandbox-profile" }
 
 # --- reachable from the TCB (dwk-proto -> dwkd-authority from M3) -----------
 # Anything here is inside the trusted computing base, so it needs an entry in

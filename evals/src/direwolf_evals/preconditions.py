@@ -11,6 +11,10 @@ exist and still cannot be measured on every machine:
   workstation does not have. ``DW_PEER_AS`` names that user, ``sudo -n -u``
   must be able to start a process as it without a password, and the uid that
   process reports must be neither this process's nor root's.
+* ``needs = ["oci-runtime"]`` — an execution-environment property (M5a) is
+  measured only against a **real OCI runtime**: a `docker` client on PATH whose
+  server answers and runs Linux containers. A machine without one does not
+  exercise it.
 
 An eval whose precondition is unmet is **not exercised**: SKIP, with a reason
 generated here, never a pass and never pending (the component exists). The
@@ -38,12 +42,13 @@ __all__ = [
     "NOT_EXERCISED",
     "PLATFORMS",
     "current_platform",
+    "oci_runtime",
     "second_identity",
     "unmet",
 ]
 
 PLATFORMS: Final = frozenset({"linux", "macos", "windows"})
-NEEDS: Final = frozenset({"second-identity"})
+NEEDS: Final = frozenset({"oci-runtime", "second-identity"})
 
 NOT_EXERCISED: Final = "not exercised"
 """The prefix of every precondition reason. Stable, so a reader can grep."""
@@ -100,6 +105,32 @@ def second_identity() -> str | None:
     return user
 
 
+@functools.cache
+def oci_runtime() -> str | None:
+    """The OCI runtime's server version, if a real one answers here: a
+    `docker` client on PATH, a server that responds within the bound, and that
+    server running Linux containers. Cached for the process."""
+    if current_platform() != "linux":
+        return None
+    client = shutil.which("docker")
+    if client is None:
+        return None
+    try:
+        probe = subprocess.run(
+            [client, "version", "--format", "{{.Server.Os}} {{.Server.Version}}"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    words = probe.stdout.split()
+    if probe.returncode != 0 or len(words) != 2 or words[0] != "linux":
+        return None
+    return words[1]
+
+
 def _effective_uid() -> int:
     """This process's effective uid, on the one platform that asks."""
     geteuid = getattr(os, "geteuid", None)
@@ -116,5 +147,10 @@ def unmet(platforms: Sequence[str], needs: Sequence[str]) -> str | None:
             return (
                 f"{NOT_EXERCISED}: needs a second operating-system identity; set {PEER_ENV} "
                 f"to a user that `sudo -n -u` can switch to, other than this one and root"
+            )
+        if need == "oci-runtime" and oci_runtime() is None:
+            return (
+                f"{NOT_EXERCISED}: needs a real OCI runtime: a `docker` client on PATH whose "
+                f"server answers and runs Linux containers"
             )
     return None

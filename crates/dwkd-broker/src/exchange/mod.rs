@@ -59,20 +59,31 @@ const MAX_AUTHORISATION_FRAME: usize = HEADER_LEN + MAX_AUTHORISATION_BODY;
 /// The most descriptors any authorisation carries: a secret launch's three.
 const MAX_DESCRIPTORS: usize = 3;
 
+/// What an exchange may act through: this broker instance's process table,
+/// and its sandbox supervisor (M5a).
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Effects<'a> {
+    /// The process table.
+    pub(crate) processes: &'a crate::process::Processes,
+    /// The sandbox supervisor.
+    pub(crate) sandbox: &'a crate::sandbox::Sandbox,
+}
+
 /// Serve one connection the kernel says the authority made. `own_uid` is the
 /// broker's effective uid, which its staging directories must be owned by;
-/// `processes` is this broker instance's process table.
+/// `effects` is what this broker instance acts through.
 pub(crate) fn serve_one(
     stream: &UnixStream,
     channel: Option<ChannelNonce>,
     own_uid: u32,
-    processes: &crate::process::Processes,
+    effects: Effects<'_>,
 ) {
     let Some(channel) = channel else {
         crate::event("channels_exhausted");
         return;
     };
-    let until = Instant::now() + DEADLINE;
+    let started = Instant::now();
+    let until = started + DEADLINE;
     let hello = BrokerHello::new(channel.clone());
     let sent =
         brokerp::encode_frame(&hello).is_ok_and(|frame| write_all(stream, &frame, until).is_ok());
@@ -94,12 +105,16 @@ pub(crate) fn serve_one(
     };
     let invocation = authorisation.invocation_id().clone();
     let operation = authorisation.kind().as_str();
+    // The whole exchange's bound is its kind's: an environment step drives a
+    // container runtime, and has the longer one both sides agree on.
+    let until = started + Duration::from_secs(authorisation.kind().deadline_seconds());
     let result = execute(
         &channel,
         &authorisation,
         received.descriptors,
         own_uid,
-        processes,
+        effects,
+        until,
     );
     match &result {
         OutcomeResult::Done(done) => {
@@ -273,8 +288,10 @@ fn execute(
     authorisation: &Authorisation,
     descriptors: Descriptors,
     own_uid: u32,
-    processes: &crate::process::Processes,
+    effects: Effects<'_>,
+    until: Instant,
 ) -> OutcomeResult {
+    let processes = effects.processes;
     if authorisation.channel() != channel {
         return OutcomeResult::Refused(BrokerRefusal::ChannelMismatch);
     }
@@ -312,6 +329,25 @@ fn execute(
                 (Some(executable), Some(cwd), Some(secret), None) => {
                     processes.start_with_secret(start, executable, cwd, &secret)
                 }
+                _ => OutcomeResult::Refused(BrokerRefusal::DescriptorCount),
+            };
+        }
+        // The environment operations (M5a): the container runtime's client
+        // and the directory it runs in, in that order.
+        Authorisation::EnvironmentPrepare(_)
+        | Authorisation::EnvironmentMeasure(_)
+        | Authorisation::EnvironmentDestroy(_)
+        | Authorisation::EnvironmentList(_) => {
+            let (Some(runtime), Some(cwd), None) = (fds.next(), fds.next(), fds.next()) else {
+                return OutcomeResult::Refused(BrokerRefusal::DescriptorCount);
+            };
+            let sandbox = effects.sandbox;
+            let held = (runtime, cwd);
+            return match authorisation {
+                Authorisation::EnvironmentPrepare(a) => sandbox.prepare(a, held, until),
+                Authorisation::EnvironmentMeasure(a) => sandbox.measure(a, held, until),
+                Authorisation::EnvironmentDestroy(a) => sandbox.destroy(a, held, until),
+                Authorisation::EnvironmentList(a) => sandbox.list(a, held, until),
                 _ => OutcomeResult::Refused(BrokerRefusal::DescriptorCount),
             };
         }

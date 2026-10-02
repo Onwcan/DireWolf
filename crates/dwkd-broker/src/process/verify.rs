@@ -66,19 +66,48 @@ pub(super) fn descriptors(
     cwd: &OwnedFd,
     authority_uid: u32,
 ) -> Result<(), BrokerRefusal> {
-    let st = checks::readable(
+    identities(
+        &Authorised {
+            executable: checks::named(&start.executable_device, &start.executable_inode),
+            sha256: start.executable_sha256.as_str(),
+            cwd: checks::named(&start.cwd_device, &start.cwd_inode),
+        },
         executable,
-        Kind::File,
-        checks::named(&start.executable_device, &start.executable_inode),
-    )?;
-    checks::readable(
         cwd,
-        Kind::Directory,
-        checks::named(&start.cwd_device, &start.cwd_inode),
-    )?;
+        authority_uid,
+    )
+}
+
+/// What the authority decided a launch's two descriptors are.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Authorised<'a> {
+    /// The executable's `(device, inode)`.
+    pub(crate) executable: (u64, u64),
+    /// Its SHA-256, lowercase hex.
+    pub(crate) sha256: &'a str,
+    /// The working directory's `(device, inode)`.
+    pub(crate) cwd: (u64, u64),
+}
+
+/// The same re-proof for any launch the authority decided on — a
+/// `process_start`'s target, or a container runtime (M5a, ADR-0047 §4):
+/// each descriptor's mode, kind and object, the executable's trust
+/// attributes and its digest, read through the descriptor that will run.
+///
+/// # Errors
+///
+/// The refusal: nothing may be started.
+pub(crate) fn identities(
+    authorised: &Authorised<'_>,
+    executable: &OwnedFd,
+    cwd: &OwnedFd,
+    authority_uid: u32,
+) -> Result<(), BrokerRefusal> {
+    let st = checks::readable(executable, Kind::File, authorised.executable)?;
+    checks::readable(cwd, Kind::Directory, authorised.cwd)?;
     trusted(executable, &st, authority_uid)?;
     let digest = hash(executable, &st)?;
-    if digest != start.executable_sha256.as_str() {
+    if digest != authorised.sha256 {
         return Err(BrokerRefusal::DigestMismatch);
     }
     Ok(())

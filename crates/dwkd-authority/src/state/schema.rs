@@ -51,7 +51,7 @@ use rusqlite::Connection;
 pub(super) const APPLICATION_ID: i64 = 0x4457_4B44;
 
 /// The schema version this build creates and understands.
-pub(super) const CURRENT_VERSION: i64 = 6;
+pub(super) const CURRENT_VERSION: i64 = 7;
 
 /// Schema version 1, the first. Static text: nothing in it is assembled from a
 /// value, and every value the authority stores is bound as a parameter.
@@ -959,6 +959,72 @@ CREATE TRIGGER run_withheld_no_delete BEFORE DELETE ON run_withheld
 BEGIN SELECT RAISE(ABORT, 'a withheld record is never deleted'); END;
 ";
 
+/// Schema version 7 (M5a, ADR-0047 §11): one row per execution environment.
+///
+/// The row is written **before** the broker is told anything — the intent,
+/// `PREPARING`, with the environment's whole specification — and moves only
+/// forward:
+///
+/// | from | to |
+/// |---|---|
+/// | `PREPARING` | `READY` (measured clean), `REFUSED` (provably none left), `UNKNOWN` (may exist), `DESTROYING` (kept by the broker but not usable) |
+/// | `READY` | `DESTROYING`, `LOST` (reconciliation found it gone) |
+/// | `UNKNOWN` | `DESTROYING`, `DESTROYED`, `LOST` |
+/// | `DESTROYING` | `DESTROYING`, `DESTROYED`, `LOST` |
+///
+/// `REFUSED`, `DESTROYED` and `LOST` are final. The identity and the intent
+/// never change, a container once known never changes, and a run has at most
+/// one environment that is not final — the partial unique index is the
+/// database's own statement of "one environment per run".
+pub(super) const SCHEMA_V7: &str = r"
+CREATE TABLE environment (
+    environment_id  TEXT    PRIMARY KEY CHECK (length(environment_id) = 30
+                                               AND substr(environment_id, 1, 4) = 'env_'),
+    run_id          TEXT    NOT NULL REFERENCES run(run_id) ON DELETE RESTRICT,
+    profile         TEXT    NOT NULL CHECK (profile IN ('OCI_STRICT')),
+    network         TEXT    NOT NULL CHECK (network IN ('NO_NETWORK', 'PROXY_ONLY')),
+    image           TEXT    NOT NULL CHECK (length(image) = 71 AND substr(image, 1, 7) = 'sha256:'
+                                            AND substr(image, 8) NOT GLOB '*[^0-9a-f]*'),
+    probe_sha256    TEXT    NOT NULL CHECK (length(probe_sha256) = 64
+                                            AND probe_sha256 NOT GLOB '*[^0-9a-f]*'),
+    declared        TEXT    NOT NULL CHECK (declared IN ('NONE', 'PROCESS_ISOLATION',
+                                            'CONTAINER_ISOLATION', 'VM_ISOLATION')),
+    measured        TEXT    CHECK (measured IS NULL OR measured IN ('NONE', 'PROCESS_ISOLATION',
+                                            'CONTAINER_ISOLATION', 'VM_ISOLATION')),
+    effective       TEXT    CHECK (effective IS NULL OR effective IN ('NONE', 'PROCESS_ISOLATION',
+                                            'CONTAINER_ISOLATION', 'VM_ISOLATION')),
+    container       TEXT    CHECK (container IS NULL OR (length(container) = 64
+                                                         AND container NOT GLOB '*[^0-9a-f]*')),
+    state           TEXT    NOT NULL CHECK (state IN ('PREPARING', 'READY', 'REFUSED',
+                                            'DESTROYING', 'DESTROYED', 'LOST', 'UNKNOWN')),
+    failure         TEXT    CHECK (failure IS NULL OR (length(failure) BETWEEN 1 AND 64
+                                                       AND failure NOT GLOB '*[^A-Z0-9_]*')),
+    incarnation     INTEGER NOT NULL CHECK (incarnation >= 1),
+    intent_ms       INTEGER NOT NULL,
+    ended_ms        INTEGER,
+    CHECK ((state IN ('REFUSED', 'DESTROYED', 'LOST')) = (ended_ms IS NOT NULL)),
+    CHECK (state != 'READY' OR (container IS NOT NULL AND effective IS NOT NULL)),
+    CHECK (state != 'REFUSED' OR failure IS NOT NULL)
+) STRICT;
+CREATE UNIQUE INDEX environment_one_live_per_run ON environment(run_id)
+    WHERE state IN ('PREPARING', 'READY', 'DESTROYING', 'UNKNOWN');
+CREATE INDEX environment_by_state ON environment(state);
+CREATE TRIGGER environment_no_delete BEFORE DELETE ON environment
+BEGIN SELECT RAISE(ABORT, 'an environment record is never deleted'); END;
+CREATE TRIGGER environment_intent_fixed BEFORE UPDATE OF environment_id, run_id, profile, network,
+    image, probe_sha256, declared, incarnation, intent_ms ON environment
+BEGIN SELECT RAISE(ABORT, 'an environment''s identity and intent are fixed'); END;
+CREATE TRIGGER environment_container_fixed BEFORE UPDATE OF container ON environment
+WHEN OLD.container IS NOT NULL AND NEW.container IS NOT OLD.container
+BEGIN SELECT RAISE(ABORT, 'an environment''s container, once known, is fixed'); END;
+CREATE TRIGGER environment_moves_forward BEFORE UPDATE OF state ON environment
+WHEN NOT ((OLD.state = 'PREPARING' AND NEW.state IN ('READY', 'REFUSED', 'UNKNOWN', 'DESTROYING'))
+       OR (OLD.state = 'READY' AND NEW.state IN ('DESTROYING', 'LOST'))
+       OR (OLD.state = 'UNKNOWN' AND NEW.state IN ('DESTROYING', 'DESTROYED', 'LOST'))
+       OR (OLD.state = 'DESTROYING' AND NEW.state IN ('DESTROYING', 'DESTROYED', 'LOST')))
+BEGIN SELECT RAISE(ABORT, 'an environment moves only forward through its lifecycle'); END;
+";
+
 /// One step from a version to the next.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct Migration {
@@ -993,6 +1059,10 @@ pub(super) const MIGRATIONS: &[Migration] = &[
     Migration {
         to: 6,
         sql: SCHEMA_V6,
+    },
+    Migration {
+        to: 7,
+        sql: SCHEMA_V7,
     },
 ];
 
@@ -1148,7 +1218,8 @@ pub(super) fn foreign_key_check(conn: &Connection) -> rusqlite::Result<Result<()
 mod tests {
     use super::{
         APPLICATION_ID, CURRENT_VERSION, MIGRATIONS, Migration, SCHEMA_V1, SCHEMA_V2, SCHEMA_V3,
-        SCHEMA_V4, SCHEMA_V5, SCHEMA_V6, Shape, ShapeError, decide, migrate, verify_exact,
+        SCHEMA_V4, SCHEMA_V5, SCHEMA_V6, SCHEMA_V7, Shape, ShapeError, decide, migrate,
+        verify_exact,
     };
     use rusqlite::Connection;
 
@@ -1213,6 +1284,7 @@ mod tests {
         assert!(conn.execute_batch(SCHEMA_V4).is_ok());
         assert!(conn.execute_batch(SCHEMA_V5).is_ok());
         assert!(conn.execute_batch(SCHEMA_V6).is_ok());
+        assert!(conn.execute_batch(SCHEMA_V7).is_ok());
         assert!(
             conn.execute_batch("DROP TRIGGER run_never_resurrects")
                 .is_ok()
@@ -1234,6 +1306,7 @@ mod tests {
         assert!(conn.execute_batch(SCHEMA_V4).is_ok());
         assert!(conn.execute_batch(SCHEMA_V5).is_ok());
         assert!(conn.execute_batch(SCHEMA_V6).is_ok());
+        assert!(conn.execute_batch(SCHEMA_V7).is_ok());
         assert!(
             conn.execute_batch("CREATE TABLE backdoor (x INTEGER)")
                 .is_ok()
@@ -1752,8 +1825,12 @@ mod tests {
             assert_eq!(migrate(&tx, 5, MIGRATIONS).ok(), Some(CURRENT_VERSION));
             assert!(tx.commit().is_ok());
         }
-        assert_eq!(CURRENT_VERSION, 6);
-        assert_eq!(verify_exact(&conn).ok(), Some(Ok(())), "exactly version 6");
+        const { assert!(CURRENT_VERSION >= 6) };
+        assert_eq!(
+            verify_exact(&conn).ok(),
+            Some(Ok(())),
+            "exactly the current version"
+        );
         let after = (
             count("SELECT count(*) FROM process_invocation"),
             count("SELECT count(*) FROM tool_process"),
@@ -1995,5 +2072,97 @@ mod tests {
             conn.execute("DELETE FROM workspace_root", []).is_err(),
             "a binding is never removed"
         );
+    }
+
+    const ENV: &str = "env_01M24BB8G3E0A851TRWE3M8FZF";
+
+    fn environment(conn: &Connection, id: &str, run: &str, state: &str) -> rusqlite::Result<usize> {
+        conn.execute(
+            "INSERT INTO environment (environment_id, run_id, profile, network, image, \
+             probe_sha256, declared, measured, effective, container, state, failure, \
+             incarnation, intent_ms, ended_ms) \
+             VALUES (?1, ?2, 'OCI_STRICT', 'NO_NETWORK', ?3, ?4, \
+             'CONTAINER_ISOLATION', NULL, NULL, NULL, ?5, NULL, 1, 0, NULL)",
+            rusqlite::params![
+                id,
+                run,
+                format!("sha256:{}", "a".repeat(64)),
+                "b".repeat(64),
+                state
+            ],
+        )
+    }
+
+    #[test]
+    fn an_environment_moves_only_forward_and_a_run_has_one_live_one() {
+        let conn = store_at(7);
+        assert!(environment(&conn, ENV, "run_a", "PREPARING").is_ok());
+        // A tag, a short digest, an unknown state, a second live environment
+        // for the same run: refused by the store itself.
+        let other = "env_01M24BB8G3E0A851TRWE3M8FZG";
+        assert!(
+            environment(&conn, other, "run_a", "PREPARING").is_err(),
+            "one per run"
+        );
+        assert!(environment(&conn, other, "run_b", "RUNNING").is_err());
+        assert!(
+            conn.execute(
+                "INSERT INTO environment (environment_id, run_id, profile, network, image, \
+                 probe_sha256, declared, state, incarnation, intent_ms) VALUES \
+                 ('env_01M24BB8G3E0A851TRWE3M8FZH', 'run_c', 'OCI_STRICT', \
+                 'NO_NETWORK', 'alpine:3', ?1, 'NONE', 'PREPARING', 1, 0)",
+                [&"b".repeat(64)],
+            )
+            .is_err(),
+            "a tag is not an image"
+        );
+        let set = |sql: &str| conn.execute(sql, []);
+        // READY needs a container and a level.
+        assert!(set("UPDATE environment SET state = 'READY'").is_err());
+        let container = "c".repeat(64);
+        assert!(
+            conn.execute(
+                "UPDATE environment SET state = 'READY', container = ?1, \
+                 measured = 'CONTAINER_ISOLATION', effective = 'CONTAINER_ISOLATION'",
+                [&container],
+            )
+            .is_ok()
+        );
+        // Never back, never re-pointed, never re-specified.
+        assert!(set("UPDATE environment SET state = 'PREPARING'").is_err());
+        assert!(set("UPDATE environment SET container = 'dddd'").is_err());
+        assert!(set("UPDATE environment SET image = 'x'").is_err());
+        assert!(set("UPDATE environment SET network = 'PROXY_ONLY'").is_err());
+        assert!(set("UPDATE environment SET state = 'DESTROYING'").is_ok());
+        // While it is being destroyed, the run still has it.
+        assert!(environment(&conn, other, "run_a", "PREPARING").is_err());
+        assert!(set("UPDATE environment SET state = 'DESTROYED', ended_ms = 5").is_ok());
+        // Final.
+        assert!(set("UPDATE environment SET state = 'DESTROYING', ended_ms = NULL").is_err());
+        assert!(set("DELETE FROM environment").is_err());
+        // The run may have a new one now.
+        assert!(environment(&conn, other, "run_a", "PREPARING").is_ok());
+        assert!(
+            set("UPDATE environment SET state = 'REFUSED', ended_ms = 6 WHERE environment_id = 'env_01M24BB8G3E0A851TRWE3M8FZG'")
+                .is_err(),
+            "a refusal names its failure"
+        );
+    }
+
+    #[test]
+    fn a_version_six_store_migrates_to_seven_with_no_environment() {
+        let conn = store_at(6);
+        {
+            let Ok(tx) = conn.unchecked_transaction() else {
+                unreachable!("a transaction")
+            };
+            assert_eq!(migrate(&tx, 6, MIGRATIONS).ok(), Some(7));
+            assert!(tx.commit().is_ok());
+        }
+        assert_eq!(verify_exact(&conn).ok(), Some(Ok(())));
+        let count: i64 = conn
+            .query_row("SELECT count(*) FROM environment", [], |row| row.get(0))
+            .unwrap_or(-1);
+        assert_eq!(count, 0);
     }
 }

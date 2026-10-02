@@ -148,14 +148,90 @@ the harness's deterministic suite; the security suites gate, unscoped, in `make
 eval-check`. What M4 does **not** provide is stated once, here: no sandbox or execution
 environment and no network path, so secret injection has no consumer (M5); no approvals,
 so no production build launches a process (M6); no model provider (M7); no runtime (M9);
-and serving on Linux only. **M5 is next and has not started.**
+and serving on Linux only. **M5 is in progress: M5a is implemented (see M5 below).**
 
 **Deps:** M3. **Deliverables:** canonicaliser (NFC, `openat2` + fallback walker, inode identity -- M4a delivers `openat2` and identity; a fallback walker needs its own ADR); fd-relative fs ops; exec broker with env scrub, rlimits, argv normalisation, executable hashing; secret broker with keychain/age backends and injection modes A–C; redaction index.
 **Acceptance:** no path string reaches policy; every op uses the fd it checked; no secret in argv, ever.
 **Adversarial:** the full path-traversal set ([EVALS.md](EVALS.md) §3) including Unicode normalisation and TOCTOU swap races in a tight loop; secret-in-output detection; core-dump inspection for secret residue.
 **Deferred:** remote fs, Windows-native hardening beyond the fallback walker.
 
-### M5 · Sandbox
+### M5 · Sandbox — **IN PROGRESS** (M5a implemented, local acceptance passed, candidate for hosted acceptance; M5b–M5e not started)
+
+M5 is two products in one (a sandbox *and* an egress proxy), so it is decomposed like M4
+([ADR-0047](adr/0047-m5a-oci-execution-environment-and-measured-assurance.md)). The
+milestone-level contract below the slices is unchanged; M5 is complete only when every
+slice is, with M5e's gate.
+
+#### M5a · OCI foundation and measured assurance — **IMPLEMENTED, LOCAL ACCEPTANCE PASS, CANDIDATE FOR HOSTED ACCEPTANCE**
+
+M5a is complete only when the hosted `sandbox-foundation` job passes on the committed tree.
+
+[ADR-0047](adr/0047-m5a-oci-execution-environment-and-measured-assurance.md).
+**Deps:** M4. **Deliverables:** the broker's `ExecutionEnvironment` abstraction (`oci`;
+`local` joins at M5d); the `oci-strict` profile as data (`dwk-sandbox-profile`), applied
+through the runtime client the authority resolved and hashed, run by the M4d launch helper
+with typed argv and a broker-owned empty configuration; DireWolf's own seccomp allowlist
+(namespace-free `clone`, `clone3` → `ENOSYS`, `AF_VSOCK` refused); a digest-pinned static
+probe with a closed PASS/FAIL/UNOBSERVABLE report; host-side measurement from the
+runtime's record; effective = min(declared, measured), no score, refusal on any failed or
+unobservable invariant; private protocol version 5 (prepare, measure, destroy, list — no
+runtime flag on the wire); schema version 7 (the environment ledger, intent before effect,
+one live environment per run); crash windows W1–W7; reconciliation by exact label and
+durable record; the test-only `NO_NETWORK` topology. **No public route; production
+sandbox execution is not reachable.**
+**Acceptance:** `make sandbox-foundation-evidence` on a real OCI runtime — every hard rule
+measured PASS from both vantages on a real container; every weakened profile FAILs its
+invariants; every tampered probe refused; foreign containers survive; exact orphan
+reaping; temporary state does not persist; the authority→broker→runtime lifecycle and its
+crash windows; NOT EXERCISED fails. Required hosted job `sandbox-foundation` and gated eval
+`m5a-sandbox-foundation`.
+**Adversarial:** writable root, root user, privileged, the runtime socket mounted, a
+capability added, `no-new-privileges` off, seccomp unconfined or the runtime's default,
+host PID/IPC/network, a mutable tag, an extra device, resource limits dropped; a changed,
+substituted, malformed, truncated, over-long, extra-field or hanging probe; copied labels,
+copied run labels, name-only and partial-label containers; drift after preparation.
+**Deferred:** every workload (M5d), any network (M5b), `local` confinement (M5d).
+
+#### M5b · `PROXY_ONLY` topology and CONNECT proxy — **NOT STARTED**
+
+**Deps:** M5a. **Deliverables:** the `PROXY_ONLY` network ([ADR-0024](adr/0024-sandbox-network-topology.md)):
+an isolated namespace whose one peer is the broker's CONNECT proxy; the proxy with IP guard,
+DNS pinning, SNI/host agreement and byte budgets; the probe's `PROXY_ONLY` checks.
+**Acceptance:** from a `PROXY_ONLY` sandbox no route exists to any address but the proxy
+endpoint (direct connections and direct DNS attempted).
+**Adversarial:** raw sockets, direct DNS, other peers, proxy-variable bypass, fronting
+through an allowlisted shared host within its byte budget.
+**Deferred:** `net.http` (M5c).
+
+#### M5c · `net.http`, SSRF and redirect policy, credential egress — **NOT STARTED**
+
+**Deps:** M5b. **Deliverables:** kernel-performed `net.http`; SSRF guard; redirect policy;
+mode A's consumer (the rendered header on a real request).
+**Acceptance:** the SSRF suite contained; a credential reaches only its bound origin.
+**Adversarial:** full SSRF suite; redirect laundering; origin confusion.
+**Deferred:** package-manager routing (M5d/M5e).
+
+#### M5d · Production sandboxed `process.exec` — **NOT STARTED**
+
+**Deps:** M5a, M5b. **Deliverables:** `process.exec` in an environment through the
+authority's gates; secret modes B/C wired to sandboxed processes; `workspace_exec_hygiene`
+enforceable in the sandbox; the workspace ownership model; the workload wall clock and
+disk quota; the `local` environment's confinement; lifecycle integration with runs.
+**Acceptance:** a real workload runs only in a measured environment at its required level.
+**Adversarial:** full escape suite from a workload; resource exhaustion; persistence.
+**Deferred:** approvals for host execution (M6).
+
+#### M5e · The M5 adversarial gate and closeout — **NOT STARTED**
+
+**Deps:** M5a–M5d. **Deliverables:** the complete escape, SSRF and persistence suites as
+merge gates; weakened-profile closure for `PROXY_ONLY`; package-manager acceptance
+(`pip install`, `npm install` against allowlisted and non-allowlisted registries).
+**Acceptance:** the milestone contract below, in full; `M5` joins the available milestones.
+**Adversarial:** everything above, together.
+**Deferred:** gVisor/Kata/Firecracker, SSH, remote workers.
+
+#### The M5 contract
+
 **Deps:** M4. **Deliverables:** `ExecutionEnvironment` trait; `oci-strict` profile with `PROXY_ONLY` networking ([ADR-0024](adr/0024-sandbox-network-topology.md)); supervisor with lifecycle, limits, reaping, and **re-attach by run-id label** after a container-runtime restart; `local` environment behind opt-in; `AssuranceLevel` surfaced to policy; CONNECT proxy with IP guard, DNS pinning, SNI/host agreement and byte budgets; kernel-performed `net.http`; **measured assurance** ([COMPETITIVE_ANALYSIS.md](COMPETITIVE_ANALYSIS.md) §17 G2) -- an authority-provided, read-only, digest-checked probe run inside each environment checks every hard rule of [SANDBOX.md](SANDBOX.md) §2 as PASS or FAIL (no weighted score), the effective `AssuranceLevel` is the lower of declared and measured, and a failed required invariant refuses the environment and is audited.
 **Acceptance:** defaults from [SANDBOX.md](SANDBOX.md) §2 verified at runtime, not merely configured -- by the measured-assurance probe, and a **weakened-profile meta-test for each hard rule** (a bridge network, a writable root, an added capability, unconfined seccomp, a mounted container socket) must make the gate fail; from a `PROXY_ONLY` sandbox, **no route exists to any address but the proxy endpoint** (verified by attempting direct connections and direct DNS); a real package manager (`pip install`, `npm install`) succeeds against an allowlisted registry and fails against a non-allowlisted one; orphan reaping exact; the opaque tunnel's residuals, domain fronting through an allowlisted shared host among them, are stated in [NETWORK_SECURITY.md](NETWORK_SECURITY.md) and bounded by the byte budget (G7).
 **Adversarial:** full escape suite; full SSRF suite; resource exhaustion; cross-run persistence attempts; a configuration that looks hardened while the running environment differs; a tampered or substituted assurance probe; a fronted request through an allowlisted shared host, which must stay within its byte budget and connection count.

@@ -22,7 +22,7 @@ use sha2::{Digest as _, Sha256};
 
 use super::observe::{read_bounded, read_within};
 use super::staging::{self, Record, Staging};
-use super::{Descriptors, execute};
+use super::{Descriptors, Effects, execute};
 
 /// A process table no filesystem test uses: it cannot start anything (its
 /// helper does not exist).
@@ -32,6 +32,28 @@ fn no_processes() -> crate::process::Processes {
         0,
         std::time::Duration::from_secs(1),
     )
+}
+
+/// What an exchange acts through, in a filesystem test: a process table and a
+/// sandbox supervisor that can start nothing. Leaked: a test process is short.
+fn effects() -> Effects<'static> {
+    Effects {
+        processes: Box::leak(Box::new(no_processes())),
+        sandbox: Box::leak(Box::new(crate::sandbox::Sandbox::new(
+            PathBuf::from("/nonexistent/dwkd-broker"),
+            0,
+            crate::sandbox::SandboxFiles {
+                seccomp: PathBuf::from("/nonexistent/seccomp.json"),
+                client_config: PathBuf::from("/nonexistent/client"),
+            },
+            false,
+        ))),
+    }
+}
+
+/// A deadline no filesystem test reaches.
+fn far() -> std::time::Instant {
+    std::time::Instant::now() + std::time::Duration::from_secs(60)
 }
 use crate::crash::Step;
 
@@ -171,7 +193,8 @@ fn run(authorisation: &Authorisation, fds: Vec<OwnedFd>) -> OutcomeResult {
         authorisation,
         descriptors(fds),
         uid,
-        &no_processes(),
+        effects(),
+        far(),
     );
     durable_in_order(crate::crash::steps().get(from..).unwrap_or_default(), &got);
     got
@@ -265,7 +288,8 @@ fn every_mismatch_is_refused_before_reading() {
                 &read_authorisation('b', id, 6),
                 one(open(&file)),
                 own,
-                &no_processes(),
+                effects(),
+                far(),
             ),
             BrokerRefusal::ChannelMismatch,
         ),
@@ -275,7 +299,8 @@ fn every_mismatch_is_refused_before_reading() {
                 &read_authorisation('a', id, 6),
                 Descriptors::default(),
                 own,
-                &no_processes(),
+                effects(),
+                far(),
             ),
             BrokerRefusal::DescriptorCount,
         ),
@@ -285,7 +310,8 @@ fn every_mismatch_is_refused_before_reading() {
                 &read_authorisation('a', (id.0, id.1.wrapping_add(1)), 6),
                 one(open(&file)),
                 own,
-                &no_processes(),
+                effects(),
+                far(),
             ),
             BrokerRefusal::IdentityMismatch,
         ),
@@ -310,7 +336,8 @@ fn every_mismatch_is_refused_before_reading() {
             &read_authorisation('a', id, 6),
             truncated,
             own,
-            &no_processes(),
+            effects(),
+            far(),
         ),
         OutcomeResult::Refused(BrokerRefusal::DescriptorCount)
     );

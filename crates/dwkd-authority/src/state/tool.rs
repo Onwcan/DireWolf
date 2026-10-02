@@ -417,7 +417,15 @@ pub(super) const fn failure_reason(failure: BrokerFailure) -> FsFailureReason {
             | BrokerRefusal::SecretDescriptor
             | BrokerRefusal::SecretEmpty
             | BrokerRefusal::SecretTooLarge
-            | BrokerRefusal::SecretUnsafeBytes => FsFailureReason::BrokerExecutionError,
+            | BrokerRefusal::SecretUnsafeBytes
+            | BrokerRefusal::RuntimeUnavailable
+            | BrokerRefusal::RuntimeFailed
+            | BrokerRefusal::RuntimeOutputMalformed
+            | BrokerRefusal::ImageMissing
+            | BrokerRefusal::TopologyUnavailable
+            | BrokerRefusal::EnvironmentNotFound
+            | BrokerRefusal::EnvironmentAmbiguous
+            | BrokerRefusal::ForeignEnvironment => FsFailureReason::BrokerExecutionError,
         },
         BrokerFailure::Indeterminate(_) => FsFailureReason::BrokerExecutionError,
     }

@@ -1,0 +1,45 @@
+[package]
+name = "dwk-sandbox-probe"
+description = "DireWolf sandbox assurance probe: measures an execution environment from inside it. Trusted by digest; decides nothing."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+# Built statically and carried in the sandbox image (ADR-0047 §8); never
+# published, never linked by a daemon.
+publish = false
+
+[[bin]]
+name = "dwk-sandbox-probe"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+# The probe runs INSIDE an environment, as the environment's own user, and
+# reports what it finds: `dwk-sandbox-profile` gives it the values the broker
+# applied, `dwk-proto` the report's closed schema.
+[dependencies]
+dwk-proto = { workspace = true }
+dwk-sandbox-profile = { workspace = true }
+
+# The calls an escaping workload would make, each attempted through a safe
+# wrapper: `mount`/`umount2`/`pivot_root`, `unshare`, `setns` and `statvfs`
+# (`nix`'s `mount`, `sched`, `fs`), an `AF_VSOCK` socket (`rustix`), the
+# seccomp canaries `ptrace` and `process_vm_readv` (`ptrace`, `uio`), and
+# the kernel keyring (`linux-keyutils`, the authority's own pinned crate). No
+# `unsafe`: a call no safe wrapper offers -- `kcmp`, `perf_event_open`,
+# `bpf`, `userfaultfd`, `io_uring_setup`, and `add_key`/`request_key`, which
+# need a keyring handle only `keyctl` gives -- is not attempted, and the
+# profile's measured content and its active-filter canaries stand for it
+# (ADR-0047 §7: PROFILE-MEASURED ONLY). In a whole-workspace build Cargo
+# unifies these `nix` features into the broker's `nix` (code, not crates);
+# the broker names none of them (TX023).
+[target.'cfg(target_os = "linux")'.dependencies]
+nix = { workspace = true, features = ["sched", "mount", "ptrace", "uio"] }
+# The `AF_VSOCK` attempt: the socket call through the same maintained safe
+# wrapper, and features, the authority already locks -- no new crate.
+rustix = { workspace = true, features = ["net"] }
+linux-keyutils = { workspace = true }

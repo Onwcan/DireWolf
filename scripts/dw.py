@@ -1983,6 +1983,528 @@ def require_tests_ran(output: str) -> None:
         raise TaskError(f"a suite ran zero tests: {summaries or 'no summary'}")
 
 
+# --- M5a: the sandbox foundation (ADR-0047) ---------------------------------
+
+SANDBOX_EVIDENCE_PREFIX = "SANDBOX-EVIDENCE "
+
+# A convenience alias for the evidence image, and nothing more: every decision
+# and every record binds the image's content identity, and the one test that
+# names this tag does so to show that a container created from a tag is caught.
+SANDBOX_IMAGE_TAG = "direwolf/sandbox-evidence:m5a"
+
+# The broker and authority suites that need a real OCI runtime. Each is
+# `#[ignore]`d, selected here by name, and required to run every test.
+SANDBOX_BROKER_TESTS = (
+    "linux::the_strict_profile_measures_clean_from_both_vantages_and_is_destroyed_exactly",
+    "linux::every_weakened_profile_is_detected",
+    "linux::a_tampered_probe_is_never_believed_and_never_leaves_a_container",
+    "linux::foreign_containers_survive_listing_measurement_and_destruction",
+    "linux::drift_is_measured_from_both_vantages",
+    "linux::temporary_state_does_not_persist_and_two_runs_are_isolated",
+    "linux::exit_semantics_distinguish_stopped_gone_unreachable_and_unavailable",
+    "linux::a_broker_crash_after_creation_leaves_only_a_labelled_reapable_container",
+    "linux::resource_limits_hold_under_bounded_pressure",
+    "linux::latency_of_prepare_measure_and_destroy",
+)
+SANDBOX_AUTHORITY_TESTS = (
+    "linux::the_lifecycle_is_durable_before_every_effect",
+    "linux::reconciliation_after_crashes_reaps_exactly_and_spares_foreign_containers",
+    "linux::drift_found_by_the_authority_destroys_the_environment",
+)
+
+# Every (suite, case) the real-container suites must report, exercised.
+SANDBOX_CASES = (
+    ("sandbox-broker", "prepare-clean"),
+    ("sandbox-broker", "runtime-version-reported"),
+    *(
+        ("sandbox-broker", case)
+        for case in (
+            "host-image-pinned",
+            "host-probe-digest",
+            "host-not-privileged",
+            "host-user-non-root",
+            "host-root-read-only",
+            "host-capabilities-dropped",
+            "host-no-new-privileges",
+            "host-seccomp-profile",
+            "host-pid-private",
+            "host-ipc-private",
+            "host-uts-private",
+            "host-network-isolated",
+            "host-mounts-exact",
+            "host-no-runtime-socket",
+            "host-no-devices",
+            "host-resource-limits",
+            "host-labels-exact",
+            "host-workspace-identity",
+            "container-uid-gid",
+            "container-capabilities-empty",
+            "container-no-new-privileges",
+            "container-seccomp-filter",
+            "container-seccomp-profile-active",
+            "container-root-read-only",
+            "container-workspace-writable",
+            "container-tmp-writable",
+            "container-no-runtime-socket",
+            "container-devices-minimal",
+            "container-pid-private",
+            "container-network-isolated",
+            "container-rlimits",
+            "container-cgroup-limits",
+            "container-proc-restricted",
+            "escape-mount-blocked",
+            "escape-unshare-blocked",
+            "escape-setns-blocked",
+            "escape-keyring-blocked",
+        )
+    ),
+    ("sandbox-broker", "measure-clean-again"),
+    ("sandbox-broker", "list-owned-exact-labels"),
+    ("sandbox-broker", "destroy-removed"),
+    ("sandbox-broker", "destroy-already-gone"),
+    *(
+        ("sandbox-broker", case)
+        for case in (
+            "baseline-conforming",
+            "weakened-writable-root",
+            "weakened-root-user",
+            "weakened-privileged",
+            "weakened-runtime-socket-mounted",
+            "weakened-capability-added",
+            "weakened-no-new-privileges-disabled",
+            "weakened-seccomp-unconfined",
+            "weakened-seccomp-default-profile",
+            "weakened-host-pid",
+            "weakened-host-ipc",
+            "weakened-host-network",
+            "weakened-mutable-image-tag",
+            "weakened-extra-device",
+            "weakened-resource-limits-dropped",
+        )
+    ),
+    ("sandbox-broker", "weakened-count"),
+    *(
+        ("sandbox-broker", case)
+        for case in (
+            "tamper-changed-byte",
+            "tamper-substituted-probe",
+            "tamper-malformed-output",
+            "tamper-truncated-output",
+            "tamper-extra-field",
+            "tamper-flood-output",
+            "tamper-hang-timeout",
+        )
+    ),
+    *(
+        ("sandbox-broker", case)
+        for case in (
+            "foreign-not-listed",
+            "foreign-destroy-refused",
+            "foreign-measure-refused",
+            "foreign-survive",
+            "destroy-by-label-exact",
+        )
+    ),
+    ("sandbox-broker", "drift-pids-limit-raised"),
+    ("sandbox-broker", "run-isolation-distinct-environments"),
+    ("sandbox-broker", "run-isolation-tmp"),
+    ("sandbox-broker", "run-isolation-destroy-one-leaves-other"),
+    ("sandbox-broker", "persistence-tmp-marker-not-inherited"),
+    ("sandbox-broker", "exit-stopped-unobservable-inside"),
+    ("sandbox-broker", "exit-gone-not-found"),
+    ("sandbox-broker", "exit-runtime-unavailable"),
+    ("sandbox-broker", "exit-image-missing-never-pulled"),
+    ("sandbox-broker", "topology-proxy-only-unavailable"),
+    ("sandbox-broker", "topology-no-network-needs-evidence-flag"),
+    ("sandbox-broker", "refusals-create-nothing"),
+    ("sandbox-broker", "crash-w3-broker-after-create-labelled"),
+    ("sandbox-broker", "crash-w3-reaped-by-label"),
+    ("sandbox-broker", "resource-pids-bounded"),
+    ("sandbox-broker", "resource-fds-bounded"),
+    ("sandbox-broker", "resource-memory-oom-killed"),
+    ("sandbox-broker", "resource-file-size-bounded"),
+    ("sandbox-broker", "subprocess-and-thread-creation"),
+    ("sandbox-broker", "latency"),
+    ("sandbox-authority", "prepare-intent-durable-before-broker"),
+    ("sandbox-authority", "prepare-ready-recorded"),
+    ("sandbox-authority", "effective-assurance-container-isolation"),
+    ("sandbox-authority", "one-environment-per-run"),
+    ("sandbox-authority", "measure-clean"),
+    ("sandbox-authority", "destroy-intent-durable-before-broker"),
+    ("sandbox-authority", "destroy-recorded"),
+    ("sandbox-authority", "destroy-idempotent"),
+    ("sandbox-authority", "audit-lifecycle"),
+    ("sandbox-authority", "crash-w2-after-intent-lost"),
+    ("sandbox-authority", "crash-w4-after-broker-reaped"),
+    ("sandbox-authority", "crash-w6-destroy-intent-completed"),
+    ("sandbox-authority", "orphan-ended-record-reaped"),
+    ("sandbox-authority", "foreign-copied-labels-survive"),
+    ("sandbox-authority", "foreign-unrelated-survive"),
+    ("sandbox-authority", "ambiguous-twins-untouched"),
+    ("sandbox-authority", "drift-destroyed"),
+)
+
+
+def _static_elf(path: Path) -> str:
+    """How `path` links, from its ELF headers: `static` or `static-pie`.
+
+    Raises TaskError for anything that would need a loader or a shared
+    library inside a `FROM scratch` image: a `PT_INTERP`, or a `DT_NEEDED`.
+    """
+    data = path.read_bytes()
+    if data[:4] != b"\x7fELF" or data[4] != 2 or data[5] != 1:
+        raise TaskError(f"{path}: not a 64-bit little-endian ELF file")
+    e_type = int.from_bytes(data[16:18], "little")
+    phoff = int.from_bytes(data[32:40], "little")
+    phentsize = int.from_bytes(data[54:56], "little")
+    phnum = int.from_bytes(data[56:58], "little")
+    dynamic = None
+    for index in range(phnum):
+        at = phoff + index * phentsize
+        p_type = int.from_bytes(data[at : at + 4], "little")
+        if p_type == 3:  # PT_INTERP
+            raise TaskError(f"{path}: has an interpreter; it is not static")
+        if p_type == 2:  # PT_DYNAMIC
+            offset = int.from_bytes(data[at + 8 : at + 16], "little")
+            size = int.from_bytes(data[at + 32 : at + 40], "little")
+            dynamic = (offset, size)
+    if dynamic is not None:
+        offset, size = dynamic
+        for at in range(offset, offset + size, 16):
+            tag = int.from_bytes(data[at : at + 8], "little")
+            if tag == 0:  # DT_NULL
+                break
+            if tag == 1:  # DT_NEEDED
+                raise TaskError(f"{path}: needs a shared library; it is not static")
+    if e_type == 3:  # ET_DYN without an interpreter: static-pie
+        return "static-pie"
+    if e_type == 2:
+        return "static"
+    raise TaskError(f"{path}: ELF type {e_type} is not an executable")
+
+
+def _one_byte_changed(source: Path, target: Path) -> int:
+    """Copy `source` to `target` with one byte of its section header table
+    flipped -- bytes the loader never reads, so the copy still runs, and a
+    different file. Returns the offset changed."""
+    data = bytearray(source.read_bytes())
+    shoff = int.from_bytes(data[40:48], "little")
+    shentsize = int.from_bytes(data[58:60], "little")
+    shnum = int.from_bytes(data[60:62], "little")
+    if shoff == 0 or shoff + shentsize * shnum != len(data):
+        raise TaskError(f"{source}: the section header table is not the file's last bytes")
+    offset = len(data) - 1
+    data[offset] ^= 0x01
+    target.write_bytes(bytes(data))
+    target.chmod(0o755)
+    return offset
+
+
+def _trusted_client(found: Path, into: Path) -> tuple[Path, str]:
+    """The runtime client the evidence hands the broker, and how it was chosen.
+
+    The broker re-proves the client against M4's executable contract: owner
+    root or this uid, no group or other write, no set-id bit, on a trusted
+    filesystem. A client that meets it is used where it is; one that does not
+    (Docker Desktop's WSL client is mode 0775 on an ISO9660 mount) is copied,
+    byte for byte, into a private directory this uid owns -- what an operator
+    does to install a trusted client -- and the copy's digest is the one the
+    evidence pins. The contract is never relaxed.
+    """
+    uid = os.getuid()
+    real = found.resolve()
+
+    def trusted(path: Path) -> bool:
+        st = path.stat()
+        if st.st_uid not in (0, uid) or st.st_mode & 0o6022:
+            return False
+        for parent in path.parents:
+            pst = parent.stat()
+            sticky = pst.st_mode & 0o1000
+            if pst.st_uid not in (0, uid) or (pst.st_mode & 0o022 and not sticky):
+                return False
+        mounts = Path("/proc/self/mounts").read_text(encoding="utf-8", errors="replace")
+        best = ("", "")
+        for line in mounts.splitlines():
+            fields = line.split()
+            if (
+                len(fields) >= 3
+                and str(path).startswith(fields[1])
+                and len(fields[1]) > len(best[0])
+            ):
+                best = (fields[1], fields[2])
+        return best[1] not in ("9p", "v9fs", "nfs", "nfs4", "cifs", "smb3", "fuse", "iso9660")
+
+    if trusted(real):
+        return real, f"{real} (used where it is)"
+    into.mkdir(mode=0o700, parents=True, exist_ok=True)
+    copy = into / "docker"
+    shutil.copyfile(real, copy)
+    copy.chmod(0o755)
+    if not trusted(copy):
+        raise TaskError(f"cannot install a trusted copy of {real} at {copy}")
+    return copy, f"{copy} (a copy of {real}, which the executable contract refuses)"
+
+
+def _docker(client: Path, socket: str, *args: str, check: bool = True) -> str:
+    """The runtime client, as the evidence's own setup runs it -- never the
+    broker's path: explicit host, no inherited configuration."""
+    result = subprocess.run(
+        [str(client), "--host", f"unix://{socket}", *args],
+        cwd=str(ROOT),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if check and result.returncode != 0:
+        raise TaskError(f"`docker {' '.join(args)}` failed: {result.stderr.strip()[:400]}")
+    return result.stdout
+
+
+def _build_image(
+    client: Path, socket: str, context: Path, binary: Path, platform_: str, fixture: str | None
+) -> str:
+    """One `FROM scratch` image holding `binary` at the probe's path: built
+    offline from local bytes, its identity the content digest the runtime
+    returns. Nothing is pulled."""
+    shutil.rmtree(context, ignore_errors=True)
+    context.mkdir(parents=True)
+    shutil.copyfile(binary, context / "sandbox-probe")
+    lines = [
+        "FROM scratch",
+        "COPY --chmod=0755 sandbox-probe /usr/libexec/direwolf/sandbox-probe",
+    ]
+    if fixture is not None:
+        lines.append(f"ENV DW_FIXTURE={fixture}")
+    (context / "Dockerfile").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    iid = context / "iid"
+    _docker(
+        client,
+        socket,
+        "build",
+        "--quiet",
+        "--pull=false",
+        "--network",
+        "none",
+        "--platform",
+        platform_,
+        "--iidfile",
+        str(iid),
+        str(context),
+    )
+    image = iid.read_text(encoding="utf-8").strip()
+    if not re.fullmatch(r"sha256:[0-9a-f]{64}", image):
+        raise TaskError(f"the built image has no content identity: {image!r}")
+    return image
+
+
+def task_sandbox_foundation_evidence() -> None:
+    """M5a's real-container evidence (ADR-0047): a real OCI runtime, real
+    containers, the real broker -- and, for the lifecycle, the real authority.
+
+    Setup first, and separate from the evidence: the probe and the fixture are
+    built statically and proved static from their ELF headers; their digests
+    are pinned; the evidence images are built offline `FROM scratch` and
+    named by content; a trusted runtime client is chosen. Then the broker's
+    and the authority's real-container suites run, every case must report,
+    no container the evidence made may remain, and every container that was
+    there before must still be there.
+
+    No reachable runtime, no container, no measurement: NOT EXERCISED, which
+    fails. Linux only.
+    """
+    if not sys.platform.startswith("linux"):
+        raise TaskError("NOT EXERCISED: the sandbox evidence needs Linux and an OCI runtime")
+    found = shutil.which("docker")
+    if found is None:
+        raise TaskError("NOT EXERCISED: no container runtime client (`docker`) on PATH")
+    socket = os.environ.get("DW_SANDBOX_SOCKET", "/var/run/docker.sock")
+    target_root = Path(os.environ.get("CARGO_TARGET_DIR", str(ROOT / "target")))
+    work = Path(os.environ.get("DW_SANDBOX_WORK", str(Path.home() / ".cache" / "dw-m5a")))
+    shutil.rmtree(work, ignore_errors=True)
+    work.mkdir(mode=0o700, parents=True)
+    client, chosen = _trusted_client(Path(found), work / "client")
+    try:
+        server = json.loads(
+            _docker(client, socket, "version", "--format", "{{json .Server}}").strip()
+        )
+    except (TaskError, json.JSONDecodeError) as exc:
+        raise TaskError(f"NOT EXERCISED: the runtime at {socket} does not answer: {exc}") from exc
+    if server.get("Os") != "linux":
+        raise TaskError(f"NOT EXERCISED: the runtime is not a Linux one: {server.get('Os')}")
+    arch = {"amd64": "x86_64", "arm64": "aarch64"}.get(str(server.get("Arch")))
+    if arch is None:
+        raise TaskError(f"the runtime's architecture {server.get('Arch')!r} is not supported")
+    triple = f"{arch}-unknown-linux-gnu"
+    platform_ = f"linux/{server.get('Arch')}"
+    before = set(
+        _docker(client, socket, "container", "ls", "--all", "--no-trunc", "--quiet").split()
+    )
+
+    # The probe and the fixture, static.
+    static = target_root / "sandbox-static"
+    env = dict(os.environ, RUSTFLAGS="-C target-feature=+crt-static")
+    command = [
+        "cargo",
+        "build",
+        "--locked",
+        "--release",
+        "-p",
+        "dwk-sandbox-probe",
+        "--bin",
+        "dwk-sandbox-probe",
+        "--example",
+        "sandbox_fixture",
+        "--target",
+        triple,
+        "--target-dir",
+        str(static),
+    ]
+    print(f"{DIM}$ RUSTFLAGS='-C target-feature=+crt-static' {' '.join(command)}{OFF}", flush=True)
+    if subprocess.run(command, cwd=str(ROOT), env=env, check=False).returncode != 0:
+        raise TaskError("the static probe did not build")
+    probe = static / triple / "release" / "dwk-sandbox-probe"
+    fixture = static / triple / "release" / "examples" / "sandbox_fixture"
+    linking = {name: _static_elf(path) for name, path in (("probe", probe), ("fixture", fixture))}
+    probe_sha = hashlib.sha256(probe.read_bytes()).hexdigest()
+    fixture_sha = hashlib.sha256(fixture.read_bytes()).hexdigest()
+    changed = work / "probe-changed"
+    offset = _one_byte_changed(probe, changed)
+
+    images: dict[str, str] = {}
+    for name, binary, variant in (
+        ("real", probe, None),
+        ("tampered-byte", changed, None),
+        ("substituted", fixture, None),
+        ("malformed", fixture, "malformed"),
+        ("truncated", fixture, "truncated"),
+        ("extra-field", fixture, "extra-field"),
+        ("flood", fixture, "flood"),
+        ("hang", fixture, "hang"),
+        ("fixture", fixture, "none"),
+    ):
+        images[name] = _build_image(
+            client, socket, work / "images" / name, binary, platform_, variant
+        )
+    _docker(client, socket, "image", "tag", images["real"], SANDBOX_IMAGE_TAG)
+    inspected = json.loads(
+        _docker(client, socket, "image", "inspect", "--format", "{{json .}}", images["real"])
+    )
+    if inspected.get("Architecture") != server.get("Arch") or inspected.get("Os") != "linux":
+        raise TaskError(f"the evidence image is not linux/{server.get('Arch')}")
+
+    print(f"{BOLD}sandbox evidence setup{OFF}")
+    version = f"{server.get('Version')} (api {server.get('ApiVersion')})"
+    print(f"  runtime            {version}, {platform_}")
+    print(f"  runtime client     {chosen}")
+    print(f"  probe              {linking['probe']}, sha256 {probe_sha}")
+    print(f"  fixture            {linking['fixture']}, sha256 {fixture_sha}")
+    print(f"  changed probe      one byte flipped at offset {offset}")
+    print(f"  image (content id) {images['real']}  repo digests: {inspected.get('RepoDigests')}")
+    for name, image in images.items():
+        print(f"  image {name:<13}{image}")
+
+    os.environ.update(
+        {
+            "DW_SANDBOX_RUNTIME": str(client),
+            "DW_SANDBOX_SOCKET": socket,
+            "DW_SANDBOX_IMAGE": images["real"],
+            "DW_SANDBOX_IMAGE_TAG": SANDBOX_IMAGE_TAG,
+            "DW_SANDBOX_PROBE_SHA256": probe_sha,
+            "DW_SANDBOX_FIXTURE_SHA256": fixture_sha,
+            "DW_SANDBOX_IMAGE_TAMPERED_BYTE": images["tampered-byte"],
+            "DW_SANDBOX_IMAGE_SUBSTITUTED": images["substituted"],
+            "DW_SANDBOX_IMAGE_MALFORMED": images["malformed"],
+            "DW_SANDBOX_IMAGE_TRUNCATED": images["truncated"],
+            "DW_SANDBOX_IMAGE_EXTRA_FIELD": images["extra-field"],
+            "DW_SANDBOX_IMAGE_FLOOD": images["flood"],
+            "DW_SANDBOX_IMAGE_HANG": images["hang"],
+            "DW_SANDBOX_IMAGE_FIXTURE": images["fixture"],
+        }
+    )
+    outputs: list[str] = []
+    try:
+        run("cargo", "build", "--locked", "-p", "dwkd-broker")
+        for package, test, names in (
+            ("dwkd-broker", "sandbox_foundation", SANDBOX_BROKER_TESTS),
+            ("dwkd-authority", "sandbox_lifecycle", SANDBOX_AUTHORITY_TESTS),
+        ):
+            output = run_captured(
+                "cargo",
+                "test",
+                "--locked",
+                "-p",
+                package,
+                "--test",
+                test,
+                "--",
+                "--ignored",
+                "--exact",
+                "--nocapture",
+                "--test-threads=1",
+                *names,
+            )
+            summaries = [line for line in output.splitlines() if line.startswith("test result: ")]
+            expected = f"test result: ok. {len(names)} passed; 0 failed; 0 ignored"
+            if len(summaries) != 1 or not summaries[0].startswith(expected):
+                raise TaskError(
+                    f"the {test} suite did not run all of its tests: expected `{expected}`, "
+                    f"got {summaries or 'no summary'}"
+                )
+            outputs.append(output)
+    finally:
+        after = set(
+            _docker(client, socket, "container", "ls", "--all", "--no-trunc", "--quiet").split()
+        )
+        for image in set(images.values()):
+            _docker(client, socket, "image", "rm", "--force", image, check=False)
+        _docker(client, socket, "image", "rm", SANDBOX_IMAGE_TAG, check=False)
+    left = sorted(after - before)
+    removed = sorted(before - after)
+    if left:
+        raise TaskError(f"the evidence left {len(left)} container(s) behind: {left}")
+    if removed:
+        raise TaskError(
+            f"{len(removed)} container(s) that predate the evidence are gone: {removed}"
+        )
+    print(f"{GREEN}cleanup: no evidence container remains; {len(before)} pre-existing kept{OFF}")
+    records = require_sandbox_evidence("\n".join(outputs), SANDBOX_CASES)
+    latency = [r for r in records if r.get("case") == "latency"]
+    if latency:
+        print(f"{BOLD}latency{OFF} {json.dumps(latency[0], sort_keys=True)}")
+    uvrun("dwcheck", "closure", "--report")
+
+
+def require_sandbox_evidence(
+    output: str, cases: tuple[tuple[str, str], ...]
+) -> list[dict[str, object]]:
+    """Every (suite, case) must have printed its SANDBOX-EVIDENCE line, exercised."""
+    reported: set[tuple[str, str]] = set()
+    records: list[dict[str, object]] = []
+    for line in output.splitlines():
+        at = line.find(SANDBOX_EVIDENCE_PREFIX)
+        if at < 0:
+            continue
+        try:
+            record = json.loads(line[at + len(SANDBOX_EVIDENCE_PREFIX) :])
+        except json.JSONDecodeError as exc:
+            raise TaskError(f"unreadable evidence line: {line[:200]}") from exc
+        if not isinstance(record, dict) or not record.get("outcome") or not record.get("suite"):
+            raise TaskError(f"malformed evidence line: {line[:200]}")
+        if str(record["outcome"]).lower().startswith("not-exercised"):
+            continue
+        reported.add((str(record["suite"]), str(record.get("case"))))
+        records.append(record)
+    missing = [f"{suite}/{case}" for suite, case in cases if (suite, case) not in reported]
+    if missing:
+        raise TaskError(
+            f"NOT EXERCISED: {len(missing)} sandbox evidence case(s) did not report: "
+            + ", ".join(missing[:40])
+        )
+    print(f"{GREEN}sandbox evidence: {len(cases)} cases reported{OFF}")
+    return records
+
+
 def _proc_evidence(output: str) -> set[tuple[str, str]]:
     """Every (suite, case) a PROC-EVIDENCE line reported as exercised."""
     reported: set[tuple[str, str]] = set()
@@ -2243,6 +2765,7 @@ TASKS = {
     "filesystem-operations-evidence": task_filesystem_operations_evidence,
     "process-broker-evidence": task_process_broker_evidence,
     "secret-broker-evidence": task_secret_broker_evidence,
+    "sandbox-foundation-evidence": task_sandbox_foundation_evidence,
     "fuzz-smoke": task_fuzz_smoke,
     "fuzz": task_fuzz,
     "security": task_security,

@@ -13,6 +13,10 @@
 # definition (ADR-0018, ADR-0019).
 /crates/dwkd-authority/   @Onwcan
 /crates/dwkd-broker/      @Onwcan
+# The sandbox's trusted probe, which the authority trusts by digest, and the
+# oci-strict profile the broker applies and the probe checks (ADR-0047).
+/crates/dwk-sandbox-probe/   @Onwcan
+/crates/dwk-sandbox-profile/ @Onwcan
 
 # The wire format between the cognition plane and the authority plane. A new
 # DWKP operation needs a written argument that it is not a second path from

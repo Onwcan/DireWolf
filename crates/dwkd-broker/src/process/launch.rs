@@ -51,6 +51,33 @@ pub(super) struct Launched {
     pub(super) stderr: io::PipeReader,
 }
 
+/// What a launch executes, byte for byte: `argv` (whose first word is
+/// display text, never opened) and the environment, built from nothing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Program {
+    /// The words of `argv`.
+    pub(crate) argv: Vec<Vec<u8>>,
+    /// `NAME=value` entries.
+    pub(crate) envp: Vec<Vec<u8>>,
+}
+
+impl Program {
+    /// The program a `process_start` names.
+    pub(super) fn of(start: &ProcessStartAuthorisation) -> Self {
+        Self {
+            argv: std::iter::once(start.argv0.as_str().as_bytes().to_vec())
+                .chain(start.args.iter().map(|a| a.as_str().as_bytes().to_vec()))
+                .collect(),
+            envp: start
+                .environment
+                .variables()
+                .into_iter()
+                .map(|(name, value)| format!("{name}={value}").into_bytes())
+                .collect(),
+        }
+    }
+}
+
 /// A secret a launch delivers (M4e): the variable for mode B, none for mode
 /// C, and the value, which also redacts the launch's output.
 #[derive(Debug)]
@@ -94,7 +121,7 @@ fn abandon(child: &mut Child) {
 /// Start the helper, hand it the launch, and wait for the handshake.
 pub(super) fn launch(
     helper_binary: &Path,
-    start: &ProcessStartAuthorisation,
+    program: &Program,
     executable: OwnedFd,
     cwd: OwnedFd,
     secret: Option<SecretLaunch>,
@@ -123,15 +150,8 @@ pub(super) fn launch(
     crate::crash::point("process_helper_spawned");
 
     let spec = helper::Spec {
-        argv: std::iter::once(start.argv0.as_str().as_bytes().to_vec())
-            .chain(start.args.iter().map(|a| a.as_str().as_bytes().to_vec()))
-            .collect(),
-        envp: start
-            .environment
-            .variables()
-            .into_iter()
-            .map(|(name, value)| format!("{name}={value}").into_bytes())
-            .collect(),
+        argv: program.argv.clone(),
+        envp: program.envp.clone(),
         crash_before_exec: crate::crash::armed("process_helper_before_exec"),
         secret: secret.map(|s| match s.env_name {
             Some(name) => helper::SpecSecret::Env(name),

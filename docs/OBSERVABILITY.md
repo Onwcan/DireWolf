@@ -20,7 +20,7 @@ Conflating them produces the common failure where a system exports rich telemetr
 
 Every security-relevant decision and action, written by the kernel at the moment of decision:
 
-`tool.*` (requested, canonicalised, decided, approved/denied, executed, outcome) · `approval.*` · `grant.*` · `capability.*` (minted, attenuated, rejected) · `secret.*` (resolved, injected, denied, redaction_hit — never the value) · `policy.*` (loaded, decision) · `budget.*` · `run.admitted` / `run.authority_frozen` · `sandbox.*` (created, escape_attempt, destroyed) · `network.*` (allowed, denied, credential_injected) · `worker.*`
+`tool.*` (requested, canonicalised, decided, approved/denied, executed, outcome) · `approval.*` · `grant.*` · `capability.*` (minted, attenuated, rejected) · `secret.*` (resolved, injected, denied, redaction_hit — never the value) · `policy.*` (loaded, decision) · `budget.*` · `run.admitted` / `run.authority_frozen` · `sandbox.*` (created, escape_attempt, destroyed — as built at M5a, `environment.*`: intent_recorded, ready, refused, outcome_unknown, measured, drifted, destroy_intent, destroyed, destroy_failed, lost, reconciled, orphan_reaped, each with the environment, the run and, where measured, the declared, measured and effective levels and the invariants that failed; [ADR-0047](adr/0047-m5a-oci-execution-environment-and-measured-assurance.md) §11) · `network.*` (allowed, denied, credential_injected) · `worker.*`
 
 ### Record
 

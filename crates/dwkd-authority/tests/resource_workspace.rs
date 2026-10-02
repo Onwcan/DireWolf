@@ -524,11 +524,13 @@ mod linux {
         // the process table and the process-idempotency table, whose
         // triggers go with them, and schema 6 (M4e) adds the secret index,
         // run bindings, injection ledger and use counts (and widens
-        // run_withheld's reasons, which an older store's rows satisfy).
+        // run_withheld's reasons, which an older store's rows satisfy), and
+        // schema 7 (M5a) adds the environment ledger.
         {
             let conn = raw(&h.state());
             conn.execute_batch(
-                "DROP TABLE secret_use; DROP TABLE secret_injection; \
+                "DROP TABLE environment; DROP TABLE secret_use; \
+                 DROP TABLE secret_injection; \
                  DROP TABLE secret_run_binding; DROP TABLE secret_revision; \
                  DROP TABLE process_idempotency; DROP TABLE tool_process; \
                  DROP TABLE process_invocation; DROP TABLE tool_staging; \
@@ -572,7 +574,7 @@ mod linux {
         {
             let conn = raw(&h.state());
             conn.execute_batch(
-                "DROP TABLE secret_use; DROP TABLE secret_injection; DROP TABLE secret_run_binding;                  DROP TABLE secret_revision; DROP TABLE process_idempotency; DROP TABLE tool_process;                  DROP TABLE process_invocation; DROP TABLE tool_staging;                  DROP TABLE tool_idempotency; DROP TABLE tool_invocation;                  PRAGMA user_version = 2;",
+                "DROP TABLE environment; DROP TABLE secret_use; DROP TABLE secret_injection; DROP TABLE secret_run_binding;                  DROP TABLE secret_revision; DROP TABLE process_idempotency; DROP TABLE tool_process;                  DROP TABLE process_invocation; DROP TABLE tool_staging;                  DROP TABLE tool_idempotency; DROP TABLE tool_invocation;                  PRAGMA user_version = 2;",
             )
             .unwrap();
         }

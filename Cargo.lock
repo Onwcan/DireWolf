@@ -344,6 +344,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "dwk-sandbox-probe"
+version = "0.0.0"
+dependencies = [
+ "dwk-proto",
+ "dwk-sandbox-profile",
+ "linux-keyutils",
+ "nix",
+ "rustix",
+]
+
+[[package]]
+name = "dwk-sandbox-profile"
+version = "0.0.0"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
 name = "dwkd-authority"
 version = "0.0.0"
 dependencies = [
@@ -367,6 +385,7 @@ name = "dwkd-broker"
 version = "0.0.0"
 dependencies = [
  "dwk-proto",
+ "dwk-sandbox-profile",
  "nix",
  "rustix",
  "sha2 0.11.0",

@@ -83,6 +83,21 @@ pub enum CrashPoint {
     SecretBeforeOutcome,
     /// Secret S9: the outcome is durable and the caller has not been answered.
     SecretAfterOutcome,
+    /// Environment W2 (M5a): the preparation's intent is durable; the broker
+    /// has been told nothing.
+    EnvironmentAfterIntent,
+    /// Environment W4: the broker answered a preparation; the outcome is not
+    /// yet durable.
+    EnvironmentAfterBroker,
+    /// Environment W5: the preparation's outcome is durable; the caller has
+    /// not been answered.
+    EnvironmentAfterOutcome,
+    /// Environment W6: a destruction's intent is durable; the broker has been
+    /// told nothing.
+    EnvironmentDestroyAfterIntent,
+    /// Environment W7: the broker answered a destruction; the outcome is not
+    /// yet durable.
+    EnvironmentDestroyAfterBroker,
 }
 
 impl CrashPoint {
@@ -121,6 +136,11 @@ impl CrashPoint {
             Self::SecretAfterBroker => '8',
             Self::SecretBeforeOutcome => '0',
             Self::SecretAfterOutcome => '9',
+            Self::EnvironmentAfterIntent => 'h',
+            Self::EnvironmentAfterBroker => 'i',
+            Self::EnvironmentAfterOutcome => 'j',
+            Self::EnvironmentDestroyAfterIntent => 'k',
+            Self::EnvironmentDestroyAfterBroker => 'l',
         }
     }
 }
@@ -151,6 +171,18 @@ impl CrashPoint {
         Self::SecretAfterBroker,
         Self::SecretBeforeOutcome,
         Self::SecretAfterOutcome,
+    ];
+
+    /// The points of an environment's lifecycle (M5a, ADR-0047 §12), in
+    /// order: W2, W4 and W5 of a preparation, W6 and W7 of a destruction.
+    /// W1 (before the intent) is [`CrashPoint::BeforeCommit`]; W3 (the
+    /// broker mid-preparation) is the broker's own.
+    pub const ENVIRONMENT: [Self; 5] = [
+        Self::EnvironmentAfterIntent,
+        Self::EnvironmentAfterBroker,
+        Self::EnvironmentAfterOutcome,
+        Self::EnvironmentDestroyAfterIntent,
+        Self::EnvironmentDestroyAfterBroker,
     ];
 }
 

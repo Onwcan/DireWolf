@@ -167,6 +167,8 @@ Budget leases therefore carry the same expiry-and-reclaim treatment as session l
 
 **Orphan reaping matters.** Containers, worktrees and child processes outliving their run are both a resource leak and a security problem — a container that outlives its capability grant is an execution environment nobody is accounting for. Every environment is labelled with its run id so reaping is exact.
 
+*(As built at M5a, [ADR-0047](adr/0047-m5a-oci-execution-environment-and-measured-assurance.md) §§11–12: an environment's intent (`PREPARING`) is durable before the broker is told anything, and its destruction (`DESTROYING`) likewise; at start every `PREPARING` row becomes `UNKNOWN`, and reconciliation compares every container labelled as the store's with the records — still running is measured again, stopped or pending is destroyed by its labels, missing is `LOST`, an ended record's surviving container is an orphan and removed, two containers claiming one environment and run are left alone, and a container naming an environment the store never recorded is foreign: its labels were copied, since nothing is created before it is recorded. Crash windows W1–W7, with their retry classes, are tabulated there; W2, W3, W4 and W6 are exercised against a real runtime.)*
+
 ## 7a. Leases have a TTL and a renewal
 
 Leases are load-bearing in five places and an earlier draft specified neither a duration nor a renewal operation, which collides directly with approvals: `approve-novel-exec` has a 1-hour TTL, so a run waiting on a human would hold a session lease for an hour with no way to keep it alive.

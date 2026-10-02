@@ -205,11 +205,40 @@ pub enum AuditEvent {
     /// a known credential shape, and it was redacted (M4e): which handle or
     /// class, how many times — never the bytes.
     SecretRedactionHit,
+    /// An execution environment's intent was recorded, before the broker was
+    /// told anything (M5a).
+    EnvironmentIntentRecorded,
+    /// An environment was prepared and measured clean: its levels (M5a).
+    EnvironmentReady,
+    /// An environment was refused, and provably none of it remains (M5a).
+    EnvironmentRefused,
+    /// An environment may exist and nothing proves whether (M5a). Never
+    /// prepared again; reconciliation decides by label.
+    EnvironmentOutcomeUnknown,
+    /// An existing environment was measured again and is still clean (M5a).
+    EnvironmentMeasured,
+    /// An existing environment no longer measures clean (M5a): it is destroyed.
+    EnvironmentDrifted,
+    /// An environment's destruction was recorded, before the broker was told
+    /// (M5a).
+    EnvironmentDestroyIntent,
+    /// An environment is gone (M5a).
+    EnvironmentDestroyed,
+    /// A destruction could not be completed; it stays pending (M5a).
+    EnvironmentDestroyFailed,
+    /// Reconciliation found a recorded environment gone, and not by the
+    /// authority's hand (M5a).
+    EnvironmentLost,
+    /// Reconciliation compared the records with the runtime's labels (M5a).
+    EnvironmentReconciled,
+    /// A container labelled as one of this store's environments, that no live
+    /// record names, was removed (M5a).
+    EnvironmentOrphanReaped,
 }
 
 impl AuditEvent {
     /// Every kind, in declaration order.
-    pub const ALL: [Self; 45] = [
+    pub const ALL: [Self; 57] = [
         Self::StoreCreated,
         Self::StoreOpened,
         Self::PolicyInstalled,
@@ -255,6 +284,18 @@ impl AuditEvent {
         Self::SecretFailed,
         Self::SecretOutcomeUnknown,
         Self::SecretRedactionHit,
+        Self::EnvironmentIntentRecorded,
+        Self::EnvironmentReady,
+        Self::EnvironmentRefused,
+        Self::EnvironmentOutcomeUnknown,
+        Self::EnvironmentMeasured,
+        Self::EnvironmentDrifted,
+        Self::EnvironmentDestroyIntent,
+        Self::EnvironmentDestroyed,
+        Self::EnvironmentDestroyFailed,
+        Self::EnvironmentLost,
+        Self::EnvironmentReconciled,
+        Self::EnvironmentOrphanReaped,
     ];
 
     /// The spelling in a record's `event` field.
@@ -306,6 +347,18 @@ impl AuditEvent {
             Self::SecretFailed => "secret.failed",
             Self::SecretOutcomeUnknown => "secret.outcome_unknown",
             Self::SecretRedactionHit => "secret.redaction_hit",
+            Self::EnvironmentIntentRecorded => "environment.intent_recorded",
+            Self::EnvironmentReady => "environment.ready",
+            Self::EnvironmentRefused => "environment.refused",
+            Self::EnvironmentOutcomeUnknown => "environment.outcome_unknown",
+            Self::EnvironmentMeasured => "environment.measured",
+            Self::EnvironmentDrifted => "environment.drifted",
+            Self::EnvironmentDestroyIntent => "environment.destroy_intent",
+            Self::EnvironmentDestroyed => "environment.destroyed",
+            Self::EnvironmentDestroyFailed => "environment.destroy_failed",
+            Self::EnvironmentLost => "environment.lost",
+            Self::EnvironmentReconciled => "environment.reconciled",
+            Self::EnvironmentOrphanReaped => "environment.orphan_reaped",
         }
     }
 }

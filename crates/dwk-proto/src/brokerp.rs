@@ -1,6 +1,7 @@
 //! The private authority → broker protocol (M4b, ADR-0043; version 2 for the
 //! M4c filesystem operations, ADR-0044; version 3 for the M4d process
-//! operations, ADR-0045; version 4 for the M4e secret primitives, ADR-0046).
+//! operations, ADR-0045; version 4 for the M4e secret primitives, ADR-0046;
+//! version 5 for the M5a execution-environment lifecycle, ADR-0047).
 //! **Not DWKP.**
 //!
 //! One exchange on one connection, and nothing else:
@@ -73,6 +74,8 @@
 //! file. The two daemons do the I/O.
 
 pub use crate::dwkp::fsops::{ContentRevision, PatchEdit, PatchEdits};
+
+pub mod sandbox;
 pub use crate::dwkp::procops::{ProcessArgs, ProcessStreamSnapshot};
 use crate::error::{ErrorCode, ProtocolError, Violation};
 use crate::frame::{self, ContentType};
@@ -82,7 +85,7 @@ use crate::limits::{
     MAX_SEARCH_MATCHES,
 };
 use crate::schema::{Defs, int, obj, string};
-use crate::wire::id::{InvocationId, ProcessId};
+use crate::wire::id::{EnvironmentId, InvocationId, ProcessId, RunId};
 use crate::wire::list::BoundedList;
 use crate::wire::macros::wire_struct;
 use crate::wire::scalar::{
@@ -92,13 +95,19 @@ use crate::wire::scalar::{
 };
 use crate::wire::{Cx, WireType, expect_integer, expect_string};
 
+use sandbox::{
+    ContainerRef, EnvironmentProfile, ImageId, InvariantChecks, Milliseconds, NetworkTopology,
+    RuntimeVersion, StoreInstance,
+};
+
 /// The protocol version this build speaks. Version 2 (ADR-0044) added the M4c
 /// operations and the `indeterminate` answer; version 3 (ADR-0045) the process
 /// operations and authorisations that carry no descriptor; version 4
-/// (ADR-0046) the secret primitives. The daemons ship together, so 4 is the
-/// only version either accepts: an older peer is refused by its hello, never
-/// half-understood.
-pub const PROTOCOL: u16 = 4;
+/// (ADR-0046) the secret primitives; version 5 (ADR-0047) the execution
+/// environment's lifecycle — prepare, measure, destroy, list. The daemons ship
+/// together, so 5 is the only version either accepts: an older peer is refused
+/// by its hello, never half-understood.
+pub const PROTOCOL: u16 = 5;
 
 /// The largest authorisation body the broker reads: one DWKP frame, because an
 /// `fs.write` carries its content and an `fs.patch` its edits. Read from the
@@ -326,7 +335,7 @@ pub const PROCESS_BASE_ENVIRONMENT: &[(&str, &str)] = &[
 
 wire_int! {
     /// The private protocol's version.
-    ProtocolVersion(u16), min = 4, max = 4
+    ProtocolVersion(u16), min = 5, max = 5
 }
 
 wire_int! {
@@ -544,6 +553,14 @@ wire_enum! {
         /// A launch that receives one secret (ADR-0046): the secret
         /// injection primitive for modes B and C.
         SecretProcessStart = "broker.secret_process_start",
+        /// Prepare an execution environment and measure it (ADR-0047).
+        EnvironmentPrepare = "broker.environment_prepare",
+        /// Measure an environment that exists (ADR-0047): re-attach.
+        EnvironmentMeasure = "broker.environment_measure",
+        /// Destroy one environment, exactly (ADR-0047).
+        EnvironmentDestroy = "broker.environment_destroy",
+        /// List the environments this store owns (ADR-0047).
+        EnvironmentList = "broker.environment_list",
         /// The broker's outcome for an authorisation.
         Outcome = "broker.outcome",
     }
@@ -566,6 +583,7 @@ impl PrivateKind {
     /// | `process_status`, `process_kill` | none: the process is the broker's own child, named by its handle |
     /// | `secret_egress` | the secret: a pipe's read end, at end of file after the value |
     /// | `secret_process_start` | the executable; the working directory; the secret pipe |
+    /// | `environment_*` | the container runtime's executable; the working directory it runs in |
     ///
     /// `None` for the hello and the outcome, which are not authorisations.
     #[must_use]
@@ -580,12 +598,39 @@ impl PrivateKind {
             | Self::FsDelete
             | Self::FsReclaim
             | Self::SecretEgress => Some(1),
-            Self::FsPatch | Self::FsMove | Self::ProcessStart => Some(2),
+            Self::FsPatch
+            | Self::FsMove
+            | Self::ProcessStart
+            | Self::EnvironmentPrepare
+            | Self::EnvironmentMeasure
+            | Self::EnvironmentDestroy
+            | Self::EnvironmentList => Some(2),
             Self::SecretProcessStart => Some(3),
             Self::Hello | Self::Outcome => None,
         }
     }
+
+    /// How long one exchange of this kind may take, end to end, in seconds
+    /// (ADR-0047 §10). A filesystem or process operation is one system call
+    /// or one launch; an environment operation drives a container runtime
+    /// through several commands, each bounded, and gets the longer bound —
+    /// on both sides of the channel, so neither waits on the other longer.
+    #[must_use]
+    pub const fn deadline_seconds(self) -> u64 {
+        match self {
+            Self::EnvironmentPrepare | Self::EnvironmentMeasure => ENVIRONMENT_DEADLINE_SECONDS,
+            Self::EnvironmentDestroy | Self::EnvironmentList => ENVIRONMENT_QUERY_DEADLINE_SECONDS,
+            _ => EXCHANGE_DEADLINE_SECONDS,
+        }
+    }
 }
+
+/// An exchange's deadline, for every kind but the environment's.
+pub const EXCHANGE_DEADLINE_SECONDS: u64 = 10;
+/// An environment preparation's or measurement's deadline.
+pub const ENVIRONMENT_DEADLINE_SECONDS: u64 = 120;
+/// An environment destruction's or listing's deadline.
+pub const ENVIRONMENT_QUERY_DEADLINE_SECONDS: u64 = 60;
 
 wire_enum! {
     /// Why the broker refused an authorisation. **A refusal means no
@@ -671,6 +716,29 @@ wire_enum! {
         /// The value cannot be delivered this way without ambiguity: CR, LF
         /// or NUL in a header value, NUL in an environment value.
         SecretUnsafeBytes = "SECRET_UNSAFE_BYTES",
+        /// The container runtime could not be reached. Nothing was created
+        /// or removed.
+        RuntimeUnavailable = "RUNTIME_UNAVAILABLE",
+        /// The container runtime refused or failed the operation, provably
+        /// before anything existed or after it was gone again.
+        RuntimeFailed = "RUNTIME_FAILED",
+        /// The container runtime answered with output this broker does not
+        /// accept as an answer. Nothing was created, or what was is gone.
+        RuntimeOutputMalformed = "RUNTIME_OUTPUT_MALFORMED",
+        /// The pinned image is not present. It is never pulled on demand
+        /// (SANDBOX.md §2, rule 5): acquiring it is a separate, explicit step.
+        ImageMissing = "IMAGE_MISSING",
+        /// The environment's network topology is not available in this build
+        /// or this broker's configuration.
+        TopologyUnavailable = "TOPOLOGY_UNAVAILABLE",
+        /// No container is this environment.
+        EnvironmentNotFound = "ENVIRONMENT_NOT_FOUND",
+        /// More than one container claims to be this environment: none is
+        /// touched.
+        EnvironmentAmbiguous = "ENVIRONMENT_AMBIGUOUS",
+        /// The container is not labelled as this environment of this store:
+        /// it is not touched.
+        ForeignEnvironment = "FOREIGN_ENVIRONMENT",
     }
 }
 
@@ -692,6 +760,9 @@ wire_enum! {
         /// Sending the kill signal failed in a way that does not prove it was
         /// not delivered.
         SignalUnconfirmed = "SIGNAL_UNCONFIRMED",
+        /// The container runtime may have created or removed a container and
+        /// the broker cannot prove which: reconciliation decides, by label.
+        EnvironmentUnconfirmed = "ENVIRONMENT_UNCONFIRMED",
     }
 }
 
@@ -765,6 +836,36 @@ wire_enum! {
         Evidence = "EVIDENCE",
         /// Entries the broker cannot account for.
         Unexpected = "UNEXPECTED",
+    }
+}
+
+wire_enum! {
+    /// What the container runtime says a container is doing.
+    ContainerState {
+        /// Created, never started.
+        Created = "CREATED",
+        /// Running.
+        Running = "RUNNING",
+        /// Paused.
+        Paused = "PAUSED",
+        /// Being restarted.
+        Restarting = "RESTARTING",
+        /// Its first process has exited.
+        Exited = "EXITED",
+        /// The runtime could not stop or remove it.
+        Dead = "DEAD",
+        /// Being removed.
+        Removing = "REMOVING",
+    }
+}
+
+wire_enum! {
+    /// What destroying an environment found.
+    DestroyState {
+        /// It existed, was this environment, and is gone.
+        Removed = "REMOVED",
+        /// It did not exist: an earlier destruction, or none was ever made.
+        AlreadyGone = "ALREADY_GONE",
     }
 }
 
@@ -1215,6 +1316,189 @@ wire_struct! {
     }
 }
 
+wire_struct! {
+    /// Prepare one execution environment (ADR-0047): create the container of
+    /// `profile` from `image` for `run_id`, labelled as `environment_id` of
+    /// `store`, with the workspace mounted; prove the probe inside it is the
+    /// authority's; start it; and measure it, from the runtime's record and
+    /// from inside. The runtime is the executable the authority checked and
+    /// handed over, run with arguments this broker builds from these typed
+    /// fields alone — no field is a runtime flag.
+    EnvironmentPrepareAuthorisation: reject {
+        /// Always `broker.environment_prepare`.
+        required kind: PrivateKind,
+        /// The protocol version.
+        required protocol: ProtocolVersion,
+        /// The channel from this connection's hello.
+        required channel: ChannelNonce,
+        /// The authority's id for the invocation.
+        required invocation_id: InvocationId,
+        /// The environment, as the authority named it.
+        required environment_id: EnvironmentId,
+        /// The run it is for.
+        required run_id: RunId,
+        /// The authority store it belongs to.
+        required store: StoreInstance,
+        /// The profile.
+        required profile: EnvironmentProfile,
+        /// The network topology.
+        required network: NetworkTopology,
+        /// The image, by content digest.
+        required image: ImageId,
+        /// The SHA-256 of the probe the image must carry.
+        required probe_sha256: ContentDigest,
+        /// The workspace directory, as the authority resolved it.
+        required workspace_path: HostPath,
+        /// Its device.
+        required workspace_device: KernelNumber,
+        /// Its inode.
+        required workspace_inode: KernelNumber,
+        /// The container runtime's control socket.
+        required runtime_socket: HostPath,
+        /// `argv[0]` for the runtime: its canonical path.
+        required runtime_argv0: HostPath,
+        /// The runtime executable's device.
+        required runtime_device: KernelNumber,
+        /// The runtime executable's inode.
+        required runtime_inode: KernelNumber,
+        /// Its SHA-256, as the authority computed it.
+        required runtime_sha256: ContentDigest,
+        /// The working directory's device.
+        required cwd_device: KernelNumber,
+        /// The working directory's inode.
+        required cwd_inode: KernelNumber,
+        /// Two: the runtime executable, then the working directory.
+        required descriptors: DescriptorCount,
+    }
+}
+
+wire_struct! {
+    /// Measure an environment that exists (ADR-0047): the same measurement a
+    /// preparation ends with, of `container`, against the same expectations.
+    /// What re-attaching after a restart is, and what proves drift.
+    EnvironmentMeasureAuthorisation: reject {
+        /// Always `broker.environment_measure`.
+        required kind: PrivateKind,
+        /// The protocol version.
+        required protocol: ProtocolVersion,
+        /// The channel from this connection's hello.
+        required channel: ChannelNonce,
+        /// The authority's id for the invocation.
+        required invocation_id: InvocationId,
+        /// The environment.
+        required environment_id: EnvironmentId,
+        /// The run it is for.
+        required run_id: RunId,
+        /// The authority store it belongs to.
+        required store: StoreInstance,
+        /// The profile.
+        required profile: EnvironmentProfile,
+        /// The network topology.
+        required network: NetworkTopology,
+        /// The image, by content digest.
+        required image: ImageId,
+        /// The SHA-256 of the probe the image must carry.
+        required probe_sha256: ContentDigest,
+        /// The workspace directory.
+        required workspace_path: HostPath,
+        /// Its device.
+        required workspace_device: KernelNumber,
+        /// Its inode.
+        required workspace_inode: KernelNumber,
+        /// The container the authority recorded.
+        required container: ContainerRef,
+        /// The container runtime's control socket.
+        required runtime_socket: HostPath,
+        /// `argv[0]` for the runtime.
+        required runtime_argv0: HostPath,
+        /// The runtime executable's device.
+        required runtime_device: KernelNumber,
+        /// The runtime executable's inode.
+        required runtime_inode: KernelNumber,
+        /// Its SHA-256.
+        required runtime_sha256: ContentDigest,
+        /// The working directory's device.
+        required cwd_device: KernelNumber,
+        /// The working directory's inode.
+        required cwd_inode: KernelNumber,
+        /// Two: the runtime executable, then the working directory.
+        required descriptors: DescriptorCount,
+    }
+}
+
+wire_struct! {
+    /// Destroy exactly one environment (ADR-0047 §12): the container labelled
+    /// as `environment_id` of `store` — and, when the authority recorded one,
+    /// that very `container`. Anything not so labelled is untouched.
+    EnvironmentDestroyAuthorisation: reject {
+        /// Always `broker.environment_destroy`.
+        required kind: PrivateKind,
+        /// The protocol version.
+        required protocol: ProtocolVersion,
+        /// The channel from this connection's hello.
+        required channel: ChannelNonce,
+        /// The authority's id for the invocation.
+        required invocation_id: InvocationId,
+        /// The environment.
+        required environment_id: EnvironmentId,
+        /// The run it is for.
+        required run_id: RunId,
+        /// The authority store it belongs to.
+        required store: StoreInstance,
+        /// The container the authority recorded, if it recorded one.
+        optional container: ContainerRef,
+        /// The container runtime's control socket.
+        required runtime_socket: HostPath,
+        /// `argv[0]` for the runtime.
+        required runtime_argv0: HostPath,
+        /// The runtime executable's device.
+        required runtime_device: KernelNumber,
+        /// The runtime executable's inode.
+        required runtime_inode: KernelNumber,
+        /// Its SHA-256.
+        required runtime_sha256: ContentDigest,
+        /// The working directory's device.
+        required cwd_device: KernelNumber,
+        /// The working directory's inode.
+        required cwd_inode: KernelNumber,
+        /// Two: the runtime executable, then the working directory.
+        required descriptors: DescriptorCount,
+    }
+}
+
+wire_struct! {
+    /// List the containers labelled as this store's environments (ADR-0047
+    /// §11): what reconciliation compares with the authority's records.
+    EnvironmentListAuthorisation: reject {
+        /// Always `broker.environment_list`.
+        required kind: PrivateKind,
+        /// The protocol version.
+        required protocol: ProtocolVersion,
+        /// The channel from this connection's hello.
+        required channel: ChannelNonce,
+        /// The authority's id for the invocation.
+        required invocation_id: InvocationId,
+        /// The authority store whose environments to list.
+        required store: StoreInstance,
+        /// The container runtime's control socket.
+        required runtime_socket: HostPath,
+        /// `argv[0]` for the runtime.
+        required runtime_argv0: HostPath,
+        /// The runtime executable's device.
+        required runtime_device: KernelNumber,
+        /// The runtime executable's inode.
+        required runtime_inode: KernelNumber,
+        /// Its SHA-256.
+        required runtime_sha256: ContentDigest,
+        /// The working directory's device.
+        required cwd_device: KernelNumber,
+        /// The working directory's inode.
+        required cwd_inode: KernelNumber,
+        /// Two: the runtime executable, then the working directory.
+        required descriptors: DescriptorCount,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Outcomes.
 // ---------------------------------------------------------------------------
@@ -1384,6 +1668,91 @@ wire_struct! {
 }
 
 wire_struct! {
+    /// What measuring an environment found: every invariant the profile
+    /// requires, each once, with its verdict — from the runtime's record and
+    /// from the trusted probe inside. The broker judges no level; the
+    /// authority does, from these.
+    EnvironmentMeasurement: reject {
+        /// Every invariant, once.
+        required checks: InvariantChecks,
+        /// The runtime's version, as it reported it.
+        optional runtime_version: RuntimeVersion,
+        /// How long the measurement took.
+        required measure_ms: Milliseconds,
+    }
+}
+
+wire_struct! {
+    /// A preparation ran: the container, whether it is kept, and what
+    /// measuring it found. A container that failed any required invariant is
+    /// removed before this answer is sent (`retained` false): the broker never
+    /// leaves one running that did not measure clean.
+    EnvironmentPrepareDone: reject {
+        /// The container the runtime created, if it created one.
+        optional container: ContainerRef,
+        /// Whether it is kept, measured clean.
+        required retained: bool,
+        /// The measurement, if the container could be measured at all.
+        optional measurement: EnvironmentMeasurement,
+        /// How long the preparation took, measurement included.
+        required prepare_ms: Milliseconds,
+    }
+}
+
+wire_struct! {
+    /// A measurement of an existing environment.
+    EnvironmentMeasureDone: reject {
+        /// What the runtime says the container is doing.
+        required state: ContainerState,
+        /// The measurement, when it could be made.
+        optional measurement: EnvironmentMeasurement,
+    }
+}
+
+wire_struct! {
+    /// A destruction.
+    EnvironmentDestroyDone: reject {
+        /// Removed, or already gone.
+        required state: DestroyState,
+        /// The container removed, if one was.
+        optional container: ContainerRef,
+        /// How long it took.
+        required destroy_ms: Milliseconds,
+    }
+}
+
+wire_struct! {
+    /// One container labelled as this store's.
+    OwnedEnvironment: reject {
+        /// The container.
+        required container: ContainerRef,
+        /// What it is doing.
+        required state: ContainerState,
+        /// Its image, by content digest, when the runtime names it so.
+        optional image: ImageId,
+        /// The environment its label names, if the label is one.
+        optional environment_id: EnvironmentId,
+        /// The run its label names, if the label is one.
+        optional run_id: RunId,
+        /// Whether every DireWolf label is present and well-formed.
+        required labels_exact: bool,
+    }
+}
+
+/// The containers a listing found.
+pub type OwnedEnvironments = BoundedList<OwnedEnvironment, 64>;
+
+wire_struct! {
+    /// A listing: at most 64 containers, and whether that was all.
+    EnvironmentListDone: reject {
+        /// The containers.
+        required environments: OwnedEnvironments,
+        /// Whether every labelled container is listed.
+        required complete: bool,
+    }
+}
+
+wire_struct! {
     /// A completed operation's result: exactly one member, the operation's own.
     BrokerDone: reject {
         /// An `fs.read`'s bytes.
@@ -1414,10 +1783,19 @@ wire_struct! {
         optional secret_egress: SecretEgressDone,
         /// A secret launch's confirmation.
         optional secret_process_start: ProcessStartDone,
+        /// An environment's preparation.
+        optional environment_prepare: EnvironmentPrepareDone,
+        /// An environment's measurement.
+        optional environment_measure: EnvironmentMeasureDone,
+        /// An environment's destruction.
+        optional environment_destroy: EnvironmentDestroyDone,
+        /// A listing of environments.
+        optional environment_list: EnvironmentListDone,
     }
     exactly_one(
         fs_read, fs_stat, fs_list, fs_search, fs_write, fs_patch, fs_move, fs_delete, fs_reclaim,
-        process_start, process_status, process_kill, secret_egress, secret_process_start
+        process_start, process_status, process_kill, secret_egress, secret_process_start,
+        environment_prepare, environment_measure, environment_destroy, environment_list
     )
 }
 
@@ -1616,6 +1994,14 @@ pub enum Authorisation {
     SecretEgress(SecretEgressAuthorisation),
     /// `broker.secret_process_start`.
     SecretProcessStart(SecretProcessStartAuthorisation),
+    /// `broker.environment_prepare`.
+    EnvironmentPrepare(EnvironmentPrepareAuthorisation),
+    /// `broker.environment_measure`.
+    EnvironmentMeasure(EnvironmentMeasureAuthorisation),
+    /// `broker.environment_destroy`.
+    EnvironmentDestroy(EnvironmentDestroyAuthorisation),
+    /// `broker.environment_list`.
+    EnvironmentList(EnvironmentListAuthorisation),
 }
 
 impl Authorisation {
@@ -1682,6 +2068,18 @@ impl Authorisation {
             PrivateKind::SecretProcessStart => {
                 Self::SecretProcessStart(SecretProcessStartAuthorisation::decode(value, cx)?)
             }
+            PrivateKind::EnvironmentPrepare => {
+                Self::EnvironmentPrepare(EnvironmentPrepareAuthorisation::decode(value, cx)?)
+            }
+            PrivateKind::EnvironmentMeasure => {
+                Self::EnvironmentMeasure(EnvironmentMeasureAuthorisation::decode(value, cx)?)
+            }
+            PrivateKind::EnvironmentDestroy => {
+                Self::EnvironmentDestroy(EnvironmentDestroyAuthorisation::decode(value, cx)?)
+            }
+            PrivateKind::EnvironmentList => {
+                Self::EnvironmentList(EnvironmentListAuthorisation::decode(value, cx)?)
+            }
             PrivateKind::Hello | PrivateKind::Outcome => {
                 return Err(ProtocolError::schema(
                     Violation::Inconsistent,
@@ -1712,6 +2110,10 @@ impl Authorisation {
             Self::ProcessKill(_) => PrivateKind::ProcessKill,
             Self::SecretEgress(_) => PrivateKind::SecretEgress,
             Self::SecretProcessStart(_) => PrivateKind::SecretProcessStart,
+            Self::EnvironmentPrepare(_) => PrivateKind::EnvironmentPrepare,
+            Self::EnvironmentMeasure(_) => PrivateKind::EnvironmentMeasure,
+            Self::EnvironmentDestroy(_) => PrivateKind::EnvironmentDestroy,
+            Self::EnvironmentList(_) => PrivateKind::EnvironmentList,
         }
     }
 
@@ -1733,6 +2135,10 @@ impl Authorisation {
             Self::ProcessKill(a) => &a.channel,
             Self::SecretEgress(a) => &a.channel,
             Self::SecretProcessStart(a) => &a.channel,
+            Self::EnvironmentPrepare(a) => &a.channel,
+            Self::EnvironmentMeasure(a) => &a.channel,
+            Self::EnvironmentDestroy(a) => &a.channel,
+            Self::EnvironmentList(a) => &a.channel,
         }
     }
 
@@ -1754,6 +2160,10 @@ impl Authorisation {
             Self::ProcessKill(a) => &a.invocation_id,
             Self::SecretEgress(a) => &a.invocation_id,
             Self::SecretProcessStart(a) => &a.invocation_id,
+            Self::EnvironmentPrepare(a) => &a.invocation_id,
+            Self::EnvironmentMeasure(a) => &a.invocation_id,
+            Self::EnvironmentDestroy(a) => &a.invocation_id,
+            Self::EnvironmentList(a) => &a.invocation_id,
         }
     }
 
@@ -1775,11 +2185,15 @@ impl Authorisation {
             Self::ProcessKill(a) => a.descriptors.get(),
             Self::SecretEgress(a) => a.descriptors.get(),
             Self::SecretProcessStart(a) => a.descriptors.get(),
+            Self::EnvironmentPrepare(a) => a.descriptors.get(),
+            Self::EnvironmentMeasure(a) => a.descriptors.get(),
+            Self::EnvironmentDestroy(a) => a.descriptors.get(),
+            Self::EnvironmentList(a) => a.descriptors.get(),
         }
     }
 
     fn check(&self) -> Result<(), ProtocolError> {
-        // The protocol version is checked by its type on decode (4 and only 4).
+        // The protocol version is checked by its type on decode (5 and only 5).
         let descriptors = DescriptorCount::new(self.declared_descriptors()).ok_or_else(|| {
             ProtocolError::schema(Violation::OutOfRange, "/descriptors", "no such count")
         })?;
@@ -1886,6 +2300,10 @@ impl Authorisation {
             Self::ProcessKill(a) => encode_frame(a),
             Self::SecretEgress(a) => encode_frame(a),
             Self::SecretProcessStart(a) => encode_frame(a),
+            Self::EnvironmentPrepare(a) => encode_frame(a),
+            Self::EnvironmentMeasure(a) => encode_frame(a),
+            Self::EnvironmentDestroy(a) => encode_frame(a),
+            Self::EnvironmentList(a) => encode_frame(a),
         }
     }
 }
@@ -2347,6 +2765,254 @@ impl SecretProcessStartAuthorisation {
     }
 }
 
+/// What the authority checked about the container runtime and the directory
+/// it runs in, for every environment operation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeSpec {
+    /// The runtime's control socket.
+    pub socket: HostPath,
+    /// `argv[0]`: the runtime executable's canonical path.
+    pub argv0: HostPath,
+    /// The runtime executable's `(device, inode)`.
+    pub executable: (u64, u64),
+    /// Its SHA-256.
+    pub sha256: ContentDigest,
+    /// The working directory's `(device, inode)`.
+    pub cwd: (u64, u64),
+}
+
+/// What an environment is, as the authority decided it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnvironmentSpec {
+    /// The environment.
+    pub environment_id: EnvironmentId,
+    /// Its run.
+    pub run_id: RunId,
+    /// Its store.
+    pub store: StoreInstance,
+    /// Its profile.
+    pub profile: EnvironmentProfile,
+    /// Its network topology.
+    pub network: NetworkTopology,
+    /// Its image.
+    pub image: ImageId,
+    /// The probe's SHA-256.
+    pub probe_sha256: ContentDigest,
+    /// The workspace directory's path.
+    pub workspace_path: HostPath,
+    /// The workspace directory's `(device, inode)`.
+    pub workspace: (u64, u64),
+}
+
+impl EnvironmentPrepareAuthorisation {
+    /// A preparation of `environment` through `runtime`.
+    #[must_use]
+    pub fn new(common: Common, environment: EnvironmentSpec, runtime: RuntimeSpec) -> Self {
+        let (kind, protocol, channel, invocation_id, descriptors) =
+            authorisation_head!(PrivateKind::EnvironmentPrepare, common);
+        Self {
+            kind,
+            protocol,
+            channel,
+            invocation_id,
+            environment_id: environment.environment_id,
+            run_id: environment.run_id,
+            store: environment.store,
+            profile: environment.profile,
+            network: environment.network,
+            image: environment.image,
+            probe_sha256: environment.probe_sha256,
+            workspace_path: environment.workspace_path,
+            workspace_device: KernelNumber::from_u64(environment.workspace.0),
+            workspace_inode: KernelNumber::from_u64(environment.workspace.1),
+            runtime_socket: runtime.socket,
+            runtime_argv0: runtime.argv0,
+            runtime_device: KernelNumber::from_u64(runtime.executable.0),
+            runtime_inode: KernelNumber::from_u64(runtime.executable.1),
+            runtime_sha256: runtime.sha256,
+            cwd_device: KernelNumber::from_u64(runtime.cwd.0),
+            cwd_inode: KernelNumber::from_u64(runtime.cwd.1),
+            descriptors,
+        }
+    }
+
+    /// The environment it names.
+    #[must_use]
+    pub fn environment(&self) -> EnvironmentSpec {
+        EnvironmentSpec {
+            environment_id: self.environment_id.clone(),
+            run_id: self.run_id.clone(),
+            store: self.store.clone(),
+            profile: self.profile,
+            network: self.network,
+            image: self.image.clone(),
+            probe_sha256: self.probe_sha256.clone(),
+            workspace_path: self.workspace_path.clone(),
+            workspace: (self.workspace_device.value(), self.workspace_inode.value()),
+        }
+    }
+
+    /// The runtime it names.
+    #[must_use]
+    pub fn runtime(&self) -> RuntimeSpec {
+        RuntimeSpec {
+            socket: self.runtime_socket.clone(),
+            argv0: self.runtime_argv0.clone(),
+            executable: (self.runtime_device.value(), self.runtime_inode.value()),
+            sha256: self.runtime_sha256.clone(),
+            cwd: (self.cwd_device.value(), self.cwd_inode.value()),
+        }
+    }
+}
+
+impl EnvironmentMeasureAuthorisation {
+    /// A measurement of `container`, which should be `environment`.
+    #[must_use]
+    pub fn new(
+        common: Common,
+        environment: EnvironmentSpec,
+        container: ContainerRef,
+        runtime: RuntimeSpec,
+    ) -> Self {
+        let (kind, protocol, channel, invocation_id, descriptors) =
+            authorisation_head!(PrivateKind::EnvironmentMeasure, common);
+        Self {
+            kind,
+            protocol,
+            channel,
+            invocation_id,
+            environment_id: environment.environment_id,
+            run_id: environment.run_id,
+            store: environment.store,
+            profile: environment.profile,
+            network: environment.network,
+            image: environment.image,
+            probe_sha256: environment.probe_sha256,
+            workspace_path: environment.workspace_path,
+            workspace_device: KernelNumber::from_u64(environment.workspace.0),
+            workspace_inode: KernelNumber::from_u64(environment.workspace.1),
+            container,
+            runtime_socket: runtime.socket,
+            runtime_argv0: runtime.argv0,
+            runtime_device: KernelNumber::from_u64(runtime.executable.0),
+            runtime_inode: KernelNumber::from_u64(runtime.executable.1),
+            runtime_sha256: runtime.sha256,
+            cwd_device: KernelNumber::from_u64(runtime.cwd.0),
+            cwd_inode: KernelNumber::from_u64(runtime.cwd.1),
+            descriptors,
+        }
+    }
+
+    /// The environment it names.
+    #[must_use]
+    pub fn environment(&self) -> EnvironmentSpec {
+        EnvironmentSpec {
+            environment_id: self.environment_id.clone(),
+            run_id: self.run_id.clone(),
+            store: self.store.clone(),
+            profile: self.profile,
+            network: self.network,
+            image: self.image.clone(),
+            probe_sha256: self.probe_sha256.clone(),
+            workspace_path: self.workspace_path.clone(),
+            workspace: (self.workspace_device.value(), self.workspace_inode.value()),
+        }
+    }
+
+    /// The runtime it names.
+    #[must_use]
+    pub fn runtime(&self) -> RuntimeSpec {
+        RuntimeSpec {
+            socket: self.runtime_socket.clone(),
+            argv0: self.runtime_argv0.clone(),
+            executable: (self.runtime_device.value(), self.runtime_inode.value()),
+            sha256: self.runtime_sha256.clone(),
+            cwd: (self.cwd_device.value(), self.cwd_inode.value()),
+        }
+    }
+}
+
+impl EnvironmentDestroyAuthorisation {
+    /// A destruction of `environment_id` (of `run_id`, in `store`), which is
+    /// `container` when one was recorded.
+    #[must_use]
+    pub fn new(
+        common: Common,
+        (environment_id, run_id, store): (EnvironmentId, RunId, StoreInstance),
+        container: Option<ContainerRef>,
+        runtime: RuntimeSpec,
+    ) -> Self {
+        let (kind, protocol, channel, invocation_id, descriptors) =
+            authorisation_head!(PrivateKind::EnvironmentDestroy, common);
+        Self {
+            kind,
+            protocol,
+            channel,
+            invocation_id,
+            environment_id,
+            run_id,
+            store,
+            container,
+            runtime_socket: runtime.socket,
+            runtime_argv0: runtime.argv0,
+            runtime_device: KernelNumber::from_u64(runtime.executable.0),
+            runtime_inode: KernelNumber::from_u64(runtime.executable.1),
+            runtime_sha256: runtime.sha256,
+            cwd_device: KernelNumber::from_u64(runtime.cwd.0),
+            cwd_inode: KernelNumber::from_u64(runtime.cwd.1),
+            descriptors,
+        }
+    }
+
+    /// The runtime it names.
+    #[must_use]
+    pub fn runtime(&self) -> RuntimeSpec {
+        RuntimeSpec {
+            socket: self.runtime_socket.clone(),
+            argv0: self.runtime_argv0.clone(),
+            executable: (self.runtime_device.value(), self.runtime_inode.value()),
+            sha256: self.runtime_sha256.clone(),
+            cwd: (self.cwd_device.value(), self.cwd_inode.value()),
+        }
+    }
+}
+
+impl EnvironmentListAuthorisation {
+    /// A listing of `store`'s environments.
+    #[must_use]
+    pub fn new(common: Common, store: StoreInstance, runtime: RuntimeSpec) -> Self {
+        let (kind, protocol, channel, invocation_id, descriptors) =
+            authorisation_head!(PrivateKind::EnvironmentList, common);
+        Self {
+            kind,
+            protocol,
+            channel,
+            invocation_id,
+            store,
+            runtime_socket: runtime.socket,
+            runtime_argv0: runtime.argv0,
+            runtime_device: KernelNumber::from_u64(runtime.executable.0),
+            runtime_inode: KernelNumber::from_u64(runtime.executable.1),
+            runtime_sha256: runtime.sha256,
+            cwd_device: KernelNumber::from_u64(runtime.cwd.0),
+            cwd_inode: KernelNumber::from_u64(runtime.cwd.1),
+            descriptors,
+        }
+    }
+
+    /// The runtime it names.
+    #[must_use]
+    pub fn runtime(&self) -> RuntimeSpec {
+        RuntimeSpec {
+            socket: self.runtime_socket.clone(),
+            argv0: self.runtime_argv0.clone(),
+            executable: (self.runtime_device.value(), self.runtime_inode.value()),
+            sha256: self.runtime_sha256.clone(),
+            cwd: (self.cwd_device.value(), self.cwd_inode.value()),
+        }
+    }
+}
+
 /// What an outcome says, once its shape is checked.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OutcomeResult {
@@ -2438,6 +3104,10 @@ impl BrokerDone {
             process_kill: None,
             secret_egress: None,
             secret_process_start: None,
+            environment_prepare: None,
+            environment_measure: None,
+            environment_destroy: None,
+            environment_list: None,
         }
     }
 
@@ -2558,6 +3228,42 @@ impl BrokerDone {
         }
     }
 
+    /// An environment's preparation.
+    #[must_use]
+    pub fn environment_prepare(done: EnvironmentPrepareDone) -> Self {
+        Self {
+            environment_prepare: Some(done),
+            ..Self::empty()
+        }
+    }
+
+    /// An environment's measurement.
+    #[must_use]
+    pub fn environment_measure(done: EnvironmentMeasureDone) -> Self {
+        Self {
+            environment_measure: Some(done),
+            ..Self::empty()
+        }
+    }
+
+    /// An environment's destruction.
+    #[must_use]
+    pub fn environment_destroy(done: EnvironmentDestroyDone) -> Self {
+        Self {
+            environment_destroy: Some(done),
+            ..Self::empty()
+        }
+    }
+
+    /// A listing of environments.
+    #[must_use]
+    pub fn environment_list(done: EnvironmentListDone) -> Self {
+        Self {
+            environment_list: Some(done),
+            ..Self::empty()
+        }
+    }
+
     /// Which operation this result is for.
     #[must_use]
     pub const fn kind(&self) -> Option<PrivateKind> {
@@ -2589,6 +3295,14 @@ impl BrokerDone {
             PrivateKind::SecretEgress
         } else if self.secret_process_start.is_some() {
             PrivateKind::SecretProcessStart
+        } else if self.environment_prepare.is_some() {
+            PrivateKind::EnvironmentPrepare
+        } else if self.environment_measure.is_some() {
+            PrivateKind::EnvironmentMeasure
+        } else if self.environment_destroy.is_some() {
+            PrivateKind::EnvironmentDestroy
+        } else if self.environment_list.is_some() {
+            PrivateKind::EnvironmentList
         } else {
             return None;
         })

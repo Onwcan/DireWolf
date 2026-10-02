@@ -178,6 +178,13 @@ wire_id! {
     ProcessId, "prc"
 }
 
+wire_id! {
+    /// An execution environment (M5a, ADR-0047): the authority's name for one
+    /// sandbox, minted with its preparation intent — never a container
+    /// runtime's id, never a process id.
+    EnvironmentId, "env"
+}
+
 /// Any DireWolf identifier: a lowercase prefix of two to eight letters and a
 /// UUIDv7 body. Used where the corpus permits any entity to be referenced —
 /// `correlation_id` (`PROTOCOL.md` §1 uses a run id) and `causation_id` (a

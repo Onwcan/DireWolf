@@ -43,15 +43,17 @@ use core::fmt;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use dwk_proto::brokerp::sandbox::{ContainerRef, StoreInstance};
 use dwk_proto::brokerp::{
-    BrokerGeneration, BrokerRefusal, ExecEnvironment, Indeterminate, ReclaimState, StagingHolds,
-    StagingOperation,
+    BrokerGeneration, BrokerRefusal, EnvironmentDestroyDone, EnvironmentListDone,
+    EnvironmentMeasureDone, EnvironmentPrepareDone, EnvironmentSpec, ExecEnvironment,
+    Indeterminate, PrivateKind, ReclaimState, StagingHolds, StagingOperation,
 };
 use dwk_proto::dwkp::fsops::{ContentRevision, PatchEdits};
-use dwk_proto::wire::id::{InvocationId, ProcessId};
+use dwk_proto::wire::id::{EnvironmentId, InvocationId, ProcessId, RunId};
 use dwk_proto::wire::scalar::{
-    EntryKind, KillOutcome, ListLimit, MatchLimit, Needle, PatchOutcome, ProcessState, ReadLimit,
-    ScanLimit, StatKind,
+    EntryKind, HostPath, KillOutcome, ListLimit, MatchLimit, Needle, PatchOutcome, ProcessState,
+    ReadLimit, ScanLimit, StatKind,
 };
 
 use crate::resource::{ExecHandoff, FileIdentity, ObjectHandoff, ParentHandoff, ReadHandoff};
@@ -176,6 +178,53 @@ pub enum Operation {
         /// The value: a pipe's read end, at end of file after it.
         secret: crate::secret::handoff::SecretPipe,
     },
+    /// Prepare an execution environment (M5a, ADR-0047): the environment
+    /// the authority specified, through the container runtime's client it
+    /// resolved and hashed.
+    EnvironmentPrepare {
+        /// What the environment is.
+        spec: EnvironmentSpec,
+        /// The runtime client and where it runs.
+        runtime: RuntimeHandoff,
+    },
+    /// Measure an environment the authority recorded.
+    EnvironmentMeasure {
+        /// What the environment should be.
+        spec: EnvironmentSpec,
+        /// The container recorded for it.
+        container: ContainerRef,
+        /// The runtime client and where it runs.
+        runtime: RuntimeHandoff,
+    },
+    /// Destroy exactly one environment.
+    EnvironmentDestroy {
+        /// The environment, its run and its store.
+        environment: (EnvironmentId, RunId, StoreInstance),
+        /// The container recorded for it, if one was.
+        container: Option<ContainerRef>,
+        /// The runtime client and where it runs.
+        runtime: RuntimeHandoff,
+    },
+    /// List every environment labelled as this store's.
+    EnvironmentList {
+        /// The store.
+        store: StoreInstance,
+        /// The runtime client and where it runs.
+        runtime: RuntimeHandoff,
+    },
+}
+
+/// The container runtime's client as the authority checked it (M5a): the
+/// executable, resolved and hashed; the directory it runs in; and the socket
+/// it talks to, which the operator configured.
+#[derive(Debug)]
+pub struct RuntimeHandoff {
+    /// The client.
+    pub executable: ExecHandoff,
+    /// Its working directory, open for reading.
+    pub cwd: ObjectHandoff,
+    /// The runtime's control socket.
+    pub socket: HostPath,
 }
 
 /// What a staging directory was made for: the operation, the one name it
@@ -208,7 +257,25 @@ impl Operation {
             Self::ProcessStatus { .. } => "process.status",
             Self::ProcessKill { .. } => "process.kill",
             Self::SecretEgress { .. } => "secret.egress",
+            Self::EnvironmentPrepare { .. } => "environment.prepare",
+            Self::EnvironmentMeasure { .. } => "environment.measure",
+            Self::EnvironmentDestroy { .. } => "environment.destroy",
+            Self::EnvironmentList { .. } => "environment.list",
         }
+    }
+
+    /// The exchange's own deadline, when it is not the default: an
+    /// environment step drives a container runtime (ADR-0047 §4).
+    #[must_use]
+    pub const fn deadline(&self) -> Option<Duration> {
+        let kind = match self {
+            Self::EnvironmentPrepare { .. } => PrivateKind::EnvironmentPrepare,
+            Self::EnvironmentMeasure { .. } => PrivateKind::EnvironmentMeasure,
+            Self::EnvironmentDestroy { .. } => PrivateKind::EnvironmentDestroy,
+            Self::EnvironmentList { .. } => PrivateKind::EnvironmentList,
+            _ => return None,
+        };
+        Some(Duration::from_secs(kind.deadline_seconds()))
     }
 }
 
@@ -267,7 +334,11 @@ impl BrokerOrder {
             Operation::ProcessStart { executable, .. } => executable.object(),
             Operation::ProcessStatus { .. }
             | Operation::ProcessKill { .. }
-            | Operation::SecretEgress { .. } => return None,
+            | Operation::SecretEgress { .. }
+            | Operation::EnvironmentPrepare { .. }
+            | Operation::EnvironmentMeasure { .. }
+            | Operation::EnvironmentDestroy { .. }
+            | Operation::EnvironmentList { .. } => return None,
         })
     }
 
@@ -424,6 +495,14 @@ pub enum BrokerDelivery {
     /// A mode A render completed: the value was read and accepted, and the
     /// broker's copy is gone. Nothing about the value comes back.
     SecretEgress,
+    /// A preparation ran (M5a).
+    EnvironmentPrepared(EnvironmentPrepareDone),
+    /// A measurement of an existing environment.
+    EnvironmentMeasured(EnvironmentMeasureDone),
+    /// A destruction.
+    EnvironmentDestroyed(EnvironmentDestroyDone),
+    /// A listing.
+    EnvironmentListed(EnvironmentListDone),
 }
 
 /// Why no connection could be used.
@@ -614,7 +693,8 @@ impl UnixBroker {
 impl EffectBroker for UnixBroker {
     #[cfg(target_os = "linux")]
     fn perform(&self, order: BrokerOrder) -> Result<BrokerDelivery, BrokerError> {
-        link::perform(&self.socket, self.broker_uid, self.deadline, order)
+        let deadline = order.operation().deadline().unwrap_or(self.deadline);
+        link::perform(&self.socket, self.broker_uid, deadline, order)
     }
 
     #[cfg(not(target_os = "linux"))]

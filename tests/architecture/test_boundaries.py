@@ -546,6 +546,33 @@ def test_the_m4d_exemptions_name_files_not_directories() -> None:
                 assert exempt.endswith(".rs"), (rule["id"], exempt)
 
 
+def test_the_m5a_boundaries_each_catch_their_violation(violation_rules: list[str]) -> None:
+    """M5a (ADR-0047): the sandbox plan spells no weakening, the probe
+    reaches nothing, the profile is data, no public path names the
+    environment API, and no runtime flag crosses the private wire -- each
+    rule firing on exactly its fixture, and the reviewed probe-digest file
+    staying exempt from TX018."""
+    expected = {
+        "TX032-the-sandbox-plan-spells-no-weakening": {"crates/dwkd-broker/src/sandbox/plan.rs"},
+        "TX033-the-probe-reports-and-reaches-nothing": {"crates/dwk-sandbox-probe/src/linux.rs"},
+        "TX034-the-sandbox-profile-is-data": {"crates/dwk-sandbox-profile/src/lib.rs"},
+        "TX035-no-public-path-reaches-an-execution-environment": {
+            "crates/dwkd-authority/src/server/sandbox_route.rs"
+        },
+        "TX036-no-runtime-flag-crosses-the-private-wire": {
+            "crates/dwk-proto/src/brokerp/sandbox_flags.rs"
+        },
+    }
+    for rule, paths in expected.items():
+        assert rule in violation_rules, rule
+        assert _paths(rule) == paths, (rule, sorted(_paths(rule)))
+    # Every banned spelling in the fixture plan is caught, line by line.
+    plan_lines = {
+        line for _path, line, _message in _findings("TX032-the-sandbox-plan-spells-no-weakening")
+    }
+    assert len(plan_lines) >= 4, sorted(plan_lines)
+
+
 def test_a_helper_crate_shared_by_both_daemons_is_rejected(violation_rules: list[str]) -> None:
     """RS007 catches a crate that depends on the daemons. It cannot see a crate
     the daemons depend on -- "a few helpers" linked into both -- which is the
@@ -642,6 +669,11 @@ def test_the_required_boundary_rules_are_all_declared() -> None:
         "TX017-a-new-declaration-means-only-what-the-resolver-found",
         "TX018-the-broker-hashes-only-to-prove-a-revision",
         "TX019-the-broker-changes-names-only-inside-directories-it-holds",
+        "TX032-the-sandbox-plan-spells-no-weakening",
+        "TX033-the-probe-reports-and-reaches-nothing",
+        "TX034-the-sandbox-profile-is-data",
+        "TX035-no-public-path-reaches-an-execution-environment",
+        "TX036-no-runtime-flag-crosses-the-private-wire",
         "DEP001-no-agent-framework-dependency",
         "DEP002-runtime-has-no-transport-dependency",
         "RS001-authority-depends-on-nothing-in-tree",

@@ -392,7 +392,17 @@ pub(super) const fn failure_reason(failure: BrokerFailure) -> ToolFailureReasonV
             | BrokerRefusal::SecretDescriptor
             | BrokerRefusal::SecretEmpty
             | BrokerRefusal::SecretTooLarge
-            | BrokerRefusal::SecretUnsafeBytes => ToolFailureReasonV3::BrokerExecutionError,
+            | BrokerRefusal::SecretUnsafeBytes
+            // The environment refusals (M5a) answer an environment
+            // operation, which no process tool sends.
+            | BrokerRefusal::RuntimeUnavailable
+            | BrokerRefusal::RuntimeFailed
+            | BrokerRefusal::RuntimeOutputMalformed
+            | BrokerRefusal::ImageMissing
+            | BrokerRefusal::TopologyUnavailable
+            | BrokerRefusal::EnvironmentNotFound
+            | BrokerRefusal::EnvironmentAmbiguous
+            | BrokerRefusal::ForeignEnvironment => ToolFailureReasonV3::BrokerExecutionError,
         },
         BrokerFailure::Indeterminate(_) => ToolFailureReasonV3::BrokerExecutionError,
     }

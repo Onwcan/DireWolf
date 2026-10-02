@@ -22,7 +22,9 @@ enum AssuranceLevel { None, ProcessIsolation, ContainerIsolation, VmIsolation }
 
 `assurance()` is a first-class, policy-visible value. A rule can say "this action requires at least `ContainerIsolation`," and an environment that cannot provide it is refused rather than silently accepted. This is how we keep isolation and authorization orthogonal instead of letting one disable the other.
 
-**Declared is not enough (M5, planned).** `assurance()` is what an environment *says* it provides. M5 adds a **measured** value: an authority-provided, read-only, digest-checked probe runs inside each prepared environment and checks every hard rule of §2 — no container socket, not privileged, no shared host namespace, no added capability, the seccomp profile applied, a read-only root — each as PASS or FAIL. The effective assurance is the lower of declared and measured; a failed required invariant refuses the environment and is audited. There is deliberately **no weighted score**: a weighted sum lets one failed invariant be averaged away by several passing ones. `direwolf doctor --sandbox` reports the same measurement (M17). ([COMPETITIVE_ANALYSIS.md](COMPETITIVE_ANALYSIS.md) §17 G2.)
+**Declared is not enough (M5a, implemented — [ADR-0047](adr/0047-m5a-oci-execution-environment-and-measured-assurance.md)).** `assurance()` is what an environment *says* it provides. M5a adds a **measured** value, from two vantages: the container runtime's own record of the container, and a digest-pinned, read-only probe that runs inside each prepared environment and checks every hard rule of §2 — no container socket, not privileged, no shared host namespace, no added capability, the seccomp profile applied, a read-only root — each as PASS or FAIL. The effective assurance is the lower of declared and measured; a failed required invariant refuses the environment and is audited. There is deliberately **no weighted score**: a weighted sum lets one failed invariant be averaged away by several passing ones. `direwolf doctor --sandbox` reports the same measurement (M17). ([COMPETITIVE_ANALYSIS.md](COMPETITIVE_ANALYSIS.md) §17 G2.)
+
+**As built in M5a** ([ADR-0047](adr/0047-m5a-oci-execution-environment-and-measured-assurance.md) §3). The broker's trait is `declared`, `prepare`, `measure`, `run_probe` (spawn-then-collect of the one program M5a runs in an environment: the probe), `destroy` and `list`; `ExecOutcome` distinguishes exited, killed, timed out, environment gone, runtime unavailable and `Unobservable`. `spawn`/`signal`/`collect` of an arbitrary workload are M5d's. The authority judges the level; the broker never does.
 
 ### Implementations
 
@@ -69,6 +71,8 @@ uts:              private
 userns:           remap           # Linux: user namespace remapping where available
 ```
 
+**As built in M5a** ([ADR-0047](adr/0047-m5a-oci-execution-environment-and-measured-assurance.md) §5): every line above, with these differences stated rather than implied. `network` is `NO_NETWORK` (the evidence harness's topology, only with the broker's `--allow-evidence-topology`) until M5b builds `PROXY_ONLY`. The device set also admits `/dev/full` and `/dev/ptmx` (the runtime's defaults), and nothing else. The workspace bind carries no `nosuid,nodev` as mount flags — the runtime has none for binds — and `no_new_privileges`, `cap_drop: ALL` (no `mknod`) and the device cgroup deliver what they would. `disk_quota`, the 600 s workload `timeout` and `userns: remap` concern workloads and are M5d's; AppArmor/SELinux labels are the runtime's default where it has them, not a required invariant.
+
 ### Hard rules — no configuration option exists to violate these
 
 1. **The container socket is never mounted.** `/var/run/docker.sock` and equivalents are denied by policy and refused by the supervisor. Mounting it is equivalent to granting root on the host.
@@ -80,7 +84,7 @@ userns:           remap           # Linux: user namespace remapping where availa
 
 ### Seccomp
 
-Start from the container runtime's default deny-list and additionally block: `ptrace`, `process_vm_readv/writev`, `kcmp`, `perf_event_open`, `bpf`, `userfaultfd`, `keyctl`/`add_key`/`request_key`, `mount`/`umount2`/`pivot_root`, `unshare`/`setns`, `clone` with namespace flags, `io_uring_setup`. `io_uring` is blocked because it has repeatedly been a sandbox-escape surface and almost nothing an agent runs needs it.
+DireWolf's own **allowlist**, stricter than a runtime's default deny-list: default action `EPERM`, native architectures only, and refused among others: `ptrace`, `process_vm_readv/writev`, `kcmp`, `perf_event_open`, `bpf`, `userfaultfd`, `keyctl`/`add_key`/`request_key`, `mount`/`umount2`/`pivot_root`, `unshare`/`setns`, `clone` with namespace flags (`clone3` answers `ENOSYS` so the C library falls back to an inspectable `clone`), `io_uring_setup`, and `socket(AF_VSOCK)` — a virtual socket reaches the hypervisor host and a network namespace does not confine it. `io_uring` is blocked because it has repeatedly been a sandbox-escape surface and almost nothing an agent runs needs it. Ordinary child processes and threads still work, and are shown to. Which denials are active attempts and which are measured from the profile's content is stated in [ADR-0047](adr/0047-m5a-oci-execution-environment-and-measured-assurance.md) §7.
 
 Deviations from the profile are recorded in the audit log and shown by `direwolf doctor`.
 
@@ -208,5 +212,7 @@ The security eval suite ([EVALS.md](EVALS.md)) includes, at minimum:
 - persistence attempts across container lifecycles
 
 Acceptance: **all contained, each with an audit record naming the denial.** Silent containment is insufficient — an escape attempt that is blocked but not recorded means an operator has no signal that they are under attack.
+
+**M5a runs the containment half that exists** on a real OCI runtime (`make sandbox-foundation-evidence`, [ADR-0047](adr/0047-m5a-oci-execution-environment-and-measured-assurance.md) §§9, 14): container-socket, privilege, capability, `mount`/`unshare`/`setns`/`ptrace`/keyring attempts, bounded pid, fd, memory and file-size pressure, device access, and persistence across environments; the `PROXY_ONLY` and SSRF cases wait for M5b–M5c. Its containment is recorded in the environment's measurement and audit record (`environment.refused`, `environment.drifted`), not yet per attempt.
 
 **The gate must be shown able to fail.** For each hard rule of §2, a meta-test runs the suite against a deliberately weakened profile — a bridge network, a writable root, an added capability, unconfined seccomp, a mounted container socket — and the gate must fail. A containment suite that passes a weakened sandbox measures nothing. A case that cannot run reports NOT EXERCISED, which fails the gate rather than skipping it.

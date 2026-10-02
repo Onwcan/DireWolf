@@ -1,0 +1,25 @@
+[package]
+name = "dwk-sandbox-profile"
+description = "DireWolf's oci-strict sandbox profile: the values the broker applies and the probe checks. Data only; decides nothing."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+# Linked by the broker, which applies the profile, and by the sandbox probe,
+# which checks it from inside -- never by the authority, which judges what
+# the probe reports and needs none of these values (ADR-0047 §5). Not a wire
+# contract: nothing here crosses a protocol, so it is not `dwk-proto`'s.
+publish = false
+
+[lints]
+workspace = true
+
+# No dependencies: numbers, names and one JSON rendering.
+[dependencies]
+
+[dev-dependencies]
+# Test oracle only: the rendered seccomp profile is checked to be strict JSON
+# of the shape a Docker-compatible runtime reads.
+serde_json = { workspace = true }

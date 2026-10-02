@@ -29,14 +29,16 @@ use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+use dwk_proto::brokerp::sandbox::ContainerRef;
 use dwk_proto::brokerp::{
-    Authorisation, BrokerDone, BrokerHello, BrokerOutcome, Common, FsDeleteAuthorisation,
-    FsListAuthorisation, FsMoveAuthorisation, FsPatchAuthorisation, FsReadAuthorisation,
-    FsReclaimAuthorisation, FsReclaimDone, FsSearchAuthorisation, FsStatAuthorisation,
-    FsWriteAuthorisation, LeafName, MAX_HELLO_BODY, MAX_OUTCOME_BODY, MoveSide, OutcomeResult,
-    ProcessArgs, ProcessKillAuthorisation, ProcessSpec, ProcessStartAuthorisation,
-    ProcessStartDone, ProcessStatusAuthorisation, ProcessStatusDone, ProcessStreamSnapshot,
-    ReclaimState, StagingHolds, StreamLimit,
+    Authorisation, BrokerDone, BrokerHello, BrokerOutcome, Common, EnvironmentDestroyAuthorisation,
+    EnvironmentListAuthorisation, EnvironmentMeasureAuthorisation, EnvironmentPrepareAuthorisation,
+    FsDeleteAuthorisation, FsListAuthorisation, FsMoveAuthorisation, FsPatchAuthorisation,
+    FsReadAuthorisation, FsReclaimAuthorisation, FsReclaimDone, FsSearchAuthorisation,
+    FsStatAuthorisation, FsWriteAuthorisation, LeafName, MAX_HELLO_BODY, MAX_OUTCOME_BODY,
+    MoveSide, OutcomeResult, ProcessArgs, ProcessKillAuthorisation, ProcessSpec,
+    ProcessStartAuthorisation, ProcessStartDone, ProcessStatusAuthorisation, ProcessStatusDone,
+    ProcessStreamSnapshot, ReclaimState, RuntimeSpec, StagingHolds, StreamLimit,
 };
 use dwk_proto::frame::FrameDecoder;
 use dwk_proto::wire::scalar::{ExitCode, HexContent, HostPath, ProcessArg, SignalNumber, StatKind};
@@ -45,8 +47,8 @@ use rustix::net::{SendAncillaryBuffer, SendAncillaryMessage, SendFlags};
 
 use super::{
     BrokerDelivery, BrokerError, BrokerFailure, BrokerOrder, FsReadDelivery, ListDelivery,
-    Operation, ProcessStartDelivery, ProcessStatusDelivery, RawListEntry, SearchDelivery,
-    StatDelivery, StreamDelivery, Unreachable,
+    Operation, ProcessStartDelivery, ProcessStatusDelivery, RawListEntry, RuntimeHandoff,
+    SearchDelivery, StatDelivery, StreamDelivery, Unreachable,
 };
 use crate::resource::{FileIdentity, ParentHandoff, ResourceKind};
 
@@ -77,6 +79,12 @@ enum Sent {
     },
     ProcessKill,
     SecretEgress,
+    EnvironmentPrepare,
+    EnvironmentMeasure,
+    EnvironmentDestroy {
+        container: Option<ContainerRef>,
+    },
+    EnvironmentList,
 }
 
 /// Perform one operation through the broker at `socket`, which must be served
@@ -181,6 +189,10 @@ fn authorise(common: Common, operation: Operation) -> Result<Prepared, BrokerFai
             vec![secret.into_transfer_descriptor()],
             Sent::SecretEgress,
         )),
+        Operation::EnvironmentPrepare { .. }
+        | Operation::EnvironmentMeasure { .. }
+        | Operation::EnvironmentDestroy { .. }
+        | Operation::EnvironmentList { .. } => environment(common, operation),
         Operation::Reclaim { directory, staging } => {
             let leaf = LeafName::new(staging.leaf.as_str())
                 .ok_or(BrokerFailure::Protocol("a recorded name is not a leaf"))?;
@@ -455,6 +467,90 @@ fn process(common: Common, operation: Operation) -> Result<Prepared, BrokerFailu
     })
 }
 
+/// The runtime client's part of an environment operation: what the broker
+/// re-proves, and the two descriptors in their fixed order — the client, then
+/// the directory it runs in.
+fn runtime_of(runtime: RuntimeHandoff) -> Result<(RuntimeSpec, Vec<OwnedFd>), BrokerFailure> {
+    let unfit = |why| BrokerFailure::Protocol(why);
+    let argv0 = HostPath::new(runtime.executable.identity().path().to_string())
+        .ok_or(unfit("a canonical path does not fit argv[0]"))?;
+    let sha256 = dwk_proto::wire::scalar::ContentDigest::new(
+        runtime.executable.identity().digest().to_string(),
+    )
+    .ok_or(unfit("a digest does not fit the wire"))?;
+    let (exe_fd, exe) = runtime.executable.into_transfer_descriptor();
+    let (cwd_fd, cwd) = runtime.cwd.into_transfer_descriptor();
+    Ok((
+        RuntimeSpec {
+            socket: runtime.socket,
+            argv0,
+            executable: pair(exe),
+            sha256,
+            cwd: pair(cwd),
+        },
+        vec![exe_fd, cwd_fd],
+    ))
+}
+
+/// An environment operation (M5a, ADR-0047): typed fields and the runtime
+/// client's two descriptors. No field is a runtime flag.
+fn environment(common: Common, operation: Operation) -> Result<Prepared, BrokerFailure> {
+    Ok(match operation {
+        Operation::EnvironmentPrepare { spec, runtime } => {
+            let (runtime, fds) = runtime_of(runtime)?;
+            (
+                Authorisation::EnvironmentPrepare(EnvironmentPrepareAuthorisation::new(
+                    common, spec, runtime,
+                )),
+                fds,
+                Sent::EnvironmentPrepare,
+            )
+        }
+        Operation::EnvironmentMeasure {
+            spec,
+            container,
+            runtime,
+        } => {
+            let (runtime, fds) = runtime_of(runtime)?;
+            (
+                Authorisation::EnvironmentMeasure(EnvironmentMeasureAuthorisation::new(
+                    common, spec, container, runtime,
+                )),
+                fds,
+                Sent::EnvironmentMeasure,
+            )
+        }
+        Operation::EnvironmentDestroy {
+            environment,
+            container,
+            runtime,
+        } => {
+            let (runtime, fds) = runtime_of(runtime)?;
+            (
+                Authorisation::EnvironmentDestroy(EnvironmentDestroyAuthorisation::new(
+                    common,
+                    environment,
+                    container.clone(),
+                    runtime,
+                )),
+                fds,
+                Sent::EnvironmentDestroy { container },
+            )
+        }
+        Operation::EnvironmentList { store, runtime } => {
+            let (runtime, fds) = runtime_of(runtime)?;
+            (
+                Authorisation::EnvironmentList(EnvironmentListAuthorisation::new(
+                    common, store, runtime,
+                )),
+                fds,
+                Sent::EnvironmentList,
+            )
+        }
+        _ => return Err(BrokerFailure::Protocol("not an environment operation")),
+    })
+}
+
 /// A retained stream, if it is within the bound and its counts agree.
 fn stream(snapshot: &ProcessStreamSnapshot, limit: u32) -> Result<StreamDelivery, BrokerFailure> {
     let content = snapshot.content.to_bytes();
@@ -567,6 +663,55 @@ fn deliver(sent: &Sent, done: BrokerDone) -> Result<BrokerDelivery, BrokerFailur
             done.secret_egress.ok_or(wrong)?;
             BrokerDelivery::SecretEgress
         }
+        Sent::EnvironmentPrepare
+        | Sent::EnvironmentMeasure
+        | Sent::EnvironmentDestroy { .. }
+        | Sent::EnvironmentList => environment_delivery(sent, done)?,
+    })
+}
+
+/// An environment operation's answer (M5a), if it is this operation's and
+/// agrees with itself.
+fn environment_delivery(sent: &Sent, done: BrokerDone) -> Result<BrokerDelivery, BrokerFailure> {
+    let wrong = BrokerFailure::Protocol("the outcome answers another operation");
+    Ok(match sent {
+        Sent::EnvironmentPrepare => {
+            let prepared = done.environment_prepare.ok_or(wrong)?;
+            // A kept environment names its container and was measured.
+            if prepared.retained && (prepared.container.is_none() || prepared.measurement.is_none())
+            {
+                return Err(BrokerFailure::Protocol(
+                    "a kept environment is not named or not measured",
+                ));
+            }
+            BrokerDelivery::EnvironmentPrepared(prepared)
+        }
+        Sent::EnvironmentMeasure => {
+            BrokerDelivery::EnvironmentMeasured(done.environment_measure.ok_or(wrong)?)
+        }
+        Sent::EnvironmentDestroy { container } => {
+            let destroyed = done.environment_destroy.ok_or(wrong)?;
+            // Removed names what was removed — the recorded container, when
+            // one was recorded; already gone names nothing.
+            let consistent = match (destroyed.state, &destroyed.container, container) {
+                (dwk_proto::brokerp::DestroyState::Removed, Some(removed), Some(recorded)) => {
+                    removed == recorded
+                }
+                (dwk_proto::brokerp::DestroyState::Removed, Some(_), None)
+                | (dwk_proto::brokerp::DestroyState::AlreadyGone, None, _) => true,
+                _ => false,
+            };
+            if !consistent {
+                return Err(BrokerFailure::Protocol(
+                    "a destruction names another container than the one recorded",
+                ));
+            }
+            BrokerDelivery::EnvironmentDestroyed(destroyed)
+        }
+        Sent::EnvironmentList => {
+            BrokerDelivery::EnvironmentListed(done.environment_list.ok_or(wrong)?)
+        }
+        _ => return Err(wrong),
     })
 }
 

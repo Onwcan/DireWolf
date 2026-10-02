@@ -74,6 +74,7 @@ pub mod broker;
 pub mod capability;
 pub mod policy;
 pub mod resource;
+pub mod sandbox;
 pub mod secret;
 pub mod server;
 pub mod state;

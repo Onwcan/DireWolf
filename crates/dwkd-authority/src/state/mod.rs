@@ -62,6 +62,8 @@ mod config;
 mod crash;
 mod db;
 mod digest;
+mod environment;
+mod environment_ops;
 mod error;
 mod files;
 mod identity;
@@ -90,7 +92,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use dwk_proto::dwkp::messages::Ack;
 use dwk_proto::dwkp::{DwkpBody, DwkpMessage};
-use dwk_proto::wire::id::{CapId, InvocationId, ProcessId, RunId, SessionId};
+use dwk_proto::wire::id::{CapId, EnvironmentId, InvocationId, ProcessId, RunId, SessionId};
 use dwk_proto::wire::scalar::{
     Epoch, FsFailureReason, FsRefusalReason, RefusalReason, RefusedOperation, ToolOperation,
 };
@@ -119,6 +121,10 @@ pub use crash::{CrashHook, CrashPoint, HookAction};
 pub use db::StorageSettings;
 pub use digest::Sha256Hash;
 pub use dwk_proto::wire::scalar::ProfileName as Mode;
+pub use environment::{
+    EnvironmentRecord, EnvironmentState, ReconcileClass, ReconcileReport, classify,
+};
+pub use environment_ops::{EnvironmentReply, EnvironmentReport};
 pub use error::{AuthorityError, PoisonReason, StartError};
 pub use files::{AUDIT_LOG, KERNEL_DB, LOCK_FILE, QUARANTINE_MARKER};
 pub use identity::{AuthenticatedSubject, CallerContext, LeaseHolder};
@@ -322,6 +328,10 @@ struct Shared {
     /// The secret metadata, consumer identities and in-memory redaction index
     /// (M4e): never persisted, never a retained plaintext.
     secrets: secrets::SecretsState,
+    /// The execution-environment configuration (M5a): attached once, by the
+    /// evidence harness, through [`Authority::attach_sandbox`]. No production
+    /// start-up path sets it.
+    sandbox: OnceLock<crate::sandbox::SandboxConfig>,
     // Held for the life of the process; the OS releases it on exit.
     _lock: std::fs::File,
 }
@@ -478,6 +488,14 @@ impl Work<'_> {
             "a minted process id is not a UUIDv7",
         ))
     }
+
+    /// An execution environment's id (M5a): minted with the intent, never
+    /// the runtime's name for it.
+    pub(crate) fn environment_id(&self) -> Result<EnvironmentId, AuthorityError> {
+        EnvironmentId::from_uuid(self.next_uuid()?).ok_or(AuthorityError::Invariant(
+            "a minted environment id is not a UUIDv7",
+        ))
+    }
 }
 
 /// The durable authority: one handle onto one state directory.
@@ -613,6 +631,7 @@ impl Authority {
             broker: options.broker,
             authority_uid,
             secrets: secret_state,
+            sandbox: OnceLock::new(),
             _lock: lock,
         });
         let mut authority = Self { shared, conn };
@@ -679,10 +698,15 @@ impl Authority {
             // An open secret use (M4e) may have reached the broker: UNKNOWN,
             // never injected again.
             let secret_unknown = secret_use::reconcile_open(work)?;
+            // A preparation a previous incarnation left (M5a) may have made a
+            // container: UNKNOWN, never prepared again; reconciliation by
+            // label ends it.
+            let environment_unknown = environment::reconcile_open(work)?;
             let interrupted = fs_interrupted.saturating_add(process_interrupted);
             let unknown = fs_unknown
                 .saturating_add(process_unknown)
-                .saturating_add(secret_unknown);
+                .saturating_add(secret_unknown)
+                .saturating_add(environment_unknown);
             work.audit(
                 AuditEvent::StoreOpened,
                 Fields::new()

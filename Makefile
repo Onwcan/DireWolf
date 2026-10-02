@@ -17,8 +17,8 @@ DW := $(PY) scripts/dw.py
         eval eval-check eval-one capability-evidence policy-benchmark \
         authority-state-evidence filesystem-canonicalization-evidence \
         authority-transport-evidence authority-write-probe broker-fs-read-evidence \
-        filesystem-operations-evidence process-broker-evidence secret-broker-evidence fuzz-smoke \
-        fuzz security docs \
+        filesystem-operations-evidence process-broker-evidence secret-broker-evidence \
+        sandbox-foundation-evidence fuzz-smoke fuzz security docs \
         preflight tools hooks clean
 
 help:            ## List available commands
@@ -92,6 +92,9 @@ process-broker-evidence: ## M4d process execution: re-proof, races, output, kill
 
 secret-broker-evidence: ## M4e secrets: backends, mode A, the injection primitive, redaction, residue, crashes; three identities need DW_BROKER_AS, DW_PEER_AS, core contract DW_M4E_CORE_EVIDENCE=1
 	@$(DW) secret-broker-evidence
+
+sandbox-foundation-evidence: ## M5a real OCI containers: strict profile measured, weakened profiles, probe tamper, lifecycle, foreign safety
+	@$(DW) sandbox-foundation-evidence
 
 fuzz-smoke:      ## Stable mutation fuzzing of dwk-proto (not coverage-guided)
 	@$(DW) fuzz-smoke

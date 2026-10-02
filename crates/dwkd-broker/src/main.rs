@@ -27,7 +27,8 @@
 //! authority's uid, and it speaks only the private protocol
 //! ([`dwk_proto::brokerp`]), which no cognition-side code can name.
 //!
-//! # Status: M4e — secret handoff; M4d — process execution, the filesystem tools
+//! # Status: M5a — execution environments; M4e — secret handoff; M4d — process
+//! execution, the filesystem tools
 //!
 //! [ADR-0043]: one private Unix-domain listener (`listener`), one exchange per
 //! connection (`exchange`): a hello naming a fresh channel, one authorisation
@@ -61,12 +62,21 @@
 //! launched target's environment or descriptor 3, a primitive no production
 //! authority issues before M5's sandbox. A secret launch's output is redacted
 //! while it is drained. The broker has no keychain, age or metadata code
-//! (TX028), and it dumps no core (`hardening`). The sandbox and egress arrive
-//! at M5.
+//! (TX028), and it dumps no core (`hardening`).
+//!
+//! [ADR-0047] adds the sandbox supervisor's first slice (`sandbox`): an
+//! `oci-strict` container prepared, measured from the runtime's record and by
+//! a digest-pinned probe inside it, destroyed and listed — through the
+//! container runtime's client the authority resolved and hashed, re-proved
+//! and executed by descriptor through the launch helper with a typed
+//! argument vector. Nothing is run inside an environment but the probe; the
+//! only topology built is the evidence harness's `NO_NETWORK`, and only with
+//! `--allow-evidence-topology`. The proxy and sandboxed workloads are M5b-M5e.
 //!
 //! [ADR-0044]: ../../../docs/adr/0044-m4c-filesystem-operations-plans-and-atomic-mutation.md
 //! [ADR-0045]: ../../../docs/adr/0045-m4d-process-execution-broker.md
 //! [ADR-0046]: ../../../docs/adr/0046-m4e-secret-handles-backends-injection-and-redaction.md
+//! [ADR-0047]: ../../../docs/adr/0047-m5a-oci-execution-environment-and-measured-assurance.md
 //!
 //! [ADR-0018]: ../../../docs/adr/0018-authority-broker-split.md
 //! [ADR-0043]: ../../../docs/adr/0043-m4b-private-broker-channel-and-brokered-fs-read.md
@@ -91,6 +101,8 @@ mod listener;
 mod nonce;
 #[cfg(target_os = "linux")]
 mod process;
+#[cfg(target_os = "linux")]
+mod sandbox;
 #[cfg(target_os = "linux")]
 mod secret;
 
@@ -188,6 +200,14 @@ fn serve(config: &config::ServeConfig) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    // The sandbox's files exist before the broker says it is serving.
+    let files = match listener::sandbox_files(&place, own_uid) {
+        Ok(files) => files,
+        Err(error) => {
+            log(&format!("cannot serve: {error}"));
+            return ExitCode::FAILURE;
+        }
+    };
     println!(
         "{NAME}: serving the private broker channel at {} as uid {own_uid} for authority uid {} \
          (pid {})",
@@ -208,12 +228,28 @@ fn serve(config: &config::ServeConfig) -> ExitCode {
         "process_generation generation={}",
         processes.generation().as_str()
     ));
+    if config.evidence_topology_permitted {
+        log(
+            "EVIDENCE TOPOLOGY: NO_NETWORK execution environments may be prepared \
+             (--allow-evidence-topology); this is the M5a evidence harness's topology, not a \
+             production one",
+        );
+    }
+    let sandbox = sandbox::Sandbox::new(
+        processes.helper().to_path_buf(),
+        config.authority_uid,
+        files,
+        config.evidence_topology_permitted,
+    );
     listener::serve(
         &bound,
         config.authority_uid,
         own_uid,
         &mut channels,
-        &processes,
+        exchange::Effects {
+            processes: &processes,
+            sandbox: &sandbox,
+        },
     );
     ExitCode::SUCCESS
 }
@@ -248,21 +284,26 @@ fn help() -> String {
          \n\
          USAGE:\n    \
              {NAME} serve --socket <PATH> --authority-uid <UID> [--allow-shared-authority-uid] [--allow-dumpable]\n    \
+                              [--allow-evidence-topology]\n    \
              {NAME} [-V | --version] [-h | --help]\n\
          \n\
          OPTIONS:\n    \
              --socket <PATH>                 absolute path of the private socket\n    \
              --authority-uid <UID>           the only uid the broker reads from\n    \
              --allow-shared-authority-uid    permit the authority to be the broker's own uid (development only)\n    \
-             --allow-dumpable                leave the process dumpable, its memory readable by its uid (development only)\n\
+             --allow-dumpable                leave the process dumpable, its memory readable by its uid (development only)\n    \
+             --allow-evidence-topology       permit NO_NETWORK execution environments (M5a evidence only)\n\
          \n\
          STATUS: M4d - the filesystem tools (read, stat, list, search, write,\n\
          patch, move, delete) and process execution (start, status, kill) of the\n\
          executable the authority checked, by its descriptor, on the HOST with\n\
          the broker's own privileges. M4e - one secret per invocation, handed\n\
          over in a pipe: an egress header rendered and dropped, or a value\n\
-         injected into a launch; no secret store. Linux only. No sandbox and no\n\
-         egress consumer: that is M5.\n",
+         injected into a launch; no secret store. M5a - execution environments:\n\
+         an oci-strict container prepared, measured, destroyed and listed\n\
+         through the runtime client the authority checked, with nothing run\n\
+         inside but the trusted probe; NO_NETWORK only, for evidence. Linux\n\
+         only. No proxy, no sandboxed workload and no egress consumer: M5b-M5e.\n",
         env!("CARGO_PKG_VERSION")
     )
 }
@@ -280,6 +321,8 @@ mod tests {
         assert!(h.contains("M4d") && h.contains("M4e") && h.contains("M5") && h.contains("HOST"));
         assert!(h.contains("no secret store"));
         assert!(h.contains("--authority-uid"));
+        assert!(h.contains("M5a") && h.contains("oci-strict") && h.contains("NO_NETWORK only"));
+        assert!(h.contains("--allow-evidence-topology"));
     }
 
     /// The broker's defining property, asserted as a test so that a future

@@ -36,6 +36,11 @@ pub(crate) struct ServeConfig {
     /// development harness that reads its `/proc`. Reduced assurance, stated
     /// at start-up; never implied. `RLIMIT_CORE` is 0 either way.
     pub(crate) dumpable_permitted: bool,
+    /// The operator's acknowledgement that the evidence harness's `NO_NETWORK`
+    /// environment topology may be built (M5a, ADR-0047 §10). Without it the
+    /// broker builds no environment at all: `PROXY_ONLY`, the production
+    /// topology, is M5b's. Stated at start-up; never implied.
+    pub(crate) evidence_topology_permitted: bool,
 }
 
 /// A command line that does not describe a configuration.
@@ -99,6 +104,7 @@ pub(crate) fn parse(args: &[String]) -> Result<Command, UsageError> {
     let mut authority_uid: Option<u32> = None;
     let mut shared = false;
     let mut dumpable = false;
+    let mut evidence_topology = false;
     while let Some(flag) = rest.next() {
         let mut value = || {
             rest.next()
@@ -131,6 +137,14 @@ pub(crate) fn parse(args: &[String]) -> Result<Command, UsageError> {
                 }
                 dumpable = true;
             }
+            "--allow-evidence-topology" => {
+                if evidence_topology {
+                    return Err(UsageError::new(
+                        "--allow-evidence-topology is given more than once",
+                    ));
+                }
+                evidence_topology = true;
+            }
             other => {
                 return Err(UsageError::new(format!("unknown flag {}", bounded(other))));
             }
@@ -152,6 +166,7 @@ pub(crate) fn parse(args: &[String]) -> Result<Command, UsageError> {
         authority_uid,
         shared_uid_permitted: shared,
         dumpable_permitted: dumpable,
+        evidence_topology_permitted: evidence_topology,
     }))
 }
 
@@ -198,6 +213,7 @@ mod tests {
                 authority_uid: 1001,
                 shared_uid_permitted: false,
                 dumpable_permitted: false,
+                evidence_topology_permitted: false,
             }))
         );
         for bad in [
@@ -261,6 +277,29 @@ mod tests {
                 ..
             }))
         ));
+    }
+
+    #[test]
+    fn the_evidence_topology_is_explicit_and_given_once() {
+        let base = ["serve", "--socket", "ABS", "--authority-uid", "7"];
+        assert!(matches!(
+            parse(&args(&base)),
+            Ok(Command::Serve(ServeConfig {
+                evidence_topology_permitted: false,
+                ..
+            }))
+        ));
+        let mut with = base.to_vec();
+        with.push("--allow-evidence-topology");
+        assert!(matches!(
+            parse(&args(&with)),
+            Ok(Command::Serve(ServeConfig {
+                evidence_topology_permitted: true,
+                ..
+            }))
+        ));
+        with.push("--allow-evidence-topology");
+        assert!(parse(&args(&with)).is_err());
     }
 
     #[test]

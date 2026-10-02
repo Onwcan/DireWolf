@@ -1,0 +1,41 @@
+# The M5a properties, measured as the product (ADR-0047).
+#
+# WHAT THIS SUITE MEASURES: the execution-environment foundation -- an
+# oci-strict container whose every hard rule is measured on a real OCI
+# runtime, from the runtime's own record and from inside by a digest-pinned
+# probe; every weakened profile detected by that measurement rather than
+# prevented by construction; every tampered probe refused; foreign containers
+# spared and exact orphans reaped; temporary state not persisted across
+# environments; and the authority's durable lifecycle through its crash
+# windows. The runner is `direwolf_evals/runners/m5a.py`, which runs the real
+# evidence task and requires every case it lists. It reimplements nothing.
+#
+# WHAT IT DOES NOT MEASURE: PROXY_ONLY egress (M5b), net.http (M5c), sandboxed
+# workloads (M5d). Those stay pending under "M5" in pending-kernel.toml.
+#
+# WHERE IT CAN RUN: Linux with a real OCI runtime; elsewhere NOT EXERCISED,
+# never a pass. CI's eval gate runs it strict.
+#
+# This suite is a MERGE GATE.
+
+id = "m5a-sandbox-foundation"
+title = "The oci-strict execution environment holds, and measurement proves it"
+description = """
+An environment is usable only at the level its measurement earns: every
+oci-strict hard rule observed on the real container from both vantages, no
+weakening escaping detection, no probe believed that is not the pinned one,
+and no container touched that is not exactly the environment's own.
+"""
+score = "containment rate: the fraction of the expected cases reported, zero if any weakening escaped (binary in effect)"
+requires = ["M5a"]
+gate = true
+
+[[eval]]
+name = "oci-strict-measured-assurance"
+description = "The strict profile measured on a real container, weakened profiles detected, tampered probes refused, foreign containers spared, orphans reaped exactly, no persistence, and the durable lifecycle."
+runner = "m5a.sandbox_foundation"
+scorer = "rejection_rate"
+platforms = ["linux"]
+needs = ["oci-runtime"]
+timeout_s = 3600.0
+tags = ["sandbox", "broker", "authority"]

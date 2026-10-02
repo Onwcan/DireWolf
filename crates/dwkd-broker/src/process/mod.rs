@@ -42,9 +42,10 @@
 
 mod fdcheck;
 pub(crate) mod helper;
-mod launch;
+pub(crate) mod launch;
+pub(crate) mod run;
 mod supervise;
-mod verify;
+pub(crate) mod verify;
 
 #[cfg(test)]
 mod tests;
@@ -153,6 +154,11 @@ impl Processes {
             authority_uid,
             wall_clock,
         })
+    }
+
+    /// The launch helper: this broker's own binary.
+    pub(crate) fn helper(&self) -> &std::path::Path {
+        &self.helper
     }
 
     /// This instance's generation.
@@ -278,7 +284,8 @@ impl Processes {
         }
         crate::crash::point("process_before_helper");
         let needle = secret.as_ref().map(|s| std::sync::Arc::clone(&s.needle));
-        let launched = match launch::launch(&self.helper, start, executable, cwd, secret) {
+        let program = launch::Program::of(start);
+        let launched = match launch::launch(&self.helper, &program, executable, cwd, secret) {
             Ok(launched) => launched,
             Err(launch::Failure::Refused(refusal)) => return refused(refusal),
             Err(launch::Failure::Unconfirmed) => {
