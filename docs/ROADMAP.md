@@ -148,23 +148,23 @@ the harness's deterministic suite; the security suites gate, unscoped, in `make
 eval-check`. What M4 does **not** provide is stated once, here: no sandbox or execution
 environment and no network path, so secret injection has no consumer (M5); no approvals,
 so no production build launches a process (M6); no model provider (M7); no runtime (M9);
-and serving on Linux only. **M5 is in progress: M5a is implemented (see M5 below).**
+and serving on Linux only. **M5 is in progress: M5a is complete (see M5 below).**
 
 **Deps:** M3. **Deliverables:** canonicaliser (NFC, `openat2` + fallback walker, inode identity -- M4a delivers `openat2` and identity; a fallback walker needs its own ADR); fd-relative fs ops; exec broker with env scrub, rlimits, argv normalisation, executable hashing; secret broker with keychain/age backends and injection modes A–C; redaction index.
 **Acceptance:** no path string reaches policy; every op uses the fd it checked; no secret in argv, ever.
 **Adversarial:** the full path-traversal set ([EVALS.md](EVALS.md) §3) including Unicode normalisation and TOCTOU swap races in a tight loop; secret-in-output detection; core-dump inspection for secret residue.
 **Deferred:** remote fs, Windows-native hardening beyond the fallback walker.
 
-### M5 · Sandbox — **IN PROGRESS** (M5a implemented, local acceptance passed, candidate for hosted acceptance; M5b–M5e not started)
+### M5 · Sandbox — **IN PROGRESS** (M5a complete, hosted acceptance passed; M5b–M5e not started)
 
 M5 is two products in one (a sandbox *and* an egress proxy), so it is decomposed like M4
 ([ADR-0047](adr/0047-m5a-oci-execution-environment-and-measured-assurance.md)). The
 milestone-level contract below the slices is unchanged; M5 is complete only when every
 slice is, with M5e's gate.
 
-#### M5a · OCI foundation and measured assurance — **IMPLEMENTED, LOCAL ACCEPTANCE PASS, CANDIDATE FOR HOSTED ACCEPTANCE**
+#### M5a · OCI foundation and measured assurance — **COMPLETE**
 
-M5a is complete only when the hosted `sandbox-foundation` job passes on the committed tree.
+M5a is complete: the required hosted `sandbox-foundation` job passed on the committed tree in CI run 37154862816.
 
 [ADR-0047](adr/0047-m5a-oci-execution-environment-and-measured-assurance.md).
 **Deps:** M4. **Deliverables:** the broker's `ExecutionEnvironment` abstraction (`oci`;

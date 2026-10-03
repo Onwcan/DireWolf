@@ -22,7 +22,7 @@ compromised host. That is the target; the status below says which parts of it ex
 
 ---
 
-## Status: M1–M4 complete; M5 (sandbox) in progress — M5a implemented
+## Status: M1–M4 complete; M5 (sandbox) in progress — M5a complete
 
 The paragraphs above describe the **design**. What is built today is the authority
 plane underneath it — the kernel side of the trust boundary — and none of the agent
@@ -37,7 +37,7 @@ above it. M4, the last milestone completed, closed on hosted CI run
 | M2.5 · Evaluation harness | **COMPLETE** | `evals/`: deterministic suites, versioned results, a reviewed baseline, fault injection; pending is never a pass |
 | M3 · Kernel core | **COMPLETE** | The typed capability lattice (10⁶ delegation chains, zero escalations); the deterministic policy engine (p99 3.6 µs at 300 rules); `kernel.db` with fenced epochs and durable admission; a hash-chained audit record for every authority-changing operation, `fsync`ed before the answer; `dwkd-authority serve`, which identifies its caller through the kernel (`SO_PEERCRED`) before reading a byte |
 | M4 · Brokers | **COMPLETE** | Filesystem resolution by identity (`openat2`, no symlink, mount or Unicode escape); `dwkd-broker`, a second privileged process that acts only on the authority's single-use authorisation; eight filesystem tools with atomic mutation; process execution decided on executable identity; secrets by opaque handle, with no API that returns a value, return-path redaction and residue evidence |
-| M5 · Sandbox | **IN PROGRESS** | **M5a — IMPLEMENTED, LOCAL ACCEPTANCE PASS, CANDIDATE FOR HOSTED ACCEPTANCE:** the `oci-strict` execution environment, measured from the runtime's record and by a digest-pinned probe inside it, with a durable, exactly-reconciled lifecycle — reachable by no public caller. M5b–M5e (the egress proxy, `net.http`, sandboxed workloads, the M5 gate) not started |
+| M5 · Sandbox | **IN PROGRESS** | **M5a — COMPLETE, HOSTED ACCEPTANCE PASS:** the `oci-strict` execution environment, measured from the runtime's record and by a digest-pinned probe inside it, with a durable, exactly-reconciled lifecycle — reachable by no public caller. M5b–M5e (the egress proxy, `net.http`, sandboxed workloads, the M5 gate) not started |
 
 **What that means in practice.** A client can connect to `dwkd-authority`, be admitted
 to a run, and ask the authority to read, list, search, stat, write, patch, move or delete
