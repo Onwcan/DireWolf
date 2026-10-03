@@ -418,7 +418,7 @@ fn a_read_of_n_bytes_never_asks_for_byte_n_plus_one() {
                 unreachable!("n={n} chunk={chunk}")
             };
             let bound = usize::try_from(n).unwrap_or(usize::MAX);
-            assert_eq!(content, file.get(..bound).unwrap_or_default());
+            assert_eq!(content.as_slice(), file.get(..bound).unwrap_or_default());
             assert!(!eof, "n={n}: the file is longer");
             assert!(
                 counted.furthest <= u64::from(n),
@@ -436,7 +436,7 @@ fn a_read_of_n_bytes_never_asks_for_byte_n_plus_one() {
         chunk: usize::MAX,
     };
     let done = read_within(8, |w, o| Ok(counted.read_at(w, o)));
-    assert!(done.is_some_and(|(c, eof)| eof && c == b"abc"));
+    assert!(done.is_some_and(|(c, eof)| eof && c.as_slice() == b"abc"));
     assert!(counted.furthest <= 8 && counted.served == 3);
 }
 

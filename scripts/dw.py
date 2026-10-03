@@ -1746,6 +1746,15 @@ SECRET_CASES = (
     ("broker-secret-primitives", "mode-c-echo-redacted-while-drained"),
     ("broker-secret-primitives", "mode-c-residue"),
     ("broker-secret-primitives", "mode-b-residue"),
+    # A file's bytes, read through fs.read, are gone from the broker once the
+    # exchange has closed: heap- and mapping-sized bounds, and repeated reads.
+    ("broker-secret-primitives", "fs-read-residue-bound-64"),
+    ("broker-secret-primitives", "fs-read-residue-bound-4096"),
+    ("broker-secret-primitives", "fs-read-residue-bound-65536"),
+    ("broker-secret-primitives", "fs-read-residue-bound-100000"),
+    ("broker-secret-primitives", "fs-read-residue-bound-131072"),
+    ("broker-secret-primitives", "fs-read-residue-bound-262144"),
+    ("broker-secret-primitives", "fs-read-residue-repeated"),
     ("authority-secret", "authority-rlimit-core"),
     ("authority-secret", "authority-not-dumpable"),
     ("authority-secret", "mode-a-real-broker"),

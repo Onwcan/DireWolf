@@ -89,6 +89,7 @@ use dwk_proto::wire::scalar::{PatchOutcome, StatKind};
 use rustix::fs::{AtFlags, FileType, Gid, Mode, OFlags, RenameFlags, Stat};
 use rustix::io::Errno;
 use sha2::{Digest as _, Sha256};
+use zeroize::Zeroizing;
 
 use super::checks::{self, Kind, identity, named};
 use super::staging::{
@@ -462,8 +463,9 @@ pub(super) fn write(
 }
 
 /// Read all of a file, up to `limit` bytes, through its descriptor. `None`
-/// when it is longer, or a read fails.
-fn read_whole(file: &OwnedFd, limit: usize) -> Option<Vec<u8>> {
+/// when it is longer, or a read fails. Zeroed when dropped, like every
+/// buffer of a file's bytes (`observe::read_within`).
+fn read_whole(file: &OwnedFd, limit: usize) -> Option<Zeroizing<Vec<u8>>> {
     let bound = u32::try_from(limit.checked_add(1)?).ok()?;
     let (bytes, eof) = super::observe::read_within(bound, |window, offset| {
         rustix::io::pread(file, window, offset)
@@ -486,8 +488,21 @@ fn is(bytes: &[u8], revision: &ContentRevision) -> bool {
 /// `delete` bytes at `offset` and puts `insert` there. `None` if they are out
 /// of order, overlap, or reach past the base — the authority refused such a
 /// patch already; this is the broker not trusting that.
-pub(super) fn apply(base: &[u8], edits: &PatchEdits) -> Option<Vec<u8>> {
-    let mut out = Vec::with_capacity(base.len());
+///
+/// The result holds the file's bytes, so it is [`Zeroizing`] and sized
+/// exactly before anything is copied: a growing buffer would reallocate and
+/// leave a copy in freed memory. A patch that would not fit the size its
+/// edits declare is malformed, and is refused before the copy that would not
+/// fit.
+pub(super) fn apply(base: &[u8], edits: &PatchEdits) -> Option<Zeroizing<Vec<u8>>> {
+    let mut size = base.len();
+    for edit in edits {
+        let delete = usize::try_from(edit.delete.get()).ok()?;
+        size = size
+            .checked_sub(delete)?
+            .checked_add(edit.insert.byte_len())?;
+    }
+    let mut out = Zeroizing::new(Vec::with_capacity(size));
     let mut cursor = 0usize;
     for edit in edits {
         let offset = usize::try_from(edit.offset.get()).ok()?;
@@ -495,15 +510,21 @@ pub(super) fn apply(base: &[u8], edits: &PatchEdits) -> Option<Vec<u8>> {
         if offset < cursor {
             return None;
         }
-        out.extend_from_slice(base.get(cursor..offset)?);
-        out.extend_from_slice(&edit.insert.to_bytes());
+        append(&mut out, base.get(cursor..offset)?)?;
+        append(&mut out, &edit.insert.to_bytes())?;
         cursor = offset.checked_add(delete)?;
         if cursor > base.len() {
             return None;
         }
     }
-    out.extend_from_slice(base.get(cursor..)?);
+    append(&mut out, base.get(cursor..)?)?;
     Some(out)
+}
+
+/// Append `bytes` to `out` within the capacity it already has: `None`, and
+/// nothing copied, rather than a reallocation.
+fn append(out: &mut Vec<u8>, bytes: &[u8]) -> Option<()> {
+    (out.capacity().checked_sub(out.len())? >= bytes.len()).then(|| out.extend_from_slice(bytes))
 }
 
 /// `fs.patch`: if the file holds the base revision, replace it — atomically,
@@ -850,7 +871,10 @@ mod tests {
     use dwk_proto::brokerp::{PatchEdit, PatchEdits};
     use dwk_proto::wire::scalar::{HexContent, PatchLength};
 
-    use super::apply;
+    /// The patched bytes, out of their zeroizing buffer, to compare.
+    fn apply(base: &[u8], edits: &PatchEdits) -> Option<Vec<u8>> {
+        super::apply(base, edits).map(|out| out.to_vec())
+    }
 
     fn edits(list: &[(u32, u32, &[u8])]) -> PatchEdits {
         let built: Vec<PatchEdit> = list

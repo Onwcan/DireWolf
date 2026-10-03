@@ -17,7 +17,8 @@
 //!   while it is drained — across read boundaries — so the process table
 //!   never retains it;
 //! * residue: after each primitive the broker's readable memory does not
-//!   hold the value;
+//!   hold the value — nor, once an `fs.read` exchange has closed, a value the
+//!   file it read held in the clear;
 //! * the production default: a broker started without `--allow-dumpable` has
 //!   `RLIMIT_CORE` 0 and is not dumpable.
 //!
@@ -60,7 +61,7 @@ mod linux {
 
     use dwk_proto::brokerp::{
         self, BrokerGeneration, BrokerHello, BrokerOutcome, BrokerRefusal, ChannelNonce, Common,
-        EgressSpec, ExecEnvironment, OutcomeResult, ProcessArgs, ProcessSpec,
+        EgressSpec, ExecEnvironment, FsReadAuthorisation, OutcomeResult, ProcessArgs, ProcessSpec,
         ProcessStartAuthorisation, ProcessStatusAuthorisation, SecretDelivery,
         SecretEgressAuthorisation, SecretEnvName, SecretHandle, SecretHeaderName,
         SecretHeaderPrefix, SecretOrigin, SecretProcessStartAuthorisation, SpawnSecret,
@@ -68,7 +69,7 @@ mod linux {
     };
     use dwk_proto::frame::FrameDecoder;
     use dwk_proto::wire::id::{InvocationId, ProcessId};
-    use dwk_proto::wire::scalar::{ContentDigest, HostPath, ProcessArg, ProcessState};
+    use dwk_proto::wire::scalar::{ContentDigest, HostPath, ProcessArg, ProcessState, ReadLimit};
     use rustix::net::{SendAncillaryBuffer, SendAncillaryMessage, SendFlags};
     use sha2::{Digest as _, Sha256};
 
@@ -447,6 +448,82 @@ mod linux {
             OutcomeResult::Refused(why) => why,
             other => panic!("not a refusal: {other:?}"),
         }
+    }
+
+    /// One `fs.read` exchange of `path`, at most `max` bytes: the content.
+    fn fs_read(socket: &Path, path: &Path, max: u32, n: u8) -> Vec<u8> {
+        let meta = std::fs::metadata(path).unwrap();
+        let file = OwnedFd::from(std::fs::File::open(path).unwrap());
+        let mut peer = Peer::connect(socket);
+        let hello = peer.hello();
+        let a = FsReadAuthorisation::new(
+            hello.channel,
+            invocation(n),
+            meta.dev(),
+            meta.ino(),
+            ReadLimit::new(max).unwrap(),
+        );
+        peer.send(&brokerp::encode_frame(&a).unwrap(), &[file.as_fd()]);
+        match peer.outcome().expect("an outcome").1 {
+            OutcomeResult::Done(done) => done.fs_read.expect("an fs.read").content.to_bytes(),
+            other => panic!("not a read: {other:?}"),
+        }
+    }
+
+    /// `fs.read` hands the broker a file's bytes as they are, and a file may
+    /// hold a secret in the clear — a `.env`, a configuration, the authority's
+    /// own three-identity evidence file. The authority redacts what it is
+    /// given and zeroizes its raw copy (ADR-0046 §21); the broker's raw copy
+    /// must be gone too once the exchange has closed — zeroed, not merely
+    /// freed. A freed block keeps its bytes, and whether a buffer comes from
+    /// the heap or from a mapping returned on free depends on its size and on
+    /// the allocator's history, so the bounds straddle the allocator's mapping
+    /// threshold and include the evidence's own 256 KiB.
+    ///
+    /// Quiescence is the exchange's `closed` event: the broker writes it after
+    /// `serve_one` has returned, so every buffer the exchange owned has been
+    /// dropped by then, and the broker is waiting in `accept`.
+    #[test]
+    fn an_fs_read_leaves_no_copy_of_the_file_in_the_broker_once_its_exchange_has_closed() {
+        let scratch = Scratch::new("read-residue");
+        let broker = Broker::start(&scratch.socket(), true, None);
+        let mut values = Vec::new();
+        for (n, (max, case)) in [
+            (64u32, "fs-read-residue-bound-64"),
+            (4_096, "fs-read-residue-bound-4096"),
+            (65_536, "fs-read-residue-bound-65536"),
+            (100_000, "fs-read-residue-bound-100000"),
+            (131_072, "fs-read-residue-bound-131072"),
+            (262_144, "fs-read-residue-bound-262144"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let value = fresh_value();
+            let path = scratch.0.join(format!("live-{n}.txt"));
+            let text = [b"token=".as_slice(), &value, b"\n"].concat();
+            std::fs::write(&path, &text).unwrap();
+            let n = u8::try_from(n).unwrap();
+            assert_eq!(fs_read(&scratch.socket(), &path, max, n), text);
+            let closed = usize::from(n) + 1;
+            broker.expect_logged("op=broker.fs_read", closed, closed);
+            assert_eq!(
+                memory_holds(broker.pid, &value),
+                Some(false),
+                "bound {max}: the file's value is still in the broker's memory"
+            );
+            evidence(case, "value-absent");
+            values.push(value);
+        }
+        // Repeated reads leave nothing behind either.
+        for value in &values {
+            assert_eq!(
+                memory_holds(broker.pid, value),
+                Some(false),
+                "an earlier read"
+            );
+        }
+        evidence("fs-read-residue-repeated", "values-absent");
     }
 
     #[test]

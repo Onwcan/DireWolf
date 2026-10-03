@@ -85,14 +85,16 @@ impl Matcher {
 }
 
 /// Scan through `read_at` — `pread` in production — for at most `bound`
-/// bytes, reporting at most `max_matches` offsets.
+/// bytes, reporting at most `max_matches` offsets. The window holds the
+/// file's bytes as they are, which may include a secret in the clear: it is
+/// zeroed when dropped, as `observe::read_within`'s buffer is.
 pub(super) fn scan(
     matcher: &Matcher,
     bound: u64,
     max_matches: usize,
     mut read_at: impl FnMut(&mut [u8], u64) -> Result<usize, Errno>,
 ) -> Option<FsSearchDone> {
-    let mut window = vec![0u8; WINDOW];
+    let mut window = zeroize::Zeroizing::new(vec![0u8; WINDOW]);
     let mut state = 0usize;
     let mut offsets: Vec<u64> = Vec::new();
     let mut truncated = false;

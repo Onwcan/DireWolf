@@ -16,6 +16,7 @@ use dwk_proto::wire::list::BoundedList;
 use dwk_proto::wire::scalar::{ByteCount, EntryKind, HexContent, LinkCount, StatKind};
 use rustix::fs::FileType;
 use rustix::io::Errno;
+use zeroize::Zeroizing;
 
 use super::checks::{self, Kind, named};
 
@@ -49,14 +50,21 @@ pub(super) fn read_bounded(file: &OwnedFd, max_bytes: u32) -> Option<FsReadDone>
 /// it. The buffer is sized from the bound, which decoding has already limited,
 /// so nothing is allocated before the bound is known to hold.
 ///
+/// The bytes are the file's as they are, and a file may hold a secret in the
+/// clear. So the buffer is [`Zeroizing`]: sized once, never reallocated, and
+/// shortened without giving back its capacity, so all of it is zeroed when it
+/// is dropped. Freed memory keeps what it held, and whether a buffer is a
+/// mapping returned on free or a heap block that stays depends on its size
+/// and the allocator's history (ADR-0046 §21 zeroizes the authority's copy).
+///
 /// `read_at` is the file: `pread` in production, a counting double in tests.
 /// Returns the bytes and whether the end was observed.
 pub(super) fn read_within(
     max_bytes: u32,
     mut read_at: impl FnMut(&mut [u8], u64) -> Result<usize, Errno>,
-) -> Option<(Vec<u8>, bool)> {
+) -> Option<(Zeroizing<Vec<u8>>, bool)> {
     let bound = usize::try_from(max_bytes).ok()?;
-    let mut content = vec![0u8; bound];
+    let mut content = Zeroizing::new(vec![0u8; bound]);
     let mut filled = 0usize;
     let mut eof_observed = false;
     while filled < bound {
