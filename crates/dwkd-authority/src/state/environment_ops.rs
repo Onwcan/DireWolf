@@ -12,8 +12,9 @@
 use std::sync::Arc;
 use std::time::Instant;
 
+use dwk_proto::brokerp::egress::{EgressCounters, EgressGrant};
 use dwk_proto::brokerp::sandbox::{
-    ContainerRef, EnvironmentProfile, SandboxInvariant, StoreInstance, Verdict,
+    ContainerRef, ContainerRole, EnvironmentProfile, SandboxInvariant, StoreInstance, Verdict,
 };
 use dwk_proto::brokerp::{DestroyState, EnvironmentMeasurement, EnvironmentSpec, OwnedEnvironment};
 use dwk_proto::wire::id::{EnvironmentId, InvocationId, RunId};
@@ -52,6 +53,9 @@ pub struct EnvironmentReport {
     pub runtime_version: Option<String>,
     /// How long the broker's measurement took.
     pub measure_ms: u32,
+    /// What the environment's proxy had done when it was measured (M5b):
+    /// counts by disposition and bytes. `None` without one.
+    pub egress: Option<EgressCounters>,
 }
 
 /// What an environment operation came to.
@@ -106,6 +110,8 @@ pub enum EnvironmentReply {
         already_gone: bool,
         /// How long the broker's destruction took.
         destroy_ms: u32,
+        /// What its proxy did over its life (M5b); `None` without one.
+        egress: Option<EgressCounters>,
     },
     /// Its destruction is recorded and could not be completed now; it is
     /// retried by the next destruction or reconciliation.
@@ -134,6 +140,7 @@ fn report_of(
     container: Option<ContainerRef>,
     measurement: &EnvironmentMeasurement,
     topology: dwk_proto::brokerp::sandbox::NetworkTopology,
+    egress: Option<EgressCounters>,
 ) -> EnvironmentReport {
     let checks: Vec<(SandboxInvariant, Verdict)> = measurement
         .checks
@@ -150,6 +157,7 @@ fn report_of(
             .as_ref()
             .map(|v| v.as_str().to_owned()),
         measure_ms: measurement.measure_ms.get(),
+        egress,
     }
 }
 
@@ -184,12 +192,15 @@ fn runtime(shared: &Shared, config: &SandboxConfig) -> Result<RuntimeHandoff, &'
 
 /// The environment's specification, with the run's workspace re-pinned now:
 /// its path, proved still to name the directory the operator bound, and
-/// that directory's identity, which the probe proves from inside.
+/// that directory's identity, which the probe proves from inside. A
+/// `PROXY_ONLY` one carries the relay's digest and, to be prepared, its
+/// grant (M5b); a measurement needs no grant.
 fn specification(
     shared: &Shared,
     config: &SandboxConfig,
     (environment, run): (&EnvironmentId, &RunId),
     binding: &RootBinding,
+    egress: Option<EgressGrant>,
 ) -> Result<EnvironmentSpec, &'static str> {
     let root = PinnedRoot::reopen(&binding.host_path, &binding.fingerprint)
         .map_err(|_| "WORKSPACE_CHANGED")?;
@@ -204,6 +215,8 @@ fn specification(
         probe_sha256: config.probe_sha256().clone(),
         workspace_path: HostPath::new(binding.host_path.clone()).ok_or("WORKSPACE_PATH")?,
         workspace: (identity.device(), identity.inode()),
+        relay_sha256: config.egress().map(|e| e.relay_sha256().clone()),
+        egress,
     })
 }
 
@@ -282,8 +295,14 @@ impl Authority {
         };
         // Outside any transaction: the client hashed, the workspace re-pinned.
         let order = runtime(&shared, &config).and_then(|handoff| {
-            specification(&shared, &config, (&environment, run), &intent.binding)
-                .map(|spec| (spec, handoff))
+            specification(
+                &shared,
+                &config,
+                (&environment, run),
+                &intent.binding,
+                intent.egress.clone(),
+            )
+            .map(|spec| (spec, handoff))
         });
         let (prepared, report, prepare_ms) = match order {
             Err(reason) => (refuse(reason), None, 0),
@@ -392,7 +411,13 @@ impl Authority {
         let order = binding
             .ok_or("NO_WORKSPACE_ROOT")
             .and_then(|binding| {
-                specification(shared, config, (&record.environment, &record.run), binding)
+                specification(
+                    shared,
+                    config,
+                    (&record.environment, &record.run),
+                    binding,
+                    None,
+                )
             })
             .and_then(|spec| runtime(shared, config).map(|handoff| (spec, handoff)));
         let outcome: Result<EnvironmentReport, (&'static str, Option<EnvironmentReport>)> =
@@ -413,6 +438,7 @@ impl Authority {
                                 Some(container),
                                 measurement,
                                 config.topology(),
+                                done.egress.clone(),
                             );
                             match report.judgement.failure(EnvironmentKind::Oci) {
                                 None => Ok(report),
@@ -427,7 +453,10 @@ impl Authority {
             };
         match outcome {
             Ok(report) => {
-                let timing = Fields::new().int("measure_ms", u64::from(report.measure_ms));
+                let mut timing = Fields::new().int("measure_ms", u64::from(report.measure_ms));
+                if let Some(counters) = &report.egress {
+                    timing = environment::egress_fields(timing, counters);
+                }
                 self.transact(|work| {
                     environment::record_measured(work, &record, &report.judgement, timing)
                 })?;
@@ -513,11 +542,16 @@ impl Authority {
             .int("authority_ms", elapsed(since));
         self.transact(|work| environment::record_destroyed(work, &record, &ending, timing))?;
         Ok(match ending {
-            DestroyEnding::Gone { container, already } => EnvironmentReply::Destroyed {
+            DestroyEnding::Gone {
+                container,
+                already,
+                egress,
+            } => EnvironmentReply::Destroyed {
                 environment: record.environment,
                 container: container.or(record.container),
                 already_gone: already,
                 destroy_ms,
+                egress,
             },
             DestroyEnding::Pending { reason } => EnvironmentReply::DestroyPending {
                 environment: record.environment,
@@ -650,12 +684,11 @@ impl Authority {
             return Ok(false);
         };
         let invocation = self.mint_invocation()?;
-        let (ending, _) = broker_destroy(
-            attached,
-            (environment, run),
-            Some(owned.container.clone()),
-            invocation,
-        );
+        // A helper is reaped through its environment's destruction, which
+        // finds the environment's own container by its labels (M5b).
+        let recorded =
+            (owned.role == Some(ContainerRole::Environment)).then(|| owned.container.clone());
+        let (ending, _) = broker_destroy(attached, (environment, run), recorded, invocation);
         let removed = matches!(ending, DestroyEnding::Gone { .. });
         self.transact(|work| environment::record_orphan(work, owned, removed))?;
         Ok(removed)
@@ -684,10 +717,15 @@ fn judge_preparation(
     match result {
         Ok(BrokerDelivery::EnvironmentPrepared(done)) => {
             let prepare_ms = done.prepare_ms.get();
-            let report = done
-                .measurement
-                .as_ref()
-                .map(|m| report_of(environment, done.container.clone(), m, config.topology()));
+            let report = done.measurement.as_ref().map(|m| {
+                report_of(
+                    environment,
+                    done.container.clone(),
+                    m,
+                    config.topology(),
+                    None,
+                )
+            });
             let judgement = report.as_ref().map(|r| r.judgement.clone());
             let failure = judgement
                 .as_ref()
@@ -770,6 +808,7 @@ fn broker_destroy(
             DestroyEnding::Gone {
                 container: done.container,
                 already: done.state == DestroyState::AlreadyGone,
+                egress: done.egress,
             },
             done.destroy_ms.get(),
         ),

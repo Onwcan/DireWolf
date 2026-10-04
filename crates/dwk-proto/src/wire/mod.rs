@@ -23,6 +23,7 @@
 //! The Python bindings follow the same order; the shared invalid-message
 //! vectors assert it.
 
+pub mod host;
 pub mod id;
 pub mod list;
 pub mod macros;

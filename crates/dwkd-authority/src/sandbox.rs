@@ -19,19 +19,31 @@
 //! turn a required invariant off: the required set is the profile's, spelled
 //! once in `dwk_proto::brokerp::sandbox`.
 //!
-//! M5a's topology is the evidence harness's `NO_NETWORK`; `PROXY_ONLY` is
-//! M5b's, and a configuration naming it is refused rather than accepted as if
-//! it existed.
+//! `PROXY_ONLY` (M5b, [ADR-0048]) is configured with what only it needs —
+//! the relay's digest and the egress budgets — through
+//! [`SandboxConfig::proxy_only`]; `NO_NETWORK` remains the evidence
+//! harness's. The destinations a `PROXY_ONLY` environment may reach are not
+//! configuration: they are the run's own `network.https` grants, exactly
+//! ([`egress_targets`]).
 //!
 //! [ADR-0047]: ../../../../docs/adr/0047-m5a-oci-execution-environment-and-measured-assurance.md
+//! [ADR-0048]: ../../../../docs/adr/0048-m5b-proxy-only-topology-and-connect-proxy.md
 
 use core::fmt;
 
 use dwk_proto::brokerp::BrokerRefusal;
+use dwk_proto::brokerp::egress::{
+    EgressByteBudget, EgressGrant, EgressHost, EgressPort, EgressTarget, EgressTargets,
+    EgressTunnelLimit, MAX_EGRESS_TARGETS,
+};
 use dwk_proto::brokerp::sandbox::{
     AssuranceLevel, ImageId, NetworkTopology, SandboxInvariant, Verdict, required_invariants,
 };
 use dwk_proto::wire::scalar::{ContentDigest, HostPath};
+
+use crate::capability::{
+    Action, Capability, HostPattern, Namespace, PortSpec, Scope, SyntacticScope,
+};
 
 /// A kind of execution environment. M5a has one; `local` joins it when M5d
 /// moves host execution under the same abstraction (SANDBOX.md §1).
@@ -117,6 +129,21 @@ impl Judgement {
             "PROBE_MISMATCH"
         } else if failed(SandboxInvariant::HostImagePinned) {
             "IMAGE_MISMATCH"
+        } else if failed(SandboxInvariant::HostRelayDigest) {
+            "RELAY_MISMATCH"
+        } else if [
+            SandboxInvariant::HostNetworkIsolated,
+            SandboxInvariant::HostProxyRelay,
+            SandboxInvariant::ContainerNetworkIsolated,
+            SandboxInvariant::ContainerProxyReachable,
+            SandboxInvariant::ContainerDirectEgressRefused,
+            SandboxInvariant::ContainerDirectDnsRefused,
+            SandboxInvariant::ContainerRawSocketsRefused,
+        ]
+        .into_iter()
+        .any(failed)
+        {
+            "NETWORK_TOPOLOGY_FAILED"
         } else if [
             SandboxInvariant::HostResourceLimits,
             SandboxInvariant::ContainerRlimits,
@@ -180,6 +207,7 @@ pub const fn refusal_class(refusal: BrokerRefusal) -> &'static str {
         BrokerRefusal::RuntimeFailed => "RUNTIME_FAILED",
         BrokerRefusal::RuntimeOutputMalformed => "RUNTIME_OUTPUT_MALFORMED",
         BrokerRefusal::TopologyUnavailable => "TOPOLOGY_UNAVAILABLE",
+        BrokerRefusal::ProxyUnavailable => "PROXY_UNAVAILABLE",
         BrokerRefusal::EnvironmentNotFound => "ENVIRONMENT_NOT_FOUND",
         BrokerRefusal::EnvironmentAmbiguous => "ENVIRONMENT_AMBIGUOUS",
         BrokerRefusal::ForeignEnvironment => "FOREIGN_ENVIRONMENT",
@@ -196,9 +224,13 @@ pub const fn refusal_class(refusal: BrokerRefusal) -> &'static str {
 /// field for a runtime flag, a capability, a device or a profile weaker
 /// than `oci-strict`: the profile is not configurable.
 ///
-/// In M5a only the evidence harness constructs one ([`crate::state::Authority::attach_sandbox`]);
+/// A `PROXY_ONLY` configuration (M5b) adds the relay's digest and the egress
+/// budgets, and nothing else: no destination, no resolver, no exception. The
+/// destinations are the run's grants.
+///
+/// Only the evidence harness constructs one ([`crate::state::Authority::attach_sandbox`]);
 /// `dwkd-authority serve` has no option that does, so no production
-/// authority prepares an environment.
+/// authority prepares an environment before M5d.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SandboxConfig {
     runtime: String,
@@ -206,6 +238,126 @@ pub struct SandboxConfig {
     image: ImageId,
     probe_sha256: ContentDigest,
     topology: NetworkTopology,
+    egress: Option<EgressConfig>,
+}
+
+/// What a `PROXY_ONLY` configuration adds: the relay, by digest, and the
+/// budgets every one of its environments gets.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EgressConfig {
+    relay_sha256: ContentDigest,
+    max_tunnels: EgressTunnelLimit,
+    max_upload_bytes: EgressByteBudget,
+    max_download_bytes: EgressByteBudget,
+}
+
+impl EgressConfig {
+    /// A relay digest and budgets, checked.
+    ///
+    /// # Errors
+    ///
+    /// [`SandboxConfigError::RelayDigest`] for a digest that is not 64
+    /// lowercase hexadecimal digits; [`SandboxConfigError::EgressBudget`] for
+    /// a limit outside the protocol's bounds (1–64 tunnels, 1 byte–16 GiB).
+    pub fn new(
+        relay_sha256: &str,
+        max_tunnels: u16,
+        max_upload_bytes: u64,
+        max_download_bytes: u64,
+    ) -> Result<Self, SandboxConfigError> {
+        let relay_sha256 = digest(relay_sha256).ok_or(SandboxConfigError::RelayDigest)?;
+        Ok(Self {
+            relay_sha256,
+            max_tunnels: EgressTunnelLimit::new(max_tunnels)
+                .ok_or(SandboxConfigError::EgressBudget)?,
+            max_upload_bytes: EgressByteBudget::new(max_upload_bytes)
+                .ok_or(SandboxConfigError::EgressBudget)?,
+            max_download_bytes: EgressByteBudget::new(max_download_bytes)
+                .ok_or(SandboxConfigError::EgressBudget)?,
+        })
+    }
+
+    /// The relay's digest.
+    #[must_use]
+    pub const fn relay_sha256(&self) -> &ContentDigest {
+        &self.relay_sha256
+    }
+
+    /// The grant for `targets`: these destinations, these budgets.
+    #[must_use]
+    pub fn grant(&self, targets: EgressTargets) -> EgressGrant {
+        EgressGrant {
+            targets,
+            max_tunnels: self.max_tunnels,
+            max_upload_bytes: self.max_upload_bytes,
+            max_download_bytes: self.max_download_bytes,
+        }
+    }
+}
+
+/// The destinations a run's grants give a `PROXY_ONLY` environment: every
+/// `network.https` capability whose host is **exact** — never a wildcard,
+/// never `*`, never an address literal, which the proxy could not compare
+/// with a TLS server name — on its port, or 443 when it names none. Nothing
+/// else becomes a destination: not `network.http` (no plain HTTP through the
+/// proxy), not `network.tcp` (no raw TCP). The probe's reserved name is never
+/// one.
+///
+/// # Errors
+///
+/// `EGRESS_GRANT_TOO_LARGE` when more destinations are granted than one
+/// grant can carry: refused, never truncated.
+pub fn egress_targets<'a>(
+    capabilities: impl IntoIterator<Item = &'a Capability>,
+) -> Result<EgressTargets, &'static str> {
+    let mut targets: Vec<EgressTarget> = Vec::new();
+    for capability in capabilities {
+        let verb = capability.verb();
+        if verb.namespace() != Namespace::Network || verb.action() != Action::Https {
+            continue;
+        }
+        let Scope::Syntactic(SyntacticScope::Endpoint(endpoint)) = capability.scope() else {
+            continue;
+        };
+        let HostPattern::Exact(_) = endpoint.host() else {
+            continue;
+        };
+        let host = endpoint.host().to_string();
+        if host == dwk_sandbox_profile_probe_host() {
+            continue;
+        }
+        let port = match endpoint.port() {
+            PortSpec::Port(port) => port,
+            PortSpec::Any => 443,
+        };
+        let (Some(host), Some(port)) = (EgressHost::new(host), EgressPort::new(port)) else {
+            continue;
+        };
+        let target = EgressTarget { host, port };
+        if !targets.contains(&target) {
+            targets.push(target);
+        }
+    }
+    if targets.len() > MAX_EGRESS_TARGETS {
+        return Err("EGRESS_GRANT_TOO_LARGE");
+    }
+    EgressTargets::new(targets).ok_or("EGRESS_GRANT_TOO_LARGE")
+}
+
+/// The name the probe asks the proxy for, which no grant may hold
+/// (`dwk_sandbox_profile::PROXY_PROBE_HOST`; the authority does not link the
+/// profile crate, so the reserved name is spelled here and checked against
+/// it by the broker's refusal of any grant naming it).
+const fn dwk_sandbox_profile_probe_host() -> &'static str {
+    "direwolf-probe.invalid"
+}
+
+fn digest(text: &str) -> Option<ContentDigest> {
+    ContentDigest::new(text.to_owned()).filter(|d| {
+        d.as_str()
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    })
 }
 
 /// Why a sandbox configuration was refused.
@@ -220,8 +372,13 @@ pub enum SandboxConfigError {
     ImageNotPinned,
     /// The probe digest is not 64 lowercase hexadecimal digits.
     ProbeDigest,
-    /// The topology is not available: `PROXY_ONLY` is M5b's.
-    TopologyUnavailable,
+    /// `PROXY_ONLY` named without its relay and budgets
+    /// ([`SandboxConfig::proxy_only`] is how it is configured).
+    EgressUnconfigured,
+    /// The relay digest is not 64 lowercase hexadecimal digits.
+    RelayDigest,
+    /// An egress budget outside the protocol's bounds.
+    EgressBudget,
 }
 
 impl SandboxConfigError {
@@ -233,7 +390,9 @@ impl SandboxConfigError {
             Self::SocketPath => "SOCKET_PATH",
             Self::ImageNotPinned => "IMAGE_NOT_PINNED",
             Self::ProbeDigest => "PROBE_DIGEST",
-            Self::TopologyUnavailable => "TOPOLOGY_UNAVAILABLE",
+            Self::EgressUnconfigured => "EGRESS_UNCONFIGURED",
+            Self::RelayDigest => "RELAY_DIGEST",
+            Self::EgressBudget => "EGRESS_BUDGET",
         }
     }
 }
@@ -251,7 +410,8 @@ fn absolute(path: &str) -> bool {
 }
 
 impl SandboxConfig {
-    /// A configuration, checked.
+    /// A `NO_NETWORK` configuration, checked. `PROXY_ONLY` is refused here:
+    /// it needs [`Self::proxy_only`].
     ///
     /// # Errors
     ///
@@ -263,6 +423,42 @@ impl SandboxConfig {
         probe_sha256: &str,
         topology: NetworkTopology,
     ) -> Result<Self, SandboxConfigError> {
+        if topology != NetworkTopology::NoNetwork {
+            return Err(SandboxConfigError::EgressUnconfigured);
+        }
+        Self::checked(runtime, socket, image, probe_sha256, topology, None)
+    }
+
+    /// A `PROXY_ONLY` configuration (M5b), checked.
+    ///
+    /// # Errors
+    ///
+    /// [`SandboxConfigError`]: nothing in it is accepted approximately.
+    pub fn proxy_only(
+        runtime: &str,
+        socket: &str,
+        image: &str,
+        probe_sha256: &str,
+        egress: EgressConfig,
+    ) -> Result<Self, SandboxConfigError> {
+        Self::checked(
+            runtime,
+            socket,
+            image,
+            probe_sha256,
+            NetworkTopology::ProxyOnly,
+            Some(egress),
+        )
+    }
+
+    fn checked(
+        runtime: &str,
+        socket: &str,
+        image: &str,
+        probe_sha256: &str,
+        topology: NetworkTopology,
+        egress: Option<EgressConfig>,
+    ) -> Result<Self, SandboxConfigError> {
         if !absolute(runtime) {
             return Err(SandboxConfigError::RuntimePath);
         }
@@ -271,22 +467,14 @@ impl SandboxConfig {
             .flatten()
             .ok_or(SandboxConfigError::SocketPath)?;
         let image = ImageId::new(image.to_owned()).ok_or(SandboxConfigError::ImageNotPinned)?;
-        let probe_sha256 = ContentDigest::new(probe_sha256.to_owned())
-            .filter(|d| {
-                d.as_str()
-                    .bytes()
-                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-            })
-            .ok_or(SandboxConfigError::ProbeDigest)?;
-        if topology != NetworkTopology::NoNetwork {
-            return Err(SandboxConfigError::TopologyUnavailable);
-        }
+        let probe_sha256 = digest(probe_sha256).ok_or(SandboxConfigError::ProbeDigest)?;
         Ok(Self {
             runtime: runtime.to_owned(),
             socket,
             image,
             probe_sha256,
             topology,
+            egress,
         })
     }
 
@@ -320,6 +508,12 @@ impl SandboxConfig {
     pub const fn topology(&self) -> NetworkTopology {
         self.topology
     }
+
+    /// What `PROXY_ONLY` adds; `None` for `NO_NETWORK`.
+    #[must_use]
+    pub const fn egress(&self) -> Option<&EgressConfig> {
+        self.egress.as_ref()
+    }
 }
 
 #[cfg(test)]
@@ -327,7 +521,9 @@ impl SandboxConfig {
 mod tests {
     use dwk_proto::brokerp::sandbox::{AssuranceLevel, NetworkTopology, SandboxInvariant, Verdict};
 
-    use super::{EnvironmentKind, SandboxConfig, SandboxConfigError, judge};
+    use super::{
+        EgressConfig, EnvironmentKind, SandboxConfig, SandboxConfigError, egress_targets, judge,
+    };
 
     fn all(verdict: Verdict) -> Vec<(SandboxInvariant, Verdict)> {
         SandboxInvariant::ALL
@@ -354,7 +550,33 @@ mod tests {
 
     #[test]
     fn one_fail_or_one_unobservable_or_one_missing_refuses_with_no_partial_credit() {
-        for &invariant in SandboxInvariant::ALL {
+        for topology in [NetworkTopology::NoNetwork, NetworkTopology::ProxyOnly] {
+            one_topology_refuses_with_no_partial_credit(topology);
+        }
+        // What only a proxy has does not bind an environment that has none.
+        for invariant in [
+            SandboxInvariant::HostRelayDigest,
+            SandboxInvariant::ContainerProxyReachable,
+        ] {
+            let mut checks = all(Verdict::Pass);
+            for check in &mut checks {
+                if check.0 == invariant {
+                    check.1 = Verdict::Fail;
+                }
+            }
+            assert!(
+                judge(EnvironmentKind::Oci, NetworkTopology::NoNetwork, &checks)
+                    .usable(EnvironmentKind::Oci)
+            );
+            assert!(
+                !judge(EnvironmentKind::Oci, NetworkTopology::ProxyOnly, &checks)
+                    .usable(EnvironmentKind::Oci)
+            );
+        }
+    }
+
+    fn one_topology_refuses_with_no_partial_credit(topology: NetworkTopology) {
+        for invariant in dwk_proto::brokerp::sandbox::required_invariants(topology) {
             for verdict in [Verdict::Fail, Verdict::Unobservable] {
                 let mut checks = all(Verdict::Pass);
                 for check in &mut checks {
@@ -362,7 +584,7 @@ mod tests {
                         check.1 = verdict;
                     }
                 }
-                let j = judge(EnvironmentKind::Oci, NetworkTopology::NoNetwork, &checks);
+                let j = judge(EnvironmentKind::Oci, topology, &checks);
                 assert_eq!(
                     j.measured.0,
                     AssuranceLevel::None,
@@ -376,13 +598,13 @@ mod tests {
                 .into_iter()
                 .filter(|(i, _)| *i != invariant)
                 .collect();
-            let j = judge(EnvironmentKind::Oci, NetworkTopology::NoNetwork, &missing);
+            let j = judge(EnvironmentKind::Oci, topology, &missing);
             assert_eq!(j.unobservable, [invariant]);
             assert!(!j.usable(EnvironmentKind::Oci));
             // Said twice, even both PASS, is not a measurement.
             let mut twice = all(Verdict::Pass);
             twice.push((invariant, Verdict::Pass));
-            let j = judge(EnvironmentKind::Oci, NetworkTopology::NoNetwork, &twice);
+            let j = judge(EnvironmentKind::Oci, topology, &twice);
             assert_eq!(j.unobservable, [invariant]);
         }
     }
@@ -418,6 +640,14 @@ mod tests {
             Some("RESOURCE_LIMIT_FAILED")
         );
         assert_eq!(
+            with(&[(I::ContainerDirectDnsRefused, Verdict::Fail)]),
+            Some("NETWORK_TOPOLOGY_FAILED")
+        );
+        assert_eq!(
+            with(&[(I::HostProxyRelay, Verdict::Fail)]),
+            Some("NETWORK_TOPOLOGY_FAILED")
+        );
+        assert_eq!(
             with(&[(I::HostRootReadOnly, Verdict::Fail)]),
             Some("ASSURANCE_FAILED")
         );
@@ -428,7 +658,7 @@ mod tests {
     }
 
     #[test]
-    fn a_configuration_is_pinned_and_proxy_only_does_not_exist_yet() {
+    fn a_configuration_is_pinned_and_proxy_only_needs_its_relay_and_budgets() {
         let digest = "a".repeat(64);
         let image = format!("sha256:{}", "b".repeat(64));
         let ok = SandboxConfig::new(
@@ -486,7 +716,7 @@ mod tests {
                 image.as_str(),
                 digest.as_str(),
                 NetworkTopology::ProxyOnly,
-                SandboxConfigError::TopologyUnavailable,
+                SandboxConfigError::EgressUnconfigured,
             ),
         ] {
             assert_eq!(
@@ -494,5 +724,77 @@ mod tests {
                 Err(want)
             );
         }
+    }
+
+    #[test]
+    fn a_proxy_only_configuration_is_exact_or_refused() {
+        let digest = "a".repeat(64);
+        let image = format!("sha256:{}", "b".repeat(64));
+        let relay = "c".repeat(64);
+        let egress = EgressConfig::new(&relay, 8, 1 << 30, 1 << 30).unwrap();
+        let config =
+            SandboxConfig::proxy_only("/usr/bin/docker", "/s", &image, &digest, egress).unwrap();
+        assert_eq!(config.topology(), NetworkTopology::ProxyOnly);
+        assert_eq!(config.egress().unwrap().relay_sha256().as_str(), relay);
+        for (relay, tunnels, up, down, want) in [
+            ("ABC", 8, 1, 1, SandboxConfigError::RelayDigest),
+            (
+                &"C".repeat(64)[..],
+                8,
+                1,
+                1,
+                SandboxConfigError::RelayDigest,
+            ),
+            (&relay[..], 0, 1, 1, SandboxConfigError::EgressBudget),
+            (&relay[..], 65, 1, 1, SandboxConfigError::EgressBudget),
+            (&relay[..], 8, 0, 1, SandboxConfigError::EgressBudget),
+            (
+                &relay[..],
+                8,
+                1,
+                (16 << 30) + 1,
+                SandboxConfigError::EgressBudget,
+            ),
+        ] {
+            assert_eq!(EgressConfig::new(relay, tunnels, up, down), Err(want));
+        }
+    }
+
+    fn capability(text: &str) -> crate::capability::Capability {
+        crate::policy::testing::syntactic_capability(text)
+    }
+
+    #[test]
+    fn only_exact_https_hosts_become_destinations() {
+        let granted = [
+            capability("network.https:pypi.org"),
+            capability("network.https:files.pythonhosted.org:443"),
+            capability("network.https:registry.example.com:8443"),
+            capability("network.https:*.example.org"),
+            crate::policy::testing::universal_capability("network.https"),
+            capability("network.http:plain.example.com"),
+            capability("network.tcp:db.example.com:5432"),
+            capability("network.https:10.0.0.1"),
+            capability("network.https:direwolf-probe.invalid"),
+            capability("network.https:pypi.org:443"),
+        ];
+        let targets = egress_targets(&granted).unwrap();
+        let named: Vec<String> = targets
+            .iter()
+            .map(|t| format!("{}:{}", t.host.as_str(), t.port.get()))
+            .collect();
+        assert_eq!(
+            named,
+            [
+                "pypi.org:443",
+                "files.pythonhosted.org:443",
+                "registry.example.com:8443"
+            ]
+        );
+        assert!(egress_targets(&[]).unwrap().is_empty());
+        let many: Vec<_> = (0..65)
+            .map(|n| capability(&format!("network.https:h{n}.example.com")))
+            .collect();
+        assert_eq!(egress_targets(&many), Err("EGRESS_GRANT_TOO_LARGE"));
     }
 }

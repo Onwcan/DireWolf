@@ -425,6 +425,10 @@ paths = [
 exempt_paths = [
     "crates/dwkd-authority/src/server",
     "crates/dwkd-broker/src/listener.rs",
+    # M5b (ADR-0048): the per-environment egress listeners, and their own
+    # unit tests' loopback origin. Named by file, like listener.rs.
+    "crates/dwkd-broker/src/egress/proxy.rs",
+    "crates/dwkd-broker/src/egress/tests.rs",
 ]
 suffixes = [".rs"]
 patterns = [
@@ -443,6 +447,15 @@ of that in front of it.
 Until M4b this rule was TX009-one-authority-server and exempted only the
 authority's server; ADR-0043 designs the private authority-to-broker hop and
 exempts exactly the one file it lives in.
+
+M5b (ADR-0048) adds the broker's `PROXY_ONLY` egress listeners, in one file,
+`egress/proxy.rs`: one Unix socket per prepared environment, in a directory
+beneath a root only the broker can enter, whose ACL lets only the relay's
+uid search it, bind-mounted read-only into that environment's relay and
+nothing else. They take no TCP connection and accept nothing from the
+authority's side. `egress/tests.rs` is that module's
+unit test, compiled only under `cfg(test)`: its loopback TCP origin is the
+far end of a test tunnel.
 """
 
 [[text_rules]]
@@ -552,7 +565,16 @@ at all (RS016).
 [[text_rules]]
 id = "TX013-the-broker-decides-nothing-records-nothing-and-reaches-nothing"
 paths = ["crates/dwkd-broker/src"]
-exempt_paths = []
+# M5b (ADR-0048): the CONNECT proxy's files that must name a network type --
+# the guard's addresses, the trusted resolver, the tunnel's one dial -- and
+# the module's unit tests. Every other pattern here still binds them through
+# TX037 and TX038, which are stricter about the network than this one.
+exempt_paths = [
+    "crates/dwkd-broker/src/egress/guard.rs",
+    "crates/dwkd-broker/src/egress/resolve.rs",
+    "crates/dwkd-broker/src/egress/tunnel.rs",
+    "crates/dwkd-broker/src/egress/tests.rs",
+]
 suffixes = [".rs"]
 patterns = [
     # A Unix-domain socket from the authority is its only input.
@@ -588,6 +610,15 @@ module and its helper.
 
 Hygiene, not containment: the real controls are the kernel's peer check on
 both ends of the channel and the broker's own identity.
+
+M5b (ADR-0048) gives the broker its one outbound path, deliberately: the
+`PROXY_ONLY` CONNECT proxy, which dials only an address the trusted resolver
+returned for a granted host and the IP guard passed, after the TLS server
+name agreed. Its four files are exempt here by name; TX037 confines the dial
+to `egress/tunnel.rs`, and TX038 keeps TLS, credentials and secrets out of the
+whole egress path. The broker still listens to nothing but the authority and
+its environments' relays (TX009), and still decides nothing: the grant is the
+authority's.
 """
 
 [[text_rules]]
@@ -653,6 +684,11 @@ exempt_paths = [
     "crates/dwkd-broker/src/exchange/staging.rs",
     "crates/dwkd-broker/src/process/fdcheck.rs",
     "crates/dwkd-broker/src/process/tests.rs",
+    # M5b (ADR-0048): the egress proxies' own private root, the evidence-only
+    # resolver fixture file, and the module's unit tests.
+    "crates/dwkd-broker/src/egress/proxy.rs",
+    "crates/dwkd-broker/src/egress/resolve.rs",
+    "crates/dwkd-broker/src/egress/tests.rs",
 ]
 suffixes = [".rs"]
 patterns = [
@@ -680,6 +716,13 @@ leak an inheritable descriptor to the target. It reads the process's view of
 itself, never a workspace name, and never executes through procfs (TX022).
 `process/tests.rs` is the launch's own test module, compiled only under
 `cfg(test)`: it creates the executables and directories it hands over.
+
+M5b (ADR-0048): `egress/proxy.rs` creates, checks and removes the broker's
+OWN egress root and the per-environment directories and sockets in it --
+never a workspace name, never anything it did not make (a stale entry that
+is not provably its own is left). `egress/resolve.rs` reads one file: the
+resolver fixture `--allow-evidence-egress` names, which is evidence-only and
+read once at start. `egress/tests.rs` is the module's unit test.
 
 Hygiene, not containment.
 """
@@ -1202,6 +1245,18 @@ or a way for the environment to steer what it reports.
 The test fixture that stands in for a tampered probe lives in `examples/`,
 outside this rule's scope, and is never part of the probe's image.
 
+M5b (ADR-0048) changes what "reaches nothing" means, deliberately: to measure
+`PROXY_ONLY`, the probe now ATTEMPTS to reach -- the profile's constant
+addresses, resolvers and the proxy endpoint, through `rustix` sockets, with
+fixed bytes (one CONNECT for a reserved `.invalid` name, one fixed DNS
+question) -- and reports only whether each attempt was refused. It still
+uses no `std::net`, resolves no name, reads no proxy variable and no
+configuration of its own, and carries nothing in or out: every byte is a
+constant of `dwk-sandbox-profile` or of the probe itself, and so is every
+destination but the nameservers the environment's own `/etc/resolv.conf`
+names (at most eight, addresses only), which it also tries -- a list that can
+only add attempts that must fail.
+
 Hygiene, not containment.
 """
 
@@ -1260,6 +1315,9 @@ exempt_paths = ["crates/dwk-proto/src/brokerp/tests.rs"]
 suffixes = [".rs"]
 patterns = [
     '^(?!\s*//).*\b(docker_args|extra_flags|runtime_options|runtime_flags|raw_args|security_opt|security_opts|cap_add|host_pid|host_ipc|host_network|seccomp_unconfined|runtime_socket_mount|writable_root|extra_mounts)\b',
+    # M5b (ADR-0048): the egress grant is typed destinations and budgets; no
+    # resolver, exception, proxy endpoint or trust material crosses the wire.
+    '^(?!\s*//).*\b(resolver|nameservers?|dns_servers?|proxy_url|proxy_address|egress_exceptions?|allow_private(_network)?|ca_cert|trust_store|tls_terminate)\b',
 ]
 reason = """
 An environment is described on the private wire by typed facts -- its id, run,
@@ -1270,6 +1328,184 @@ a mount specification would let the authority's message, and whatever reached
 it, choose the sandbox's shape.
 
 Hygiene, not containment: the wire types reject every undeclared member.
+
+M5b (ADR-0048): a `PROXY_ONLY` environment's grant is typed too -- exact
+canonical hosts, ports and budgets. A resolver, an address exception, a
+proxy endpoint or trust material on the wire would let the message choose
+where the broker resolves, what the guard lets through, or what TLS it
+trusts; the broker's resolver is its own, its exceptions exist only for the
+evidence's local fixture flag, and there is no TLS to configure.
+"""
+
+# ===========================================================================
+# M5b: PROXY_ONLY and the CONNECT proxy (ADR-0048). Hygiene over the source;
+# the controls are the topology, the proxy's checks and the measurement --
+# shown by `make sandbox-egress-evidence` against a real OCI runtime.
+# ===========================================================================
+
+[[text_rules]]
+id = "TX037-the-broker-dials-only-from-the-tunnel"
+paths = ["crates/dwkd-broker/src"]
+# The one dial, and the module's unit tests (their loopback origin).
+exempt_paths = [
+    "crates/dwkd-broker/src/egress/tunnel.rs",
+    "crates/dwkd-broker/src/egress/tests.rs",
+]
+suffixes = [".rs"]
+patterns = [
+    '^(?!\s*//).*\b(TcpStream|UdpSocket)\s*::\s*(connect|connect_timeout|bind)\b',
+    '^(?!\s*//).*\brustix\s*::\s*net\s*::\s*(connect|socket|socket_with)\b',
+    '^(?!\s*//).*\bsocket2\b',
+]
+reason = """
+The broker has exactly one outbound network path (ADR-0048): a tunnel the
+CONNECT proxy opens to an address the trusted resolver returned for a granted
+host, the IP guard passed and the TLS server name agreed with. That dial is
+spelled once, in `egress/tunnel.rs`, after every check. A second connect
+anywhere in the broker -- a health check, a "direct" fallback, a resolver of
+its own -- would be a path out none of those checks stand in front of.
+
+Hygiene, not containment: the topology gives the environment no other route,
+and the evidence shows each bypass refused.
+"""
+
+[[text_rules]]
+id = "TX038-the-egress-path-terminates-no-tls-and-injects-nothing"
+paths = ["crates/dwkd-broker/src/egress", "crates/dwk-sandbox-relay/src"]
+exempt_paths = []
+suffixes = [".rs"]
+patterns = [
+    # No TLS stack, no certificate handling: the tunnel is opaque.
+    '^(?!\s*//).*\b(rustls|openssl|native_tls|webpki|x509_parser|tokio_rustls|boring|schannel|security_framework)\b',
+    # No credential header is ever written into a tunnel.
+    '^(?!\s*//).*"(Authorization|Proxy-Authorization|Cookie|Set-Cookie)\b',
+    # No secret, no store, no audit, no key.
+    '^(?!\s*//).*\bcrate\s*::\s*secret\b',
+    '^(?!\s*//).*\b(rusqlite|hmac|keyring|ed25519_dalek|age)\s*::',
+    '^(?!\s*//).*(kernel\.db|audit\.log)',
+    '^(?!\s*//).*\bunsafe\b',
+]
+reason = """
+The `PROXY_ONLY` proxy is opaque (ADR-0048, NETWORK_SECURITY.md §4): it reads
+the CONNECT request and the TLS ClientHello's server name, and after that
+carries bytes it never decrypts. There is no DireWolf CA, no trust store, no
+TLS termination and no credential injection on this path -- credential-bearing
+requests are `net.http`'s (M5c), where the kernel is the client. A TLS crate,
+a credential header or a secret here would be the first step of an
+inspecting, injecting proxy arriving without the ADR that would have to
+decide it.
+
+Hygiene, not containment: the evidence shows the tunnel's bytes reach the
+origin unchanged and nothing but counts is recorded.
+"""
+
+[[text_rules]]
+id = "TX039-the-relay-is-a-byte-pump"
+paths = ["crates/dwk-sandbox-relay/src"]
+exempt_paths = []
+suffixes = [".rs"]
+patterns = [
+    # It parses nothing it carries: no request line, no protocol version.
+    '^(?!\s*//).*"(CONNECT|GET|POST|HTTP/)',
+    # It reads no configuration, starts nothing, opens no file.
+    '^(?!\s*//).*\benv\s*::\s*(var|vars|var_os|vars_os)\b',
+    '^(?!\s*//).*\bstd\s*::\s*process\s*::\s*(Command|exit)\b',
+    '^(?!\s*//).*\bstd\s*::\s*fs\b',
+    '^(?!\s*//).*\bunsafe\b',
+]
+reason = """
+The relay runs inside the environment's network namespace and is the one
+thing there that can reach the broker (ADR-0048). It must stay a dumb pump:
+accept on the proxy address, connect to the one mounted socket, copy bytes
+both ways, pass a close on. Every decision -- the request, the grant, the
+resolution, the guard, the server name, the budgets -- is the broker's, on
+the host. A relay that parsed, filtered or rewrote what it carries would be
+a second, unmeasured policy point inside the boundary it serves.
+
+Its `setup` mode makes one netlink request, adding the proxy address to the
+namespace's loopback, and exits.
+
+Hygiene, not containment.
+"""
+
+[[text_rules]]
+id = "TX040-only-the-setup-holds-a-capability"
+paths = ["crates/dwkd-broker/src"]
+# The relay plan spells the one `--cap-add`; the plan's tests name the word
+# to assert no other plan has it.
+exempt_paths = [
+    "crates/dwkd-broker/src/sandbox/relay_plan.rs",
+    "crates/dwkd-broker/src/sandbox/plan_tests.rs",
+]
+suffixes = [".rs"]
+patterns = [
+    '^(?!\s*//).*"--cap-add"',
+]
+reason = """
+Exactly one container DireWolf makes holds a capability (ADR-0048): the
+one-shot setup of a `PROXY_ONLY` environment, which holds NET_ADMIN to add
+the proxy address to the environment's loopback and exits before any
+workload exists. Its command line is `sandbox/relay_plan.rs`'s, and TX041
+keeps that file to that one capability. A `--cap-add` anywhere else in the
+broker would be a capability in a container no ADR gave one.
+
+Hygiene, not containment: the broker measures every environment's and its
+relay's capability sets, from the runtime's record and from inside.
+"""
+
+[[text_rules]]
+id = "TX041-the-relay-plan-spells-no-other-weakening"
+paths = ["crates/dwkd-broker/src/sandbox/relay_plan.rs"]
+exempt_paths = []
+suffixes = [".rs"]
+patterns = [
+    # Any capability but the one, or a second capability on its line.
+    '^(?!\s*//).*"--cap-add"(?!\s*,\s*"NET_ADMIN"\s*\])',
+    '^(?!\s*//).*"--(privileged|device|device-cgroup-rule|group-add|pid|uts|userns|volumes-from|add-host|init)\b',
+    '^(?!\s*//).*"(-v|--volume|-e|--env)"',
+    '^(?!\s*//).*(unconfined|label=disable|label:disable|systempaths)',
+    '^(?!\s*//).*=host\b',
+    '^(?!\s*//).*"host"',
+    '^(?!\s*//).*(docker|containerd|podman|crio|buildkitd)\.sock',
+    '^(?!\s*//).*"--pull=(always|missing)"',
+]
+reason = """
+`sandbox/relay_plan.rs` spells the setup's and the relay's command lines
+(ADR-0048). Both join only the environment's network namespace, run the
+pinned image's digest-checked relay with a read-only root, no new privileges
+and the oci-strict seccomp profile, and are given no environment variable.
+The setup alone holds NET_ADMIN; the relay alone has a mount -- the broker's
+directory for its environment, read-only. Any other weakening word here is a
+weaker helper in the product.
+
+Hygiene, not containment: the broker measures the relay's record
+(`HOST_PROXY_RELAY`) and refuses a setup that is still there.
+"""
+
+[[text_rules]]
+id = "TX042-no-ambient-proxy-setting-reaches-an-environment"
+paths = ["crates/dwkd-broker/src/egress", "crates/dwkd-broker/src/sandbox"]
+exempt_paths = []
+suffixes = [".rs"]
+patterns = [
+    # The broker's own environment is never read here: not a proxy variable,
+    # not anything.
+    '^(?!\s*//).*\benv\s*::\s*(var|vars|var_os|vars_os)\b',
+    # A proxy variable is the profile's constant, never a name spelled here
+    # to be looked up or passed through.
+    '^(?!\s*//).*"(HTTPS?_PROXY|ALL_PROXY|NO_PROXY|FTP_PROXY|https?_proxy|all_proxy|no_proxy|ftp_proxy)"',
+]
+reason = """
+A `PROXY_ONLY` environment is given exactly the broker's proxy variables --
+`dwk-sandbox-profile`'s constants -- and nothing inherited (ADR-0048): not
+the broker's own HTTP_PROXY, not a value a caller chose, and not what the
+runtime client's user configuration would inject (the client runs with an
+empty private configuration directory). Reading the environment or naming a
+proxy variable in the egress or sandbox code would be the first step of
+inheriting one.
+
+Hygiene, not containment: `HOST_PROXY_ENVIRONMENT` measures the environment's
+variables, and the evidence starts a broker with hostile ones.
 """
 
 # ===========================================================================

@@ -34,6 +34,15 @@ fn no_processes() -> crate::process::Processes {
     )
 }
 
+/// A proxy registry with nothing open and no root on disk: no filesystem
+/// test prepares an environment, so none needs one, and none is left behind.
+fn no_proxies() -> std::sync::Arc<crate::egress::proxy::Proxies> {
+    std::sync::Arc::new(crate::egress::proxy::Proxies::without_root(
+        std::sync::Arc::new(crate::egress::resolve::SystemResolver),
+        crate::egress::Limits::PRODUCTION,
+    ))
+}
+
 /// What an exchange acts through, in a filesystem test: a process table and a
 /// sandbox supervisor that can start nothing. Leaked: a test process is short.
 fn effects() -> Effects<'static> {
@@ -47,6 +56,7 @@ fn effects() -> Effects<'static> {
                 client_config: PathBuf::from("/nonexistent/client"),
             },
             false,
+            no_proxies(),
         ))),
     }
 }

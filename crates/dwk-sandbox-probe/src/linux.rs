@@ -25,6 +25,9 @@ use nix::errno::Errno;
 use nix::sys::statvfs::{FsFlags, statvfs};
 use nix::unistd::Pid;
 
+#[path = "network.rs"]
+mod network;
+
 pub(crate) fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
     match args.get(1).map(String::as_str) {
@@ -32,6 +35,10 @@ pub(crate) fn main() -> ExitCode {
         Some(profile::PROBE_TARGET) if args.len() == 2 => target(),
         Some(profile::PROBE_MEASURE) if args.len() == 4 => {
             let environment = args.get(2).and_then(|s| EnvironmentId::parse(s));
+            // The topology is named so that a measurement is of a stated
+            // environment; what the probe attempts is the same for both —
+            // every direct path refused — and the authority decides which
+            // verdicts each topology requires.
             let topology = args.get(3).and_then(|t| {
                 NetworkTopology::ALL
                     .iter()
@@ -39,7 +46,7 @@ pub(crate) fn main() -> ExitCode {
                     .find(|n| n.as_str() == t)
             });
             match (environment, topology) {
-                (Some(environment), Some(topology)) => measure(&environment, topology),
+                (Some(environment), Some(_)) => measure(&environment),
                 _ => usage(),
             }
         }
@@ -67,7 +74,7 @@ fn target() -> ExitCode {
     ExitCode::SUCCESS
 }
 
-fn measure(environment: &EnvironmentId, topology: NetworkTopology) -> ExitCode {
+fn measure(environment: &EnvironmentId) -> ExitCode {
     let status = Status::read();
     let mut found: Vec<(I, Verdict)> = vec![
         (I::ContainerUidGid, uid_gid(status.as_ref())),
@@ -83,7 +90,17 @@ fn measure(environment: &EnvironmentId, topology: NetworkTopology) -> ExitCode {
         (I::ContainerSeccompProfileActive, seccomp_profile_active()),
         (I::ContainerRootReadOnly, root_read_only()),
         (I::ContainerPidNamespacePrivate, pid_namespace_private()),
-        (I::ContainerNetworkIsolated, network_isolated(topology)),
+        (I::ContainerNetworkIsolated, network::isolated()),
+        (I::ContainerProxyReachable, network::proxy_reachable()),
+        (
+            I::ContainerDirectEgressRefused,
+            network::direct_egress_refused(),
+        ),
+        (I::ContainerDirectDnsRefused, network::direct_dns_refused()),
+        (
+            I::ContainerRawSocketsRefused,
+            network::raw_sockets_refused(),
+        ),
         (I::ContainerRlimits, rlimits()),
         (I::ContainerCgroupLimits, cgroup_limits()),
         (I::ContainerDevicesMinimal, devices_minimal()),
@@ -112,7 +129,7 @@ fn measure(environment: &EnvironmentId, topology: NetworkTopology) -> ExitCode {
                 .map_or(Verdict::Unobservable, |(_, v)| *v),
         })
         .collect();
-    let (Some(checks), Some(version)) = (InvariantChecks::new(checks), ProbeReportVersion::new(1))
+    let (Some(checks), Some(version)) = (InvariantChecks::new(checks), ProbeReportVersion::new(2))
     else {
         return ExitCode::from(3);
     };
@@ -313,40 +330,6 @@ fn pid_namespace_private() -> Verdict {
             )
         }
         Err(_) => Verdict::Unobservable,
-    }
-}
-
-fn network_isolated(topology: NetworkTopology) -> Verdict {
-    match topology {
-        // M5b defines what PROXY_ONLY looks like from inside.
-        NetworkTopology::ProxyOnly => Verdict::Unobservable,
-        NetworkTopology::NoNetwork => {
-            let interfaces = match fs::read_to_string("/proc/net/dev") {
-                Ok(text) => {
-                    let interfaces: Vec<&str> = text
-                        .lines()
-                        .skip(2)
-                        .filter_map(|l| l.split_once(':').map(|(name, _)| name.trim()))
-                        .collect();
-                    pass_if(interfaces == ["lo"])
-                }
-                Err(_) => Verdict::Unobservable,
-            };
-            all(&[interfaces, vsock_refused()])
-        }
-    }
-}
-
-/// A virtual socket is not confined by the network namespace: it reaches the
-/// hypervisor host. Creating one must be refused (the profile's `AF_VSOCK`
-/// rule), or be impossible on this kernel.
-fn vsock_refused() -> Verdict {
-    use rustix::net::{AddressFamily, SocketType, socket};
-    match socket(AddressFamily::VSOCK, SocketType::STREAM, None) {
-        Ok(_) => Verdict::Fail,
-        // EPERM is the profile's refusal; any other failure also means
-        // there is no virtual socket to connect with.
-        Err(_) => Verdict::Pass,
     }
 }
 

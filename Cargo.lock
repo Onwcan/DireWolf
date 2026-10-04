@@ -362,6 +362,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "dwk-sandbox-relay"
+version = "0.0.0"
+dependencies = [
+ "dwk-sandbox-profile",
+ "rustix",
+]
+
+[[package]]
 name = "dwkd-authority"
 version = "0.0.0"
 dependencies = [

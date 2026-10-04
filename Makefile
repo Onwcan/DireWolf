@@ -18,7 +18,7 @@ DW := $(PY) scripts/dw.py
         authority-state-evidence filesystem-canonicalization-evidence \
         authority-transport-evidence authority-write-probe broker-fs-read-evidence \
         filesystem-operations-evidence process-broker-evidence secret-broker-evidence \
-        sandbox-foundation-evidence fuzz-smoke fuzz security docs \
+        sandbox-foundation-evidence sandbox-egress-evidence fuzz-smoke fuzz security docs \
         preflight tools hooks clean
 
 help:            ## List available commands
@@ -95,6 +95,9 @@ secret-broker-evidence: ## M4e secrets: backends, mode A, the injection primitiv
 
 sandbox-foundation-evidence: ## M5a real OCI containers: strict profile measured, weakened profiles, probe tamper, lifecycle, foreign safety
 	@$(DW) sandbox-foundation-evidence
+
+sandbox-egress-evidence: ## M5b PROXY_ONLY on real OCI containers: relay, CONNECT proxy, guard, pinning, SNI, budgets, bypasses, weakened topologies
+	@$(DW) sandbox-egress-evidence
 
 fuzz-smoke:      ## Stable mutation fuzzing of dwk-proto (not coverage-guided)
 	@$(DW) fuzz-smoke

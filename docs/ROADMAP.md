@@ -148,14 +148,15 @@ the harness's deterministic suite; the security suites gate, unscoped, in `make
 eval-check`. What M4 does **not** provide is stated once, here: no sandbox or execution
 environment and no network path, so secret injection has no consumer (M5); no approvals,
 so no production build launches a process (M6); no model provider (M7); no runtime (M9);
-and serving on Linux only. **M5 is in progress: M5a is complete (see M5 below).**
+and serving on Linux only. **M5 is in progress: M5a is complete; M5b is implemented and awaits
+its hosted acceptance (see M5 below).**
 
 **Deps:** M3. **Deliverables:** canonicaliser (NFC, `openat2` + fallback walker, inode identity -- M4a delivers `openat2` and identity; a fallback walker needs its own ADR); fd-relative fs ops; exec broker with env scrub, rlimits, argv normalisation, executable hashing; secret broker with keychain/age backends and injection modes A–C; redaction index.
 **Acceptance:** no path string reaches policy; every op uses the fd it checked; no secret in argv, ever.
 **Adversarial:** the full path-traversal set ([EVALS.md](EVALS.md) §3) including Unicode normalisation and TOCTOU swap races in a tight loop; secret-in-output detection; core-dump inspection for secret residue.
 **Deferred:** remote fs, Windows-native hardening beyond the fallback walker.
 
-### M5 · Sandbox — **IN PROGRESS** (M5a complete, hosted acceptance passed; M5b–M5e not started)
+### M5 · Sandbox — **IN PROGRESS** (M5a complete, hosted acceptance passed; M5b implemented, local acceptance pass, candidate for hosted acceptance; M5c–M5e not started)
 
 M5 is two products in one (a sandbox *and* an egress proxy), so it is decomposed like M4
 ([ADR-0047](adr/0047-m5a-oci-execution-environment-and-measured-assurance.md)). The
@@ -192,16 +193,44 @@ substituted, malformed, truncated, over-long, extra-field or hanging probe; copi
 copied run labels, name-only and partial-label containers; drift after preparation.
 **Deferred:** every workload (M5d), any network (M5b), `local` confinement (M5d).
 
-#### M5b · `PROXY_ONLY` topology and CONNECT proxy — **NOT STARTED**
+#### M5b · `PROXY_ONLY` topology and CONNECT proxy — **IMPLEMENTED · LOCAL ACCEPTANCE PASS · CANDIDATE FOR HOSTED ACCEPTANCE**
 
-**Deps:** M5a. **Deliverables:** the `PROXY_ONLY` network ([ADR-0024](adr/0024-sandbox-network-topology.md)):
-an isolated namespace whose one peer is the broker's CONNECT proxy; the proxy with IP guard,
-DNS pinning, SNI/host agreement and byte budgets; the probe's `PROXY_ONLY` checks.
-**Acceptance:** from a `PROXY_ONLY` sandbox no route exists to any address but the proxy
-endpoint (direct connections and direct DNS attempted).
-**Adversarial:** raw sockets, direct DNS, other peers, proxy-variable bypass, fronting
-through an allowlisted shared host within its byte budget.
-**Deferred:** `net.http` (M5c).
+M5b is implemented and `make sandbox-egress-evidence` passes locally (Docker Desktop 29.8.1 in
+WSL2: 8 broker tests and 1 authority test, all 104 cases, nothing left behind); M5a's
+evidence still passes. It is complete only when the required hosted `sandbox-egress` job
+passes on the committed tree.
+
+[ADR-0048](adr/0048-m5b-proxy-only-topology-and-connect-proxy.md).
+**Deps:** M5a. **Deliverables (as built):** the `PROXY_ONLY` network
+([ADR-0024](adr/0024-sandbox-network-topology.md), realised as ADR-0048 §2): the runtime's
+`none` network, `169.254.7.1/32` added to its loopback by a one-shot setup container (the
+one DireWolf container with a capability, NET_ADMIN, gone before any workload), and an
+unprivileged relay in the same namespace forwarding each connection to a broker socket
+mounted into it alone, in a directory whose ACL lets only the relay's uid reach it; the
+broker's opaque CONNECT proxy — a strict bounded parser, the run's own exact
+`network.https` grants, one pinned resolution on the host, the whole answer
+judged by the IP guard (a mixed answer refused outright), the TLS server name agreeing with
+the CONNECT host before anything is dialled (ECH refused, TLS only), environment-wide byte
+budgets and a tunnel limit at the socket — with no TLS termination, no CA, no trust-store
+change and no credential injection; seven new measured invariants (49 in all); private
+protocol version 6; labels schema 2 with roles; a broker restart that fails closed; the
+evidence-only fixture resolver (`--allow-evidence-egress`). No public route; no workload.
+**Acceptance:** `make sandbox-egress-evidence` on a real OCI runtime — from a `PROXY_ONLY`
+environment no route exists to any address but the proxy endpoint (every direct TCP, UDP,
+DNS, raw, packet, ICMP and virtual-socket attempt refused, with its errno and mechanism);
+tunnels through the real relay obey the grant, guard, pin, server name and budgets; every
+weakened or drifted topology detected; crashes, restart and foreign resources exact; NOT
+EXERCISED fails. Required hosted job `sandbox-egress` and gated eval `m5b-sandbox-egress`.
+**Adversarial:** raw, packet and ICMP sockets; direct DNS to external, runtime-embedded and
+local-stub resolvers; other peers (link-local neighbour, bridge host, Desktop host, LAN,
+metadata, IPv6, IPv4-mapped, NAT64); proxy variables ignored, redirected or pointed at
+another peer; address literals, ports and hosts not granted; blocked, mixed, failing,
+timing-out and rebinding answers; SNI mismatch, missing, ambiguous and ECH; plain HTTP; a
+bridge network, a missing relay, removed proxy variables, a stopped relay, an extra peer, a
+fake resolver in the namespace, a setup left running, the socket's directory opened to
+other uids, a tampered relay; any uid but the relay's at the broker's socket; and the
+fronting residual — carried unseen, bounded by the budget.
+**Deferred:** `net.http` (M5c); a workload using the proxy (M5d).
 
 #### M5c · `net.http`, SSRF and redirect policy, credential egress — **NOT STARTED**
 

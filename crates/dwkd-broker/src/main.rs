@@ -27,8 +27,8 @@
 //! authority's uid, and it speaks only the private protocol
 //! ([`dwk_proto::brokerp`]), which no cognition-side code can name.
 //!
-//! # Status: M5a — execution environments; M4e — secret handoff; M4d — process
-//! execution, the filesystem tools
+//! # Status: M5b — `PROXY_ONLY` egress; M5a — execution environments; M4e — secret
+//! handoff; M4d — process execution, the filesystem tools
 //!
 //! [ADR-0043]: one private Unix-domain listener (`listener`), one exchange per
 //! connection (`exchange`): a hello naming a fresh channel, one authorisation
@@ -71,12 +71,21 @@
 //! and executed by descriptor through the launch helper with a typed
 //! argument vector. Nothing is run inside an environment but the probe; the
 //! only topology built is the evidence harness's `NO_NETWORK`, and only with
-//! `--allow-evidence-topology`. The proxy and sandboxed workloads are M5b-M5e.
+//! `--allow-evidence-topology`. Sandboxed workloads are M5d's.
+//!
+//! [ADR-0048] adds `PROXY_ONLY` (`egress`): the broker's opaque CONNECT
+//! proxy, one Unix socket per environment reached only through that
+//! environment's relay, enforcing the authority's grant, the IP guard, one
+//! pinned resolution, TLS server-name agreement and byte budgets — the
+//! broker's one outbound path, dialled only from `egress/tunnel.rs`. It
+//! terminates no TLS, holds no CA and injects nothing. `--allow-evidence-egress`
+//! swaps in the evidence's fixture resolver, loudly; production has none.
 //!
 //! [ADR-0044]: ../../../docs/adr/0044-m4c-filesystem-operations-plans-and-atomic-mutation.md
 //! [ADR-0045]: ../../../docs/adr/0045-m4d-process-execution-broker.md
 //! [ADR-0046]: ../../../docs/adr/0046-m4e-secret-handles-backends-injection-and-redaction.md
 //! [ADR-0047]: ../../../docs/adr/0047-m5a-oci-execution-environment-and-measured-assurance.md
+//! [ADR-0048]: ../../../docs/adr/0048-m5b-proxy-only-topology-and-connect-proxy.md
 //!
 //! [ADR-0018]: ../../../docs/adr/0018-authority-broker-split.md
 //! [ADR-0043]: ../../../docs/adr/0043-m4b-private-broker-channel-and-brokered-fs-read.md
@@ -87,6 +96,8 @@
 mod config;
 #[cfg(target_os = "linux")]
 mod crash;
+#[cfg(target_os = "linux")]
+mod egress;
 #[cfg(target_os = "linux")]
 mod exchange;
 #[cfg(target_os = "linux")]
@@ -200,9 +211,18 @@ fn serve(config: &config::ServeConfig) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    // The sandbox's files exist before the broker says it is serving.
+    // The sandbox's files exist before the broker says it is serving — and
+    // the egress proxies' root is settled: what a dead broker left there is
+    // gone before anything may ask for an environment (M5b).
     let files = match listener::sandbox_files(&place, own_uid) {
         Ok(files) => files,
+        Err(error) => {
+            log(&format!("cannot serve: {error}"));
+            return ExitCode::FAILURE;
+        }
+    };
+    let proxies = match proxies(config, &place, own_uid) {
+        Ok(proxies) => proxies,
         Err(error) => {
             log(&format!("cannot serve: {error}"));
             return ExitCode::FAILURE;
@@ -228,18 +248,12 @@ fn serve(config: &config::ServeConfig) -> ExitCode {
         "process_generation generation={}",
         processes.generation().as_str()
     ));
-    if config.evidence_topology_permitted {
-        log(
-            "EVIDENCE TOPOLOGY: NO_NETWORK execution environments may be prepared \
-             (--allow-evidence-topology); this is the M5a evidence harness's topology, not a \
-             production one",
-        );
-    }
     let sandbox = sandbox::Sandbox::new(
         processes.helper().to_path_buf(),
         config.authority_uid,
         files,
         config.evidence_topology_permitted,
+        proxies,
     );
     listener::serve(
         &bound,
@@ -252,6 +266,46 @@ fn serve(config: &config::ServeConfig) -> ExitCode {
         },
     );
     ExitCode::SUCCESS
+}
+
+/// The `PROXY_ONLY` proxies (M5b, ADR-0048), in the broker's own directory,
+/// with the host's resolver — or, for the egress evidence only, a fixture's,
+/// said loudly. The evidence topology is announced here too: both are the
+/// sandbox's evidence-only acknowledgements.
+#[cfg(target_os = "linux")]
+fn proxies(
+    config: &config::ServeConfig,
+    place: &listener::SocketPlace,
+    own_uid: u32,
+) -> Result<std::sync::Arc<egress::proxy::Proxies>, String> {
+    if config.evidence_topology_permitted {
+        log(
+            "EVIDENCE TOPOLOGY: NO_NETWORK execution environments may be prepared \
+             (--allow-evidence-topology); this is the M5a evidence harness's topology, not a \
+             production one",
+        );
+    }
+    let resolver: egress::resolve::Shared = match &config.evidence_egress {
+        None => std::sync::Arc::new(egress::resolve::SystemResolver),
+        Some(path) => {
+            let fixture = egress::resolve::FixtureResolver::load(path)
+                .map_err(|error| format!("the egress fixture: {error}"))?;
+            log(
+                "EVIDENCE EGRESS: the CONNECT proxy resolves names from a fixture file and may \
+                 reach the loopback addresses it names (--allow-evidence-egress); this is the \
+                 M5b evidence harness's resolver, never a production one",
+            );
+            std::sync::Arc::new(fixture)
+        }
+    };
+    egress::proxy::Proxies::new(
+        place.dir().join("egress"),
+        own_uid,
+        resolver,
+        egress::Limits::PRODUCTION,
+    )
+    .map(std::sync::Arc::new)
+    .map_err(|error| format!("the egress proxies: {}", error.0))
 }
 
 /// The launch helper: see `process::helper`.
@@ -284,7 +338,7 @@ fn help() -> String {
          \n\
          USAGE:\n    \
              {NAME} serve --socket <PATH> --authority-uid <UID> [--allow-shared-authority-uid] [--allow-dumpable]\n    \
-                              [--allow-evidence-topology]\n    \
+                              [--allow-evidence-topology] [--allow-evidence-egress <FILE>]\n    \
              {NAME} [-V | --version] [-h | --help]\n\
          \n\
          OPTIONS:\n    \
@@ -292,7 +346,8 @@ fn help() -> String {
              --authority-uid <UID>           the only uid the broker reads from\n    \
              --allow-shared-authority-uid    permit the authority to be the broker's own uid (development only)\n    \
              --allow-dumpable                leave the process dumpable, its memory readable by its uid (development only)\n    \
-             --allow-evidence-topology       permit NO_NETWORK execution environments (M5a evidence only)\n\
+             --allow-evidence-topology       permit NO_NETWORK execution environments (M5a evidence only)\n    \
+             --allow-evidence-egress <FILE>  resolve egress names from a fixture file (M5b evidence only)\n\
          \n\
          STATUS: M4d - the filesystem tools (read, stat, list, search, write,\n\
          patch, move, delete) and process execution (start, status, kill) of the\n\
@@ -302,8 +357,12 @@ fn help() -> String {
          injected into a launch; no secret store. M5a - execution environments:\n\
          an oci-strict container prepared, measured, destroyed and listed\n\
          through the runtime client the authority checked, with nothing run\n\
-         inside but the trusted probe; NO_NETWORK only, for evidence. Linux\n\
-         only. No proxy, no sandboxed workload and no egress consumer: M5b-M5e.\n",
+         inside but the trusted probe. M5b - PROXY_ONLY: the runtime's none\n\
+         network, one relay in it, and an opaque CONNECT proxy (no TLS\n\
+         termination, no CA, no credential) enforcing the grant, the IP guard,\n\
+         one pinned resolution, server-name agreement and byte budgets.\n\
+         NO_NETWORK only for evidence. Linux only. No sandboxed workload and\n\
+         no net.http: M5c-M5e.\n",
         env!("CARGO_PKG_VERSION")
     )
 }

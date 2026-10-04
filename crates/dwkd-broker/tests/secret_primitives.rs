@@ -690,7 +690,7 @@ mod linux {
 
         // Messages the language does not have: closed, unanswered.
         for (case, edit) in [
-            ("old-private-version", ("\"protocol\":5", "\"protocol\":4")),
+            ("old-private-version", ("\"protocol\":6", "\"protocol\":5")),
             (
                 "unknown-kind",
                 ("broker.secret_egress", "broker.secret_fetch"),

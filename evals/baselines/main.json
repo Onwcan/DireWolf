@@ -66,6 +66,10 @@
    "status": "pass",
    "min_score": 1.0
   },
+  "m5b-sandbox-egress/proxy-only-egress": {
+   "status": "pass",
+   "min_score": 1.0
+  },
   "pending-kernel/approval-binding-drift": {
    "status": "pending",
    "pending_reason": "requires M6: there is no approval registry and no binding hash."
@@ -76,7 +80,7 @@
   },
   "pending-kernel/sandbox-egress": {
    "status": "pending",
-   "pending_reason": "requires M5: there is no sandbox and no egress proxy."
+   "pending_reason": "requires M5: M5b measures the topology and the proxy (m5b-sandbox-egress); a sandboxed workload using them is M5d's, and the complete gate M5e's."
   },
   "protocol-compat/canonical-determinism": {
    "status": "pass",

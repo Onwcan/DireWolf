@@ -175,26 +175,27 @@ fn an_outcome_carries_exactly_one_answer() {
     let mut both = BrokerOutcome::new(channel(), invocation(), OutcomeResult::done(done));
     both.refused = Some(BrokerRefusal::ReadFailed);
     assert!(encode_frame(&both).is_err());
-    let none = r#"{"channel":"0123456789abcdef0123456789abcdef","invocation_id":"inv_01M24BB8G3E0A851TRWE3M8FZF","kind":"broker.outcome","protocol":5}"#;
+    let none = r#"{"channel":"0123456789abcdef0123456789abcdef","invocation_id":"inv_01M24BB8G3E0A851TRWE3M8FZF","kind":"broker.outcome","protocol":6}"#;
     assert!(BrokerOutcome::decode_frame_body(none.as_bytes()).is_err());
     // A done names exactly one operation.
-    let two = r#"{"channel":"0123456789abcdef0123456789abcdef","done":{"fs_move":{},"fs_delete":{"debris":false}},"invocation_id":"inv_01M24BB8G3E0A851TRWE3M8FZF","kind":"broker.outcome","protocol":5}"#;
+    let two = r#"{"channel":"0123456789abcdef0123456789abcdef","done":{"fs_move":{},"fs_delete":{"debris":false}},"invocation_id":"inv_01M24BB8G3E0A851TRWE3M8FZF","kind":"broker.outcome","protocol":6}"#;
     assert!(BrokerOutcome::decode_frame_body(two.as_bytes()).is_err());
 }
 
 #[test]
 fn unknown_members_old_versions_and_second_spellings_are_refused() {
     for text in [
-        r#"{"channel":"0123456789abcdef0123456789abcdef","kind":"broker.hello","protocol":5,"extra":1}"#,
-        r#"{"channel":"0123456789ABCDEF0123456789ABCDEF","kind":"broker.hello","protocol":5}"#,
-        // Versions 1 to 4 are not half-understood (ADR-0047 made it 5), and
+        r#"{"channel":"0123456789abcdef0123456789abcdef","kind":"broker.hello","protocol":6,"extra":1}"#,
+        r#"{"channel":"0123456789ABCDEF0123456789ABCDEF","kind":"broker.hello","protocol":6}"#,
+        // Versions 1 to 5 are not half-understood (ADR-0048 made it 6), and
         // a later one is not guessed at.
         r#"{"channel":"0123456789abcdef0123456789abcdef","kind":"broker.hello","protocol":1}"#,
         r#"{"channel":"0123456789abcdef0123456789abcdef","kind":"broker.hello","protocol":2}"#,
         r#"{"channel":"0123456789abcdef0123456789abcdef","kind":"broker.hello","protocol":3}"#,
         r#"{"channel":"0123456789abcdef0123456789abcdef","kind":"broker.hello","protocol":4}"#,
-        r#"{"channel":"0123456789abcdef0123456789abcdef","kind":"broker.hello","protocol":6}"#,
-        r#"{"channel":"0123456789abcdef0123456789abcdef","kind":"broker.hello","kind":"broker.hello","protocol":5}"#,
+        r#"{"channel":"0123456789abcdef0123456789abcdef","kind":"broker.hello","protocol":5}"#,
+        r#"{"channel":"0123456789abcdef0123456789abcdef","kind":"broker.hello","protocol":7}"#,
+        r#"{"channel":"0123456789abcdef0123456789abcdef","kind":"broker.hello","kind":"broker.hello","protocol":6}"#,
     ] {
         assert!(
             BrokerHello::decode_frame_body(text.as_bytes()).is_err(),
@@ -202,7 +203,7 @@ fn unknown_members_old_versions_and_second_spellings_are_refused() {
         );
     }
     // An unknown kind is not an authorisation.
-    let unknown = r#"{"kind":"broker.fs_chmod","protocol":5}"#;
+    let unknown = r#"{"kind":"broker.fs_chmod","protocol":6}"#;
     assert!(Authorisation::decode_frame_body(unknown.as_bytes()).is_err());
     for (text, ok) in [
         ("0", true),
@@ -647,7 +648,7 @@ fn a_secret_result_names_its_own_operation_and_says_nothing_of_the_value() {
         BrokerDone::secret_egress().secret_egress,
         Some(SecretEgressDone {})
     );
-    let text = r#"{"channel":"0123456789abcdef0123456789abcdef","done":{"secret_egress":{"length":8}},"invocation_id":"inv_01M24BB8G3E0A851TRWE3M8FZF","kind":"broker.outcome","protocol":5}"#;
+    let text = r#"{"channel":"0123456789abcdef0123456789abcdef","done":{"secret_egress":{"length":8}},"invocation_id":"inv_01M24BB8G3E0A851TRWE3M8FZF","kind":"broker.outcome","protocol":6}"#;
     assert!(BrokerOutcome::decode_frame_body(text.as_bytes()).is_err());
 }
 
@@ -682,6 +683,124 @@ fn environment_spec() -> super::EnvironmentSpec {
         workspace_path: crate::wire::scalar::HostPath::new("/srv/ws")
             .unwrap_or_else(|| unreachable!()),
         workspace: (2049, 131),
+        relay_sha256: None,
+        egress: None,
+    }
+}
+
+/// A `PROXY_ONLY` preparation's spec: the relay pinned, one target granted.
+fn proxy_spec() -> super::EnvironmentSpec {
+    use super::egress::{
+        EgressByteBudget, EgressGrant, EgressHost, EgressPort, EgressTarget, EgressTargets,
+        EgressTunnelLimit,
+    };
+    let mut spec = environment_spec();
+    spec.network = super::sandbox::NetworkTopology::ProxyOnly;
+    spec.relay_sha256 = Some(
+        crate::wire::scalar::ContentDigest::new("f".repeat(64)).unwrap_or_else(|| unreachable!()),
+    );
+    spec.egress = Some(EgressGrant {
+        targets: EgressTargets::new(vec![EgressTarget {
+            host: EgressHost::new("pypi.org").unwrap_or_else(|| unreachable!()),
+            port: EgressPort::new(443).unwrap_or_else(|| unreachable!()),
+        }])
+        .unwrap_or_else(|| unreachable!()),
+        max_tunnels: EgressTunnelLimit::new(4).unwrap_or_else(|| unreachable!()),
+        max_upload_bytes: EgressByteBudget::new(1 << 20).unwrap_or_else(|| unreachable!()),
+        max_download_bytes: EgressByteBudget::new(1 << 24).unwrap_or_else(|| unreachable!()),
+    });
+    spec
+}
+
+#[test]
+fn a_proxy_only_preparation_carries_typed_targets_and_nothing_wider() {
+    let prepare = Authorisation::EnvironmentPrepare(super::EnvironmentPrepareAuthorisation::new(
+        common(),
+        proxy_spec(),
+        runtime_spec(),
+    ));
+    let bytes = body(&prepare.encode_frame().unwrap_or_default());
+    let decoded = Authorisation::decode_frame_body(&bytes);
+    assert_eq!(decoded, Ok(prepare.clone()));
+    let Ok(Authorisation::EnvironmentPrepare(decoded)) = decoded else {
+        unreachable!()
+    };
+    let spec = decoded.environment();
+    assert_eq!(spec, proxy_spec());
+    assert!(
+        spec.egress
+            .as_ref()
+            .is_some_and(|g| g.permits("pypi.org", 443))
+    );
+    // A pattern, an address, a range, a second spelling: none is a target.
+    let text = String::from_utf8(bytes).unwrap_or_default();
+    for (from, to) in [
+        ("\"pypi.org\"", "\"*.pypi.org\""),
+        ("\"pypi.org\"", "\"10.0.0.1\""),
+        ("\"pypi.org\"", "\"PYPI.org\""),
+        ("\"pypi.org\"", "\"pypi.org.\""),
+        ("\"pypi.org\"", "\"[::1]\""),
+        ("\"port\":443", "\"port\":0"),
+    ] {
+        let bad = text.replacen(from, to, 1);
+        assert_ne!(bad, text, "{to}");
+        assert!(
+            Authorisation::decode_frame_body(bad.as_bytes()).is_err(),
+            "{to}"
+        );
+    }
+    for smuggled in [
+        r#""cidr":"10.0.0.0/8","#,
+        r#""allow_private":true,"#,
+        r#""proxy_url":"http://evil:1","#,
+    ] {
+        let bad = text.replacen("\"targets\"", &format!("{smuggled}\"targets\""), 1);
+        assert!(
+            Authorisation::decode_frame_body(bad.as_bytes()).is_err(),
+            "{smuggled}"
+        );
+    }
+}
+
+#[test]
+fn egress_counters_and_roles_travel_and_carry_no_host() {
+    use super::egress::{
+        EgressCount, EgressCountList, EgressCountValue, EgressCounters, EgressDisposition,
+    };
+    use super::sandbox::{ContainerRef, ContainerRole, Milliseconds};
+    let counters = EgressCounters {
+        dispositions: EgressCountList::new(vec![
+            EgressCount {
+                disposition: EgressDisposition::Closed,
+                count: EgressCountValue::new(3).unwrap_or_else(|| unreachable!()),
+            },
+            EgressCount {
+                disposition: EgressDisposition::SniMismatch,
+                count: EgressCountValue::new(1).unwrap_or_else(|| unreachable!()),
+            },
+        ])
+        .unwrap_or_else(|| unreachable!()),
+        bytes_upstream: crate::wire::scalar::ByteCount::new(10).unwrap_or_else(|| unreachable!()),
+        bytes_downstream: crate::wire::scalar::ByteCount::new(20).unwrap_or_else(|| unreachable!()),
+    };
+    assert_eq!(counters.count(EgressDisposition::Closed), 3);
+    assert_eq!(counters.count(EgressDisposition::AddressBlocked), 0);
+    let done = BrokerDone::environment_destroy(super::EnvironmentDestroyDone {
+        state: super::DestroyState::Removed,
+        container: ContainerRef::new("e".repeat(64)),
+        destroy_ms: Milliseconds::new(7).unwrap_or_else(|| unreachable!()),
+        egress: Some(counters),
+    });
+    let outcome = BrokerOutcome::new(channel(), invocation(), OutcomeResult::done(done.clone()));
+    let bytes = body(&encode_frame(&outcome).unwrap_or_default());
+    assert_eq!(
+        BrokerOutcome::decode_frame_body(&bytes).map(|o| o.result()),
+        Ok(OutcomeResult::done(done))
+    );
+    let text = String::from_utf8(bytes).unwrap_or_default();
+    assert!(!text.contains("host"), "{text}");
+    for role in ContainerRole::ALL {
+        assert!(!role.label().is_empty());
     }
 }
 

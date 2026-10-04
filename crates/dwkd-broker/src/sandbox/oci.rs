@@ -16,19 +16,32 @@
 //! [`super::inspect`]), the probe's bytes (judged by [`super::digest`]) and
 //! the probe's report (decoded strictly, or `UNOBSERVABLE`). Nothing the
 //! runtime or the probe prints reaches a log; only its length does.
+//!
+//! A `PROXY_ONLY` environment (M5b, ADR-0048) is three containers and one
+//! broker listener, made in this order and taken down in the reverse: the
+//! broker's proxy for it is opened; the environment is created and started
+//! in the runtime's `none` network with the broker's proxy variables; the
+//! relay inside the image is hashed against the authority's digest; the
+//! one-shot setup container adds the proxy address to the environment's
+//! loopback and is removed by the runtime; the relay is started in the
+//! environment's namespace with the broker's directory mounted. Each step
+//! that does not happen shows in the measurement, and an environment that
+//! does not measure clean is taken down whole — helpers, environment and
+//! listener.
 
 use std::os::fd::OwnedFd;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
 use dwk_proto::brokerp::sandbox::{
-    AssuranceLevel, ContainerRef, MAX_PROBE_REPORT_BYTES, Milliseconds, NetworkTopology,
-    ProbeReport, RuntimeVersion, SandboxInvariant, StoreInstance, Verdict,
+    AssuranceLevel, ContainerRef, ContainerRole, MAX_PROBE_REPORT_BYTES, Milliseconds,
+    NetworkTopology, ProbeReport, RuntimeVersion, SandboxInvariant, StoreInstance, Verdict,
 };
 use dwk_proto::brokerp::{BrokerRefusal, ContainerState, EnvironmentSpec, RuntimeSpec};
 use dwk_proto::wire::id::{EnvironmentId, RunId};
 use rustix::fs::Stat;
 
+use crate::egress::proxy::Proxies;
 use crate::process::launch::Program;
 use crate::process::run::{self, Bounds, Completed, Ended};
 use crate::process::verify::{self, Authorised};
@@ -36,7 +49,7 @@ use crate::process::verify::{self, Authorised};
 use super::environment::{
     Destroyed, EnvFailure, EnvHandle, ExecOutcome, ExecutionEnvironment, Listed, Measured, Prepared,
 };
-use super::{Checks, digest, inspect, plan};
+use super::{Checks, digest, inspect, plan, relay_plan};
 
 /// The longest one runtime step may take.
 const STEP: Duration = Duration::from_secs(60);
@@ -255,21 +268,25 @@ pub(crate) struct Oci<'a> {
     seccomp_path: &'a str,
     seccomp_profile: &'a str,
     socket: String,
+    proxies: &'a Proxies,
 }
 
 impl<'a> Oci<'a> {
     /// The environment kind, over `runtime`, with the profile file the
-    /// listener wrote and the profile text it holds.
+    /// listener wrote and the profile text it holds, and the broker's
+    /// proxies.
     pub(crate) fn new(
         runtime: Runtime<'a>,
         (seccomp_path, seccomp_profile): (&'a str, &'a str),
         socket: &str,
+        proxies: &'a Proxies,
     ) -> Self {
         Self {
             runtime,
             seccomp_path,
             seccomp_profile,
             socket: socket.to_owned(),
+            proxies,
         }
     }
 
@@ -333,14 +350,19 @@ impl<'a> Oci<'a> {
         }
     }
 
-    /// Every container labelled as `store`'s (and `environment`'s).
+    /// Every container labelled as `store`'s (and `environment`'s, and
+    /// `role`'s).
     fn owned_ids(
         &self,
         store: &StoreInstance,
         environment: Option<(&EnvironmentId, &RunId)>,
+        role: Option<ContainerRole>,
     ) -> Result<(Vec<ContainerRef>, bool), EnvFailure> {
         let bound = (MAX_LISTED + 1) * 65;
-        match self.runtime.call(plan::owned(store, environment), bound) {
+        match self
+            .runtime
+            .call(plan::owned(store, environment, role), bound)
+        {
             Ok(done) if done.ended == Ended::Exited(0) => {
                 let found = lines(&done.stdout)
                     .and_then(|lines| {
@@ -374,11 +396,15 @@ impl<'a> Oci<'a> {
     }
 
     /// A creation that failed or cannot be confirmed: remove whatever the
-    /// runtime made under this environment's labels, and say what is known.
+    /// runtime made under this environment's labels, close its proxy, and
+    /// say what is known.
     fn abandon(&self, spec: &EnvironmentSpec) -> Result<Prepared, EnvFailure> {
-        let Ok((made, complete)) =
-            self.owned_ids(&spec.store, Some((&spec.environment_id, &spec.run_id)))
-        else {
+        let _ = self.proxies.close(spec.environment_id.as_str());
+        let Ok((made, complete)) = self.owned_ids(
+            &spec.store,
+            Some((&spec.environment_id, &spec.run_id)),
+            None,
+        ) else {
             return Err(EnvFailure::Unconfirmed);
         };
         if !complete {
@@ -400,6 +426,171 @@ impl<'a> Oci<'a> {
         {
             Ok(done) if done.stdout_cut => Verdict::Fail,
             Ok(done) if succeeded(&done) => digest::probe(&done.stdout, spec.probe_sha256.as_str()),
+            _ => Verdict::Unobservable,
+        }
+    }
+
+    /// The relay's bytes, out of `container`'s root, against the pinned
+    /// digest. No digest pinned: nothing can pass.
+    fn relay_digest(&self, container: &ContainerRef, spec: &EnvironmentSpec) -> Verdict {
+        let Some(expected) = &spec.relay_sha256 else {
+            return Verdict::Fail;
+        };
+        match self
+            .runtime
+            .call(plan::copy_relay(container), digest::MAX_ARCHIVE_BYTES)
+        {
+            Ok(done) if done.stdout_cut => Verdict::Fail,
+            Ok(done) if succeeded(&done) => digest::relay(&done.stdout, expected.as_str()),
+            _ => Verdict::Unobservable,
+        }
+    }
+
+    /// Every helper labelled as `environment`'s, of `role`: proved labelled
+    /// so, then removed. Nothing labelled otherwise is touched.
+    fn remove_helpers(
+        &self,
+        store: &StoreInstance,
+        environment: (&EnvironmentId, &RunId),
+    ) -> Result<(), EnvFailure> {
+        // The setup first (it may still be running), then the relay.
+        for role in [ContainerRole::Setup, ContainerRole::Relay] {
+            let (found, complete) = self.owned_ids(store, Some(environment), Some(role))?;
+            if !complete {
+                return Err(EnvFailure::Refused(BrokerRefusal::EnvironmentAmbiguous));
+            }
+            for helper in &found {
+                match self.record(helper)? {
+                    None => {}
+                    Some(object) => {
+                        let record = inspect::Record::new(&object);
+                        if !record.is(store, environment) || record.role() != Some(role) {
+                            return Err(EnvFailure::Refused(BrokerRefusal::ForeignEnvironment));
+                        }
+                        self.remove(helper)?;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Take a prepared environment down whole: its helpers, the
+    /// environment, its proxy.
+    fn teardown(&self, spec: &EnvironmentSpec, container: &ContainerRef) -> Result<(), EnvFailure> {
+        let helpers = self.remove_helpers(&spec.store, (&spec.environment_id, &spec.run_id));
+        let environment = self.remove(container);
+        let _ = self.proxies.close(spec.environment_id.as_str());
+        helpers.and(environment)
+    }
+
+    /// Give a started `PROXY_ONLY` environment its one peer: hash the relay
+    /// in its image, run the setup, start the relay. A step that does not
+    /// happen is not retried and not fatal here: the measurement shows it,
+    /// and an environment without its peer is not kept.
+    fn connect_peer(&self, spec: &EnvironmentSpec, container: &ContainerRef, egress_dir: &str) {
+        // The relay runs as root with one capability in the setup: it is
+        // never started unless it is the pinned one.
+        let digest = self.relay_digest(container, spec);
+        if digest != Verdict::Pass {
+            crate::event(&format!("relay_withheld digest={}", digest.as_str()));
+            return;
+        }
+        let Some(setup) = relay_plan::setup(spec, container, self.seccomp_path) else {
+            return;
+        };
+        if !self.runtime.call(setup, LINE).as_ref().is_ok_and(succeeded) {
+            crate::event("relay_setup_failed");
+            return;
+        }
+        crate::crash::point("environment_network_set");
+        let Some(create) = relay_plan::relay(spec, container, self.seccomp_path, egress_dir) else {
+            return;
+        };
+        let relay = match self.runtime.call(create, LINE) {
+            Ok(done) if succeeded(&done) => {
+                one_line(&done.stdout).and_then(|id| ContainerRef::new(id.to_owned()))
+            }
+            _ => None,
+        };
+        let Some(relay) = relay else {
+            crate::event("relay_create_failed");
+            return;
+        };
+        if !self
+            .runtime
+            .call(plan::start(&relay), LINE)
+            .as_ref()
+            .is_ok_and(succeeded)
+        {
+            crate::event("relay_start_failed");
+            return;
+        }
+        crate::crash::point("environment_relay_started");
+    }
+
+    /// `HOST_PROXY_RELAY`: the environment's peers are exactly its
+    /// topology's — for `PROXY_ONLY` one exact relay, the broker's proxy for
+    /// it open, no setup left; for `NO_NETWORK` none of the three.
+    fn peers(&self, handle: &EnvHandle, spec: &EnvironmentSpec) -> Verdict {
+        let environment = (&spec.environment_id, &spec.run_id);
+        let listed = |role| self.owned_ids(&spec.store, Some(environment), Some(role));
+        let (Ok((relays, relays_complete)), Ok((setups, setups_complete))) =
+            (listed(ContainerRole::Relay), listed(ContainerRole::Setup))
+        else {
+            return Verdict::Unobservable;
+        };
+        if !relays_complete || !setups_complete {
+            return Verdict::Unobservable;
+        }
+        let id = spec.environment_id.as_str();
+        match spec.network {
+            NetworkTopology::NoNetwork => {
+                if relays.is_empty() && setups.is_empty() && self.proxies.dir(id).is_none() {
+                    Verdict::Pass
+                } else {
+                    Verdict::Fail
+                }
+            }
+            NetworkTopology::ProxyOnly => {
+                let ([relay], true) = (relays.as_slice(), setups.is_empty()) else {
+                    return Verdict::Fail;
+                };
+                let open = self.proxies.is_open(id);
+                let dir = self.proxies.dir(id);
+                let (true, Some(dir)) = (open, dir.as_ref().and_then(|d| d.to_str())) else {
+                    return Verdict::Fail;
+                };
+                match self.record(relay) {
+                    Ok(Some(object)) => match inspect::Record::new(&object).relay_exact(
+                        spec,
+                        &handle.container,
+                        dir,
+                        self.seccomp_profile,
+                    ) {
+                        Some(true) => Verdict::Pass,
+                        Some(false) => Verdict::Fail,
+                        None => Verdict::Unobservable,
+                    },
+                    Ok(None) => Verdict::Fail,
+                    Err(_) => Verdict::Unobservable,
+                }
+            }
+        }
+    }
+
+    /// `HOST_RELAY_DIGEST`: the running relay's own file. `NO_NETWORK` has
+    /// none, and does not require it.
+    fn running_relay_digest(&self, spec: &EnvironmentSpec) -> Verdict {
+        if spec.network != NetworkTopology::ProxyOnly {
+            return Verdict::Unobservable;
+        }
+        let environment = (&spec.environment_id, &spec.run_id);
+        match self.owned_ids(&spec.store, Some(environment), Some(ContainerRole::Relay)) {
+            Ok((relays, true)) => match relays.as_slice() {
+                [relay] => self.relay_digest(relay, spec),
+                _ => Verdict::Fail,
+            },
             _ => Verdict::Unobservable,
         }
     }
@@ -467,6 +658,11 @@ impl<'a> Oci<'a> {
             }
         });
         checks.push((SandboxInvariant::HostWorkspaceIdentity, workspace));
+        checks.push((SandboxInvariant::HostProxyRelay, self.peers(handle, spec)));
+        checks.push((
+            SandboxInvariant::HostRelayDigest,
+            self.running_relay_digest(spec),
+        ));
         for invariant in dwk_proto::brokerp::sandbox::probe_invariants() {
             let verdict = report
                 .as_ref()
@@ -521,13 +717,32 @@ impl ExecutionEnvironment for Oci<'_> {
     }
 
     fn prepare(&self, spec: &EnvironmentSpec) -> Result<Prepared, EnvFailure> {
-        if spec.network != NetworkTopology::NoNetwork {
-            return Err(EnvFailure::Refused(BrokerRefusal::TopologyUnavailable));
-        }
+        // `PROXY_ONLY` needs what the authority decided for it: the grant
+        // and the relay's digest. Neither has a default.
+        let grant = match (spec.network, &spec.egress, &spec.relay_sha256) {
+            (NetworkTopology::NoNetwork, None, None) => None,
+            (NetworkTopology::ProxyOnly, Some(grant), Some(_)) => Some(grant.clone()),
+            _ => return Err(EnvFailure::Refused(BrokerRefusal::ProxyUnavailable)),
+        };
         self.version()?;
         self.image_present(spec)?;
         let argv = plan::create(spec, self.seccomp_path)
             .ok_or(EnvFailure::Refused(BrokerRefusal::Unsupported))?;
+        // The listener exists before anything could connect to it.
+        let egress_dir = match grant {
+            None => None,
+            Some(grant) => {
+                let dir = self
+                    .proxies
+                    .start(spec.environment_id.as_str(), grant)
+                    .map_err(|_| EnvFailure::Refused(BrokerRefusal::ProxyUnavailable))?;
+                let Some(dir) = dir.to_str() else {
+                    let _ = self.proxies.close(spec.environment_id.as_str());
+                    return Err(EnvFailure::Refused(BrokerRefusal::Unsupported));
+                };
+                Some(dir.to_owned())
+            }
+        };
         let container = match self.runtime.call(argv, LINE) {
             Ok(done) if succeeded(&done) => {
                 match one_line(&done.stdout).and_then(|id| ContainerRef::new(id.to_owned())) {
@@ -536,7 +751,10 @@ impl ExecutionEnvironment for Oci<'_> {
                 }
             }
             Ok(_) | Err(run::Failure::Unconfirmed) => return self.abandon(spec),
-            Err(run::Failure::Refused(why)) => return Err(EnvFailure::Refused(why)),
+            Err(run::Failure::Refused(why)) => {
+                let _ = self.proxies.close(spec.environment_id.as_str());
+                return Err(EnvFailure::Refused(why));
+            }
         };
         crate::crash::point("environment_created");
         let handle = EnvHandle {
@@ -545,14 +763,17 @@ impl ExecutionEnvironment for Oci<'_> {
         };
         let started = self.runtime.call(plan::start(&handle.container), LINE);
         if !started.as_ref().is_ok_and(succeeded) {
-            return match self.remove(&handle.container) {
+            return match self.teardown(spec, &handle.container) {
                 Ok(()) => Err(EnvFailure::Refused(BrokerRefusal::RuntimeFailed)),
                 Err(_) => Err(EnvFailure::Unconfirmed),
             };
         }
         crate::crash::point("environment_started");
+        if let Some(dir) = &egress_dir {
+            self.connect_peer(spec, &handle.container, dir);
+        }
         let Ok(measured) = self.measure(&handle, spec) else {
-            return match self.remove(&handle.container) {
+            return match self.teardown(spec, &handle.container) {
                 Ok(()) => Err(EnvFailure::Refused(BrokerRefusal::RuntimeFailed)),
                 Err(_) => Err(EnvFailure::Unconfirmed),
             };
@@ -563,8 +784,9 @@ impl ExecutionEnvironment for Oci<'_> {
             .as_ref()
             .is_some_and(|checks| clean(checks, spec.network));
         if !keep {
-            // Never left running unless it measured clean.
-            self.remove(&handle.container)?;
+            // Never left running unless it measured clean: helpers,
+            // environment and listener alike.
+            self.teardown(spec, &handle.container)?;
         }
         Ok(Prepared {
             handle: Some(handle),
@@ -627,7 +849,11 @@ impl ExecutionEnvironment for Oci<'_> {
         container: Option<&ContainerRef>,
     ) -> Result<Destroyed, EnvFailure> {
         self.version()?;
-        let (labelled, complete) = self.owned_ids(store, Some(environment))?;
+        // The helpers first: they live in the environment's namespace, and
+        // are this environment's by the same labels.
+        self.remove_helpers(store, environment)?;
+        let (labelled, complete) =
+            self.owned_ids(store, Some(environment), Some(ContainerRole::Environment))?;
         // Only a container labelled as exactly this environment of this run
         // is it; a copy naming another run is not, and does not make the
         // genuine one ambiguous.
@@ -668,7 +894,7 @@ impl ExecutionEnvironment for Oci<'_> {
 
     fn list(&self, store: &StoreInstance) -> Result<Listed, EnvFailure> {
         self.version()?;
-        let (ids, complete) = self.owned_ids(store, None)?;
+        let (ids, complete) = self.owned_ids(store, None, None)?;
         if ids.is_empty() {
             return Ok(Listed {
                 environments: Vec::new(),

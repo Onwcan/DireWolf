@@ -5,6 +5,7 @@ members = [
     "crates/dwk-proto",
     "crates/dwk-sandbox-probe",
     "crates/dwk-sandbox-profile",
+    "crates/dwk-sandbox-relay",
     "crates/dwkd-authority",
     "crates/dwkd-broker",
     "tools/protogen",

@@ -1,0 +1,44 @@
+# The M5b properties, measured as the product (ADR-0048).
+#
+# WHAT THIS SUITE MEASURES: PROXY_ONLY egress -- an environment whose network
+# namespace has no route and exactly one peer, the broker's CONNECT proxy
+# behind a relay, on a real OCI runtime. Tunnels through the real relay obey
+# the run's own exact network.https grants, the IP guard on the whole answer,
+# one pinned resolution, server-name agreement and budgets enforced at the
+# socket; every direct path a process that ignores the proxy can try is
+# refused, and by which mechanism; every weakened or drifted topology is
+# detected by the measurement; crashes, a broker restart and foreign resources
+# are handled exactly. The fronting residual is shown, not hidden. The runner
+# is `direwolf_evals/runners/m5b.py`, which runs the real evidence task and
+# requires every case it lists. It reimplements nothing.
+#
+# WHAT IT DOES NOT MEASURE: net.http, redirects and credential egress (M5c),
+# sandboxed workloads in production (M5d), the complete M5 gate (M5e). Those
+# stay pending under "M5" in pending-kernel.toml.
+#
+# WHERE IT CAN RUN: Linux with a real OCI runtime; elsewhere NOT EXERCISED,
+# never a pass. CI's eval gate runs it strict.
+#
+# This suite is a MERGE GATE.
+
+id = "m5b-sandbox-egress"
+title = "A PROXY_ONLY environment reaches only its proxy, and the proxy enforces the grant"
+description = """
+No route but the proxy endpoint; the proxy opaque, strict and fail-closed --
+the run's exact grants, the whole answer guarded, one pinned resolution, the
+server name agreeing before anything is dialled, budgets at the socket -- and
+every bypass, weakening and drift caught.
+"""
+score = "containment rate: the fraction of the expected cases reported, zero if any weakening escaped or any bypass is unexplained (binary in effect)"
+requires = ["M5b"]
+gate = true
+
+[[eval]]
+name = "proxy-only-egress"
+description = "The PROXY_ONLY topology measured clean, tunnels through the real relay obeying grant, guard, pin, server name and budgets, every bypass refused with its mechanism, every weakened topology detected, and the lifecycle exact."
+runner = "m5b.sandbox_egress"
+scorer = "rejection_rate"
+platforms = ["linux"]
+needs = ["oci-runtime"]
+timeout_s = 3600.0
+tags = ["sandbox", "network", "broker", "authority"]

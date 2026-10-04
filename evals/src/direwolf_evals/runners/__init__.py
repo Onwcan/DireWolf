@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from direwolf_evals.model import Eval, Outcome
-from direwolf_evals.runners import authority, harness, m4, m5a, protocol, replay
+from direwolf_evals.runners import authority, harness, m4, m5a, m5b, protocol, replay
 
 __all__ = ["RUNNERS", "Context", "Runner", "resolve"]
 
@@ -59,6 +59,9 @@ RUNNERS: dict[str, Runner] = {
     # containers, the digest-pinned probe, the released broker and the real
     # authority. Never a model of them.
     "m5a.sandbox_foundation": m5a.sandbox_foundation,
+    # M5b: PROXY_ONLY -- the real setup and relay containers, the real
+    # CONNECT proxy, the real authority's grant. Never a model of them.
+    "m5b.sandbox_egress": m5b.sandbox_egress,
     # The harness proving itself against a dummy process.
     "harness.checkpoint": harness.checkpoint,
     "harness.pause_resume": harness.pause_resume,

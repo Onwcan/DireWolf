@@ -345,6 +345,8 @@ def test_the_broker_grows_no_authority_and_no_other_input(violation_rules: list[
         "crates/dwkd-broker/src/tcp.rs",
         "crates/dwkd-broker/src/hash.rs",
         "crates/dwkd-broker/src/process/shell.rs",
+        # M5b's dial outside the tunnel names a TCP stream too (TX037's own).
+        "crates/dwkd-broker/src/dial_elsewhere.rs",
     }
     # A digest is TX018's, not TX013's.
     assert not any("sha2" in f.message for f in findings)
@@ -573,6 +575,52 @@ def test_the_m5a_boundaries_each_catch_their_violation(violation_rules: list[str
     assert len(plan_lines) >= 4, sorted(plan_lines)
 
 
+def test_the_m5b_boundaries_each_catch_their_violation(violation_rules: list[str]) -> None:
+    """M5b (ADR-0048): the broker dials only from the tunnel, the egress path
+    terminates no TLS and injects nothing, the relay is a byte pump, only the
+    setup holds a capability and its plan spells no other weakening, and no
+    ambient proxy setting reaches an environment -- each rule firing on
+    exactly its fixture."""
+    expected = {
+        "TX037-the-broker-dials-only-from-the-tunnel": {"crates/dwkd-broker/src/dial_elsewhere.rs"},
+        "TX038-the-egress-path-terminates-no-tls-and-injects-nothing": {
+            "crates/dwkd-broker/src/egress/tls.rs"
+        },
+        "TX039-the-relay-is-a-byte-pump": {"crates/dwk-sandbox-relay/src/linux.rs"},
+        # M5a's weakened plan fixture adds a capability too: TX040 catches it
+        # as well as TX032.
+        "TX040-only-the-setup-holds-a-capability": {
+            "crates/dwkd-broker/src/sandbox/cap.rs",
+            "crates/dwkd-broker/src/sandbox/plan.rs",
+        },
+        "TX041-the-relay-plan-spells-no-other-weakening": {
+            "crates/dwkd-broker/src/sandbox/relay_plan.rs"
+        },
+        "TX042-no-ambient-proxy-setting-reaches-an-environment": {
+            "crates/dwkd-broker/src/egress/ambient.rs"
+        },
+    }
+    for rule, paths in expected.items():
+        assert rule in violation_rules, rule
+        assert _paths(rule) == paths, (rule, sorted(_paths(rule)))
+    # The relay plan's second capability, its privilege and the host network
+    # are each caught; the egress grant's resolver and exceptions too.
+    assert len(_findings("TX041-the-relay-plan-spells-no-other-weakening")) >= 3
+    assert len(_findings("TX036-no-runtime-flag-crosses-the-private-wire")) >= 4
+
+
+def test_the_m5b_exemptions_name_files_not_directories() -> None:
+    """The reviewed egress files are exempt by name: a sibling dropped into
+    `egress/` is not reviewed by being there."""
+    import tomllib
+
+    raw = tomllib.loads(RULES.read_text(encoding="utf-8"))
+    for rule in raw["text_rules"]:
+        for exempt in rule.get("exempt_paths", []):
+            if "/egress" in exempt or "relay_plan" in exempt:
+                assert exempt.endswith(".rs"), (rule["id"], exempt)
+
+
 def test_a_helper_crate_shared_by_both_daemons_is_rejected(violation_rules: list[str]) -> None:
     """RS007 catches a crate that depends on the daemons. It cannot see a crate
     the daemons depend on -- "a few helpers" linked into both -- which is the
@@ -674,6 +722,12 @@ def test_the_required_boundary_rules_are_all_declared() -> None:
         "TX034-the-sandbox-profile-is-data",
         "TX035-no-public-path-reaches-an-execution-environment",
         "TX036-no-runtime-flag-crosses-the-private-wire",
+        "TX037-the-broker-dials-only-from-the-tunnel",
+        "TX038-the-egress-path-terminates-no-tls-and-injects-nothing",
+        "TX039-the-relay-is-a-byte-pump",
+        "TX040-only-the-setup-holds-a-capability",
+        "TX041-the-relay-plan-spells-no-other-weakening",
+        "TX042-no-ambient-proxy-setting-reaches-an-environment",
         "DEP001-no-agent-framework-dependency",
         "DEP002-runtime-has-no-transport-dependency",
         "RS001-authority-depends-on-nothing-in-tree",

@@ -37,9 +37,9 @@ gate = false
 
 [[eval]]
 name = "sandbox-egress"
-description = "From a PROXY_ONLY sandbox, no route exists to any address but the proxy."
+description = "From a PROXY_ONLY sandbox, no route exists to any address but the proxy -- for a real sandboxed workload, end to end."
 requires = ["M5"]
-pending_reason = "there is no sandbox and no egress proxy."
+pending_reason = "M5b measures the topology and the proxy (m5b-sandbox-egress); a sandboxed workload using them is M5d's, and the complete gate M5e's."
 tags = ["sandbox", "network"]
 
 [[eval]]

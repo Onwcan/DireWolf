@@ -33,7 +33,8 @@
 //! only reconciliation — which removes by label, exactly — ends it.
 
 use dwk_proto::brokerp::OwnedEnvironment;
-use dwk_proto::brokerp::sandbox::{AssuranceLevel, ContainerRef, NetworkTopology};
+use dwk_proto::brokerp::egress::{EgressCounters, EgressGrant};
+use dwk_proto::brokerp::sandbox::{AssuranceLevel, ContainerRef, ContainerRole, NetworkTopology};
 use dwk_proto::wire::id::{EnvironmentId, InvocationId, RunId};
 use rusqlite::OptionalExtension as _;
 
@@ -107,6 +108,9 @@ pub(super) struct Intent {
     pub(super) environment: EnvironmentId,
     pub(super) invocation: InvocationId,
     pub(super) binding: RootBinding,
+    /// `PROXY_ONLY`'s grant: the run's exact `network.https` destinations
+    /// and the configuration's budgets (M5b). `None` for `NO_NETWORK`.
+    pub(super) egress: Option<EgressGrant>,
 }
 
 /// What starting a preparation decided.
@@ -156,6 +160,22 @@ pub(super) fn begin_prepare(
     if live.is_some() {
         return Ok(Begun::Refused("ENVIRONMENT_EXISTS"));
     }
+    // What a `PROXY_ONLY` environment may reach is the run's own grants,
+    // decided at admission and immutable since: never configuration.
+    let egress = match config.egress() {
+        None => None,
+        Some(egress) => {
+            let admission = super::admission::load(work, run.as_str())?;
+            let granted = admission
+                .granted()
+                .iter()
+                .map(super::admission::Grant::capability);
+            match crate::sandbox::egress_targets(granted) {
+                Ok(targets) => Some(egress.grant(targets)),
+                Err(reason) => return Ok(Begun::Refused(reason)),
+            }
+        }
+    };
     let environment = work.environment_id()?;
     let invocation = work.invocation_id()?;
     let kind = EnvironmentKind::Oci;
@@ -180,23 +200,38 @@ pub(super) fn begin_prepare(
             now,
         ],
     ))?;
-    work.audit(
-        AuditEvent::EnvironmentIntentRecorded,
-        Fields::new()
-            .text("environment_id", environment.as_str())
-            .text("run_id", run.as_str())
-            .text("invocation_id", invocation.as_str())
-            .text("kind", "oci")
-            .text("profile", "oci-strict")
-            .text("network", config.topology().as_str())
-            .text("image", config.image().as_str())
-            .text("probe_sha256", config.probe_sha256().as_str())
-            .text("declared", level(kind.declared().0)),
-    )?;
+    let mut fields = Fields::new()
+        .text("environment_id", environment.as_str())
+        .text("run_id", run.as_str())
+        .text("invocation_id", invocation.as_str())
+        .text("kind", "oci")
+        .text("profile", "oci-strict")
+        .text("network", config.topology().as_str())
+        .text("image", config.image().as_str())
+        .text("probe_sha256", config.probe_sha256().as_str())
+        .text("declared", level(kind.declared().0));
+    if let (Some(grant), Some(egress)) = (&egress, config.egress()) {
+        // The grant, whole: what the environment may reach, and how much.
+        fields = fields
+            .text("relay_sha256", egress.relay_sha256().as_str())
+            .list(
+                "egress_targets",
+                grant
+                    .targets
+                    .iter()
+                    .map(|t| Field::Text(format!("{}:{}", t.host.as_str(), t.port.get())))
+                    .collect(),
+            )
+            .int("egress_max_tunnels", u64::from(grant.max_tunnels.get()))
+            .int("egress_max_upload_bytes", grant.max_upload_bytes.get())
+            .int("egress_max_download_bytes", grant.max_download_bytes.get());
+    }
+    work.audit(AuditEvent::EnvironmentIntentRecorded, fields)?;
     Ok(Begun::Intent(Box::new(Intent {
         environment,
         invocation,
         binding,
+        egress,
     })))
 }
 
@@ -492,6 +527,8 @@ pub(super) enum DestroyEnding {
     Gone {
         container: Option<ContainerRef>,
         already: bool,
+        /// What its proxy did, when it had one open (M5b).
+        egress: Option<EgressCounters>,
     },
     /// It could not be completed, and stays pending.
     Pending { reason: &'static str },
@@ -510,7 +547,11 @@ pub(super) fn record_destroyed(
         .text("environment_id", record.environment.as_str())
         .text("run_id", record.run.as_str());
     match ending {
-        DestroyEnding::Gone { container, already } => {
+        DestroyEnding::Gone {
+            container,
+            already,
+            egress,
+        } => {
             let container = container.as_ref().or(record.container.as_ref());
             work.db(work.tx.execute(
                 "UPDATE environment SET state = 'DESTROYED', container = COALESCE(container, ?2), \
@@ -525,6 +566,9 @@ pub(super) fn record_destroyed(
             if let Some(container) = container {
                 fields = fields.text("container", container.as_str());
             }
+            if let Some(counters) = egress {
+                fields = egress_fields(fields, counters);
+            }
             fields.extend(timing);
             work.audit(AuditEvent::EnvironmentDestroyed, fields)
         }
@@ -533,6 +577,22 @@ pub(super) fn record_destroyed(
             base.text("reason", *reason),
         ),
     }
+}
+
+/// What an environment's proxy did, as audit fields: counts by disposition
+/// and bytes each way. Never a host, a server name or a payload.
+pub(super) fn egress_fields(fields: Fields, counters: &EgressCounters) -> Fields {
+    fields
+        .list(
+            "egress_dispositions",
+            counters
+                .dispositions
+                .iter()
+                .map(|c| Field::Text(format!("{}={}", c.disposition.as_str(), c.count.get())))
+                .collect(),
+        )
+        .int("egress_bytes_upstream", counters.bytes_upstream.get())
+        .int("egress_bytes_downstream", counters.bytes_downstream.get())
 }
 
 /// Record a measurement of a `READY` environment that is still clean.
@@ -658,12 +718,27 @@ pub enum ReconcileClass {
     Orphan(OwnedEnvironment),
 }
 
+/// Whether a listed container is an environment itself, not one of its
+/// `PROXY_ONLY` helpers (M5b).
+fn environment_role(owned: &OwnedEnvironment) -> bool {
+    owned.role == Some(ContainerRole::Environment)
+}
+
 /// Compare the records with the runtime's listing. Pure: the caller acts.
 ///
 /// `records` holds every live record and the record — whatever its state —
 /// of every environment a listed container names. `current` is this
 /// incarnation: a `PREPARING` record it made is an operation in flight on
 /// another handle, and is left alone.
+///
+/// A `PROXY_ONLY` environment's relay and setup containers (M5b) carry its
+/// labels and their role. They belong to its record and are classified with
+/// it: a live record's helpers are its own — measured with it, destroyed
+/// with it — and a live record whose environment container is gone but
+/// whose helpers remain is pending, not missing, so destroying it removes
+/// them. An ended record's helpers are an orphan, reaped once by the
+/// environment's destruction (which removes every role). A helper is never a
+/// twin of its environment.
 #[must_use]
 pub fn classify(
     records: &[EnvironmentRecord],
@@ -672,6 +747,8 @@ pub fn classify(
 ) -> Vec<ReconcileClass> {
     let mut classes = Vec::new();
     let mut claimed: Vec<&EnvironmentId> = Vec::new();
+    let mut helped: Vec<&EnvironmentId> = Vec::new();
+    let mut orphaned: Vec<&EnvironmentId> = Vec::new();
     for owned in listed {
         let Some(environment) = owned.environment_id.as_ref().filter(|_| owned.labels_exact) else {
             classes.push(ReconcileClass::Foreign(owned.container.clone()));
@@ -686,14 +763,34 @@ pub fn classify(
             classes.push(ReconcileClass::Foreign(owned.container.clone()));
             continue;
         }
+        if !environment_role(owned) {
+            if record.state.is_final() {
+                // Reaped with its environment's container, if that is listed
+                // too; otherwise once, for every helper of it.
+                let beside = listed.iter().any(|o| {
+                    environment_role(o)
+                        && o.labels_exact
+                        && o.environment_id.as_ref() == Some(environment)
+                        && o.run_id.as_ref() == Some(&record.run)
+                });
+                if !beside && !orphaned.contains(&environment) {
+                    orphaned.push(environment);
+                    classes.push(ReconcileClass::Orphan(owned.clone()));
+                }
+            } else if !helped.contains(&environment) {
+                helped.push(environment);
+            }
+            continue;
+        }
         // Twins: more than one container carrying exactly this environment's
-        // labels, its run's included. A copy naming another run was
-        // already set aside as foreign and does not make the genuine one
-        // ambiguous.
+        // labels and the environment's role, its run's included. A copy
+        // naming another run was already set aside as foreign and does not
+        // make the genuine one ambiguous.
         let twins = listed
             .iter()
             .filter(|o| {
                 o.labels_exact
+                    && environment_role(o)
                     && o.environment_id.as_ref() == Some(environment)
                     && o.run_id.as_ref() == Some(&record.run)
             })
@@ -720,6 +817,7 @@ pub fn classify(
                 }
             }
             EnvironmentState::Refused | EnvironmentState::Destroyed | EnvironmentState::Lost => {
+                orphaned.push(environment);
                 classes.push(ReconcileClass::Orphan(owned.clone()));
             }
             EnvironmentState::Preparing
@@ -733,7 +831,12 @@ pub fn classify(
         let in_flight =
             record.state == EnvironmentState::Preparing && record.incarnation >= current;
         if !record.state.is_final() && !in_flight && !claimed.contains(&&record.environment) {
-            classes.push(ReconcileClass::Missing(record.clone()));
+            if helped.contains(&&record.environment) {
+                // Its helpers remain: only a destruction removes them.
+                classes.push(ReconcileClass::Pending(record.clone()));
+            } else {
+                classes.push(ReconcileClass::Missing(record.clone()));
+            }
         }
     }
     classes
@@ -802,7 +905,7 @@ pub(super) fn record_orphan(
 #[cfg(test)]
 #[allow(clippy::unwrap_used, reason = "test assertions")]
 mod tests {
-    use dwk_proto::brokerp::sandbox::{ContainerRef, NetworkTopology};
+    use dwk_proto::brokerp::sandbox::{ContainerRef, ContainerRole, NetworkTopology};
     use dwk_proto::brokerp::{ContainerState, OwnedEnvironment};
     use dwk_proto::wire::id::{EnvironmentId, RunId};
 
@@ -836,6 +939,14 @@ mod tests {
             environment_id: n.map(env),
             run_id: RunId::parse("run_01M24BB8G3E0A851TRWE3M8FZF"),
             labels_exact: exact,
+            role: Some(ContainerRole::Environment),
+        }
+    }
+
+    fn helper(c: char, n: char, role: ContainerRole) -> OwnedEnvironment {
+        OwnedEnvironment {
+            role: Some(role),
+            ..owned(c, Some(n), ContainerState::Running, true)
         }
     }
 
@@ -961,6 +1072,59 @@ mod tests {
         assert_eq!(
             classify(&records, &listed, 1),
             [ReconcileClass::Ambiguous(env('A'))]
+        );
+    }
+
+    #[test]
+    fn a_proxy_only_environment_s_helpers_belong_to_its_record() {
+        use ContainerRole::{Relay, Setup};
+        use EnvironmentState::{Destroyed, Ready};
+        // A ready environment with its relay: measured as one, never twins.
+        let records = [record('A', Ready, Some('a'))];
+        let listed = [
+            owned('a', Some('A'), ContainerState::Running, true),
+            helper('1', 'A', Relay),
+        ];
+        assert_eq!(
+            classify(&records, &listed, 1),
+            [ReconcileClass::StillRunning(record('A', Ready, Some('a')))]
+        );
+        // Its environment container gone, its relay left: pending, so the
+        // destruction removes the relay — not merely recorded lost.
+        assert_eq!(
+            classify(&records, &[helper('1', 'A', Relay)], 1),
+            [ReconcileClass::Pending(record('A', Ready, Some('a')))]
+        );
+        // An ended environment's helpers: one orphan, reaped once.
+        let ended = [record('H', Destroyed, Some('4'))];
+        let classes = classify(
+            &ended,
+            &[helper('1', 'H', Relay), helper('2', 'H', Setup)],
+            1,
+        );
+        assert_eq!(classes, [ReconcileClass::Orphan(helper('1', 'H', Relay))]);
+        // Beside its own environment container, that container is the orphan.
+        let classes = classify(
+            &ended,
+            &[
+                helper('1', 'H', Relay),
+                owned('4', Some('H'), ContainerState::Running, true),
+            ],
+            1,
+        );
+        assert_eq!(
+            classes,
+            [ReconcileClass::Orphan(owned(
+                '4',
+                Some('H'),
+                ContainerState::Running,
+                true
+            ))]
+        );
+        // A helper naming an environment this store never recorded: foreign.
+        assert_eq!(
+            classify(&[], &[helper('1', 'Z', Relay)], 1),
+            [ReconcileClass::Foreign(container('1'))]
         );
     }
 }

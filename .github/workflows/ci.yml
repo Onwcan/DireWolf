@@ -364,6 +364,29 @@ jobs:
           docker info --format '{{.OperatingSystem}} kernel {{.KernelVersion}} cgroup v{{.CgroupVersion}} runtime {{.DefaultRuntime}} {{.SecurityOptions}}'
       - run: make sandbox-foundation-evidence
 
+  # M5b (ADR-0048): PROXY_ONLY against the same real runtime -- the
+  # environment, its one-shot setup and its relay as real containers in one
+  # network namespace, every workload byte crossing the real relay and the
+  # broker's real CONNECT proxy. The probe, the relay and the workload fixture
+  # are built statically and proved static, their digests pinned, and the
+  # images built offline FROM scratch. The destinations are fixtures (the
+  # broker's evidence-only resolver file and a loopback origin); the boundary
+  # is not. Every bypass is attempted and its mechanism reported, every
+  # weakened topology must be detected, and no container or network may be
+  # left behind or removed. No runtime: NOT EXERCISED, which fails. The `ci`
+  # job requires it.
+  sandbox-egress:
+    name: sandbox egress (make sandbox-egress-evidence)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v5.0.1
+      - uses: ./.github/actions/setup
+      - name: Show the OCI runtime
+        run: |
+          docker version --format 'client {{.Client.Version}} server {{.Server.Version}} api {{.Server.APIVersion}} {{.Server.Os}}/{{.Server.Arch}}'
+          docker info --format '{{.OperatingSystem}} kernel {{.KernelVersion}} cgroup v{{.CgroupVersion}} runtime {{.DefaultRuntime}} {{.SecurityOptions}}'
+      - run: make sandbox-egress-evidence
+
   supply-chain:
     name: dependencies (make security)
     runs-on: ubuntu-latest
@@ -405,7 +428,7 @@ jobs:
   ci:
     name: CI
     runs-on: ubuntu-latest
-    needs: [format, lint, typecheck, architecture, schema, evals, test, authority-transport, filesystem-canonicalization, broker-fs-read, filesystem-operations, process-broker, secret-broker, sandbox-foundation, supply-chain, build]
+    needs: [format, lint, typecheck, architecture, schema, evals, test, authority-transport, filesystem-canonicalization, broker-fs-read, filesystem-operations, process-broker, secret-broker, sandbox-foundation, sandbox-egress, supply-chain, build]
     if: always()
     steps:
       - name: Fail unless every required job succeeded

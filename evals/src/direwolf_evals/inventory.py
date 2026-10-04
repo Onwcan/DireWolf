@@ -138,12 +138,24 @@ INVENTORY: Final[tuple[SecurityProperty, ...]] = (
         "weakened profile detected; tampered probes refused; foreign containers "
         "spared; exact orphan reaping; no persistence across environments.",
     ),
+    # --- measurable now: M5b shipped PROXY_ONLY and the CONNECT proxy ------
+    # (ADR-0048).
+    SecurityProperty(
+        "A PROXY_ONLY environment reaches only its proxy",
+        "M5b",
+        "m5b-sandbox-egress",
+        "No route but the proxy endpoint on a real runtime; tunnels through the "
+        "real relay obey the run's exact grants, the IP guard, one pinned "
+        "resolution, server-name agreement and socket budgets; every bypass "
+        "refused with its mechanism; every weakened topology detected.",
+    ),
     # --- pending: the mechanism does not exist yet -------------------------
     SecurityProperty(
-        "Sandbox and egress isolation (PROXY_ONLY)",
+        "Sandboxed workload egress, end to end (the complete M5 gate)",
         "M5",
         None,
-        "Needs the sandbox and the egress proxy.",
+        "Needs sandboxed workloads (M5d) and net.http (M5c); M5b measures the "
+        "topology and the proxy they will use.",
     ),
     SecurityProperty(
         "Approval binding survives drift, replay and substitution",

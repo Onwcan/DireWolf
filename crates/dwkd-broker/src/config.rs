@@ -38,9 +38,16 @@ pub(crate) struct ServeConfig {
     pub(crate) dumpable_permitted: bool,
     /// The operator's acknowledgement that the evidence harness's `NO_NETWORK`
     /// environment topology may be built (M5a, ADR-0047 §10). Without it the
-    /// broker builds no environment at all: `PROXY_ONLY`, the production
-    /// topology, is M5b's. Stated at start-up; never implied.
+    /// broker builds `PROXY_ONLY` environments only (M5b). Stated at
+    /// start-up; never implied.
     pub(crate) evidence_topology_permitted: bool,
+    /// The egress evidence's fixture file (M5b, ADR-0048): when given, the
+    /// proxy resolves names from it instead of the host's resolver, and may
+    /// reach the loopback addresses it names. Evidence only — a fixture
+    /// origin on loopback is what no production grant may ever reach —
+    /// stated loudly at start-up, never implied, and absent from every
+    /// production configuration.
+    pub(crate) evidence_egress: Option<PathBuf>,
 }
 
 /// A command line that does not describe a configuration.
@@ -105,6 +112,7 @@ pub(crate) fn parse(args: &[String]) -> Result<Command, UsageError> {
     let mut shared = false;
     let mut dumpable = false;
     let mut evidence_topology = false;
+    let mut evidence_egress: Option<PathBuf> = None;
     while let Some(flag) = rest.next() {
         let mut value = || {
             rest.next()
@@ -145,6 +153,19 @@ pub(crate) fn parse(args: &[String]) -> Result<Command, UsageError> {
                 }
                 evidence_topology = true;
             }
+            "--allow-evidence-egress" => {
+                let path = PathBuf::from(value()?);
+                if !path.is_absolute() {
+                    return Err(UsageError::new(
+                        "--allow-evidence-egress needs an absolute path",
+                    ));
+                }
+                if evidence_egress.replace(path).is_some() {
+                    return Err(UsageError::new(
+                        "--allow-evidence-egress is given more than once",
+                    ));
+                }
+            }
             other => {
                 return Err(UsageError::new(format!("unknown flag {}", bounded(other))));
             }
@@ -167,6 +188,7 @@ pub(crate) fn parse(args: &[String]) -> Result<Command, UsageError> {
         shared_uid_permitted: shared,
         dumpable_permitted: dumpable,
         evidence_topology_permitted: evidence_topology,
+        evidence_egress,
     }))
 }
 
@@ -214,6 +236,7 @@ mod tests {
                 shared_uid_permitted: false,
                 dumpable_permitted: false,
                 evidence_topology_permitted: false,
+                evidence_egress: None,
             }))
         );
         for bad in [
@@ -300,6 +323,33 @@ mod tests {
         ));
         with.push("--allow-evidence-topology");
         assert!(parse(&args(&with)).is_err());
+    }
+
+    #[test]
+    fn the_evidence_egress_is_explicit_absolute_and_given_once() {
+        let base = ["serve", "--socket", "ABS", "--authority-uid", "7"];
+        let fixture = socket();
+        let mut with: Vec<String> = args(&base);
+        with.push("--allow-evidence-egress".to_owned());
+        with.push(fixture.clone());
+        assert!(matches!(
+            parse(&with),
+            Ok(Command::Serve(ServeConfig {
+                evidence_egress: Some(ref path),
+                ..
+            })) if path.to_str() == Some(fixture.as_str())
+        ));
+        let mut twice = with.clone();
+        twice.push("--allow-evidence-egress".to_owned());
+        twice.push(fixture);
+        assert!(parse(&twice).is_err());
+        let mut relative = args(&base);
+        relative.push("--allow-evidence-egress".to_owned());
+        relative.push("fixture.txt".to_owned());
+        assert!(parse(&relative).is_err());
+        let mut valueless = args(&base);
+        valueless.push("--allow-evidence-egress".to_owned());
+        assert!(parse(&valueless).is_err());
     }
 
     #[test]

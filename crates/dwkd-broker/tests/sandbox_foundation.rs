@@ -45,7 +45,7 @@ mod linux {
 
     use dwk_proto::brokerp::sandbox::{
         ContainerRef, EnvironmentProfile, ImageId, NetworkTopology, SandboxInvariant as I,
-        StoreInstance, Verdict,
+        StoreInstance, Verdict, required_invariants,
     };
     use dwk_proto::brokerp::{
         Authorisation, BrokerDone, BrokerHello, BrokerOutcome, BrokerRefusal, Common,
@@ -392,6 +392,8 @@ mod linux {
             probe_sha256: ContentDigest::new(probe.to_owned()).unwrap(),
             workspace_path: HostPath::new(workspace.display().to_string()).unwrap(),
             workspace: identity(workspace),
+            relay_sha256: None,
+            egress: None,
         }
     }
 
@@ -551,11 +553,15 @@ mod linux {
         found[0]
     }
 
+    /// The required invariants that did not pass. Every environment here is
+    /// `NO_NETWORK`, which has no proxy to hash or reach (M5b, ADR-0048):
+    /// those two are reported, and not required.
     fn not_passing(measurement: &EnvironmentMeasurement) -> Vec<(I, Verdict)> {
+        let required = required_invariants(NetworkTopology::NoNetwork);
         measurement
             .checks
             .iter()
-            .filter(|c| c.verdict != Verdict::Pass)
+            .filter(|c| required.contains(&c.invariant) && c.verdict != Verdict::Pass)
             .map(|c| (c.invariant, c.verdict))
             .collect()
     }
@@ -720,6 +726,7 @@ mod linux {
                 profile::LABEL_PROFILE,
                 EnvironmentProfile::OciStrict.label().to_owned(),
             ),
+            (profile::LABEL_ROLE, "environment".to_owned()),
         ] {
             argv.push("--label".into());
             argv.push(format!("{key}={value}"));
@@ -1209,6 +1216,7 @@ mod linux {
                     profile::LABEL_PROFILE,
                     EnvironmentProfile::OciStrict.label(),
                 ),
+                label(profile::LABEL_ROLE, "environment"),
             ],
         );
         let listed = list(&socket, &ev);
@@ -1421,15 +1429,16 @@ mod linux {
         );
         evidence("exit-image-missing-never-pulled", "image-missing");
 
-        // PROXY_ONLY does not exist yet; NO_NETWORK only with the evidence
-        // acknowledgement.
+        // PROXY_ONLY exists since M5b (ADR-0048), and is never prepared
+        // without the grant and relay digest the authority decided;
+        // NO_NETWORK only with the evidence acknowledgement.
         let mut proxy = s2.clone();
         proxy.network = NetworkTopology::ProxyOnly;
         assert_eq!(
             refusal(prepare(&socket, &ev, &proxy)),
-            BrokerRefusal::TopologyUnavailable
+            BrokerRefusal::ProxyUnavailable
         );
-        evidence("topology-proxy-only-unavailable", "topology-unavailable");
+        evidence("topology-proxy-only-needs-its-grant", "proxy-unavailable");
         drop(broker);
         let plain = Scratch::new("exits-plain");
         let _production = Broker::start(&plain.socket(), false, None);

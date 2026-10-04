@@ -86,6 +86,12 @@ impl SocketPlace {
     pub(crate) fn path(&self) -> &Path {
         &self.path
     }
+
+    /// The checked directory the socket is in: the broker's own, where its
+    /// other private files live (the sandbox's, the egress proxies').
+    pub(crate) fn dir(&self) -> &Path {
+        &self.dir
+    }
 }
 
 /// The broker's effective uid, learnt without `libc`: a file created `O_EXCL`

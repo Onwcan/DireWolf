@@ -49,16 +49,54 @@ impl EnvironmentProfile {
 wire_enum! {
     /// An environment's network topology: an authority-owned property of the
     /// environment, never a runtime flag a caller supplies (ADR-0024,
-    /// ADR-0047 §9).
+    /// ADR-0047 §9). A network mode, not an assurance level.
     NetworkTopology {
-        /// ADR-0024's production topology: a private network namespace whose
-        /// one reachable peer is the broker's CONNECT proxy. **M5b**: M5a has
-        /// no proxy, so no environment with this topology can be prepared.
+        /// ADR-0024's production topology, as ADR-0048 builds it (M5b): a
+        /// network namespace with no interface but loopback, no route and no
+        /// resolver, whose one reachable peer is the broker's CONNECT proxy at
+        /// `169.254.7.1:8080` — an address on that loopback, served by the
+        /// environment's relay and forwarded to the broker.
         ProxyOnly = "PROXY_ONLY",
-        /// No interface but loopback. M5a's **evidence** topology only: the
-        /// broker accepts it only when its operator started it with
-        /// `--allow-evidence-topology`, and no production path requests it.
+        /// No interface but loopback, and no proxy. M5a's **evidence**
+        /// topology only: the broker accepts it only when its operator started
+        /// it with `--allow-evidence-topology`, and no production path
+        /// requests it.
         NoNetwork = "NO_NETWORK",
+    }
+}
+
+wire_enum! {
+    /// What a DireWolf container is to its environment (M5b, ADR-0048). Every
+    /// container an environment owns carries its role as a label, so a relay
+    /// is never mistaken for the environment, or for its twin.
+    ContainerRole {
+        /// The environment itself: the trusted probe, holding.
+        Environment = "ENVIRONMENT",
+        /// A `PROXY_ONLY` environment's relay: unprivileged, in the
+        /// environment's network namespace, forwarding each connection to
+        /// `169.254.7.1:8080` to the broker's proxy.
+        Relay = "RELAY",
+        /// A `PROXY_ONLY` environment's one-shot setup: adds the proxy address
+        /// to the namespace's loopback, and exits. Never kept.
+        Setup = "SETUP",
+    }
+}
+
+impl ContainerRole {
+    /// The label value.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Environment => "environment",
+            Self::Relay => "relay",
+            Self::Setup => "setup",
+        }
+    }
+
+    /// The role a label value names.
+    #[must_use]
+    pub fn from_label(value: &str) -> Option<Self> {
+        Self::ALL.iter().copied().find(|r| r.label() == value)
     }
 }
 
@@ -170,6 +208,20 @@ wire_enum! {
         HostRunning = "HOST_RUNNING",
         /// The mounted workspace is the object the authority pinned.
         HostWorkspaceIdentity = "HOST_WORKSPACE_IDENTITY",
+        /// The environment's proxy variables are exactly the broker's fixed
+        /// endpoint (`PROXY_ONLY`), or absent (`NO_NETWORK`): nothing inherited
+        /// from the host, nothing a caller chose (M5b).
+        HostProxyEnvironment = "HOST_PROXY_ENVIRONMENT",
+        /// The environment's network peers are exactly its topology's. For
+        /// `PROXY_ONLY`: one relay in the environment's own network namespace
+        /// — the pinned image, unprivileged, a read-only root, exactly the
+        /// broker's egress socket mounted, labelled as this environment's
+        /// relay — the broker's proxy for it open, and no setup container
+        /// left. For `NO_NETWORK`: no relay, no setup container and no proxy
+        /// at all (M5b).
+        HostProxyRelay = "HOST_PROXY_RELAY",
+        /// The relay inside the image hashes to the authority's digest (M5b).
+        HostRelayDigest = "HOST_RELAY_DIGEST",
         /// Real, effective and saved uid and gid are `10001`, no
         /// supplementary group.
         ContainerUidGid = "CONTAINER_UID_GID",
@@ -200,9 +252,23 @@ wire_enum! {
         ContainerDevicesMinimal = "CONTAINER_DEVICES_MINIMAL",
         /// PID 1 is the environment's own holder: a private PID namespace.
         ContainerPidNamespacePrivate = "CONTAINER_PID_NAMESPACE_PRIVATE",
-        /// The network topology holds from inside (for `NO_NETWORK`: only
-        /// loopback).
+        /// The network topology holds from inside: the only interface is
+        /// loopback, no route leaves it, and a virtual socket cannot be made.
         ContainerNetworkIsolated = "CONTAINER_NETWORK_ISOLATED",
+        /// `PROXY_ONLY`: `169.254.7.1:8080` accepts a connection and answers
+        /// as DireWolf's proxy (M5b).
+        ContainerProxyReachable = "CONTAINER_PROXY_REACHABLE",
+        /// Attempted, every direct path out is refused by the topology — TCP
+        /// and UDP over IPv4 and IPv6 to an external, a host, a LAN, a
+        /// metadata and a link-local address, and the proxy address on any
+        /// port but the proxy's (M5b).
+        ContainerDirectEgressRefused = "CONTAINER_DIRECT_EGRESS_REFUSED",
+        /// Attempted, no DNS query leaves: UDP and TCP to the configured and
+        /// to well-known resolvers get no answer (M5b).
+        ContainerDirectDnsRefused = "CONTAINER_DIRECT_DNS_REFUSED",
+        /// Raw and packet sockets cannot be made, and an ICMP socket, where
+        /// one can be made, reaches nothing (M5b).
+        ContainerRawSocketsRefused = "CONTAINER_RAW_SOCKETS_REFUSED",
         /// The process limits are the profile's.
         ContainerRlimits = "CONTAINER_RLIMITS",
         /// The cgroup limits are the profile's, as the kernel enforces them.
@@ -245,21 +311,37 @@ impl SandboxInvariant {
             | Self::HostResourceLimits
             | Self::HostLabelsExact
             | Self::HostRunning
-            | Self::HostWorkspaceIdentity => Vantage::Host,
+            | Self::HostWorkspaceIdentity
+            | Self::HostProxyEnvironment
+            | Self::HostProxyRelay
+            | Self::HostRelayDigest => Vantage::Host,
             _ => Vantage::Container,
         }
+    }
+
+    /// Whether the invariant concerns the proxy itself, and so exists only
+    /// in a `PROXY_ONLY` environment.
+    #[must_use]
+    pub const fn proxy_only(self) -> bool {
+        matches!(self, Self::HostRelayDigest | Self::ContainerProxyReachable)
     }
 }
 
 /// Every invariant `CONTAINER_ISOLATION` requires of an `oci-strict`
 /// environment with `topology`. Each must be `PASS`; absent, `FAIL` and
 /// `UNOBSERVABLE` alike deny the level.
+///
+/// `PROXY_ONLY` requires every invariant. `NO_NETWORK` requires every one but
+/// the two that concern the proxy itself (ADR-0048): it has no proxy to hash
+/// or reach. Its peers are still judged — none — and the direct-egress, DNS
+/// and raw-socket attempts hold there too.
 #[must_use]
 pub fn required_invariants(topology: NetworkTopology) -> Vec<SandboxInvariant> {
-    // Both topologies require the network invariants; what they check differs
-    // (for PROXY_ONLY, M5b adds the proxy peer). M5a prepares NO_NETWORK only.
-    let _ = topology;
-    SandboxInvariant::ALL.to_vec()
+    SandboxInvariant::ALL
+        .iter()
+        .copied()
+        .filter(|i| topology == NetworkTopology::ProxyOnly || !i.proxy_only())
+        .collect()
 }
 
 /// The invariants the probe reports, in declaration order.
@@ -353,8 +435,10 @@ wire_enum! {
 }
 
 wire_int! {
-    /// The probe report's schema version.
-    ProbeReportVersion(u16), min = 1, max = 1
+    /// The probe report's schema version: 2 since M5b added the `PROXY_ONLY`
+    /// and direct-egress invariants (ADR-0048). A version-1 report — a probe
+    /// built before them — is not a report.
+    ProbeReportVersion(u16), min = 2, max = 2
 }
 
 wire_struct! {
@@ -473,7 +557,7 @@ mod tests {
         .unwrap();
         let report = ProbeReport {
             kind: ProbeReportKind::Report,
-            version: ProbeReportVersion::new(1).unwrap(),
+            version: ProbeReportVersion::new(2).unwrap(),
             checks,
             workspace_device: Some(KernelNumber::from_u64(64)),
             workspace_inode: Some(KernelNumber::from_u64(2)),
@@ -501,6 +585,38 @@ mod tests {
         ] {
             assert!(ProbeReport::decode_bytes(bad.as_bytes()).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn each_topology_requires_its_own_invariants() {
+        let proxy = required_invariants(NetworkTopology::ProxyOnly);
+        let none = required_invariants(NetworkTopology::NoNetwork);
+        assert_eq!(proxy, SandboxInvariant::ALL.to_vec(), "PROXY_ONLY: all");
+        for proxy_only in [
+            SandboxInvariant::HostRelayDigest,
+            SandboxInvariant::ContainerProxyReachable,
+        ] {
+            assert!(proxy.contains(&proxy_only) && !none.contains(&proxy_only));
+        }
+        // The peers, the bypass attempts and the proxy variables bind both
+        // topologies.
+        for both in [
+            SandboxInvariant::HostProxyEnvironment,
+            SandboxInvariant::HostProxyRelay,
+            SandboxInvariant::HostNetworkIsolated,
+            SandboxInvariant::ContainerNetworkIsolated,
+            SandboxInvariant::ContainerDirectEgressRefused,
+            SandboxInvariant::ContainerDirectDnsRefused,
+            SandboxInvariant::ContainerRawSocketsRefused,
+        ] {
+            assert!(proxy.contains(&both) && none.contains(&both), "{both:?}");
+        }
+        assert_eq!(none.len() + 2, proxy.len());
+        // Roles round-trip through their labels.
+        for role in ContainerRole::ALL {
+            assert_eq!(ContainerRole::from_label(role.label()), Some(*role));
+        }
+        assert_eq!(ContainerRole::from_label("Relay"), None);
     }
 
     #[test]

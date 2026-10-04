@@ -24,6 +24,9 @@ const BLOCK: usize = 512;
 /// The name the runtime gives the probe's entry: the path's last component.
 const PROBE_NAME: &str = "sandbox-probe";
 
+/// The name it gives the relay's (M5b, ADR-0048).
+const RELAY_NAME: &str = "sandbox-relay";
+
 /// Where a header's fields are.
 struct Header<'a>(&'a [u8]);
 
@@ -80,8 +83,8 @@ impl Header<'_> {
     }
 }
 
-/// The probe's one file, out of `archive`.
-fn probe_file(archive: &[u8]) -> Result<&[u8], Verdict> {
+/// The one file named `expected_name`, out of `archive`.
+fn one_file<'a>(archive: &'a [u8], expected_name: &str) -> Result<&'a [u8], Verdict> {
     let mut at = 0usize;
     let mut found: Option<&[u8]> = None;
     loop {
@@ -114,7 +117,7 @@ fn probe_file(archive: &[u8]) -> Result<&[u8], Verdict> {
             b'0' | 0 => {
                 let name = header.name().ok_or(Verdict::Unobservable)?;
                 let leaf = name.trim_end_matches('/').rsplit('/').next().unwrap_or("");
-                if leaf != PROBE_NAME || found.is_some() {
+                if leaf != expected_name || found.is_some() {
                     return Err(Verdict::Fail);
                 }
                 found = Some(content);
@@ -141,7 +144,18 @@ fn hex(bytes: &[u8]) -> String {
 /// Whether `archive` holds exactly the probe `expected` names.
 #[must_use]
 pub(crate) fn probe(archive: &[u8], expected: &str) -> Verdict {
-    match probe_file(archive) {
+    named(archive, PROBE_NAME, expected)
+}
+
+/// Whether `archive` holds exactly the relay `expected` names: the same
+/// rules, its own name (M5b).
+#[must_use]
+pub(crate) fn relay(archive: &[u8], expected: &str) -> Verdict {
+    named(archive, RELAY_NAME, expected)
+}
+
+fn named(archive: &[u8], name: &str, expected: &str) -> Verdict {
+    match one_file(archive, name) {
         Ok(file) if hex(file) == expected => Verdict::Pass,
         Ok(_) => Verdict::Fail,
         Err(verdict) => verdict,
@@ -157,7 +171,7 @@ pub(crate) fn probe(archive: &[u8], expected: &str) -> Verdict {
 mod tests {
     use dwk_proto::brokerp::sandbox::Verdict;
 
-    use super::{BLOCK, hex, probe};
+    use super::{BLOCK, hex, probe, relay};
 
     /// One ustar entry.
     fn entry(name: &str, kind: u8, content: &[u8]) -> Vec<u8> {
@@ -238,6 +252,26 @@ mod tests {
             entry("sandbox-probe", b'0', &bytes),
         ]);
         assert_eq!(probe(&pax, &want), Verdict::Pass);
+    }
+
+    #[test]
+    fn the_relay_is_its_own_file_and_never_the_probe() {
+        let bytes = b"\x7fELF the relay".to_vec();
+        let want = hex(&bytes);
+        assert_eq!(
+            relay(&archive(&[entry("sandbox-relay", b'0', &bytes)]), &want),
+            Verdict::Pass
+        );
+        // The probe's file under the relay's digest, or the relay's under
+        // the probe's name: neither passes.
+        assert_eq!(
+            relay(&archive(&[entry("sandbox-probe", b'0', &bytes)]), &want),
+            Verdict::Fail
+        );
+        assert_eq!(
+            probe(&archive(&[entry("sandbox-relay", b'0', &bytes)]), &want),
+            Verdict::Fail
+        );
     }
 
     #[test]

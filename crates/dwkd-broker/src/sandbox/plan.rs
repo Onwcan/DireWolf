@@ -14,13 +14,14 @@
 //! only profile, and a weaker one is not a variant of it (ADR-0047 §5).
 
 use dwk_proto::brokerp::EnvironmentSpec;
-use dwk_proto::brokerp::sandbox::{ContainerRef, NetworkTopology, StoreInstance};
+use dwk_proto::brokerp::sandbox::{ContainerRef, ContainerRole, NetworkTopology, StoreInstance};
 use dwk_proto::wire::id::{EnvironmentId, RunId};
 use dwk_sandbox_profile::{
-    LABEL_ENVIRONMENT, LABEL_OWNER, LABEL_OWNER_VALUE, LABEL_PROFILE, LABEL_RUN, LABEL_SCHEMA,
-    LABEL_SCHEMA_VALUE, LABEL_STORE, MEMORY_BYTES, MEMORY_SWAP_BYTES, NANO_CPUS, OOM_SCORE_ADJ,
-    PIDS_LIMIT, PROBE_HOLD, PROBE_MEASURE, PROBE_PATH, RLIMIT_CORE, RLIMIT_FSIZE, RLIMIT_NOFILE,
-    RLIMIT_NPROC, SANDBOX_GID, SANDBOX_UID, TMPFS, WORKSPACE_TARGET,
+    LABEL_ENVIRONMENT, LABEL_OWNER, LABEL_OWNER_VALUE, LABEL_PROFILE, LABEL_ROLE, LABEL_RUN,
+    LABEL_SCHEMA, LABEL_SCHEMA_VALUE, LABEL_STORE, MEMORY_BYTES, MEMORY_SWAP_BYTES, NANO_CPUS,
+    OOM_SCORE_ADJ, PIDS_LIMIT, PROBE_HOLD, PROBE_MEASURE, PROBE_PATH, PROXY_VARIABLES, RELAY_PATH,
+    RLIMIT_CORE, RLIMIT_FSIZE, RLIMIT_NOFILE, RLIMIT_NPROC, SANDBOX_GID, SANDBOX_UID, TMPFS,
+    WORKSPACE_TARGET,
 };
 
 /// The container name an environment is created under: unique per runtime,
@@ -48,13 +49,14 @@ fn user() -> String {
     format!("{SANDBOX_UID}:{SANDBOX_GID}")
 }
 
-fn words(list: &[&str]) -> Vec<String> {
+pub(crate) fn words(list: &[&str]) -> Vec<String> {
     list.iter().map(|w| (*w).to_owned()).collect()
 }
 
-/// The labels every environment carries, in a fixed order.
+/// The labels every container of an environment carries, in a fixed order:
+/// the environment's, and what this container is to it.
 #[must_use]
-pub(crate) fn labels(spec: &EnvironmentSpec) -> Vec<(&'static str, String)> {
+pub(crate) fn labels(spec: &EnvironmentSpec, role: ContainerRole) -> Vec<(&'static str, String)> {
     vec![
         (LABEL_OWNER, LABEL_OWNER_VALUE.to_owned()),
         (LABEL_SCHEMA, LABEL_SCHEMA_VALUE.to_owned()),
@@ -62,15 +64,17 @@ pub(crate) fn labels(spec: &EnvironmentSpec) -> Vec<(&'static str, String)> {
         (LABEL_ENVIRONMENT, spec.environment_id.as_str().to_owned()),
         (LABEL_RUN, spec.run_id.as_str().to_owned()),
         (LABEL_PROFILE, spec.profile.label().to_owned()),
+        (LABEL_ROLE, role.label().to_owned()),
     ]
 }
 
-/// The network the environment joins. M5a builds `NO_NETWORK` only; a
-/// `PROXY_ONLY` environment is refused before any plan is made (M5b).
-const fn network(topology: NetworkTopology) -> Option<&'static str> {
+/// The network the environment joins: none — no interface but loopback —
+/// for both topologies. `PROXY_ONLY`'s one peer is added inside that
+/// namespace afterwards ([`super::relay_plan`]), never by joining a network
+/// the runtime routes (ADR-0048).
+const fn network(topology: NetworkTopology) -> &'static str {
     match topology {
-        NetworkTopology::NoNetwork => Some("none"),
-        NetworkTopology::ProxyOnly => None,
+        NetworkTopology::NoNetwork | NetworkTopology::ProxyOnly => "none",
     }
 }
 
@@ -89,20 +93,28 @@ fn workspace_mount(path: &str) -> String {
 }
 
 /// `docker create` for an `oci-strict` environment (SANDBOX.md §2). `None`
-/// for a topology M5a does not build, or a workspace path the mount syntax
-/// could misread.
+/// for a workspace path the mount syntax could misread.
 #[must_use]
 pub(crate) fn create(spec: &EnvironmentSpec, seccomp_profile: &str) -> Option<Vec<String>> {
-    let network = network(spec.network)?;
+    let network = network(spec.network);
     if !mountable(spec.workspace_path.as_str()) || !mountable(seccomp_profile) {
         return None;
     }
     let mut argv = words(&["create", "--pull", "never"]);
     argv.push("--name".to_owned());
     argv.push(container_name(&spec.store, &spec.environment_id));
-    for (key, value) in labels(spec) {
+    for (key, value) in labels(spec, ContainerRole::Environment) {
         argv.push("--label".to_owned());
         argv.push(format!("{key}={value}"));
+    }
+    // The proxy variables, for `PROXY_ONLY` only: the profile's constants,
+    // never the broker's own environment or a caller's value. A tool that
+    // ignores them has no other path (ADR-0048).
+    if spec.network == NetworkTopology::ProxyOnly {
+        for (name, value) in PROXY_VARIABLES {
+            argv.push("--env".to_owned());
+            argv.push(format!("{name}={value}"));
+        }
     }
     // Identity and privilege.
     argv.extend(words(&["--user"]));
@@ -165,13 +177,18 @@ pub(crate) fn create(spec: &EnvironmentSpec, seccomp_profile: &str) -> Option<Ve
 }
 
 /// `NANO_CPUS` as the runtime's `--cpus` decimal.
+fn cpus() -> String {
+    cpus_of(NANO_CPUS)
+}
+
+/// Nanocpus as the runtime's `--cpus` decimal.
 #[allow(
     clippy::integer_division,
     reason = "whole CPUs and the exact nanosecond remainder"
 )]
-fn cpus() -> String {
-    let whole = NANO_CPUS / 1_000_000_000;
-    let fraction = NANO_CPUS % 1_000_000_000;
+pub(crate) fn cpus_of(nano: u64) -> String {
+    let whole = nano / 1_000_000_000;
+    let fraction = nano % 1_000_000_000;
     if fraction == 0 {
         whole.to_string()
     } else {
@@ -212,8 +229,18 @@ pub(crate) fn inspect(containers: &[&ContainerRef]) -> Vec<String> {
 /// The probe's bytes, as a tar stream, out of the container's own root.
 #[must_use]
 pub(crate) fn copy_probe(container: &ContainerRef) -> Vec<String> {
+    copy_out(container, PROBE_PATH)
+}
+
+/// The relay's bytes, as a tar stream, out of a container's own root.
+#[must_use]
+pub(crate) fn copy_relay(container: &ContainerRef) -> Vec<String> {
+    copy_out(container, RELAY_PATH)
+}
+
+fn copy_out(container: &ContainerRef, path: &str) -> Vec<String> {
     let mut argv = words(&["container", "cp"]);
-    argv.push(format!("{}:{PROBE_PATH}", container.as_str()));
+    argv.push(format!("{}:{path}", container.as_str()));
     argv.push("-".to_owned());
     argv
 }
@@ -242,11 +269,12 @@ pub(crate) fn remove(container: &ContainerRef) -> Vec<String> {
 }
 
 /// Every container carrying this store's labels — and, given one, this
-/// environment's — by full id.
+/// environment's, and given one, this role's — by full id.
 #[must_use]
 pub(crate) fn owned(
     store: &StoreInstance,
     environment: Option<(&EnvironmentId, &RunId)>,
+    role: Option<ContainerRole>,
 ) -> Vec<String> {
     let mut argv = words(&["container", "ls", "--all", "--no-trunc", "--quiet"]);
     argv.push("--filter".to_owned());
@@ -261,6 +289,10 @@ pub(crate) fn owned(
         ));
         argv.push("--filter".to_owned());
         argv.push(format!("label={LABEL_RUN}={}", run.as_str()));
+    }
+    if let Some(role) = role {
+        argv.push("--filter".to_owned());
+        argv.push(format!("label={LABEL_ROLE}={}", role.label()));
     }
     argv
 }

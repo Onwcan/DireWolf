@@ -15,21 +15,28 @@
 //! makes on its own is conservative: a prepared container that did not
 //! measure clean is removed before the answer is sent.
 //!
-//! `NO_NETWORK` is the only topology M5a builds, and only a broker started
-//! with `--allow-evidence-topology` builds it: it is the evidence harness's
-//! topology, not a production one. `PROXY_ONLY` is M5b's, and refused here
-//! as unavailable (ADR-0047 §10).
+//! `PROXY_ONLY` (M5b, [ADR-0048]) is the topology a sandboxed workload will
+//! have: the runtime's `none` network, one relay in that namespace, and this
+//! broker's CONNECT proxy ([`crate::egress`]) behind it, opened before the
+//! environment is created and closed when it is destroyed — its counters
+//! returned with the destruction. `NO_NETWORK` is still the M5a evidence
+//! harness's topology, built only by a broker started with
+//! `--allow-evidence-topology` (ADR-0047 §10). Nothing runs inside either
+//! but the probe: workloads are M5d's.
 //!
 //! [ADR-0047]: ../../../../docs/adr/0047-m5a-oci-execution-environment-and-measured-assurance.md
+//! [ADR-0048]: ../../../../docs/adr/0048-m5b-proxy-only-topology-and-connect-proxy.md
 
 mod digest;
 mod environment;
 mod inspect;
 mod oci;
 mod plan;
+mod relay_plan;
 
 use std::os::fd::OwnedFd;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Instant;
 
 use dwk_proto::brokerp::sandbox::{
@@ -45,6 +52,8 @@ use dwk_proto::brokerp::{
 };
 
 use environment::{Destroyed, EnvFailure, EnvHandle, ExecutionEnvironment, Measured};
+
+use crate::egress::proxy::Proxies;
 
 /// One measurement: every invariant, with its verdict.
 pub(crate) type Checks = Vec<(SandboxInvariant, Verdict)>;
@@ -70,6 +79,7 @@ pub(crate) struct Sandbox {
     files: SandboxFiles,
     profile: String,
     evidence_topology: bool,
+    proxies: Arc<Proxies>,
 }
 
 /// The margin kept at the end of an exchange's deadline for the answer.
@@ -103,14 +113,16 @@ fn measurement(measured: &Measured) -> Option<EnvironmentMeasurement> {
 }
 
 impl Sandbox {
-    /// The supervisor. `helper` is this binary (the launch helper), and
+    /// The supervisor. `helper` is this binary (the launch helper),
     /// `evidence_topology` the operator's acknowledgement that the evidence
-    /// harness's `NO_NETWORK` topology may be built.
+    /// harness's `NO_NETWORK` topology may be built, and `proxies` the
+    /// broker's `PROXY_ONLY` listeners.
     pub(crate) fn new(
         helper: PathBuf,
         authority_uid: u32,
         files: SandboxFiles,
         evidence_topology: bool,
+        proxies: Arc<Proxies>,
     ) -> Self {
         Self {
             helper,
@@ -118,13 +130,15 @@ impl Sandbox {
             files,
             profile: dwk_sandbox_profile::seccomp_profile_json(),
             evidence_topology,
+            proxies,
         }
     }
 
     fn topology(&self, network: NetworkTopology) -> Result<(), BrokerRefusal> {
         match network {
+            NetworkTopology::ProxyOnly => Ok(()),
             NetworkTopology::NoNetwork if self.evidence_topology => Ok(()),
-            _ => Err(BrokerRefusal::TopologyUnavailable),
+            NetworkTopology::NoNetwork => Err(BrokerRefusal::TopologyUnavailable),
         }
     }
 
@@ -151,6 +165,7 @@ impl Sandbox {
                 held,
                 (seccomp, &self.profile),
                 runtime.socket.as_str(),
+                &self.proxies,
             )),
             Err(why) => OutcomeResult::Refused(why),
         }
@@ -166,6 +181,16 @@ impl Sandbox {
         let spec = authorisation.environment();
         if let Err(why) = self.topology(spec.network) {
             return OutcomeResult::Refused(why);
+        }
+        // The probe's own question must stay unanswerable: a grant that
+        // names it would let a listener that is not the proxy pass for it.
+        if spec.egress.as_ref().is_some_and(|grant| {
+            grant
+                .targets
+                .iter()
+                .any(|t| t.host.as_str() == dwk_sandbox_profile::PROXY_PROBE_HOST)
+        }) {
+            return OutcomeResult::Refused(BrokerRefusal::Unsupported);
         }
         let since = Instant::now();
         self.with_oci(descriptors, &authorisation.runtime(), until, |env| {
@@ -217,6 +242,7 @@ impl Sandbox {
                     EnvironmentMeasureDone {
                         state: measured.state,
                         measurement: measurement(&measured),
+                        egress: self.proxies.counters(spec.environment_id.as_str()),
                     },
                 ))),
                 Err(why) => failure(why),
@@ -232,31 +258,40 @@ impl Sandbox {
         until: Instant,
     ) -> OutcomeResult {
         let since = Instant::now();
-        self.with_oci(
-            descriptors,
-            &authorisation.runtime(),
-            until,
-            |env| match env.destroy(
+        self.with_oci(descriptors, &authorisation.runtime(), until, |env| {
+            let destroyed = env.destroy(
                 &authorisation.store,
                 (&authorisation.environment_id, &authorisation.run_id),
                 authorisation.container.as_ref(),
-            ) {
+            );
+            // Whatever the runtime managed, the environment's proxy is
+            // closed: a destruction never leaves its egress open.
+            let egress = self.proxies.close(authorisation.environment_id.as_str());
+            match destroyed {
                 Ok(destroyed) => {
                     let (state, container): (DestroyState, Option<ContainerRef>) = match destroyed {
                         Destroyed::Removed(container) => (DestroyState::Removed, Some(container)),
                         Destroyed::AlreadyGone => (DestroyState::AlreadyGone, None),
                     };
+                    if let Some(counters) = &egress {
+                        crate::event(&format!(
+                            "egress_closed upstream={} downstream={}",
+                            counters.bytes_upstream.get(),
+                            counters.bytes_downstream.get()
+                        ));
+                    }
                     OutcomeResult::Done(Box::new(BrokerDone::environment_destroy(
                         EnvironmentDestroyDone {
                             state,
                             container,
                             destroy_ms: Milliseconds::of(since.elapsed()),
+                            egress,
                         },
                     )))
                 }
                 Err(why) => failure(why),
-            },
-        )
+            }
+        })
     }
 
     /// `broker.environment_list`.

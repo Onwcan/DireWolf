@@ -38,7 +38,9 @@ MAX_REASON_CHARS: Final = 1000
 """An error detail is diagnostics, not a channel. Bounded, like everything else
 that reaches a result file."""
 
-AVAILABLE_MILESTONES: Final[frozenset[str]] = frozenset({"M1", "M2", "M2.5", "M3", "M4", "M5a"})
+AVAILABLE_MILESTONES: Final[frozenset[str]] = frozenset(
+    {"M1", "M2", "M2.5", "M3", "M4", "M5a", "M5b"}
+)
 """What this build has. An eval requiring anything else is pending.
 
 Extending this set is how a milestone turns its suites on: "M3" joined it in
@@ -51,8 +53,11 @@ dormant, and an eval with no runner reports ERROR once its milestone is here.
 "M5a" is a SLICE of M5 (ADR-0047): the execution-environment foundation and
 its measured assurance. It turns on exactly the suite that requires it. "M5"
 itself is not here -- M5 is in progress, not complete -- so every property
-waiting for the whole milestone (a PROXY_ONLY sandbox's egress, above all)
-stays pending.
+waiting for the whole milestone stays pending.
+
+"M5b" is the second slice (ADR-0048): the PROXY_ONLY topology and the opaque
+CONNECT proxy. It turns on exactly the suite that requires it; the complete
+M5 gate -- sandboxed workloads, net.http -- still waits for "M5".
 """
 
 

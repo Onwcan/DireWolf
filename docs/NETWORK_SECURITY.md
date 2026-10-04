@@ -46,9 +46,13 @@ The replacement separates what was conflated:
 
 The sandbox gets a minimal private network namespace: a veth pair, no default route, no DNS resolver, and exactly one reachable peer — `169.254.7.1:8080`, the kernel's CONNECT proxy — injected as `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY` and the equivalent per-tool config. Everything else is unroutable. A process that ignores the proxy variables has no connectivity, which remains the correct failure mode.
 
+**As built in M5b** ([ADR-0048](adr/0048-m5b-proxy-only-topology-and-connect-proxy.md)): not a veth pair but fewer peers still — the runtime's `none` network (loopback only), `169.254.7.1/32` added to that loopback by a one-shot setup container, and an unprivileged relay in the same namespace forwarding each connection, unread, to the broker's per-environment socket — whose directory's ACL lets only the relay's uid reach it. There is no route at all. The variables are `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY` and `NO_PROXY` in both cases; per-tool configuration is not written — package-manager routing is M5d's. The proxy is the broker's (the "Egress Proxy" above), on the host. Measured: every external, metadata, host-gateway, LAN, link-local, IPv6, IPv4-mapped and NAT64 destination fails `ENETUNREACH`; the proxy address on any other port `ECONNREFUSED`; raw and packet sockets `EPERM` (no capability); a virtual socket `EPERM` (seccomp); an ICMP echo `ENETUNREACH`; no resolver answers.
+
+**What the proxy sees (M5b, as built):** the CONNECT host and port, the resolved addresses, the TLS server name, connection metadata and timing, and byte counts. **What it does not:** the HTTP path, headers, body or response inside TLS, the encrypted `Host`, and any credential inside TLS. Its audit and events carry dispositions and counts, never a payload.
+
 **The tunnel is opaque, and we say so.** For proxied traffic the kernel enforces the destination host (from the CONNECT target and the TLS SNI, which must agree), the resolved IP (§3 guard), the port, byte budgets and connection counts. It does **not** see paths, headers, bodies or responses, and it injects no credentials. That is a real reduction in visibility compared with the original design, and it is the price of the original design being impossible. Credential-bearing requests go through `net.http`, where the kernel is the client and therefore sees everything.
 
-**Residual: domain fronting.** Because the kernel sees the SNI and not the request inside the tunnel, a process in the sandbox can reach any origin served from the same front as an allowlisted host — a CDN or a large shared platform — by naming the allowed host in the SNI and another in the encrypted `Host` header. An allowlist entry for a broad shared host is therefore an allowlist entry for everything behind it. The mitigations are narrow allowlist entries, the tunnel's byte budget and connection count, and keeping every credential-bearing request on `net.http`; M5's egress evidence shows the budget bounding such a tunnel. (Recorded from the limits another sandbox documents for itself: [COMPETITIVE_ANALYSIS.md](COMPETITIVE_ANALYSIS.md) §17 G7.)
+**Residual: domain fronting.** Because the kernel sees the SNI and not the request inside the tunnel, a process in the sandbox can reach any origin served from the same front as an allowlisted host — a CDN or a large shared platform — by naming the allowed host in the SNI and another in the encrypted `Host` header. An allowlist entry for a broad shared host is therefore an allowlist entry for everything behind it. The mitigations are narrow allowlist entries, the tunnel's byte budget and connection count, and keeping every credential-bearing request on `net.http`; M5b's egress evidence shows exactly that: a request naming another origin inside an agreeing tunnel is carried unseen, and the environment's upload budget stops it at the byte. (Recorded from the limits another sandbox documents for itself: [COMPETITIVE_ANALYSIS.md](COMPETITIVE_ANALYSIS.md) §17 G7.)
 
 This also resolves a product problem: `npm install`, `pip install` and `cargo fetch` work against allowlisted registry hosts, which the earlier "all allowlisted executables get `network_deny`" rule made impossible.
 
@@ -74,6 +78,8 @@ The runtime process likewise has no sockets (enforced by banned-import lint *and
 14. Audit
 ```
 
+**For sandbox egress (M5b, as built — [ADR-0048](adr/0048-m5b-proxy-only-topology-and-connect-proxy.md) §§4–7)** the pipeline is the proxy's: a strict CONNECT parse, the run's own exact `network.https` grants (a wildcard grants no tunnel), metadata names refused, the tunnel limit, one resolution by the host's resolver under a deadline, the whole answer guarded, `200`, a strict `ClientHello` whose one server name is the CONNECT host (ECH refused; TLS only), the pinned address dialled, and environment-wide byte budgets at the socket. Credential injection, redirects and response handling are `net.http`'s (M5c).
+
 ### DNS rebinding
 
 Step 3 pins the resolved address set and step 8 connects to a pinned address. The name is resolved **once** and the connection uses that result, so a second resolution returning `127.0.0.1` cannot occur. Additionally:
@@ -81,6 +87,7 @@ Step 3 pins the resolved address set and step 8 connects to a pinned address. Th
 - TTLs below a floor (30 s) are clamped upward for pinning purposes.
 - A name resolving to *both* public and private addresses is rejected outright rather than filtered, because that pattern is almost exclusively a rebinding attack.
 - The pin is scoped to the request, including all redirect hops.
+- **As built for the M5b proxy:** the pin is scoped to one tunnel; the name is never re-resolved inside it, and the next tunnel resolves and is judged afresh (measured: a rebinding name's first tunnel reaches the pinned origin, its second gets the blocked answer and is refused).
 
 ## 3. Blocked address ranges
 
@@ -99,6 +106,8 @@ Denied by default for any agent-initiated request:
 | `192.0.0.0/24`, `192.0.2.0/24`, `198.18/15`, `198.51.100/24`, `203.0.113/24` | Special-use / documentation |
 | IPv4-mapped IPv6 (`::ffff:0:0/96`) of any blocked range | Bypass vector |
 | NAT64 (`64:ff9b::/96`) of any blocked range | Bypass vector |
+
+**As built in M5b** (the proxy's guard, `dwkd-broker/src/egress/guard.rs`): the table above, plus the 6to4 relay anycast (`192.88.99.0/24`); IPv6 is reachable only within `2000::/3`, minus documentation (`2001:db8::/32`, `3fff::/20`), discard (`100::/64`) and `2001::/23` (Teredo included); NAT64 and 6to4 addresses are judged by the IPv4 address they embed; IPv4-mapped and IPv4-compatible addresses are blocked outright. Production has no unblocking mechanism at all; the three-step unblocking below is not built. The guard judges ranges, not the host: a granted name that resolves to a public address of the host itself, or of its own network, passes it, and is reachable on the granted port with the granted server name.
 
 Metadata endpoints additionally get hostname-level blocks (`metadata.google.internal`, `metadata.goog`, `instance-data`) so a DNS-level trick cannot reach them.
 

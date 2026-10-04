@@ -402,7 +402,8 @@ pub(super) const fn failure_reason(failure: BrokerFailure) -> ToolFailureReasonV
             | BrokerRefusal::TopologyUnavailable
             | BrokerRefusal::EnvironmentNotFound
             | BrokerRefusal::EnvironmentAmbiguous
-            | BrokerRefusal::ForeignEnvironment => ToolFailureReasonV3::BrokerExecutionError,
+            | BrokerRefusal::ForeignEnvironment
+            | BrokerRefusal::ProxyUnavailable => ToolFailureReasonV3::BrokerExecutionError,
         },
         BrokerFailure::Indeterminate(_) => ToolFailureReasonV3::BrokerExecutionError,
     }

@@ -88,8 +88,9 @@ pub const LABEL_OWNER: &str = "io.direwolf.owner";
 pub const LABEL_OWNER_VALUE: &str = "direwolf";
 /// The label naming the label schema.
 pub const LABEL_SCHEMA: &str = "io.direwolf.schema";
-/// Its value: this schema.
-pub const LABEL_SCHEMA_VALUE: &str = "1";
+/// Its value: this schema. 2 since M5b gave every container a role
+/// ([`LABEL_ROLE`], ADR-0048).
+pub const LABEL_SCHEMA_VALUE: &str = "2";
 /// The label naming the authority store that created the environment.
 pub const LABEL_STORE: &str = "io.direwolf.store";
 /// The label naming the environment.
@@ -98,6 +99,149 @@ pub const LABEL_ENVIRONMENT: &str = "io.direwolf.environment";
 pub const LABEL_RUN: &str = "io.direwolf.run";
 /// The label naming the profile.
 pub const LABEL_PROFILE: &str = "io.direwolf.profile";
+/// The label naming what the container is to its environment: the
+/// environment itself, its relay, or its one-shot setup (`ContainerRole`'s
+/// label values, M5b).
+pub const LABEL_ROLE: &str = "io.direwolf.role";
+
+// ---------------------------------------------------------------------------
+// `PROXY_ONLY` (M5b, ADR-0048): the topology's fixed values.
+//
+// The environment's network namespace has no interface but loopback (the
+// runtime's `none` network). The one-shot setup container adds
+// `PROXY_ADDRESS/32` to that loopback; the relay, in the same namespace,
+// listens on `PROXY_ADDRESS:PROXY_PORT` and forwards each connection to the
+// broker's per-environment socket, mounted read-only at `EGRESS_TARGET` in the
+// relay alone. Nothing else is routable, so a process that ignores the proxy
+// variables has no path out.
+// ---------------------------------------------------------------------------
+
+/// The proxy's address: link-local, on the namespace's loopback (ADR-0024).
+pub const PROXY_ADDRESS: [u8; 4] = [169, 254, 7, 1];
+/// The proxy's port.
+pub const PROXY_PORT: u16 = 8080;
+/// The proxy, as a URL.
+pub const PROXY_URL: &str = "http://169.254.7.1:8080";
+/// Where the environment's own loopback services stay local.
+pub const NO_PROXY_VALUE: &str = "localhost,127.0.0.1,::1";
+/// Every proxy variable a `PROXY_ONLY` environment is given, and exactly
+/// these: the broker's constants, never a value inherited from its own
+/// environment or chosen by a caller. They are a convenience for tools; the
+/// topology, not their cooperation, is the containment.
+pub const PROXY_VARIABLES: &[(&str, &str)] = &[
+    ("HTTP_PROXY", PROXY_URL),
+    ("HTTPS_PROXY", PROXY_URL),
+    ("ALL_PROXY", PROXY_URL),
+    ("NO_PROXY", NO_PROXY_VALUE),
+    ("http_proxy", PROXY_URL),
+    ("https_proxy", PROXY_URL),
+    ("all_proxy", PROXY_URL),
+    ("no_proxy", NO_PROXY_VALUE),
+];
+/// Every name tools read a proxy from. In a `NO_NETWORK` environment none is
+/// set; in a `PROXY_ONLY` one, only [`PROXY_VARIABLES`].
+pub const PROXY_VARIABLE_NAMES: &[&str] = &[
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "NO_PROXY",
+    "FTP_PROXY",
+    "RSYNC_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "all_proxy",
+    "no_proxy",
+    "ftp_proxy",
+    "rsync_proxy",
+];
+
+/// Where the relay lives in the sandbox image, beside the probe, bound to the
+/// image by its content digest and, separately, by its own SHA-256.
+pub const RELAY_PATH: &str = "/usr/libexec/direwolf/sandbox-relay";
+/// The relay's argument for the setup container: add the proxy address to
+/// the namespace's loopback, then exit.
+pub const RELAY_SETUP: &str = "setup";
+/// The relay's argument for the relay container: serve the proxy endpoint.
+pub const RELAY_SERVE: &str = "serve";
+/// The relay's identity: its own unprivileged user, not the environment's.
+pub const RELAY_UID: u32 = 10_002;
+/// Its group.
+pub const RELAY_GID: u32 = 10_002;
+/// Where the broker's egress socket is mounted, read-only, in the relay — and
+/// in nothing else.
+pub const EGRESS_TARGET: &str = "/run/direwolf-egress";
+/// The broker's per-environment socket, inside [`EGRESS_TARGET`].
+pub const EGRESS_SOCKET_NAME: &str = "proxy.sock";
+/// The most connections the relay forwards at once; the broker's grant bounds
+/// tunnels below this.
+pub const RELAY_MAX_CONNECTIONS: usize = 64;
+/// The relay's and the setup's process limit: two threads for each
+/// connection the relay forwards, and a margin for its own.
+pub const RELAY_PIDS_LIMIT: u64 = 144;
+/// Their memory limit, in bytes (64 MiB); memory plus swap is the same, so
+/// no swap.
+pub const RELAY_MEMORY_BYTES: u64 = 64 << 20;
+/// Their CPU limit, in nanocpus (0.5 CPU).
+pub const RELAY_NANO_CPUS: u64 = 500_000_000;
+
+/// The server name the probe asks the proxy for. `.invalid` is reserved
+/// (RFC 6761): no grant names it, so a DireWolf proxy refuses it with its own
+/// answer — which is how the probe knows the peer it reached is the proxy.
+pub const PROXY_PROBE_HOST: &str = "direwolf-probe.invalid";
+/// The header a DireWolf proxy names its decision in.
+pub const PROXY_DECISION_HEADER: &str = "X-DireWolf-Egress";
+
+/// IPv4 destinations the probe tries to reach directly, with what each
+/// stands for. Every attempt must be refused by the topology (no route):
+/// a connection, or a silence suggesting a route whose packets are dropped,
+/// fails the measurement.
+pub const DIRECT_TCP_V4: &[([u8; 4], u16, &str)] = &[
+    ([1, 1, 1, 1], 443, "external"),
+    ([8, 8, 8, 8], 53, "external-dns"),
+    ([169, 254, 169, 254], 80, "metadata"),
+    ([169, 254, 7, 2], 8080, "link-local-neighbour"),
+    ([172, 17, 0, 1], 80, "container-bridge-host"),
+    ([192, 168, 65, 254], 80, "desktop-host"),
+    ([10, 0, 0, 1], 80, "private-lan"),
+    ([192, 168, 1, 1], 80, "private-lan"),
+    ([100, 100, 100, 100], 80, "cgnat-overlay"),
+];
+/// The proxy's own address on ports that are not the proxy's: nothing may
+/// listen there, so each is refused (`ECONNREFUSED`), never accepted.
+pub const PROXY_OTHER_PORTS: &[u16] = &[22, 53, 80, 443, 8081];
+/// IPv6 destinations the probe tries to reach directly.
+pub const DIRECT_TCP_V6: &[([u16; 8], u16, &str)] = &[
+    (
+        [0x2606, 0x4700, 0x4700, 0, 0, 0, 0, 0x1111],
+        443,
+        "external",
+    ),
+    ([0xfd00, 0x0ec2, 0, 0, 0, 0, 0, 0x0254], 80, "metadata-v6"),
+    (
+        [0, 0, 0, 0, 0, 0xffff, 0x0101, 0x0101],
+        443,
+        "ipv4-mapped-external",
+    ),
+    (
+        [0x0064, 0xff9b, 0, 0, 0, 0, 0xa9fe, 0xa9fe],
+        80,
+        "nat64-metadata",
+    ),
+];
+/// Resolvers the probe sends a real DNS query to, over UDP and TCP, besides
+/// those its `/etc/resolv.conf` names: none may answer.
+pub const DIRECT_DNS_V4: &[([u8; 4], &str)] = &[
+    ([127, 0, 0, 53], "local-stub"),
+    ([127, 0, 0, 11], "runtime-embedded"),
+    ([8, 8, 8, 8], "external"),
+    ([1, 1, 1, 1], "external"),
+    ([169, 254, 169, 253], "cloud-link-local"),
+    ([192, 168, 65, 7], "desktop-host"),
+    ([10, 0, 2, 3], "user-mode-network"),
+];
+/// The IPv6 resolvers the probe queries.
+pub const DIRECT_DNS_V6: &[([u16; 8], &str)] =
+    &[([0x2001, 0x4860, 0x4860, 0, 0, 0, 0, 0x8888], "external")];
 
 /// The only device nodes an `oci-strict` process may find: `(name, major,
 /// minor)`, beneath `/dev`. Anything else — a block device, `/dev/kmsg`, a
@@ -708,5 +852,18 @@ mod tests {
         assert_eq!(socket["args"][0]["value"], AF_VSOCK);
         assert!(!SECCOMP_ALLOWED.contains(&"socket"));
         assert!(!SECCOMP_ALLOWED.contains(&"socketpair"));
+    }
+
+    #[test]
+    fn the_relay_is_bounded_for_every_connection_it_may_forward() {
+        let per_connection = u64::try_from(super::RELAY_MAX_CONNECTIONS).unwrap() * 2;
+        assert!(super::RELAY_PIDS_LIMIT > per_connection);
+        // And below the environment's own: the helpers are the smaller.
+        const _: () = assert!(super::RELAY_PIDS_LIMIT < super::PIDS_LIMIT);
+        const _: () = assert!(super::RELAY_MEMORY_BYTES < super::MEMORY_BYTES);
+        // The proxy variables are a subset of the names, each once.
+        for (name, _) in super::PROXY_VARIABLES {
+            assert!(super::PROXY_VARIABLE_NAMES.contains(name), "{name}");
+        }
     }
 }

@@ -2123,7 +2123,7 @@ SANDBOX_CASES = (
     ("sandbox-broker", "exit-gone-not-found"),
     ("sandbox-broker", "exit-runtime-unavailable"),
     ("sandbox-broker", "exit-image-missing-never-pulled"),
-    ("sandbox-broker", "topology-proxy-only-unavailable"),
+    ("sandbox-broker", "topology-proxy-only-needs-its-grant"),
     ("sandbox-broker", "topology-no-network-needs-evidence-flag"),
     ("sandbox-broker", "refusals-create-nothing"),
     ("sandbox-broker", "crash-w3-broker-after-create-labelled"),
@@ -2271,11 +2271,18 @@ def _docker(client: Path, socket: str, *args: str, check: bool = True) -> str:
 
 
 def _build_image(
-    client: Path, socket: str, context: Path, binary: Path, platform_: str, fixture: str | None
+    client: Path,
+    socket: str,
+    context: Path,
+    binary: Path,
+    platform_: str,
+    fixture: str | None,
+    extra: dict[str, Path] | None = None,
 ) -> str:
-    """One `FROM scratch` image holding `binary` at the probe's path: built
-    offline from local bytes, its identity the content digest the runtime
-    returns. Nothing is pulled."""
+    """One `FROM scratch` image holding `binary` at the probe's path -- and,
+    for M5b, `extra` files at their paths (the relay, the egress evidence's
+    workload fixture): built offline from local bytes, its identity the
+    content digest the runtime returns. Nothing is pulled."""
     shutil.rmtree(context, ignore_errors=True)
     context.mkdir(parents=True)
     shutil.copyfile(binary, context / "sandbox-probe")
@@ -2283,6 +2290,10 @@ def _build_image(
         "FROM scratch",
         "COPY --chmod=0755 sandbox-probe /usr/libexec/direwolf/sandbox-probe",
     ]
+    for target, source in (extra or {}).items():
+        name = Path(target).name
+        shutil.copyfile(source, context / name)
+        lines.append(f"COPY --chmod=0755 {name} {target}")
     if fixture is not None:
         lines.append(f"ENV DW_FIXTURE={fixture}")
     (context / "Dockerfile").write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -2481,6 +2492,341 @@ def task_sandbox_foundation_evidence() -> None:
     latency = [r for r in records if r.get("case") == "latency"]
     if latency:
         print(f"{BOLD}latency{OFF} {json.dumps(latency[0], sort_keys=True)}")
+    uvrun("dwcheck", "closure", "--report")
+
+
+# --- M5b: PROXY_ONLY and the CONNECT proxy (ADR-0048) -----------------------
+
+SANDBOX_RELAY_PATH = "/usr/libexec/direwolf/sandbox-relay"
+SANDBOX_FIXTURE_PATH = "/usr/libexec/direwolf/sandbox-fixture"
+
+EGRESS_BROKER_TESTS = (
+    "linux::a_proxy_only_environment_measures_clean_and_reaches_only_its_proxy",
+    "linux::tunnels_through_the_real_topology_obey_the_grant_the_guard_and_the_server_name",
+    "linux::budgets_hold_at_the_socket_in_the_real_topology",
+    "linux::a_process_that_ignores_the_proxy_has_no_path",
+    "linux::ambient_proxy_settings_never_reach_an_environment",
+    "linux::weakened_topologies_are_detected",
+    "linux::crashes_and_restarts_fail_closed_and_leave_only_labelled_reapable_resources",
+    "linux::a_production_broker_has_no_exception_and_no_fixture",
+)
+EGRESS_AUTHORITY_TESTS = ("linux::a_proxy_only_environment_reaches_exactly_the_runs_https_hosts",)
+
+# Every (suite, case) the M5b real-topology suites must report, exercised.
+EGRESS_CASES = (
+    *(
+        ("sandbox-egress", case)
+        for case in (
+            "proxy-only-prepare-clean",
+            "proxy-only-host-network-isolated",
+            "proxy-only-host-proxy-environment",
+            "proxy-only-host-proxy-relay",
+            "proxy-only-host-relay-digest",
+            "proxy-only-container-network-isolated",
+            "proxy-only-container-proxy-reachable",
+            "proxy-only-container-direct-egress-refused",
+            "proxy-only-container-direct-dns-refused",
+            "proxy-only-container-raw-sockets-refused",
+            "proxy-only-container-capabilities-empty",
+            "proxy-only-host-capabilities-dropped",
+            "proxy-only-environment-and-relay-only",
+            "proxy-only-relay-shares-the-namespace-unprivileged",
+            "proxy-only-listener-open",
+            "proxy-only-socket-mounted-in-relay-only",
+            "proxy-only-socket-directory-relay-uid-only",
+            "proxy-only-listed-with-roles",
+            "proxy-only-measure-clean-again",
+            "proxy-only-destroy-removes-every-role",
+            "proxy-only-destroy-closes-listener",
+            "proxy-only-destroy-counters",
+            "proxy-only-destroy-idempotent",
+            "tunnel-granted-carries-bytes",
+            "tunnel-via-proxy-variable",
+            "tunnel-host-not-granted",
+            "tunnel-port-not-granted",
+            "tunnel-address-literal-refused",
+            "resolver-blocked",
+            "resolver-metadata-blocked",
+            "resolver-mixed-refused-outright",
+            "resolver-failure",
+            "resolver-timeout",
+            "resolver-rebinding-pinned",
+            "tunnel-sni-mismatch-closed",
+            "tunnel-sni-missing-closed",
+            "tunnel-ech-refused",
+            "tunnel-plain-http-refused",
+            "counters-at-destroy-by-disposition",
+            "audit-observability-no-payload",
+            "budget-upload-exhausted",
+            "budget-upload-spent-stays-spent",
+            "budget-upload-exact-at-socket",
+            "budget-download-exhausted",
+            "budget-tunnel-limit",
+            "fronting-residual-carried-and-bounded",
+            "bypass-tcp-external",
+            "bypass-tcp-external-dns",
+            "bypass-tcp-cloud-metadata",
+            "bypass-tcp-bridge-host",
+            "bypass-tcp-desktop-host",
+            "bypass-tcp-private-lan",
+            "bypass-tcp-link-local-neighbour",
+            "bypass-tcp-host-loopback-origin",
+            "bypass-tcp-ipv6-external",
+            "bypass-tcp-ipv4-mapped",
+            "bypass-tcp-nat64-metadata",
+            "bypass-udp-external",
+            "bypass-udp-ipv6-external",
+            "bypass-proxy-address-other-ports",
+            "bypass-dns-external",
+            "bypass-dns-embedded-runtime-resolver",
+            "bypass-dns-local-stub",
+            "bypass-dns-desktop-host",
+            "bypass-dns-ipv6-external",
+            "bypass-library-resolver",
+            "bypass-library-resolver-public-name",
+            "bypass-raw-ipv4",
+            "bypass-raw-ipv6",
+            "bypass-packet",
+            "bypass-vsock",
+            "bypass-icmp",
+            "bypass-proxy-variable-redirected",
+            "bypass-proxy-variable-other-peer",
+            "bypass-origin-never-reached",
+            "proxy-variables-broker-owned",
+            "proxy-variables-ambient-ignored",
+            "runtime-client-config-proxies-ignored",
+            "weakened-bridge-network",
+            "weakened-missing-relay",
+            "weakened-proxy-variables-removed",
+            "drift-relay-stopped",
+            "drift-extra-peer-listening",
+            "drift-fake-resolver-in-namespace",
+            "drift-setup-left-running",
+            "drift-egress-directory-opened",
+            "weakened-relay-tampered",
+            "weakened-topology-count",
+            "crash-environment-network-set",
+            "crash-environment-relay-started",
+            "restart-proxy-closed-fails-closed",
+            "foreign-resources-untouched",
+            "production-proxy-only-prepared",
+            "production-no-fixture-resolver",
+            "production-loopback-blocked-no-exception",
+            "production-proxy-only-needs-its-grant",
+        )
+    ),
+    *(
+        ("sandbox-authority-egress", case)
+        for case in (
+            "grant-from-run-exact-https",
+            "grant-wildcard-and-plain-http-not-destinations",
+            "audit-intent-records-grant",
+            "tunnel-through-authority-prepared-environment",
+            "wildcard-covered-name-not-granted",
+            "audit-measured-counters",
+            "audit-destroyed-counters",
+            "reconcile-helper-orphan-reaped",
+        )
+    ),
+)
+
+
+def _runtime_state(client: Path, socket: str) -> tuple[set[str], set[str]]:
+    """Every container and every network the runtime holds, by id."""
+    containers = set(
+        _docker(client, socket, "container", "ls", "--all", "--no-trunc", "--quiet").split()
+    )
+    networks = set(_docker(client, socket, "network", "ls", "--no-trunc", "--quiet").split())
+    return containers, networks
+
+
+def task_sandbox_egress_evidence() -> None:
+    """M5b's real-topology evidence (ADR-0048): `PROXY_ONLY` environments in a
+    real OCI runtime -- the environment, its setup and its relay real
+    containers in one real network namespace -- and the real broker's CONNECT
+    proxy behind them, with the real authority for the grant.
+
+    Setup first: the probe, the relay and the workload fixture are built
+    statically and proved static; the probe's and the relay's digests are
+    pinned; the evidence images are built offline `FROM scratch` and named by
+    content (the product's: probe and relay; the evidence's: with the
+    workload fixture; and one whose relay differs by a byte). The destinations
+    are fixtures -- the broker's evidence-only resolver file and a loopback
+    origin -- and the boundary is not.
+
+    Then every suite must run every test and every case must report; no
+    container or network the evidence made may remain, and every one that was
+    there before must still be there. No runtime: NOT EXERCISED, which fails.
+    Linux only.
+    """
+    if not sys.platform.startswith("linux"):
+        raise TaskError("NOT EXERCISED: the egress evidence needs Linux and an OCI runtime")
+    found = shutil.which("docker")
+    if found is None:
+        raise TaskError("NOT EXERCISED: no container runtime client (`docker`) on PATH")
+    socket = os.environ.get("DW_SANDBOX_SOCKET", "/var/run/docker.sock")
+    target_root = Path(os.environ.get("CARGO_TARGET_DIR", str(ROOT / "target")))
+    work = Path(os.environ.get("DW_EGRESS_WORK", str(Path.home() / ".cache" / "dw-m5b")))
+    shutil.rmtree(work, ignore_errors=True)
+    work.mkdir(mode=0o700, parents=True)
+    client, chosen = _trusted_client(Path(found), work / "client")
+    try:
+        server = json.loads(
+            _docker(client, socket, "version", "--format", "{{json .Server}}").strip()
+        )
+    except (TaskError, json.JSONDecodeError) as exc:
+        raise TaskError(f"NOT EXERCISED: the runtime at {socket} does not answer: {exc}") from exc
+    if server.get("Os") != "linux":
+        raise TaskError(f"NOT EXERCISED: the runtime is not a Linux one: {server.get('Os')}")
+    arch = {"amd64": "x86_64", "arm64": "aarch64"}.get(str(server.get("Arch")))
+    if arch is None:
+        raise TaskError(f"the runtime's architecture {server.get('Arch')!r} is not supported")
+    triple = f"{arch}-unknown-linux-gnu"
+    platform_ = f"linux/{server.get('Arch')}"
+    before_containers, before_networks = _runtime_state(client, socket)
+
+    static = target_root / "sandbox-static"
+    env = dict(os.environ, RUSTFLAGS="-C target-feature=+crt-static")
+    command = [
+        "cargo",
+        "build",
+        "--locked",
+        "--release",
+        "-p",
+        "dwk-sandbox-probe",
+        "--bin",
+        "dwk-sandbox-probe",
+        "--example",
+        "sandbox_fixture",
+        "-p",
+        "dwk-sandbox-relay",
+        "--bin",
+        "dwk-sandbox-relay",
+        "--target",
+        triple,
+        "--target-dir",
+        str(static),
+    ]
+    print(f"{DIM}$ RUSTFLAGS='-C target-feature=+crt-static' {' '.join(command)}{OFF}", flush=True)
+    if subprocess.run(command, cwd=str(ROOT), env=env, check=False).returncode != 0:
+        raise TaskError("the static probe, relay and fixture did not build")
+    release = static / triple / "release"
+    probe = release / "dwk-sandbox-probe"
+    relay = release / "dwk-sandbox-relay"
+    fixture = release / "examples" / "sandbox_fixture"
+    linking = {
+        name: _static_elf(path)
+        for name, path in (("probe", probe), ("relay", relay), ("fixture", fixture))
+    }
+    probe_sha = hashlib.sha256(probe.read_bytes()).hexdigest()
+    relay_sha = hashlib.sha256(relay.read_bytes()).hexdigest()
+    changed_relay = work / "relay-changed"
+    offset = _one_byte_changed(relay, changed_relay)
+
+    images = {
+        "product": _build_image(
+            client,
+            socket,
+            work / "images" / "product",
+            probe,
+            platform_,
+            None,
+            {SANDBOX_RELAY_PATH: relay},
+        ),
+        "fixture": _build_image(
+            client,
+            socket,
+            work / "images" / "fixture",
+            probe,
+            platform_,
+            None,
+            {SANDBOX_RELAY_PATH: relay, SANDBOX_FIXTURE_PATH: fixture},
+        ),
+        "tampered-relay": _build_image(
+            client,
+            socket,
+            work / "images" / "tampered-relay",
+            probe,
+            platform_,
+            None,
+            {SANDBOX_RELAY_PATH: changed_relay},
+        ),
+    }
+    print(f"{BOLD}egress evidence setup{OFF}")
+    version = f"{server.get('Version')} (api {server.get('ApiVersion')})"
+    print(f"  runtime            {version}, {platform_}")
+    print(f"  runtime client     {chosen}")
+    print(f"  probe              {linking['probe']}, sha256 {probe_sha}")
+    print(f"  relay              {linking['relay']}, sha256 {relay_sha}")
+    print(f"  fixture            {linking['fixture']} (evidence image only)")
+    print(f"  changed relay      one byte flipped at offset {offset}")
+    for name, image in images.items():
+        print(f"  image {name:<14}{image}")
+
+    os.environ.update(
+        {
+            "DW_SANDBOX_RUNTIME": str(client),
+            "DW_SANDBOX_SOCKET": socket,
+            "DW_SANDBOX_PROBE_SHA256": probe_sha,
+            "DW_EGRESS_RELAY_SHA256": relay_sha,
+            "DW_EGRESS_IMAGE": images["product"],
+            "DW_EGRESS_IMAGE_FIXTURE": images["fixture"],
+            "DW_EGRESS_IMAGE_TAMPERED_RELAY": images["tampered-relay"],
+        }
+    )
+    outputs: list[str] = []
+    try:
+        run("cargo", "build", "--locked", "-p", "dwkd-broker")
+        for package, test, names in (
+            ("dwkd-broker", "sandbox_egress", EGRESS_BROKER_TESTS),
+            ("dwkd-authority", "sandbox_lifecycle", EGRESS_AUTHORITY_TESTS),
+        ):
+            output = run_captured(
+                "cargo",
+                "test",
+                "--locked",
+                "-p",
+                package,
+                "--test",
+                test,
+                "--",
+                "--ignored",
+                "--exact",
+                "--nocapture",
+                "--test-threads=1",
+                *names,
+            )
+            summaries = [line for line in output.splitlines() if line.startswith("test result: ")]
+            expected = f"test result: ok. {len(names)} passed; 0 failed; 0 ignored"
+            if len(summaries) != 1 or not summaries[0].startswith(expected):
+                raise TaskError(
+                    f"the {test} suite did not run all of its tests: expected `{expected}`, "
+                    f"got {summaries or 'no summary'}"
+                )
+            outputs.append(output)
+    finally:
+        after_containers, after_networks = _runtime_state(client, socket)
+        for image in set(images.values()):
+            _docker(client, socket, "image", "rm", "--force", image, check=False)
+    left = sorted(after_containers - before_containers)
+    removed = sorted(before_containers - after_containers)
+    left_networks = sorted(after_networks - before_networks)
+    removed_networks = sorted(before_networks - after_networks)
+    if left or left_networks:
+        raise TaskError(
+            f"the evidence left {len(left)} container(s) and {len(left_networks)} network(s) "
+            f"behind: {left + left_networks}"
+        )
+    if removed or removed_networks:
+        raise TaskError(
+            f"{len(removed) + len(removed_networks)} resource(s) that predate the evidence are "
+            f"gone: {removed + removed_networks}"
+        )
+    print(
+        f"{GREEN}cleanup: no evidence container or network remains; {len(before_containers)} "
+        f"container(s) and {len(before_networks)} network(s) pre-existing kept{OFF}"
+    )
+    require_sandbox_evidence("\n".join(outputs), EGRESS_CASES)
     uvrun("dwcheck", "closure", "--report")
 
 
@@ -2775,6 +3121,7 @@ TASKS = {
     "process-broker-evidence": task_process_broker_evidence,
     "secret-broker-evidence": task_secret_broker_evidence,
     "sandbox-foundation-evidence": task_sandbox_foundation_evidence,
+    "sandbox-egress-evidence": task_sandbox_egress_evidence,
     "fuzz-smoke": task_fuzz_smoke,
     "fuzz": task_fuzz,
     "security": task_security,

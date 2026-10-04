@@ -11,7 +11,8 @@
 
 use dwk_proto::brokerp::EnvironmentSpec;
 use dwk_proto::brokerp::sandbox::{
-    EnvironmentProfile, ImageId, NetworkTopology, SandboxInvariant, StoreInstance, Verdict,
+    ContainerRef, ContainerRole, EnvironmentProfile, ImageId, NetworkTopology, SandboxInvariant,
+    StoreInstance, Verdict,
 };
 use dwk_proto::json::{Object, Value};
 use dwk_proto::wire::id::{EnvironmentId, RunId};
@@ -29,16 +30,22 @@ fn image() -> String {
 }
 
 fn spec() -> EnvironmentSpec {
+    spec_with(NetworkTopology::NoNetwork)
+}
+
+fn spec_with(network: NetworkTopology) -> EnvironmentSpec {
     EnvironmentSpec {
         environment_id: EnvironmentId::parse(ENV).unwrap(),
         run_id: RunId::parse(RUN).unwrap(),
         store: StoreInstance::new("0123abcd".to_owned()).unwrap(),
         profile: EnvironmentProfile::OciStrict,
-        network: NetworkTopology::NoNetwork,
+        network,
         image: ImageId::new(image()).unwrap(),
         probe_sha256: ContentDigest::new("b".repeat(64)).unwrap(),
         workspace_path: HostPath::new("/srv/ws".to_owned()).unwrap(),
         workspace: (1, 2),
+        relay_sha256: None,
+        egress: None,
     }
 }
 
@@ -55,13 +62,15 @@ fn conforming() -> String {
   "Config": {{
     "User": "10001:10001",
     "Image": "{image}",
+    "Env": ["PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"],
     "Labels": {{
       "io.direwolf.owner": "direwolf",
-      "io.direwolf.schema": "1",
+      "io.direwolf.schema": "2",
       "io.direwolf.store": "0123abcd",
       "io.direwolf.environment": "{ENV}",
       "io.direwolf.run": "{RUN}",
-      "io.direwolf.profile": "oci-strict"
+      "io.direwolf.profile": "oci-strict",
+      "io.direwolf.role": "environment"
     }}
   }},
   "HostConfig": {{
@@ -182,11 +191,12 @@ fn replace(mut object: Object, path: &[&str], value: Value) -> Object {
 fn a_conforming_record_passes_every_host_invariant_it_speaks_to() {
     let object = record(&conforming());
     assert_eq!(failing(&object), Vec::<SandboxInvariant>::new());
-    assert_eq!(verdicts(&object).len(), 19);
+    assert_eq!(verdicts(&object).len(), 20);
     let record = Record::new(&object);
     assert!(record.is(&spec().store, (&spec().environment_id, &spec().run_id)));
     let owned = record.owned(&spec().store).unwrap();
     assert!(owned.labels_exact);
+    assert_eq!(owned.role, Some(ContainerRole::Environment));
     assert_eq!(owned.environment_id.unwrap().as_str(), ENV);
 }
 
@@ -451,4 +461,248 @@ fn replace_changes_exactly_one_member() {
         .map(|(a, _)| a.0)
         .collect();
     assert_eq!(differing, [SandboxInvariant::HostResourceLimits]);
+}
+
+fn env_list(items: &[&str]) -> Value {
+    strings(items)
+}
+
+fn proxy_verdict(object: &Object, network: NetworkTopology) -> Verdict {
+    Record::new(object)
+        .judge(&spec_with(network), PROFILE, SOCKET)
+        .into_iter()
+        .find(|(i, _)| *i == SandboxInvariant::HostProxyEnvironment)
+        .map(|(_, v)| v)
+        .unwrap()
+}
+
+const BROKER_VARIABLES: [&str; 8] = [
+    "HTTP_PROXY=http://169.254.7.1:8080",
+    "HTTPS_PROXY=http://169.254.7.1:8080",
+    "ALL_PROXY=http://169.254.7.1:8080",
+    "NO_PROXY=localhost,127.0.0.1,::1",
+    "http_proxy=http://169.254.7.1:8080",
+    "https_proxy=http://169.254.7.1:8080",
+    "all_proxy=http://169.254.7.1:8080",
+    "no_proxy=localhost,127.0.0.1,::1",
+];
+
+#[test]
+fn proxy_variables_are_exactly_the_broker_s_or_none() {
+    let none = record(&conforming());
+    assert_eq!(
+        proxy_verdict(&none, NetworkTopology::NoNetwork),
+        Verdict::Pass
+    );
+    assert_eq!(
+        proxy_verdict(&none, NetworkTopology::ProxyOnly),
+        Verdict::Fail
+    );
+    let mut with: Vec<&str> = vec!["PATH=/usr/bin"];
+    with.extend(BROKER_VARIABLES);
+    let exact = mutated(&["Config", "Env"], env_list(&with));
+    assert_eq!(
+        proxy_verdict(&exact, NetworkTopology::ProxyOnly),
+        Verdict::Pass
+    );
+    assert_eq!(
+        proxy_verdict(&exact, NetworkTopology::NoNetwork),
+        Verdict::Fail
+    );
+    // One inherited or redirected value, one extra name in any spelling, one
+    // repeated: each fails.
+    for extra in [
+        "HTTPS_PROXY=http://proxy.corp.example:3128",
+        "FTP_PROXY=http://169.254.7.1:8080",
+        "Https_Proxy=http://169.254.7.1:8080",
+        "no_proxy=*",
+        "HTTP_PROXY=http://169.254.7.1:8080",
+    ] {
+        let mut weakened = with.clone();
+        weakened.push(extra);
+        let object = mutated(&["Config", "Env"], env_list(&weakened));
+        assert_eq!(
+            proxy_verdict(&object, NetworkTopology::ProxyOnly),
+            Verdict::Fail,
+            "{extra}"
+        );
+    }
+    let mut missing = with.clone();
+    missing.retain(|e| !e.starts_with("no_proxy="));
+    let object = mutated(&["Config", "Env"], env_list(&missing));
+    assert_eq!(
+        proxy_verdict(&object, NetworkTopology::ProxyOnly),
+        Verdict::Fail
+    );
+    let object = mutated(&["Config", "Env"], Value::Bool(true));
+    assert_eq!(
+        proxy_verdict(&object, NetworkTopology::ProxyOnly),
+        Verdict::Unobservable
+    );
+}
+
+const EGRESS_DIR: &str = "/run/dw/egress/env_01M24BB8G3E0A851TRWE3M8FZF";
+
+fn environment_container() -> ContainerRef {
+    ContainerRef::new("c".repeat(64)).unwrap()
+}
+
+/// A conforming relay record.
+fn relay_record() -> String {
+    let seccomp = serde_like_escape(PROFILE);
+    let image = image();
+    format!(
+        r#"[{{
+  "Id": "{id}",
+  "Image": "{image}",
+  "State": {{"Status": "running", "Running": true, "Paused": false, "Restarting": false}},
+  "Config": {{
+    "User": "10002:10002",
+    "Image": "{image}",
+    "Env": ["PATH=/usr/bin"],
+    "Entrypoint": ["/usr/libexec/direwolf/sandbox-relay"],
+    "Cmd": ["serve"],
+    "Labels": {{
+      "io.direwolf.owner": "direwolf",
+      "io.direwolf.schema": "2",
+      "io.direwolf.store": "0123abcd",
+      "io.direwolf.environment": "{ENV}",
+      "io.direwolf.run": "{RUN}",
+      "io.direwolf.profile": "oci-strict",
+      "io.direwolf.role": "relay",
+      "desktop.docker.io/wsl-distro": "Ubuntu"
+    }}
+  }},
+  "HostConfig": {{
+    "Binds": null,
+    "NetworkMode": "container:{env}",
+    "RestartPolicy": {{"Name": "no", "MaximumRetryCount": 0}},
+    "VolumesFrom": null,
+    "Mounts": [{{"Type": "bind", "Source": "{EGRESS_DIR}", "Target": "/run/direwolf-egress",
+                "ReadOnly": true, "BindOptions": {{"Propagation": "rprivate"}}}}],
+    "CapAdd": null,
+    "CapDrop": ["ALL"],
+    "IpcMode": "private",
+    "PidMode": "",
+    "UsernsMode": "",
+    "Privileged": false,
+    "ReadonlyRootfs": true,
+    "SecurityOpt": ["no-new-privileges=true", "seccomp={seccomp}"],
+    "Memory": 67108864,
+    "NanoCpus": 500000000,
+    "PidsLimit": 144,
+    "Devices": [],
+    "DeviceCgroupRules": null,
+    "DeviceRequests": null,
+    "MaskedPaths": ["/proc/kcore"],
+    "ReadonlyPaths": ["/proc/sys"]
+  }},
+  "Mounts": [{{"Type": "bind", "Source": "{EGRESS_DIR}", "Destination": "/run/direwolf-egress",
+              "Mode": "", "RW": false, "Propagation": "rprivate"}}]
+}}]"#,
+        id = "d".repeat(64),
+        env = "c".repeat(64),
+    )
+}
+
+fn relay_mutated(path: &[&str], value: Value) -> Object {
+    let text = relay_record();
+    let parsed =
+        dwk_proto::json::parse(text.as_bytes(), dwk_proto::json::ParseOptions::ijson()).unwrap();
+    let Value::Array(mut items) = parsed else {
+        panic!("not an array")
+    };
+    let Value::Object(object) = items.remove(0) else {
+        panic!("not an object")
+    };
+    replace(object, path, value)
+}
+
+fn relay_verdict(object: &Object) -> Option<bool> {
+    Record::new(object).relay_exact(
+        &spec_with(NetworkTopology::ProxyOnly),
+        &environment_container(),
+        EGRESS_DIR,
+        PROFILE,
+    )
+}
+
+#[test]
+fn the_relay_record_is_judged_exactly_and_every_weakening_is_caught() {
+    let relay = record(&relay_record());
+    assert_eq!(relay_verdict(&relay), Some(true));
+    assert_eq!(Record::new(&relay).role(), Some(ContainerRole::Relay));
+    let owned = Record::new(&relay).owned(&spec().store).unwrap();
+    assert!(owned.labels_exact);
+    assert_eq!(owned.role, Some(ContainerRole::Relay));
+    for (path, value) in [
+        (&["Config", "User"][..], Value::String("0:0".to_owned())),
+        (&["Config", "User"], Value::String("10001:10001".to_owned())),
+        (&["HostConfig", "CapAdd"], strings(&["NET_ADMIN"])),
+        (&["HostConfig", "Privileged"], Value::Bool(true)),
+        (&["HostConfig", "ReadonlyRootfs"], Value::Bool(false)),
+        (
+            &["HostConfig", "NetworkMode"],
+            Value::String("bridge".to_owned()),
+        ),
+        (
+            &["HostConfig", "NetworkMode"],
+            Value::String("host".to_owned()),
+        ),
+        (
+            &["HostConfig", "NetworkMode"],
+            Value::String(format!("container:{}", "e".repeat(64))),
+        ),
+        (
+            &["HostConfig", "SecurityOpt"],
+            strings(&["no-new-privileges=true", "seccomp=unconfined"]),
+        ),
+        (&["HostConfig", "PidMode"], Value::String("host".to_owned())),
+        (
+            &["HostConfig", "Binds"],
+            strings(&["/var/run/docker.sock:/var/run/docker.sock"]),
+        ),
+        (&["Config", "Cmd"], strings(&["setup"])),
+        (
+            &["Config", "Entrypoint"],
+            strings(&["/usr/libexec/direwolf/sandbox-probe"]),
+        ),
+        (
+            &["Config", "Env"],
+            strings(&["HTTPS_PROXY=http://169.254.7.1:8080"]),
+        ),
+        (&["Config", "Image"], Value::String("alpine:3".to_owned())),
+        (
+            &["HostConfig", "PidsLimit"],
+            Value::Number(dwk_proto::json::Number::Int(4096)),
+        ),
+        (&["State", "Status"], Value::String("exited".to_owned())),
+        (
+            &["Config", "Labels", "io.direwolf.role"],
+            Value::String("environment".to_owned()),
+        ),
+    ] {
+        let object = relay_mutated(path, value);
+        assert_eq!(relay_verdict(&object), Some(false), "{path:?}");
+    }
+    // A second mount, a writable one, another source.
+    for mounts in [
+        format!(
+            r#"[{{"Type":"bind","Source":"{EGRESS_DIR}","Destination":"/run/direwolf-egress","RW":true}}]"#
+        ),
+        r#"[{"Type":"bind","Source":"/run/dw/egress/other","Destination":"/run/direwolf-egress","RW":false}]"#
+            .to_owned(),
+        format!(
+            r#"[{{"Type":"bind","Source":"{EGRESS_DIR}","Destination":"/run/direwolf-egress","RW":false}},{{"Type":"bind","Source":"/srv/ws","Destination":"/workspace","RW":true}}]"#
+        ),
+    ] {
+        let value =
+            dwk_proto::json::parse(mounts.as_bytes(), dwk_proto::json::ParseOptions::ijson())
+                .unwrap();
+        let object = relay_mutated(&["Mounts"], value);
+        assert_eq!(relay_verdict(&object), Some(false), "{mounts}");
+    }
+    // Absent fields are unobservable, never a pass.
+    let object = relay_mutated(&["Config", "Entrypoint"], Value::Bool(false));
+    assert_eq!(relay_verdict(&object), None);
 }

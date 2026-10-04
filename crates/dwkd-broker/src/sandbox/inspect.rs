@@ -12,20 +12,22 @@
 //! actually applied (ADR-0047 §8 states the split).
 
 use dwk_proto::brokerp::sandbox::{
-    ContainerRef, ImageId, NetworkTopology, SandboxInvariant, StoreInstance, Verdict,
+    ContainerRef, ContainerRole, ImageId, NetworkTopology, SandboxInvariant, StoreInstance, Verdict,
 };
 use dwk_proto::brokerp::{ContainerState, EnvironmentSpec, OwnedEnvironment};
 use dwk_proto::json::{self, Number, Object, ParseOptions, Value};
 use dwk_proto::wire::id::{EnvironmentId, RunId};
 use dwk_sandbox_profile::{
-    LABEL_ENVIRONMENT, LABEL_OWNER, LABEL_OWNER_VALUE, LABEL_PROFILE, LABEL_RUN, LABEL_SCHEMA,
-    LABEL_SCHEMA_VALUE, LABEL_STORE, MEMORY_BYTES, MEMORY_SWAP_BYTES, NANO_CPUS, OOM_SCORE_ADJ,
-    PIDS_LIMIT, RLIMIT_CORE, RLIMIT_FSIZE, RLIMIT_NOFILE, RLIMIT_NPROC, RUNTIME_SOCKET_NAMES,
-    SANDBOX_GID, SANDBOX_UID, TMP_TARGET, TMPFS, VAR_TMP_TARGET, WORKSPACE_TARGET,
+    EGRESS_TARGET, LABEL_ENVIRONMENT, LABEL_OWNER, LABEL_OWNER_VALUE, LABEL_PROFILE, LABEL_ROLE,
+    LABEL_RUN, LABEL_SCHEMA, LABEL_SCHEMA_VALUE, LABEL_STORE, MEMORY_BYTES, MEMORY_SWAP_BYTES,
+    NANO_CPUS, OOM_SCORE_ADJ, PIDS_LIMIT, PROXY_VARIABLE_NAMES, PROXY_VARIABLES,
+    RELAY_MEMORY_BYTES, RELAY_NANO_CPUS, RELAY_PATH, RELAY_PIDS_LIMIT, RELAY_SERVE, RLIMIT_CORE,
+    RLIMIT_FSIZE, RLIMIT_NOFILE, RLIMIT_NPROC, RUNTIME_SOCKET_NAMES, SANDBOX_GID, SANDBOX_UID,
+    TMP_TARGET, TMPFS, VAR_TMP_TARGET, WORKSPACE_TARGET,
 };
 
 use super::Checks;
-use super::plan;
+use super::{plan, relay_plan};
 
 /// The namespace every DireWolf label is in.
 const DIREWOLF_LABELS: &str = "io.direwolf.";
@@ -196,6 +198,11 @@ impl<'a> Record<'a> {
             .map(|(_, v)| v)
     }
 
+    /// What the container is to its environment, by its role label.
+    pub(crate) fn role(&self) -> Option<ContainerRole> {
+        ContainerRole::from_label(self.label(LABEL_ROLE)?)
+    }
+
     /// Whether the record is labelled as `environment` of `store`: the only
     /// containers any environment operation touches.
     pub(crate) fn is(
@@ -215,14 +222,16 @@ impl<'a> Record<'a> {
         let state = self.state()?;
         let environment_id = self.label(LABEL_ENVIRONMENT).and_then(EnvironmentId::parse);
         let run_id = self.label(LABEL_RUN).and_then(RunId::parse);
+        let role = self.role();
         let ours = self.labels().is_some_and(|labels| {
             let direwolf: Vec<_> = labels
                 .iter()
                 .filter(|(k, _)| k.starts_with(DIREWOLF_LABELS))
                 .collect();
-            direwolf.len() == 6
+            direwolf.len() == 7
         });
         let labels_exact = ours
+            && role.is_some()
             && self.label(LABEL_OWNER) == Some(LABEL_OWNER_VALUE)
             && self.label(LABEL_SCHEMA) == Some(LABEL_SCHEMA_VALUE)
             && self.label(LABEL_STORE) == Some(store.as_str())
@@ -237,6 +246,7 @@ impl<'a> Record<'a> {
             environment_id,
             run_id,
             labels_exact,
+            role,
         })
     }
 
@@ -304,7 +314,7 @@ impl<'a> Record<'a> {
             ),
             (
                 SandboxInvariant::HostNetworkIsolated,
-                verdict(self.network_isolated(spec.network)),
+                verdict(self.network_isolated()),
             ),
             (
                 SandboxInvariant::HostMountsExact,
@@ -324,7 +334,125 @@ impl<'a> Record<'a> {
                 verdict(self.labels_exact(spec)),
             ),
             (SandboxInvariant::HostRunning, verdict(self.running())),
+            (
+                SandboxInvariant::HostProxyEnvironment,
+                verdict(self.proxy_environment(spec.network)),
+            ),
         ]
+    }
+
+    /// The environment's proxy variables, as the runtime records its whole
+    /// environment (the image's and the plan's together): for `PROXY_ONLY`
+    /// exactly the broker's, each once; for `NO_NETWORK` none. A proxy
+    /// variable the image carries, or one the runtime's client injected from
+    /// a user configuration, fails it — in any spelling of its name.
+    fn proxy_environment(&self, topology: NetworkTopology) -> Option<bool> {
+        let env = strings(self.object, &["Config", "Env"])?;
+        let mut found: Vec<(&str, &str)> = Vec::new();
+        for entry in env {
+            let (name, value) = entry.split_once('=').unwrap_or((entry, ""));
+            if PROXY_VARIABLE_NAMES
+                .iter()
+                .any(|n| n.eq_ignore_ascii_case(name))
+            {
+                found.push((name, value));
+            }
+        }
+        Some(match topology {
+            NetworkTopology::NoNetwork => found.is_empty(),
+            NetworkTopology::ProxyOnly => {
+                found.len() == PROXY_VARIABLES.len()
+                    && PROXY_VARIABLES
+                        .iter()
+                        .all(|wanted| found.iter().filter(|f| *f == wanted).count() == 1)
+            }
+        })
+    }
+
+    /// Whether this record is exactly the relay a `PROXY_ONLY` environment
+    /// needs: running, the pinned image and its relay, unprivileged, a
+    /// read-only root, no capability, the profile's seccomp filter, in
+    /// exactly `environment`'s network namespace, with exactly the broker's
+    /// directory for it mounted read-only, no proxy variable, the profile's
+    /// limits, and labelled as this environment's relay.
+    pub(crate) fn relay_exact(
+        &self,
+        spec: &EnvironmentSpec,
+        environment: &ContainerRef,
+        egress_dir: &str,
+        seccomp_profile: &str,
+    ) -> Option<bool> {
+        let o = self.object;
+        let security = strings(o, &["HostConfig", "SecurityOpt"]);
+        let labels = self.labels().map(|labels| {
+            let ours: Vec<&(&str, &str)> = labels
+                .iter()
+                .filter(|(k, _)| k.starts_with(DIREWOLF_LABELS))
+                .collect();
+            let expected = plan::labels(spec, ContainerRole::Relay);
+            ours.len() == expected.len()
+                && expected
+                    .iter()
+                    .all(|(k, v)| ours.iter().any(|(lk, lv)| lk == k && lv == v))
+        });
+        let mounts = objects(o, &["Mounts"]).map(|mounts| {
+            mounts.len() == 1
+                && mounts.iter().all(|m| {
+                    text(m, &["Type"]) == Some("bind")
+                        && text(m, &["Source"]) == Some(egress_dir)
+                        && text(m, &["Destination"]) == Some(EGRESS_TARGET)
+                        && boolean(m, &["RW"]) == Some(false)
+                })
+        });
+        let requested = objects(o, &["HostConfig", "Mounts"]).map(|mounts| {
+            mounts.len() == 1
+                && mounts.iter().all(|m| {
+                    text(m, &["Type"]) == Some("bind")
+                        && text(m, &["Source"]) == Some(egress_dir)
+                        && text(m, &["Target"]) == Some(EGRESS_TARGET)
+                        && boolean(m, &["ReadOnly"]) == Some(true)
+                })
+        });
+        let number = |path: &[&str], want: u64| {
+            integer(o, path).map(|found| i64::try_from(want).is_ok_and(|w| w == found))
+        };
+        let command = strings(o, &["Config", "Entrypoint"])
+            .zip(strings(o, &["Config", "Cmd"]))
+            .map(|(entry, cmd)| entry == [RELAY_PATH] && cmd == [RELAY_SERVE]);
+        let no_proxy_variables = strings(o, &["Config", "Env"]).map(|env| {
+            env.iter().all(|entry| {
+                let name = entry.split_once('=').map_or(*entry, |(n, _)| n);
+                !PROXY_VARIABLE_NAMES
+                    .iter()
+                    .any(|n| n.eq_ignore_ascii_case(name))
+            })
+        });
+        all(&[
+            self.image_pinned(spec),
+            text(o, &["Config", "User"]).map(|u| u == relay_plan::relay_user()),
+            self.not_privileged(security.as_deref()),
+            boolean(o, &["HostConfig", "ReadonlyRootfs"]),
+            self.capabilities_dropped(),
+            security.as_deref().map(no_new_privileges),
+            security.as_deref().map(|s| seccomp(s, seccomp_profile)),
+            text(o, &["HostConfig", "NetworkMode"])
+                .map(|m| m == format!("container:{}", environment.as_str())),
+            text(o, &["HostConfig", "PidMode"]).map(str::is_empty),
+            text(o, &["HostConfig", "IpcMode"]).map(|m| m == "private"),
+            text(o, &["HostConfig", "UsernsMode"]).map(|m| m != "host"),
+            mounts,
+            requested,
+            empty(o, &["HostConfig", "Binds"]),
+            empty(o, &["HostConfig", "VolumesFrom"]),
+            self.no_devices(),
+            number(&["HostConfig", "PidsLimit"], RELAY_PIDS_LIMIT),
+            number(&["HostConfig", "Memory"], RELAY_MEMORY_BYTES),
+            number(&["HostConfig", "NanoCpus"], RELAY_NANO_CPUS),
+            command,
+            no_proxy_variables,
+            labels,
+            self.running(),
+        ])
     }
 
     fn image_pinned(&self, spec: &EnvironmentSpec) -> Option<bool> {
@@ -364,11 +492,11 @@ impl<'a> Record<'a> {
         )
     }
 
-    fn network_isolated(&self, topology: NetworkTopology) -> Option<bool> {
-        if topology != NetworkTopology::NoNetwork {
-            // PROXY_ONLY is M5b's to measure.
-            return None;
-        }
+    /// Both topologies' environment containers have the runtime's `none`
+    /// network: no interface but loopback, nothing published, no host entry
+    /// added. `PROXY_ONLY`'s one peer is judged separately
+    /// (`HOST_PROXY_RELAY`).
+    fn network_isolated(&self) -> Option<bool> {
         let o = self.object;
         let mode = text(o, &["HostConfig", "NetworkMode"]).map(|m| m == "none");
         let networks = match at(o, &["NetworkSettings", "Networks"]) {
@@ -511,7 +639,7 @@ impl<'a> Record<'a> {
             .iter()
             .filter(|(k, _)| k.starts_with(DIREWOLF_LABELS))
             .collect();
-        let expected = plan::labels(spec);
+        let expected = plan::labels(spec, ContainerRole::Environment);
         Some(
             ours.len() == expected.len()
                 && expected

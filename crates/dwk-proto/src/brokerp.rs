@@ -1,8 +1,9 @@
 //! The private authority → broker protocol (M4b, ADR-0043; version 2 for the
 //! M4c filesystem operations, ADR-0044; version 3 for the M4d process
 //! operations, ADR-0045; version 4 for the M4e secret primitives, ADR-0046;
-//! version 5 for the M5a execution-environment lifecycle, ADR-0047).
-//! **Not DWKP.**
+//! version 5 for the M5a execution-environment lifecycle, ADR-0047; version 6
+//! for the M5b `PROXY_ONLY` topology's relay, egress grant and counters,
+//! ADR-0048). **Not DWKP.**
 //!
 //! One exchange on one connection, and nothing else:
 //!
@@ -75,6 +76,7 @@
 
 pub use crate::dwkp::fsops::{ContentRevision, PatchEdit, PatchEdits};
 
+pub mod egress;
 pub mod sandbox;
 pub use crate::dwkp::procops::{ProcessArgs, ProcessStreamSnapshot};
 use crate::error::{ErrorCode, ProtocolError, Violation};
@@ -95,19 +97,23 @@ use crate::wire::scalar::{
 };
 use crate::wire::{Cx, WireType, expect_integer, expect_string};
 
+use egress::{EgressCounters, EgressGrant};
 use sandbox::{
-    ContainerRef, EnvironmentProfile, ImageId, InvariantChecks, Milliseconds, NetworkTopology,
-    RuntimeVersion, StoreInstance,
+    ContainerRef, ContainerRole, EnvironmentProfile, ImageId, InvariantChecks, Milliseconds,
+    NetworkTopology, RuntimeVersion, StoreInstance,
 };
 
 /// The protocol version this build speaks. Version 2 (ADR-0044) added the M4c
 /// operations and the `indeterminate` answer; version 3 (ADR-0045) the process
 /// operations and authorisations that carry no descriptor; version 4
 /// (ADR-0046) the secret primitives; version 5 (ADR-0047) the execution
-/// environment's lifecycle — prepare, measure, destroy, list. The daemons ship
-/// together, so 5 is the only version either accepts: an older peer is refused
+/// environment's lifecycle — prepare, measure, destroy, list; version 6
+/// (ADR-0048) the `PROXY_ONLY` topology — the relay's digest and the egress
+/// grant on a preparation, every container's role in a listing, and the
+/// proxy's counters on a measurement and a destruction. The daemons ship
+/// together, so 6 is the only version either accepts: an older peer is refused
 /// by its hello, never half-understood.
-pub const PROTOCOL: u16 = 5;
+pub const PROTOCOL: u16 = 6;
 
 /// The largest authorisation body the broker reads: one DWKP frame, because an
 /// `fs.write` carries its content and an `fs.patch` its edits. Read from the
@@ -335,7 +341,7 @@ pub const PROCESS_BASE_ENVIRONMENT: &[(&str, &str)] = &[
 
 wire_int! {
     /// The private protocol's version.
-    ProtocolVersion(u16), min = 5, max = 5
+    ProtocolVersion(u16), min = 6, max = 6
 }
 
 wire_int! {
@@ -739,6 +745,9 @@ wire_enum! {
         /// The container is not labelled as this environment of this store:
         /// it is not touched.
         ForeignEnvironment = "FOREIGN_ENVIRONMENT",
+        /// A `PROXY_ONLY` environment's proxy could not be opened, or its
+        /// grant does not fit the topology: nothing was created (ADR-0048).
+        ProxyUnavailable = "PROXY_UNAVAILABLE",
     }
 }
 
@@ -1367,6 +1376,13 @@ wire_struct! {
         required cwd_device: KernelNumber,
         /// The working directory's inode.
         required cwd_inode: KernelNumber,
+        /// `PROXY_ONLY` only (ADR-0048): the SHA-256 of the relay the image
+        /// must carry. Absent for `NO_NETWORK`; the broker refuses either
+        /// mismatch.
+        optional relay_sha256: ContentDigest,
+        /// `PROXY_ONLY` only (ADR-0048): what the environment's processes may
+        /// reach through the broker's CONNECT proxy. Absent for `NO_NETWORK`.
+        optional egress: EgressGrant,
         /// Two: the runtime executable, then the working directory.
         required descriptors: DescriptorCount,
     }
@@ -1421,6 +1437,8 @@ wire_struct! {
         required cwd_device: KernelNumber,
         /// The working directory's inode.
         required cwd_inode: KernelNumber,
+        /// `PROXY_ONLY` only: the relay's SHA-256, proved again.
+        optional relay_sha256: ContentDigest,
         /// Two: the runtime executable, then the working directory.
         required descriptors: DescriptorCount,
     }
@@ -1706,6 +1724,8 @@ wire_struct! {
         required state: ContainerState,
         /// The measurement, when it could be made.
         optional measurement: EnvironmentMeasurement,
+        /// `PROXY_ONLY`: what the environment's proxy has done so far.
+        optional egress: EgressCounters,
     }
 }
 
@@ -1718,6 +1738,8 @@ wire_struct! {
         optional container: ContainerRef,
         /// How long it took.
         required destroy_ms: Milliseconds,
+        /// `PROXY_ONLY`: what the environment's proxy did, now closed.
+        optional egress: EgressCounters,
     }
 }
 
@@ -1734,6 +1756,8 @@ wire_struct! {
         optional environment_id: EnvironmentId,
         /// The run its label names, if the label is one.
         optional run_id: RunId,
+        /// What it is to its environment, if its role label names a role.
+        optional role: ContainerRole,
         /// Whether every DireWolf label is present and well-formed.
         required labels_exact: bool,
     }
@@ -2802,6 +2826,10 @@ pub struct EnvironmentSpec {
     pub workspace_path: HostPath,
     /// The workspace directory's `(device, inode)`.
     pub workspace: (u64, u64),
+    /// `PROXY_ONLY`: the relay's SHA-256.
+    pub relay_sha256: Option<ContentDigest>,
+    /// `PROXY_ONLY`, on a preparation: what the proxy may tunnel to.
+    pub egress: Option<EgressGrant>,
 }
 
 impl EnvironmentPrepareAuthorisation {
@@ -2832,6 +2860,8 @@ impl EnvironmentPrepareAuthorisation {
             runtime_sha256: runtime.sha256,
             cwd_device: KernelNumber::from_u64(runtime.cwd.0),
             cwd_inode: KernelNumber::from_u64(runtime.cwd.1),
+            relay_sha256: environment.relay_sha256,
+            egress: environment.egress,
             descriptors,
         }
     }
@@ -2849,6 +2879,8 @@ impl EnvironmentPrepareAuthorisation {
             probe_sha256: self.probe_sha256.clone(),
             workspace_path: self.workspace_path.clone(),
             workspace: (self.workspace_device.value(), self.workspace_inode.value()),
+            relay_sha256: self.relay_sha256.clone(),
+            egress: self.egress.clone(),
         }
     }
 
@@ -2899,11 +2931,13 @@ impl EnvironmentMeasureAuthorisation {
             runtime_sha256: runtime.sha256,
             cwd_device: KernelNumber::from_u64(runtime.cwd.0),
             cwd_inode: KernelNumber::from_u64(runtime.cwd.1),
+            relay_sha256: environment.relay_sha256,
             descriptors,
         }
     }
 
-    /// The environment it names.
+    /// The environment it names. A measurement carries no grant: the proxy
+    /// already holds the one it was prepared with.
     #[must_use]
     pub fn environment(&self) -> EnvironmentSpec {
         EnvironmentSpec {
@@ -2916,6 +2950,8 @@ impl EnvironmentMeasureAuthorisation {
             probe_sha256: self.probe_sha256.clone(),
             workspace_path: self.workspace_path.clone(),
             workspace: (self.workspace_device.value(), self.workspace_inode.value()),
+            relay_sha256: self.relay_sha256.clone(),
+            egress: None,
         }
     }
 

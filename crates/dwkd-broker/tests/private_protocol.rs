@@ -1091,8 +1091,8 @@ mod linux {
                 Box::new(move |c| {
                     let a = authorisation(c, 1, id, 7);
                     let text = String::from_utf8(a[5..].to_vec()).unwrap();
-                    assert!(text.contains(r#""protocol":5"#));
-                    json(&text.replace(r#""protocol":5"#, r#""protocol":1"#))
+                    assert!(text.contains(r#""protocol":6"#));
+                    json(&text.replace(r#""protocol":6"#, r#""protocol":1"#))
                 }),
             ),
             (
@@ -1101,7 +1101,7 @@ mod linux {
                 Box::new(move |c| {
                     let a = authorisation(c, 1, id, 7);
                     let text = String::from_utf8(a[5..].to_vec()).unwrap();
-                    json(&text.replace(r#""protocol":5"#, r#""protocol":2"#))
+                    json(&text.replace(r#""protocol":6"#, r#""protocol":2"#))
                 }),
             ),
             (
@@ -1111,7 +1111,7 @@ mod linux {
                 Box::new(move |c| {
                     let a = authorisation(c, 1, id, 7);
                     let text = String::from_utf8(a[5..].to_vec()).unwrap();
-                    json(&text.replace(r#""protocol":5"#, r#""protocol":3"#))
+                    json(&text.replace(r#""protocol":6"#, r#""protocol":3"#))
                 }),
             ),
             (
@@ -1120,7 +1120,16 @@ mod linux {
                 Box::new(move |c| {
                     let a = authorisation(c, 1, id, 7);
                     let text = String::from_utf8(a[5..].to_vec()).unwrap();
-                    json(&text.replace(r#""protocol":5"#, r#""protocol":4"#))
+                    json(&text.replace(r#""protocol":6"#, r#""protocol":4"#))
+                }),
+            ),
+            (
+                // M5a's protocol, which M5b's broker no longer speaks (ADR-0048).
+                "protocol-five",
+                Box::new(move |c| {
+                    let a = authorisation(c, 1, id, 7);
+                    let text = String::from_utf8(a[5..].to_vec()).unwrap();
+                    json(&text.replace(r#""protocol":6"#, r#""protocol":5"#))
                 }),
             ),
             (

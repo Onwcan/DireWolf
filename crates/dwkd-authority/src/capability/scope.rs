@@ -300,7 +300,7 @@ pub struct HostLabel(String);
 
 impl HostLabel {
     /// The longest label, per RFC 1035.
-    pub const MAX_BYTES: usize = 63;
+    pub const MAX_BYTES: usize = dwk_proto::wire::host::MAX_LABEL_BYTES;
 
     /// A label: lowercase alphanumerics and hyphens, not starting or ending
     /// with a hyphen.
@@ -311,17 +311,13 @@ impl HostLabel {
     /// the two fail-closed readings. The cost is that `API.example.com` must be
     /// written `api.example.com`; the benefit is that no comparison anywhere
     /// depends on a normalisation step being remembered.
+    ///
+    /// The rule is `dwk_proto::wire::host::is_label`: one implementation,
+    /// shared with the egress proxy that compares a CONNECT target and a TLS
+    /// server name against a granted host (M5b, ADR-0048).
     #[must_use]
     pub fn new(text: &str) -> Option<Self> {
-        let bytes = text.as_bytes();
-        let ok = !bytes.is_empty()
-            && bytes.len() <= Self::MAX_BYTES
-            && !text.starts_with('-')
-            && !text.ends_with('-')
-            && text
-                .chars()
-                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
-        ok.then(|| Self(text.to_owned()))
+        dwk_proto::wire::host::is_label(text).then(|| Self(text.to_owned()))
     }
 
     /// The label.
@@ -349,7 +345,7 @@ pub enum HostPattern {
 
 impl HostPattern {
     /// The most labels a host may have.
-    pub const MAX_LABELS: usize = 16;
+    pub const MAX_LABELS: usize = dwk_proto::wire::host::MAX_LABELS;
 
     /// Parse a host or domain pattern.
     ///

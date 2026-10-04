@@ -1,0 +1,30 @@
+[package]
+name = "dwk-sandbox-relay"
+description = "DireWolf PROXY_ONLY relay: the one listener in an environment's network namespace, forwarding to the broker's CONNECT proxy. Trusted by digest; parses nothing."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+# Built statically and carried in the sandbox image beside the probe
+# (ADR-0048); never published, never linked by a daemon.
+publish = false
+
+[[bin]]
+name = "dwk-sandbox-relay"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+# The relay knows where it listens and where it forwards, from the profile
+# both daemons share; it speaks no protocol, so it links no `dwk-proto`.
+[dependencies]
+dwk-sandbox-profile = { workspace = true }
+
+# The setup step's one netlink request (`RTM_NEWADDR` on loopback), through
+# the same maintained safe wrapper and features the workspace already locks
+# (`net`): no new crate, no `unsafe`.
+[target.'cfg(target_os = "linux")'.dependencies]
+rustix = { workspace = true }

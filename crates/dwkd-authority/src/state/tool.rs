@@ -425,7 +425,8 @@ pub(super) const fn failure_reason(failure: BrokerFailure) -> FsFailureReason {
             | BrokerRefusal::TopologyUnavailable
             | BrokerRefusal::EnvironmentNotFound
             | BrokerRefusal::EnvironmentAmbiguous
-            | BrokerRefusal::ForeignEnvironment => FsFailureReason::BrokerExecutionError,
+            | BrokerRefusal::ForeignEnvironment
+            | BrokerRefusal::ProxyUnavailable => FsFailureReason::BrokerExecutionError,
         },
         BrokerFailure::Indeterminate(_) => FsFailureReason::BrokerExecutionError,
     }
