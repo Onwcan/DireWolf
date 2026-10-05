@@ -148,15 +148,14 @@ the harness's deterministic suite; the security suites gate, unscoped, in `make
 eval-check`. What M4 does **not** provide is stated once, here: no sandbox or execution
 environment and no network path, so secret injection has no consumer (M5); no approvals,
 so no production build launches a process (M6); no model provider (M7); no runtime (M9);
-and serving on Linux only. **M5 is in progress: M5a is complete; M5b is implemented and awaits
-its hosted acceptance (see M5 below).**
+and serving on Linux only. **M5 is in progress: M5a and M5b are complete (see M5 below).**
 
 **Deps:** M3. **Deliverables:** canonicaliser (NFC, `openat2` + fallback walker, inode identity -- M4a delivers `openat2` and identity; a fallback walker needs its own ADR); fd-relative fs ops; exec broker with env scrub, rlimits, argv normalisation, executable hashing; secret broker with keychain/age backends and injection modes A–C; redaction index.
 **Acceptance:** no path string reaches policy; every op uses the fd it checked; no secret in argv, ever.
 **Adversarial:** the full path-traversal set ([EVALS.md](EVALS.md) §3) including Unicode normalisation and TOCTOU swap races in a tight loop; secret-in-output detection; core-dump inspection for secret residue.
 **Deferred:** remote fs, Windows-native hardening beyond the fallback walker.
 
-### M5 · Sandbox — **IN PROGRESS** (M5a complete, hosted acceptance passed; M5b implemented, local acceptance pass, candidate for hosted acceptance; M5c–M5e not started)
+### M5 · Sandbox — **IN PROGRESS** (M5a complete, hosted acceptance passed; M5b complete, hosted acceptance passed; M5c–M5e not started)
 
 M5 is two products in one (a sandbox *and* an egress proxy), so it is decomposed like M4
 ([ADR-0047](adr/0047-m5a-oci-execution-environment-and-measured-assurance.md)). The
@@ -193,12 +192,15 @@ substituted, malformed, truncated, over-long, extra-field or hanging probe; copi
 copied run labels, name-only and partial-label containers; drift after preparation.
 **Deferred:** every workload (M5d), any network (M5b), `local` confinement (M5d).
 
-#### M5b · `PROXY_ONLY` topology and CONNECT proxy — **IMPLEMENTED · LOCAL ACCEPTANCE PASS · CANDIDATE FOR HOSTED ACCEPTANCE**
+#### M5b · `PROXY_ONLY` topology and CONNECT proxy — **COMPLETE**
 
-M5b is implemented and `make sandbox-egress-evidence` passes locally (Docker Desktop 29.8.1 in
-WSL2: 8 broker tests and 1 authority test, all 104 cases, nothing left behind); M5a's
-evidence still passes. It is complete only when the required hosted `sandbox-egress` job
-passes on the committed tree.
+M5b is complete: the required hosted `sandbox-egress` job and the gated `m5b-sandbox-egress`
+eval passed on the committed tree (`b8cfc5e`) in CI run 37373469608, attempt 2, with M5a's
+`sandbox-foundation` job still green. The first hosted run (37243649970) lost the probe's
+report in the weakened network cases, where the runner's routes led to silent destinations;
+the probe's network checks were bounded before acceptance
+([NETWORK_SECURITY.md](NETWORK_SECURITY.md) §1). Locally: Docker Desktop 29.8.1 in WSL2,
+8 broker tests and 1 authority test, all 104 cases, nothing left behind.
 
 [ADR-0048](adr/0048-m5b-proxy-only-topology-and-connect-proxy.md).
 **Deps:** M5a. **Deliverables (as built):** the `PROXY_ONLY` network
