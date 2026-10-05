@@ -28,6 +28,8 @@
 
 use dwk_proto as _;
 use dwkd_authority as _;
+#[cfg(target_os = "linux")]
+use nix as _;
 use proptest as _;
 use rusqlite as _;
 #[cfg(target_os = "linux")]

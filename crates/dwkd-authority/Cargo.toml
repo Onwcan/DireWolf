@@ -65,14 +65,15 @@ zeroize = { workspace = true }
 hmac = { workspace = true }
 getrandom = { workspace = true }
 
-# Peer credentials for the DWKP server (M3e) and the canonical filesystem
-# resolver (M4a): `SO_PEERCRED`, and `openat2` relative to held descriptors,
-# through a maintained safe wrapper, so the crate keeps `forbid(unsafe_code)`.
-# Linux only, because Linux is the one platform where the authority claims
-# peer authentication (ADR-0035, ADR-0041) or high-assurance resolution
-# (ADR-0042); elsewhere the server refuses to start, the resolver refuses to
-# resolve, and nothing here is linked. Only `crate::server::peer` and
-# `crate::resource::fs::linux` may use it (TX008).
+# The canonical filesystem resolver (M4a): `openat2` relative to held
+# descriptors, through a maintained safe wrapper, so the crate keeps
+# `forbid(unsafe_code)`; and, since M4b, the private channel's descriptor
+# passing. Peer credentials were read through it from M3e until ADR-0049
+# moved them to `nix` below. Linux only, because Linux is the one platform
+# where the authority claims peer authentication (ADR-0035, ADR-0041) or
+# high-assurance resolution (ADR-0042); elsewhere the server refuses to
+# start, the resolver refuses to resolve, and nothing here is linked. Only
+# the reviewed files may name it (TX008).
 #
 # M4e (ADR-0046 §9) adds `process` for `setrlimit(RLIMIT_CORE)` and
 # `prctl(PR_SET_DUMPABLE)` at serve start (`server/hardening.rs`): code, not
@@ -80,6 +81,13 @@ getrandom = { workspace = true }
 # build links the same rustix as before.
 [target.'cfg(target_os = "linux")'.dependencies]
 rustix = { workspace = true, features = ["process"] }
+# The kernel's peer credentials (ADR-0049, amending ADR-0019, ADR-0035 and
+# ADR-0041): `SO_PEERCRED` through `nix`'s `socket` feature, and nothing
+# else of `nix`. It reads the kernel's `ucred` as it is -- a pid of 0, which
+# the kernel reports for a peer in a pid namespace this process cannot see,
+# included -- where `rustix` 1.1.5's typed read is undefined behaviour for
+# that peer. Only `crate::server::peer` may use it (TX043).
+nix = { workspace = true, features = ["socket"] }
 # The Linux keychain backend (M4e): the kernel keyring. Only
 # `crate::secret::backend` may use it (TX025).
 linux-keyutils = { workspace = true }

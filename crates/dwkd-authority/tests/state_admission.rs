@@ -8,6 +8,8 @@
     clippy::too_many_lines
 )]
 
+#[cfg(target_os = "linux")]
+use nix as _;
 use proptest as _;
 #[cfg(target_os = "linux")]
 use rustix as _;

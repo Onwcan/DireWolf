@@ -1091,3 +1091,87 @@ mod serde_like {
         }
     }
 }
+
+/// Set in the copy of this test binary that reads a hidden peer.
+const HIDDEN_READER: &str = "DW_BROKER_HIDDEN_PEER_READER";
+
+/// The flags that put the reader where it cannot see its peer: a new user
+/// namespace (so no privilege is needed) and a new pid namespace, of which
+/// the reader is the first process.
+const HIDDEN_NAMESPACES: [&str; 5] = [
+    "--user",
+    "--map-current-user",
+    "--pid",
+    "--fork",
+    "--kill-child",
+];
+
+/// The case `rustix` 1.1.5 read as undefined behaviour (ADR-0049): a reader
+/// in a pid namespace that cannot see its peer, for which the kernel reports
+/// the peer's pid as 0. Made without privilege: `unshare` runs a copy of this
+/// test as the reader, in a new user and pid namespace, with one end of a
+/// socket pair this process made as its stdin — and a socket pair's
+/// credentials are its maker's. The broker's reader must give the uid and no
+/// pid, and the launch helper's check must not take such a peer for its
+/// parent. Where unprivileged namespaces are unavailable, the test says NOT
+/// EXERCISED and shows nothing.
+#[test]
+fn a_peer_in_a_pid_namespace_this_process_cannot_see_is_read_soundly() {
+    if std::env::var_os(HIDDEN_READER).is_some() {
+        // The reader: its stdin is the far end of the pair.
+        let parent =
+            rustix::process::getppid().and_then(|p| u32::try_from(p.as_raw_nonzero().get()).ok());
+        match crate::peer::of(&std::io::stdin()) {
+            Ok(peer) => println!(
+                "HIDDEN-PEER uid={} pid={} parent={}",
+                peer.uid,
+                peer.pid
+                    .map_or_else(|| "none".to_owned(), |p| p.to_string()),
+                crate::peer::is_parent(peer, parent, rustix::process::geteuid().as_raw()),
+            ),
+            Err(error) => println!("HIDDEN-PEER error={:?}", error.kind()),
+        }
+        return;
+    }
+    let _serial = serial();
+    let available = std::process::Command::new("unshare")
+        .args(HIDDEN_NAMESPACES)
+        .arg("true")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success());
+    if !available {
+        eprintln!(
+            "NOT EXERCISED: unprivileged user and pid namespaces are not available here \
+             (`unshare --user --pid` failed), so no peer this process cannot see can be made"
+        );
+        return;
+    }
+    let (ours, theirs) = std::os::unix::net::UnixStream::pair().unwrap();
+    let output = std::process::Command::new("unshare")
+        .args(HIDDEN_NAMESPACES)
+        .arg(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "process::tests::a_peer_in_a_pid_namespace_this_process_cannot_see_is_read_soundly",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(HIDDEN_READER, "1")
+        .stdin(std::process::Stdio::from(OwnedFd::from(theirs)))
+        .output()
+        .unwrap();
+    drop(ours);
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "{text}{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let own = fs::metadata("/proc/self").unwrap().uid();
+    let line = format!("HIDDEN-PEER uid={own} pid=none parent=false");
+    assert!(text.contains(&line), "{text}");
+    println!("exercised in a hidden pid namespace: {line}");
+}

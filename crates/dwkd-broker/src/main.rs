@@ -111,6 +111,8 @@ mod listener;
 #[cfg(target_os = "linux")]
 mod nonce;
 #[cfg(target_os = "linux")]
+mod peer;
+#[cfg(target_os = "linux")]
 mod process;
 #[cfg(target_os = "linux")]
 mod sandbox;

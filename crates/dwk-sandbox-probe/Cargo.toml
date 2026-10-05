@@ -38,7 +38,7 @@ dwk-sandbox-profile = { workspace = true }
 # unifies these `nix` features into the broker's `nix` (code, not crates);
 # the broker names none of them (TX023).
 [target.'cfg(target_os = "linux")'.dependencies]
-nix = { workspace = true, features = ["sched", "mount", "ptrace", "uio"] }
+nix = { workspace = true, features = ["process", "fs", "sched", "mount", "ptrace", "uio"] }
 # The `AF_VSOCK` attempt: the socket call through the same maintained safe
 # wrapper, and features, the authority already locks -- no new crate.
 rustix = { workspace = true, features = ["net"] }

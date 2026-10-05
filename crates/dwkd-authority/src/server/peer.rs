@@ -1,20 +1,28 @@
 //! Who is on the other end of an accepted socket, as the kernel reports it.
 //!
-//! **The only module that may use `rustix`** (TX008), and the one place the
-//! platform decision is made: [`support`] says whether this build can derive a
-//! peer's identity, and the server refuses to start where it cannot.
+//! **The only module that may read a peer's credentials** (TX043: the only
+//! one that may name `nix`), and the one place the platform decision is made:
+//! [`support`] says whether this build can derive a peer's identity, and the
+//! server refuses to start where it cannot. The broker link asks here too.
 //!
 //! # Linux: `SO_PEERCRED`
 //!
 //! [`peer_credentials`] reads the credentials the kernel recorded for the
-//! connecting socket when it called `connect(2)` — the peer's **effective**
-//! uid and its pid at that moment — through `rustix`'s safe wrapper, so the
-//! crate keeps `forbid(unsafe_code)` ([ADR-0035] §3). Nothing the peer sends
-//! can change them: they are attached to the connection, not carried in it.
+//! socket at the other end when it called `connect(2)` or `listen(2)` — the
+//! peer's **effective** uid and its pid at that moment — through `nix`'s safe
+//! wrapper, so the crate keeps `forbid(unsafe_code)` ([ADR-0049], amending
+//! [ADR-0035] §3). Nothing the peer sends can change them: they are attached
+//! to the connection, not carried in it.
 //!
 //! The uid is the subject. The pid is **diagnostic only**: pids are recycled,
 //! so one names a process for an audit reader and never scopes anything the
-//! authority decides ([ADR-0041]).
+//! authority decides ([ADR-0041]). It is not always there to name: the kernel
+//! reports a pid of **0** for a peer in a pid namespace this process cannot
+//! see (a container's, a sibling's), with its uid still exact. Such a peer
+//! is judged by its uid like any other, and recorded with no pid. Until
+//! ADR-0049 the credentials were read through `rustix` 1.1.5, whose typed
+//! `UCred` holds the pid as a non-zero `Pid`: for that peer the read was
+//! undefined behaviour, which happened to surface as an error.
 //!
 //! # macOS: unsupported, stated rather than faked
 //!
@@ -35,6 +43,7 @@
 //! [ADR-0029]: ../../../../../docs/adr/0029-packaging-runtime-first-decoupled-authority.md
 //! [ADR-0035]: ../../../../../docs/adr/0035-m3-authority-dependency-set.md
 //! [ADR-0041]: ../../../../../docs/adr/0041-m3e-authenticated-dwkp-transport.md
+//! [ADR-0049]: ../../../../../docs/adr/0049-peer-credentials-read-soundly-through-nix.md
 
 /// What the kernel reports about a connected peer.
 #[cfg(unix)]
@@ -42,7 +51,8 @@
 pub(crate) struct PeerCredentials {
     /// The peer's effective uid when it connected. The subject.
     pub(crate) uid: u32,
-    /// The peer's pid when it connected. Diagnostic only.
+    /// The peer's pid when it connected, when this process can name it — not
+    /// for a peer in a pid namespace it cannot see. Diagnostic only.
     pub(crate) pid: Option<u32>,
 }
 
@@ -83,11 +93,23 @@ pub(crate) const fn support() -> Result<(), &'static str> {
 pub(crate) fn peer_credentials(
     stream: &std::os::unix::net::UnixStream,
 ) -> std::io::Result<PeerCredentials> {
-    let cred = rustix::net::sockopt::socket_peercred(stream)?;
-    Ok(PeerCredentials {
-        uid: cred.uid.as_raw(),
-        pid: u32::try_from(cred.pid.as_raw_nonzero().get()).ok(),
-    })
+    let cred = nix::sys::socket::getsockopt(stream, nix::sys::socket::sockopt::PeerCredentials)
+        .map_err(std::io::Error::from)?;
+    Ok(PeerCredentials::from_kernel(cred.uid(), cred.pid()))
+}
+
+#[cfg(unix)]
+impl PeerCredentials {
+    /// The kernel's `ucred` fields, as the server keeps them: a pid of 0 —
+    /// a peer in a pid namespace this process cannot see — or anything else
+    /// that is not a positive pid is no pid at all, never a guess.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    fn from_kernel(uid: u32, pid: i32) -> Self {
+        Self {
+            uid,
+            pid: u32::try_from(pid).ok().filter(|pid| *pid != 0),
+        }
+    }
 }
 
 /// No safe mechanism on this platform. Unreachable in practice — the server
@@ -108,7 +130,26 @@ pub(crate) fn peer_credentials(
 
 #[cfg(all(test, unix))]
 mod tests {
-    use super::{peer_credentials, support};
+    use super::{PeerCredentials, peer_credentials, support};
+
+    #[test]
+    fn a_pid_the_kernel_cannot_name_is_no_pid_and_the_uid_still_decides() {
+        // The kernel's 0: a peer in a pid namespace this process cannot see.
+        // `rustix` 1.1.5 read this into a non-zero `Pid` -- undefined
+        // behaviour; here it is a uid with no pid. (A real peer in such a
+        // namespace is made by the broker's launch tests, which may start a
+        // process; the authority starts none, TX010.)
+        assert_eq!(
+            PeerCredentials::from_kernel(1000, 0),
+            PeerCredentials {
+                uid: 1000,
+                pid: None
+            }
+        );
+        assert_eq!(PeerCredentials::from_kernel(1000, -1).pid, None);
+        assert_eq!(PeerCredentials::from_kernel(1000, 4242).pid, Some(4242));
+        assert_eq!(PeerCredentials::from_kernel(0, 1).uid, 0);
+    }
 
     #[cfg(target_os = "linux")]
     #[test]

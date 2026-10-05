@@ -359,7 +359,6 @@ paths = ["crates/dwkd-authority/src"]
 # it builds the hostile trees (symlinks, FIFOs, renames) the resolver is
 # measured against, and is compiled only under `cfg(test)`.
 exempt_paths = [
-    "crates/dwkd-authority/src/server/peer.rs",
     "crates/dwkd-authority/src/resource/fs/linux/mod.rs",
     "crates/dwkd-authority/src/resource/fs/linux/tests.rs",
     "crates/dwkd-authority/src/resource/exec/linux.rs",
@@ -410,6 +409,14 @@ read-only, bounded, nothing else. `server/hardening.rs` sets `RLIMIT_CORE` to
 (`rustix::process`, the feature the broker already enables): two calls on
 the process's own state, none on another process. The rest of `secret/` and
 `server/` stays under the rule.
+
+ADR-0049 takes the first use away: rustix 1.1.5 reads `SO_PEERCRED` into a
+`UCred` whose pid is a non-zero `Pid`, and the kernel reports a pid of 0 for
+a peer in a pid namespace the reader cannot see -- undefined behaviour, which
+any local user could provoke on the authority's socket. The peer credentials
+are now read through `nix` (TX043), in `server/peer.rs`, which therefore
+leaves this list; `broker/link.rs` asks it for the broker's uid and keeps
+rustix for `SCM_RIGHTS` alone.
 """
 
 [[text_rules]]
@@ -956,19 +963,21 @@ exempt_paths = [
     "crates/dwkd-broker/src/hardening.rs",
 ]
 suffixes = [".rs"]
-# The binary's `use nix as _;` acknowledgement is not a finding.
 patterns = [
     '^(?!\s*//).*\bexecveat\b',
-    '^(?!\s*//)(?!\s*use\s+nix\s+as\s+_\s*;).*\bnix\b',
     '^(?!\s*//).*\b(setrlimit|set_no_new_privs|set_parent_process_death_signal|dup2_stderr)\b',
 ]
 reason = """
-`nix` is linked by the broker for two safe functions, `execveat` and
-`dup2_stderr` (ADR-0045 §7), and only the launch helper calls them, after it
-has installed the stderr pipe, applied the limits, changed to the checked
-working directory, armed the parent-death signal, set `no_new_privs` and
-re-audited its descriptors. Those steps, and the exec, live in one file: a
-second caller would be an exec without them.
+`nix` is linked by the broker for two safe functions the launch needs,
+`execveat` and `dup2_stderr` (ADR-0045 §7), and only the launch helper calls
+them, after it has installed the stderr pipe, applied the limits, changed to
+the checked working directory, armed the parent-death signal, set
+`no_new_privs` and re-audited its descriptors. Those steps, and the exec, live
+in one file: a second caller would be an exec without them.
+
+Until ADR-0049 this rule also confined the name `nix` to the helper. Peer
+credentials now come through `nix` as well, in `peer.rs`, so where `nix` may
+be named is TX043's; the exec and the steps before it stay here.
 
 Hygiene, not containment.
 """
@@ -1509,6 +1518,47 @@ variables, and the evidence starts a broker with hostile ones.
 """
 
 # ===========================================================================
+# ADR-0049: peer credentials read soundly, through nix. Hygiene over the
+# source; the kernel's peer check itself is shown by the transport and broker
+# evidence, and the hidden-pid case by tests that run each daemon in a pid
+# namespace that cannot see its peer.
+# ===========================================================================
+
+[[text_rules]]
+id = "TX043-nix-only-in-the-launch-helper-and-the-peer-readers"
+paths = ["crates/dwkd-authority/src", "crates/dwkd-broker/src"]
+# FILES: the authority's one peer reader; the broker's one peer reader and
+# its launch helper (`execveat`, `dup2_stderr`; TX023 keeps the exec there).
+exempt_paths = [
+    "crates/dwkd-authority/src/server/peer.rs",
+    "crates/dwkd-broker/src/peer.rs",
+    "crates/dwkd-broker/src/process/helper.rs",
+]
+suffixes = [".rs"]
+# A binary's `use nix as _;` acknowledges the manifest edge for
+# `unused_crate_dependencies` and uses nothing; it is not a finding.
+patterns = [
+    '^(?!\s*//)(?!\s*use\s+nix\s+as\s+_\s*;).*\bnix\b',
+]
+reason = """
+`nix` reaches the kernel below std in both daemons, and it has exactly the
+reviewed uses its features were enabled for: `SO_PEERCRED` -- the kernel's
+record of who is at the other end of a socket, read soundly where `rustix`
+1.1.5's typed read is undefined behaviour for a peer in a pid namespace the
+reader cannot see (ADR-0049) -- in one file per daemon, and in the broker the
+launch helper's `execveat` and `dup2_stderr` (ADR-0045). Everything else it
+offers -- signals, mounts, ptrace, process control -- is a surface with no
+reviewed use in either daemon; a new one is a decision, not a convenience.
+
+The authority enables `nix`'s `socket` feature and nothing else; the broker
+`process`, `fs` and `socket`. A file that needs a peer's credentials asks the
+reader (`server::peer`, `crate::peer`): the authority's broker link and the
+broker's listener and launch helper all do.
+
+Hygiene, not containment.
+"""
+
+# ===========================================================================
 # Documentation
 # ===========================================================================
 
@@ -1700,12 +1750,13 @@ generated bindings agree on.
 #   hybrid-array, typenum,
 #   cpufeatures, cfg-if
 #
-#   libc                    TARGET-CONDITIONAL: cpufeatures depends on it for
-#                           aarch64 (Linux, Android, Apple) and loongarch64
-#                           only, where it detects CPU features.  The exact
-#                           gate takes the union over every target Cargo
-#                           resolved, because the allowlist must hold on each
-#                           supported one; it is not linked on x86_64.
+#   libc                    cpufeatures depends on it for aarch64 (Linux,
+#                           Android, Apple) and loongarch64, where it detects
+#                           CPU features; since M4e getrandom links it on every
+#                           Unix target, x86_64 included; and since ADR-0049
+#                           nix calls glibc's `getsockopt` through it.  Rust
+#                           bindings to the C library the process already
+#                           loads -- no C of its own.
 #
 #   rustix, linux-raw-sys   peer credentials for the DWKP server (M3e,
 #                           ADR-0041): SO_PEERCRED through a maintained safe
@@ -1721,8 +1772,25 @@ generated bindings agree on.
 #                           manifest -- it adds code, not crates, and the
 #                           closure below is unchanged by it; the syscall
 #                           surface is what grew, and that is the TCB change
-#                           ADR-0042 records.  Only `server/peer.rs` and
-#                           `resource/fs/linux/` may name it (TX008).
+#                           ADR-0042 records.  Only the reviewed files may name
+#                           it (TX008).  Since ADR-0049 it no longer reads peer
+#                           credentials: its typed `UCred` cannot hold the pid
+#                           of 0 the kernel reports for a peer in a pid
+#                           namespace the reader cannot see.
+#
+#   nix, memoffset          peer credentials since ADR-0049: SO_PEERCRED
+#                           through nix 0.31.3's safe `getsockopt`, which
+#                           returns the kernel's `ucred` with the pid as a
+#                           plain integer.  The authority enables `socket` and
+#                           nothing else, for target_os = "linux" only;
+#                           `memoffset` is that feature's dependency (offsets
+#                           for socket-address structures).  nix's other
+#                           dependencies -- libc, bitflags, cfg-if -- were
+#                           already linked.  MEASURED, `cargo tree -e
+#                           normal,no-proc-macro`: Linux x86_64 and aarch64
+#                           98 -> 100 third-party crates; the union below
+#                           147 -> 149.  Only `server/peer.rs` may name it
+#                           (TX043).
 #
 #   errno                   TARGET-CONDITIONAL: rustix's libc backend, which it
 #                           uses on Linux targets without a raw-syscall backend
@@ -1787,11 +1855,20 @@ allowed_third_party = [
     "typenum",
     "cpufeatures",
     "cfg-if",
-    # Target-conditional, via cpufeatures on aarch64 and loongarch64.
+    # Via cpufeatures on aarch64 and loongarch64, getrandom on Unix (M4e),
+    # and nix on Linux (ADR-0049).
     "libc",
-    # M3e: peer credentials (Linux only; ADR-0041).
+    # M3e: peer credentials (Linux only; ADR-0041), until ADR-0049 moved them
+    # to nix; still the filesystem resolver (ADR-0042), the private channel's
+    # descriptor passing (ADR-0043) and the authority's own hardening.
     "rustix",
     "linux-raw-sys",
+    # ADR-0049 (amending ADR-0019, ADR-0035, ADR-0041): peer credentials read
+    # soundly -- `SO_PEERCRED` through nix's `socket` feature, Linux only,
+    # named in `server/peer.rs` alone (TX043). `memoffset` is that feature's
+    # one dependency; `libc`, `bitflags` and `cfg-if` were already linked.
+    "nix",
+    "memoffset",
     # Target-conditional, via rustix's libc backend on powerpc64le and s390x.
     "errno",
     # In the union only: rustix/errno for cfg(windows), never built there.
@@ -1978,6 +2055,11 @@ allowed_build_third_party = [
     "rustc_version",
     "semver",
     "version_check",
+    # ADR-0049: nix's build script uses `cfg_aliases` to name its target
+    # cfgs; memoffset's uses `autocfg` to probe the compiler. Neither
+    # compiles C or reaches the network.
+    "cfg_aliases",
+    "autocfg",
 ]
 
 # ---------------------------------------------------------------------------

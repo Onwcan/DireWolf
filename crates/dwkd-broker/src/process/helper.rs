@@ -399,8 +399,10 @@ pub(crate) fn run() -> ExitCode {
     };
     let mut control = UnixStream::from(control);
     let parent = rustix::process::getppid();
-    let authentic = rustix::net::sockopt::socket_peercred(&control)
-        .is_ok_and(|cred| Some(cred.pid) == parent && cred.uid == rustix::process::geteuid());
+    let parent_pid = parent.and_then(|p| u32::try_from(p.as_raw_nonzero().get()).ok());
+    let authentic = crate::peer::of(&control).is_ok_and(|peer| {
+        crate::peer::is_parent(peer, parent_pid, rustix::process::geteuid().as_raw())
+    });
     if !authentic {
         // Not launched by a broker: nothing is written, nothing is done.
         return ExitCode::from(2);

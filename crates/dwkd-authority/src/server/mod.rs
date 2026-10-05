@@ -62,7 +62,9 @@
 //! [ADR-0041]: ../../../../docs/adr/0041-m3e-authenticated-dwkp-transport.md
 
 mod config;
-mod peer;
+// The one reader of a peer's credentials (TX043), which the broker link
+// asks too.
+pub(crate) mod peer;
 
 #[cfg(unix)]
 mod connection;

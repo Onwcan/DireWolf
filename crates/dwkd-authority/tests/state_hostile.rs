@@ -18,6 +18,8 @@
 )]
 
 #[cfg(target_os = "linux")]
+use nix as _;
+#[cfg(target_os = "linux")]
 use rustix as _;
 use sha2 as _;
 use toml as _;

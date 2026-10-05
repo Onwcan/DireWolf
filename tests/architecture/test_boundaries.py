@@ -247,8 +247,9 @@ def test_the_transport_cannot_become_a_second_authority_engine(
 def test_rustix_is_named_only_at_the_reviewed_syscall_boundaries(
     violation_rules: list[str],
 ) -> None:
-    """TX008 (narrowed by ADR-0042): rustix outside `server/peer.rs` and
-    `resource/fs/linux/` is a finding -- including in `resource/fs/mod.rs`,
+    """TX008 (narrowed by ADR-0042, and by ADR-0049, which moved peer
+    credentials to nix): rustix outside its reviewed files is a finding --
+    including in `resource/fs/mod.rs`,
     the portable half of the same resolver, one directory up. The fixture's
     `resource/fs/linux/mod.rs` uses rustix and is NOT a finding, which proves
     the exemption names that file rather than silencing the rule; the
@@ -509,9 +510,9 @@ def test_no_shell_no_pre_exec_no_raw_exec_no_inherited_environment(
 
 
 def test_only_the_launch_helper_executes(violation_rules: list[str]) -> None:
-    """TX023: `execveat` or `nix` outside the launch helper is a finding; the
-    fixture's `process/helper.rs`, which does both, is not, and a `use nix as
-    _;` acknowledgement is not."""
+    """TX023: `execveat` outside the launch helper is a finding; the
+    fixture's `process/helper.rs`, which calls it, is not. Where `nix` may be
+    named at all is TX043's since ADR-0049."""
     rule = "TX023-only-the-launch-helper-executes"
     assert rule in violation_rules
     findings = _findings(rule)
@@ -519,7 +520,25 @@ def test_only_the_launch_helper_executes(violation_rules: list[str]) -> None:
         ("crates/dwkd-broker/src/process/shell.rs", 29),
     }
     texts = " ".join(m for _, _, m in findings)
-    assert "execveat" in texts and "nix" in texts
+    assert "execveat" in texts
+
+
+def test_nix_is_named_only_by_the_launch_helper_and_the_peer_readers(
+    violation_rules: list[str],
+) -> None:
+    """TX043 (ADR-0049): `nix` in the authority outside `server/peer.rs`, or
+    in the broker outside `peer.rs` and the launch helper, is a finding.
+    The fixture's `server/peer.rs`, `peer.rs` and `process/helper.rs` name it
+    and are NOT findings, which proves the exemptions name those files; a
+    `use nix as _;` acknowledgement is not a finding either."""
+    rule = "TX043-nix-only-in-the-launch-helper-and-the-peer-readers"
+    assert rule in violation_rules
+    findings = _findings(rule)
+    assert {(p, line) for p, line, _ in findings} == {
+        ("crates/dwkd-authority/src/peer_elsewhere.rs", 7),
+        ("crates/dwkd-broker/src/process/shell.rs", 29),
+    }, findings
+    assert all("as _" not in m for _, _, m in findings)
 
 
 def test_a_stored_executable_identity_is_read_in_one_module(
@@ -728,6 +747,7 @@ def test_the_required_boundary_rules_are_all_declared() -> None:
         "TX040-only-the-setup-holds-a-capability",
         "TX041-the-relay-plan-spells-no-other-weakening",
         "TX042-no-ambient-proxy-setting-reaches-an-environment",
+        "TX043-nix-only-in-the-launch-helper-and-the-peer-readers",
         "DEP001-no-agent-framework-dependency",
         "DEP002-runtime-has-no-transport-dependency",
         "RS001-authority-depends-on-nothing-in-tree",

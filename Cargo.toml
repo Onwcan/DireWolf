@@ -137,20 +137,25 @@ linux-keyutils = { version = "=0.2.5", default-features = false }
 # Linux, so these are library-tested there, never served.
 keyring = { version = "=3.6.3", default-features = false }
 
-# --- the broker only: never reachable from the TCB --------------------------
-# `dwkd-broker` alone may name these; `architecture.toml [authority]
-# .allowed_third_party` keeps them out of the authority's closure.
+# --- nix: the broker's launch helper, and every daemon's peer credentials ---
 #
 # `nix` (M4d, ADR-0045 §§9, 20): the one call the broker's launch helper makes that
 # no safe API in `std` or `rustix` offers -- `execveat(fd, "", argv, envp,
 # AT_EMPTY_PATH)`, which executes the very descriptor the broker re-proved,
 # with no path walk (no `/proc/self/fd`, no reopen). `nix::unistd::execveat`
 # is a safe fn over `libc::syscall(SYS_execveat, ...)`: no glibc `fexecve`,
-# so no `/proc` fallback either. Default features off; `process` for exec,
-# `fs` for `AtFlags`. It links `libc` (bindings only, no C) and builds with
-# `cfg_aliases`. Pinned exactly: an exec primitive is not a version anyone
-# should move without a reviewer.
-nix = { version = "=0.31.3", default-features = false, features = ["process", "fs"] }
+# so no `/proc` fallback either. It links `libc` (bindings only, no C) and
+# builds with `cfg_aliases`. Pinned exactly: an exec primitive is not a
+# version anyone should move without a reviewer.
+#
+# ADR-0049 adds its `socket` feature for `SO_PEERCRED`, in the broker and the
+# authority both: `getsockopt(.., PeerCredentials)` returns the kernel's
+# `ucred` as it is, a pid of 0 included, where `rustix` 1.1.5 reads it into a
+# non-zero `Pid` -- undefined behaviour for a peer in a pid namespace the
+# reader cannot see. `socket` brings `memoffset` (and, to build it,
+# `autocfg`). No features here: each crate names the ones it uses, so the
+# authority's manifest says `socket` and nothing else.
+nix = { version = "=0.31.3", default-features = false }
 
 # --- dev-only: tests, property tests, differential oracles ------------------
 # Never linked into a shipped binary. dwcheck excludes dev-only edges from the

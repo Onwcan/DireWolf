@@ -59,6 +59,8 @@ use dwkd_authority::state::{AUDIT_LOG, KERNEL_DB, verify_audit_against_store, ve
 // crates, and (Linux only) the peer-credential wrapper. Acknowledged rather
 // than silenced with an `#[allow]`.
 use dwk_proto as _;
+#[cfg(target_os = "linux")]
+use nix as _;
 use rusqlite as _;
 #[cfg(target_os = "linux")]
 use rustix as _;

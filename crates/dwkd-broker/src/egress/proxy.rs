@@ -26,15 +26,15 @@
 //! already decides who reaches it. A filesystem that cannot keep the ACL
 //! refuses the proxy (`PROXY_UNAVAILABLE`).
 //!
-//! `SO_PEERCRED` is deliberately **not** consulted (ADR-0048). Where the
-//! runtime runs containers in a pid namespace the broker cannot see (Docker
-//! Desktop's engine runs in a sibling WSL distribution), the kernel reports
-//! the relay's pid as 0 — measured: uid 10002, gid 10002, pid 0 — and
-//! `rustix` 1.1.5's `socket_peercred` reads that into a non-zero `Pid`, which
-//! is undefined behaviour, not an error. A check that is unsound for exactly
-//! the peers it is for is not a check; the sound replacement needs a crate
-//! the workspace does not have. The ACL makes the same uid check, at path
-//! resolution instead of after `accept`.
+//! `SO_PEERCRED` is **not** consulted here (ADR-0048). When M5b was built the
+//! only reader was `rustix` 1.1.5's `socket_peercred`, and where the runtime
+//! runs containers in a pid namespace the broker cannot see (Docker Desktop's
+//! engine runs in a sibling WSL distribution) the kernel reports the relay's
+//! pid as 0 — measured: uid 10002, gid 10002, pid 0 — which that read turned
+//! into undefined behaviour. The ACL makes the same uid check, at path
+//! resolution instead of after `accept`. A sound reader now exists
+//! (`crate::peer`, ADR-0049); checking the relay's uid after `accept` as
+//! well, as defence in depth, is ADR-0048's revisit, not done here.
 //!
 //! Each environment's grant, budgets and counters are its own.
 //!

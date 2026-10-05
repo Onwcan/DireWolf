@@ -101,9 +101,10 @@ pub(super) fn perform(
         .map_err(|_| before(BrokerFailure::Unreachable(Unreachable::Connect)))?;
     // Who is listening, as the kernel recorded it when the broker called
     // listen(2). Nothing has been sent yet, and nothing is sent to anyone else.
-    let cred = rustix::net::sockopt::socket_peercred(&stream)
+    // Its uid decides, with or without a pid this process can see (ADR-0049).
+    let cred = crate::server::peer::peer_credentials(&stream)
         .map_err(|_| before(BrokerFailure::Unreachable(Unreachable::PeerCredentials)))?;
-    let observed_uid = cred.uid.as_raw();
+    let observed_uid = cred.uid;
     if observed_uid != broker_uid {
         return Err(before(BrokerFailure::PeerRefused { observed_uid }));
     }

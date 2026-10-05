@@ -492,12 +492,13 @@ pub(crate) fn serve(
             }
         };
         // Who connected, as the kernel recorded it. Nothing has been read and
-        // nothing will be, unless it is the authority.
-        let Ok(cred) = rustix::net::sockopt::socket_peercred(&stream) else {
+        // nothing will be, unless it is the authority: its uid decides, with
+        // or without a pid this process can see (ADR-0049).
+        let Ok(cred) = crate::peer::of(&stream) else {
             crate::event("peer_unknown");
             continue;
         };
-        let peer = cred.uid.as_raw();
+        let peer = cred.uid;
         if peer != authority_uid {
             crate::event(&format!("peer_refused peer_uid={peer}"));
             drop(stream);

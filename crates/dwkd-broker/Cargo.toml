@@ -47,8 +47,10 @@ rustix = { workspace = true, features = ["process", "thread"] }
 # M5a (ADR-0047 §5): the oci-strict profile the sandbox module applies --
 # numbers, names and the seccomp policy; no dependencies of its own.
 dwk-sandbox-profile = { workspace = true }
-# The launch helper's `execveat` (ADR-0045 §9): see the workspace manifest.
-nix = { workspace = true }
+# The launch helper's `execveat` (ADR-0045 §9; `process`, and `fs` for
+# `AtFlags`), and the kernel's peer credentials on the private channel and the
+# helper's control socket (ADR-0049; `socket`): see the workspace manifest.
+nix = { workspace = true, features = ["process", "fs", "socket"] }
 # M4c (ADR-0044 §12): `fs.patch` proves a file holds its base revision, and
 # its result the post revision, by SHA-256 -- the digest the runtime states
 # them by. The same pinned, pure-Rust crate and features the authority uses.

@@ -185,10 +185,17 @@ M3, and `dwcheck` already checks it as TCB. Dev-dependencies are not linked and
 not counted, but they are still audited by `cargo deny`.
 
 *The dependency inventory.* **TCB (`dwkd-authority` and `dwk-proto`), since
-M4e: 147 crates in the exact gate's union and 8 build-only; 98 third-party
-crates linked on Linux x86_64 and aarch64, 100 on macOS, 101 on Windows**
-(counted by name; by name and version 106/106/108/110), where M4d's union was
-twenty-seven ([ADR-0046](docs/adr/0046-m4e-secret-handles-backends-injection-and-redaction.md) §25).
+ADR-0049: 149 crates in the exact gate's union and 10 build-only; 100
+third-party crates linked on Linux x86_64 and aarch64.** ADR-0049
+([peer credentials read soundly](docs/adr/0049-peer-credentials-read-soundly-through-nix.md))
+added `nix` 0.31.3 (its `socket` feature only, Linux only, usable in
+`server/peer.rs` alone, TX043) and `memoffset` 0.9.1, linked, and
+`cfg_aliases` and `autocfg`, build-only: `rustix` 1.1.5's `SO_PEERCRED` read
+was undefined behaviour for a peer in a pid namespace the reader cannot see.
+Before that, since M4e: 147 crates in the union and 8 build-only; 98
+third-party crates linked on Linux x86_64 and aarch64, 100 on macOS, 101 on
+Windows (counted by name; by name and version 106/106/108/110), where M4d's
+union was twenty-seven ([ADR-0046](docs/adr/0046-m4e-secret-handles-backends-injection-and-redaction.md) §25).
 What M4e added: `age` 0.11.5 with its cryptography (RustCrypto and dalek:
 X25519, ChaCha20-Poly1305, HKDF, scrypt, PBKDF2) and its localisation stack
 (i18n-embed, Fluent, rust-embed, futures, parking_lot — linked although
