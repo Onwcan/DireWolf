@@ -1372,7 +1372,10 @@ mod linux {
     /// profile, or the platform.
     fn mechanism(line: &str, kind: &str) -> &'static str {
         match (kind, field(line, "name")) {
-            (_, Some("ENETUNREACH" | "EHOSTUNREACH")) => "topology-no-route",
+            // No route at all. `EHOSTUNREACH` is not that: it is what a
+            // route to a neighbour that never answered gives — a path, as
+            // the probe judges it too.
+            (_, Some("ENETUNREACH")) => "topology-no-route",
             ("local", Some("ECONNREFUSED")) => "topology-nothing-listening",
             ("caps", Some("EPERM")) => "capabilities",
             ("seccomp", Some("EPERM")) => "seccomp",
@@ -1749,6 +1752,14 @@ mod linux {
     }
 
     fn failing(measurement: &EnvironmentMeasurement, expected: &[I], case: &str) -> String {
+        // The probe answered within the broker's step: its report is there,
+        // so the inside vantage is measured, not lost to a timeout.
+        assert_ne!(
+            verdict(measurement, I::ContainerUidGid),
+            Verdict::Unobservable,
+            "{case}: the probe's report did not arrive; failing {:?}",
+            not_passing(measurement)
+        );
         for invariant in expected {
             assert_eq!(
                 verdict(measurement, *invariant),
@@ -1758,12 +1769,13 @@ mod linux {
             );
         }
         format!(
-            "detected:{}",
+            "detected:{};measured-in-{}ms",
             expected
                 .iter()
                 .map(|i| i.as_str())
                 .collect::<Vec<_>>()
-                .join("+")
+                .join("+"),
+            measurement.measure_ms.get()
         )
     }
 
@@ -1794,7 +1806,9 @@ mod linux {
         let mut detected = 0usize;
 
         // Ordinary bridged networking, proxy variables and all, is not
-        // PROXY_ONLY: there is a route, and the checks find it.
+        // PROXY_ONLY: there is a route, and the checks find it — from inside
+        // too, within the probe's step, whatever the destinations past the
+        // route do (a runner's network leaves some silent).
         let (e, r, s) = fresh(&ev.fixture_image);
         let id = test_only_environment(&ev, &seccomp, &workspace, (&e, &r), "bridge", true);
         let (m, _, _) = measure(&socket, &ev, &s, &ContainerRef::new(id.clone()).unwrap());
@@ -1804,6 +1818,8 @@ mod linux {
                 I::HostNetworkIsolated,
                 I::ContainerNetworkIsolated,
                 I::ContainerDirectEgressRefused,
+                I::ContainerDirectDnsRefused,
+                I::ContainerProxyReachable,
                 I::HostProxyRelay,
             ],
             "weakened-bridge-network",

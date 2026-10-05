@@ -936,9 +936,17 @@ mod linux {
                 &[I::HostIpcNamespacePrivate],
             ),
             (
+                // A namespace with real routes, where some destinations stay
+                // silent: the probe must still answer within its step, and
+                // see the paths from inside.
                 "weakened-host-network",
                 Box::new(|a| replace_value(a, "--network", "host")),
-                &[I::HostNetworkIsolated, I::ContainerNetworkIsolated],
+                &[
+                    I::HostNetworkIsolated,
+                    I::ContainerNetworkIsolated,
+                    I::ContainerDirectEgressRefused,
+                    I::ContainerDirectDnsRefused,
+                ],
             ),
             (
                 "weakened-mutable-image-tag",
@@ -978,6 +986,13 @@ mod linux {
             ev.remove(&id);
             let measurement = measured.measurement.unwrap();
             let found = not_passing(&measurement);
+            // The probe answered within the broker's step: its report is
+            // there, so the inside vantage is measured, not lost.
+            assert_ne!(
+                verdict(&measurement, I::ContainerUidGid),
+                Verdict::Unobservable,
+                "{case}: the probe's report did not arrive; found {found:?}"
+            );
             if caught.is_empty() {
                 assert!(found.is_empty(), "{case}: {found:?}");
                 evidence(case, "clean");
@@ -994,12 +1009,13 @@ mod linux {
             evidence(
                 case,
                 &format!(
-                    "detected:{}",
+                    "detected:{};measured-in-{}ms",
                     caught
                         .iter()
                         .map(|i| i.as_str())
                         .collect::<Vec<_>>()
-                        .join("+")
+                        .join("+"),
+                    measurement.measure_ms.get()
                 ),
             );
         }

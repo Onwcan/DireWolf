@@ -56,8 +56,9 @@ const STEP: Duration = Duration::from_secs(60);
 
 /// The longest the probe may take to measure, inside the environment: it
 /// normally needs well under a second, and one that takes longer is not
-/// believed (`UNOBSERVABLE`).
-const PROBE_STEP: Duration = Duration::from_secs(30);
+/// believed (`UNOBSERVABLE`). The profile's constant, which the probe bounds
+/// its own network attempts against.
+const PROBE_STEP: Duration = Duration::from_secs(dwk_sandbox_profile::PROBE_STEP_SECONDS);
 
 /// The most bytes of a one-line answer: a container id, a version.
 const LINE: usize = 4096;

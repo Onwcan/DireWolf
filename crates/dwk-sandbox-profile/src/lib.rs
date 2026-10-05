@@ -81,6 +81,11 @@ pub const PROBE_HOLD: &str = "hold";
 pub const PROBE_MEASURE: &str = "measure";
 /// The probe's argument for the child its ptrace canary attaches to.
 pub const PROBE_TARGET: &str = "ptrace-target";
+/// The longest one measurement by the probe may take, in seconds: the broker
+/// stops waiting then, and a probe that has not answered is believed about
+/// nothing (`UNOBSERVABLE`). The probe keeps its own network attempts well
+/// inside it, however the namespace routes (they are bounded against this).
+pub const PROBE_STEP_SECONDS: u64 = 30;
 
 /// The label every environment carries, naming DireWolf as its owner.
 pub const LABEL_OWNER: &str = "io.direwolf.owner";
