@@ -118,7 +118,7 @@ unicode-normalization = { version = "=0.1.25", default-features = false }
 # and no pre-release post-quantum crates (`kem 0.3.0-pre.0`, `ml-kem`), which
 # 0.12 requires even with every feature off. Default features off: no armor,
 # no plugins, no SSH recipients, no async, no CLI helpers.
-age = { version = "=0.11.5", default-features = false }
+age = { version = "=0.12.1", default-features = false }
 # `zeroize`: secret material is `Zeroizing<Vec<u8>>`, scrubbed on drop. Already
 # in `age`'s closure; named directly so the type is ours, not a re-export.
 zeroize = { version = "=1.9.0", default-features = false, features = ["alloc"] }
@@ -127,7 +127,7 @@ zeroize = { version = "=1.9.0", default-features = false, features = ["alloc"] }
 # authority's `sha2`: three new small crates (`hmac`, `ctutils`, `cmov`).
 hmac = { version = "=0.13.0", default-features = false }
 # `getrandom`: the per-process fingerprint key. Already in `age`'s closure.
-getrandom = { version = "=0.2.17", default-features = false }
+getrandom = { version = "=0.3.4", default-features = false }
 # Linux keychain: the kernel keyring (keyutils), through a maintained safe
 # wrapper over the `keyctl` syscalls. No D-Bus, no native library: it works on
 # a headless host, which Secret Service does not (ADR-0046 §6).
