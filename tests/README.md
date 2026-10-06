@@ -192,8 +192,11 @@ exchanges names while the resolver walks; `tests/resource_workspace.rs`
 covers the state layer — binding a root, resolving for a run, the workspace
 anchor, and migrating an M3 store. Each case prints one `FS-EVIDENCE` line.
 `make filesystem-canonicalization-evidence` (Linux) runs both and fails on a
-category with no exercised case, a race campaign with an escape, or a case
-not exercised that an ordinary machine can exercise.
+category with no exercised case, a race campaign with an escape, a parent
+campaign that counted no `RACE` (each one's attacker makes its first move
+while the walk is held just before its chain check, so one is guaranteed), a
+chain re-verification witness that did not refuse as `RACE`, or a case not
+exercised that an ordinary machine can exercise.
 
 **`tests/architecture/`** is the unusual one, and it is the point of M1. It
 contains two things:

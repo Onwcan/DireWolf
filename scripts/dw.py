@@ -450,6 +450,23 @@ FS_TOCTOU_CASES = (
     "leaf-replaced",
     "root-path-exchange",
 )
+# The two parent campaigns must show the chain re-verification firing in their
+# own count (ADR-0042 section 14): at least one RACE each. Each attacker makes
+# its first move inside the check's window, so one is guaranteed; the free
+# moves may add more, as the scheduler allows.
+FS_RACE_REQUIRED_CASES = ("parent-rename", "parent-moved-out-and-back")
+FS_RACE_COUNT = re.compile(r"-race-(\d+)$")
+# Further evidence of the chain re-verification firing, required by name and
+# outcome in addition to -- never instead of -- the parent campaigns' own RACE
+# counts. The first changes the tree under a chain it opened; the other two
+# move a parent at a fixed point of the production walk, just before the
+# walk's chain check, and require RACE at the parent's depth.
+FS_CHAIN_WITNESS_CASES = (
+    "chain-reverified-after-change",
+    "parent-renamed-before-chain-check",
+    "parent-moved-out-before-chain-check",
+)
+FS_CHAIN_WITNESS_OUTCOME = "refused:RACE"
 # M4b: admission resolves every new concrete fs.read declaration through the
 # same resolver (ADR-0043 section 8). Each named case must report.
 FS_ADMISSION_CASES = (
@@ -482,8 +499,10 @@ def task_filesystem_canonicalization_evidence() -> None:
     root to a workspace, resolving for a run, and migrating an M3 store; then
     admission resolving every new concrete fs.read declaration (M4b). Each
     case prints one `FS-EVIDENCE` line after its assertions held; this task
-    requires every category, every race campaign with zero escapes, and lists
-    what the machine could not exercise. Linux only: the resolver is openat2.
+    requires every category, every race campaign with zero escapes, a RACE in
+    each parent campaign's own count, every chain re-verification witness
+    refusing as RACE, and lists what the machine could not exercise. Linux
+    only: the resolver is openat2.
     """
     if not sys.platform.startswith("linux"):
         raise TaskError(
@@ -560,6 +579,22 @@ def require_filesystem_evidence(output: str) -> None:
             problems.append(f"race campaign `{case}` did not report")
         elif not reported[0].startswith("escaped-0-unexpected-0-"):
             problems.append(f"race campaign `{case}`: {reported[0]}")
+    for case in FS_RACE_REQUIRED_CASES:
+        reported = races.get(case)
+        caught = FS_RACE_COUNT.search(reported[0]) if reported else None
+        if reported is not None and (caught is None or int(caught.group(1)) < 1):
+            problems.append(f"race campaign `{case}` caught no RACE: {reported[0]}")
+    witnessed = {
+        case: (outcome, count)
+        for case, outcome, count in exercised.get("toctou", [])
+        if case in FS_CHAIN_WITNESS_CASES
+    }
+    for case in FS_CHAIN_WITNESS_CASES:
+        reported = witnessed.get(case)
+        if reported is None:
+            problems.append(f"chain witness `{case}` did not report")
+        elif reported[0] != FS_CHAIN_WITNESS_OUTCOME or reported[1] < 1:
+            problems.append(f"chain witness `{case}`: {reported[0]} x{reported[1]}")
     for category, case, outcome in unexercised:
         if case not in FS_ENVIRONMENTAL:
             problems.append(f"{category}/{case} was not exercised ({outcome})")
@@ -574,6 +609,7 @@ def require_filesystem_evidence(output: str) -> None:
         print(f"  {category:<17} {len(cases):>3} cases  {total:>7} observations")
     raced = sum(count for _, count in races.values())
     print(f"  race campaigns: {len(races)}, {raced} raced resolutions, 0 escapes required")
+    print(f"  chain witnesses: {len(witnessed)} of {len(FS_CHAIN_WITNESS_CASES)}, RACE required")
     for category, case, outcome in unexercised:
         print(f"  NOT EXERCISED  {category}/{case}: {outcome}")
     if problems:

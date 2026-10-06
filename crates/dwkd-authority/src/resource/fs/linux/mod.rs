@@ -144,6 +144,28 @@ fn root_io(errno: Errno) -> RootError {
     RootError::Io(errno.raw_os_error())
 }
 
+#[cfg(test)]
+thread_local! {
+    /// A change this thread's next walk makes to the tree once every component
+    /// was opened, classified and found in its parent's listing, and before the
+    /// chain is re-verified: the window a race campaign's attacker reaches only
+    /// when the scheduler puts a rename there. The tests arrange it: the chain
+    /// witnesses rename a parent here, and the parent race campaigns hold their
+    /// first resolution here while the attacker thread makes its first move.
+    /// **Test observation, not an interface**: it does not exist in any other
+    /// build.
+    static BEFORE_CHAIN_CHECK: core::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { core::cell::RefCell::new(None) };
+}
+
+/// Make the change a test arranged for this point of the walk, once.
+#[cfg(test)]
+fn before_chain_check() {
+    if let Some(change) = BEFORE_CHAIN_CHECK.with(|slot| slot.borrow_mut().take()) {
+        change();
+    }
+}
+
 /// Resolve `names` beneath the pinned root.
 pub(in crate::resource) fn walk(
     root: &OwnedFd,
@@ -179,6 +201,8 @@ pub(in crate::resource) fn walk(
         opened.push((fd, identity(&st)));
         last = Some((kind, widen(st.st_nlink)));
     }
+    #[cfg(test)]
+    before_chain_check();
     verify_chain(root.as_fd(), &opened, names)?;
 
     let Some((kind, links)) = last else {

@@ -66,6 +66,9 @@ RESOLVER_TESTS = (
     REPO_ROOT / "crates" / "dwkd-authority" / "tests" / "resource_workspace.rs",
     REPO_ROOT / "crates" / "dwkd-authority" / "tests" / "admission_fs.rs",
 )
+# The resolver, whose walk holds the one test-only step that the chain
+# witnesses and the parent race campaigns use.
+RESOLVER = REPO_ROOT / "crates" / "dwkd-authority" / "src" / "resource" / "fs" / "linux" / "mod.rs"
 # M4b's brokered fs.read evidence, and the tests that print it.
 BROKER_JOB = "broker-fs-read"
 BROKER_FOREIGN_SUITE = REPO_ROOT / "crates" / "dwkd-authority" / "tests" / "broker_foreign.rs"
@@ -505,9 +508,10 @@ def _fs_complete() -> list[str]:
         if category != "toctou"
     ]
     lines += [
-        _fs_line("toctou", case, "escaped-0-unexpected-0-resolved-9-refused-1-swaps-500", 10)
+        _fs_line("toctou", case, "escaped-0-unexpected-0-resolved-9-refused-1-swaps-500-race-1", 10)
         for case in dw.FS_TOCTOU_CASES
     ]
+    lines += [_fs_line("toctou", case, "refused:RACE") for case in dw.FS_CHAIN_WITNESS_CASES]
     lines += [_fs_line("admission", case, "withheld") for case in dw.FS_ADMISSION_CASES]
     return lines
 
@@ -555,6 +559,34 @@ def _only_unexercised(category: str) -> Callable[[list[str]], list[str]]:
         ),
         (_only_unexercised("magic-link"), "category `magic-link` has no exercised case"),
         (_without("stored-grant-rehydrated"), "admission case `stored-grant-rehydrated`"),
+        (_replacing("-race-1", "-race-0"), "race campaign `parent-rename` caught no RACE"),
+        (
+            _replacing("-race-1", ""),
+            "race campaign `parent-moved-out-and-back` caught no RACE",
+        ),
+        (
+            _without("parent-moved-out-before-chain-check"),
+            "chain witness `parent-moved-out-before-chain-check` did not report",
+        ),
+        (
+            _without("chain-reverified-after-change"),
+            "chain witness `chain-reverified-after-change` did not report",
+        ),
+        (
+            _replacing(
+                '"parent-renamed-before-chain-check","outcome":"refused:RACE"',
+                '"parent-renamed-before-chain-check","outcome":"resolved"',
+            ),
+            "chain witness `parent-renamed-before-chain-check`: resolved x1",
+        ),
+        (
+            _replacing("refused:RACE", "refused:NOT_FOUND"),
+            "chain witness `chain-reverified-after-change`: refused:NOT_FOUND x1",
+        ),
+        (
+            _replacing('"outcome":"refused:RACE","count":1', '"outcome":"refused:RACE","count":0'),
+            "chain witness `parent-renamed-before-chain-check`: refused:RACE x0",
+        ),
         (_adding("FS-EVIDENCE {not json"), "unreadable evidence line"),
         (_adding('FS-EVIDENCE {"category":"x","count":"1"}'), "malformed evidence line"),
         (lambda _: [], "category `normal` has no exercised case"),
@@ -567,6 +599,13 @@ def _only_unexercised(category: str) -> Callable[[list[str]], list[str]]:
         "race-not-exercised",
         "category-only-unexercised",
         "missing-admission-case",
+        "parent-campaign-race-0",
+        "parent-campaign-no-race-count",
+        "missing-parent-chain-witness",
+        "missing-chain-witness",
+        "chain-witness-resolved",
+        "chain-witness-other-refusal",
+        "chain-witness-counted-nothing",
         "unreadable",
         "malformed",
         "nothing",
@@ -588,12 +627,80 @@ def test_the_task_names_what_the_resolver_tests_print() -> None:
     every category it requires, is one a test prints. A renamed case would
     otherwise fail only in CI, or -- for an environmental one -- never."""
     source = "\n".join(path.read_text(encoding="utf-8") for path in RESOLVER_TESTS)
-    for case in (*dw.FS_TOCTOU_CASES, *dw.FS_ENVIRONMENTAL, *dw.FS_ADMISSION_CASES):
+    cases = (
+        *dw.FS_TOCTOU_CASES,
+        *dw.FS_CHAIN_WITNESS_CASES,
+        *dw.FS_ENVIRONMENTAL,
+        *dw.FS_ADMISSION_CASES,
+    )
+    for case in cases:
         assert f'"{case}"' in source, f"no resolver test prints `{case}`"
     for category in dw.FS_EVIDENCE_CATEGORIES:
         emitted = f'evidence("{category}"' in source or f'"{category}",' in source
         emitted = emitted or f'\\"category\\":\\"{category}\\"' in source
         assert emitted, f"no resolver test emits category `{category}`"
+
+
+def test_only_the_parent_campaigns_must_count_a_race(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The parent campaigns' attackers make their first move inside the chain
+    check's window, so each must count a RACE. The other campaigns are not
+    arranged that way, and a RACE count of zero there is a measurement."""
+    assert set(dw.FS_RACE_REQUIRED_CASES) <= set(dw.FS_TOCTOU_CASES)
+    others = [
+        line
+        if any(f'"case":"{case}"' in line for case in dw.FS_RACE_REQUIRED_CASES)
+        else line.replace("-race-1", "-race-0")
+        for line in _fs_complete()
+    ]
+    dw.require_filesystem_evidence("\n".join(others))
+    assert "complete" in capsys.readouterr().out
+
+
+def test_the_chain_witnesses_and_the_parent_campaigns_never_stand_in_for_each_other(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Both are required. Campaigns that each counted RACE refusals do not
+    excuse a missing witness, and every witness reporting RACE does not excuse
+    a parent campaign that counted none."""
+    assert not set(dw.FS_CHAIN_WITNESS_CASES) & set(dw.FS_TOCTOU_CASES)
+    without_witnesses = [line for line in _fs_complete() if "refused:RACE" not in line]
+    with pytest.raises(dw.TaskError) as failure:
+        dw.require_filesystem_evidence("\n".join(without_witnesses))
+    for case in dw.FS_CHAIN_WITNESS_CASES:
+        assert f"chain witness `{case}` did not report" in str(failure.value)
+    uncaught = [line.replace("-race-1", "-race-0") for line in _fs_complete()]
+    with pytest.raises(dw.TaskError) as failure:
+        dw.require_filesystem_evidence("\n".join(uncaught))
+    for case in dw.FS_RACE_REQUIRED_CASES:
+        assert f"race campaign `{case}` caught no RACE" in str(failure.value)
+    assert "chain witness" not in str(failure.value)
+    capsys.readouterr()
+
+
+def test_the_chain_witness_step_exists_only_in_tests_and_only_before_the_chain_check() -> None:
+    """The witnesses and the parent campaigns hold the production walk at one
+    point while a parent moves. That step must not exist outside a test build,
+    and must sit immediately before the chain check -- moved after it, neither
+    would show the check firing."""
+    source = RESOLVER.read_text(encoding="utf-8")
+    assert "#[cfg(test)]\n    before_chain_check();\n    verify_chain(root.as_fd()" in source
+    assert "#[cfg(test)]\nthread_local! {\n" in source
+    assert "#[cfg(test)]\nfn before_chain_check() {" in source
+    assert source.count("before_chain_check") == 2
+    assert source.count("BEFORE_CHAIN_CHECK") == 2
+    assert source.count("thread_local!") == 1
+    crates = REPO_ROOT / "crates"
+    users = sorted(
+        path.relative_to(REPO_ROOT).as_posix()
+        for path in crates.rglob("*.rs")
+        if "BEFORE_CHAIN_CHECK" in path.read_text(encoding="utf-8")
+    )
+    assert users == [
+        "crates/dwkd-authority/src/resource/fs/linux/mod.rs",
+        "crates/dwkd-authority/src/resource/fs/linux/tests.rs",
+    ]
 
 
 def test_the_filesystem_task_off_linux_is_not_exercised_and_runs_nothing(

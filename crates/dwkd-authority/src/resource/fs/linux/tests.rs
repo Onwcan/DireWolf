@@ -7,7 +7,12 @@
 //! each, and say so: the magic-link test opens a procfs directory as a root
 //! (production pinning refuses procfs, which is itself asserted), and the
 //! traversal test calls the per-component open directly with `..` to show the
-//! kernel refuses what the grammar never lets through.
+//! kernel refuses what the grammar never lets through. The parent-move chain
+//! witnesses and the two parent race campaigns bypass nothing: they hold the
+//! production walk at one fixed point (`BEFORE_CHAIN_CHECK`, compiled only
+//! into tests) while a real directory is renamed — by the witness, or by the
+//! campaign's attacker thread for its first move — instead of waiting for a
+//! scheduler to put a rename there.
 //!
 //! Each case prints one machine-checkable line,
 //!
@@ -27,11 +32,13 @@
     clippy::integer_division
 )]
 
+use std::cell::Cell;
 use std::fmt::Write as _;
 use std::fs;
 use std::os::unix::ffi::OsStrExt as _;
 use std::os::unix::fs::{MetadataExt as _, symlink};
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Barrier};
 use std::thread::JoinHandle;
@@ -44,7 +51,9 @@ use super::super::{
     Access, Assurance, Expect, FileIdentity, Handle, PinnedRoot, ResolveError, ResolvedResource,
     ResourceKind, RootError,
 };
-use super::{identity, open_child, verify_chain, verify_entry, verify_entry_within};
+use super::{
+    BEFORE_CHAIN_CHECK, identity, open_child, verify_chain, verify_entry, verify_entry_within,
+};
 use crate::capability::DeclaredPath;
 use crate::resource::PathComponent;
 use crate::scratch::Scratch;
@@ -823,6 +832,47 @@ fn the_chain_is_reverified_after_the_walk() {
     evidence("toctou", "chain-reverified-after-change", "refused:RACE", 3);
 }
 
+/// The chain re-verification shown firing inside the production walk, without
+/// depending on the scheduler: resolve `text` while `parent` is renamed to
+/// `away` at the one point a parent campaign's attacker reaches only by
+/// chance — after the walk opened, classified and listed every component, and
+/// before it re-verifies the chain. The walk must refuse it as `RACE` at the
+/// parent's depth, 1. The same path resolves before the move and again once
+/// the parent is back, so the refusal is the move's.
+fn parent_moved_before_chain_check(
+    case: &str,
+    root: &PinnedRoot,
+    text: &str,
+    parent: &Path,
+    away: &Path,
+) {
+    assert!(observe(root, text).is_ok(), "{case}: the path resolves");
+    let moved = Rc::new(Cell::new(false));
+    let (done, from, to) = (Rc::clone(&moved), parent.to_owned(), away.to_owned());
+    BEFORE_CHAIN_CHECK.with(|slot| {
+        *slot.borrow_mut() = Some(Box::new(move || {
+            fs::rename(&from, &to).expect("move the parent mid-walk");
+            done.set(true);
+        }));
+    });
+    let result = observe(root, text);
+    assert!(
+        moved.get(),
+        "{case}: the walk never reached its chain check"
+    );
+    assert_eq!(
+        result.as_ref().err(),
+        Some(&ResolveError::Race { depth: 1 }),
+        "{case}: the chain re-verification never caught a parent moving mid-walk"
+    );
+    fs::rename(away, parent).expect("put the parent back");
+    assert!(
+        observe(root, text).is_ok(),
+        "{case}: the path resolves again"
+    );
+    evidence("toctou", case, &outcome(&result), 1);
+}
+
 // ---------------------------------------------------------------------------
 // TOCTOU: a real attacker thread, racing the resolver.
 // ---------------------------------------------------------------------------
@@ -834,11 +884,26 @@ struct Attacker {
 }
 
 impl Attacker {
-    fn start(mut move_once: impl FnMut() + Send + 'static, ready: &Arc<Barrier>) -> Self {
+    /// Start an attacker that moves until stopped once `ready` releases it.
+    /// With a `cue`, it first makes exactly one move between two waits on the
+    /// cue — at a moment the resolving thread chooses — and only then waits
+    /// for `ready`.
+    fn start(
+        mut move_once: impl FnMut() + Send + 'static,
+        cue: Option<&Arc<Barrier>>,
+        ready: &Arc<Barrier>,
+    ) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let swaps = Arc::new(AtomicU64::new(0));
         let (flag, count, barrier) = (Arc::clone(&stop), Arc::clone(&swaps), Arc::clone(ready));
+        let cue = cue.map(Arc::clone);
         let thread = std::thread::spawn(move || {
+            if let Some(cue) = cue {
+                cue.wait();
+                move_once();
+                count.fetch_add(1, Ordering::Relaxed);
+                cue.wait();
+            }
             barrier.wait();
             while !flag.load(Ordering::Relaxed) {
                 move_once();
@@ -852,11 +917,29 @@ impl Attacker {
         }
     }
 
+    /// Moves made so far.
+    fn moves(&self) -> u64 {
+        self.swaps.load(Ordering::Relaxed)
+    }
+
     fn finish(self) -> u64 {
         self.stop.store(true, Ordering::Relaxed);
         self.thread.join().expect("the attacker thread");
         self.swaps.load(Ordering::Relaxed)
     }
+}
+
+/// Where a campaign's attacker makes its first move.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FirstMove {
+    /// Wherever the scheduler puts it, like every other move.
+    Free,
+    /// Inside the chain re-verification's window: the campaign's first
+    /// resolution is held at the walk's chain check (`BEFORE_CHAIN_CHECK`)
+    /// while the attacker thread makes its first real move, and must be
+    /// refused as `RACE`. Then the attacker runs free, and the free
+    /// resolutions begin once it has moved again.
+    BeforeChainCheck,
 }
 
 /// Resolve `text` `RACE_ITERATIONS` times while `attacker` runs. The property
@@ -865,30 +948,66 @@ impl Attacker {
 ///
 /// Returns how many refusals were `RACE` — the chain re-verification catching a
 /// name that stopped binding mid-walk — for campaigns that must show it firing.
+/// The scheduler decides how often a free move lands in that window; with
+/// [`FirstMove::BeforeChainCheck`] one resolution more, made before the free
+/// ones, is guaranteed to be caught, and is counted like any other.
 fn campaign(
     case: &str,
     root: &PinnedRoot,
     text: &str,
     allowed: &[FileIdentity],
     forbidden: &[FileIdentity],
+    first: FirstMove,
     attack: impl FnMut() + Send + 'static,
 ) -> u64 {
     let ready = Arc::new(Barrier::new(2));
-    let attacker = Attacker::start(attack, &ready);
-    ready.wait();
+    let cue = (first == FirstMove::BeforeChainCheck).then(|| Arc::new(Barrier::new(2)));
+    let attacker = Attacker::start(attack, cue.as_ref(), &ready);
     let (mut resolved, mut refused, mut escaped, mut unexpected) = (0u64, 0u64, 0u64, 0u64);
     let mut raced = 0u64;
-    for _ in 0..RACE_ITERATIONS {
-        match observe(root, text) {
-            Ok(found) if forbidden.contains(&found.identity()) => escaped += 1,
-            Ok(found) if allowed.contains(&found.identity()) => resolved += 1,
-            Ok(_) => unexpected += 1,
-            Err(ResolveError::Race { .. }) => {
-                refused += 1;
-                raced += 1;
-            }
-            Err(_) => refused += 1,
+    let mut tally = |result: Result<ResolvedResource, ResolveError>| match result {
+        Ok(found) if forbidden.contains(&found.identity()) => escaped += 1,
+        Ok(found) if allowed.contains(&found.identity()) => resolved += 1,
+        Ok(_) => unexpected += 1,
+        Err(ResolveError::Race { .. }) => {
+            refused += 1;
+            raced += 1;
         }
+        Err(_) => refused += 1,
+    };
+    if let Some(cue) = cue {
+        let held = Rc::new(Cell::new(false));
+        let done = Rc::clone(&held);
+        BEFORE_CHAIN_CHECK.with(|slot| {
+            *slot.borrow_mut() = Some(Box::new(move || {
+                cue.wait(); // the attacker makes its first move
+                cue.wait(); // and has made it
+                done.set(true);
+            }));
+        });
+        let result = observe(root, text);
+        assert!(
+            held.get(),
+            "{case}: the first resolution never reached its chain check"
+        );
+        assert!(
+            matches!(result, Err(ResolveError::Race { .. })),
+            "{case}: the chain re-verification missed the attacker's first move"
+        );
+        tally(result);
+    }
+    ready.wait();
+    if first == FirstMove::BeforeChainCheck {
+        // The attacker was parked while the first resolution was checked, and
+        // this thread, not the attacker, came out of the barrier running: on a
+        // single CPU it could finish every free resolution before the attacker
+        // ran at all. The free resolutions start once it is moving again.
+        while attacker.moves() < 2 {
+            core::hint::spin_loop();
+        }
+    }
+    for _ in 0..RACE_ITERATIONS {
+        tally(observe(root, text));
     }
     let swaps = attacker.finish();
     evidence(
@@ -897,7 +1016,7 @@ fn campaign(
         &format!(
             "escaped-{escaped}-unexpected-{unexpected}-resolved-{resolved}-refused-{refused}-swaps-{swaps}-race-{raced}"
         ),
-        RACE_ITERATIONS,
+        resolved + refused + escaped + unexpected,
     );
     assert_eq!(escaped, 0, "{case}: an escape object was returned");
     assert_eq!(unexpected, 0, "{case}: an object outside the allowed set");
@@ -944,6 +1063,7 @@ fn toctou_swapping_an_entry_for_a_symlink_never_escapes() {
         "/workspace/target",
         &[file],
         &[secret, link],
+        FirstMove::Free,
         exchange(&ws, "target", "decoy"),
     );
 
@@ -961,6 +1081,7 @@ fn toctou_swapping_an_entry_for_a_symlink_never_escapes() {
         "/workspace/dir/leaf",
         &[inside_leaf],
         &[outside_leaf, secret],
+        FirstMove::Free,
         exchange(&ws, "dir", "dir-decoy"),
     );
 }
@@ -970,11 +1091,29 @@ fn toctou_renaming_a_parent_never_escapes() {
     let Some((fx, root, _ws, secret)) = race_fixture("fs-toctou-parent") else {
         return;
     };
+    // Neither campaign could return a forbidden object even without the chain
+    // re-verification — the leaf is the leaf — but without it the object comes
+    // back under a name that no longer binds, or from a parent that has left
+    // the workspace. What shows the walk runs the check is that it fires. A
+    // free move reaches the check's window — after the parent was found in the
+    // root's listing, before the re-verification looks it up again: a few
+    // syscalls on the leaf — only when the scheduler puts it there. So each
+    // campaign's attacker makes its first move inside that window, and each
+    // campaign must count at least one RACE; the free moves may add more. A
+    // witness before each campaign also pins the depth it is caught at.
+
     // The parent renamed back and forth inside the workspace.
     fs::create_dir(fx.ws("p")).unwrap();
     fs::write(fx.ws("p/leaf"), b"inside").unwrap();
     let parent_leaf = id_of(&fx.ws("p/leaf"));
     let (from, to) = (fx.ws("p"), fx.ws("q"));
+    parent_moved_before_chain_check(
+        "parent-renamed-before-chain-check",
+        &root,
+        "/workspace/p/leaf",
+        &from,
+        &to,
+    );
     let mut flip = false;
     let renamed = campaign(
         "parent-rename",
@@ -982,6 +1121,7 @@ fn toctou_renaming_a_parent_never_escapes() {
         "/workspace/p/leaf",
         &[parent_leaf],
         &[secret],
+        FirstMove::BeforeChainCheck,
         move || {
             flip = !flip;
             let _ = if flip {
@@ -991,12 +1131,23 @@ fn toctou_renaming_a_parent_never_escapes() {
             };
         },
     );
+    assert!(
+        renamed > 0,
+        "parent-rename: the chain re-verification never caught a parent moving mid-walk"
+    );
 
     // The parent moved out of the workspace and back again.
     fs::create_dir(fx.ws("m")).unwrap();
     fs::write(fx.ws("m/leaf"), b"inside").unwrap();
     let moved_leaf = id_of(&fx.ws("m/leaf"));
     let (home, away) = (fx.ws("m"), fx.out("m-away"));
+    parent_moved_before_chain_check(
+        "parent-moved-out-before-chain-check",
+        &root,
+        "/workspace/m/leaf",
+        &home,
+        &away,
+    );
     let mut out = false;
     let moved = campaign(
         "parent-moved-out-and-back",
@@ -1004,6 +1155,7 @@ fn toctou_renaming_a_parent_never_escapes() {
         "/workspace/m/leaf",
         &[moved_leaf],
         &[secret],
+        FirstMove::BeforeChainCheck,
         move || {
             out = !out;
             let _ = if out {
@@ -1013,15 +1165,9 @@ fn toctou_renaming_a_parent_never_escapes() {
             };
         },
     );
-
-    // Neither campaign could return a forbidden object even without the chain
-    // re-verification — the leaf is the leaf — but without it the object comes
-    // back under a name that no longer binds, or from a parent that has left
-    // the workspace. What shows the walk runs the check is that it fires: some
-    // walks were caught with a parent that moved underneath them.
     assert!(
-        renamed + moved > 0,
-        "the chain re-verification never caught a parent moving mid-walk"
+        moved > 0,
+        "parent-moved-out-and-back: the chain re-verification never caught a parent moving mid-walk"
     );
 }
 
@@ -1045,6 +1191,7 @@ fn toctou_replacing_the_leaf_never_escapes() {
         "/workspace/leaf2",
         &allowed,
         &[secret, evil],
+        FirstMove::Free,
         move || {
             turn = turn.wrapping_add(1);
             let partner = if turn.is_multiple_of(2) {
@@ -1076,6 +1223,7 @@ fn toctou_exchanging_the_root_path_never_redirects_a_pinned_root() {
         "/workspace/marker",
         &[marker_a],
         &[marker_b],
+        FirstMove::Free,
         exchange(&base, "ws", "ws-other"),
     );
 }
