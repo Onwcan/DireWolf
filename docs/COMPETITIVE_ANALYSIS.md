@@ -1,6 +1,8 @@
 # Competitive Analysis: DireWolf and the agent-runtime landscape
 
-**Research date:** 2026-09-28 (verification pass completed 2026-09-29).
+**Research date:** 2026-09-28 (verification pass completed 2026-09-29). **Provider-coverage
+pass:** 2026-10-07, at the same snapshot commits (§7a); the one vendor document it also
+consults is dated where it is used.
 **Replaces:** the 2026-09-11 analysis, which compared a specification against two projects.
 **Method:** each project's own documentation, source files read one at a time at a pinned
 commit, its licence file, and advisories in the GitHub advisory database. No repository was
@@ -57,7 +59,7 @@ most of it is not yet built.
 | Taint | Run-level, monotone, held by the authority; raised to `LOCAL_UNVERIFIED` by file content and process output; a policy predicate (`when.taint_level`) the shipped packs use (M3d–M4d) | Network-sourced taint (M5); artifact and memory provenance (M12, M13) |
 | Sandbox | **Foundation (M5a) and `PROXY_ONLY` networking (M5b, complete, hosted acceptance passed):** an `oci-strict` environment prepared and **measured** from the runtime's record and by a digest-pinned probe inside it, weakened profiles and topologies shown to be detected; its only network peer the broker's opaque CONNECT proxy, every bypass measured as refused; no public caller can prepare one and no workload runs in it. Policy is told every action runs on the host | Sandboxed workloads (M5d); `net.http` (M5c) |
 | Approvals, budgets | **None.** A decision that would require approval is `DENY` | M6 |
-| Model egress, providers | **None** (so no Ollama yet) | M7 |
+| Model egress, providers | **None** | M7: native, cloud-platform, OpenAI-compatible and local/self-hosted provider families, Hugging Face and Ollama among them, all behind the authority's model egress (§7a) |
 | Agent loop, tools, context, memory, subagents, MCP | **None** | M8–M16 |
 | CLI | `direwolf --version` and `doctor` only | M17 |
 | Channels, scheduler, browser, plugins, web UI, remote workers | **None** | Post-V1 (M19–M28) |
@@ -273,8 +275,8 @@ experiences as "is the agent contained?", and several projects implement them to
 | # | Capability | DW now | DW target | Hermes | OpenClaw | IronSecCo/IronClaw | NEAR AI/IronClaw | OpenFang | OpenLegion | Capgate | Claude Code | Codex | Daytona | OpenHands |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
 | P1 | Agent loop that completes tasks | PLANNED | M9 | IMPLEMENTED | IMPLEMENTED | IMPLEMENTED (alpha) | IMPLEMENTED | IMPLEMENTED | IMPLEMENTED | N/A | IMPLEMENTED | IMPLEMENTED | N/A | IMPLEMENTED |
-| P2 | Model providers | PLANNED | M7 | IMPLEMENTED | IMPLEMENTED | IMPLEMENTED (via host proxy) | IMPLEMENTED | IMPLEMENTED | IMPLEMENTED | N/A | IMPLEMENTED | IMPLEMENTED | N/A | IMPLEMENTED |
-| P3 | Local models | PLANNED (Ollama first-class) | M7, M17 | UNVERIFIED | UNVERIFIED | UNVERIFIED | UNVERIFIED | UNVERIFIED | UNVERIFIED | N/A | UNVERIFIED | IMPLEMENTED (Ollama and LM Studio crates) | N/A | UNVERIFIED |
+| P2 | Model providers | PLANNED (four families, §7a) | M7 | IMPLEMENTED | IMPLEMENTED | IMPLEMENTED (via host proxy) | IMPLEMENTED | IMPLEMENTED | IMPLEMENTED | N/A | IMPLEMENTED | IMPLEMENTED | N/A | IMPLEMENTED |
+| P3 | Local models | PLANNED (Ollama first-class; vLLM, LM Studio, self-hosted Hugging Face) | M7, M17 | IMPLEMENTED (Ollama, vLLM, SGLang, llama.cpp through its custom endpoint; LM Studio provider) | IMPLEMENTED (Ollama, LM Studio, vLLM, SGLang, llama.cpp) | NOT FOUND | IMPLEMENTED (`ollama` backend; LM Studio and vLLM through `openai_compatible`) | IMPLEMENTED (Ollama, vLLM, LM Studio) | IMPLEMENTED (Ollama) | N/A | NOT FOUND | IMPLEMENTED (Ollama and LM Studio crates) | N/A | UNVERIFIED |
 | P4 | File tools | IMPLEMENTED (eight tools through the broker; no agent calls them yet; Linux) | M10 | IMPLEMENTED | IMPLEMENTED | IMPLEMENTED | IMPLEMENTED | IMPLEMENTED | IMPLEMENTED | N/A | IMPLEMENTED | IMPLEMENTED | UNVERIFIED | IMPLEMENTED |
 | P5 | Command execution | PARTIAL (built end to end; no production launch before M6) | M5, M6 | IMPLEMENTED | IMPLEMENTED | IMPLEMENTED | IMPLEMENTED | IMPLEMENTED | IMPLEMENTED | N/A | IMPLEMENTED | IMPLEMENTED | IMPLEMENTED | IMPLEMENTED |
 | P6 | Web fetch / search | PLANNED | M5, M10 | IMPLEMENTED | IMPLEMENTED | IMPLEMENTED (through the egress broker) | IMPLEMENTED | IMPLEMENTED | IMPLEMENTED | N/A | IMPLEMENTED | UNVERIFIED | N/A | UNVERIFIED |
@@ -290,6 +292,92 @@ experiences as "is the agent contained?", and several projects implement them to
 | P16 | Policy simulation before a change | PARTIAL (engine and fixture suites; no CLI) | M17 | NOT FOUND | NOT FOUND | UNVERIFIED | UNVERIFIED | UNVERIFIED | UNVERIFIED | IMPLEMENTED (`simulate`, same engine, no grants minted) | NOT FOUND | NOT FOUND | N/A | NOT FOUND |
 | P17 | Security self-check command | PARTIAL (`doctor` exists; sandbox measurement planned) | M17 | UNVERIFIED | IMPLEMENTED (`openclaw security audit`) | IMPLEMENTED (`ironctl scan`, configuration-based) | UNVERIFIED | UNVERIFIED | UNVERIFIED | UNVERIFIED | PARTIAL (`/sandbox` dependency panel) | UNVERIFIED | N/A | UNVERIFIED |
 | P18 | Native Windows | NOT IMPLEMENTED (serving refuses; Windows Credential Manager backend tested, not served) | WSL2 recommended; native = reduced assurance, stated | UNVERIFIED | UNVERIFIED | NOT FOUND (WSL2 required) | UNVERIFIED | UNVERIFIED | UNVERIFIED | UNVERIFIED | NOT FOUND for the sandbox (WSL2) | PARTIAL (a Windows sandbox crate exists) | N/A | UNVERIFIED |
+
+**Correction (2026-10-07).** P3 was re-verified at the same snapshot commits by the
+provider-coverage pass (§7a): seven cells that said UNVERIFIED now carry what the files
+listed there state. Codex's was already verified; OpenHands stays UNVERIFIED.
+
+### 7a. Model-provider coverage at the snapshot
+
+M7 targets broad provider coverage (a project-owner decision, 2026-10-07), so this pass asks
+which provider families the compared runtimes actually reach. It reads one file or
+directory per project at the snapshot commit in §4: Hermes Agent
+`website/docs/integrations/providers.md`; OpenClaw `docs/providers/` (its index and the
+`openai/`, `google`, `huggingface` pages); IronSecCo/IronClaw `README.md`; NEAR AI/IronClaw
+`.env.example`; OpenFang `README.md`; OpenLegion `README.md`; Claude Code `CHANGELOG.md`;
+Codex `codex-rs/model-provider-info/src/lib.rs`; OpenHands `README.md`. **IMPLEMENTED** means
+a dedicated provider entry in that file; **IMPLEMENTED (compatible)** means reached through
+the project's generic OpenAI-compatible path, as that file documents it, not a separate
+integration. Using an OpenAI-compatible library, or LiteLLM, is not counted as support for
+anything the file does not name. Capgate and Daytona call no model: N/A, and omitted.
+
+| Provider family | Hermes | OpenClaw | IronSecCo/IronClaw | NEAR AI/IronClaw | OpenFang | OpenLegion | Claude Code | Codex | OpenHands |
+|---|---|---|---|---|---|---|---|---|---|
+| Anthropic | IMPLEMENTED | IMPLEMENTED | IMPLEMENTED (default) | IMPLEMENTED | IMPLEMENTED (native driver) | IMPLEMENTED | IMPLEMENTED | NOT FOUND | UNVERIFIED |
+| OpenAI | IMPLEMENTED | IMPLEMENTED | IMPLEMENTED | IMPLEMENTED | IMPLEMENTED (compatible) | IMPLEMENTED | NOT FOUND | IMPLEMENTED | UNVERIFIED |
+| Any OpenAI-compatible endpoint | IMPLEMENTED ("Custom endpoint") | IMPLEMENTED | NOT FOUND | IMPLEMENTED (`openai_compatible`) | IMPLEMENTED (driver) | UNVERIFIED | NOT FOUND (LLM gateways front Claude only) | IMPLEMENTED (`model_providers` in config) | UNVERIFIED |
+| Google Gemini API | IMPLEMENTED | IMPLEMENTED | NOT FOUND | IMPLEMENTED (`gemini_oauth`) | IMPLEMENTED (native driver) | IMPLEMENTED | NOT FOUND | NOT FOUND | UNVERIFIED |
+| Google Vertex AI | IMPLEMENTED (its OpenAI-compatible endpoint) | IMPLEMENTED (`google-vertex`) | NOT FOUND | NOT FOUND | NOT FOUND | UNVERIFIED | IMPLEMENTED | NOT FOUND | UNVERIFIED |
+| AWS Bedrock | IMPLEMENTED | IMPLEMENTED | NOT FOUND | NOT FOUND | IMPLEMENTED (named) | UNVERIFIED | IMPLEMENTED | IMPLEMENTED (`amazon-bedrock`) | UNVERIFIED |
+| Azure OpenAI / AI Foundry | IMPLEMENTED (`azure-foundry`) | IMPLEMENTED (OpenAI provider on an Azure resource) | NOT FOUND | NOT FOUND | NOT FOUND | UNVERIFIED | IMPLEMENTED (Microsoft Foundry) | NOT FOUND | UNVERIFIED |
+| Hugging Face, hosted (Inference Providers) | IMPLEMENTED (`huggingface`, its router) | IMPLEMENTED (its router) | NOT FOUND | NOT FOUND | IMPLEMENTED (compatible) | UNVERIFIED | NOT FOUND | NOT FOUND | UNVERIFIED |
+| Hugging Face, self-hosted (TGI, Inference Endpoints) | NOT FOUND | NOT FOUND | NOT FOUND | NOT FOUND | NOT FOUND | UNVERIFIED | NOT FOUND | NOT FOUND | UNVERIFIED |
+| OpenRouter | IMPLEMENTED | IMPLEMENTED | IMPLEMENTED | IMPLEMENTED (compatible) | IMPLEMENTED (compatible) | UNVERIFIED | NOT FOUND | NOT FOUND | UNVERIFIED |
+| Ollama | IMPLEMENTED (compatible, local; Ollama Cloud provider) | IMPLEMENTED (local and cloud) | NOT FOUND | IMPLEMENTED (`ollama`) | IMPLEMENTED (compatible) | IMPLEMENTED | NOT FOUND | IMPLEMENTED | UNVERIFIED |
+| vLLM | IMPLEMENTED (compatible) | IMPLEMENTED | NOT FOUND | IMPLEMENTED (compatible) | IMPLEMENTED (compatible) | UNVERIFIED | NOT FOUND | NOT FOUND | UNVERIFIED |
+| LM Studio | IMPLEMENTED | IMPLEMENTED | NOT FOUND | IMPLEMENTED (compatible) | IMPLEMENTED (compatible) | UNVERIFIED | NOT FOUND | IMPLEMENTED | UNVERIFIED |
+
+OpenFang's README states the shape directly: three native drivers (Anthropic, Gemini,
+OpenAI-compatible) "route to 27 providers". Claude Code reaches Claude models only, on
+Anthropic, Bedrock, Vertex AI, Microsoft Foundry and LLM gateways. OpenLegion's "100+
+providers via LiteLLM" is a library's breadth, not counted beyond the ten it names. OpenHands
+says "use with any LLM"; its model layer is outside the repository pinned in §4.
+
+**Hosted vendors** that DireWolf names as M7 targets, and where a snapshot reaches them:
+
+| Vendor | Reached at the snapshot by |
+|---|---|
+| Groq | OpenClaw (`groq.md`); OpenFang; OpenLegion; Hermes (a documented compatible endpoint) |
+| Mistral | OpenClaw (`mistral.md`); OpenFang; Hermes (a documented compatible endpoint) |
+| Cohere | OpenClaw (`cohere.md`); OpenFang |
+| DeepSeek | Hermes (`deepseek`); OpenClaw; OpenFang; OpenLegion |
+| xAI | Hermes (`xai`, Responses API); OpenClaw; OpenFang; OpenLegion |
+| Together AI | OpenClaw; OpenFang; Hermes and NEAR AI/IronClaw (compatible endpoint) |
+| Fireworks AI | Hermes (`fireworks`); OpenClaw; OpenFang; NEAR AI/IronClaw (compatible endpoint) |
+| Cerebras | OpenClaw; OpenFang; Hermes (a documented compatible endpoint) |
+| SambaNova | OpenFang |
+| Perplexity | OpenClaw; OpenFang; Hermes (a documented compatible endpoint) |
+
+Also present in the snapshots and **not** named as DireWolf targets: NVIDIA NIM, SGLang and
+llama.cpp's server, LiteLLM as a proxy, regional platforms (Qwen, Moonshot, MiniMax, Z.ai and
+others), hosted gateways, and logins that reuse a consumer subscription (GitHub Copilot,
+ChatGPT, Claude). M7 can reach a compatible one through a reviewed profile; none is a
+commitment.
+
+**Not counted as verified:** OpenLegion's providers beyond the ten it names; any provider of
+OpenHands; Azure in Codex, absent from its built-in table; and a self-hosted Hugging Face
+deployment in any compared runtime — the two that reach Hugging Face use only its hosted
+router. **Current vendor documentation** (Hugging Face, read 2026-10-07, not a snapshot):
+Text Generation Inference serves an OpenAI-compatible Messages API at
+`/v1/chat/completions`, self-hosted and on Inference Endpoints; the Inference Providers
+router chooses the serving backend on its own side — fastest by default, cheapest or a
+preferred or named provider on request — and fails over automatically.
+
+**DireWolf's planning conclusion.** M7 does not trail the serious agent runtimes on provider
+breadth ([ROADMAP.md](ROADMAP.md) M7): native adapters where protocol semantics require
+them (Anthropic, OpenAI, Gemini); the major cloud model platforms (Bedrock, Vertex AI,
+Azure); **one** reviewed OpenAI-compatible adapter whose per-service profiles cover the
+compatible vendors above; first-class local and self-hosted serving (Ollama, vLLM, LM
+Studio); and Hugging Face explicitly, hosted and self-hosted.
+
+**Breadth does not override the security model.** No provider SDK or adapter gets authority
+or a privileged network path; credentials stay with the authority and are injected only at
+the origin they are bound to (the failure class of OpenClaw's
+[GHSA-vhpg-cq3w-v8p9](https://github.com/openclaw/openclaw/security/advisories/GHSA-vhpg-cq3w-v8p9),
+§11); the privacy class is the authority's; and routing or failover — DireWolf's own, or an
+aggregator's such as Hugging Face's router above — never widens what a run may reach. An
+aggregator's origin is authorised as an aggregator: whatever it forwards to counts as
+reached.
 
 ---
 
@@ -739,6 +827,12 @@ Each has a ledger entry in §17 and a roadmap item.
 | G6 | Recall-loop prevention and unattended-session gating in memory | OpenClaw | M13 |
 | G7 | Domain fronting through an allowlisted shared host stated as a residual of the opaque tunnel | Claude Code's documented limits | M5 (documented now) |
 
+### Adopted by the provider-coverage pass (2026-10-07)
+
+| # | Idea | Sources | Owner |
+|---|---|---|---|
+| G17 | Provider breadth by protocol family — native, cloud platforms, one reviewed OpenAI-compatible adapter, local and self-hosted, Hugging Face named — behind the one kernel path (§7a) | Hermes Agent, OpenClaw, OpenFang, NEAR AI/IronClaw, OpenLegion, Codex, Claude Code; the project owner | M7 |
+
 ### Studied and rejected
 
 See §16.
@@ -855,6 +949,17 @@ Every candidate idea from the research, with its decision. Fields: **SOURCE** ·
 - DECISION: **DEFER** to M28: key-possession workload identity; permits bound to the canonical action digest, the epoch, the broker identity and an expiry, with a durable nonce; encrypted host–worker transport; multi-host authority state considered there, not before.
 - DOCS TO UPDATE: ROADMAP post-V1 table.
 
+**G17 — Provider breadth** (provider-coverage pass, 2026-10-07)
+- SOURCE: Hermes Agent, OpenClaw, OpenFang, NEAR AI/IronClaw, OpenLegion, Codex, Claude Code (§7a); the project owner (Hugging Face).
+- IDEA: reach the native vendors, the cloud model platforms, the OpenAI-compatible vendors and local or self-hosted serving, Hugging Face included.
+- DIREWOLF CURRENT STATE: no provider exists (M7). The plan named Anthropic and an OpenAI-compatible adapter, with Ollama as the only named local provider.
+- REAL GAP?: **Yes**, in the plan: the serious runtimes reach the cloud platforms (Bedrock, Vertex AI, Azure), Hugging Face and several local servers, which the M7 plan did not name.
+- DECISION: **ADOPT WITH DIFFERENT DESIGN.** Breadth through protocol families behind one kernel path ([ADR-0020](adr/0020-provider-request-path-v2.md)) — native adapters only where semantics differ, one reviewed OpenAI-compatible adapter with declarative per-service profiles, cloud-platform authentication as a kernel-side credential mechanism — never through a provider SDK, a per-vendor privileged path or routing that widens a run's reach (§7a).
+- TARGET MILESTONE: **M7.**
+- WHY: model choice is intelligence, not authority; a runtime that reaches fewer models than its peers is not used, and one that buys breadth with an SDK in the credential path has given its authority away.
+- ACCEPTANCE EVIDENCE: ROADMAP M7 acceptance — switching provider or model across families changes nothing that decides authority; `LOCAL_ONLY` reaches no remote vendor, aggregator or cloud platform; credentials only at their bound origin, never across a redirect; metering agrees with provider-reported usage; streams canonicalise; failover stays inside the allowed upstreams; one remote native, one compatible and one local provider work, and the Hugging Face and Ollama paths are exercised, from recorded contract fixtures in ordinary CI.
+- DOCS TO UPDATE: ROADMAP M7; PRODUCT_SPEC §5; ARCHITECTURE §1; MODEL_ROUTING §7; README; `architecture.toml` TX001.
+
 **G9–G16 — ideas already addressed** (no roadmap change)
 
 | # | Source | Idea | DireWolf state | Decision |
@@ -882,6 +987,7 @@ Every candidate idea from the research, with its decision. Fields: **SOURCE** ·
 | G6 memory recall loops, session gating | ADOPT WITH DIFFERENT DESIGN | M13 | [MEMORY.md](MEMORY.md) §5, [EVALS.md](EVALS.md) §3 |
 | G7 domain fronting residual | ADOPT (documentation) | M5 adversarial | [NETWORK_SECURITY.md](NETWORK_SECURITY.md) §1, [THREAT_MODEL.md](THREAT_MODEL.md) §9 |
 | G8 workload identity, remote permits | DEFER | M28 note | — |
+| G17 provider breadth (2026-10-07) | ADOPT WITH DIFFERENT DESIGN | M7 deliverables, acceptance, adversarial | [PRODUCT_SPEC.md](PRODUCT_SPEC.md) §5, [ARCHITECTURE.md](ARCHITECTURE.md) §1, [MODEL_ROUTING.md](MODEL_ROUTING.md) §7, [README](../README.md), `architecture.toml` TX001 |
 
 Nothing in this re-baseline changes production code, the protocol, or an accepted ADR.
 

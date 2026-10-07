@@ -12,7 +12,7 @@
 | G1 Bounded autonomy | An agent can run for hours without supervision *and* a reviewer can state exactly what authority it held | Every run has a printable effective-capability set, frozen at admission |
 | G2 Structural containment | A fully compromised model or runtime process does not compromise the host | Security eval suite: 30+ escape probes, all contained |
 | G3 Model agnosticism | Swapping providers changes config, not core code | `grep -r <provider> core/` returns nothing outside `providers/` |
-| G4 Local-first | Full core function with no cloud service other than a model endpoint; local models make even that optional | `direwolf` works air-gapped with Ollama |
+| G4 Local-first | Full core function with no cloud service other than a model endpoint; local models make even that optional | `direwolf` works air-gapped against a local model server — Ollama, or another local or self-hosted provider ([ROADMAP.md](ROADMAP.md) M7) |
 | G5 Inspectability | Any action can be explained after the fact: why it ran, what it saw, who allowed it | Replay reconstructs context manifests and policy decisions |
 | G6 Recoverability | Process death is a pause, not a loss | `kill -9` mid-run; resume continues, or fails closed with a stated reason |
 | G7 Measurability | Superiority claims are evidence-backed or not made | [BENCHMARKS.md](BENCHMARKS.md) methodology, published raw results |

@@ -253,6 +253,33 @@ def _tail(text: str) -> str:
     return text[-MAX_ARTIFACT:]
 
 
+# libtest's report of a panic: `thread '<test>' (<tid>) panicked at <place>:`,
+# then the message on the next line.
+_PANIC = re.compile(r"^thread '(?P<test>[^']*)'(?: \(\d+\))? panicked at (?P<place>\S+):$")
+
+
+def _panics(output: str) -> str:
+    """Each panic in a cargo run's output: the test, the place and the first
+    line of the message. Diagnostics only -- the verdict is the exit status."""
+    lines = output.splitlines()
+    found: list[str] = []
+    for index, line in enumerate(lines):
+        match = _PANIC.match(line.strip())
+        if match:
+            message = lines[index + 1].strip() if index + 1 < len(lines) else ""
+            found.append(f"{match['test']} panicked at {match['place']}: {message}")
+    return "; ".join(found)
+
+
+def _failed(what: str, run: _Cargo) -> str:
+    """The reason a failed cargo run gives: its exit status and, when libtest
+    printed any, every panic, so that a hosted log names the cause and not
+    only an exit code."""
+    reason = f"{what} failed (exit {run.returncode})"
+    panics = _panics(run.output)
+    return f"{reason}: {panics}"[:MAX_ARTIFACT] if panics else reason
+
+
 def _transport(run: _Cargo, expected: frozenset[str], suites: set[str]) -> Outcome:
     """Judge real-process evidence: every expected case present, contained,
     audited where it said it would be, and served by the real binary."""
@@ -260,7 +287,7 @@ def _transport(run: _Cargo, expected: frozenset[str], suites: set[str]) -> Outco
         return Outcome(
             Status.FAIL,
             {"cases": 0.0},
-            f"the real-process suite failed (exit {run.returncode})",
+            _failed("the real-process suite", run),
             {"output": _tail(run.output)},
         )
     try:
@@ -357,7 +384,7 @@ def policy_denies_by_default(ctx: Context) -> Outcome:
         return Outcome(
             Status.FAIL,
             {},
-            f"the evidence test failed (exit {run.returncode})",
+            _failed("the evidence test", run),
             {"output": _tail(run.output)},
         )
     try:

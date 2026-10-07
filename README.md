@@ -56,7 +56,9 @@ until M5.
   prepare one and nothing but the assurance probe runs in it; every action still runs on
   the host, and policy is told so;
 - **approvals and budgets** (M6) — a decision that would need approval is a denial;
-- **model providers**, Ollama among them (M7);
+- **model providers** (M7) — native, cloud-platform, OpenAI-compatible and local or
+  self-hosted families, Hugging Face and Ollama among them, every one behind the
+  authority's model egress;
 - the **agent runtime** — the loop, tools an agent calls, context, memory, skills,
   subagents, MCP (M8–M16) — so the runtime's own confinement is not built either (M9);
 - the full **CLI** (M17): `direwolf` supports `--version` and `doctor`, and nothing else;

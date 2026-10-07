@@ -105,7 +105,7 @@ $ direwolf run authority run_01J8...
 |---|---|
 | **Kernel (Rust)** | Policy engine, capability broker with ⊑ lattice, approval registry, budget ledger, secret broker, fs broker (fd-relative), exec broker, egress proxy, model egress with metering, OCI sandbox supervisor, hash-chained audit |
 | **Runtime (Python)** | Agent loop + run state machine, wait sets, context engine + manifests + compaction, tool registry (18 core tools — [TOOL_SYSTEM.md](TOOL_SYSTEM.md) §3), subagents with attenuation, task DAG (sequence/fan-out/join), memory (episodic + semantic, FTS5), artifacts, event log |
-| **Providers** | Anthropic; OpenAI-compatible (covers OpenRouter, Ollama, vLLM, LM Studio) |
+| **Providers** | Broad, by protocol family (widened by the owner, 2026-10-07; scope and acceptance in [ROADMAP.md](ROADMAP.md) M7): native Anthropic, OpenAI and Google Gemini; the AWS Bedrock, Google Vertex AI and Azure model platforms; one reviewed OpenAI-compatible adapter with per-service profiles (OpenRouter, Hugging Face, Groq, Mistral and others); local and self-hosted serving — Ollama first-class, vLLM, LM Studio, self-hosted Hugging Face. Every one behind the same kernel model egress; provider choice changes intelligence, never authority |
 | **Routing** | Rule-based, policy-constrained, cost/health aware |
 | **Interface** | `direwolf` CLI — chat, run, agent, policy (including `policy diff`), grant, audit, memory, artifact, doctor (including `doctor --sandbox`), `security demo`, export |
 | **Detached runs** | `direwolf run --detach` with a pending-approval queue (`direwolf approve --list`), local desktop notification, and unattended policy semantics. The minimum viable unattended path, without the channel surface. |

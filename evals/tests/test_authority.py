@@ -355,6 +355,37 @@ def test_an_uncontained_case_fails_the_eval(tmp_path: Path) -> None:
     assert "NOT CONTAINED" in judged.reason
 
 
+def test_a_failed_suite_names_each_panic_and_is_still_only_a_failure() -> None:
+    """A failing real-process suite says which test panicked, where and why,
+    so that a hosted log names the cause -- and the verdict is unchanged."""
+    output = "\n".join(
+        [
+            "test linux::storms_of_connections_and_replays_change_nothing ... FAILED",
+            "",
+            "thread 'linux::storms_of_connections_and_replays_change_nothing' (1133) panicked "
+            "at crates/dwkd-authority/tests/transport_support/mod.rs:346:22:",
+            "expected a message, got Closed",
+            "note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace",
+        ]
+    )
+    judged = authority._transport(
+        authority._Cargo(101, output), authority.HOSTILE_CASES, {"hostile"}
+    )
+    assert judged.status is Status.FAIL
+    assert judged.metrics == {"cases": 0.0}
+    assert judged.reason == (
+        "the real-process suite failed (exit 101): "
+        "linux::storms_of_connections_and_replays_change_nothing panicked at "
+        "crates/dwkd-authority/tests/transport_support/mod.rs:346:22: "
+        "expected a message, got Closed"
+    )
+    unexplained = authority._transport(
+        authority._Cargo(101, "error: could not compile"), authority.HOSTILE_CASES, {"hostile"}
+    )
+    assert unexplained.status is Status.FAIL
+    assert unexplained.reason == "the real-process suite failed (exit 101)"
+
+
 # --- the product ---------------------------------------------------------------
 
 

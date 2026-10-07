@@ -110,8 +110,11 @@ Because the kernel performs the call, cost control is structural: there is no un
 | Policy (admission) | Decides the run's `privacy_class` and `allowed_upstreams` |
 | Router | **Proposes** within those constraints |
 | Kernel model egress | **Enforces** — holds the credential, refuses disallowed origins |
+| Upstream aggregator or cloud platform | **Routes again, on its own side** — OpenRouter, Hugging Face's router or a platform's model catalogue picks the backend. The kernel authorises the aggregator's origin, and policy counts every backend it may forward to as reached: never `LOCAL_ONLY`, and a backend preference sent to it narrows a request without authorising anything |
 
 A wrong router is a quality problem. A compromised router is still not a confidentiality problem.
+
+Provider breadth ([ROADMAP.md](ROADMAP.md) M7) adds candidates to step 1's eligible set (§3); it never adds a way around it. Fallback (§4) walks only that set, so health-driven failover is constrained routing, never permission to try any available vendor, and a provider family changes which model answers, never what the run may reach.
 
 ## 8. Testing
 

@@ -42,6 +42,7 @@ mod transport_support;
 #[cfg(target_os = "linux")]
 mod linux {
     use std::io::Write as _;
+    use std::net::Shutdown;
     use std::time::{Duration, Instant};
 
     use dwk_proto::dwkp::DwkpBody;
@@ -49,7 +50,9 @@ mod linux {
     use dwkd_authority::state::verify_audit_against_store;
 
     use super::state_support::{acquire_msg, admit_simple, heartbeat_msg, session};
-    use super::transport_support::{Client, Fixture, PROMPT, Received, Server, evidence};
+    use super::transport_support::{
+        Client, Fixture, PROMPT, Received, Server, evidence, handshake,
+    };
 
     fn served(fx: &Fixture, n: u64) -> Duration {
         let started = Instant::now();
@@ -59,6 +62,52 @@ mod linux {
             panic!("a well-behaved peer is served")
         };
         started.elapsed()
+    }
+
+    /// A well-behaved peer served once the server has a slot for it. A
+    /// connection the server has no room for is closed before a byte is read
+    /// — the bound working — so a peer that is closed unanswered connects
+    /// again, until `PROMPT`. Anything else fails at once. A connection's slot
+    /// is released when its thread ends, a moment after the peer sees the
+    /// stream end, so no fixed pause can promise one is free.
+    fn served_once_a_slot_frees(fx: &Fixture, n: u64) -> Duration {
+        let started = Instant::now();
+        loop {
+            let mut client = Client::connect(&fx.socket());
+            let _ = client.raw(&handshake(1, 1, 1).to_frame().unwrap());
+            match client.recv(PROMPT) {
+                Received::Closed => {
+                    assert!(
+                        started.elapsed() < PROMPT,
+                        "no slot freed within {PROMPT:?}"
+                    );
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                Received::Message(answer) => {
+                    let DwkpBody::HandshakeAccepted(_) = &answer.body else {
+                        panic!("handshake not accepted: {answer:?}")
+                    };
+                    let DwkpBody::LeaseGrant(_) =
+                        client.call(&acquire_msg(&session(900_000 + n))).body
+                    else {
+                        panic!("a well-behaved peer is served")
+                    };
+                    return started.elapsed();
+                }
+                Received::TimedOut => panic!("neither answered nor closed within {PROMPT:?}"),
+            }
+        }
+    }
+
+    /// End `client`'s stream and wait for the server to end it too: then the
+    /// server is done with the connection, served to its clean end or refused
+    /// for want of a slot. Either way it is closed unanswered.
+    fn ended_by_the_server(mut client: Client) {
+        let _ = client.stream().shutdown(Shutdown::Write);
+        assert!(
+            client.recv(PROMPT).is_closed(),
+            "the server ends a connection whose peer ended it"
+        );
     }
 
     #[test]
@@ -75,11 +124,7 @@ mod linux {
         // One more: accepted by the kernel, identified, then refused by the
         // server before a byte is read — no holder, no answer.
         let mut extra = Client::connect(&fx.socket());
-        let _ = extra.raw(
-            &super::transport_support::handshake(1, 1, 1)
-                .to_frame()
-                .unwrap(),
-        );
+        let _ = extra.raw(&handshake(1, 1, 1).to_frame().unwrap());
         assert!(extra.recv(PROMPT).is_closed());
         let deadline = Instant::now() + PROMPT;
         while fx.events("transport.connection_refused").is_empty() {
@@ -87,9 +132,8 @@ mod linux {
             std::thread::sleep(Duration::from_millis(20));
         }
         // A slot frees when a connection ends, and a new peer is served.
-        drop(held.pop());
-        std::thread::sleep(Duration::from_millis(200));
-        assert!(served(&fx, 1) < PROMPT);
+        ended_by_the_server(held.pop().unwrap());
+        assert!(served_once_a_slot_frees(&fx, 1) < PROMPT);
         drop(held);
         evidence("stress", "connection-limit", "resource-bound", true, true);
     }
@@ -186,12 +230,37 @@ mod linux {
 
     #[test]
     fn storms_of_connections_and_replays_change_nothing() {
-        let fx = Fixture::new("s-storm");
+        // Connect and vanish, many times and all at once, on a server of its
+        // own. More arrive than there are slots: those without one are
+        // refused, the bound working, and the server may still be full when
+        // the last client has gone. So the storm is over only when the server
+        // has ended every one of its connections, and nothing it leaves behind
+        // can decide what the flood and the replays below meet.
+        let storm = Fixture::new("s-storm");
+        let storm_server = Server::start(&storm.args(&[]));
+        let vanished: Vec<Client> = (0..300)
+            .map(|_| {
+                // Gone at once, as before; only the read side is kept, to see
+                // the server end the connection.
+                let mut client = Client::connect(&storm.socket());
+                let _ = client.stream().shutdown(Shutdown::Write);
+                client
+            })
+            .collect();
+        vanished.into_iter().for_each(ended_by_the_server);
+        // After it a new peer is served, a clean end of stream was not a
+        // violation, and the chain is intact. Serving that peer took the
+        // worker past every record the storm's connections had queued.
+        served_once_a_slot_frees(&storm, 5);
+        assert!(
+            storm.events("transport.protocol_violation").is_empty(),
+            "a clean end of stream is a disconnect, not a violation"
+        );
+        drop(storm_server);
+        verify_audit_against_store(&storm.state()).expect("the chain is intact after the storm");
+
+        let fx = Fixture::new("s-flood");
         let server = Server::start(&fx.args(&[]));
-        // Connect and vanish, many times: clean ends of stream, not violations.
-        for _ in 0..300 {
-            drop(Client::connect(&fx.socket()));
-        }
         // Garbage, many times: each connection closed and audited, and the
         // audit bounded by the rate limit.
         for _ in 0..80 {
@@ -228,7 +297,8 @@ mod linux {
         assert_eq!(fx.events("run.admitted").len(), 1);
         drop(client);
         drop(server);
-        verify_audit_against_store(&fx.state()).expect("the chain is intact after the storm");
+        verify_audit_against_store(&fx.state())
+            .expect("the chain is intact after the flood and the replays");
         evidence(
             "stress",
             "connect-disconnect-storm",

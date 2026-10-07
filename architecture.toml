@@ -155,13 +155,31 @@ patterns = [
     '(?i)\bollama\b',
     '(?i)\bmistral\b',
     '(?i)\bcohere\b',
+    # The rest of the targets M7 names (docs/ROADMAP.md M7, 2026-10-07).  A name
+    # that is also an ordinary word is matched only with its vendor's
+    # qualifier: "together", "vertex" and "perplexity" are not provider names.
+    '(?i)\bvertex[\s._-]*ai\b',
+    '(?i)\bazure\b',
+    '(?i)\bhugging[\s._-]*face\b',
+    '(?i)\bopenrouter\b',
+    '(?i)\bgroq\b',
+    '(?i)\bdeepseek\b',
+    '(?i)\bxai\b',
+    '(?i)\btogether[\s._-]*ai\b',
+    '(?i)\bfireworks[\s._-]*ai\b',
+    '(?i)\bcerebras\b',
+    '(?i)\bsambanova\b',
+    '(?i)\bperplexity[\s._-]*ai\b',
+    '(?i)\bvllm\b',
+    '(?i)\blm[\s._-]*studio\b',
 ]
 reason = """
 Goal G3, model agnosticism: swapping providers changes configuration, not core
 code.  The stated measure is that a search for a provider name returns nothing
 outside the adapter package (docs/ARCHITECTURE.md §1).  Checked as text rather
 than as imports because the leak that matters is usually a string literal or a
-branch on a model name, not an import.
+branch on a model name, not an import.  Every provider M7 names as a target is
+a name here (tests/architecture/test_boundaries.py proves each one matches).
 """
 
 [[text_rules]]

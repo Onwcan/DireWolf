@@ -15,6 +15,7 @@ Scope note: these rules are development hygiene, not containment. See
 
 from __future__ import annotations
 
+import re
 import tomllib
 from pathlib import Path
 
@@ -162,6 +163,49 @@ def test_provider_names_outside_the_adapter_package_are_rejected(
 ) -> None:
     """Goal G3: swapping providers changes configuration, not core code."""
     assert "TX001-provider-names-confined" in violation_rules
+
+
+def test_every_provider_m7_names_is_a_confined_name() -> None:
+    """TX001's patterns are G3's measure, so a provider M7 names as a target
+    (docs/ROADMAP.md M7) that no pattern matches could be branched on in core
+    code unseen. Each target, spelled as code spells it, must match; the
+    ordinary words the qualified patterns are written to spare must not."""
+    raw = tomllib.loads(RULES.read_text(encoding="utf-8"))
+    (rule,) = [r for r in raw["text_rules"] if r["id"] == "TX001-provider-names-confined"]
+    patterns = [re.compile(pattern) for pattern in rule["patterns"]]
+    targets = [
+        "anthropic",
+        "openai",
+        "gemini",
+        "bedrock",
+        "vertex_ai",
+        "Vertex AI",
+        "azure",
+        "huggingface",
+        "hugging_face",
+        "Hugging Face",
+        "openrouter",
+        "groq",
+        "mistral",
+        "deepseek",
+        "xai",
+        "together_ai",
+        "fireworks-ai",
+        "cerebras",
+        "sambanova",
+        "perplexity_ai",
+        "cohere",
+        "ollama",
+        "vllm",
+        "lm_studio",
+        "lmstudio",
+        "LM Studio",
+    ]
+    unmatched = [name for name in targets if not any(p.search(name) for p in patterns)]
+    assert not unmatched, f"M7 targets TX001 does not confine: {unmatched}"
+    ordinary = ["work together", "a graph vertex", "the corpus perplexity", "fireworks"]
+    flagged = [text for text in ordinary if any(p.search(text) for p in patterns)]
+    assert not flagged, f"ordinary words TX001 would reject: {flagged}"
 
 
 def test_a_new_crate_cannot_bridge_the_two_daemons(violation_rules: list[str]) -> None:
