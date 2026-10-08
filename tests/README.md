@@ -116,12 +116,16 @@ and real age files (`secret/backend/tests.rs`), redaction
 crash campaign R1–R10, output redaction) against an in-process broker stand-in
 that reads the pipe — labelled so. **Real broker:**
 `crates/dwkd-broker/tests/secret_primitives.rs` sends the released broker
-`secret_egress` and `secret_process_start` with real pipes and real targets,
+credential exchanges (`broker.http_credential_exchange`, M5c — M4e's
+`secret_egress` is retired) and `secret_process_start` with real pipes and
+real targets,
 and reads its memory and the targets' `/proc` afterwards. **Real processes:**
 `crates/dwkd-authority/tests/secret_evidence.rs` re-executes its own test
 binary as a separate runtime that reads files holding live values through
 the released daemons, receives placeholders, and has its memory scanned, hosts the authority library in a
-child against the real broker for mode A, and checks the hardened daemons'
+child against the real broker for mode A — and, for an echoed credential (M5c, ADR-0050 D11),
+once per way it can come back, with fresh daemons, scanning both for the value and its hex
+form and reporting what the broker's libraries leave as measured — and checks the hardened daemons'
 core limit and dumpable flag; its three-identity and core-file tests are
 `#[ignore]`d unless the task selects them (`DW_BROKER_AS`, `DW_PEER_AS`,
 `DW_M4E_CORE_EVIDENCE`), and use `sudo` only to stage binaries, read memory

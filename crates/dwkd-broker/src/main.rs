@@ -27,8 +27,9 @@
 //! authority's uid, and it speaks only the private protocol
 //! ([`dwk_proto::brokerp`]), which no cognition-side code can name.
 //!
-//! # Status: M5b — `PROXY_ONLY` egress; M5a — execution environments; M4e — secret
-//! handoff; M4d — process execution, the filesystem tools
+//! # Status: M5c — `net.http` (in progress); M5b — `PROXY_ONLY` egress; M5a —
+//! execution environments; M4e — secret handoff; M4d — process execution,
+//! the filesystem tools
 //!
 //! [ADR-0043]: one private Unix-domain listener (`listener`), one exchange per
 //! connection (`exchange`): a hello naming a fresh channel, one authorisation
@@ -57,8 +58,9 @@
 //! [ADR-0046] adds secrets, one value per invocation and never a store: the
 //! authority hands the broker the read end of a pipe it filled and closed
 //! (`secret`), which the broker reads once into a buffer it zeroes.
-//! `secret_egress` renders a mode A header and drops it — the consumer is
-//! M5's `net.http` — and `secret_process_start` injects the value into a
+//! Mode A's header is composed only into a `net.http` hop's request
+//! (`http::render`, M5c; M4e's render-and-drop `secret_egress` is retired),
+//! and `secret_process_start` injects the value into a
 //! launched target's environment or descriptor 3, a primitive no production
 //! authority issues before M5's sandbox. A secret launch's output is redacted
 //! while it is drained. The broker has no keychain, age or metadata code
@@ -81,11 +83,25 @@
 //! terminates no TLS, holds no CA and injects nothing. `--allow-evidence-egress`
 //! swaps in the evidence's fixture resolver, loudly; production has none.
 //!
+//! [ADR-0050] adds `net.http`'s HTTPS client (`http`): one resolution per
+//! host per request and one exchange per hop the authority authorised, to the
+//! addresses the guard pinned — re-judged here — over `rustls` with
+//! verification always on and Mozilla's roots compiled in, rendered and read
+//! by `ureq-proto`'s framing with DireWolf's stricter checks, every bound and
+//! deadline the broker's own. It follows no redirect, re-resolves nothing,
+//! pools nothing and reads no proxy setting. Mode A's credential is composed
+//! into the one request it was authorised for, from a one-shot pipe, and
+//! scrubbed with it; an echo of it in the response is redacted before
+//! anything of the response is encoded. `--allow-evidence-trust` replaces the
+//! roots with a test authority, loudly, and only beside
+//! `--allow-evidence-egress`'s fixture resolver; production has none.
+//!
 //! [ADR-0044]: ../../../docs/adr/0044-m4c-filesystem-operations-plans-and-atomic-mutation.md
 //! [ADR-0045]: ../../../docs/adr/0045-m4d-process-execution-broker.md
 //! [ADR-0046]: ../../../docs/adr/0046-m4e-secret-handles-backends-injection-and-redaction.md
 //! [ADR-0047]: ../../../docs/adr/0047-m5a-oci-execution-environment-and-measured-assurance.md
 //! [ADR-0048]: ../../../docs/adr/0048-m5b-proxy-only-topology-and-connect-proxy.md
+//! [ADR-0050]: ../../../docs/adr/0050-m5c-kernel-performed-net-http-ssrf-redirects-and-credential-egress.md
 //!
 //! [ADR-0018]: ../../../docs/adr/0018-authority-broker-split.md
 //! [ADR-0043]: ../../../docs/adr/0043-m4b-private-broker-channel-and-brokered-fs-read.md
@@ -102,6 +118,8 @@ mod egress;
 mod exchange;
 #[cfg(target_os = "linux")]
 mod hardening;
+#[cfg(target_os = "linux")]
+mod http;
 // Off Linux the broker does not serve, so nothing names the wire types; the
 // manifest edge is acknowledged here for `unused_crate_dependencies`.
 #[cfg(not(target_os = "linux"))]
@@ -223,8 +241,8 @@ fn serve(config: &config::ServeConfig) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let proxies = match proxies(config, &place, own_uid) {
-        Ok(proxies) => proxies,
+    let (proxies, http) = match network(config, &place, own_uid) {
+        Ok(network) => network,
         Err(error) => {
             log(&format!("cannot serve: {error}"));
             return ExitCode::FAILURE;
@@ -265,20 +283,82 @@ fn serve(config: &config::ServeConfig) -> ExitCode {
         exchange::Effects {
             processes: &processes,
             sandbox: &sandbox,
+            http: &http,
         },
     );
     ExitCode::SUCCESS
 }
 
+/// The network side: one resolver for the CONNECT proxy and the HTTPS
+/// client — one deadline, one in-flight bound, one evidence fixture or none
+/// (ADR-0050 §6) — the proxies, and the client.
+#[cfg(target_os = "linux")]
+fn network(
+    config: &config::ServeConfig,
+    place: &listener::SocketPlace,
+    own_uid: u32,
+) -> Result<(std::sync::Arc<egress::proxy::Proxies>, http::Client), String> {
+    let resolver = resolver(config)?;
+    let proxies = proxies(config, place, own_uid, std::sync::Arc::clone(&resolver))?;
+    let http = http_client(config, resolver)?;
+    Ok((proxies, http))
+}
+
+/// The broker's one resolver: the host's — or, for the egress evidence only,
+/// a fixture's, said loudly.
+#[cfg(target_os = "linux")]
+fn resolver(config: &config::ServeConfig) -> Result<egress::resolve::Shared, String> {
+    Ok(match &config.evidence_egress {
+        None => std::sync::Arc::new(egress::resolve::SystemResolver),
+        Some(path) => {
+            let fixture = egress::resolve::FixtureResolver::load(path)
+                .map_err(|error| format!("the egress fixture: {error}"))?;
+            log(
+                "EVIDENCE EGRESS: the CONNECT proxy and the net.http client resolve names from a \
+                 fixture file and may reach the loopback addresses it names \
+                 (--allow-evidence-egress); this is the M5b and M5c evidence harnesses' \
+                 resolver, never a production one",
+            );
+            std::sync::Arc::new(fixture)
+        }
+    })
+}
+
+/// The `net.http` client (M5c, ADR-0050 §9): Mozilla's roots — or, for the
+/// evidence only, its own test authority instead, said loudly.
+#[cfg(target_os = "linux")]
+fn http_client(
+    config: &config::ServeConfig,
+    resolver: egress::resolve::Shared,
+) -> Result<http::Client, String> {
+    let trust = match &config.evidence_trust {
+        None => http::tls::production()?,
+        Some(path) => {
+            let trust = http::tls::evidence(path)?;
+            log(
+                "EVIDENCE TRUST: the net.http client trusts the certificates in a test file \
+                 INSTEAD OF Mozilla's roots (--allow-evidence-trust); this is the M5c evidence \
+                 harness's trust anchor, never a production one",
+            );
+            trust
+        }
+    };
+    Ok(http::Client::new(
+        resolver,
+        trust,
+        http::Deadlines::PRODUCTION,
+    ))
+}
+
 /// The `PROXY_ONLY` proxies (M5b, ADR-0048), in the broker's own directory,
-/// with the host's resolver — or, for the egress evidence only, a fixture's,
-/// said loudly. The evidence topology is announced here too: both are the
-/// sandbox's evidence-only acknowledgements.
+/// over the broker's one resolver. The evidence topology is announced here
+/// too: both are the sandbox's evidence-only acknowledgements.
 #[cfg(target_os = "linux")]
 fn proxies(
     config: &config::ServeConfig,
     place: &listener::SocketPlace,
     own_uid: u32,
+    resolver: egress::resolve::Shared,
 ) -> Result<std::sync::Arc<egress::proxy::Proxies>, String> {
     if config.evidence_topology_permitted {
         log(
@@ -287,19 +367,6 @@ fn proxies(
              production one",
         );
     }
-    let resolver: egress::resolve::Shared = match &config.evidence_egress {
-        None => std::sync::Arc::new(egress::resolve::SystemResolver),
-        Some(path) => {
-            let fixture = egress::resolve::FixtureResolver::load(path)
-                .map_err(|error| format!("the egress fixture: {error}"))?;
-            log(
-                "EVIDENCE EGRESS: the CONNECT proxy resolves names from a fixture file and may \
-                 reach the loopback addresses it names (--allow-evidence-egress); this is the \
-                 M5b evidence harness's resolver, never a production one",
-            );
-            std::sync::Arc::new(fixture)
-        }
-    };
     egress::proxy::Proxies::new(
         place.dir().join("egress"),
         own_uid,
@@ -341,6 +408,7 @@ fn help() -> String {
          USAGE:\n    \
              {NAME} serve --socket <PATH> --authority-uid <UID> [--allow-shared-authority-uid] [--allow-dumpable]\n    \
                               [--allow-evidence-topology] [--allow-evidence-egress <FILE>]\n    \
+                              [--allow-evidence-trust <PEM>]\n    \
              {NAME} [-V | --version] [-h | --help]\n\
          \n\
          OPTIONS:\n    \
@@ -349,7 +417,8 @@ fn help() -> String {
              --allow-shared-authority-uid    permit the authority to be the broker's own uid (development only)\n    \
              --allow-dumpable                leave the process dumpable, its memory readable by its uid (development only)\n    \
              --allow-evidence-topology       permit NO_NETWORK execution environments (M5a evidence only)\n    \
-             --allow-evidence-egress <FILE>  resolve egress names from a fixture file (M5b evidence only)\n\
+             --allow-evidence-egress <FILE>  resolve egress names from a fixture file (M5b, M5c evidence only)\n    \
+             --allow-evidence-trust <PEM>    trust a test authority instead of Mozilla's roots; needs --allow-evidence-egress (M5c evidence only)\n\
          \n\
          STATUS: M4d - the filesystem tools (read, stat, list, search, write,\n\
          patch, move, delete) and process execution (start, status, kill) of the\n\
@@ -363,8 +432,11 @@ fn help() -> String {
          network, one relay in it, and an opaque CONNECT proxy (no TLS\n\
          termination, no CA, no credential) enforcing the grant, the IP guard,\n\
          one pinned resolution, server-name agreement and byte budgets.\n\
-         NO_NETWORK only for evidence. Linux only. No sandboxed workload and\n\
-         no net.http: M5c-M5e.\n",
+         NO_NETWORK only for evidence. M5c - net.http: one HTTPS exchange\n\
+         per authorised hop to the pinned addresses, re-judged, with TLS\n\
+         verification always on; no redirect followed, nothing re-resolved,\n\
+         pooled or proxied; a credential composed into its one request. Linux\n\
+         only. No sandboxed workload: M5d-M5e.\n",
         env!("CARGO_PKG_VERSION")
     )
 }

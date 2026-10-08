@@ -49,7 +49,15 @@ CARGO_TOOLS = {
 # The coverage-guided targets, grouped by the surface they attack, because the
 # two surfaces take different seeds: DWKP vectors are the wrong corpus for a
 # TOML parser and vice versa.
-PROTO_FUZZ_TARGETS = ("frame_decoder", "dwkp_decode", "canonical_roundtrip", "envelope_version")
+PROTO_FUZZ_TARGETS = (
+    "frame_decoder",
+    "dwkp_decode",
+    "canonical_roundtrip",
+    "envelope_version",
+    # M5c (ADR-0050 §16): the URL canonicaliser and the `Location` resolver.
+    "url_parse",
+    "location_resolve",
+)
 POLICY_FUZZ_TARGETS = ("policy_loader", "policy_evaluate")
 FUZZ_TARGETS = PROTO_FUZZ_TARGETS + POLICY_FUZZ_TARGETS
 # libFuzzer needs nightly. Pinned by date so a fuzz run is repeatable and a bump
@@ -1798,6 +1806,26 @@ SECRET_CASES = (
     ("authority-secret", "mode-a-authority-residue"),
     ("authority-secret", "mode-a-broker-residue"),
     ("authority-secret", "mode-a-durable-state-scan"),
+    # M5c D11 (ADR-0050 §§8, 20): an echoed credential, by the way it comes
+    # back -- the runtime's answer, the authority's process and the broker's
+    # own encoding clean (asserted); the broker's library buffers measured.
+    *(
+        ("authority-secret", f"mode-a-echo-{kind}{path}")
+        for path in (
+            "body",
+            "chunked-body",
+            "straddling-the-bound",
+            "past-the-bound",
+            "kept-header",
+            "dropped-header",
+            "location",
+            "malformed",
+            "truncated",
+        )
+        for kind in ("", "broker-library-residue-")
+    ),
+    ("authority-secret", "mode-a-echo-audited"),
+    ("authority-secret", "mode-a-echo-durable-state-scan"),
     ("authority-secret", "return-path-fs-read-live-value"),
     ("authority-secret", "return-path-binary-around-value"),
     ("authority-secret", "return-path-across-read-boundary"),
@@ -2866,6 +2894,425 @@ def task_sandbox_egress_evidence() -> None:
     uvrun("dwcheck", "closure", "--report")
 
 
+# --- M5c: kernel-performed net.http (ADR-0050) --------------------------------
+
+NET_EVIDENCE_PREFIX = "NET-EVIDENCE "
+
+# M5c's evidence (ADR-0050 §16). Each (suite, case) is printed by exactly one
+# test, after its assertions held; a missing one -- or one whose outcome says it
+# was not exercised -- fails the task. The suites, and what they are:
+#   broker-http               the broker's HTTPS client against REAL TLS origins
+#                             in its own process (rustls servers on loopback,
+#                             this run's PKI): rendering, framing, bounds,
+#                             certificates, deadlines, the credential's render,
+#                             the broker's own guard;
+#   authority-net-pipeline    the authority's per-hop state machine against a
+#                             FAKE broker: order, grants, per-address policy,
+#                             the guard again, redirects, budgets, taint,
+#                             obligations, outcomes, crash windows N1-N4. Not
+#                             transport evidence;
+#   authority-net-credential  mode A's consumer against a FAKE broker and REAL
+#                             keyring values: origin binding, a use per hop,
+#                             never across origins, a secret in a request,
+#                             echoes redacted;
+#   net-http                  the REAL broker binary, REAL local HTTPS origins,
+#                             the fixture resolver and the authority's library:
+#                             SSRF and DNS, HTTP and redirects, TLS, secrets
+#                             and residue, crashes, keys, budgets, the shipped
+#                             packs and taint.
+NET_HTTP_CASES = (
+    ("authority-net-credential", "credential-cross-origin-redirect"),
+    ("authority-net-credential", "credential-same-origin-redirect"),
+    ("authority-net-credential", "echoed-credential"),
+    ("authority-net-credential", "runtime-sets-credential-header"),
+    ("authority-net-credential", "secret-in-request-body"),
+    ("authority-net-credential", "secret-in-request-header"),
+    ("authority-net-credential", "secret-in-request-url"),
+    ("authority-net-pipeline", "broker-lost-after-send"),
+    ("authority-net-pipeline", "broker-refusal-before-send"),
+    ("authority-net-pipeline", "budget-bytes"),
+    ("authority-net-pipeline", "budget-never-refilled"),
+    ("authority-net-pipeline", "budget-origins"),
+    ("authority-net-pipeline", "budget-requests"),
+    ("authority-net-pipeline", "crash-N1-after-resolve"),
+    ("authority-net-pipeline", "crash-N2-after-intent"),
+    ("authority-net-pipeline", "crash-N3-after-exchange"),
+    ("authority-net-pipeline", "crash-N4-after-outcome"),
+    ("authority-net-pipeline", "final-denial-before-resolution"),
+    ("authority-net-pipeline", "guard-loopback-answer"),
+    ("authority-net-pipeline", "guard-metadata-ip-answer"),
+    ("authority-net-pipeline", "guard-mixed-answer"),
+    ("authority-net-pipeline", "idempotency-key-reused"),
+    ("authority-net-pipeline", "idempotency-one-namespace"),
+    ("authority-net-pipeline", "metadata-name-before-resolution"),
+    ("authority-net-pipeline", "no-resolution-without-grant"),
+    ("authority-net-pipeline", "obligation-max-output-bytes"),
+    ("authority-net-pipeline", "obligation-unenforceable"),
+    ("authority-net-pipeline", "order-guard-intent-exchange"),
+    ("authority-net-pipeline", "per-hop-reauthorisation-max-requests"),
+    ("authority-net-pipeline", "policy-per-pinned-address"),
+    ("authority-net-pipeline", "preview-without-address"),
+    ("authority-net-pipeline", "protocol-v4-net-http"),
+    ("authority-net-pipeline", "redirect-303-to-get"),
+    ("authority-net-pipeline", "redirect-307-with-body"),
+    ("authority-net-pipeline", "redirect-blocked-target"),
+    ("authority-net-pipeline", "redirect-cross-origin-headers"),
+    ("authority-net-pipeline", "redirect-downgrade"),
+    ("authority-net-pipeline", "redirect-loop"),
+    ("authority-net-pipeline", "redirect-metadata-name"),
+    ("authority-net-pipeline", "redirect-mixed-target"),
+    ("authority-net-pipeline", "redirect-not-followed"),
+    ("authority-net-pipeline", "redirect-policy-denied"),
+    ("authority-net-pipeline", "redirect-same-origin-pinned"),
+    ("authority-net-pipeline", "redirect-sixth-hop"),
+    ("authority-net-pipeline", "redirect-ungranted-host"),
+    ("authority-net-pipeline", "resolution-failed"),
+    ("authority-net-pipeline", "resolution-timeout"),
+    ("authority-net-pipeline", "runtime-credential-header"),
+    ("authority-net-pipeline", "taint-novel-destination"),
+    ("authority-net-pipeline", "taint-seen-destination"),
+    ("authority-net-pipeline", "url-digest-only-in-audit"),
+    ("authority-net-pipeline", "userinfo-and-literals"),
+    ("broker-http", "bad-chunk-size"),
+    ("broker-http", "body-past-bound-cut"),
+    ("broker-http", "broker-rejudges-pinned-addresses"),
+    ("broker-http", "close-delimited"),
+    ("broker-http", "credential-composed-in-broker"),
+    ("broker-http", "credential-header-injection-refused"),
+    ("broker-http", "echo-body-redacted-before-encoding"),
+    ("broker-http", "echo-header-dropped-whole"),
+    ("broker-http", "echo-in-a-broken-response"),
+    ("broker-http", "echo-straddling-the-bound"),
+    ("broker-http", "evidence-ca-under-production-trust"),
+    ("broker-http", "expired"),
+    ("broker-http", "gzip"),
+    ("broker-http", "head-parser-mutation"),
+    ("broker-http", "head-past-64-kib"),
+    ("broker-http", "header-bomb"),
+    ("broker-http", "http-1-0"),
+    ("broker-http", "http2-only-server"),
+    ("broker-http", "length-and-chunked"),
+    ("broker-http", "other-transfer-coding"),
+    ("broker-http", "pinned-request-rendered"),
+    ("broker-http", "redirect-not-followed-by-broker"),
+    ("broker-http", "response-parser-mutation"),
+    ("broker-http", "resolution-judged-whole"),
+    ("broker-http", "self-signed"),
+    ("broker-http", "slow-head"),
+    ("broker-http", "stalled-body"),
+    ("broker-http", "status-past-599"),
+    ("broker-http", "switching-protocols"),
+    ("broker-http", "tls-handshake-timeout"),
+    ("broker-http", "truncated-body"),
+    ("broker-http", "two-lengths"),
+    ("broker-http", "two-locations"),
+    ("broker-http", "untrusted-authority"),
+    ("broker-http", "wrong-name"),
+    ("net-http", "budget-redirect-hop"),
+    ("net-http", "budget-requests"),
+    ("net-http", "crash-after-exchange"),
+    ("net-http", "crash-after-intent"),
+    ("net-http", "crash-after-resolve"),
+    ("net-http", "credential-bound-origin"),
+    ("net-http", "credential-broker-residue-after-send"),
+    ("net-http", "credential-cross-origin-redirect"),
+    ("net-http", "credential-durable-state"),
+    ("net-http", "credential-echo-broker-residue"),
+    ("net-http", "credential-echo-redacted"),
+    ("net-http", "credential-port-confusion"),
+    ("net-http", "credential-same-origin-redirect"),
+    ("net-http", "credential-unbound-origin"),
+    ("net-http", "dns-rebinding-next-request"),
+    ("net-http", "dns-rebinding-pinned-within-request"),
+    ("net-http", "dns-resolution-failed"),
+    ("net-http", "dns-resolution-timeout"),
+    ("net-http", "https-get-pinned"),
+    ("net-http", "idempotency-key-reused"),
+    ("net-http", "origin-confusion-backslash"),
+    ("net-http", "origin-confusion-encoded-dot-segment"),
+    ("net-http", "origin-confusion-idna-label"),
+    ("net-http", "origin-confusion-port"),
+    ("net-http", "origin-confusion-trailing-dot"),
+    ("net-http", "origin-confusion-uppercase"),
+    ("net-http", "origin-confusion-userinfo"),
+    ("net-http", "plaintext-refused"),
+    ("net-http", "policy-balanced"),
+    ("net-http", "policy-power-internal-range"),
+    ("net-http", "policy-safe"),
+    ("net-http", "redirect-303-to-get"),
+    ("net-http", "redirect-307-with-body"),
+    ("net-http", "redirect-blocked-address"),
+    ("net-http", "redirect-cross-origin"),
+    ("net-http", "redirect-downgrade"),
+    ("net-http", "redirect-loop"),
+    ("net-http", "redirect-metadata-name"),
+    ("net-http", "redirect-mixed-address"),
+    ("net-http", "redirect-not-followed"),
+    ("net-http", "redirect-same-origin"),
+    ("net-http", "redirect-sixth-hop"),
+    ("net-http", "redirect-ungranted-origin"),
+    ("net-http", "response-101"),
+    ("net-http", "response-bad-chunk-size"),
+    ("net-http", "response-close-delimited"),
+    ("net-http", "response-encoded"),
+    ("net-http", "response-header-bomb"),
+    ("net-http", "response-length-and-chunked"),
+    ("net-http", "response-malformed-status"),
+    ("net-http", "response-never-answers"),
+    ("net-http", "response-past-the-bound"),
+    ("net-http", "response-set-cookie"),
+    ("net-http", "runtime-authorization-header"),
+    ("net-http", "runtime-cookie-header"),
+    ("net-http", "secret-in-request"),
+    ("net-http", "ssrf-6to4"),
+    ("net-http", "ssrf-ip-literal-decimal"),
+    ("net-http", "ssrf-ip-literal-dotted"),
+    ("net-http", "ssrf-ip-literal-hex"),
+    ("net-http", "ssrf-ip-literal-octal"),
+    ("net-http", "ssrf-ip-literal-v6"),
+    ("net-http", "ssrf-ipv4-mapped"),
+    ("net-http", "ssrf-ipv6-loopback"),
+    ("net-http", "ssrf-loopback-not-excepted"),
+    ("net-http", "ssrf-metadata-address"),
+    ("net-http", "ssrf-metadata-name"),
+    ("net-http", "ssrf-mixed-answer"),
+    ("net-http", "ssrf-nat64"),
+    ("net-http", "ssrf-private-answer"),
+    ("net-http", "ssrf-teredo"),
+    ("net-http", "ssrf-ungranted-host-not-resolved"),
+    ("net-http", "taint-novel-destination"),
+    ("net-http", "taint-seen-destination"),
+    ("net-http", "tls-expired"),
+    ("net-http", "tls-self-signed"),
+    ("net-http", "tls-test-authority-under-production-trust"),
+    ("net-http", "tls-untrusted-root"),
+    ("net-http", "tls-wrong-name"),
+)
+
+
+def require_net_evidence(output: str, cases: tuple[tuple[str, str], ...]) -> None:
+    """Every (suite, case) must have printed its NET-EVIDENCE line, exercised."""
+    if not cases:
+        raise TaskError("net.http evidence: zero cases required")
+    reported: set[tuple[str, str]] = set()
+    for line in output.splitlines():
+        at = line.find(NET_EVIDENCE_PREFIX)
+        if at < 0:
+            continue
+        try:
+            record = json.loads(line[at + len(NET_EVIDENCE_PREFIX) :])
+        except json.JSONDecodeError as exc:
+            raise TaskError(f"unreadable evidence line: {line[:200]}") from exc
+        if not isinstance(record, dict) or not record.get("outcome") or not record.get("suite"):
+            raise TaskError(f"malformed evidence line: {line[:200]}")
+        if str(record["outcome"]).lower().startswith("not-exercised"):
+            continue
+        reported.add((str(record["suite"]), str(record.get("case"))))
+    missing = [f"{suite}/{case}" for suite, case in cases if (suite, case) not in reported]
+    if missing:
+        raise TaskError(
+            f"NOT EXERCISED: {len(missing)} net.http evidence case(s) did not report: "
+            + ", ".join(missing[:40])
+        )
+    print(f"{GREEN}net.http evidence: {len(cases)} cases reported{OFF}")
+
+
+def busy_processes(count: int) -> list[subprocess.Popen[bytes]]:
+    """`count` processes that do nothing but spin: CPU contention for an
+    evidence run (DW_CPU_CONTENTION). The caller stops them."""
+    return [
+        subprocess.Popen(
+            [sys.executable, "-c", "while True: pass"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        for _ in range(count)
+    ]
+
+
+def task_net_http_evidence() -> None:
+    """M5c net.http (ADR-0050 §16) on real processes, no internet.
+
+    The broker's HTTPS client against real TLS origins; the authority's
+    per-hop pipeline and mode A's consumer against a fake broker; and the real
+    broker binary with local HTTPS origins (tests/net_http/origin.py, a PKI
+    made for the run), the fixture resolver and the authority's library. Every
+    case of NET_HTTP_CASES is required. DW_CPU_CONTENTION=<n> runs it all
+    beside n spinning processes. Linux only; needs openssl and python3.
+    """
+    if not sys.platform.startswith("linux"):
+        raise TaskError(
+            "NOT EXERCISED: the net.http evidence runs only on Linux (ADR-0050 §19); "
+            "use WSL2 on Windows"
+        )
+    for tool in ("bash", "openssl", "python3"):
+        if shutil.which(tool) is None:
+            raise TaskError(f"NOT EXERCISED: the net.http evidence needs {tool}")
+    contention = os.environ.get("DW_CPU_CONTENTION", "").strip()
+    if contention and not contention.isdigit():
+        raise TaskError(f"DW_CPU_CONTENTION={contention}: not a count of processes")
+    run("cargo", "build", "--locked", "-p", "dwkd-broker")
+    busy = busy_processes(int(contention or "0"))
+    if busy:
+        print(f"{BOLD}under CPU contention: {len(busy)} spinning process(es){OFF}")
+    try:
+        suites = [
+            run_captured(
+                "cargo",
+                "test",
+                "--locked",
+                "-p",
+                "dwkd-broker",
+                "--bins",
+                "http::",
+                "--",
+                "--nocapture",
+            ),
+            run_captured(
+                "cargo",
+                "test",
+                "--locked",
+                "-p",
+                "dwkd-authority",
+                "--lib",
+                "state::net_http",
+                "--",
+                "--nocapture",
+            ),
+            run_captured(
+                "cargo",
+                "test",
+                "--locked",
+                "-p",
+                "dwkd-authority",
+                "--lib",
+                "state::secret_use",
+                "--",
+                "--nocapture",
+                fresh_keyring=True,
+            ),
+            run_captured(
+                "cargo",
+                "test",
+                "--locked",
+                "-p",
+                "dwkd-authority",
+                "--test",
+                "net_http_evidence",
+                "--",
+                "--nocapture",
+                "--test-threads=1",
+                fresh_keyring=True,
+            ),
+        ]
+    finally:
+        for process in busy:
+            process.kill()
+            process.wait()
+    for output in suites:
+        require_tests_ran(output)
+    require_net_evidence("\n".join(suites), NET_HTTP_CASES)
+    uvrun("dwcheck", "closure", "--report")
+
+
+# The mutation review (ADR-0050 §16): each line weakens one safeguard the
+# evidence exists to prove, in the source, one at a time. Each mutant must
+# compile and must fail `net-http-evidence`; the file is then restored, and
+# its SHA-256 proves it byte-identical. A mutant that survives, or does not
+# compile, fails the review.
+NET_HTTP_MUTATIONS = (
+    (
+        "the shared IP guard blocks nothing",
+        "crates/dwk-proto/src/wire/guard.rs",
+        ".filter(|address| blocked(**address) && !exceptions.contains(address))",
+        ".filter(|address| blocked(**address) && !exceptions.contains(address) && false)",
+    ),
+    (
+        "a pinned host is resolved again on every hop",
+        "crates/dwkd-authority/src/state/net_http/mod.rs",
+        "if let Some(pinned) = chain.pins.get(hop.host()) {",
+        "if let Some(pinned) = chain.pins.get(hop.host()).filter(|_| false) {",
+    ),
+    (
+        "a redirect hop is sent whatever its gates decided",
+        "crates/dwkd-authority/src/state/net_http/ledger.rs",
+        "    if !plan.permits() {",
+        "    if first && !plan.permits() {",
+    ),
+    (
+        "the credential follows a redirect to another origin",
+        "crates/dwkd-authority/src/state/net_http/mod.rs",
+        "credential: home && canonical.credential.is_some(),",
+        "credential: canonical.credential.is_some(),",
+    ),
+    (
+        "the call's response bound is ignored",
+        "crates/dwkd-authority/src/state/net_http/mod.rs",
+        ".map_or(RESPONSE_LIMIT, |l| l.get().min(RESPONSE_LIMIT))",
+        ".map_or(RESPONSE_LIMIT, |_| RESPONSE_LIMIT)",
+    ),
+    (
+        "no hop is debited from the run's budget",
+        "crates/dwkd-authority/src/state/net_http/ledger.rs",
+        "count(DISTINCT host || ':' || port) FROM net_hop WHERE run_id = ?1\",",
+        "count(DISTINCT host || ':' || port) FROM net_hop WHERE run_id = ?1 AND 0\",",
+    ),
+)
+
+
+def task_net_http_mutations() -> None:
+    """Weaken each net.http safeguard in turn; the evidence must catch every one.
+
+    Slow (the whole net-http-evidence per mutant). Every file is restored
+    byte-identically whatever happens, and checked.
+    """
+    killed: list[str] = []
+    for what, rel, old, new in NET_HTTP_MUTATIONS:
+        path = ROOT / rel
+        original = path.read_bytes()
+        digest = hashlib.sha256(original).hexdigest()
+        text = original.decode("utf-8")
+        if text.count(old) != 1:
+            raise TaskError(f"mutation `{what}`: its target is not in {rel} exactly once")
+        print(f"{BOLD}mutant: {what}{OFF}")
+        outcome = "survived"
+        try:
+            path.write_bytes(text.replace(old, new).encode("utf-8"))
+            try:
+                run(
+                    "cargo",
+                    "test",
+                    "--locked",
+                    "--no-run",
+                    "-p",
+                    "dwk-proto",
+                    "-p",
+                    "dwkd-broker",
+                    "-p",
+                    "dwkd-authority",
+                )
+            except TaskError:
+                outcome = "did not compile"
+            else:
+                try:
+                    task_net_http_evidence()
+                except TaskError as exc:
+                    outcome = f"killed: {str(exc)[:160]}"
+        finally:
+            path.write_bytes(original)
+        if hashlib.sha256(path.read_bytes()).hexdigest() != digest:
+            raise TaskError(f"{rel} was not restored byte-identically")
+        print(f"{DIM}restored {rel} (sha256 {digest[:16]}...){OFF}")
+        if not outcome.startswith("killed"):
+            raise TaskError(f"mutant `{what}` {outcome}: the evidence does not guard it")
+        killed.append(what)
+        print(f"{GREEN}mutant killed: {what}{OFF}")
+    print(
+        f"{GREEN}net.http mutation review: {len(killed)} of {len(NET_HTTP_MUTATIONS)} killed{OFF}"
+    )
+
+
 def require_sandbox_evidence(
     output: str, cases: tuple[tuple[str, str], ...]
 ) -> list[dict[str, object]]:
@@ -3158,6 +3605,8 @@ TASKS = {
     "secret-broker-evidence": task_secret_broker_evidence,
     "sandbox-foundation-evidence": task_sandbox_foundation_evidence,
     "sandbox-egress-evidence": task_sandbox_egress_evidence,
+    "net-http-evidence": task_net_http_evidence,
+    "net-http-mutations": task_net_http_mutations,
     "fuzz-smoke": task_fuzz_smoke,
     "fuzz": task_fuzz,
     "security": task_security,

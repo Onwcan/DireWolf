@@ -426,7 +426,14 @@ pub(super) const fn failure_reason(failure: BrokerFailure) -> FsFailureReason {
             | BrokerRefusal::EnvironmentNotFound
             | BrokerRefusal::EnvironmentAmbiguous
             | BrokerRefusal::ForeignEnvironment
-            | BrokerRefusal::ProxyUnavailable => FsFailureReason::BrokerExecutionError,
+            | BrokerRefusal::ProxyUnavailable
+            // The network refusals (M5c) answer a network exchange, which no
+            // filesystem or process tool sends.
+            | BrokerRefusal::HttpAddressBlocked
+            | BrokerRefusal::HttpConnectFailed
+            | BrokerRefusal::HttpTlsFailed
+            | BrokerRefusal::HttpTimeout
+            | BrokerRefusal::HttpRequestInvalid => FsFailureReason::BrokerExecutionError,
         },
         BrokerFailure::Indeterminate(_) => FsFailureReason::BrokerExecutionError,
     }
@@ -532,7 +539,9 @@ fn key_bound(
         .query_row(
             "SELECT invocation_id FROM tool_idempotency WHERE subject = ?1 AND session_id = ?2 \
              AND idempotency_key = ?3 UNION ALL SELECT invocation_id FROM process_idempotency \
-             WHERE subject = ?1 AND session_id = ?2 AND idempotency_key = ?3 LIMIT 1",
+             WHERE subject = ?1 AND session_id = ?2 AND idempotency_key = ?3 UNION ALL \
+             SELECT invocation_id FROM net_idempotency WHERE subject = ?1 AND session_id = ?2 \
+             AND idempotency_key = ?3 LIMIT 1",
             rusqlite::params![
                 asked.caller.subject().storage_key(),
                 asked.session.as_str(),

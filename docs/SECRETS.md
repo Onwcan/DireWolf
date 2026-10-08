@@ -87,9 +87,31 @@ Ordered by preference. The kernel selects the most restrictive mode the secret a
 ### (A) `egress` — the default, and the only one where the secret never leaves the kernel
 
 > **M4e:** the secret side is real — gates, durable intent, one backend read,
-> one handoff, the header rendered in the broker and dropped. **There is no
-> egress consumer until M5's `net.http`**, and redirect, DNS and IP policy
-> arrive with it (ADR-0046 §12).
+> one handoff (ADR-0046 §12).
+>
+> **M5c (in progress, pending acceptance — [ADR-0050](adr/0050-m5c-kernel-performed-net-http-ssrf-redirects-and-credential-egress.md) §8):**
+> mode A's consumer is `net.http`. A credential is attached only to a hop at
+> the request's first origin, and only when its metadata names that origin
+> exactly; every attachment is its own `secret.use` through both gates, its own
+> durable intent (a `secret_injection` row the hop names), one backend read and
+> one fresh pipe; a same-origin redirect may carry it again, as a new use, and
+> a cross-origin hop never does, whatever the metadata says about the other
+> origin. The broker composes the header into the request it is about to write
+> and nowhere else (TX045); M4e's render-and-drop `broker.secret_egress` and
+> the in-process `Authority::secret_egress` are retired, and M4e's evidence
+> runs through `net.http` with every case kept. Measured: after a credential
+> exchange neither daemon's memory nor any durable file holds the value.
+> **An echo stops at the broker (D11):** an origin that sends the credential
+> back has it taken out by the broker that sent it, before anything of the
+> response is encoded — a header holding it dropped whole, the body redacted
+> (read past the bound by the value's length, so an echo straddling the bound
+> is caught) — and the count is audited for the handle. Measured, nine ways:
+> the runtime's answer, the audit, durable state and the authority's memory
+> never hold it, and the broker's own encoding never saw it. **Residual,
+> pending the owner's acceptance:** the broker's TLS and HTTP libraries
+> (`rustls`'s per-record copy, the `http` header map) free the echoed bytes
+> without zeroing — readable only by a reader of the broker's memory, measured
+> and reported per way, never claimed absent (ADR-0050 §20, D11).
 
 `dwkd-broker` adds the header when connecting to an allowlisted origin, using a **one-shot injection handed to it by `dwkd-authority`** for that invocation only. The secret at rest exists in exactly one process — `dwkd-authority` — and never in a child, an environment, a file, or any memory the agent can influence. The broker holds the value only for the duration of the request and holds no long-lived key ([ADR-0018](adr/0018-authority-broker-split.md)).
 

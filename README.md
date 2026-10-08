@@ -37,7 +37,7 @@ above it. M4, the last milestone completed, closed on hosted CI run
 | M2.5 · Evaluation harness | **COMPLETE** | `evals/`: deterministic suites, versioned results, a reviewed baseline, fault injection; pending is never a pass |
 | M3 · Kernel core | **COMPLETE** | The typed capability lattice (10⁶ delegation chains, zero escalations); the deterministic policy engine (p99 3.6 µs at 300 rules); `kernel.db` with fenced epochs and durable admission; a hash-chained audit record for every authority-changing operation, `fsync`ed before the answer; `dwkd-authority serve`, which identifies its caller through the kernel (`SO_PEERCRED`) before reading a byte |
 | M4 · Brokers | **COMPLETE** | Filesystem resolution by identity (`openat2`, no symlink, mount or Unicode escape); `dwkd-broker`, a second privileged process that acts only on the authority's single-use authorisation; eight filesystem tools with atomic mutation; process execution decided on executable identity; secrets by opaque handle, with no API that returns a value, return-path redaction and residue evidence |
-| M5 · Sandbox | **IN PROGRESS** | **M5a — COMPLETE, HOSTED ACCEPTANCE PASS:** the `oci-strict` execution environment, measured from the runtime's record and by a digest-pinned probe inside it, with a durable, exactly-reconciled lifecycle — reachable by no public caller. **M5b — COMPLETE, HOSTED ACCEPTANCE PASS:** `PROXY_ONLY` — an environment whose only network peer is the broker's opaque CONNECT proxy, behind a relay, enforcing the run's exact HTTPS grants, the IP guard, one pinned resolution, server-name agreement and byte budgets; every bypass measured as refused. M5c–M5e (`net.http`, sandboxed workloads, the M5 gate) not started |
+| M5 · Sandbox | **IN PROGRESS** | **M5a — COMPLETE, HOSTED ACCEPTANCE PASS:** the `oci-strict` execution environment, measured from the runtime's record and by a digest-pinned probe inside it, with a durable, exactly-reconciled lifecycle — reachable by no public caller. **M5b — COMPLETE, HOSTED ACCEPTANCE PASS:** `PROXY_ONLY` — an environment whose only network peer is the broker's opaque CONNECT proxy, behind a relay, enforcing the run's exact HTTPS grants, the IP guard, one pinned resolution, server-name agreement and byte budgets; every bypass measured as refused. **M5c — IN PROGRESS** (implemented, pending owner acceptance of ADR-0050 and hosted CI): `net.http`, the kernel's own HTTPS request — every hop decided by the authority, resolved only for a granted host, guarded by both daemons and pinned; a credential only at its bound origin. M5d–M5e (sandboxed workloads, the M5 gate) not started |
 
 **What that means in practice.** A client can connect to `dwkd-authority`, be admitted
 to a run, and ask the authority to read, list, search, stat, write, patch, move or delete
@@ -50,11 +50,12 @@ until M5.
 
 **What does not exist yet**, and which milestone owns it:
 
-- a **sandboxed workload**, `net.http` and any network path a workload uses (M5c–M5e) —
+- a **sandboxed workload** and any network path a workload uses (M5d–M5e) —
   M5a builds and measures the execution environment and M5b gives it `PROXY_ONLY`
   networking (one peer: the broker's opaque CONNECT proxy), but no public caller can
   prepare one and nothing but the assurance probe runs in it; every action still runs on
-  the host, and policy is told so;
+  the host, and policy is told so. `net.http` (M5c), the kernel's own HTTPS request, is
+  implemented and awaits its owner's acceptance and hosted CI;
 - **approvals and budgets** (M6) — a decision that would need approval is a denial;
 - **model providers** (M7) — native, cloud-platform, OpenAI-compatible and local or
   self-hosted families, Hugging Face and Ollama among them, every one behind the

@@ -48,6 +48,12 @@ pub(crate) struct ServeConfig {
     /// stated loudly at start-up, never implied, and absent from every
     /// production configuration.
     pub(crate) evidence_egress: Option<PathBuf>,
+    /// The `net.http` evidence's trust anchor (M5c, ADR-0050 §9): when given,
+    /// the HTTPS client trusts the certificates in this file **instead of**
+    /// Mozilla's roots, so the evidence's local origins can be reached and no
+    /// real one can. Evidence only, stated loudly at start-up, never implied,
+    /// and absent from every production configuration.
+    pub(crate) evidence_trust: Option<PathBuf>,
 }
 
 /// A command line that does not describe a configuration.
@@ -92,6 +98,18 @@ fn parse_uid(flag: &str, text: &str) -> Result<u32, UsageError> {
 }
 
 /// Parse the arguments after the program name.
+/// An evidence-only file flag: an absolute path, given once.
+fn evidence_path(flag: &str, value: &str, slot: &mut Option<PathBuf>) -> Result<(), UsageError> {
+    let path = PathBuf::from(value);
+    if !path.is_absolute() {
+        return Err(UsageError::new(format!("{flag} needs an absolute path")));
+    }
+    if slot.replace(path).is_some() {
+        return Err(UsageError::new(format!("{flag} is given more than once")));
+    }
+    Ok(())
+}
+
 pub(crate) fn parse(args: &[String]) -> Result<Command, UsageError> {
     let mut rest = args.iter();
     match rest.next().map(String::as_str) {
@@ -113,6 +131,7 @@ pub(crate) fn parse(args: &[String]) -> Result<Command, UsageError> {
     let mut dumpable = false;
     let mut evidence_topology = false;
     let mut evidence_egress: Option<PathBuf> = None;
+    let mut evidence_trust: Option<PathBuf> = None;
     while let Some(flag) = rest.next() {
         let mut value = || {
             rest.next()
@@ -153,19 +172,8 @@ pub(crate) fn parse(args: &[String]) -> Result<Command, UsageError> {
                 }
                 evidence_topology = true;
             }
-            "--allow-evidence-egress" => {
-                let path = PathBuf::from(value()?);
-                if !path.is_absolute() {
-                    return Err(UsageError::new(
-                        "--allow-evidence-egress needs an absolute path",
-                    ));
-                }
-                if evidence_egress.replace(path).is_some() {
-                    return Err(UsageError::new(
-                        "--allow-evidence-egress is given more than once",
-                    ));
-                }
-            }
+            "--allow-evidence-egress" => evidence_path(flag, value()?, &mut evidence_egress)?,
+            "--allow-evidence-trust" => evidence_path(flag, value()?, &mut evidence_trust)?,
             other => {
                 return Err(UsageError::new(format!("unknown flag {}", bounded(other))));
             }
@@ -182,6 +190,14 @@ pub(crate) fn parse(args: &[String]) -> Result<Command, UsageError> {
             "--authority-uid is required: the broker reads from no one else",
         ));
     };
+    // The test authority is trusted only beside the evidence's fixture
+    // resolver: a broker that resolves real names never trusts it.
+    if evidence_trust.is_some() && evidence_egress.is_none() {
+        return Err(UsageError::new(
+            "--allow-evidence-trust needs --allow-evidence-egress: a test authority is \
+             trusted only for the evidence's fixture origins",
+        ));
+    }
     Ok(Command::Serve(ServeConfig {
         socket,
         authority_uid,
@@ -189,6 +205,7 @@ pub(crate) fn parse(args: &[String]) -> Result<Command, UsageError> {
         dumpable_permitted: dumpable,
         evidence_topology_permitted: evidence_topology,
         evidence_egress,
+        evidence_trust,
     }))
 }
 
@@ -237,6 +254,7 @@ mod tests {
                 dumpable_permitted: false,
                 evidence_topology_permitted: false,
                 evidence_egress: None,
+                evidence_trust: None,
             }))
         );
         for bad in [
@@ -350,6 +368,56 @@ mod tests {
         let mut valueless = args(&base);
         valueless.push("--allow-evidence-egress".to_owned());
         assert!(parse(&valueless).is_err());
+    }
+
+    #[test]
+    fn the_evidence_trust_anchor_is_explicit_absolute_and_given_once() {
+        let base = ["serve", "--socket", "ABS", "--authority-uid", "7"];
+        assert!(matches!(
+            parse(&args(&base)),
+            Ok(Command::Serve(ServeConfig {
+                evidence_trust: None,
+                ..
+            }))
+        ));
+        let anchor = socket();
+        // Alone it is refused: a broker resolving real names never trusts a
+        // test authority.
+        let mut alone: Vec<String> = args(&base);
+        alone.push("--allow-evidence-trust".to_owned());
+        alone.push(anchor.clone());
+        assert!(parse(&alone).is_err());
+        let mut with: Vec<String> = args(&base);
+        with.push("--allow-evidence-egress".to_owned());
+        with.push(socket());
+        with.push("--allow-evidence-trust".to_owned());
+        with.push(anchor.clone());
+        assert!(matches!(
+            parse(&with),
+            Ok(Command::Serve(ServeConfig {
+                evidence_trust: Some(ref path),
+                ..
+            })) if path.to_str() == Some(anchor.as_str())
+        ));
+        let mut twice = with.clone();
+        twice.push("--allow-evidence-trust".to_owned());
+        twice.push(anchor);
+        assert!(parse(&twice).is_err());
+        let mut relative = args(&base);
+        relative.push("--allow-evidence-trust".to_owned());
+        relative.push("ca.pem".to_owned());
+        assert!(parse(&relative).is_err());
+        // No spelling turns verification off: there is no such flag.
+        for absent in [
+            "--insecure",
+            "--no-verify",
+            "--allow-insecure-tls",
+            "--ca-dir",
+        ] {
+            let mut with = args(&base);
+            with.push(absent.to_owned());
+            assert!(parse(&with).is_err(), "{absent}");
+        }
     }
 
     #[test]

@@ -23,11 +23,14 @@
 //! The Python bindings follow the same order; the shared invalid-message
 //! vectors assert it.
 
+pub mod guard;
 pub mod host;
+pub mod http;
 pub mod id;
 pub mod list;
 pub mod macros;
 pub mod scalar;
+pub mod url;
 
 pub use list::BoundedList;
 

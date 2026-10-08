@@ -78,10 +78,10 @@ fn version_one_is_kept_exactly_and_version_two_beside_it() {
         DwkpBody::ToolInvokeV3(_)
     ));
     // A version this build does not know names the range it does.
-    let v4 = request("direwolf.tool.invoke", 4, KEY, READ);
-    let err = dwkp::decode_body(v4.as_bytes()).unwrap_err();
+    let v5 = request("direwolf.tool.invoke", 5, KEY, READ);
+    let err = dwkp::decode_body(v5.as_bytes()).unwrap_err();
     assert_eq!(err.code, ErrorCode::VersionUnsupported);
-    assert_eq!(err.supported.map(|r| (r.min, r.max)), Some((1, 3)));
+    assert_eq!(err.supported.map(|r| (r.min, r.max)), Some((1, 4)));
 }
 
 #[test]

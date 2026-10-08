@@ -44,7 +44,8 @@ fn no_proxies() -> std::sync::Arc<crate::egress::proxy::Proxies> {
 }
 
 /// What an exchange acts through, in a filesystem test: a process table and a
-/// sandbox supervisor that can start nothing. Leaked: a test process is short.
+/// sandbox supervisor that can start nothing, and an HTTPS client no
+/// filesystem authorisation reaches. Leaked: a test process is short.
 fn effects() -> Effects<'static> {
     Effects {
         processes: Box::leak(Box::new(no_processes())),
@@ -57,6 +58,11 @@ fn effects() -> Effects<'static> {
             },
             false,
             no_proxies(),
+        ))),
+        http: Box::leak(Box::new(crate::http::Client::new(
+            std::sync::Arc::new(crate::egress::resolve::SystemResolver),
+            crate::http::tls::production().unwrap_or_else(|e| unreachable!("{e}")),
+            crate::http::Deadlines::PRODUCTION,
         ))),
     }
 }

@@ -157,6 +157,33 @@ keyring = { version = "=3.6.3", default-features = false }
 # authority's manifest says `socket` and nothing else.
 nix = { version = "=0.31.3", default-features = false }
 
+# --- M5c: the broker's HTTPS client (ADR-0050 §18) --------------------------
+# Broker only: `dwkd-authority` names none of these (TX044, TX047), and its
+# measured closure does not change. Measured before they were chosen
+# (ADR-0050 §18: linked, build-only and native crates per candidate) and every
+# one pinned exactly, for the reason `toml` is: a TLS stack and an HTTP framing
+# library are not versions anyone should move without a reviewer.
+#
+# `rustls` with `ring` (D1): TLS 1.2 and 1.3, certificate verification always
+# on through `rustls-webpki`, no `aws-lc-rs`, no logging, no post-quantum
+# preference crate. `ring` builds C and assembly with `cc` at build time: the
+# one native component, reviewed in ADR-0050 §18.
+rustls = { version = "=0.23.45", default-features = false, features = ["ring", "std", "tls12"] }
+# Mozilla's root store, compiled in (D1): fixed and reproducible, never the
+# host's trust store or `SSL_CERT_FILE` (TX046). CDLA-Permissive-2.0, the one
+# licence exception in deny.toml.
+webpki-roots = { version = "=1.0.9", default-features = false }
+# HTTP/1.1 framing (D2): a sans-I/O protocol library over `httparse` -- every
+# buffer is the broker's, so the buffer a credential header is written into is
+# `Zeroizing` and nothing else ever holds it in plaintext (ADR-0050 §9). No
+# I/O, no pool, no redirect following (the broker never calls it), no proxy, no
+# resolver. Only its `client` half.
+ureq-proto = { version = "=0.6.4", default-features = false, features = ["client"] }
+# `Bytes::from_owner`: the credential header's value is a `Bytes` whose owner
+# is `Zeroizing`, so dropping the request scrubs it. Already in the closure of
+# `http`, whose request and header types `ureq-proto` speaks and re-exports.
+bytes = { version = "=1.12.1", default-features = false, features = ["std"] }
+
 # --- dev-only: tests, property tests, differential oracles ------------------
 # Never linked into a shipped binary. dwcheck excludes dev-only edges from the
 # TCB closure and a fixture proves it does not exclude normal ones.

@@ -155,7 +155,7 @@ and serving on Linux only. **M5 is in progress: M5a and M5b are complete (see M5
 **Adversarial:** the full path-traversal set ([EVALS.md](EVALS.md) §3) including Unicode normalisation and TOCTOU swap races in a tight loop; secret-in-output detection; core-dump inspection for secret residue.
 **Deferred:** remote fs, Windows-native hardening beyond the fallback walker.
 
-### M5 · Sandbox — **IN PROGRESS** (M5a complete, hosted acceptance passed; M5b complete, hosted acceptance passed; M5c–M5e not started)
+### M5 · Sandbox — **IN PROGRESS** (M5a complete, hosted acceptance passed; M5b complete, hosted acceptance passed; M5c implemented and validated locally, owner review and hosted acceptance pending; M5d–M5e not started)
 
 M5 is two products in one (a sandbox *and* an egress proxy), so it is decomposed like M4
 ([ADR-0047](adr/0047-m5a-oci-execution-environment-and-measured-assurance.md)). The
@@ -234,13 +234,51 @@ other uids, a tampered relay; any uid but the relay's at the broker's socket; an
 fronting residual — carried unseen, bounded by the budget.
 **Deferred:** `net.http` (M5c); a workload using the proxy (M5d).
 
-#### M5c · `net.http`, SSRF and redirect policy, credential egress — **NOT STARTED**
+#### M5c · `net.http`, SSRF and redirect policy, credential egress — **IN PROGRESS** (implemented and validated locally; owner security review and hosted acceptance pending)
 
-**Deps:** M5b. **Deliverables:** kernel-performed `net.http`; SSRF guard; redirect policy;
-mode A's consumer (the rendered header on a real request).
-**Acceptance:** the SSRF suite contained; a credential reaches only its bound origin.
-**Adversarial:** full SSRF suite; redirect laundering; origin confusion.
-**Deferred:** package-manager routing (M5d/M5e).
+M5c is implemented in the working tree and its local gates pass, its closeout review
+included; it is complete only when its owner accepts
+[ADR-0050](adr/0050-m5c-kernel-performed-net-http-ssrf-redirects-and-credential-egress.md)
+(Proposed) — its decisions D1–D12, D11's residual among them — and the required hosted
+`net-http` job, every multi-identity half and the gated `m5c-net-http` eval pass on the
+committed tree.
+
+**Deps:** M5b. **Deliverables (as built, pending acceptance):** ToolInvoke and
+CanonicalPreview version 4 with the typed `net.http` call (no address, resolver, proxy,
+timeout, trust material or credential value on the wire); one canonical URL parser shared
+with the capability grammar (`dwk_proto::wire::url`); the address guard moved to
+`dwk_proto::wire::guard` and run by the CONNECT proxy, by `net.http`'s broker side and by the
+authority; the authority's per-hop pipeline — canonicalise, grant, resolve only a covered
+host, judge the whole answer again, policy for every pinned address, budgets, durable
+intent, exchange, outcome, taint, redaction, redirect — with schema version 8
+(`net_request`, `net_hop`, `net_idempotency`), crash windows N1–N4 and per-run budgets that
+are never refilled; private protocol version 7 (`broker.http_resolve`,
+`broker.http_exchange`, `broker.http_credential_exchange`; `broker.secret_egress`
+retired); the broker as the HTTPS client (`rustls` with `ring` and Mozilla's roots, the
+sans-I/O `ureq-proto` engine, pinned dials only, strict framing, no decoding, deadlines,
+never following a redirect); mode A's consumer — a credential attached only at the
+request's first origin, each hop its own decided and recorded `secret.use`, through a
+fresh one-shot pipe, and an echo of it taken out by the broker before anything of the
+response is encoded. The `PROXY_ONLY` tunnel is untouched.
+**Acceptance:** `make net-http-evidence` (no internet: real TLS origins, the fixture
+resolver, the released broker) — 166 required cases across SSRF and DNS, HTTP and
+redirects, TLS, secrets and residue, lifecycle and budgets; `make net-http-mutations` —
+six weakened safeguards each caught; M4e's secret evidence moved to `net.http` with every
+case kept, and an echoed credential measured nine ways (178 secret cases); required hosted
+job `net-http` (also under CPU contention) and gated eval `m5c-net-http`.
+**Adversarial:** every guarded range and its IPv4-mapped, NAT64, 6to4 and Teredo shapes; a
+mixed answer; metadata names and addresses; address literals in every spelling; userinfo,
+case, trailing dots, encoded dot segments, backslashes, port confusion; rebinding within and
+across requests; redirects to blocked, mixed, metadata, ungranted and downgraded targets,
+loops, the sixth hop, a body resent; malformed, encoded, oversized, header-bomb,
+close-delimited and silent responses; wrong-name, expired, self-signed and untrusted
+certificates, and the test authority under production trust; a credential across origins,
+in the request, echoed back; crashes after resolution, intent and exchange; reused keys;
+spent budgets; the shipped packs and taint.
+**Residual, pending the owner's acceptance:** an origin that echoes the credential can
+leave it in the broker's TLS and HTTP libraries' freed memory (ADR-0050 §20, D11) — never
+in a message, the audit, the authority or the runtime's answer — measured and reported.
+**Deferred:** package-manager routing (M5d/M5e); model egress (M7); approvals (M6).
 
 #### M5d · Production sandboxed `process.exec` — **NOT STARTED**
 

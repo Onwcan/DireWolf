@@ -39,7 +39,7 @@ MAX_REASON_CHARS: Final = 1000
 that reaches a result file."""
 
 AVAILABLE_MILESTONES: Final[frozenset[str]] = frozenset(
-    {"M1", "M2", "M2.5", "M3", "M4", "M5a", "M5b"}
+    {"M1", "M2", "M2.5", "M3", "M4", "M5a", "M5b", "M5c"}
 )
 """What this build has. An eval requiring anything else is pending.
 
@@ -58,6 +58,12 @@ waiting for the whole milestone stays pending.
 "M5b" is the second slice (ADR-0048): the PROXY_ONLY topology and the opaque
 CONNECT proxy. It turns on exactly the suite that requires it; the complete
 M5 gate -- sandboxed workloads, net.http -- still waits for "M5".
+
+"M5c" is the third (ADR-0050, Proposed until its owner accepts it):
+kernel-performed net.http and mode A's credential egress. It turns on exactly
+the suite that requires it, which must pass in CI's gate; M5c is complete
+only when its owner accepts the ADR and the hosted job passes, and the
+complete M5 gate -- sandboxed workloads in production -- still waits for "M5".
 """
 
 

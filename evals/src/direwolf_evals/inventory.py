@@ -149,13 +149,23 @@ INVENTORY: Final[tuple[SecurityProperty, ...]] = (
         "resolution, server-name agreement and socket budgets; every bypass "
         "refused with its mechanism; every weakened topology detected.",
     ),
+    # --- measurable now: M5c, kernel-performed net.http (ADR-0050) ----------
+    SecurityProperty(
+        "net.http: every hop decided, pinned, guarded twice; a credential only at its origin",
+        "M5c",
+        "m5c-net-http",
+        "The real broker and local HTTPS origins with no internet: SSRF and DNS "
+        "refused, redirects re-decided per hop, TLS verified, responses bounded, "
+        "a credential at its bound origin only and never across one, crashes "
+        "UNKNOWN and never repeated, budgets never refilled.",
+    ),
     # --- pending: the mechanism does not exist yet -------------------------
     SecurityProperty(
         "Sandboxed workload egress, end to end (the complete M5 gate)",
         "M5",
         None,
-        "Needs sandboxed workloads (M5d) and net.http (M5c); M5b measures the "
-        "topology and the proxy they will use.",
+        "Needs sandboxed workloads (M5d); M5b measures the topology and the "
+        "proxy they will use, and M5c the kernel's own HTTPS path.",
     ),
     SecurityProperty(
         "Approval binding survives drift, replay and substitution",

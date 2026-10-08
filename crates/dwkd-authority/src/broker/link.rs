@@ -1,6 +1,11 @@
 //! The authority's end of the private broker channel, on Linux (M4b,
 //! ADR-0043; M4c, ADR-0044; M4d, ADR-0045; M4e, ADR-0046).
 //!
+//! M5c (ADR-0050) adds `net.http`'s resolution, which carries nothing, and
+//! its exchange, which carries a credential's pipe when the hop has one; the
+//! answer to an exchange is checked against the bound the hop was authorised
+//! with before anything of it is believed.
+//!
 //! One of the three authority modules that may name `rustix` (TX008), and the
 //! only one that may send a descriptor or take one out of a handoff (TX014).
 //! The exchange, and where each property comes from:
@@ -78,13 +83,19 @@ enum Sent {
         stream_limit: u32,
     },
     ProcessKill,
-    SecretEgress,
     EnvironmentPrepare,
     EnvironmentMeasure,
     EnvironmentDestroy {
         container: Option<ContainerRef>,
     },
     EnvironmentList,
+    HttpResolve,
+    HttpExchange {
+        response_limit: u32,
+        /// Whether the hop carried a credential: only then can its answer
+        /// count echoes of one.
+        credential: bool,
+    },
 }
 
 /// Perform one operation through the broker at `socket`, which must be served
@@ -181,19 +192,42 @@ fn authorise(common: Common, operation: Operation) -> Result<Prepared, BrokerFai
         Operation::ProcessStart { .. }
         | Operation::ProcessStatus { .. }
         | Operation::ProcessKill { .. } => process(common, operation),
-        // The value is the one descriptor; the message carries only the
-        // handle, the origin, the header and its prefix.
-        Operation::SecretEgress { spec, secret } => Ok((
-            Authorisation::SecretEgress(dwk_proto::brokerp::SecretEgressAuthorisation::new(
-                common, spec,
-            )),
-            vec![secret.into_transfer_descriptor()],
-            Sent::SecretEgress,
-        )),
         Operation::EnvironmentPrepare { .. }
         | Operation::EnvironmentMeasure { .. }
         | Operation::EnvironmentDestroy { .. }
         | Operation::EnvironmentList { .. } => environment(common, operation),
+        // `net.http` (M5c): a resolution carries nothing; an exchange carries
+        // the credential's pipe, and only it, when the hop has one.
+        Operation::HttpResolve { host } => Ok((
+            Authorisation::HttpResolve(dwk_proto::brokerp::http::HttpResolveAuthorisation::new(
+                common, host,
+            )),
+            Vec::new(),
+            Sent::HttpResolve,
+        )),
+        Operation::HttpExchange { hop, secret } => {
+            let response_limit = hop.response_limit.get();
+            let credential = hop.credential.is_some();
+            let descriptors = match (&hop.credential, secret) {
+                (Some(_), Some(secret)) => vec![secret.into_transfer_descriptor()],
+                (None, None) => Vec::new(),
+                _ => {
+                    return Err(BrokerFailure::Protocol(
+                        "a credential and its pipe travel together or not at all",
+                    ));
+                }
+            };
+            Ok((
+                Authorisation::HttpExchange(
+                    dwk_proto::brokerp::http::HttpExchangeAuthorisation::new(common, hop),
+                ),
+                descriptors,
+                Sent::HttpExchange {
+                    response_limit,
+                    credential,
+                },
+            ))
+        }
         Operation::Reclaim { directory, staging } => {
             let leaf = LeafName::new(staging.leaf.as_str())
                 .ok_or(BrokerFailure::Protocol("a recorded name is not a leaf"))?;
@@ -660,15 +694,88 @@ fn deliver(sent: &Sent, done: BrokerDone) -> Result<BrokerDelivery, BrokerFailur
             status(&done.process_status.ok_or(wrong)?, *stream_limit)?
         }
         Sent::ProcessKill => BrokerDelivery::ProcessKilled(done.process_kill.ok_or(wrong)?.outcome),
-        Sent::SecretEgress => {
-            done.secret_egress.ok_or(wrong)?;
-            BrokerDelivery::SecretEgress
-        }
         Sent::EnvironmentPrepare
         | Sent::EnvironmentMeasure
         | Sent::EnvironmentDestroy { .. }
         | Sent::EnvironmentList => environment_delivery(sent, done)?,
+        Sent::HttpResolve | Sent::HttpExchange { .. } => http_delivery(sent, done)?,
     })
+}
+
+/// A `net.http` operation's answer (M5c), if it is this operation's and
+/// agrees with what was sent.
+fn http_delivery(sent: &Sent, done: BrokerDone) -> Result<BrokerDelivery, BrokerFailure> {
+    let wrong = BrokerFailure::Protocol("the outcome answers another operation");
+    match sent {
+        Sent::HttpResolve => resolution(done.http_resolve.ok_or(wrong)?),
+        Sent::HttpExchange {
+            response_limit,
+            credential,
+        } => exchanged(
+            done.http_exchange.ok_or(wrong)?,
+            *response_limit,
+            *credential,
+        ),
+        _ => Err(wrong),
+    }
+}
+
+/// A resolution's answer, if it agrees with itself: addresses exactly when
+/// the guard allowed them.
+fn resolution(
+    done: dwk_proto::brokerp::http::HttpResolveDone,
+) -> Result<BrokerDelivery, BrokerFailure> {
+    let resolved = done.disposition == dwk_proto::brokerp::http::ResolveDisposition::Resolved;
+    if resolved == done.addresses.is_empty() {
+        return Err(BrokerFailure::Protocol(
+            "a resolution names addresses exactly when it resolved",
+        ));
+    }
+    Ok(BrokerDelivery::HttpResolved(done))
+}
+
+/// An exchange's answer, if it stays within the hop's bound and the
+/// keep-list: no more body than was authorised, no header but the kept
+/// ones, `location` only in its own field; headers and a `location` only for
+/// a completed exchange; echoes of a credential only from a hop that carried
+/// one.
+fn exchanged(
+    done: dwk_proto::brokerp::http::HttpExchangeDone,
+    response_limit: u32,
+    credential: bool,
+) -> Result<BrokerDelivery, BrokerFailure> {
+    if !credential && done.credential_echoes.get() > 0 {
+        return Err(BrokerFailure::Protocol(
+            "echoes of a credential the hop did not carry",
+        ));
+    }
+    let limit = usize::try_from(response_limit).unwrap_or(0);
+    if done.body.byte_len() > limit {
+        return Err(BrokerFailure::Protocol(
+            "the broker returned more body than the hop was authorised to",
+        ));
+    }
+    let kept = done.headers.iter().all(|header| {
+        let name = header.name.as_str();
+        name != "location" && dwk_proto::wire::http::response_header_kept(name)
+    });
+    if !kept {
+        return Err(BrokerFailure::Protocol(
+            "the broker returned a header off the keep-list",
+        ));
+    }
+    let completed = done.disposition == dwk_proto::brokerp::http::ExchangeDisposition::Completed;
+    if completed && done.status.is_none() {
+        return Err(BrokerFailure::Protocol(
+            "a completed exchange names its status",
+        ));
+    }
+    if !completed && (!done.headers.is_empty() || done.location.is_some()) {
+        return Err(BrokerFailure::Protocol(
+            "a response that did not complete carries no header",
+        ));
+    }
+    Ok(BrokerDelivery::HttpExchanged(done))
 }
 
 /// An environment operation's answer (M5a), if it is this operation's and
@@ -899,4 +1006,58 @@ fn send_with_descriptors(
     // that call follows as ordinary bytes.
     let rest = frame.get(sent..).unwrap_or_default();
     stream.write_all(rest).map_err(|e| io_failure(&e))
+}
+
+#[cfg(test)]
+mod tests {
+    use dwk_proto::brokerp::http::{
+        ExchangeDisposition, HeaderCount, HttpExchangeDone, HttpHeader, HttpHeaderName,
+        HttpHeaderValue, HttpLocation, HttpStatus, ResponseHeaders,
+    };
+    use dwk_proto::wire::scalar::{ByteCount, HexContent};
+
+    use super::{BrokerFailure, exchanged};
+
+    fn answer(disposition: ExchangeDisposition, echoes: u16) -> HttpExchangeDone {
+        let header = |name: &str, value: &str| HttpHeader {
+            name: HttpHeaderName::new(name).unwrap_or_else(|| unreachable!()),
+            value: HttpHeaderValue::new(value).unwrap_or_else(|| unreachable!()),
+        };
+        HttpExchangeDone {
+            disposition,
+            status: HttpStatus::new(302),
+            headers: ResponseHeaders::new(vec![header("content-type", "text/plain")])
+                .unwrap_or_else(|| unreachable!()),
+            location: HttpLocation::new("/next"),
+            body: HexContent::from_bytes(b"ok").unwrap_or_else(|| unreachable!()),
+            truncated: false,
+            headers_dropped: HeaderCount::new(0).unwrap_or_else(|| unreachable!()),
+            cookies_dropped: HeaderCount::new(0).unwrap_or_else(|| unreachable!()),
+            credential_echoes: HeaderCount::new(echoes).unwrap_or_else(|| unreachable!()),
+            bytes_sent: ByteCount::new(10).unwrap_or_else(|| unreachable!()),
+            bytes_received: ByteCount::new(10).unwrap_or_else(|| unreachable!()),
+        }
+    }
+
+    fn refused(result: &Result<super::BrokerDelivery, BrokerFailure>) -> bool {
+        matches!(result, Err(BrokerFailure::Protocol(_)))
+    }
+
+    #[test]
+    fn an_answer_is_held_to_what_its_hop_was_and_how_it_ended() {
+        let completed = ExchangeDisposition::Completed;
+        assert!(exchanged(answer(completed, 0), 2, false).is_ok());
+        assert!(exchanged(answer(completed, 1), 2, true).is_ok());
+        // More body than the hop's bound.
+        assert!(refused(&exchanged(answer(completed, 0), 1, false)));
+        // Echoes of a credential the hop never carried: not this hop's answer.
+        assert!(refused(&exchanged(answer(completed, 1), 2, false)));
+        // A response that broke off carries no header and no `Location`.
+        let broken = ExchangeDisposition::ResponseMalformed;
+        assert!(refused(&exchanged(answer(broken, 0), 2, false)));
+        let mut bare = answer(broken, 1);
+        bare.headers = ResponseHeaders::new(Vec::new()).unwrap_or_else(|| unreachable!());
+        bare.location = None;
+        assert!(exchanged(bare, 2, true).is_ok());
+    }
 }

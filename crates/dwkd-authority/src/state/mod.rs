@@ -71,6 +71,7 @@ mod ids;
 mod lease;
 #[cfg(all(test, target_os = "linux"))]
 mod lookup_tests;
+mod net_http;
 mod plan;
 mod policy_state;
 mod process;
@@ -129,6 +130,7 @@ pub use error::{AuthorityError, PoisonReason, StartError};
 pub use files::{AUDIT_LOG, KERNEL_DB, LOCK_FILE, QUARANTINE_MARKER};
 pub use identity::{AuthenticatedSubject, CallerContext, LeaseHolder};
 pub use lease::{DEFAULT_LEASE_TTL_MS, MAX_EPOCH, MAX_LEASE_TTL_MS, MIN_LEASE_TTL_MS};
+pub use net_http::NetBudget;
 pub use plan::{PlannedAction, RetryClass, ToolPlan, ToolVersion};
 pub use policy_state::{MAX_CEILING_CAPABILITIES, MAX_POLICY_SOURCES, PolicySet, PolicySource};
 pub use process::{
@@ -137,7 +139,6 @@ pub use process::{
 };
 pub use query::{AuthorityAnswer, DecisionRecord, Proposal, TaintCause, Undecidable};
 pub use resolution::ResolutionRefused;
-pub use secret_use::{EgressReply, EgressRequest};
 pub use staging::{MAX_RECLAIMS_PER_SWEEP, Settled};
 pub use tool::{ToolReply, ToolRequest};
 pub use transport::{TransportClass, TransportEvent, Violation};
@@ -171,6 +172,9 @@ pub struct StartupConfig {
     /// The operator's secret metadata (M4e, ADR-0046): handles and where
     /// their values live — never a value. Empty when no secret is configured.
     pub secrets: crate::secret::metadata::SecretConfig,
+    /// Each run's `net.http` budgets (M5c, ADR-0050 §10): D10's defaults
+    /// unless the operator narrows or widens them.
+    pub net_budget: NetBudget,
 }
 
 impl StartupConfig {
@@ -184,6 +188,7 @@ impl StartupConfig {
             flags: ConfigFlags::default(),
             lease_ttl_ms: DEFAULT_LEASE_TTL_MS,
             secrets: crate::secret::metadata::SecretConfig::default(),
+            net_budget: NetBudget::default(),
         }
     }
 }
@@ -332,6 +337,13 @@ struct Shared {
     /// evidence harness, through [`Authority::attach_sandbox`]. No production
     /// start-up path sets it.
     sandbox: OnceLock<crate::sandbox::SandboxConfig>,
+    /// Each run's `net.http` budgets (M5c).
+    net_budget: NetBudget,
+    /// Addresses the authority's own guard lets through although blocked:
+    /// the `net.http` evidence's fixture origins, attached once through
+    /// [`Authority::attach_net_evidence`]. No production start-up path sets
+    /// it, so in production the guard has no exception (ADR-0050 §6).
+    net_exceptions: OnceLock<Vec<dwk_proto::wire::guard::Address>>,
     // Held for the life of the process; the OS releases it on exit.
     _lock: std::fs::File,
 }
@@ -632,6 +644,8 @@ impl Authority {
             authority_uid,
             secrets: secret_state,
             sandbox: OnceLock::new(),
+            net_budget: config.net_budget,
+            net_exceptions: OnceLock::new(),
             _lock: lock,
         });
         let mut authority = Self { shared, conn };
@@ -698,6 +712,9 @@ impl Authority {
             // An open secret use (M4e) may have reached the broker: UNKNOWN,
             // never injected again.
             let secret_unknown = secret_use::reconcile_open(work)?;
+            // An open `net.http` hop (M5c) may have reached its origin:
+            // UNKNOWN, never sent again; its request with it.
+            let net_unknown = net_http::reconcile_open(work)?;
             // A preparation a previous incarnation left (M5a) may have made a
             // container: UNKNOWN, never prepared again; reconciliation by
             // label ends it.
@@ -706,6 +723,7 @@ impl Authority {
             let unknown = fs_unknown
                 .saturating_add(process_unknown)
                 .saturating_add(secret_unknown)
+                .saturating_add(net_unknown)
                 .saturating_add(environment_unknown);
             work.audit(
                 AuditEvent::StoreOpened,
@@ -1446,86 +1464,25 @@ impl Authority {
         })
     }
 
-    /// One mode A secret use (M4e, ADR-0046 §§11–12, 17): the secret side of
-    /// a containing egress invocation, whose tool (`net.http`) is M5's. An
-    /// in-process API with **no DWKP route**: nothing on the wire reaches it.
-    ///
-    /// `state::secret_use` sets out the order: decide — the fence, the
-    /// metadata, the mode, `secret.use:<handle>` through both gates — and
-    /// record the intent durably; **only then** read the value, outside any
-    /// transaction; teach the redaction index; move it into a one-shot pipe
-    /// and zero the authority's copy; hand the pipe to the broker; record the
-    /// outcome, durably — and only then answer. The value itself is never
-    /// returned, by this or any other API.
+    /// Attach the `net.http` evidence's fixture addresses (M5c, ADR-0050
+    /// §16): addresses the authority's own guard lets through although
+    /// blocked, so the evidence's local origins — which the broker reaches
+    /// only with `--allow-evidence-egress` — are judged as the broker judges
+    /// them. An in-process API with **no DWKP route** and no `serve` option:
+    /// only the evidence harness calls it, and a production authority's guard
+    /// has no exception.
     ///
     /// # Errors
     ///
-    /// [`AuthorityError`] when the authority cannot answer. A crash hook at a
-    /// [`CrashPoint::SECRET`] point poisons the store, as a crash would.
-    pub fn secret_egress(
+    /// [`AuthorityError::Invariant`] when exceptions are already attached.
+    pub fn attach_net_evidence(
         &mut self,
-        caller: &CallerContext,
-        session: &SessionId,
-        run: &RunId,
-        epoch: Epoch,
-        request: &EgressRequest,
-    ) -> Result<EgressReply, AuthorityError> {
-        let shared = Arc::clone(&self.shared);
-        let active = shared.active()?;
-        shared.crash(CrashPoint::SecretBeforeMetadata)?;
-        let asked = secret_use::Asked {
-            caller,
-            session,
-            run,
-            epoch,
-            request,
-        };
-        let after_metadata = || shared.crash(CrashPoint::SecretAfterMetadata);
-        let decided = self.transact(|work| {
-            secret_use::decide(work, &asked, &shared.secrets, active, &after_metadata)
-        })?;
-        let authorised = match decided {
-            secret_use::Decided::Refused(reason) => return Ok(EgressReply::Refused(reason)),
-            secret_use::Decided::Denied(reason) => return Ok(EgressReply::Denied(reason)),
-            secret_use::Decided::Replayed {
-                invocation,
-                state,
-                failure,
-            } => {
-                return Ok(EgressReply::Replayed {
-                    invocation,
-                    state,
-                    failure,
-                });
-            }
-            secret_use::Decided::Authorised(authorised) => *authorised,
-        };
-        // The intent is committed and audited. Until here no backend was
-        // touched.
-        shared.crash(CrashPoint::SecretAfterIntent)?;
-        let invocation = authorised.invocation.clone();
-
-        // 10. The value, with no transaction open.
-        let material = crate::secret::backend::read(
-            &authorised.metadata.storage,
-            shared.secrets.config().age.as_ref(),
-            shared.authority_uid,
-        );
-        let (ending, resolved) = match material {
-            Err(error) => (secret_use::Ending::Failed(error.code()), false),
-            Ok(material) => (
-                hand_over(&shared, &authorised, &invocation, material)?,
-                true,
-            ),
-        };
-        shared.crash(CrashPoint::SecretBeforeOutcome)?;
-        self.transact(|work| secret_use::record_outcome(work, &authorised, run, ending, resolved))?;
-        shared.crash(CrashPoint::SecretAfterOutcome)?;
-        Ok(match ending {
-            secret_use::Ending::Injected => EgressReply::Injected { invocation },
-            secret_use::Ending::Failed(reason) => EgressReply::Failed { invocation, reason },
-            secret_use::Ending::Unknown => EgressReply::Unknown { invocation },
-        })
+        exceptions: Vec<dwk_proto::wire::guard::Address>,
+    ) -> Result<(), AuthorityError> {
+        self.shared
+            .net_exceptions
+            .set(exceptions)
+            .map_err(|_| AuthorityError::Invariant("net.http exceptions are attached once"))
     }
 
     /// A process tool's hand-off could not be built after its intent was
@@ -1761,8 +1718,22 @@ impl Authority {
                 let reply = self.tool_preview(caller, session, run, epoch, &request)?;
                 wire::tool_reply_v2(&reply).map_err(unrepresentable)
             }
+            _ => self.dispatch_typed(caller, message),
+        }
+    }
+
+    /// The typed tool messages of versions 3 and 4; anything else is not an
+    /// authority request.
+    fn dispatch_typed(
+        &mut self,
+        caller: &CallerContext,
+        message: &DwkpMessage,
+    ) -> Result<DwkpBody, AuthorityError> {
+        match &message.body {
             DwkpBody::ToolInvokeV3(call) => self.dispatch_v3(caller, message, call, true),
             DwkpBody::CanonicalPreviewV3(call) => self.dispatch_v3(caller, message, call, false),
+            DwkpBody::ToolInvokeV4(call) => self.dispatch_v4(caller, message, call, true),
+            DwkpBody::CanonicalPreviewV4(call) => self.dispatch_v4(caller, message, call, false),
             _ => Err(AuthorityError::NotAnAuthorityRequest),
         }
     }
@@ -1829,50 +1800,6 @@ impl Authority {
     pub fn operator(&mut self) -> OperatorBootstrap<'_> {
         OperatorBootstrap { authority: self }
     }
-}
-
-/// Steps 11–13 of a secret use, after the backend read: the return path
-/// learns the value; a value that would break a header is refused here as
-/// well as in the broker, and never leaves; the value moves into a one-shot
-/// pipe and the authority's copy is zeroed; the broker consumes it, once.
-fn hand_over(
-    shared: &Shared,
-    authorised: &secret_use::Authorised,
-    invocation: &InvocationId,
-    material: crate::secret::material::SecretMaterial,
-) -> Result<secret_use::Ending, AuthorityError> {
-    shared.crash(CrashPoint::SecretAfterBackend)?;
-    // 11. The return path learns it before it can go anywhere.
-    shared.secrets.register(&authorised.handle, &material);
-    shared.crash(CrashPoint::SecretAfterRegister)?;
-    if !crate::secret::handoff::header_safe(&material) {
-        drop(material);
-        return Ok(secret_use::Ending::Failed(
-            crate::secret::SecretError::MaterialInvalid.code(),
-        ));
-    }
-    // 12. The one-shot pipe; the authority's copy is zeroed.
-    let pipe = match crate::secret::handoff::one_shot(material) {
-        Ok(pipe) => pipe,
-        Err(error) => return Ok(secret_use::Ending::Failed(error.code())),
-    };
-    shared.crash(CrashPoint::SecretAfterHandoff)?;
-    // 13. The broker consumes it, once.
-    let order = BrokerOrder::new(
-        invocation.clone(),
-        crate::broker::Operation::SecretEgress {
-            spec: authorised.spec.clone(),
-            secret: pipe,
-        },
-    );
-    let result = if let Some(broker) = &shared.broker {
-        broker.perform(order)
-    } else {
-        drop(order);
-        Err(BrokerError::before_sending(BrokerFailure::NotConfigured))
-    };
-    shared.crash(CrashPoint::SecretAfterBroker)?;
-    Ok(secret_use::classify(&result))
 }
 
 /// What step 3 of a process call decides from.

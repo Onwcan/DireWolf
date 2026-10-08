@@ -39,6 +39,15 @@ use nix as _;
 use sha2 as _;
 #[cfg(target_os = "linux")]
 use zeroize as _;
+// M5c's HTTPS client crates (ADR-0050 §18), reached only through the binary.
+#[cfg(target_os = "linux")]
+use bytes as _;
+#[cfg(target_os = "linux")]
+use rustls as _;
+#[cfg(target_os = "linux")]
+use ureq_proto as _;
+#[cfg(target_os = "linux")]
+use webpki_roots as _;
 
 #[cfg(target_os = "linux")]
 mod linux {

@@ -98,6 +98,18 @@ pub enum CrashPoint {
     /// Environment W7: the broker answered a destruction; the outcome is not
     /// yet durable.
     EnvironmentDestroyAfterBroker,
+    /// Network N1 (M5c): the broker answered a resolution; nothing about it
+    /// is recorded and nothing has been decided with it.
+    NetAfterResolve,
+    /// Network N2: a hop's intent — and its credential's, if it carries one
+    /// — is durable; nothing has been sent.
+    NetAfterIntent,
+    /// Network N3: the broker answered an exchange — the origin may have
+    /// acted — and the hop's outcome is not yet durable.
+    NetAfterBroker,
+    /// Network N4: the hop's outcome is durable; the next hop is not decided
+    /// and the runtime has not been answered.
+    NetAfterOutcome,
 }
 
 impl CrashPoint {
@@ -141,6 +153,10 @@ impl CrashPoint {
             Self::EnvironmentAfterOutcome => 'j',
             Self::EnvironmentDestroyAfterIntent => 'k',
             Self::EnvironmentDestroyAfterBroker => 'l',
+            Self::NetAfterResolve => 'm',
+            Self::NetAfterIntent => 'n',
+            Self::NetAfterBroker => 'o',
+            Self::NetAfterOutcome => 'p',
         }
     }
 }
@@ -183,6 +199,17 @@ impl CrashPoint {
         Self::EnvironmentAfterOutcome,
         Self::EnvironmentDestroyAfterIntent,
         Self::EnvironmentDestroyAfterBroker,
+    ];
+
+    /// The points of one `net.http` hop (M5c, ADR-0050 §§11, 16), in order:
+    /// N1 after its resolution, N2 after its intent, N3 after the exchange,
+    /// N4 after its outcome. A hop that carries a credential also crosses
+    /// [`CrashPoint::SECRET`]'s points from R3 on.
+    pub const NET: [Self; 4] = [
+        Self::NetAfterResolve,
+        Self::NetAfterIntent,
+        Self::NetAfterBroker,
+        Self::NetAfterOutcome,
     ];
 }
 

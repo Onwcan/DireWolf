@@ -671,7 +671,198 @@ def _payload_v3(rng: random.Random, schema: str) -> object:
     raise AssertionError(f"no version-3 generator for {schema}")
 
 
+def _label(rng: random.Random) -> str:
+    """One DNS label in its one spelling: no hyphen at either end."""
+    alphabet = "abcdefghijklmnopqrstuvwxyz0123456789"
+    inner = "".join(rng.choice(alphabet + "-") for _ in range(rng.randrange(0, 12)))
+    return rng.choice(alphabet) + inner + rng.choice(alphabet) if inner else rng.choice(alphabet)
+
+
+def _net_host(rng: random.Random) -> str:
+    """A canonical host that is not an address literal: the last label holds a letter."""
+    labels = [_label(rng) for _ in range(rng.randrange(0, 4))]
+    return ".".join([*labels, rng.choice("abcdefghijklmnopqrstuvwxyz") + _label(rng)])
+
+
+def _header_name(rng: random.Random) -> str:
+    alphabet = "abcdefghijklmnopqrstuvwxyz0123456789!#$%&'*+.^_`|~-"
+    return "".join(rng.choice(alphabet) for _ in range(rng.randint(1, 64)))
+
+
+def _header_value(rng: random.Random) -> str:
+    visible = [chr(c) for c in range(0x21, 0x7F)]
+    if rng.random() < 0.2:
+        return ""
+    middle = "".join(rng.choice([*visible, " "]) for _ in range(rng.randrange(0, 60)))
+    return rng.choice(visible) + middle + rng.choice(visible) if middle else rng.choice(visible)
+
+
+def _net_call(rng: random.Random) -> dwkp.NetHttpCall:
+    method = rng.choice(["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"])
+    visible = [chr(c) for c in range(0x21, 0x7F)]
+    url = rng.choice(["https", "http", "wss"]) + "://" + _net_host(rng) + "/"
+    url += "".join(rng.choice(visible) for _ in range(rng.randrange(0, 80)))
+    headers = None
+    if rng.random() < 0.5:
+        headers = [
+            dwkp.HttpHeader(name=_header_name(rng), value=_header_value(rng))
+            for _ in range(rng.choice([0, 1, rng.randrange(0, 6), 32]))
+        ]
+    return dwkp.NetHttpCall(
+        method=method,
+        url=url,
+        headers=headers,
+        body=rng.choice([None, _hex(rng, 0, 64)]),
+        credential_handle=rng.choice([None, _kebab(rng, 63)]),
+        follow_redirects=rng.random() < 0.5,
+        max_response_bytes=rng.choice([None, 1, rng.randint(1, 262144), 262144]),
+    )
+
+
+def _tool_call_v4(rng: random.Random) -> dwkp.ToolCallV4:
+    """Version 4: exactly one of the twelve typed members."""
+    if rng.random() < 0.4:
+        return dwkp.ToolCallV4(net_http=_net_call(rng))
+    v3 = _tool_call_v3(rng)
+    return dwkp.ToolCallV4(
+        **{name: getattr(v3, name) for name in v3.__slots__ if getattr(v3, name) is not None}
+    )
+
+
+def _net_decision(rng: random.Random) -> dwkp.NetActionDecision:
+    return dwkp.NetActionDecision(
+        effect=rng.choice(["ALLOW", "DENY"]),
+        reason=rng.choice(
+            [
+                "ALLOWED_BY_RULE",
+                "DENIED_BY_RULE",
+                "DEFAULT_DENY",
+                "NO_CAPABILITY",
+                "UNRESOLVED_POLICY_INPUT",
+                "OBLIGATION_UNENFORCEABLE",
+                "APPROVAL_REQUIRED",
+            ]
+        ),
+        capability_result=rng.choice(["SATISFIED", "NOT_SATISFIED"]),
+        policy_result=rng.choice(["SATISFIED", "NOT_SATISFIED"]),
+        rule_id=_kebab(rng, 63),
+        rule_source=_rule_source(rng),
+    )
+
+
+def _net_plan_action(rng: random.Random) -> dwkp.PlannedActionV4:
+    if rng.random() < 0.3:
+        return dwkp.PlannedActionV4(
+            injection=dwkp.PlannedInjectionAction(
+                handle=_kebab(rng, 63),
+                host=_net_host(rng),
+                port=rng.randint(1, 65535),
+                decision=_net_decision(rng),
+            )
+        )
+    return dwkp.PlannedActionV4(
+        net=dwkp.PlannedNetAction(
+            host=_net_host(rng),
+            port=rng.randint(1, 65535),
+            method=rng.choice(["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]),
+            url_sha256=_digest(rng),
+            body_bytes=rng.randint(0, MAX_SAFE_INTEGER),
+            decision=_net_decision(rng),
+        )
+    )
+
+
+def _tool_plan_v4(rng: random.Random) -> dwkp.ToolPlanV4:
+    if rng.random() < 0.5:
+        actions = [_net_plan_action(rng) for _ in range(rng.randint(0, 4))]
+        return dwkp.ToolPlanV4(
+            tool="net.http",
+            environment="HOST",
+            effect=rng.choice(["ALLOW", "DENY"]),
+            actions=actions,
+        )
+    v3 = _tool_plan_v3(rng)
+    return dwkp.ToolPlanV4(
+        tool=v3.tool,
+        environment=v3.environment,
+        effect=v3.effect,
+        actions=[dwkp.PlannedActionV4(fs=a.fs, process=a.process) for a in v3.actions],
+    )
+
+
+def _tool_output_v4(rng: random.Random) -> dwkp.ToolOutputV4:
+    if rng.random() < 0.4:
+        hops = [
+            dwkp.NetHop(
+                hop=n,
+                host=_net_host(rng),
+                port=rng.randint(1, 65535),
+                method=rng.choice(["GET", "HEAD", "POST", "OPTIONS"]),
+                status=rng.choice([None, rng.randint(100, 599)]),
+                injected=rng.random() < 0.3,
+            )
+            for n in range(1, rng.randint(0, 6) + 1)
+        ]
+        return dwkp.ToolOutputV4(
+            net_http=dwkp.NetHttpResult(
+                status=rng.randint(100, 599),
+                headers=[
+                    dwkp.HttpHeader(name=_header_name(rng), value=_header_value(rng))
+                    for _ in range(rng.choice([0, 1, rng.randrange(0, 16), 16]))
+                ],
+                body=_hex(rng, 0, 64),
+                truncated=rng.random() < 0.5,
+                hops=hops,
+                redirect_ended=rng.choice(
+                    [None, "NOT_FOLLOWED", "REDIRECT_LIMIT", "REDIRECT_LOOP", "HOP_DENIED"]
+                ),
+            )
+        )
+    v3 = _tool_output_v3(rng)
+    return dwkp.ToolOutputV4(
+        **{name: getattr(v3, name) for name in v3.__slots__ if getattr(v3, name) is not None}
+    )
+
+
+def _payload_v4(rng: random.Random, schema: str) -> object:
+    if schema in ("direwolf.tool.invoke", "direwolf.tool.preview"):
+        return _tool_call_v4(rng)
+    if schema == "direwolf.tool.result":
+        return dwkp.ToolResultV4(
+            invocation_id=_id(rng, "inv"), plan=_tool_plan_v4(rng), output=_tool_output_v4(rng)
+        )
+    if schema == "direwolf.tool.denied":
+        return dwkp.ToolDenialV4(plan=_tool_plan_v4(rng))
+    if schema == "direwolf.tool.previewed":
+        return dwkp.CanonicalPreviewResultV4(plan=_tool_plan_v4(rng))
+    if schema == "direwolf.tool.refused":
+        operation = rng.choice(sorted(dwkp._TOOLREFUSALV4_PAIRING))
+        return dwkp.ToolRefusalV4(
+            operation=operation, reason=rng.choice(dwkp._TOOLREFUSALV4_PAIRING[operation])
+        )
+    if schema == "direwolf.tool.failed":
+        return dwkp.ToolFailureV4(
+            invocation_id=_id(rng, "inv"),
+            reason=rng.choice(
+                [
+                    "OUTCOME_UNKNOWN",
+                    "EXEC_FAILED",
+                    "CONNECT_FAILED",
+                    "TLS_FAILED",
+                    "RESPONSE_MALFORMED",
+                    "ENCODING_UNSUPPORTED",
+                    "TIMEOUT",
+                    "ADDRESS_BLOCKED",
+                    "CREDENTIAL_FAILED",
+                ]
+            ),
+        )
+    raise AssertionError(f"no version-4 generator for {schema}")
+
+
 def _payload(rng: random.Random, schema: str, version: int = 1) -> object:
+    if version == 4 and schema.startswith("direwolf.tool."):
+        return _payload_v4(rng, schema)
     if version == 3 and schema.startswith("direwolf.tool."):
         return _payload_v3(rng, schema)
     if version == 2 and schema.startswith("direwolf.tool."):

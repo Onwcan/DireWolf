@@ -70,6 +70,10 @@
    "status": "pass",
    "min_score": 1.0
   },
+  "m5c-net-http/kernel-performed-net-http": {
+   "status": "pass",
+   "min_score": 1.0
+  },
   "pending-kernel/approval-binding-drift": {
    "status": "pending",
    "pending_reason": "requires M6: there is no approval registry and no binding hash."

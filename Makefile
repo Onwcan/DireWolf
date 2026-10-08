@@ -18,7 +18,7 @@ DW := $(PY) scripts/dw.py
         authority-state-evidence filesystem-canonicalization-evidence \
         authority-transport-evidence authority-write-probe broker-fs-read-evidence \
         filesystem-operations-evidence process-broker-evidence secret-broker-evidence \
-        sandbox-foundation-evidence sandbox-egress-evidence fuzz-smoke fuzz security docs \
+        sandbox-foundation-evidence sandbox-egress-evidence net-http-evidence net-http-mutations fuzz-smoke fuzz security docs \
         preflight tools hooks clean
 
 help:            ## List available commands
@@ -98,6 +98,12 @@ sandbox-foundation-evidence: ## M5a real OCI containers: strict profile measured
 
 sandbox-egress-evidence: ## M5b PROXY_ONLY on real OCI containers: relay, CONNECT proxy, guard, pinning, SNI, budgets, bypasses, weakened topologies
 	@$(DW) sandbox-egress-evidence
+
+net-http-evidence: ## M5c net.http, no internet: SSRF/DNS, redirects, TLS, credential binding and residue, crashes, budgets (DW_CPU_CONTENTION=n adds load)
+	@$(DW) net-http-evidence
+
+net-http-mutations: ## M5c mutation review: each net.http safeguard weakened in turn must fail net-http-evidence (slow)
+	@$(DW) net-http-mutations
 
 fuzz-smoke:      ## Stable mutation fuzzing of dwk-proto (not coverage-guided)
 	@$(DW) fuzz-smoke

@@ -320,6 +320,7 @@ fn start(
         flags: config.flags,
         lease_ttl_ms: config.lease_ttl_ms,
         secrets,
+        net_budget: crate::state::NetBudget::default(),
     };
     let options = StartOptions {
         broker,

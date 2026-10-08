@@ -30,6 +30,15 @@ use nix as _;
 use sha2 as _;
 #[cfg(target_os = "linux")]
 use zeroize as _;
+// M5c's HTTPS client crates (ADR-0050 §18), reached only through the binary.
+#[cfg(target_os = "linux")]
+use bytes as _;
+#[cfg(target_os = "linux")]
+use rustls as _;
+#[cfg(target_os = "linux")]
+use ureq_proto as _;
+#[cfg(target_os = "linux")]
+use webpki_roots as _;
 
 #[cfg(not(target_os = "linux"))]
 #[test]
@@ -1091,8 +1100,8 @@ mod linux {
                 Box::new(move |c| {
                     let a = authorisation(c, 1, id, 7);
                     let text = String::from_utf8(a[5..].to_vec()).unwrap();
-                    assert!(text.contains(r#""protocol":6"#));
-                    json(&text.replace(r#""protocol":6"#, r#""protocol":1"#))
+                    assert!(text.contains(r#""protocol":7"#));
+                    json(&text.replace(r#""protocol":7"#, r#""protocol":1"#))
                 }),
             ),
             (
@@ -1101,7 +1110,7 @@ mod linux {
                 Box::new(move |c| {
                     let a = authorisation(c, 1, id, 7);
                     let text = String::from_utf8(a[5..].to_vec()).unwrap();
-                    json(&text.replace(r#""protocol":6"#, r#""protocol":2"#))
+                    json(&text.replace(r#""protocol":7"#, r#""protocol":2"#))
                 }),
             ),
             (
@@ -1111,7 +1120,7 @@ mod linux {
                 Box::new(move |c| {
                     let a = authorisation(c, 1, id, 7);
                     let text = String::from_utf8(a[5..].to_vec()).unwrap();
-                    json(&text.replace(r#""protocol":6"#, r#""protocol":3"#))
+                    json(&text.replace(r#""protocol":7"#, r#""protocol":3"#))
                 }),
             ),
             (
@@ -1120,7 +1129,7 @@ mod linux {
                 Box::new(move |c| {
                     let a = authorisation(c, 1, id, 7);
                     let text = String::from_utf8(a[5..].to_vec()).unwrap();
-                    json(&text.replace(r#""protocol":6"#, r#""protocol":4"#))
+                    json(&text.replace(r#""protocol":7"#, r#""protocol":4"#))
                 }),
             ),
             (
@@ -1129,7 +1138,16 @@ mod linux {
                 Box::new(move |c| {
                     let a = authorisation(c, 1, id, 7);
                     let text = String::from_utf8(a[5..].to_vec()).unwrap();
-                    json(&text.replace(r#""protocol":6"#, r#""protocol":5"#))
+                    json(&text.replace(r#""protocol":7"#, r#""protocol":5"#))
+                }),
+            ),
+            (
+                // M5b's protocol, which M5c's broker no longer speaks (ADR-0050).
+                "protocol-six",
+                Box::new(move |c| {
+                    let a = authorisation(c, 1, id, 7);
+                    let text = String::from_utf8(a[5..].to_vec()).unwrap();
+                    json(&text.replace(r#""protocol":7"#, r#""protocol":6"#))
                 }),
             ),
             (

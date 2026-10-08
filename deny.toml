@@ -53,7 +53,14 @@ allow = [
     "CC0-1.0",
 ]
 confidence-threshold = 0.93
-exceptions = []
+# One crate, one licence, version-exact in Cargo.toml: `webpki-roots` is data --
+# Mozilla's CA certificate store, compiled into the broker for its HTTPS client
+# (ADR-0050 §18) -- published under CDLA-Permissive-2.0, a permissive data
+# licence with no copyleft and no obligation beyond keeping the notice. It is
+# linked by `dwkd-broker` only, never by the authority.
+exceptions = [
+    { allow = ["CDLA-Permissive-2.0"], crate = "webpki-roots" },
+]
 
 # ---------------------------------------------------------------------------
 # Bans
@@ -85,6 +92,21 @@ skip = [
     { crate = "syn@2.0.119", reason = "proc macros only, never linked: dalek's, zeroize's and age's localisation derives use syn 2; serde_derive, displaydoc and futures-macro use syn 3 (ADR-0046 §25)" },
     { crate = "toml@0.5.11", reason = "build time only: find-crate, which i18n-embed's proc macros use to read Cargo.toml, takes toml 0.5; the policy and secret-metadata loaders use toml 1" },
     { crate = "windows-sys@0.60.2", reason = "keyring 3.6.3 (the Windows Credential Manager backend, ADR-0046 §6) takes 0.60; rustix, errno and winapi-util take 0.61. Windows only, and the authority serves nothing there" },
+    { crate = "base64@0.21.7", reason = "age 0.11.5 (ADR-0046 §25, the authority) takes base64 0.21; ureq-proto 0.6.4 (ADR-0050 §18, the broker only) takes 0.23, for Basic userinfo the broker never sends -- a URL with userinfo is refused before it is decided. One copy per daemon" },
+    # M5c (ADR-0050 §18, D1): ring 0.17.14, rustls's crypto provider in the
+    # broker, takes windows-sys 0.52 and its target crates on Windows. The
+    # broker serves only on Linux (ADR-0050 §19), so no daemon that runs links
+    # any of them; each is listed, version-exact, so a third copy fails.
+    { crate = "windows-sys@0.52.0", reason = "ring 0.17.14 (the broker's TLS provider, ADR-0050 §18) on Windows only; the broker serves only on Linux" },
+    { crate = "windows-targets@0.52.6", reason = "ring 0.17.14 via windows-sys 0.52, Windows only; the broker serves only on Linux (ADR-0050 §18)" },
+    { crate = "windows_aarch64_gnullvm@0.52.6", reason = "ring 0.17.14 via windows-sys 0.52, Windows only; the broker serves only on Linux (ADR-0050 §18)" },
+    { crate = "windows_aarch64_msvc@0.52.6", reason = "ring 0.17.14 via windows-sys 0.52, Windows only; the broker serves only on Linux (ADR-0050 §18)" },
+    { crate = "windows_i686_gnu@0.52.6", reason = "ring 0.17.14 via windows-sys 0.52, Windows only; the broker serves only on Linux (ADR-0050 §18)" },
+    { crate = "windows_i686_gnullvm@0.52.6", reason = "ring 0.17.14 via windows-sys 0.52, Windows only; the broker serves only on Linux (ADR-0050 §18)" },
+    { crate = "windows_i686_msvc@0.52.6", reason = "ring 0.17.14 via windows-sys 0.52, Windows only; the broker serves only on Linux (ADR-0050 §18)" },
+    { crate = "windows_x86_64_gnu@0.52.6", reason = "ring 0.17.14 via windows-sys 0.52, Windows only; the broker serves only on Linux (ADR-0050 §18)" },
+    { crate = "windows_x86_64_gnullvm@0.52.6", reason = "ring 0.17.14 via windows-sys 0.52, Windows only; the broker serves only on Linux (ADR-0050 §18)" },
+    { crate = "windows_x86_64_msvc@0.52.6", reason = "ring 0.17.14 via windows-sys 0.52, Windows only; the broker serves only on Linux (ADR-0050 §18)" },
 ]
 skip-tree = []
 
@@ -100,6 +122,16 @@ deny = [
     # repository data inside a Rust process.  Repository operations belong in
     # the broker as brokered `process.exec` of the `git` binary.
     { crate = "git2", reason = "invoke the git binary through the exec broker instead" },
+    # `net.http` (ADR-0050 §9): the broker dials only the addresses the guard
+    # pinned, and trusts only the compiled-in roots. A client with its own
+    # resolver, connection pool, redirect following or ambient proxy settings,
+    # a second DNS resolver, or the host's trust store would each undo one of
+    # those, quietly.
+    { crate = "reqwest", reason = "net.http is the broker's own client over pinned addresses; see ADR-0050 §9" },
+    { crate = "hickory-resolver", reason = "names are resolved once, by the broker's one resolver; see ADR-0050 §6" },
+    { crate = "trust-dns-resolver", reason = "names are resolved once, by the broker's one resolver; see ADR-0050 §6" },
+    { crate = "rustls-native-certs", reason = "the HTTPS client trusts webpki-roots only, never the host's store; see ADR-0050 §9" },
+    { crate = "rustls-platform-verifier", reason = "the HTTPS client trusts webpki-roots only, never the host's store; see ADR-0050 §9" },
 ]
 
 # ---------------------------------------------------------------------------

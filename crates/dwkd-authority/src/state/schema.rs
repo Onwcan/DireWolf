@@ -51,7 +51,7 @@ use rusqlite::Connection;
 pub(super) const APPLICATION_ID: i64 = 0x4457_4B44;
 
 /// The schema version this build creates and understands.
-pub(super) const CURRENT_VERSION: i64 = 7;
+pub(super) const CURRENT_VERSION: i64 = 8;
 
 /// Schema version 1, the first. Static text: nothing in it is assembled from a
 /// value, and every value the authority stores is bound as a parameter.
@@ -1025,6 +1025,159 @@ WHEN NOT ((OLD.state = 'PREPARING' AND NEW.state IN ('READY', 'REFUSED', 'UNKNOW
 BEGIN SELECT RAISE(ABORT, 'an environment moves only forward through its lifecycle'); END;
 ";
 
+/// Schema version 8 (M5c, ADR-0050 §11): `net.http`'s ledger.
+///
+/// * `net_request` is one row per invocation: the intent — method, origin,
+///   the SHA-256 of the canonical URL (never the URL: its path and query may
+///   hold anything), whether a credential handle was named — durable before
+///   anything is resolved for an effect, then exactly one ending. Its key is
+///   bound in `net_idempotency`, in the same namespace as every other tool's.
+/// * `net_hop` is one row per hop, written **before** the broker is asked to
+///   perform it: the hop's origin, method, URL digest, the addresses the guard
+///   pinned, the credential's injection if one is attached, and the budget it
+///   is charged — then exactly one ending. Hops are consecutive. A hop that
+///   reached a TLS handshake (`tls_established`) is what makes its origin
+///   *seen* by the run: destination novelty is a fact the ledger proves.
+/// * Budgets are sums over a run's hops (`charge_out`, `charge_in`, one
+///   request each, distinct origins): charged at the intent, in the same
+///   transaction, never refunded — a crash, a failure or an `UNKNOWN` ending
+///   keeps what it was charged.
+///
+/// No column can hold a URL path or query, a header value, a body, an
+/// address the runtime chose, or a credential value.
+pub(super) const SCHEMA_V8: &str = r"
+CREATE TABLE net_request (
+    invocation_id     TEXT    PRIMARY KEY CHECK (length(invocation_id) = 30
+                                                 AND substr(invocation_id, 1, 4) = 'inv_'),
+    run_id            TEXT    NOT NULL REFERENCES run(run_id) ON DELETE RESTRICT,
+    method            TEXT    NOT NULL CHECK (method IN ('GET', 'HEAD', 'POST', 'PUT', 'PATCH',
+                                                         'DELETE', 'OPTIONS')),
+    host              TEXT    NOT NULL CHECK (length(host) BETWEEN 1 AND 253
+                                              AND host NOT GLOB '*[^a-z0-9.-]*'),
+    port              INTEGER NOT NULL CHECK (port BETWEEN 1 AND 65535),
+    url_sha256        TEXT    NOT NULL CHECK (length(url_sha256) = 64
+                                              AND url_sha256 NOT GLOB '*[^0-9a-f]*'),
+    credential_handle TEXT    CHECK (credential_handle IS NULL
+                                     OR (length(credential_handle) BETWEEN 1 AND 64
+                                         AND credential_handle NOT GLOB '*[^a-z0-9._-]*')),
+    follow_redirects  INTEGER NOT NULL CHECK (follow_redirects IN (0, 1)),
+    incarnation       INTEGER NOT NULL CHECK (incarnation >= 1),
+    state             TEXT    NOT NULL CHECK (state IN ('INTENT', 'COMPLETED', 'FAILED',
+                                                        'UNKNOWN')),
+    failure           TEXT    CHECK (failure IS NULL OR (length(failure) BETWEEN 1 AND 64
+                                                         AND failure NOT GLOB '*[^A-Z0-9_]*')),
+    final_status      INTEGER CHECK (final_status IS NULL OR final_status BETWEEN 100 AND 599),
+    hops              INTEGER CHECK (hops IS NULL OR hops BETWEEN 1 AND 6),
+    redirect_ended    TEXT    CHECK (redirect_ended IS NULL
+                                     OR (length(redirect_ended) BETWEEN 1 AND 64
+                                         AND redirect_ended NOT GLOB '*[^A-Z0-9_]*')),
+    intent_ms         INTEGER NOT NULL,
+    ended_ms          INTEGER,
+    CHECK ((state = 'INTENT') = (ended_ms IS NULL)),
+    CHECK (state != 'FAILED' OR failure IS NOT NULL),
+    CHECK (state IN ('FAILED', 'UNKNOWN') OR failure IS NULL),
+    CHECK ((state = 'COMPLETED') = (final_status IS NOT NULL)),
+    CHECK (state != 'COMPLETED' OR hops IS NOT NULL),
+    CHECK (redirect_ended IS NULL OR state = 'COMPLETED')
+) STRICT;
+CREATE INDEX net_request_by_state ON net_request(state);
+CREATE TRIGGER net_request_intent_fixed BEFORE UPDATE OF invocation_id, run_id, method, host,
+    port, url_sha256, credential_handle, follow_redirects, incarnation, intent_ms ON net_request
+BEGIN SELECT RAISE(ABORT, 'a request''s intent is immutable'); END;
+CREATE TRIGGER net_request_ends_once BEFORE UPDATE OF state, failure, final_status, hops,
+    redirect_ended, ended_ms ON net_request
+WHEN OLD.state != 'INTENT' OR NEW.state = 'INTENT'
+BEGIN SELECT RAISE(ABORT, 'a request ends once, from INTENT'); END;
+CREATE TRIGGER net_request_no_delete BEFORE DELETE ON net_request
+BEGIN SELECT RAISE(ABORT, 'a request record is never deleted'); END;
+
+CREATE TABLE net_hop (
+    invocation_id    TEXT    NOT NULL REFERENCES net_request(invocation_id) ON DELETE RESTRICT,
+    hop              INTEGER NOT NULL CHECK (hop BETWEEN 1 AND 6),
+    run_id           TEXT    NOT NULL REFERENCES run(run_id) ON DELETE RESTRICT,
+    method           TEXT    NOT NULL CHECK (method IN ('GET', 'HEAD', 'POST', 'PUT', 'PATCH',
+                                                        'DELETE', 'OPTIONS')),
+    host             TEXT    NOT NULL CHECK (length(host) BETWEEN 1 AND 253
+                                             AND host NOT GLOB '*[^a-z0-9.-]*'),
+    port             INTEGER NOT NULL CHECK (port BETWEEN 1 AND 65535),
+    url_sha256       TEXT    NOT NULL CHECK (length(url_sha256) = 64
+                                             AND url_sha256 NOT GLOB '*[^0-9a-f]*'),
+    addresses        TEXT    NOT NULL CHECK (length(addresses) BETWEEN 8 AND 528
+                                             AND addresses NOT GLOB '*[^0-9a-f,]*'),
+    injection_id     TEXT    UNIQUE REFERENCES secret_injection(invocation_id)
+                                    ON DELETE RESTRICT,
+    charge_out       INTEGER NOT NULL CHECK (charge_out >= 0),
+    charge_in        INTEGER NOT NULL CHECK (charge_in >= 0),
+    incarnation      INTEGER NOT NULL CHECK (incarnation >= 1),
+    state            TEXT    NOT NULL CHECK (state IN ('INTENT', 'COMPLETED', 'FAILED',
+                                                       'UNKNOWN')),
+    disposition      TEXT    CHECK (disposition IS NULL
+                                    OR (length(disposition) BETWEEN 1 AND 64
+                                        AND disposition NOT GLOB '*[^A-Z0-9_]*')),
+    status           INTEGER CHECK (status IS NULL OR status BETWEEN 100 AND 599),
+    tls_established  INTEGER NOT NULL CHECK (tls_established IN (0, 1)),
+    bytes_sent       INTEGER CHECK (bytes_sent IS NULL OR bytes_sent >= 0),
+    bytes_received   INTEGER CHECK (bytes_received IS NULL OR bytes_received >= 0),
+    intent_ms        INTEGER NOT NULL,
+    ended_ms         INTEGER,
+    PRIMARY KEY (invocation_id, hop),
+    CHECK ((state = 'INTENT') = (ended_ms IS NULL)),
+    CHECK ((state = 'INTENT') = (disposition IS NULL)),
+    CHECK (state != 'COMPLETED' OR (status IS NOT NULL AND tls_established = 1)),
+    CHECK (state != 'INTENT' OR tls_established = 0)
+) STRICT;
+CREATE INDEX net_hop_by_run_origin ON net_hop(run_id, host, port);
+CREATE INDEX net_hop_by_state ON net_hop(state);
+CREATE TRIGGER net_hop_in_order BEFORE INSERT ON net_hop
+WHEN NEW.hop != 1 + COALESCE((SELECT max(hop) FROM net_hop
+                              WHERE invocation_id = NEW.invocation_id), 0)
+     OR NOT EXISTS (SELECT 1 FROM net_request WHERE invocation_id = NEW.invocation_id
+                    AND run_id = NEW.run_id AND state = 'INTENT')
+     OR EXISTS (SELECT 1 FROM net_hop WHERE invocation_id = NEW.invocation_id
+                AND state = 'INTENT')
+BEGIN SELECT RAISE(ABORT, 'a hop follows the last, of an open request, one at a time'); END;
+CREATE TRIGGER net_hop_intent_fixed BEFORE UPDATE OF invocation_id, hop, run_id, method, host,
+    port, url_sha256, addresses, injection_id, charge_out, charge_in, incarnation, intent_ms
+    ON net_hop
+BEGIN SELECT RAISE(ABORT, 'a hop''s intent is immutable'); END;
+CREATE TRIGGER net_hop_ends_once BEFORE UPDATE OF state, disposition, status, tls_established,
+    bytes_sent, bytes_received, ended_ms ON net_hop
+WHEN OLD.state != 'INTENT' OR NEW.state = 'INTENT'
+BEGIN SELECT RAISE(ABORT, 'a hop ends once, from INTENT'); END;
+CREATE TRIGGER net_hop_no_delete BEFORE DELETE ON net_hop
+BEGIN SELECT RAISE(ABORT, 'a hop record is never deleted'); END;
+
+CREATE TABLE net_idempotency (
+    subject          TEXT    NOT NULL,
+    session_id       TEXT    NOT NULL,
+    idempotency_key  TEXT    NOT NULL,
+    request_digest   TEXT    NOT NULL CHECK (length(request_digest) = 64
+                                             AND request_digest NOT GLOB '*[^0-9a-f]*'),
+    invocation_id    TEXT    NOT NULL UNIQUE REFERENCES net_request(invocation_id)
+                                             ON DELETE RESTRICT,
+    recorded_ms      INTEGER NOT NULL,
+    PRIMARY KEY (subject, session_id, idempotency_key)
+) STRICT;
+CREATE TRIGGER net_idempotency_no_update BEFORE UPDATE ON net_idempotency
+BEGIN SELECT RAISE(ABORT, 'an idempotency record is immutable'); END;
+CREATE TRIGGER net_idempotency_no_delete BEFORE DELETE ON net_idempotency
+BEGIN SELECT RAISE(ABORT, 'an idempotency record is never deleted'); END;
+CREATE TRIGGER net_idempotency_one_namespace BEFORE INSERT ON net_idempotency
+WHEN EXISTS (SELECT 1 FROM tool_idempotency WHERE subject = NEW.subject
+             AND session_id = NEW.session_id AND idempotency_key = NEW.idempotency_key)
+     OR EXISTS (SELECT 1 FROM process_idempotency WHERE subject = NEW.subject
+                AND session_id = NEW.session_id AND idempotency_key = NEW.idempotency_key)
+BEGIN SELECT RAISE(ABORT, 'an idempotency key names one invocation'); END;
+CREATE TRIGGER tool_idempotency_not_a_request BEFORE INSERT ON tool_idempotency
+WHEN EXISTS (SELECT 1 FROM net_idempotency WHERE subject = NEW.subject
+             AND session_id = NEW.session_id AND idempotency_key = NEW.idempotency_key)
+BEGIN SELECT RAISE(ABORT, 'an idempotency key names one invocation'); END;
+CREATE TRIGGER process_idempotency_not_a_request BEFORE INSERT ON process_idempotency
+WHEN EXISTS (SELECT 1 FROM net_idempotency WHERE subject = NEW.subject
+             AND session_id = NEW.session_id AND idempotency_key = NEW.idempotency_key)
+BEGIN SELECT RAISE(ABORT, 'an idempotency key names one invocation'); END;
+";
+
 /// One step from a version to the next.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct Migration {
@@ -1063,6 +1216,10 @@ pub(super) const MIGRATIONS: &[Migration] = &[
     Migration {
         to: 7,
         sql: SCHEMA_V7,
+    },
+    Migration {
+        to: 8,
+        sql: SCHEMA_V8,
     },
 ];
 
@@ -1218,7 +1375,7 @@ pub(super) fn foreign_key_check(conn: &Connection) -> rusqlite::Result<Result<()
 mod tests {
     use super::{
         APPLICATION_ID, CURRENT_VERSION, MIGRATIONS, Migration, SCHEMA_V1, SCHEMA_V2, SCHEMA_V3,
-        SCHEMA_V4, SCHEMA_V5, SCHEMA_V6, SCHEMA_V7, Shape, ShapeError, decide, migrate,
+        SCHEMA_V4, SCHEMA_V5, SCHEMA_V6, SCHEMA_V7, SCHEMA_V8, Shape, ShapeError, decide, migrate,
         verify_exact,
     };
     use rusqlite::Connection;
@@ -1285,6 +1442,7 @@ mod tests {
         assert!(conn.execute_batch(SCHEMA_V5).is_ok());
         assert!(conn.execute_batch(SCHEMA_V6).is_ok());
         assert!(conn.execute_batch(SCHEMA_V7).is_ok());
+        assert!(conn.execute_batch(SCHEMA_V8).is_ok());
         assert!(
             conn.execute_batch("DROP TRIGGER run_never_resurrects")
                 .is_ok()
@@ -1307,6 +1465,7 @@ mod tests {
         assert!(conn.execute_batch(SCHEMA_V5).is_ok());
         assert!(conn.execute_batch(SCHEMA_V6).is_ok());
         assert!(conn.execute_batch(SCHEMA_V7).is_ok());
+        assert!(conn.execute_batch(SCHEMA_V8).is_ok());
         assert!(
             conn.execute_batch("CREATE TABLE backdoor (x INTEGER)")
                 .is_ok()
@@ -2156,13 +2315,81 @@ mod tests {
             let Ok(tx) = conn.unchecked_transaction() else {
                 unreachable!("a transaction")
             };
-            assert_eq!(migrate(&tx, 6, MIGRATIONS).ok(), Some(7));
+            assert_eq!(migrate(&tx, 6, MIGRATIONS).ok(), Some(CURRENT_VERSION));
             assert!(tx.commit().is_ok());
         }
+        const { assert!(CURRENT_VERSION >= 7) };
         assert_eq!(verify_exact(&conn).ok(), Some(Ok(())));
         let count: i64 = conn
             .query_row("SELECT count(*) FROM environment", [], |row| row.get(0))
             .unwrap_or(-1);
         assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn a_version_seven_store_migrates_to_eight_and_a_key_stays_one_namespace() {
+        // M5c (ADR-0050 §11): v8 adds the net.http ledger. A v7 store's rows
+        // survive and the new tables start empty; a key bound by a request is
+        // not free for any other tool, and the reverse.
+        let conn = store_at(7);
+        assert!(environment(&conn, ENV, "run_a", "PREPARING").is_ok());
+        {
+            let Ok(tx) = conn.unchecked_transaction() else {
+                unreachable!("a transaction")
+            };
+            assert_eq!(migrate(&tx, 7, MIGRATIONS).ok(), Some(CURRENT_VERSION));
+            assert!(tx.commit().is_ok());
+        }
+        const { assert!(CURRENT_VERSION >= 8) };
+        assert_eq!(verify_exact(&conn).ok(), Some(Ok(())));
+        let count = |sql: &str| conn.query_row(sql, [], |row| row.get::<_, i64>(0)).ok();
+        assert_eq!(count("SELECT count(*) FROM environment"), Some(1));
+        for sql in [
+            "SELECT count(*) FROM net_request",
+            "SELECT count(*) FROM net_hop",
+            "SELECT count(*) FROM net_idempotency",
+        ] {
+            assert_eq!(count(sql), Some(0), "{sql}");
+        }
+        let bind = |table: &str, key: &str, n: u8| {
+            let sql = match table {
+                "net" => {
+                    "INSERT INTO net_idempotency (subject, session_id, idempotency_key, \
+                     request_digest, invocation_id, recorded_ms) VALUES ('uid:1000', 'ses_x', \
+                     ?1, ?2, ?3, 0)"
+                }
+                "tool" => {
+                    "INSERT INTO tool_idempotency (subject, session_id, idempotency_key, \
+                     request_digest, invocation_id, recorded_ms) VALUES ('uid:1000', 'ses_x', \
+                     ?1, ?2, ?3, 0)"
+                }
+                _ => {
+                    "INSERT INTO process_idempotency (subject, session_id, idempotency_key, \
+                     request_digest, invocation_id, recorded_ms) VALUES ('uid:1000', 'ses_x', \
+                     ?1, ?2, ?3, 0)"
+                }
+            };
+            conn.execute(sql, rusqlite::params![key, "ab".repeat(32), inv(n)])
+        };
+        assert!(bind("net", "k1", 0).is_ok());
+        assert!(
+            bind("tool", "k1", 1).is_err(),
+            "a request's key is not free for a file"
+        );
+        assert!(
+            bind("process", "k1", 2).is_err(),
+            "a request's key is not free for a process"
+        );
+        assert!(bind("tool", "k2", 3).is_ok());
+        assert!(bind("process", "k3", 4).is_ok());
+        assert!(
+            bind("net", "k2", 5).is_err(),
+            "a file's key is not free for a request"
+        );
+        assert!(
+            bind("net", "k3", 6).is_err(),
+            "a process's key is not free for a request"
+        );
+        assert!(bind("net", "k4", 7).is_ok());
     }
 }

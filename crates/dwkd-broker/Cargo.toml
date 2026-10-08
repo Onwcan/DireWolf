@@ -60,3 +60,12 @@ sha2 = { workspace = true }
 # assignment in the helper -- is `Zeroizing`. The same pinned crate and
 # features as the authority (`alloc`, no derive, no proc macro).
 zeroize = { workspace = true }
+# M5c (ADR-0050 §§9, 18): the HTTPS client `net.http` hops are performed with
+# -- `rustls` (verification always on, Mozilla's roots compiled in), the
+# `ureq-proto` framing library over `httparse` (and the `http` types it
+# re-exports), and `bytes` for a header value whose owner is `Zeroizing`.
+# Named only in `src/http` (TX044); the authority links none.
+rustls = { workspace = true }
+webpki-roots = { workspace = true }
+ureq-proto = { workspace = true }
+bytes = { workspace = true }

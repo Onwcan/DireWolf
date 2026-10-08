@@ -1,14 +1,17 @@
 //! The broker's secret primitives against the released broker binary (M4e,
 //! ADR-0046 §§11–16, 22): this harness plays the authority — the kernel
 //! reports its uid as the one the broker was told to read from — and speaks
-//! private protocol version 4 exactly as the authority's link does.
+//! the private protocol exactly as the authority's link does (version 7).
 //!
 //! What is measured, on real processes:
 //!
-//! * mode A: the value arrives as a descriptor, is read once — `rchar` says
-//!   exactly how many bytes — and nothing about it comes back; a replay on a
-//!   new connection reads nothing; every hostile descriptor and message is
-//!   refused;
+//! * mode A, as `net.http`'s credential exchange (ADR-0050 §8; M4e's
+//!   render-and-drop `broker.secret_egress` is retired): the value arrives as
+//!   a descriptor, is read once — `rchar` says exactly how many bytes — and
+//!   rendered into the request, which a closed loopback port never receives;
+//!   nothing about it comes back; a replay on a new connection reads nothing;
+//!   every hostile descriptor and message is refused. The header reaching its
+//!   origin, and only its origin, is the `net.http` evidence's;
 //! * modes B and C, **the secret injection primitive** (not a sandbox: the
 //!   target runs on the host with the broker's privileges, and the authority
 //!   never sends this before M5): the target receives the value exactly as
@@ -44,6 +47,15 @@ use rustix as _;
 use sha2 as _;
 #[cfg(target_os = "linux")]
 use zeroize as _;
+// M5c's HTTPS client crates (ADR-0050 §18), reached only through the binary.
+#[cfg(target_os = "linux")]
+use bytes as _;
+#[cfg(target_os = "linux")]
+use rustls as _;
+#[cfg(target_os = "linux")]
+use ureq_proto as _;
+#[cfg(target_os = "linux")]
+use webpki_roots as _;
 
 #[cfg(target_os = "linux")]
 mod linux {
@@ -59,15 +71,20 @@ mod linux {
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 
+    use dwk_proto::brokerp::egress::{EgressHost, EgressPort};
+    use dwk_proto::brokerp::http::{
+        HopNumber, HopSpec, HttpCredential, HttpExchangeAuthorisation, HttpMethod, HttpTarget,
+        NetAddress, NetAddresses, RequestHeaders, ResponseLimit,
+    };
     use dwk_proto::brokerp::{
         self, BrokerGeneration, BrokerHello, BrokerOutcome, BrokerRefusal, ChannelNonce, Common,
-        EgressSpec, ExecEnvironment, FsReadAuthorisation, OutcomeResult, ProcessArgs, ProcessSpec,
-        ProcessStartAuthorisation, ProcessStatusAuthorisation, SecretDelivery,
-        SecretEgressAuthorisation, SecretEnvName, SecretHandle, SecretHeaderName,
-        SecretHeaderPrefix, SecretOrigin, SecretProcessStartAuthorisation, SpawnSecret,
-        StreamLimit,
+        ExecEnvironment, FsReadAuthorisation, OutcomeResult, ProcessArgs, ProcessSpec,
+        ProcessStartAuthorisation, ProcessStatusAuthorisation, SecretDelivery, SecretEnvName,
+        SecretHandle, SecretHeaderName, SecretHeaderPrefix, SecretProcessStartAuthorisation,
+        SpawnSecret, StreamLimit,
     };
     use dwk_proto::frame::FrameDecoder;
+    use dwk_proto::wire::guard::Address;
     use dwk_proto::wire::id::{InvocationId, ProcessId};
     use dwk_proto::wire::scalar::{ContentDigest, HostPath, ProcessArg, ProcessState, ReadLimit};
     use rustix::net::{SendAncillaryBuffer, SendAncillaryMessage, SendFlags};
@@ -161,6 +178,11 @@ mod linux {
     impl Broker {
         /// A same-uid broker. `dumpable` lets this harness read its `/proc`.
         fn start(socket: &Path, dumpable: bool, crash: Option<&str>) -> Self {
+            Self::start_with(socket, dumpable, crash, &[])
+        }
+
+        /// A same-uid broker with `extra` flags after the others.
+        fn start_with(socket: &Path, dumpable: bool, crash: Option<&str>, extra: &[&str]) -> Self {
             let mut command = Command::new(BIN);
             command.env_clear();
             if let Some(point) = crash {
@@ -176,6 +198,7 @@ mod linux {
             if dumpable {
                 command.arg("--allow-dumpable");
             }
+            command.args(extra);
             let mut child = command
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
@@ -422,24 +445,65 @@ mod linux {
         OwnedFd::from(reader)
     }
 
-    fn egress_frame(channel: &ChannelNonce) -> Vec<u8> {
-        let a = SecretEgressAuthorisation::new(
-            Common::new(channel.clone(), invocation(1)),
-            EgressSpec {
+    /// A loopback port nothing listens on: bound, read, released.
+    fn closed_port() -> u16 {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        port
+    }
+
+    /// A broker whose guard lets loopback through — the `net.http`
+    /// evidence's fixture resolver, `--allow-evidence-egress` — so a
+    /// credential exchange to a closed loopback port reads, checks and
+    /// renders the credential and then fails to connect: the whole secret
+    /// side of mode A, with nothing dialled beyond this host.
+    fn credential_broker(scratch: &Scratch, crash: Option<&str>) -> Broker {
+        let fixture = scratch.0.join("egress.fixture");
+        std::fs::write(&fixture, "allow 127.0.0.1\n").unwrap();
+        Broker::start_with(
+            &scratch.socket(),
+            true,
+            crash,
+            &["--allow-evidence-egress", fixture.to_str().unwrap()],
+        )
+    }
+
+    /// One credential exchange of `api-token` to `127.0.0.1:<port>`.
+    fn exchange_frame(channel: &ChannelNonce, port: u16) -> Vec<u8> {
+        let hop = HopSpec {
+            hop: HopNumber::new(1).unwrap(),
+            method: HttpMethod::Get,
+            host: EgressHost::new("api.example.com").unwrap(),
+            port: EgressPort::new(port).unwrap(),
+            target: HttpTarget::new("/v1").unwrap(),
+            headers: RequestHeaders::new(Vec::new()).unwrap(),
+            body: None,
+            addresses: NetAddresses::new(vec![NetAddress::from_address(Address::V4([
+                127, 0, 0, 1,
+            ]))])
+            .unwrap(),
+            response_limit: ResponseLimit::new(1024).unwrap(),
+            credential: Some(HttpCredential {
                 handle: SecretHandle::new("api-token").unwrap(),
-                origin: SecretOrigin::new("api.example.com:443").unwrap(),
                 header_name: SecretHeaderName::new("Authorization").unwrap(),
                 header_prefix: SecretHeaderPrefix::new("Bearer "),
-            },
-        );
+            }),
+        };
+        let a = HttpExchangeAuthorisation::new(Common::new(channel.clone(), invocation(1)), hop);
         brokerp::encode_frame(&a).unwrap()
     }
 
-    /// One render exchange: the outcome body and result, or `None` if closed.
-    fn render(socket: &Path, fds: &[BorrowedFd<'_>]) -> Option<(Vec<u8>, OutcomeResult)> {
+    /// One credential exchange: the outcome body and result, or `None` if
+    /// closed.
+    fn render(
+        socket: &Path,
+        port: u16,
+        fds: &[BorrowedFd<'_>],
+    ) -> Option<(Vec<u8>, OutcomeResult)> {
         let mut peer = Peer::connect(socket);
         let hello = peer.hello();
-        peer.send(&egress_frame(&hello.channel), fds);
+        peer.send(&exchange_frame(&hello.channel, port), fds);
         peer.outcome()
     }
 
@@ -526,21 +590,30 @@ mod linux {
         evidence("fs-read-residue-repeated", "values-absent");
     }
 
+    /// Mode A's render (M4e's `secret_egress`, retired by ADR-0050 §8) is now
+    /// a credential exchange's: the same one descriptor, read once, checked,
+    /// composed into the request about to be written — and here, with no
+    /// origin listening, never written. Nothing of it comes back.
     #[test]
     fn a_render_reads_the_value_once_through_its_descriptor_and_returns_nothing_of_it() {
         let scratch = Scratch::new("egress");
-        let broker = Broker::start(&scratch.socket(), true, None);
+        let broker = credential_broker(&scratch, None);
         let socket = scratch.socket();
+        let port = closed_port();
         let value = fresh_value();
         let baseline = broker.open_fds();
 
         let before = broker.rchar();
         let secret = one_shot(&value);
-        let (body, result) = render(&socket, &[secret.as_fd()]).expect("an outcome");
-        let OutcomeResult::Done(done) = result else {
-            panic!("rendered")
-        };
-        assert!(done.secret_egress.is_some());
+        let (body, result) = render(&socket, port, &[secret.as_fd()]).expect("an outcome");
+        // Read, checked and rendered: the only refusal left is the dial.
+        assert!(
+            matches!(
+                result,
+                OutcomeResult::Refused(BrokerRefusal::HttpConnectFailed)
+            ),
+            "{result:?}"
+        );
         let read = broker.rchar() - before;
         assert_eq!(
             read,
@@ -556,11 +629,14 @@ mod linux {
                 .stderr()
                 .contains(std::str::from_utf8(&value).unwrap())
         );
-        evidence("egress-render-one-descriptor", "DONE-rchar-exact-no-echo");
+        evidence(
+            "egress-render-one-descriptor",
+            "HTTP_CONNECT_FAILED-rendered-rchar-exact-no-echo",
+        );
 
         // The same descriptor, consumed: it holds nothing now, and says so.
         assert_eq!(
-            refusal(render(&socket, &[secret.as_fd()])),
+            refusal(render(&socket, port, &[secret.as_fd()])),
             BrokerRefusal::SecretEmpty
         );
         evidence("egress-descriptor-reused-after-consumption", "SECRET_EMPTY");
@@ -574,7 +650,7 @@ mod linux {
         let mut peer = Peer::connect(&socket);
         let _ = peer.hello();
         let again = one_shot(&value);
-        peer.send(&egress_frame(&old.channel), &[again.as_fd()]);
+        peer.send(&exchange_frame(&old.channel, port), &[again.as_fd()]);
         assert_eq!(refusal(peer.outcome()), BrokerRefusal::ChannelMismatch);
         assert_eq!(broker.rchar() - before, 0, "a replay reads nothing");
         evidence(
@@ -596,8 +672,9 @@ mod linux {
     #[test]
     fn every_hostile_secret_descriptor_or_message_is_refused_before_anything_is_rendered() {
         let scratch = Scratch::new("egress-hostile");
-        let broker = Broker::start(&scratch.socket(), true, None);
+        let broker = credential_broker(&scratch, None);
         let socket = scratch.socket();
+        let port = closed_port();
         let value = fresh_value();
         let dir = OwnedFd::from(std::fs::File::open(&scratch.0).unwrap());
         let file_path = scratch.0.join("plain");
@@ -672,7 +749,7 @@ mod linux {
         ];
         for (case, fds, want) in cases {
             let started = Instant::now();
-            assert_eq!(refusal(render(&socket, &fds)), want, "{case}");
+            assert_eq!(refusal(render(&socket, port, &fds)), want, "{case}");
             assert!(
                 started.elapsed() < Duration::from_secs(5),
                 "{case}: nothing waited"
@@ -681,19 +758,19 @@ mod linux {
         }
         drop(kept_writer);
         // Eleven exchanges, each refused and logged once, and read in full.
-        broker.expect_logged("op=broker.secret_egress", 11, 11);
+        broker.expect_logged("op=broker.http_credential_exchange", 11, 11);
         assert_eq!(
             broker.count("executed invocation"),
             0,
-            "nothing was rendered"
+            "nothing was rendered into a request that left"
         );
 
         // Messages the language does not have: closed, unanswered.
         for (case, edit) in [
-            ("old-private-version", ("\"protocol\":6", "\"protocol\":5")),
+            ("old-private-version", ("\"protocol\":7", "\"protocol\":6")),
             (
                 "unknown-kind",
-                ("broker.secret_egress", "broker.secret_fetch"),
+                ("broker.http_credential_exchange", "broker.secret_egress"),
             ),
             (
                 "header-with-space",
@@ -710,9 +787,10 @@ mod linux {
         ] {
             let mut peer = Peer::connect(&socket);
             let hello = peer.hello();
-            let text = String::from_utf8(egress_frame(&hello.channel)[5..].to_vec())
-                .unwrap()
-                .replacen(edit.0, edit.1, 1);
+            let original =
+                String::from_utf8(exchange_frame(&hello.channel, port)[5..].to_vec()).unwrap();
+            assert!(original.contains(edit.0), "{case}: the edit applies");
+            let text = original.replacen(edit.0, edit.1, 1);
             let bytes =
                 dwk_proto::frame::encode(dwk_proto::frame::ContentType::Json, text.as_bytes())
                     .unwrap();
@@ -725,10 +803,10 @@ mod linux {
         let mut peer = Peer::connect(&socket);
         let hello = peer.hello();
         let secret = one_shot(&value);
-        peer.send(&egress_frame(&hello.channel), &[secret.as_fd()]);
+        peer.send(&exchange_frame(&hello.channel, port), &[secret.as_fd()]);
         drop(peer);
         let deadline = Instant::now() + PROMPT;
-        while broker.count("outcome_failed") + broker.count("executed invocation") == 0 {
+        while broker.count("outcome_failed") + broker.count("refused invocation") < 12 {
             assert!(Instant::now() < deadline);
             std::thread::sleep(Duration::from_millis(10));
         }
@@ -744,11 +822,11 @@ mod linux {
     #[test]
     fn a_broker_stopped_after_reading_the_value_answers_nothing_and_leaves_nothing() {
         let scratch = Scratch::new("egress-crash");
-        let mut broker = Broker::start(&scratch.socket(), true, Some("secret_after_read"));
+        let mut broker = credential_broker(&scratch, Some("http_credential_after_read"));
         let value = fresh_value();
         let secret = one_shot(&value);
         assert!(
-            render(&scratch.socket(), &[secret.as_fd()]).is_none(),
+            render(&scratch.socket(), closed_port(), &[secret.as_fd()]).is_none(),
             "no outcome"
         );
         let deadline = Instant::now() + PROMPT;

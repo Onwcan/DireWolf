@@ -25,6 +25,8 @@ use dwk_proto::frame::{self, FrameDecoder};
 use dwk_proto::json::{self, ParseOptions, Value};
 use dwk_proto::limits::MAX_FRAME_BODY;
 use dwk_proto::version::SUPPORTED_ENVELOPE;
+use dwk_proto::wire::host;
+use dwk_proto::wire::url::HttpsUrl;
 
 /// Framing: never panics; incremental decoding under an input-chosen chunking
 /// agrees with whole-buffer decoding; no frame exceeds the limit or is empty.
@@ -153,6 +155,53 @@ pub(crate) fn envelope_version(data: &[u8]) {
     }
 }
 
+/// The URL canonicaliser (M5c, ADR-0050 §4): never panics; an accepted URL is
+/// `https`, names a canonical host that is not an address literal, has one
+/// spelling — its canonical form parses back to itself — and its request
+/// target is that spelling's tail.
+pub(crate) fn url_parse(data: &[u8]) {
+    let Ok(text) = std::str::from_utf8(data) else {
+        return;
+    };
+    let Ok(url) = HttpsUrl::parse(text) else {
+        return;
+    };
+    let canonical = url.canonical();
+    assert!(canonical.starts_with("https://"), "{canonical}");
+    let host = url.origin().host();
+    assert!(
+        host::is_host(host) && !host::is_address_literal(host),
+        "{host}"
+    );
+    let again = HttpsUrl::parse(&canonical).expect("a canonical URL parses");
+    assert_eq!(
+        again.canonical(),
+        canonical,
+        "a canonical URL has one spelling"
+    );
+    assert!(canonical.ends_with(&url.request_target()));
+}
+
+/// A redirect's `Location`, resolved against a hop's URL (ADR-0050 §§4, 7):
+/// never panics; whatever it yields is a canonical `https` URL with one
+/// spelling — a redirect can never produce another scheme or a second reading.
+pub(crate) fn location_resolve(data: &[u8]) {
+    let Ok(text) = std::str::from_utf8(data) else {
+        return;
+    };
+    let base = HttpsUrl::parse("https://api.example.com:8443/v1/a/b?q=1").expect("the base parses");
+    if let Ok(url) = base.resolve(text) {
+        let canonical = url.canonical();
+        assert!(canonical.starts_with("https://"), "{canonical}");
+        let again = HttpsUrl::parse(&canonical).expect("a resolved URL parses");
+        assert_eq!(
+            again.canonical(),
+            canonical,
+            "a resolved URL has one spelling"
+        );
+    }
+}
+
 /// A fuzz target body.
 pub(crate) type Target = fn(&[u8]);
 
@@ -162,4 +211,6 @@ pub(crate) const TARGETS: &[(&str, Target)] = &[
     ("dwkp_decode", dwkp_decode),
     ("canonical_roundtrip", canonical_roundtrip),
     ("envelope_version", envelope_version),
+    ("url_parse", url_parse),
+    ("location_resolve", location_resolve),
 ];

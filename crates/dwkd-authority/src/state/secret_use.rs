@@ -1,151 +1,103 @@
 //! One secret use, mode A (M4e, ADR-0046 §§11–12, 17–20): the authority's
-//! pipeline from a handle to a one-shot handoff the broker consumes once.
+//! pipeline from a handle to a one-shot handoff the broker consumes once —
+//! as the credential of one `net.http` hop, its consumer (M5c, ADR-0050 §8).
 //!
 //! **A secret use is not a tool.** It is the secret side of a containing
-//! egress invocation — `net.http`, which is M5's. M4e has no such tool, so
-//! the pipeline is an in-process authority API ([`super::Authority::secret_egress`])
-//! with no DWKP route: no runtime can call it, and nothing on the wire names
-//! it. It exists so that everything the secret side must guarantee is real
-//! and measured before the consumer arrives.
+//! egress invocation: each hop of a `net.http` that names a credential and is
+//! at the request's own origin is one use, decided and recorded on its own.
+//! M4e's in-process stand-in for that consumer (`Authority::secret_egress`,
+//! and the broker's render-and-drop `broker.secret_egress`) is retired:
+//! nothing but a hop reaches this module.
 //!
-//! # The order (ADR-0046 §17)
+//! # The order (ADR-0046 §17, ADR-0050 §5)
 //!
 //! | step | where | a value exists? |
 //! |---|---|---|
-//! | 1. fence, run, key | transaction | no |
-//! | 2. the request, typed: handle, concrete origin | transaction | no |
+//! | 1. fence, run, key — the request's | the hop's transaction | no |
+//! | 2. the handle, typed; the origin, the hop's, concrete | the request's first transaction | no |
 //! | 4. metadata only: configured, unrevoked, the run's revision | transaction | no |
 //! | 5. the mode, from the operator's metadata, never the request | transaction | no |
-//! | 6–8. `secret.use:<handle>` through both gates; obligations enforceable | transaction | no |
-//! | 9. durable intent, audited | commit | no |
+//! | 6–8. `secret.use:<handle>` through both gates; obligations enforceable | the hop's transaction | no |
+//! | 9. durable intent, audited, with the hop's | commit | no |
 //! | 10. the backend read | **no transaction** | the authority's, zeroizing |
 //! | 11. the redaction index learns it | memory | yes |
 //! | 12. the one-shot pipe; the authority's copy zeroed | no transaction | the pipe's |
-//! | 13. the broker reads it once, renders, drops | the broker | the broker's, briefly |
+//! | 13. the broker reads it once, renders it into the hop's request | the broker | the broker's, for one exchange |
 //! | 14–16. the outcome, the use count, durably | transaction | no |
 //!
 //! Nothing is read from a backend before step 9 commits. A denial at any step
-//! before it injects nothing and reads nothing. A key used before answers the
-//! recorded outcome and reads nothing. An intent a previous incarnation left
-//! open is ended `UNKNOWN` at start ([`reconcile_open`]) and never injected
-//! again: the containing invocation's retry rules decide what happens next,
-//! and there is no standalone retry loop for a secret.
+//! before it injects nothing and reads nothing. An intent a previous
+//! incarnation left open is ended `UNKNOWN` at start ([`reconcile_open`]) and
+//! never injected again: the hop is never performed again either, and there
+//! is no standalone retry loop for a secret.
 
-use dwk_proto::brokerp::{EgressSpec, SecretHeaderName, SecretHeaderPrefix, SecretOrigin};
+use dwk_proto::brokerp::http::HttpCredential;
+use dwk_proto::brokerp::{SecretHeaderName, SecretHeaderPrefix, SecretOrigin};
 use dwk_proto::wire::id::{InvocationId, RunId, SessionId};
-use dwk_proto::wire::scalar::{Epoch, IdempotencyKey};
-use rusqlite::OptionalExtension as _;
+use dwk_proto::wire::scalar::Epoch;
 
-use crate::broker::{BrokerDelivery, BrokerError, BrokerFailure};
 use crate::capability::{
     Action, Capability, ConstraintSet, Endpoint, Label, Namespace, Scope, SyntacticScope, Verb,
 };
-use crate::policy::{CanonicalAction, Environment, Obligation};
+use crate::policy::Obligation;
 use crate::secret::SecretError;
 use crate::secret::metadata::{InjectionMode, SecretHandle, SecretMetadata};
 use crate::secret::select::{self, Consumption};
 
 use super::Work;
-use super::admission;
 use super::audit::{AuditEvent, Field, Fields};
 use super::error::AuthorityError;
 use super::identity::CallerContext;
-use super::lease::{self, to_sql};
+use super::lease::to_sql;
 use super::policy_state::ActiveAuthority;
-use super::query::{self, DecisionRecord};
+use super::query::DecisionRecord;
 use super::secrets::{self, SecretsState};
-use super::tool;
 
-/// One mode A use, as the containing invocation would state it: the handle
-/// and the concrete origin, and the key that makes it happen at most once.
-/// No header, no prefix, no mode: the operator's metadata supplies those.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EgressRequest {
-    /// The handle.
-    pub handle: String,
-    /// The origin the value is for: `host:port`, lowercase, concrete.
-    pub origin: String,
-    /// The idempotency key.
-    pub key: IdempotencyKey,
-}
-
-/// What a mode A use came to.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum EgressReply {
-    /// Refused before any decision — the fence, the run, a malformed request
-    /// — and recorded. Nothing was read or injected.
-    Refused(&'static str),
-    /// The key was used before: its recorded outcome. Nothing was read or
-    /// injected again.
-    Replayed {
-        /// The invocation the key is bound to.
-        invocation: InvocationId,
-        /// Its recorded state.
-        state: String,
-        /// Its recorded failure, if it failed.
-        failure: Option<String>,
-    },
-    /// Denied — by the metadata, the selector, a gate or an unenforceable
-    /// obligation — with the typed reason. Nothing was read or injected.
-    Denied(&'static str),
-    /// The broker received the value once and accepted it.
-    Injected {
-        /// The invocation.
-        invocation: InvocationId,
-    },
-    /// Provably not injected: the backend failed, the value cannot be carried
-    /// safely, or the broker refused or was never reached.
-    Failed {
-        /// The invocation.
-        invocation: InvocationId,
-        /// Why, from a closed vocabulary.
-        reason: &'static str,
-    },
-    /// The broker may have received the value and cannot say.
-    Unknown {
-        /// The invocation.
-        invocation: InvocationId,
-    },
-}
-
-/// Who asks, about what.
+/// Who asks for a credential, where: the request's caller and run, the
+/// handle its call named, and the hop's origin.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct Asked<'a> {
     pub(super) caller: &'a CallerContext,
     pub(super) session: &'a SessionId,
     pub(super) run: &'a RunId,
     pub(super) epoch: Epoch,
-    pub(super) request: &'a EgressRequest,
+    /// The handle, as the call named it.
+    pub(super) handle: &'a str,
+    /// The hop's origin: `host:port`, canonical.
+    pub(super) origin: &'a str,
+    /// The use's key, once the request has an invocation: `<invocation>:<hop>`.
+    pub(super) key: Option<&'a str>,
+}
+
+/// A credential the operator's metadata allows at the hop's origin, before
+/// either gate: steps 2, 4 and 5.
+#[derive(Debug, Clone)]
+pub(super) struct Prepared {
+    pub(super) handle: SecretHandle,
+    pub(super) revision: i64,
+    pub(super) metadata: SecretMetadata,
+    /// The origin, as the private protocol spells it.
+    pub(super) origin: SecretOrigin,
+    /// What the broker renders: the handle, the header, the prefix. Never the
+    /// value.
+    pub(super) credential: HttpCredential,
 }
 
 /// A use both gates allowed, whose intent is durable.
 #[derive(Debug, Clone)]
 pub(super) struct Authorised {
     pub(super) invocation: InvocationId,
-    pub(super) handle: SecretHandle,
-    pub(super) revision: i64,
-    pub(super) metadata: SecretMetadata,
-    pub(super) spec: EgressSpec,
-}
-
-/// What steps 1–9 decided.
-#[derive(Debug)]
-pub(super) enum Decided {
-    Refused(&'static str),
-    Replayed {
-        invocation: InvocationId,
-        state: String,
-        failure: Option<String>,
-    },
-    Denied(&'static str),
-    Authorised(Box<Authorised>),
+    pub(super) prepared: Prepared,
 }
 
 /// How a use ended, before it is recorded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Ending {
+    /// The value went into a request the broker wrote.
     Injected,
+    /// Provably not sent, with the typed reason.
     Failed(&'static str),
+    /// It may have been sent, and nothing proves whether.
     Unknown,
 }
 
@@ -156,9 +108,10 @@ fn base_fields(asked: &Asked<'_>) -> Fields {
         .text("session_id", asked.session.as_str())
         .text("run_id", asked.run.as_str())
         .int("epoch", asked.epoch.get())
-        .text("handle", asked.request.handle.as_str())
-        .text("origin", asked.request.origin.as_str())
-        .text("idempotency_key", asked.request.key.as_str())
+        .text("handle", asked.handle)
+        .text("origin", asked.origin)
+        .maybe_text("idempotency_key", asked.key.map(str::to_owned))
+        .text("consumer", "net.http")
         .text("environment", "host")
 }
 
@@ -167,15 +120,15 @@ fn deny(
     asked: &Asked<'_>,
     reason: &'static str,
     extra: Fields,
-) -> Result<Decided, AuthorityError> {
+) -> Result<&'static str, AuthorityError> {
     let mut fields = base_fields(asked).text("reason", reason);
     fields.extend(extra);
     work.audit(AuditEvent::SecretDenied, fields)?;
-    Ok(Decided::Denied(reason))
+    Ok(reason)
 }
 
 /// The capability a use of `handle` requires: `secret.use:<handle>`.
-fn required(handle: &SecretHandle) -> Result<Capability, AuthorityError> {
+pub(super) fn required(handle: &SecretHandle) -> Result<Capability, AuthorityError> {
     let verb = Verb::new(Namespace::Secret, Action::Use)
         .ok_or(AuthorityError::Invariant("secret.use is not a verb"))?;
     let label =
@@ -191,7 +144,7 @@ fn required(handle: &SecretHandle) -> Result<Capability, AuthorityError> {
 /// Whether every obligation the decision carries is one a secret use keeps:
 /// `audit_level` only. Anything else needs machinery a secret use does not
 /// have (an execution environment, an approval), so the use is denied.
-fn obligations_enforced(record: &DecisionRecord) -> bool {
+pub(super) fn obligations_enforced(record: &DecisionRecord) -> bool {
     record
         .policy()
         .obligations()
@@ -200,7 +153,7 @@ fn obligations_enforced(record: &DecisionRecord) -> bool {
         .all(|o| matches!(o, Obligation::AuditLevel(_)))
 }
 
-fn gate_fields(active: &ActiveAuthority, record: &DecisionRecord) -> Fields {
+pub(super) fn gate_fields(active: &ActiveAuthority, record: &DecisionRecord) -> Fields {
     let policy = record.policy();
     Fields::new()
         .text("policy_revision", active.revision.to_hex())
@@ -227,87 +180,124 @@ fn gate_fields(active: &ActiveAuthority, record: &DecisionRecord) -> Fields {
         )
 }
 
-/// A key already bound: its invocation and recorded outcome.
-fn bound(
-    work: &Work<'_>,
-    asked: &Asked<'_>,
-) -> Result<Option<(String, String, Option<String>)>, AuthorityError> {
-    work.db(work
-        .tx
-        .query_row(
-            "SELECT invocation_id, state, failure FROM secret_injection WHERE subject = ?1 \
-             AND session_id = ?2 AND idempotency_key = ?3",
-            rusqlite::params![
-                asked.caller.subject().storage_key(),
-                asked.session.as_str(),
-                asked.request.key.as_str()
-            ],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        )
-        .optional())
-}
-
-fn refuse(
+/// Steps 2, 4 and 5: the handle typed, the origin concrete, the metadata and
+/// the revision the run may use, the mode — the operator's, never the
+/// request's. `Ok(Err(reason))` is a denial, audited; nothing is read.
+pub(super) fn prepare(
     work: &mut Work<'_>,
     asked: &Asked<'_>,
-    reason: &'static str,
-) -> Result<Decided, AuthorityError> {
-    work.audit(
-        AuditEvent::SecretDenied,
-        base_fields(asked).text("refusal", reason),
-    )?;
-    Ok(Decided::Refused(reason))
+    secrets_state: &SecretsState,
+    after_metadata: &dyn Fn() -> Result<(), AuthorityError>,
+) -> Result<Result<Prepared, &'static str>, AuthorityError> {
+    // 2. The handle, typed. The origin is concrete: a lowercase name and a
+    // port, never a pattern — the hop's, which the URL parser produced.
+    let (Some(handle), Some(origin)) = (
+        SecretHandle::new(asked.handle),
+        SecretOrigin::new(asked.origin),
+    ) else {
+        return deny(work, asked, "MALFORMED_REQUEST", Fields::new()).map(Err);
+    };
+    let Ok(endpoint) = Endpoint::parse(origin.as_str()) else {
+        return deny(work, asked, "MALFORMED_REQUEST", Fields::new()).map(Err);
+    };
+    // 4. The metadata, and the revision the run may use. Nothing else.
+    let Some(metadata) = secrets_state.metadata(&handle).cloned() else {
+        return deny(
+            work,
+            asked,
+            SecretError::NotConfigured.code(),
+            Fields::new(),
+        )
+        .map(Err);
+    };
+    let revision = match secrets::check_use(work, asked.run.as_str(), handle.as_str())? {
+        Ok(revision) => revision,
+        Err(error) => return deny(work, asked, error.code(), Fields::new()).map(Err),
+    };
+    after_metadata()?;
+    // 5. The mode: the operator's allowlist and origins decide, never the
+    // request.
+    let mode = match select::select(
+        &metadata,
+        secrets_state.consumers(&handle),
+        &Consumption::Egress { origin: &endpoint },
+    ) {
+        Ok(mode) => mode,
+        Err(error) => return deny(work, asked, error.code(), Fields::new()).map(Err),
+    };
+    if mode != InjectionMode::Egress {
+        return Err(AuthorityError::Invariant(
+            "an egress use selected another mode",
+        ));
+    }
+    // The header comes from the metadata, which the loader proved an egress
+    // secret has.
+    let Some(header_name) = metadata
+        .header
+        .as_ref()
+        .and_then(|h| SecretHeaderName::new(h.as_str()))
+    else {
+        return deny(
+            work,
+            asked,
+            SecretError::InjectionModeUnavailable.code(),
+            Fields::new(),
+        )
+        .map(Err);
+    };
+    let header_prefix = metadata
+        .prefix
+        .as_ref()
+        .and_then(|p| SecretHeaderPrefix::new(p.as_str()));
+    let wire_handle = dwk_proto::brokerp::SecretHandle::new(handle.as_str())
+        .ok_or(AuthorityError::Invariant("a handle does not fit the wire"))?;
+    Ok(Ok(Prepared {
+        handle,
+        revision,
+        metadata,
+        origin,
+        credential: HttpCredential {
+            handle: wire_handle,
+            header_name,
+            header_prefix,
+        },
+    }))
 }
 
-/// Step 1: the fence and the run, then the key. `Some` is the answer when
-/// the use stops here: a refusal, or a replayed key's recorded outcome.
-fn fenced(
+/// Steps 6–8, judged: `Some(reason)` when `record` — `secret.use:<handle>`
+/// through both gates — does not permit the use, audited with the gates.
+pub(super) fn refused_by_gates(
     work: &mut Work<'_>,
     asked: &Asked<'_>,
     active: &ActiveAuthority,
-) -> Result<Option<Decided>, AuthorityError> {
-    if !lease::fence(work, asked.caller, asked.session, asked.epoch)? {
-        return refuse(work, asked, "STALE_EPOCH").map(Some);
-    }
-    if !tool::run_is_held(
-        work,
-        asked.caller,
-        asked.session,
-        asked.run,
-        asked.epoch,
-        active,
-    )? {
-        return refuse(work, asked, "UNKNOWN_RUN").map(Some);
-    }
-    if let Some((invocation, state, failure)) = bound(work, asked)? {
-        let invocation = InvocationId::parse(&invocation).ok_or(AuthorityError::Invariant(
-            "a stored invocation id does not parse",
-        ))?;
-        work.audit(
-            AuditEvent::SecretDenied,
-            base_fields(asked)
-                .text("refusal", "IDEMPOTENCY_KEY_REPLAYED")
-                .text("invocation_id", invocation.as_str())
-                .text("recorded_state", state.as_str()),
-        )?;
-        return Ok(Some(Decided::Replayed {
-            invocation,
-            state,
-            failure,
-        }));
-    }
-    Ok(None)
+    record: &DecisionRecord,
+) -> Result<Option<&'static str>, AuthorityError> {
+    let reason = if !record.capability_satisfied() {
+        "CAPABILITY_NOT_GRANTED"
+    } else if !record.policy_satisfied() {
+        "POLICY_DENIED"
+    } else if !obligations_enforced(record) {
+        "OBLIGATION_UNENFORCEABLE"
+    } else {
+        return Ok(None);
+    };
+    let gates = gate_fields(active, record).text("mode", InjectionMode::Egress.as_str());
+    deny(work, asked, reason, gates).map(Some)
 }
 
-/// Step 9: the durable intent, audited with the gates that allowed it.
-fn record_intent(
+/// Step 9: the durable intent, audited with the gates that allowed it. The
+/// hop's own intent is recorded in the same transaction, after this.
+pub(super) fn record_intent(
     work: &mut Work<'_>,
     asked: &Asked<'_>,
-    authorised: &Authorised,
-    revision: i64,
-    gates: Fields,
-) -> Result<(), AuthorityError> {
-    let invocation = &authorised.invocation;
+    prepared: Prepared,
+    active: &ActiveAuthority,
+    record: &DecisionRecord,
+) -> Result<Authorised, AuthorityError> {
+    let key = asked.key.ok_or(AuthorityError::Invariant(
+        "a credential's intent is recorded without its key",
+    ))?;
+    let invocation = work.invocation_id()?;
     work.db(work.tx.execute(
         "INSERT INTO secret_injection (invocation_id, run_id, subject, session_id, \
          idempotency_key, handle, revision, mode, consumer, incarnation, state, failure, \
@@ -318,144 +308,25 @@ fn record_intent(
             asked.run.as_str(),
             asked.caller.subject().storage_key(),
             asked.session.as_str(),
-            asked.request.key.as_str(),
-            authorised.handle.as_str(),
-            revision,
-            authorised.spec.origin.as_str(),
+            key,
+            prepared.handle.as_str(),
+            prepared.revision,
+            prepared.origin.as_str(),
             to_sql(work.incarnation())?,
             to_sql(work.now)?
         ],
     ))?;
     let mut fields = base_fields(asked)
         .text("invocation_id", invocation.as_str())
-        .int("revision", u64::try_from(revision).unwrap_or(0))
-        .text("backend", authorised.metadata.storage.backend())
-        .text("header", authorised.spec.header_name.as_str());
-    fields.extend(gates);
-    work.audit(AuditEvent::SecretIntentRecorded, fields)
-}
-
-/// Steps 1–9, in one transaction. No backend is touched.
-pub(super) fn decide(
-    work: &mut Work<'_>,
-    asked: &Asked<'_>,
-    secrets_state: &SecretsState,
-    active: &ActiveAuthority,
-    after_metadata: &dyn Fn() -> Result<(), AuthorityError>,
-) -> Result<Decided, AuthorityError> {
-    // 1. The fence and the run, then the key.
-    if let Some(stopped) = fenced(work, asked, active)? {
-        return Ok(stopped);
-    }
-    // 2. The request, typed. The origin is concrete: a lowercase name and a
-    // port, never a pattern.
-    let (Some(handle), Some(wire_origin)) = (
-        SecretHandle::new(&asked.request.handle),
-        SecretOrigin::new(asked.request.origin.as_str()),
-    ) else {
-        return refuse(work, asked, "MALFORMED_REQUEST");
-    };
-    let Ok(origin) = Endpoint::parse(wire_origin.as_str()) else {
-        return refuse(work, asked, "MALFORMED_REQUEST");
-    };
-    // 4. The metadata, and the revision the run may use. Nothing else.
-    let Some(metadata) = secrets_state.metadata(&handle).cloned() else {
-        return deny(
-            work,
-            asked,
-            SecretError::NotConfigured.code(),
-            Fields::new(),
-        );
-    };
-    let revision = match secrets::check_use(work, asked.run.as_str(), handle.as_str())? {
-        Ok(revision) => revision,
-        Err(error) => return deny(work, asked, error.code(), Fields::new()),
-    };
-    after_metadata()?;
-    // 5. The mode: the operator's allowlist and origins decide, never the
-    // request.
-    let mode = match select::select(
-        &metadata,
-        secrets_state.consumers(&handle),
-        &Consumption::Egress { origin: &origin },
-    ) {
-        Ok(mode) => mode,
-        Err(error) => return deny(work, asked, error.code(), Fields::new()),
-    };
-    if mode != InjectionMode::Egress {
-        return Err(AuthorityError::Invariant(
-            "an egress use selected another mode",
-        ));
-    }
-    // The header comes from the metadata, which the loader proved an egress
-    // secret has.
-    let Some(header) = metadata
-        .header
-        .as_ref()
-        .and_then(|h| SecretHeaderName::new(h.as_str()))
-    else {
-        return deny(
-            work,
-            asked,
-            SecretError::InjectionModeUnavailable.code(),
-            Fields::new(),
-        );
-    };
-    let prefix = metadata
-        .prefix
-        .as_ref()
-        .and_then(|p| SecretHeaderPrefix::new(p.as_str()));
-    let wire_handle = dwk_proto::brokerp::SecretHandle::new(handle.as_str())
-        .ok_or(AuthorityError::Invariant("a handle does not fit the wire"))?;
-    // 6-8. `secret.use:<handle>` through both gates, and the obligations.
-    let admission = admission::load(work, asked.run.as_str())?;
-    let context = query::policy_context(work, asked.run.as_str(), active)?;
-    let action = CanonicalAction::new(required(&handle)?, Environment::Host);
-    let record = query::decide(&action, &admission, &context, active);
-    let gates = gate_fields(active, &record).text("mode", mode.as_str());
-    if !record.capability_satisfied() {
-        return deny(work, asked, "CAPABILITY_NOT_GRANTED", gates);
-    }
-    if !record.policy_satisfied() {
-        return deny(work, asked, "POLICY_DENIED", gates);
-    }
-    if !obligations_enforced(&record) {
-        return deny(work, asked, "OBLIGATION_UNENFORCEABLE", gates);
-    }
-    // 9. The durable intent.
-    let authorised = Authorised {
-        invocation: work.invocation_id()?,
-        handle,
-        revision,
-        metadata,
-        spec: EgressSpec {
-            handle: wire_handle,
-            origin: wire_origin,
-            header_name: header,
-            header_prefix: prefix,
-        },
-    };
-    record_intent(work, asked, &authorised, revision, gates)?;
-    Ok(Decided::Authorised(Box::new(authorised)))
-}
-
-/// The broker's answer, as an ending. A refusal, or a failure before the
-/// authorisation left, provably injected nothing.
-pub(super) fn classify(result: &Result<BrokerDelivery, BrokerError>) -> Ending {
-    match result {
-        Ok(BrokerDelivery::SecretEgress) => Ending::Injected,
-        Err(error) if !error.sent => Ending::Failed(match error.failure {
-            BrokerFailure::Protocol(_) => "BROKER_PROTOCOL_ERROR",
-            _ => "BROKER_UNAVAILABLE",
-        }),
-        Err(BrokerError {
-            failure: BrokerFailure::Refused(refusal),
-            ..
-        }) => Ending::Failed(refusal.as_str()),
-        // Another operation's answer, or a failure after the authorisation
-        // left: the broker may have read the value and cannot say.
-        _ => Ending::Unknown,
-    }
+        .int("revision", u64::try_from(prepared.revision).unwrap_or(0))
+        .text("backend", prepared.metadata.storage.backend())
+        .text("header", prepared.credential.header_name.as_str());
+    fields.extend(gate_fields(active, record).text("mode", InjectionMode::Egress.as_str()));
+    work.audit(AuditEvent::SecretIntentRecorded, fields)?;
+    Ok(Authorised {
+        invocation,
+        prepared,
+    })
 }
 
 /// Steps 14–16: the ending, durably; a confirmed injection counted once.
@@ -484,15 +355,16 @@ pub(super) fn record_outcome(
     if ended != 1 {
         return Err(AuthorityError::Invariant("a secret use was not open"));
     }
+    let prepared = &authorised.prepared;
     let base = || {
         Fields::new()
             .text("invocation_id", authorised.invocation.as_str())
             .text("run_id", run.as_str())
-            .text("handle", authorised.handle.as_str())
-            .int("revision", u64::try_from(authorised.revision).unwrap_or(0))
+            .text("handle", prepared.handle.as_str())
+            .int("revision", u64::try_from(prepared.revision).unwrap_or(0))
             .text("mode", InjectionMode::Egress.as_str())
-            .text("origin", authorised.spec.origin.as_str())
-            .text("backend", authorised.metadata.storage.backend())
+            .text("origin", prepared.origin.as_str())
+            .text("backend", prepared.metadata.storage.backend())
     };
     if resolved {
         work.audit(AuditEvent::SecretResolved, base())?;
@@ -506,7 +378,7 @@ pub(super) fn record_outcome(
             "INSERT INTO secret_use (handle, uses, last_used_ms) VALUES (?1, 1, ?2) \
              ON CONFLICT (handle) DO UPDATE SET uses = uses + 1, last_used_ms = ?2 \
              RETURNING uses",
-            rusqlite::params![authorised.handle.as_str(), to_sql(work.now)?],
+            rusqlite::params![prepared.handle.as_str(), to_sql(work.now)?],
             |row| row.get(0),
         ))?;
         fields = fields.int("uses", u64::try_from(uses).unwrap_or(0));

@@ -81,6 +81,41 @@ const TOKENS: &[&[u8]] = &[
     b"\x00\x00\x00\x02\x01{}",
     b"\x00\x10\x00\x01\x01",
     b"\xff\xff\xff\xff\x01",
+    // M5c: the URL canonicaliser's and the `Location` resolver's pieces.
+    b"https://",
+    b"http://",
+    b"//",
+    b"@",
+    b"%2e",
+    b"%2E%2e",
+    b"..",
+    b"/./",
+    b"#",
+    b"?",
+    b":443",
+    b":0",
+    b"[::1]",
+    b"127.0.0.1",
+    b"0x7f",
+    b"xn--",
+    b"\\",
+];
+
+/// URLs and redirect targets, for the M5c targets: the vectors hold URLs only
+/// inside JSON.
+const URL_SEEDS: &[&[u8]] = &[
+    b"https://api.example.com/v1/items?page=2",
+    b"https://a.b:8443/x/y",
+    b"https://api.example.com",
+    b"/next?x=1",
+    b"other",
+    b"?only=query",
+    b"//cdn.example.com/blob",
+    b"https://user@api.example.com/",
+    b"http://api.example.com/",
+    b"https://127.0.0.1/",
+    b"https://api.example.com/%2e%2e/admin",
+    b"https://API.example.com./",
 ];
 
 fn seeds() -> Vec<Vec<u8>> {
@@ -94,6 +129,7 @@ fn seeds() -> Vec<Vec<u8>> {
             out.push(bytes);
         }
     }
+    out.extend(URL_SEEDS.iter().map(|s| s.to_vec()));
     out
 }
 

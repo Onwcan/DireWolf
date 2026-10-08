@@ -1,6 +1,7 @@
 //! The authority's side of the private broker channel (M4b, [ADR-0043]; the
 //! M4c operations, [ADR-0044]; the M4d process operations, [ADR-0045]; the
-//! M4e mode A render, [ADR-0046]).
+//! M4e mode A render, [ADR-0046]; M5c's `net.http` resolution and exchange,
+//! [ADR-0050]).
 //!
 //! The authority decides; `dwkd-broker` does ([ADR-0018]). This module is the
 //! one place an authorised effect crosses from the first to the second: the
@@ -35,6 +36,7 @@
 //! [ADR-0044]: ../../../../docs/adr/0044-m4c-filesystem-operations-plans-and-atomic-mutation.md
 //! [ADR-0045]: ../../../../docs/adr/0045-m4d-process-execution-broker.md
 //! [ADR-0046]: ../../../../docs/adr/0046-m4e-secret-handles-backends-injection-and-redaction.md
+//! [ADR-0050]: ../../../../docs/adr/0050-m5c-kernel-performed-net-http-ssrf-redirects-and-credential-egress.md
 
 #[cfg(target_os = "linux")]
 mod link;
@@ -169,15 +171,6 @@ pub enum Operation {
         /// The broker instance that launched it.
         generation: BrokerGeneration,
     },
-    /// Render one mode A header (M4e, ADR-0046 §12): the handle, the origin
-    /// and the operator's header and prefix, and the value as the one
-    /// descriptor. Nothing about the value is in the message.
-    SecretEgress {
-        /// What is not secret.
-        spec: dwk_proto::brokerp::EgressSpec,
-        /// The value: a pipe's read end, at end of file after it.
-        secret: crate::secret::handoff::SecretPipe,
-    },
     /// Prepare an execution environment (M5a, ADR-0047): the environment
     /// the authority specified, through the container runtime's client it
     /// resolved and hashed.
@@ -211,6 +204,22 @@ pub enum Operation {
         store: StoreInstance,
         /// The runtime client and where it runs.
         runtime: RuntimeHandoff,
+    },
+    /// Resolve one `net.http` host, once, through the broker's resolver
+    /// (M5c, ADR-0050 §6). No descriptor.
+    HttpResolve {
+        /// The host, canonical.
+        host: dwk_proto::brokerp::egress::EgressHost,
+    },
+    /// Perform one `net.http` hop to its pinned addresses (M5c, ADR-0050
+    /// §9): the hop as the authority decided it and, when it carries one,
+    /// the credential's one-shot pipe as the only descriptor.
+    HttpExchange {
+        /// The hop.
+        hop: dwk_proto::brokerp::http::HopSpec,
+        /// The credential's value: a pipe's read end, at end of file after
+        /// it. Present exactly when `hop.credential` is.
+        secret: Option<crate::secret::handoff::SecretPipe>,
     },
 }
 
@@ -256,11 +265,12 @@ impl Operation {
             Self::ProcessStart { .. } => "process.start",
             Self::ProcessStatus { .. } => "process.status",
             Self::ProcessKill { .. } => "process.kill",
-            Self::SecretEgress { .. } => "secret.egress",
             Self::EnvironmentPrepare { .. } => "environment.prepare",
             Self::EnvironmentMeasure { .. } => "environment.measure",
             Self::EnvironmentDestroy { .. } => "environment.destroy",
             Self::EnvironmentList { .. } => "environment.list",
+            Self::HttpResolve { .. } => "http.resolve",
+            Self::HttpExchange { .. } => "http.exchange",
         }
     }
 
@@ -273,6 +283,8 @@ impl Operation {
             Self::EnvironmentMeasure { .. } => PrivateKind::EnvironmentMeasure,
             Self::EnvironmentDestroy { .. } => PrivateKind::EnvironmentDestroy,
             Self::EnvironmentList { .. } => PrivateKind::EnvironmentList,
+            Self::HttpResolve { .. } => PrivateKind::HttpResolve,
+            Self::HttpExchange { .. } => PrivateKind::HttpExchange,
             _ => return None,
         };
         Some(Duration::from_secs(kind.deadline_seconds()))
@@ -334,11 +346,12 @@ impl BrokerOrder {
             Operation::ProcessStart { executable, .. } => executable.object(),
             Operation::ProcessStatus { .. }
             | Operation::ProcessKill { .. }
-            | Operation::SecretEgress { .. }
             | Operation::EnvironmentPrepare { .. }
             | Operation::EnvironmentMeasure { .. }
             | Operation::EnvironmentDestroy { .. }
-            | Operation::EnvironmentList { .. } => return None,
+            | Operation::EnvironmentList { .. }
+            | Operation::HttpResolve { .. }
+            | Operation::HttpExchange { .. } => return None,
         })
     }
 
@@ -492,9 +505,6 @@ pub enum BrokerDelivery {
     ProcessStatus(ProcessStatusDelivery),
     /// A kill's acknowledgement.
     ProcessKilled(KillOutcome),
-    /// A mode A render completed: the value was read and accepted, and the
-    /// broker's copy is gone. Nothing about the value comes back.
-    SecretEgress,
     /// A preparation ran (M5a).
     EnvironmentPrepared(EnvironmentPrepareDone),
     /// A measurement of an existing environment.
@@ -503,6 +513,11 @@ pub enum BrokerDelivery {
     EnvironmentDestroyed(EnvironmentDestroyDone),
     /// A listing.
     EnvironmentListed(EnvironmentListDone),
+    /// A `net.http` resolution, as the broker's guard judged it (M5c).
+    HttpResolved(dwk_proto::brokerp::http::HttpResolveDone),
+    /// A `net.http` exchange that sent its request (M5c): within every bound
+    /// the hop was authorised with.
+    HttpExchanged(dwk_proto::brokerp::http::HttpExchangeDone),
 }
 
 /// Why no connection could be used.

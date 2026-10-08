@@ -60,13 +60,15 @@ const MAX_AUTHORISATION_FRAME: usize = HEADER_LEN + MAX_AUTHORISATION_BODY;
 const MAX_DESCRIPTORS: usize = 3;
 
 /// What an exchange may act through: this broker instance's process table,
-/// and its sandbox supervisor (M5a).
+/// its sandbox supervisor (M5a), and its HTTPS client (M5c).
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Effects<'a> {
     /// The process table.
     pub(crate) processes: &'a crate::process::Processes,
     /// The sandbox supervisor.
     pub(crate) sandbox: &'a crate::sandbox::Sandbox,
+    /// The `net.http` client.
+    pub(crate) http: &'a crate::http::Client,
 }
 
 /// Serve one connection the kernel says the authority made. `own_uid` is the
@@ -315,20 +317,23 @@ fn execute(
         }
         Authorisation::ProcessStatus(status) => return processes.status(status),
         Authorisation::ProcessKill(kill) => return processes.kill(kill),
-        // The secret primitives (M4e): the value is always the last
-        // descriptor. A render carries only it; a secret launch carries the
-        // executable, the working directory, then it.
-        Authorisation::SecretEgress(egress) => {
-            return match (fds.next(), fds.next()) {
-                (Some(secret), None) => crate::secret::egress(egress, &secret),
-                _ => OutcomeResult::Refused(BrokerRefusal::DescriptorCount),
-            };
-        }
+        // The secret launch primitive (M4e): the value is the last
+        // descriptor, after the executable and the working directory. Mode
+        // A's value travels only with a credential exchange (below).
         Authorisation::SecretProcessStart(start) => {
             return match (fds.next(), fds.next(), fds.next(), fds.next()) {
                 (Some(executable), Some(cwd), Some(secret), None) => {
                     processes.start_with_secret(start, executable, cwd, &secret)
                 }
+                _ => OutcomeResult::Refused(BrokerRefusal::DescriptorCount),
+            };
+        }
+        // `net.http` (M5c): a resolution and a plain exchange carry nothing;
+        // a credential exchange carries the credential's pipe, and only it.
+        Authorisation::HttpResolve(resolve) => return effects.http.resolve(resolve),
+        Authorisation::HttpExchange(exchange) => {
+            return match (fds.next(), fds.next()) {
+                (secret, None) => effects.http.exchange(exchange, secret, until),
                 _ => OutcomeResult::Refused(BrokerRefusal::DescriptorCount),
             };
         }

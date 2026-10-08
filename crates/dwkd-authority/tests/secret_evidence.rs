@@ -50,13 +50,15 @@ use zeroize as _;
 
 #[cfg(target_os = "linux")]
 mod broker_support;
+#[cfg(target_os = "linux")]
+mod net_support;
 mod state_support;
 #[cfg(target_os = "linux")]
 mod transport_support;
 
 #[cfg(target_os = "linux")]
 mod linux {
-    use std::io::{BufRead as _, BufReader, Read as _, Seek as _, SeekFrom};
+    use std::io::{BufRead as _, BufReader, Read as _, Seek as _, SeekFrom, Write as _};
     use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
     use std::path::{Path, PathBuf};
     use std::process::{Command, Stdio};
@@ -65,12 +67,11 @@ mod linux {
     use std::time::{Duration, Instant};
 
     use dwk_proto::dwkp::DwkpBody;
-    use dwk_proto::wire::scalar::IdempotencyKey;
     use dwkd_authority::broker::{EffectBroker, UnixBroker};
     use dwkd_authority::capability::PrivacyClass;
     use dwkd_authority::state::{
-        Authority, EgressReply, EgressRequest, ManualClock, Mode, PolicySet, PolicySource, Reply,
-        StartOptions, StartupConfig, WorkspaceId, WorkspaceSensitivity,
+        Authority, ManualClock, Mode, PolicySet, PolicySource, Reply, StartOptions, StartupConfig,
+        WorkspaceId, WorkspaceSensitivity,
     };
     use linux_keyutils::{Key, KeyPermissionsBuilder, KeyRing, KeyRingIdentifier, Permission};
     use sha2::{Digest as _, Sha256};
@@ -270,7 +271,7 @@ mod linux {
             command.env(name, value);
         }
         let mut child = command
-            .stdin(Stdio::null())
+            .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn()
@@ -283,6 +284,24 @@ mod linux {
             }
         });
         (child, received)
+    }
+
+    /// Lines until `marker`.
+    fn until_marker(lines: &mpsc::Receiver<String>, marker: &str) -> Vec<String> {
+        let deadline = Instant::now() + Duration::from_secs(60);
+        let mut out = Vec::new();
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            let line = lines.recv_timeout(left).expect("the child reports");
+            // Only the child's own report lines: libtest writes its own.
+            let Some((_, report)) = line.split_once("M4E:") else {
+                continue;
+            };
+            if report == marker {
+                return out;
+            }
+            out.push(report.to_owned());
+        }
     }
 
     /// Lines until `DONE`.
@@ -605,143 +624,329 @@ M4E:DONE"
 
     const POLICY: &str = "schema_version = 1\n\n[meta]\nname = \"m4e\"\n\n[[rule]]\nid = \
         \"allow-secret-use\"\neffect = \"ALLOW\"\nwhen.verb = \"secret.use\"\nwhen.environment = \
-        \"host\"\n\n[[rule]]\nid = \"default\"\neffect = \"DENY\"\nreason = \"NO_MATCHING_RULE\"\n";
+        \"host\"\n\n[[rule]]\nid = \"allow-https\"\neffect = \"ALLOW\"\nwhen.verb = \
+        \"network.https\"\nwhen.environment = \"host\"\n\n[[rule]]\nid = \"default\"\neffect = \
+        \"DENY\"\nreason = \"NO_MATCHING_RULE\"\n";
+
+    /// The operator's secret metadata for mode A's consumer, `net.http`
+    /// (ADR-0050 §8): `api-token` in the keychain, for the evidence's origin
+    /// and for a port nothing listens on. Owned by this uid, mode 0600.
+    fn egress_secrets_file(dir: &Path, entry: &str, origin: u16, closed: u16) -> PathBuf {
+        let path = dir.join("secrets.toml");
+        std::fs::write(
+            &path,
+            format!(
+                "schema_version = 1\n\n[secrets.api-token]\ntype = \"bearer\"\nstorage = \
+                 \"keychain\"\nkeychain = \"{entry}\"\norigins = [\"origin.test:{origin}\", \
+                 \"closed.test:{closed}\"]\nheader = \"Authorization\"\nprefix = \"Bearer \"\n\
+                 injection = [\"egress\"]\n"
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        path
+    }
+
+    /// Mode A's host: the authority's library on a state directory, with the
+    /// secret metadata, reaching the real broker, a run admitted -- in a child
+    /// process that never sees the value but through its own store.
+    struct ModeAHost {
+        authority: Authority,
+        caller: dwkd_authority::state::CallerContext,
+        run: String,
+        epoch: u64,
+        n: u64,
+    }
+
+    impl ModeAHost {
+        /// From `DW_M4E_HOST_*`; `None` when this is not a host child.
+        fn from_env() -> Option<Self> {
+            let (Ok(dir), Ok(broker), Ok(entry), Ok(origin), Ok(closed)) = (
+                std::env::var("DW_M4E_HOST_DIR"),
+                std::env::var("DW_M4E_HOST_BROKER"),
+                std::env::var("DW_M4E_HOST_ENTRY"),
+                std::env::var("DW_M4E_HOST_ORIGIN_PORT"),
+                std::env::var("DW_M4E_HOST_CLOSED_PORT"),
+            ) else {
+                return None;
+            };
+            let (origin, closed): (u16, u16) = (origin.parse().unwrap(), closed.parse().unwrap());
+            Some(Self::start(
+                &PathBuf::from(dir),
+                &broker,
+                &entry,
+                origin,
+                closed,
+            ))
+        }
+
+        fn start(dir: &Path, broker: &str, entry: &str, origin: u16, closed: u16) -> Self {
+            let mut config = StartupConfig::new(
+                PolicySet {
+                    profile: "m4e".to_owned(),
+                    sources: vec![PolicySource {
+                        name: "m4e.toml".to_owned(),
+                        text: POLICY.to_owned(),
+                    }],
+                },
+                Mode::Balanced,
+                vec!["secret.use:*".to_owned(), "network.https:*".to_owned()],
+            );
+            let text =
+                std::fs::read_to_string(egress_secrets_file(dir, entry, origin, closed)).unwrap();
+            config.secrets = dwkd_authority::secret::metadata::parse(&text).unwrap();
+            let link: Arc<dyn EffectBroker> =
+                Arc::new(UnixBroker::new(PathBuf::from(broker), own_uid()));
+            let (mut authority, _) = Authority::start(
+                &dir.join("state"),
+                &config,
+                StartOptions {
+                    clock: Arc::new(ManualClock::new(START_MS)),
+                    crash_hook: None,
+                    broker: Some(link),
+                },
+            )
+            .unwrap();
+            // The evidence's origins are on loopback; only this harness can let
+            // the authority's guard through to them.
+            authority
+                .attach_net_evidence(vec![dwk_proto::wire::guard::Address::V4([127, 0, 0, 1])])
+                .unwrap();
+            let workspace = WorkspaceId::new("ws").unwrap();
+            std::fs::create_dir_all(dir.join("ws")).unwrap();
+            {
+                let mut operator = authority.operator();
+                operator
+                    .install_agent_profile(&profile(
+                        "operator",
+                        &["secret.use:api-token", "network.https:*"],
+                        &[],
+                        PrivacyClass::Any,
+                    ))
+                    .unwrap();
+                operator
+                    .install_workspace(&workspace, WorkspaceSensitivity::Private)
+                    .unwrap();
+                operator
+                    .install_workspace_root(&workspace, dir.join("ws").to_str().unwrap())
+                    .unwrap();
+                operator
+                    .bind_session_workspace(&session(1), &workspace)
+                    .unwrap();
+            }
+            let caller =
+                authority.connect(dwkd_authority::state::AuthenticatedSubject::unix_uid(1000));
+            let Reply::Done(epoch) = authority.acquire_lease(&caller, &session(1)).unwrap() else {
+                panic!("a lease")
+            };
+            let admitted = authority
+                .admit_run(
+                    &caller,
+                    &admit_msg(
+                        &session(1),
+                        epoch,
+                        "k1",
+                        "operator",
+                        &[],
+                        &["secret.use:api-token", "network.https:*"],
+                        1,
+                    ),
+                )
+                .unwrap();
+            let Reply::Done(admission) = admitted else {
+                panic!("admitted")
+            };
+            Self {
+                run: admission.run_id().as_str().to_owned(),
+                epoch: epoch.get(),
+                authority,
+                caller,
+                n: 0,
+            }
+        }
+
+        /// `net.http` GET of `url` with `api-token`, under `key`; `limit`
+        /// bounds the body when given.
+        fn fetch(&mut self, url: &str, key: &str, limit: Option<u32>) -> DwkpBody {
+            self.n += 1;
+            let bound = limit.map_or_else(String::new, |l| format!(r#","max_response_bytes":{l}"#));
+            let message = super::state_support::decode(&format!(
+                r#"{{"v":1,"id":"{id}","type":"request","schema":"direwolf.tool.invoke","schema_version":4,"ts":"2026-09-21T10:01:00.000Z","session_id":"{session}","run_id":"{run}","epoch":{epoch},"idempotency_key":"{key}","payload":{{"net_http":{{"method":"GET","url":"{url}","credential_handle":"api-token","follow_redirects":false{bound}}}}}}}"#,
+                id = super::state_support::id("msg", 50_000 + self.n),
+                session = session(1).as_str(),
+                run = self.run,
+                epoch = self.epoch,
+            ));
+            self.authority.dispatch(&self.caller, &message).unwrap()
+        }
+
+        /// Whether every hop of an answer carried the credential.
+        fn summary(body: &DwkpBody) -> String {
+            match body {
+                DwkpBody::ToolResultV4(result) => {
+                    let output = result.output.net_http.as_ref().unwrap();
+                    if output.hops.iter().all(|hop| hop.injected) {
+                        "INJECTED".to_owned()
+                    } else {
+                        "NOT-INJECTED".to_owned()
+                    }
+                }
+                DwkpBody::ToolRefusedV4(refusal) => format!("REFUSED {}", refusal.reason.as_str()),
+                DwkpBody::ToolFailedV4(failure) => format!("FAILED {}", failure.reason.as_str()),
+                other => format!("OTHER {other:?}"),
+            }
+        }
+    }
 
     /// The authority, as a child: start on `DW_M4E_HOST_DIR` with the secret
-    /// metadata, reach the real broker, admit a run, use `api-token` once and
-    /// replay it, then wait to be read.
+    /// metadata, reach the real broker, admit a run, use `api-token` once at
+    /// its origin through `net.http` and replay the key; then, once told to,
+    /// use it once more towards a port nothing listens on; then wait to be
+    /// read.
     #[test]
     #[ignore = "the authority-host child of mode_a_leaves_the_value_in_neither_process"]
     fn authority_host_child() {
-        let (Ok(dir), Ok(broker), Ok(entry)) = (
-            std::env::var("DW_M4E_HOST_DIR"),
-            std::env::var("DW_M4E_HOST_BROKER"),
-            std::env::var("DW_M4E_HOST_ENTRY"),
-        ) else {
+        let Some(mut host) = ModeAHost::from_env() else {
             return;
         };
-        let dir = PathBuf::from(dir);
-        let mut config = StartupConfig::new(
-            PolicySet {
-                profile: "m4e".to_owned(),
-                sources: vec![PolicySource {
-                    name: "m4e.toml".to_owned(),
-                    text: POLICY.to_owned(),
-                }],
-            },
-            Mode::Balanced,
-            vec!["secret.use:*".to_owned()],
-        );
-        let text = std::fs::read_to_string(secrets_file(&dir, &entry)).unwrap();
-        config.secrets = dwkd_authority::secret::metadata::parse(&text).unwrap();
-        let link: Arc<dyn EffectBroker> =
-            Arc::new(UnixBroker::new(PathBuf::from(broker), own_uid()));
-        let (mut authority, _) = Authority::start(
-            &dir.join("state"),
-            &config,
-            StartOptions {
-                clock: Arc::new(ManualClock::new(START_MS)),
-                crash_hook: None,
-                broker: Some(link),
-            },
-        )
-        .unwrap();
-        let workspace = WorkspaceId::new("ws").unwrap();
-        std::fs::create_dir_all(dir.join("ws")).unwrap();
-        {
-            let mut operator = authority.operator();
-            operator
-                .install_agent_profile(&profile(
-                    "operator",
-                    &["secret.use:api-token"],
-                    &[],
-                    PrivacyClass::Any,
-                ))
-                .unwrap();
-            operator
-                .install_workspace(&workspace, WorkspaceSensitivity::Private)
-                .unwrap();
-            operator
-                .install_workspace_root(&workspace, dir.join("ws").to_str().unwrap())
-                .unwrap();
-            operator
-                .bind_session_workspace(&session(1), &workspace)
-                .unwrap();
-        }
-        let caller = authority.connect(dwkd_authority::state::AuthenticatedSubject::unix_uid(1000));
-        let Reply::Done(epoch) = authority.acquire_lease(&caller, &session(1)).unwrap() else {
-            panic!("a lease")
-        };
-        let admitted = authority
-            .admit_run(
-                &caller,
-                &admit_msg(
-                    &session(1),
-                    epoch,
-                    "k1",
-                    "operator",
-                    &[],
-                    &["secret.use:api-token"],
-                    1,
-                ),
-            )
-            .unwrap();
-        let Reply::Done(admission) = admitted else {
-            panic!("admitted")
-        };
-        let request = EgressRequest {
-            handle: "api-token".to_owned(),
-            origin: "api.example.com:443".to_owned(),
-            key: IdempotencyKey::new("use-1".to_owned()).unwrap(),
-        };
+        let origin = std::env::var("DW_M4E_HOST_ORIGIN_PORT").unwrap();
+        let closed = std::env::var("DW_M4E_HOST_CLOSED_PORT").unwrap();
+        let at_origin = format!("https://origin.test:{origin}/ok");
         for _ in 0..2 {
-            let reply = authority
-                .secret_egress(&caller, &session(1), admission.run_id(), epoch, &request)
-                .unwrap();
-            println!(
-                "
-M4E:{}",
-                match reply {
-                    EgressReply::Injected { .. } => "INJECTED".to_owned(),
-                    EgressReply::Replayed { state, .. } => format!("REPLAYED {state}"),
-                    other => format!("OTHER {other:?}"),
-                }
-            );
+            let answer = ModeAHost::summary(&host.fetch(&at_origin, "use-1", None));
+            println!("\nM4E:{answer}");
         }
-        println!(
-            "
-M4E:DONE"
-        );
+        println!("\nM4E:PAUSE");
+        let mut go = String::new();
+        let _ = std::io::stdin().read_line(&mut go);
+        let answer = ModeAHost::summary(&host.fetch(
+            &format!("https://closed.test:{closed}/ok"),
+            "use-2",
+            None,
+        ));
+        println!("\nM4E:{answer}");
+        println!("\nM4E:DONE");
+        park();
+    }
+
+    /// The authority, as a child, for the echo evidence: for each `FETCH
+    /// <path> <limit|->` line on stdin, use `api-token` at that path of its
+    /// origin and print what the runtime would receive -- status, truncation,
+    /// the body and every header, in hex -- or the refusal; then `ANSWERED`.
+    #[test]
+    #[ignore = "the echo child of mode_a_echoed_credentials_stop_at_the_broker"]
+    fn echo_host_child() {
+        let Some(mut host) = ModeAHost::from_env() else {
+            return;
+        };
+        let origin = std::env::var("DW_M4E_HOST_ORIGIN_PORT").unwrap();
+        let stdin = std::io::stdin();
+        let mut line = String::new();
+        let mut key = 0u32;
+        while stdin.read_line(&mut line).is_ok_and(|n| n > 0) {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if let ["FETCH", path, limit] = parts.as_slice() {
+                key += 1;
+                let limit = limit.parse::<u32>().ok();
+                let url = format!("https://origin.test:{origin}{path}");
+                match host.fetch(&url, &format!("echo-{key}"), limit) {
+                    DwkpBody::ToolResultV4(result) => {
+                        let output = result.output.net_http.unwrap();
+                        let headers: Vec<String> = output
+                            .headers
+                            .iter()
+                            .map(|h| {
+                                format!("{}={}", h.name.as_str(), hex(h.value.as_str().as_bytes()))
+                            })
+                            .collect();
+                        println!(
+                            "\nM4E:RESULT {} {} {} {}",
+                            output.status.get(),
+                            output.truncated,
+                            hex(&output.body.to_bytes()),
+                            if headers.is_empty() {
+                                "-".to_owned()
+                            } else {
+                                headers.join(",")
+                            },
+                        );
+                    }
+                    other => println!("\nM4E:{}", ModeAHost::summary(&other)),
+                }
+                println!("\nM4E:ANSWERED");
+            }
+            line.clear();
+        }
         park();
     }
 
     #[test]
     fn mode_a_leaves_the_value_in_neither_process() {
+        if !super::net_support::tools_present() {
+            println!("NOT EXERCISED: mode A's consumer needs bash, openssl and python3");
+            return;
+        }
         let value = fresh("host", 40);
         let Some(seeded) = Seeded::new("host", &value) else {
             println!("NOT EXERCISED: no usable kernel keyring on this host");
             return;
         };
         let dir = super::state_support::TempDir::new("m4e-host");
+        let pki = super::net_support::pki(dir.path());
+        let origin = super::net_support::Origin::start(&pki, "origin");
+        let closed = {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.local_addr().unwrap().port()
+        };
+        let fixture = super::net_support::fixture(
+            dir.path(),
+            "resolve origin.test 127.0.0.1\nresolve closed.test 127.0.0.1\nallow 127.0.0.1\n",
+        );
         let socket = dir.path().join("bipc").join("broker.sock");
         let broker = Broker::start(
             &socket,
             own_uid(),
-            &["--allow-shared-authority-uid", "--allow-dumpable"],
+            &[
+                "--allow-shared-authority-uid",
+                "--allow-dumpable",
+                "--allow-evidence-egress",
+                fixture.to_str().unwrap(),
+                "--allow-evidence-trust",
+                pki.join("ca.pem").to_str().unwrap(),
+            ],
         );
-        let before = rchar(broker.pid);
         let (mut host, lines) = child(
             "linux::authority_host_child",
             &[
                 ("DW_M4E_HOST_DIR", dir.path().display().to_string()),
                 ("DW_M4E_HOST_BROKER", socket.display().to_string()),
                 ("DW_M4E_HOST_ENTRY", seeded.0.clone()),
+                ("DW_M4E_HOST_ORIGIN_PORT", origin.port.to_string()),
+                ("DW_M4E_HOST_CLOSED_PORT", closed.to_string()),
             ],
         );
-        let answers = until_done(&lines);
-        assert_eq!(answers, ["INJECTED", "REPLAYED INJECTED"]);
-        evidence("mode-a-real-broker", "INJECTED-once-replay-recorded");
-        // The broker read the value once: the replay read nothing.
+        // Through the real broker to its bound origin, once; the replayed key
+        // reaches nothing.
+        let answers = until_marker(&lines, "PAUSE");
+        assert_eq!(answers, ["INJECTED", "REFUSED IDEMPOTENCY_KEY_REUSED"]);
+        let seen = origin.requests();
+        assert_eq!(seen.len(), 1, "the origin heard the request once");
+        let bearer: String = Sha256::digest([b"Bearer ".as_slice(), &value].concat())
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        assert_eq!(super::net_support::authorization(&seen[0]), Some(bearer));
+        evidence(
+            "mode-a-real-broker",
+            "INJECTED-at-bound-origin-once-replay-refused",
+        );
+        // A second use, towards a port nothing listens on: the broker reads
+        // the value once, renders it, and fails to connect. Nothing else is
+        // read: `rchar` grows by exactly the value.
+        let before = rchar(broker.pid);
+        host.stdin.as_mut().unwrap().write_all(b"go\n").unwrap();
+        let answers = until_marker(&lines, "DONE");
+        assert_eq!(answers, ["FAILED CONNECT_FAILED"]);
         assert_eq!(
             rchar(broker.pid) - before,
             u64::try_from(value.len()).unwrap()
@@ -763,11 +968,265 @@ M4E:DONE"
         let _ = host.kill();
         let _ = host.wait();
         drop(broker);
+        drop(origin);
         for needle in [&value[..], &value[..16]] {
             let found = files_holding(dir.path(), needle, &[]);
             assert!(found.is_empty(), "durable plaintext in {found:?}");
         }
         evidence("mode-a-durable-state-scan", "zero-matches");
+    }
+
+    /// The two evidence cases of one way an echo comes back, spelled whole so
+    /// that `scripts/dw.py`'s case list is checked against this source: what
+    /// DireWolf holds (asserted), and what the broker's libraries leave
+    /// (measured).
+    fn echo_cases(way: &str) -> (&'static str, &'static str) {
+        match way {
+            "body" => (
+                "mode-a-echo-body",
+                "mode-a-echo-broker-library-residue-body",
+            ),
+            "chunked-body" => (
+                "mode-a-echo-chunked-body",
+                "mode-a-echo-broker-library-residue-chunked-body",
+            ),
+            "straddling-the-bound" => (
+                "mode-a-echo-straddling-the-bound",
+                "mode-a-echo-broker-library-residue-straddling-the-bound",
+            ),
+            "past-the-bound" => (
+                "mode-a-echo-past-the-bound",
+                "mode-a-echo-broker-library-residue-past-the-bound",
+            ),
+            "kept-header" => (
+                "mode-a-echo-kept-header",
+                "mode-a-echo-broker-library-residue-kept-header",
+            ),
+            "dropped-header" => (
+                "mode-a-echo-dropped-header",
+                "mode-a-echo-broker-library-residue-dropped-header",
+            ),
+            "location" => (
+                "mode-a-echo-location",
+                "mode-a-echo-broker-library-residue-location",
+            ),
+            "malformed" => (
+                "mode-a-echo-malformed",
+                "mode-a-echo-broker-library-residue-malformed",
+            ),
+            "truncated" => (
+                "mode-a-echo-truncated",
+                "mode-a-echo-broker-library-residue-truncated",
+            ),
+            other => panic!("an echo with no evidence cases: {other}"),
+        }
+    }
+
+    /// Whether `haystack` holds any 16-byte window of `value`: a prefix, a
+    /// suffix or the middle of a value cut by a bound counts as a leak.
+    fn holds_a_window_of(haystack: &[u8], value: &[u8]) -> bool {
+        value.windows(16).any(|window| contains(haystack, window))
+    }
+
+    /// D11 (ADR-0050 §§8, 20): an origin that sends mode A's credential back.
+    /// For each way it can come back -- the body (whole, split across
+    /// chunks, straddling the response bound, past it), a kept header, a
+    /// header off the keep-list, a `Location`, a malformed and a truncated
+    /// response -- fresh daemons, then: what the runtime would receive holds
+    /// no 16-byte window of the value; the authority's process holds neither
+    /// the value nor its hex; the broker never encoded it (no hex form in its
+    /// memory); the audit names the handle's echoes and holds no byte of it.
+    /// What the broker's TLS and HTTP libraries leave in freed memory is
+    /// measured and reported, never asserted away.
+    #[test]
+    fn mode_a_echoed_credentials_stop_at_the_broker() {
+        if !super::net_support::tools_present() {
+            println!("NOT EXERCISED: mode A's consumer needs bash, openssl and python3");
+            return;
+        }
+        let value = fresh("echo", 40);
+        let Some(seeded) = Seeded::new("echo", &value) else {
+            println!("NOT EXERCISED: no usable kernel keyring on this host");
+            return;
+        };
+        let value_hex = hex(&value);
+        let marker = b"[redacted:api-token]".as_slice();
+        let dir = super::state_support::TempDir::new("m4e-echo");
+        let pki = super::net_support::pki(dir.path());
+        let origin = super::net_support::Origin::start(&pki, "origin");
+        let closed = {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.local_addr().unwrap().port()
+        };
+        // "Bearer " and 30 bytes of the value inside a 1 KiB bound, 10 past it.
+        let paths: [(&str, &str, Option<u32>); 9] = [
+            ("body", "/echo-auth?where=body", None),
+            ("chunked-body", "/echo-auth?where=chunked", None),
+            (
+                "straddling-the-bound",
+                "/echo-auth?where=straddle&at=987",
+                Some(1024),
+            ),
+            (
+                "past-the-bound",
+                "/echo-auth?where=beyond&at=2048",
+                Some(1024),
+            ),
+            ("kept-header", "/echo-auth?where=kept", None),
+            ("dropped-header", "/echo-auth?where=dropped", None),
+            ("location", "/echo-auth?where=location", None),
+            ("malformed", "/echo-auth?where=malformed", None),
+            ("truncated", "/echo-auth?where=truncated", None),
+        ];
+        let mut measured = Vec::new();
+        for (n, (case, path, limit)) in paths.iter().enumerate() {
+            let run_dir = dir.path().join(format!("echo-{n}"));
+            std::fs::create_dir_all(&run_dir).unwrap();
+            let fixture = super::net_support::fixture(
+                &run_dir,
+                "resolve origin.test 127.0.0.1\nresolve closed.test 127.0.0.1\nallow 127.0.0.1\n",
+            );
+            let socket = run_dir.join("bipc").join("broker.sock");
+            let broker = Broker::start(
+                &socket,
+                own_uid(),
+                &[
+                    "--allow-shared-authority-uid",
+                    "--allow-dumpable",
+                    "--allow-evidence-egress",
+                    fixture.to_str().unwrap(),
+                    "--allow-evidence-trust",
+                    pki.join("ca.pem").to_str().unwrap(),
+                ],
+            );
+            let (mut host, lines) = child(
+                "linux::echo_host_child",
+                &[
+                    ("DW_M4E_HOST_DIR", run_dir.display().to_string()),
+                    ("DW_M4E_HOST_BROKER", socket.display().to_string()),
+                    ("DW_M4E_HOST_ENTRY", seeded.0.clone()),
+                    ("DW_M4E_HOST_ORIGIN_PORT", origin.port.to_string()),
+                    ("DW_M4E_HOST_CLOSED_PORT", closed.to_string()),
+                ],
+            );
+            let bound = limit.map_or_else(|| "-".to_owned(), |l| l.to_string());
+            host.stdin
+                .as_mut()
+                .unwrap()
+                .write_all(format!("FETCH {path} {bound}\n").as_bytes())
+                .unwrap();
+            let answer = until_marker(&lines, "ANSWERED");
+            std::thread::sleep(Duration::from_millis(100));
+            let authority = (
+                memory_holds(host.id(), &value),
+                memory_holds(host.id(), value_hex.as_bytes()),
+            );
+            let in_broker = (
+                memory_holds(broker.pid, &value),
+                memory_holds(broker.pid, value_hex.as_bytes()),
+            );
+            println!(
+                "ECHO-MEASURE {case}: answer={answer:?} authority(raw,hex)={authority:?} \
+                 broker(raw,hex)={in_broker:?}"
+            );
+            let _ = host.kill();
+            let _ = host.wait();
+            drop(broker);
+            let audit = std::fs::read(run_dir.join("state").join("audit.log")).unwrap_or_default();
+            measured.push((*case, answer, authority, in_broker, audit));
+        }
+        drop(origin);
+        for (case, answer, authority, in_broker, audit) in &measured {
+            // What the runtime would receive.
+            let [only] = answer.as_slice() else {
+                panic!("{case}: {answer:?}")
+            };
+            let fields: Vec<&str> = only.split(' ').collect();
+            match (*case, fields.as_slice()) {
+                ("malformed" | "truncated", ["FAILED", reason]) => {
+                    assert_eq!(*reason, "RESPONSE_MALFORMED", "{case}");
+                }
+                (_, ["RESULT", status, truncated, body, headers]) => {
+                    let body = unhex(body);
+                    assert!(!holds_a_window_of(&body, &value), "{case}: the body");
+                    let headers: Vec<(&str, Vec<u8>)> = if *headers == "-" {
+                        Vec::new()
+                    } else {
+                        headers
+                            .split(',')
+                            .map(|h| {
+                                let (name, value) = h.split_once('=').unwrap();
+                                (name, unhex(value))
+                            })
+                            .collect()
+                    };
+                    for (name, bytes) in &headers {
+                        assert!(!holds_a_window_of(bytes, &value), "{case}: header {name}");
+                    }
+                    let names: Vec<&str> = headers.iter().map(|(n, _)| *n).collect();
+                    match *case {
+                        "body" | "chunked-body" => assert!(contains(&body, marker), "{case}"),
+                        "straddling-the-bound" => {
+                            assert_eq!(*truncated, "true", "{case}");
+                            assert!(body.iter().take(987).all(|b| *b == b'a'), "{case}");
+                        }
+                        "past-the-bound" => {
+                            assert_eq!(*truncated, "true", "{case}");
+                            assert!(body.iter().all(|b| *b == b'a'), "{case}");
+                        }
+                        "kept-header" => assert!(!names.contains(&"etag"), "{case}: {names:?}"),
+                        "location" => {
+                            assert_eq!(*status, "302", "{case}");
+                            assert!(!names.contains(&"location"), "{case}: {names:?}");
+                        }
+                        _ => {}
+                    }
+                }
+                _ => panic!("{case}: {only}"),
+            }
+            // The authority's process: neither the value nor its hex.
+            assert_eq!(
+                *authority,
+                (Some(false), Some(false)),
+                "{case}: the authority holds the echoed value"
+            );
+            // The broker never encoded it: its memory holds no hex form.
+            assert_eq!(in_broker.1, Some(false), "{case}: the broker encoded it");
+            assert!(
+                in_broker.0.is_some(),
+                "{case}: the broker's memory was read"
+            );
+            // The audit: never a byte of it.
+            assert!(!contains(audit, &value) && !contains(audit, value_hex.as_bytes()));
+            let (clean, residue) = echo_cases(case);
+            evidence(
+                clean,
+                "runtime-audit-authority-clean-broker-never-encoded-it",
+            );
+            evidence(
+                residue,
+                if in_broker.0 == Some(true) {
+                    "PRESENT-documented-limitation-rustls-and-http-buffers"
+                } else {
+                    "absent"
+                },
+            );
+        }
+        // The audit names the handle for an echo it redacted, as a count.
+        let (_, _, _, _, audit) = &measured[0];
+        let audit = String::from_utf8_lossy(audit);
+        assert!(
+            audit
+                .lines()
+                .any(|l| l.contains("secret.redaction_hit") && l.contains("api-token")),
+            "the echo's redaction is audited"
+        );
+        evidence("mode-a-echo-audited", "redaction-hit-handle-and-count");
+        for needle in [&value[..], &value[..16], value_hex.as_bytes()] {
+            let found = files_holding(dir.path(), needle, &[]);
+            assert!(found.is_empty(), "durable plaintext in {found:?}");
+        }
+        evidence("mode-a-echo-durable-state-scan", "zero-matches");
     }
 
     // ---- the hosted half: three identities, the hardened daemons read as root ----

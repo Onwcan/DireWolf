@@ -1,6 +1,10 @@
 //! The broker's secret primitives (M4e, [ADR-0046]): reading a value from the
-//! one descriptor the authority handed over, the mode A render, and the
-//! redaction of an injected value from a launch's output.
+//! one descriptor the authority handed over, and the redaction of an injected
+//! value from what comes back -- a launch's output, and (M5c, [ADR-0050] §8)
+//! the response to the `net.http` hop that carried it, before any byte of the
+//! response is copied into a message. Mode A's header is composed only into a
+//! `net.http` hop's request (`crate::http::render`); M4e's render-and-drop
+//! `broker.secret_egress`, which delivered it to nothing, is retired.
 //!
 //! **The broker holds no long-lived key, and reaches no store.** Every value
 //! it ever holds arrived as the read end of a pipe the authority filled and
@@ -21,14 +25,12 @@
 //! redaction, when both of its streams reach end of file.
 //!
 //! [ADR-0046]: ../../../docs/adr/0046-m4e-secret-handles-backends-injection-and-redaction.md
+//! [ADR-0050]: ../../../docs/adr/0050-m5c-kernel-performed-net-http-ssrf-redirects-and-credential-egress.md
 
 use std::os::fd::OwnedFd;
 use std::sync::Arc;
 
-use dwk_proto::brokerp::{
-    BrokerDone, BrokerRefusal, MAX_SECRET_BYTES, OutcomeResult, SecretEgressAuthorisation,
-    SecretHandle,
-};
+use dwk_proto::brokerp::{BrokerRefusal, MAX_SECRET_BYTES, SecretHandle};
 use rustix::fs::{FileType, OFlags};
 use rustix::io::Errno;
 use zeroize::Zeroizing;
@@ -75,40 +77,6 @@ pub(crate) fn read_value(fd: &OwnedFd) -> Result<Zeroizing<Vec<u8>>, BrokerRefus
     // Shortening keeps the capacity: the whole allocation is zeroed on drop.
     value.truncate(filled);
     Ok(value)
-}
-
-/// `broker.secret_egress`: read the value, refuse one that would break the
-/// header, compose `name: prefix value`, and drop the composition — zeroed.
-///
-/// M4e has no egress consumer (`net.http` and the proxy are M5's): the render
-/// is delivered to nothing. What it proves is the secret side of mode A —
-/// the value reaches the broker only in this invocation's exchange, as a
-/// descriptor, is checked for header safety here as well as in the
-/// authority, and is gone when the exchange ends.
-pub(crate) fn egress(authorisation: &SecretEgressAuthorisation, fd: &OwnedFd) -> OutcomeResult {
-    let value = match read_value(fd) {
-        Ok(value) => value,
-        Err(refusal) => return OutcomeResult::Refused(refusal),
-    };
-    crate::crash::point("secret_after_read");
-    if value.iter().any(|b| matches!(b, b'\r' | b'\n' | 0)) {
-        return OutcomeResult::Refused(BrokerRefusal::SecretUnsafeBytes);
-    }
-    let name = authorisation.header_name.as_str().as_bytes();
-    let prefix = authorisation
-        .header_prefix
-        .as_ref()
-        .map_or(&b""[..], |p| p.as_str().as_bytes());
-    let size = name.len() + 2 + prefix.len() + value.len();
-    let mut header = Zeroizing::new(Vec::with_capacity(size));
-    header.extend_from_slice(name);
-    header.extend_from_slice(b": ");
-    header.extend_from_slice(prefix);
-    header.extend_from_slice(&value);
-    // Nothing consumes it until M5. Both buffers are zeroed here.
-    drop(header);
-    drop(value);
-    OutcomeResult::done(BrokerDone::secret_egress())
 }
 
 /// An injected value a launch's output is redacted of, for as long as its
@@ -158,6 +126,31 @@ impl Needle {
     pub(crate) fn value(&self) -> &[u8] {
         &self.value
     }
+
+    /// The value's length, never its bytes: how far past a bound a response
+    /// is read so that an occurrence beginning inside it is seen whole.
+    pub(crate) fn len(&self) -> usize {
+        self.value.len()
+    }
+
+    /// Whether `haystack` holds the value whole: for a response header, which
+    /// is dropped rather than redacted in part.
+    pub(crate) fn found_in(&self, haystack: &[u8]) -> bool {
+        let value = self.value.as_slice();
+        let mut q = 0usize;
+        for &byte in haystack {
+            while q > 0 && value.get(q) != Some(&byte) {
+                q = self.failure.get(q - 1).copied().unwrap_or(0);
+            }
+            if value.get(q) == Some(&byte) {
+                q += 1;
+            }
+            if q == value.len() {
+                return true;
+            }
+        }
+        false
+    }
 }
 
 /// The streaming state of one redacted stream: how much of the value the
@@ -167,12 +160,23 @@ impl Needle {
 pub(crate) struct Redactor {
     needle: Arc<Needle>,
     matched: usize,
+    /// Whole occurrences replaced so far: a count, never a position.
+    found: usize,
 }
 
 impl Redactor {
     /// A redactor for `needle`.
     pub(crate) const fn new(needle: Arc<Needle>) -> Self {
-        Self { needle, matched: 0 }
+        Self {
+            needle,
+            matched: 0,
+            found: 0,
+        }
+    }
+
+    /// How many whole occurrences this redactor replaced.
+    pub(crate) const fn occurrences(&self) -> usize {
+        self.found
     }
 
     /// Feed `input`; `emit` receives every byte that is certainly not part of
@@ -197,6 +201,7 @@ impl Redactor {
                 // A whole occurrence: nothing of it is released.
                 emit(&self.needle.placeholder);
                 self.matched = 0;
+                self.found = self.found.saturating_add(1);
                 continue;
             }
             if released > 0 {
@@ -225,8 +230,7 @@ impl Redactor {
 
 #[cfg(test)]
 mod tests {
-    use super::{Needle, Redactor};
-    use dwk_proto::brokerp::SecretHandle;
+    use super::{Needle, Redactor, SecretHandle};
     use zeroize::Zeroizing;
 
     fn redact(value: &[u8], chunks: &[&[u8]]) -> Vec<u8> {
@@ -282,5 +286,24 @@ mod tests {
         );
         // Nothing in, nothing out.
         assert!(redact(b"abc", &[]).is_empty());
+    }
+
+    #[test]
+    fn a_whole_value_is_found_and_counted_and_a_part_of_it_is_neither() {
+        let handle = SecretHandle::new("h").unwrap_or_else(|| unreachable!());
+        let needle = Needle::new(Zeroizing::new(b"abab".to_vec()), &handle)
+            .unwrap_or_else(|| unreachable!());
+        assert!(needle.found_in(b"Bearer xababx"));
+        assert!(needle.found_in(b"aabab"));
+        assert!(!needle.found_in(b"aba"));
+        assert!(!needle.found_in(b"ab ab"));
+        assert!(!needle.found_in(b""));
+        let mut redactor = Redactor::new(needle);
+        let mut out = Vec::new();
+        redactor.feed(b"ab", &mut |b| out.extend_from_slice(b));
+        redactor.feed(b"abxababab", &mut |b| out.extend_from_slice(b));
+        redactor.finish(&mut |b| out.extend_from_slice(b));
+        assert_eq!(out, b"[redacted:h]x[redacted:h]ab".to_vec());
+        assert_eq!(redactor.occurrences(), 2);
     }
 }

@@ -1361,7 +1361,7 @@
   {
    "name": "tool invoke at a version this build does not know",
    "family": "dwkp",
-   "input": "{\"v\": 1, \"id\": \"msg_01M24BB8G0E87TVJX9GX248ADD\", \"type\": \"request\", \"ts\": \"2026-09-12T09:14:22.481Z\", \"session_id\": \"ses_01M24BB8G2E87V1ZPZXQ7DSCVW\", \"run_id\": \"run_01M24BB8G3E0A851TRWE3M8FZF\", \"epoch\": 7, \"schema\": \"direwolf.tool.invoke\", \"schema_version\": 4, \"idempotency_key\": \"inv-7f3a\", \"payload\": {\"fs_delete\": {\"path\": \"/workspace/a\"}}}",
+   "input": "{\"v\": 1, \"id\": \"msg_01M24BB8G0E87TVJX9GX248ADD\", \"type\": \"request\", \"ts\": \"2026-09-12T09:14:22.481Z\", \"session_id\": \"ses_01M24BB8G2E87V1ZPZXQ7DSCVW\", \"run_id\": \"run_01M24BB8G3E0A851TRWE3M8FZF\", \"epoch\": 7, \"schema\": \"direwolf.tool.invoke\", \"schema_version\": 5, \"idempotency_key\": \"inv-7f3a\", \"payload\": {\"fs_delete\": {\"path\": \"/workspace/a\"}}}",
    "code": "PROTOCOL_VERSION_UNSUPPORTED",
    "violation": "OUT_OF_RANGE",
    "path": "/schema_version"
@@ -1605,6 +1605,206 @@
    "code": "PROTOCOL_SCHEMA_VIOLATION",
    "violation": "INCONSISTENT",
    "path": "/payload/output/process_kill"
+  },
+  {
+   "name": "v4 net.http at version 3",
+   "family": "dwkp",
+   "input": "{\"v\": 1, \"id\": \"msg_01M24BB8G0E87TVJX9GX248ADD\", \"type\": \"request\", \"ts\": \"2026-09-12T09:14:22.481Z\", \"session_id\": \"ses_01M24BB8G2E87V1ZPZXQ7DSCVW\", \"run_id\": \"run_01M24BB8G3E0A851TRWE3M8FZF\", \"epoch\": 7, \"schema\": \"direwolf.tool.invoke\", \"schema_version\": 3, \"idempotency_key\": \"inv-7f3a\", \"payload\": {\"net_http\": {\"method\": \"GET\", \"url\": \"https://api.example.com/\", \"follow_redirects\": false}}}",
+   "code": "PROTOCOL_SCHEMA_VIOLATION",
+   "violation": "UNKNOWN_FIELD",
+   "path": "/payload/net_http"
+  },
+  {
+   "name": "v4 net.http naming a resolved address",
+   "family": "dwkp",
+   "input": "{\"v\": 1, \"id\": \"msg_01M24BB8G0E87TVJX9GX248ADD\", \"type\": \"request\", \"ts\": \"2026-09-12T09:14:22.481Z\", \"session_id\": \"ses_01M24BB8G2E87V1ZPZXQ7DSCVW\", \"run_id\": \"run_01M24BB8G3E0A851TRWE3M8FZF\", \"epoch\": 7, \"schema\": \"direwolf.tool.invoke\", \"schema_version\": 4, \"idempotency_key\": \"inv-7f3a\", \"payload\": {\"net_http\": {\"method\": \"GET\", \"url\": \"https://api.example.com/\", \"follow_redirects\": false, \"address\": \"127.0.0.1\"}}}",
+   "code": "PROTOCOL_SCHEMA_VIOLATION",
+   "violation": "UNKNOWN_FIELD",
+   "path": "/payload/net_http/address"
+  },
+  {
+   "name": "v4 net.http choosing a proxy",
+   "family": "dwkp",
+   "input": "{\"v\": 1, \"id\": \"msg_01M24BB8G0E87TVJX9GX248ADD\", \"type\": \"request\", \"ts\": \"2026-09-12T09:14:22.481Z\", \"session_id\": \"ses_01M24BB8G2E87V1ZPZXQ7DSCVW\", \"run_id\": \"run_01M24BB8G3E0A851TRWE3M8FZF\", \"epoch\": 7, \"schema\": \"direwolf.tool.invoke\", \"schema_version\": 4, \"idempotency_key\": \"inv-7f3a\", \"payload\": {\"net_http\": {\"method\": \"GET\", \"url\": \"https://api.example.com/\", \"follow_redirects\": false, \"proxy\": \"http://proxy.example:3128\"}}}",
+   "code": "PROTOCOL_SCHEMA_VIOLATION",
+   "violation": "UNKNOWN_FIELD",
+   "path": "/payload/net_http/proxy"
+  },
+  {
+   "name": "v4 net.http turning certificate verification off",
+   "family": "dwkp",
+   "input": "{\"v\": 1, \"id\": \"msg_01M24BB8G0E87TVJX9GX248ADD\", \"type\": \"request\", \"ts\": \"2026-09-12T09:14:22.481Z\", \"session_id\": \"ses_01M24BB8G2E87V1ZPZXQ7DSCVW\", \"run_id\": \"run_01M24BB8G3E0A851TRWE3M8FZF\", \"epoch\": 7, \"schema\": \"direwolf.tool.invoke\", \"schema_version\": 4, \"idempotency_key\": \"inv-7f3a\", \"payload\": {\"net_http\": {\"method\": \"GET\", \"url\": \"https://api.example.com/\", \"follow_redirects\": false, \"tls_verify\": false}}}",
+   "code": "PROTOCOL_SCHEMA_VIOLATION",
+   "violation": "UNKNOWN_FIELD",
+   "path": "/payload/net_http/tls_verify"
+  },
+  {
+   "name": "v4 net.http choosing its own deadline",
+   "family": "dwkp",
+   "input": "{\"v\": 1, \"id\": \"msg_01M24BB8G0E87TVJX9GX248ADD\", \"type\": \"request\", \"ts\": \"2026-09-12T09:14:22.481Z\", \"session_id\": \"ses_01M24BB8G2E87V1ZPZXQ7DSCVW\", \"run_id\": \"run_01M24BB8G3E0A851TRWE3M8FZF\", \"epoch\": 7, \"schema\": \"direwolf.tool.invoke\", \"schema_version\": 4, \"idempotency_key\": \"inv-7f3a\", \"payload\": {\"net_http\": {\"method\": \"GET\", \"url\": \"https://api.example.com/\", \"follow_redirects\": false, \"timeout_ms\": 600000}}}",
+   "code": "PROTOCOL_SCHEMA_VIOLATION",
+   "violation": "UNKNOWN_FIELD",
+   "path": "/payload/net_http/timeout_ms"
+  },
+  {
+   "name": "v4 net.http with a header value that ends the header",
+   "family": "dwkp",
+   "input": "{\"v\": 1, \"id\": \"msg_01M24BB8G0E87TVJX9GX248ADD\", \"type\": \"request\", \"ts\": \"2026-09-12T09:14:22.481Z\", \"session_id\": \"ses_01M24BB8G2E87V1ZPZXQ7DSCVW\", \"run_id\": \"run_01M24BB8G3E0A851TRWE3M8FZF\", \"epoch\": 7, \"schema\": \"direwolf.tool.invoke\", \"schema_version\": 4, \"idempotency_key\": \"inv-7f3a\", \"payload\": {\"net_http\": {\"method\": \"GET\", \"url\": \"https://api.example.com/\", \"follow_redirects\": false, \"headers\": [{\"name\": \"x-a\", \"value\": \"a\\r\\nhost: evil.example\"}]}}}",
+   "code": "PROTOCOL_SCHEMA_VIOLATION",
+   "violation": "INVALID_FORMAT",
+   "path": "/payload/net_http/headers/0/value"
+  },
+  {
+   "name": "v4 net.http with a header name in a second spelling",
+   "family": "dwkp",
+   "input": "{\"v\": 1, \"id\": \"msg_01M24BB8G0E87TVJX9GX248ADD\", \"type\": \"request\", \"ts\": \"2026-09-12T09:14:22.481Z\", \"session_id\": \"ses_01M24BB8G2E87V1ZPZXQ7DSCVW\", \"run_id\": \"run_01M24BB8G3E0A851TRWE3M8FZF\", \"epoch\": 7, \"schema\": \"direwolf.tool.invoke\", \"schema_version\": 4, \"idempotency_key\": \"inv-7f3a\", \"payload\": {\"net_http\": {\"method\": \"GET\", \"url\": \"https://api.example.com/\", \"follow_redirects\": false, \"headers\": [{\"name\": \"Content-Type\", \"value\": \"text/plain\"}]}}}",
+   "code": "PROTOCOL_SCHEMA_VIOLATION",
+   "violation": "INVALID_FORMAT",
+   "path": "/payload/net_http/headers/0/name"
+  },
+  {
+   "name": "v4 net.http with headers as an object rather than a list",
+   "family": "dwkp",
+   "input": "{\"v\": 1, \"id\": \"msg_01M24BB8G0E87TVJX9GX248ADD\", \"type\": \"request\", \"ts\": \"2026-09-12T09:14:22.481Z\", \"session_id\": \"ses_01M24BB8G2E87V1ZPZXQ7DSCVW\", \"run_id\": \"run_01M24BB8G3E0A851TRWE3M8FZF\", \"epoch\": 7, \"schema\": \"direwolf.tool.invoke\", \"schema_version\": 4, \"idempotency_key\": \"inv-7f3a\", \"payload\": {\"net_http\": {\"method\": \"GET\", \"url\": \"https://api.example.com/\", \"follow_redirects\": false, \"headers\": {\"accept\": \"*/*\"}}}}",
+   "code": "PROTOCOL_SCHEMA_VIOLATION",
+   "violation": "WRONG_TYPE",
+   "path": "/payload/net_http/headers"
+  },
+  {
+   "name": "v4 net.http with a method outside the closed set",
+   "family": "dwkp",
+   "input": "{\"v\": 1, \"id\": \"msg_01M24BB8G0E87TVJX9GX248ADD\", \"type\": \"request\", \"ts\": \"2026-09-12T09:14:22.481Z\", \"session_id\": \"ses_01M24BB8G2E87V1ZPZXQ7DSCVW\", \"run_id\": \"run_01M24BB8G3E0A851TRWE3M8FZF\", \"epoch\": 7, \"schema\": \"direwolf.tool.invoke\", \"schema_version\": 4, \"idempotency_key\": \"inv-7f3a\", \"payload\": {\"net_http\": {\"method\": \"CONNECT\", \"url\": \"https://api.example.com/\", \"follow_redirects\": false}}}",
+   "code": "PROTOCOL_SCHEMA_VIOLATION",
+   "violation": "UNKNOWN_VARIANT",
+   "path": "/payload/net_http/method"
+  },
+  {
+   "name": "v4 net.http without saying whether redirects are followed",
+   "family": "dwkp",
+   "input": "{\"v\": 1, \"id\": \"msg_01M24BB8G0E87TVJX9GX248ADD\", \"type\": \"request\", \"ts\": \"2026-09-12T09:14:22.481Z\", \"session_id\": \"ses_01M24BB8G2E87V1ZPZXQ7DSCVW\", \"run_id\": \"run_01M24BB8G3E0A851TRWE3M8FZF\", \"epoch\": 7, \"schema\": \"direwolf.tool.invoke\", \"schema_version\": 4, \"idempotency_key\": \"inv-7f3a\", \"payload\": {\"net_http\": {\"method\": \"GET\", \"url\": \"https://api.example.com/\"}}}",
+   "code": "PROTOCOL_SCHEMA_VIOLATION",
+   "violation": "MISSING_FIELD",
+   "path": "/payload/net_http/follow_redirects"
+  },
+  {
+   "name": "v4 net.http asking for more than one frame can return",
+   "family": "dwkp",
+   "input": "{\"v\": 1, \"id\": \"msg_01M24BB8G0E87TVJX9GX248ADD\", \"type\": \"request\", \"ts\": \"2026-09-12T09:14:22.481Z\", \"session_id\": \"ses_01M24BB8G2E87V1ZPZXQ7DSCVW\", \"run_id\": \"run_01M24BB8G3E0A851TRWE3M8FZF\", \"epoch\": 7, \"schema\": \"direwolf.tool.invoke\", \"schema_version\": 4, \"idempotency_key\": \"inv-7f3a\", \"payload\": {\"net_http\": {\"method\": \"GET\", \"url\": \"https://api.example.com/\", \"follow_redirects\": false, \"max_response_bytes\": 262145}}}",
+   "code": "PROTOCOL_SCHEMA_VIOLATION",
+   "violation": "OUT_OF_RANGE",
+   "path": "/payload/net_http/max_response_bytes"
+  },
+  {
+   "name": "v4 net.http with a control character in the URL",
+   "family": "dwkp",
+   "input": "{\"v\": 1, \"id\": \"msg_01M24BB8G0E87TVJX9GX248ADD\", \"type\": \"request\", \"ts\": \"2026-09-12T09:14:22.481Z\", \"session_id\": \"ses_01M24BB8G2E87V1ZPZXQ7DSCVW\", \"run_id\": \"run_01M24BB8G3E0A851TRWE3M8FZF\", \"epoch\": 7, \"schema\": \"direwolf.tool.invoke\", \"schema_version\": 4, \"idempotency_key\": \"inv-7f3a\", \"payload\": {\"net_http\": {\"method\": \"GET\", \"url\": \"https://api.example.com/\\u0007\", \"follow_redirects\": false}}}",
+   "code": "PROTOCOL_SCHEMA_VIOLATION",
+   "violation": "INVALID_FORMAT",
+   "path": "/payload/net_http/url"
+  },
+  {
+   "name": "v4 net.http with a non-ASCII URL",
+   "family": "dwkp",
+   "input": "{\"v\": 1, \"id\": \"msg_01M24BB8G0E87TVJX9GX248ADD\", \"type\": \"request\", \"ts\": \"2026-09-12T09:14:22.481Z\", \"session_id\": \"ses_01M24BB8G2E87V1ZPZXQ7DSCVW\", \"run_id\": \"run_01M24BB8G3E0A851TRWE3M8FZF\", \"epoch\": 7, \"schema\": \"direwolf.tool.invoke\", \"schema_version\": 4, \"idempotency_key\": \"inv-7f3a\", \"payload\": {\"net_http\": {\"method\": \"GET\", \"url\": \"https://b\\u00fccher.example/\", \"follow_redirects\": false}}}",
+   "code": "PROTOCOL_SCHEMA_VIOLATION",
+   "violation": "INVALID_FORMAT",
+   "path": "/payload/net_http/url"
+  },
+  {
+   "name": "v4 net.http naming a credential by text that is not a handle",
+   "family": "dwkp",
+   "input": "{\"v\": 1, \"id\": \"msg_01M24BB8G0E87TVJX9GX248ADD\", \"type\": \"request\", \"ts\": \"2026-09-12T09:14:22.481Z\", \"session_id\": \"ses_01M24BB8G2E87V1ZPZXQ7DSCVW\", \"run_id\": \"run_01M24BB8G3E0A851TRWE3M8FZF\", \"epoch\": 7, \"schema\": \"direwolf.tool.invoke\", \"schema_version\": 4, \"idempotency_key\": \"inv-7f3a\", \"payload\": {\"net_http\": {\"method\": \"GET\", \"url\": \"https://api.example.com/\", \"follow_redirects\": false, \"credential_handle\": \"Bearer abc\"}}}",
+   "code": "PROTOCOL_SCHEMA_VIOLATION",
+   "violation": "INVALID_FORMAT",
+   "path": "/payload/net_http/credential_handle"
+  },
+  {
+   "name": "v4 net.http with a body in upper-case hex",
+   "family": "dwkp",
+   "input": "{\"v\": 1, \"id\": \"msg_01M24BB8G0E87TVJX9GX248ADD\", \"type\": \"request\", \"ts\": \"2026-09-12T09:14:22.481Z\", \"session_id\": \"ses_01M24BB8G2E87V1ZPZXQ7DSCVW\", \"run_id\": \"run_01M24BB8G3E0A851TRWE3M8FZF\", \"epoch\": 7, \"schema\": \"direwolf.tool.invoke\", \"schema_version\": 4, \"idempotency_key\": \"inv-7f3a\", \"payload\": {\"net_http\": {\"method\": \"POST\", \"url\": \"https://api.example.com/\", \"follow_redirects\": false, \"body\": \"7B7D\"}}}",
+   "code": "PROTOCOL_SCHEMA_VIOLATION",
+   "violation": "INVALID_FORMAT",
+   "path": "/payload/net_http/body"
+  },
+  {
+   "name": "v4 tool invoke without its idempotency key",
+   "family": "dwkp",
+   "input": "{\"v\": 1, \"id\": \"msg_01M24BB8G0E87TVJX9GX248ADD\", \"type\": \"request\", \"ts\": \"2026-09-12T09:14:22.481Z\", \"session_id\": \"ses_01M24BB8G2E87V1ZPZXQ7DSCVW\", \"run_id\": \"run_01M24BB8G3E0A851TRWE3M8FZF\", \"epoch\": 7, \"schema\": \"direwolf.tool.invoke\", \"schema_version\": 4, \"payload\": {\"net_http\": {\"method\": \"GET\", \"url\": \"https://api.example.com/\", \"follow_redirects\": false}}}",
+   "code": "PROTOCOL_SCHEMA_VIOLATION",
+   "violation": "MISSING_FIELD",
+   "path": "/idempotency_key"
+  },
+  {
+   "name": "v4 tool invoke naming a network and a filesystem call",
+   "family": "dwkp",
+   "input": "{\"v\": 1, \"id\": \"msg_01M24BB8G0E87TVJX9GX248ADD\", \"type\": \"request\", \"ts\": \"2026-09-12T09:14:22.481Z\", \"session_id\": \"ses_01M24BB8G2E87V1ZPZXQ7DSCVW\", \"run_id\": \"run_01M24BB8G3E0A851TRWE3M8FZF\", \"epoch\": 7, \"schema\": \"direwolf.tool.invoke\", \"schema_version\": 4, \"idempotency_key\": \"inv-7f3a\", \"payload\": {\"fs_stat\": {\"path\": \"/workspace\"}, \"net_http\": {\"method\": \"GET\", \"url\": \"https://api.example.com/\", \"follow_redirects\": false}}}",
+   "code": "PROTOCOL_SCHEMA_VIOLATION",
+   "violation": "INCONSISTENT",
+   "path": "/payload/net_http"
+  },
+  {
+   "name": "v4 result with a seventh hop",
+   "family": "dwkp",
+   "input": "{\"v\": 1, \"id\": \"msg_01M24BB8G0E87TVJX9GX248ADD\", \"type\": \"response\", \"ts\": \"2026-09-12T09:14:22.481Z\", \"causation_id\": \"msg_01M24BB8G1FQR94D2PF2XVQDV4\", \"schema\": \"direwolf.tool.result\", \"schema_version\": 4, \"payload\": {\"invocation_id\": \"inv_01M24BB8G4E87TVJX9GX248ADD\", \"plan\": {\"tool\": \"net.http\", \"environment\": \"HOST\", \"effect\": \"ALLOW\", \"actions\": [{\"net\": {\"host\": \"api.example.com\", \"port\": 443, \"method\": \"GET\", \"url_sha256\": \"9b2f0c35b6f1a1b0a41ad2c7f1d48c1c2b1a3e6b0f6f1bb1c8ad0b2f6c1e9d7a\", \"body_bytes\": 0, \"decision\": {\"effect\": \"ALLOW\", \"reason\": \"ALLOWED_BY_RULE\", \"capability_result\": \"SATISFIED\", \"policy_result\": \"SATISFIED\", \"rule_id\": \"allow-api\", \"rule_source\": \"policy/operator.toml:20\"}}}]}, \"output\": {\"net_http\": {\"status\": 200, \"headers\": [], \"body\": \"\", \"truncated\": false, \"hops\": [{\"hop\": 1, \"host\": \"api.example.com\", \"port\": 443, \"method\": \"GET\", \"injected\": false, \"status\": 302}, {\"hop\": 2, \"host\": \"api.example.com\", \"port\": 443, \"method\": \"GET\", \"injected\": false, \"status\": 302}, {\"hop\": 3, \"host\": \"api.example.com\", \"port\": 443, \"method\": \"GET\", \"injected\": false, \"status\": 302}, {\"hop\": 4, \"host\": \"api.example.com\", \"port\": 443, \"method\": \"GET\", \"injected\": false, \"status\": 302}, {\"hop\": 5, \"host\": \"api.example.com\", \"port\": 443, \"method\": \"GET\", \"injected\": false, \"status\": 302}, {\"hop\": 6, \"host\": \"api.example.com\", \"port\": 443, \"method\": \"GET\", \"injected\": false, \"status\": 302}, {\"hop\": 6, \"host\": \"api.example.com\", \"port\": 443, \"method\": \"GET\", \"injected\": false, \"status\": 200}]}}}}",
+   "code": "PROTOCOL_SCHEMA_VIOLATION",
+   "violation": "TOO_MANY_ITEMS",
+   "path": "/payload/output/net_http/hops"
+  },
+  {
+   "name": "v4 hop status past 599",
+   "family": "dwkp",
+   "input": "{\"v\": 1, \"id\": \"msg_01M24BB8G0E87TVJX9GX248ADD\", \"type\": \"response\", \"ts\": \"2026-09-12T09:14:22.481Z\", \"causation_id\": \"msg_01M24BB8G1FQR94D2PF2XVQDV4\", \"schema\": \"direwolf.tool.result\", \"schema_version\": 4, \"payload\": {\"invocation_id\": \"inv_01M24BB8G4E87TVJX9GX248ADD\", \"plan\": {\"tool\": \"net.http\", \"environment\": \"HOST\", \"effect\": \"ALLOW\", \"actions\": [{\"net\": {\"host\": \"api.example.com\", \"port\": 443, \"method\": \"GET\", \"url_sha256\": \"9b2f0c35b6f1a1b0a41ad2c7f1d48c1c2b1a3e6b0f6f1bb1c8ad0b2f6c1e9d7a\", \"body_bytes\": 0, \"decision\": {\"effect\": \"ALLOW\", \"reason\": \"ALLOWED_BY_RULE\", \"capability_result\": \"SATISFIED\", \"policy_result\": \"SATISFIED\", \"rule_id\": \"allow-api\", \"rule_source\": \"policy/operator.toml:20\"}}}]}, \"output\": {\"net_http\": {\"status\": 200, \"headers\": [], \"body\": \"\", \"truncated\": false, \"hops\": [{\"hop\": 1, \"host\": \"api.example.com\", \"port\": 443, \"method\": \"GET\", \"injected\": false, \"status\": 600}]}}}}",
+   "code": "PROTOCOL_SCHEMA_VIOLATION",
+   "violation": "OUT_OF_RANGE",
+   "path": "/payload/output/net_http/hops/0/status"
+  },
+  {
+   "name": "v4 result header in a second spelling",
+   "family": "dwkp",
+   "input": "{\"v\": 1, \"id\": \"msg_01M24BB8G0E87TVJX9GX248ADD\", \"type\": \"response\", \"ts\": \"2026-09-12T09:14:22.481Z\", \"causation_id\": \"msg_01M24BB8G1FQR94D2PF2XVQDV4\", \"schema\": \"direwolf.tool.result\", \"schema_version\": 4, \"payload\": {\"invocation_id\": \"inv_01M24BB8G4E87TVJX9GX248ADD\", \"plan\": {\"tool\": \"net.http\", \"environment\": \"HOST\", \"effect\": \"ALLOW\", \"actions\": [{\"net\": {\"host\": \"api.example.com\", \"port\": 443, \"method\": \"GET\", \"url_sha256\": \"9b2f0c35b6f1a1b0a41ad2c7f1d48c1c2b1a3e6b0f6f1bb1c8ad0b2f6c1e9d7a\", \"body_bytes\": 0, \"decision\": {\"effect\": \"ALLOW\", \"reason\": \"ALLOWED_BY_RULE\", \"capability_result\": \"SATISFIED\", \"policy_result\": \"SATISFIED\", \"rule_id\": \"allow-api\", \"rule_source\": \"policy/operator.toml:20\"}}}]}, \"output\": {\"net_http\": {\"status\": 200, \"headers\": [{\"name\": \"Set-Cookie\", \"value\": \"a=b\"}], \"body\": \"\", \"truncated\": false, \"hops\": [{\"hop\": 1, \"host\": \"api.example.com\", \"port\": 443, \"method\": \"GET\", \"injected\": false, \"status\": 200}]}}}}",
+   "code": "PROTOCOL_SCHEMA_VIOLATION",
+   "violation": "INVALID_FORMAT",
+   "path": "/payload/output/net_http/headers/0/name"
+  },
+  {
+   "name": "v4 network action naming an address literal as its host",
+   "family": "dwkp",
+   "input": "{\"v\": 1, \"id\": \"msg_01M24BB8G0E87TVJX9GX248ADD\", \"type\": \"response\", \"ts\": \"2026-09-12T09:14:22.481Z\", \"causation_id\": \"msg_01M24BB8G1FQR94D2PF2XVQDV4\", \"schema\": \"direwolf.tool.result\", \"schema_version\": 4, \"payload\": {\"invocation_id\": \"inv_01M24BB8G4E87TVJX9GX248ADD\", \"plan\": {\"tool\": \"net.http\", \"environment\": \"HOST\", \"effect\": \"ALLOW\", \"actions\": [{\"net\": {\"host\": \"10.0.0.1\", \"port\": 443, \"method\": \"GET\", \"url_sha256\": \"9b2f0c35b6f1a1b0a41ad2c7f1d48c1c2b1a3e6b0f6f1bb1c8ad0b2f6c1e9d7a\", \"body_bytes\": 0, \"decision\": {\"effect\": \"ALLOW\", \"reason\": \"ALLOWED_BY_RULE\", \"capability_result\": \"SATISFIED\", \"policy_result\": \"SATISFIED\", \"rule_id\": \"allow-api\", \"rule_source\": \"policy/operator.toml:20\"}}}]}, \"output\": {\"net_http\": {\"status\": 200, \"headers\": [], \"body\": \"\", \"truncated\": false, \"hops\": [{\"hop\": 1, \"host\": \"api.example.com\", \"port\": 443, \"method\": \"GET\", \"injected\": false, \"status\": 200}]}}}}",
+   "code": "PROTOCOL_SCHEMA_VIOLATION",
+   "violation": "INVALID_FORMAT",
+   "path": "/payload/plan/actions/0/net/host"
+  },
+  {
+   "name": "v4 network action naming a host with a trailing dot",
+   "family": "dwkp",
+   "input": "{\"v\": 1, \"id\": \"msg_01M24BB8G0E87TVJX9GX248ADD\", \"type\": \"response\", \"ts\": \"2026-09-12T09:14:22.481Z\", \"causation_id\": \"msg_01M24BB8G1FQR94D2PF2XVQDV4\", \"schema\": \"direwolf.tool.result\", \"schema_version\": 4, \"payload\": {\"invocation_id\": \"inv_01M24BB8G4E87TVJX9GX248ADD\", \"plan\": {\"tool\": \"net.http\", \"environment\": \"HOST\", \"effect\": \"ALLOW\", \"actions\": [{\"net\": {\"host\": \"api.example.com.\", \"port\": 443, \"method\": \"GET\", \"url_sha256\": \"9b2f0c35b6f1a1b0a41ad2c7f1d48c1c2b1a3e6b0f6f1bb1c8ad0b2f6c1e9d7a\", \"body_bytes\": 0, \"decision\": {\"effect\": \"ALLOW\", \"reason\": \"ALLOWED_BY_RULE\", \"capability_result\": \"SATISFIED\", \"policy_result\": \"SATISFIED\", \"rule_id\": \"allow-api\", \"rule_source\": \"policy/operator.toml:20\"}}}]}, \"output\": {\"net_http\": {\"status\": 200, \"headers\": [], \"body\": \"\", \"truncated\": false, \"hops\": [{\"hop\": 1, \"host\": \"api.example.com\", \"port\": 443, \"method\": \"GET\", \"injected\": false, \"status\": 200}]}}}}",
+   "code": "PROTOCOL_SCHEMA_VIOLATION",
+   "violation": "INVALID_FORMAT",
+   "path": "/payload/plan/actions/0/net/host"
+  },
+  {
+   "name": "v4 plan action naming both a network and an injection action",
+   "family": "dwkp",
+   "input": "{\"v\": 1, \"id\": \"msg_01M24BB8G0E87TVJX9GX248ADD\", \"type\": \"response\", \"ts\": \"2026-09-12T09:14:22.481Z\", \"causation_id\": \"msg_01M24BB8G1FQR94D2PF2XVQDV4\", \"schema\": \"direwolf.tool.result\", \"schema_version\": 4, \"payload\": {\"invocation_id\": \"inv_01M24BB8G4E87TVJX9GX248ADD\", \"plan\": {\"tool\": \"net.http\", \"environment\": \"HOST\", \"effect\": \"ALLOW\", \"actions\": [{\"net\": {\"host\": \"api.example.com\", \"port\": 443, \"method\": \"GET\", \"url_sha256\": \"9b2f0c35b6f1a1b0a41ad2c7f1d48c1c2b1a3e6b0f6f1bb1c8ad0b2f6c1e9d7a\", \"body_bytes\": 0, \"decision\": {\"effect\": \"ALLOW\", \"reason\": \"ALLOWED_BY_RULE\", \"capability_result\": \"SATISFIED\", \"policy_result\": \"SATISFIED\", \"rule_id\": \"allow-api\", \"rule_source\": \"policy/operator.toml:20\"}}, \"injection\": {\"handle\": \"api-token\", \"host\": \"api.example.com\", \"port\": 443, \"decision\": {\"effect\": \"ALLOW\", \"reason\": \"ALLOWED_BY_RULE\", \"capability_result\": \"SATISFIED\", \"policy_result\": \"SATISFIED\", \"rule_id\": \"allow-api-token\", \"rule_source\": \"policy/operator.toml:31\"}}}]}, \"output\": {\"net_http\": {\"status\": 200, \"headers\": [], \"body\": \"\", \"truncated\": false, \"hops\": [{\"hop\": 1, \"host\": \"api.example.com\", \"port\": 443, \"method\": \"GET\", \"injected\": false, \"status\": 200}]}}}}",
+   "code": "PROTOCOL_SCHEMA_VIOLATION",
+   "violation": "INCONSISTENT",
+   "path": "/payload/plan/actions/0/injection"
+  },
+  {
+   "name": "v4 tool refusal a preview cannot produce",
+   "family": "dwkp",
+   "input": "{\"v\": 1, \"id\": \"msg_01M24BB8G0E87TVJX9GX248ADD\", \"type\": \"response\", \"ts\": \"2026-09-12T09:14:22.481Z\", \"causation_id\": \"msg_01M24BB8G1FQR94D2PF2XVQDV4\", \"schema\": \"direwolf.tool.refused\", \"schema_version\": 4, \"payload\": {\"operation\": \"CANONICAL_PREVIEW\", \"reason\": \"RESOLUTION_FAILED\"}}",
+   "code": "PROTOCOL_SCHEMA_VIOLATION",
+   "violation": "INCONSISTENT",
+   "path": "/payload/reason"
+  },
+  {
+   "name": "v4 failure class that does not exist",
+   "family": "dwkp",
+   "input": "{\"v\": 1, \"id\": \"msg_01M24BB8G0E87TVJX9GX248ADD\", \"type\": \"response\", \"ts\": \"2026-09-12T09:14:22.481Z\", \"causation_id\": \"msg_01M24BB8G1FQR94D2PF2XVQDV4\", \"schema\": \"direwolf.tool.failed\", \"schema_version\": 4, \"payload\": {\"invocation_id\": \"inv_01M24BB8G4E87TVJX9GX248ADD\", \"reason\": \"REDIRECT_FOLLOWED\"}}",
+   "code": "PROTOCOL_SCHEMA_VIOLATION",
+   "violation": "UNKNOWN_VARIANT",
+   "path": "/payload/reason"
   }
  ]
 }

@@ -135,6 +135,11 @@ SECRET_CASES: Final = frozenset(
         ("authority-secret", "mode-a-authority-residue"),
         ("authority-secret", "mode-a-broker-residue"),
         ("authority-secret", "authority-residue-after-redaction"),
+        # M5c D11: an echoed credential stops at the broker -- the runtime's
+        # answer, the authority and the broker's own encoding never hold it
+        ("authority-secret", "mode-a-echo-straddling-the-bound"),
+        ("authority-secret", "mode-a-echo-kept-header"),
+        ("authority-secret", "mode-a-echo-audited"),
         # the production daemons: no core, no same-uid reader
         ("authority-secret", "authority-rlimit-core"),
         ("authority-secret", "authority-not-dumpable"),

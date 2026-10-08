@@ -403,7 +403,14 @@ pub(super) const fn failure_reason(failure: BrokerFailure) -> ToolFailureReasonV
             | BrokerRefusal::EnvironmentNotFound
             | BrokerRefusal::EnvironmentAmbiguous
             | BrokerRefusal::ForeignEnvironment
-            | BrokerRefusal::ProxyUnavailable => ToolFailureReasonV3::BrokerExecutionError,
+            | BrokerRefusal::ProxyUnavailable
+            // The network refusals (M5c) answer a network exchange, which no
+            // filesystem or process tool sends.
+            | BrokerRefusal::HttpAddressBlocked
+            | BrokerRefusal::HttpConnectFailed
+            | BrokerRefusal::HttpTlsFailed
+            | BrokerRefusal::HttpTimeout
+            | BrokerRefusal::HttpRequestInvalid => ToolFailureReasonV3::BrokerExecutionError,
         },
         BrokerFailure::Indeterminate(_) => ToolFailureReasonV3::BrokerExecutionError,
     }
@@ -936,7 +943,7 @@ pub(super) enum Decided {
     },
 }
 
-/// Whether an idempotency key is already bound, in either ledger.
+/// Whether an idempotency key is already bound, in any ledger.
 fn key_bound(
     work: &Work<'_>,
     asked: &Asked<'_>,
@@ -947,7 +954,9 @@ fn key_bound(
         .query_row(
             "SELECT 1 FROM process_idempotency WHERE subject = ?1 AND session_id = ?2 \
              AND idempotency_key = ?3 UNION ALL SELECT 1 FROM tool_idempotency WHERE \
-             subject = ?1 AND session_id = ?2 AND idempotency_key = ?3 LIMIT 1",
+             subject = ?1 AND session_id = ?2 AND idempotency_key = ?3 UNION ALL SELECT 1 \
+             FROM net_idempotency WHERE subject = ?1 AND session_id = ?2 \
+             AND idempotency_key = ?3 LIMIT 1",
             rusqlite::params![
                 asked.caller.subject().storage_key(),
                 asked.session.as_str(),

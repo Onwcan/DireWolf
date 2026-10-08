@@ -728,3 +728,168 @@ fn tool_reply_v2_inner(reply: &ToolReply) -> Result<DwkpBody, WireGap> {
         }),
     })
 }
+
+// ---------------------------------------------------------------------------
+// Version 4 (M5c, ADR-0050): `net.http`, and version 3's tools re-shaped.
+// ---------------------------------------------------------------------------
+
+/// One gate of a `net.http` plan, as the wire states it: the decision, the
+/// reason, both gates' results and the rule that produced the effect — or,
+/// before resolution, the rule that needed the address.
+fn net_decision(
+    decided: &super::net_http::plan::Gate,
+    resolved: bool,
+) -> Result<dwk_proto::dwkp::netops::NetActionDecision, WireGap> {
+    let record = decided.record();
+    let policy = record.policy();
+    let (rule_id, rule_source) = rule(policy.rule_id().as_str(), policy.rule_source())?;
+    Ok(dwk_proto::dwkp::netops::NetActionDecision {
+        effect: if decided.permits() {
+            DecisionEffect::Allow
+        } else {
+            DecisionEffect::Deny
+        },
+        reason: decided.reason(resolved),
+        capability_result: gate(record.capability_satisfied()),
+        policy_result: gate(decided.policy_satisfied()),
+        rule_id,
+        rule_source,
+    })
+}
+
+/// A `net.http` plan: its network action — the gate that refused, or the
+/// first — and its injection action, when the call named a credential.
+fn net_plan(
+    plan: &super::net_http::plan::NetPlan,
+) -> Result<dwk_proto::dwkp::netops::ToolPlanV4, WireGap> {
+    use dwk_proto::dwkp::netops::{
+        CoreToolV4, CredentialHandle, NetHost, NetPort, PlannedActionV4, PlannedActionsV4,
+        PlannedInjectionAction, PlannedNetAction, ToolPlanV4,
+    };
+    use dwk_proto::wire::scalar::ContentDigest;
+    let net = &plan.net;
+    let reported = net
+        .reported()
+        .ok_or(WireGap::Unrepresentable("a network action with no gate"))?;
+    let mut actions = vec![PlannedActionV4 {
+        fs: None,
+        process: None,
+        net: Some(PlannedNetAction {
+            host: NetHost::new(net.host.as_str()).ok_or(WireGap::Unrepresentable("a host"))?,
+            port: NetPort::new(net.port).ok_or(WireGap::Unrepresentable("a port"))?,
+            method: net.method,
+            url_sha256: ContentDigest::new(net.url_sha256.to_hex())
+                .ok_or(WireGap::Unrepresentable("a URL digest"))?,
+            body_bytes: ByteCount::new(net.body_bytes)
+                .ok_or(WireGap::Unrepresentable("a body size"))?,
+            decision: net_decision(reported, net.resolved)?,
+        }),
+        injection: None,
+    }];
+    if let Some(injection) = &plan.injection {
+        actions.push(PlannedActionV4 {
+            fs: None,
+            process: None,
+            net: None,
+            injection: Some(PlannedInjectionAction {
+                handle: CredentialHandle::new(injection.handle.as_str())
+                    .ok_or(WireGap::Unrepresentable("a handle"))?,
+                host: NetHost::new(injection.host.as_str())
+                    .ok_or(WireGap::Unrepresentable("a host"))?,
+                port: NetPort::new(injection.port).ok_or(WireGap::Unrepresentable("a port"))?,
+                decision: net_decision(&injection.gate, net.resolved)?,
+            }),
+        });
+    }
+    Ok(ToolPlanV4 {
+        tool: CoreToolV4::NetHttp,
+        environment: ActionEnvironment::Host,
+        effect: if plan.permits() {
+            DecisionEffect::Allow
+        } else {
+            DecisionEffect::Deny
+        },
+        actions: PlannedActionsV4::new(actions).ok_or(WireGap::Unrepresentable("a plan"))?,
+    })
+}
+
+/// The response body for a `net.http` operation (M5c, ADR-0050).
+///
+/// # Errors
+///
+/// [`WireGap::Unrepresentable`] only for a value that does not fit its wire
+/// type -- a bug.
+pub(crate) fn net_reply(reply: &super::net_http::NetReply) -> Result<DwkpBody, WireGap> {
+    use super::net_http::NetReply;
+    use dwk_proto::dwkp::netops::{
+        CanonicalPreviewResultV4, ToolDenialV4, ToolFailureV4, ToolOutputV4, ToolRefusalV4,
+        ToolResultV4,
+    };
+    Ok(match reply {
+        NetReply::Done {
+            invocation,
+            plan,
+            output,
+        } => DwkpBody::ToolResultV4(ToolResultV4 {
+            invocation_id: invocation.clone(),
+            plan: net_plan(plan)?,
+            output: ToolOutputV4 {
+                fs_read: None,
+                fs_list: None,
+                fs_search: None,
+                fs_stat: None,
+                fs_write: None,
+                fs_patch: None,
+                fs_move: None,
+                fs_delete: None,
+                process_exec: None,
+                process_status: None,
+                process_kill: None,
+                net_http: Some((**output).clone()),
+            },
+        }),
+        NetReply::Denied(plan) => DwkpBody::ToolDeniedV4(ToolDenialV4 {
+            plan: net_plan(plan)?,
+        }),
+        NetReply::Previewed(plan) => DwkpBody::ToolPreviewedV4(CanonicalPreviewResultV4 {
+            plan: net_plan(plan)?,
+        }),
+        NetReply::Refused(operation, reason) => DwkpBody::ToolRefusedV4(ToolRefusalV4 {
+            operation: *operation,
+            reason: *reason,
+        }),
+        NetReply::Failed { invocation, reason } => DwkpBody::ToolFailedV4(ToolFailureV4 {
+            invocation_id: invocation.clone(),
+            reason: *reason,
+        }),
+    })
+}
+
+/// A version-3 type's value as the version-4 type of the same shape: version
+/// 4's members, plans, refusals and failures are version 3's, widened.
+fn widen<V3: dwk_proto::wire::WireType, V4: dwk_proto::wire::WireType>(
+    value: &V3,
+) -> Result<V4, WireGap> {
+    value
+        .encode()
+        .and_then(|v| V4::decode(v, &mut dwk_proto::wire::Cx::new()))
+        .map_err(|_| WireGap::Unrepresentable("a version-3 answer in version 4's shape"))
+}
+
+/// A version-3 tool's answer in version 4's shapes: the answer to one of the
+/// eleven tools asked at version 4.
+///
+/// # Errors
+///
+/// [`WireGap::Unrepresentable`] for an answer that is not a version-3 tool
+/// response, or does not widen -- a bug.
+pub(crate) fn v4_from_v3(body: DwkpBody) -> Result<DwkpBody, WireGap> {
+    Ok(match body {
+        DwkpBody::ToolResultV3(p) => DwkpBody::ToolResultV4(widen(&p)?),
+        DwkpBody::ToolDeniedV3(p) => DwkpBody::ToolDeniedV4(widen(&p)?),
+        DwkpBody::ToolPreviewedV3(p) => DwkpBody::ToolPreviewedV4(widen(&p)?),
+        DwkpBody::ToolRefusedV3(p) => DwkpBody::ToolRefusedV4(widen(&p)?),
+        DwkpBody::ToolFailedV3(p) => DwkpBody::ToolFailedV4(widen(&p)?),
+        _ => return Err(WireGap::Unrepresentable("not a version-3 tool answer")),
+    })
+}

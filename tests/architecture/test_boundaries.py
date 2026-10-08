@@ -621,11 +621,17 @@ def test_the_m5a_boundaries_each_catch_their_violation(violation_rules: list[str
         "TX032-the-sandbox-plan-spells-no-weakening": {"crates/dwkd-broker/src/sandbox/plan.rs"},
         "TX033-the-probe-reports-and-reaches-nothing": {"crates/dwk-sandbox-probe/src/linux.rs"},
         "TX034-the-sandbox-profile-is-data": {"crates/dwk-sandbox-profile/src/lib.rs"},
+        # M5c (ADR-0050) extends TX035 to the net.http evidence's exception
+        # list; its fixture is the second file the rule catches.
         "TX035-no-public-path-reaches-an-execution-environment": {
-            "crates/dwkd-authority/src/server/sandbox_route.rs"
+            "crates/dwkd-authority/src/server/sandbox_route.rs",
+            "crates/dwkd-authority/src/server/net_evidence_route.rs",
         },
+        # M5c (ADR-0050) extends TX036 to the net.http hop; its fixture is the
+        # second file the rule catches.
         "TX036-no-runtime-flag-crosses-the-private-wire": {
-            "crates/dwk-proto/src/brokerp/sandbox_flags.rs"
+            "crates/dwk-proto/src/brokerp/sandbox_flags.rs",
+            "crates/dwk-proto/src/brokerp/http_flags.rs",
         },
     }
     for rule, paths in expected.items():
@@ -682,6 +688,78 @@ def test_the_m5b_exemptions_name_files_not_directories() -> None:
         for exempt in rule.get("exempt_paths", []):
             if "/egress" in exempt or "relay_plan" in exempt:
                 assert exempt.endswith(".rs"), (rule["id"], exempt)
+
+
+def test_the_m5c_boundaries_each_catch_their_violation(violation_rules: list[str]) -> None:
+    """M5c (ADR-0050): TLS and HTTP crates only in the broker's HTTPS client,
+    a credential header composed in one place, no ambient setting or held
+    state in the client, no outbound socket or resolution in the authority,
+    one address guard, and no client configuration on the private wire --
+    each rule firing on exactly its fixture."""
+    expected = {
+        "TX044-tls-and-http-crates-only-in-the-brokers-https-client": {
+            "crates/dwkd-authority/src/net_client.rs",
+            "crates/dwkd-broker/src/fetch.rs",
+            # M5b's TLS-terminating proxy fixture names a TLS crate too.
+            "crates/dwkd-broker/src/egress/tls.rs",
+        },
+        "TX045-a-credential-header-is-composed-in-one-place": {
+            "crates/dwkd-broker/src/http/shortcut.rs",
+            # M5b's injecting proxy fixture writes a credential header too.
+            "crates/dwkd-broker/src/egress/tls.rs",
+        },
+        "TX046-the-https-client-reads-no-ambient-setting-and-holds-nothing": {
+            "crates/dwkd-broker/src/http/ambient.rs",
+            # Exempt from TX013 and TX044 by name, and caught here.
+            "crates/dwkd-broker/src/http/tls.rs",
+        },
+        "TX047-the-authority-opens-no-outbound-socket-and-resolves-no-name": {
+            "crates/dwkd-authority/src/net_client.rs",
+            # The TCP listener of TX009's fixture is an authority socket too.
+            "crates/dwkd-authority/src/server/mod.rs",
+        },
+        "TX048-one-address-guard": {"crates/dwkd-authority/src/policy/private_ranges.rs"},
+    }
+    for rule, paths in expected.items():
+        assert rule in violation_rules, rule
+        assert _paths(rule) == paths, (rule, sorted(_paths(rule)))
+    # Each ambient setting, each address-table form and each client knob on
+    # the private wire is caught on its own line.
+    ambient = {
+        line
+        for path, line, _ in _findings(
+            "TX046-the-https-client-reads-no-ambient-setting-and-holds-nothing"
+        )
+        if path.endswith("http/ambient.rs")
+    }
+    assert ambient == {5, 6, 7, 8}, sorted(ambient)
+    assert {line for _, line, _ in _findings("TX048-one-address-guard")} == {5, 8, 9}
+    http_flags = {
+        line
+        for path, line, _ in _findings("TX036-no-runtime-flag-crosses-the-private-wire")
+        if path.endswith("brokerp/http_flags.rs")
+    }
+    assert http_flags == {6, 7, 8, 9}, sorted(http_flags)
+
+
+def test_the_m5c_exemptions_name_files_not_directories() -> None:
+    """The reviewed HTTPS client's files are exempt by name: a sibling dropped
+    into `http/` is not reviewed by being there, and the client dials from
+    `http/connect.rs` alone."""
+    import tomllib
+
+    raw = tomllib.loads(RULES.read_text(encoding="utf-8"))
+    for rule in raw["text_rules"]:
+        for exempt in rule.get("exempt_paths", []):
+            if "/http" in exempt:
+                assert exempt.endswith(".rs"), (rule["id"], exempt)
+    dial = next(r for r in raw["text_rules"] if r["id"].startswith("TX037-"))
+    assert sorted(e for e in dial["exempt_paths"] if "/http/" in e) == [
+        "crates/dwkd-broker/src/http/connect.rs",
+        "crates/dwkd-broker/src/http/tests.rs",
+    ]
+    tls = next(r for r in raw["text_rules"] if r["id"].startswith("TX038-"))
+    assert tls["exempt_paths"] == [], "the egress path stays TLS-free"
 
 
 def test_a_helper_crate_shared_by_both_daemons_is_rejected(violation_rules: list[str]) -> None:
@@ -792,6 +870,11 @@ def test_the_required_boundary_rules_are_all_declared() -> None:
         "TX041-the-relay-plan-spells-no-other-weakening",
         "TX042-no-ambient-proxy-setting-reaches-an-environment",
         "TX043-nix-only-in-the-launch-helper-and-the-peer-readers",
+        "TX044-tls-and-http-crates-only-in-the-brokers-https-client",
+        "TX045-a-credential-header-is-composed-in-one-place",
+        "TX046-the-https-client-reads-no-ambient-setting-and-holds-nothing",
+        "TX047-the-authority-opens-no-outbound-socket-and-resolves-no-name",
+        "TX048-one-address-guard",
         "DEP001-no-agent-framework-dependency",
         "DEP002-runtime-has-no-transport-dependency",
         "RS001-authority-depends-on-nothing-in-tree",

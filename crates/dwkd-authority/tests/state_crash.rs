@@ -136,8 +136,9 @@ fn assert_recovered(state: &Path, point: CrashPoint, report: &StartReport) {
             assert_eq!(report.audit_torn_tail_bytes, 0);
         }
         // Crossed only between the phases of a tool invocation (M4b), a
-        // secret use (M4e) or an environment's lifecycle (M5a), never by an
-        // admission: `CrashPoint::ALL` does not contain them.
+        // secret use (M4e), an environment's lifecycle (M5a) or a `net.http`
+        // hop (M5c), never by an admission: `CrashPoint::ALL` does not
+        // contain them.
         CrashPoint::ToolAfterIntent
         | CrashPoint::ToolAfterOpen
         | CrashPoint::ToolAfterBroker
@@ -155,7 +156,11 @@ fn assert_recovered(state: &Path, point: CrashPoint, report: &StartReport) {
         | CrashPoint::EnvironmentAfterBroker
         | CrashPoint::EnvironmentAfterOutcome
         | CrashPoint::EnvironmentDestroyAfterIntent
-        | CrashPoint::EnvironmentDestroyAfterBroker => {
+        | CrashPoint::EnvironmentDestroyAfterBroker
+        | CrashPoint::NetAfterResolve
+        | CrashPoint::NetAfterIntent
+        | CrashPoint::NetAfterBroker
+        | CrashPoint::NetAfterOutcome => {
             unreachable!("{point} is not a transaction crash point")
         }
     }

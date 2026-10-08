@@ -3,7 +3,9 @@
 //! operations, ADR-0045; version 4 for the M4e secret primitives, ADR-0046;
 //! version 5 for the M5a execution-environment lifecycle, ADR-0047; version 6
 //! for the M5b `PROXY_ONLY` topology's relay, egress grant and counters,
-//! ADR-0048). **Not DWKP.**
+//! ADR-0048; version 7 for M5c's `net.http` — one resolution and one HTTPS
+//! exchange per hop, the broker the client and the authority the decider,
+//! ADR-0050). **Not DWKP.**
 //!
 //! One exchange on one connection, and nothing else:
 //!
@@ -77,6 +79,7 @@
 pub use crate::dwkp::fsops::{ContentRevision, PatchEdit, PatchEdits};
 
 pub mod egress;
+pub mod http;
 pub mod sandbox;
 pub use crate::dwkp::procops::{ProcessArgs, ProcessStreamSnapshot};
 use crate::error::{ErrorCode, ProtocolError, Violation};
@@ -110,10 +113,11 @@ use sandbox::{
 /// environment's lifecycle — prepare, measure, destroy, list; version 6
 /// (ADR-0048) the `PROXY_ONLY` topology — the relay's digest and the egress
 /// grant on a preparation, every container's role in a listing, and the
-/// proxy's counters on a measurement and a destruction. The daemons ship
-/// together, so 6 is the only version either accepts: an older peer is refused
-/// by its hello, never half-understood.
-pub const PROTOCOL: u16 = 6;
+/// proxy's counters on a measurement and a destruction; version 7 (ADR-0050)
+/// `net.http`'s resolution and exchange. The daemons ship together, so 7 is
+/// the only version either accepts: an older peer is refused by its hello,
+/// never half-understood.
+pub const PROTOCOL: u16 = 7;
 
 /// The largest authorisation body the broker reads: one DWKP frame, because an
 /// `fs.write` carries its content and an `fs.patch` its edits. Read from the
@@ -341,7 +345,7 @@ pub const PROCESS_BASE_ENVIRONMENT: &[(&str, &str)] = &[
 
 wire_int! {
     /// The private protocol's version.
-    ProtocolVersion(u16), min = 6, max = 6
+    ProtocolVersion(u16), min = 7, max = 7
 }
 
 wire_int! {
@@ -554,8 +558,6 @@ wire_enum! {
         ProcessStatus = "broker.process_status",
         /// A `process.kill` authorisation.
         ProcessKill = "broker.process_kill",
-        /// A mode A secret render (ADR-0046): compose one header, once.
-        SecretEgress = "broker.secret_egress",
         /// A launch that receives one secret (ADR-0046): the secret
         /// injection primitive for modes B and C.
         SecretProcessStart = "broker.secret_process_start",
@@ -567,6 +569,13 @@ wire_enum! {
         EnvironmentDestroy = "broker.environment_destroy",
         /// List the environments this store owns (ADR-0047).
         EnvironmentList = "broker.environment_list",
+        /// Resolve one host for a `net.http` hop, once (ADR-0050).
+        HttpResolve = "broker.http_resolve",
+        /// Perform one `net.http` hop to its pinned addresses (ADR-0050).
+        HttpExchange = "broker.http_exchange",
+        /// Perform one `net.http` hop that carries a credential: the
+        /// credential's pipe is the one descriptor (ADR-0050 §8).
+        HttpCredentialExchange = "broker.http_credential_exchange",
         /// The broker's outcome for an authorisation.
         Outcome = "broker.outcome",
     }
@@ -587,15 +596,18 @@ impl PrivateKind {
     /// | `fs_reclaim` | the directory the staging directory is in, open for reading |
     /// | `process_start` | the executable, open for reading; the working directory, open for reading |
     /// | `process_status`, `process_kill` | none: the process is the broker's own child, named by its handle |
-    /// | `secret_egress` | the secret: a pipe's read end, at end of file after the value |
     /// | `secret_process_start` | the executable; the working directory; the secret pipe |
     /// | `environment_*` | the container runtime's executable; the working directory it runs in |
+    /// | `http_resolve`, `http_exchange` | none: a name to resolve, a hop to perform |
+    /// | `http_credential_exchange` | the credential: a pipe's read end, at end of file after the value |
     ///
     /// `None` for the hello and the outcome, which are not authorisations.
     #[must_use]
     pub const fn descriptors(self) -> Option<u8> {
         match self {
-            Self::ProcessStatus | Self::ProcessKill => Some(0),
+            Self::ProcessStatus | Self::ProcessKill | Self::HttpResolve | Self::HttpExchange => {
+                Some(0)
+            }
             Self::FsRead
             | Self::FsStat
             | Self::FsList
@@ -603,7 +615,7 @@ impl PrivateKind {
             | Self::FsWrite
             | Self::FsDelete
             | Self::FsReclaim
-            | Self::SecretEgress => Some(1),
+            | Self::HttpCredentialExchange => Some(1),
             Self::FsPatch
             | Self::FsMove
             | Self::ProcessStart
@@ -626,6 +638,10 @@ impl PrivateKind {
         match self {
             Self::EnvironmentPrepare | Self::EnvironmentMeasure => ENVIRONMENT_DEADLINE_SECONDS,
             Self::EnvironmentDestroy | Self::EnvironmentList => ENVIRONMENT_QUERY_DEADLINE_SECONDS,
+            Self::HttpResolve => http::RESOLVE_EXCHANGE_DEADLINE_SECONDS,
+            Self::HttpExchange | Self::HttpCredentialExchange => {
+                http::HTTP_EXCHANGE_DEADLINE_SECONDS
+            }
             _ => EXCHANGE_DEADLINE_SECONDS,
         }
     }
@@ -748,6 +764,19 @@ wire_enum! {
         /// A `PROXY_ONLY` environment's proxy could not be opened, or its
         /// grant does not fit the topology: nothing was created (ADR-0048).
         ProxyUnavailable = "PROXY_UNAVAILABLE",
+        /// The broker's own guard refused a pinned address, or the host is a
+        /// metadata name: nothing was dialled (ADR-0050 §6).
+        HttpAddressBlocked = "HTTP_ADDRESS_BLOCKED",
+        /// No pinned address accepted a connection: nothing was sent.
+        HttpConnectFailed = "HTTP_CONNECT_FAILED",
+        /// The TLS handshake failed — the certificate did not verify for the
+        /// host, or nothing acceptable was offered: nothing was sent.
+        HttpTlsFailed = "HTTP_TLS_FAILED",
+        /// A deadline passed before any byte of the request was sent.
+        HttpTimeout = "HTTP_TIMEOUT",
+        /// The broker could not render the request it was authorised to send
+        /// (its own re-check failed): nothing was sent.
+        HttpRequestInvalid = "HTTP_REQUEST_INVALID",
     }
 }
 
@@ -1249,35 +1278,6 @@ wire_struct! {
 }
 
 wire_struct! {
-    /// One mode A render (ADR-0046 §12): read the secret from the one
-    /// descriptor, refuse a value that would break the header, compose
-    /// `header_name: header_prefix value` for `origin`, and drop it —
-    /// zeroized — at the end of this exchange. M4e has no egress consumer:
-    /// the render is the secret side of the contract, delivered to nothing
-    /// until M5's `net.http` exists, and it proves the handoff is one-shot.
-    SecretEgressAuthorisation: reject {
-        /// Always `broker.secret_egress`.
-        required kind: PrivateKind,
-        /// The protocol version.
-        required protocol: ProtocolVersion,
-        /// The channel from this connection's hello.
-        required channel: ChannelNonce,
-        /// The authority's id for the invocation.
-        required invocation_id: InvocationId,
-        /// The handle whose value the descriptor holds.
-        required handle: SecretHandle,
-        /// The origin the header is for.
-        required origin: SecretOrigin,
-        /// The header, from the operator's metadata.
-        required header_name: SecretHeaderName,
-        /// What precedes the value, from the operator's metadata.
-        optional header_prefix: SecretHeaderPrefix,
-        /// One: the secret pipe.
-        required descriptors: DescriptorCount,
-    }
-}
-
-wire_struct! {
     /// A launch that receives one secret (ADR-0046 §§13, 16): everything a
     /// `process_start` is, plus the handle and how the value is delivered.
     /// **The secret injection primitive, not a sandbox**: the target runs on
@@ -1679,13 +1679,6 @@ wire_struct! {
 }
 
 wire_struct! {
-    /// A mode A render completed: the value was read to its end, accepted and
-    /// composed, and the composition is gone. Nothing about the value — not
-    /// its length, not a digest — comes back.
-    SecretEgressDone: reject {}
-}
-
-wire_struct! {
     /// What measuring an environment found: every invariant the profile
     /// requires, each once, with its verdict — from the runtime's record and
     /// from the trusted probe inside. The broker judges no level; the
@@ -1803,8 +1796,6 @@ wire_struct! {
         optional process_status: ProcessStatusDone,
         /// A kill's acknowledgement.
         optional process_kill: ProcessKillDone,
-        /// A mode A render's acknowledgement.
-        optional secret_egress: SecretEgressDone,
         /// A secret launch's confirmation.
         optional secret_process_start: ProcessStartDone,
         /// An environment's preparation.
@@ -1815,11 +1806,16 @@ wire_struct! {
         optional environment_destroy: EnvironmentDestroyDone,
         /// A listing of environments.
         optional environment_list: EnvironmentListDone,
+        /// A `net.http` resolution.
+        optional http_resolve: http::HttpResolveDone,
+        /// A `net.http` exchange, with or without a credential.
+        optional http_exchange: http::HttpExchangeDone,
     }
     exactly_one(
         fs_read, fs_stat, fs_list, fs_search, fs_write, fs_patch, fs_move, fs_delete, fs_reclaim,
-        process_start, process_status, process_kill, secret_egress, secret_process_start,
-        environment_prepare, environment_measure, environment_destroy, environment_list
+        process_start, process_status, process_kill, secret_process_start,
+        environment_prepare, environment_measure, environment_destroy, environment_list,
+        http_resolve, http_exchange
     )
 }
 
@@ -2014,8 +2010,6 @@ pub enum Authorisation {
     ProcessStatus(ProcessStatusAuthorisation),
     /// `broker.process_kill`.
     ProcessKill(ProcessKillAuthorisation),
-    /// `broker.secret_egress`.
-    SecretEgress(SecretEgressAuthorisation),
     /// `broker.secret_process_start`.
     SecretProcessStart(SecretProcessStartAuthorisation),
     /// `broker.environment_prepare`.
@@ -2026,6 +2020,11 @@ pub enum Authorisation {
     EnvironmentDestroy(EnvironmentDestroyAuthorisation),
     /// `broker.environment_list`.
     EnvironmentList(EnvironmentListAuthorisation),
+    /// `broker.http_resolve`.
+    HttpResolve(http::HttpResolveAuthorisation),
+    /// `broker.http_exchange` or `broker.http_credential_exchange`: the
+    /// message's own `kind` says which.
+    HttpExchange(http::HttpExchangeAuthorisation),
 }
 
 impl Authorisation {
@@ -2086,9 +2085,6 @@ impl Authorisation {
             PrivateKind::ProcessKill => {
                 Self::ProcessKill(ProcessKillAuthorisation::decode(value, cx)?)
             }
-            PrivateKind::SecretEgress => {
-                Self::SecretEgress(SecretEgressAuthorisation::decode(value, cx)?)
-            }
             PrivateKind::SecretProcessStart => {
                 Self::SecretProcessStart(SecretProcessStartAuthorisation::decode(value, cx)?)
             }
@@ -2103,6 +2099,12 @@ impl Authorisation {
             }
             PrivateKind::EnvironmentList => {
                 Self::EnvironmentList(EnvironmentListAuthorisation::decode(value, cx)?)
+            }
+            PrivateKind::HttpResolve => {
+                Self::HttpResolve(http::HttpResolveAuthorisation::decode(value, cx)?)
+            }
+            PrivateKind::HttpExchange | PrivateKind::HttpCredentialExchange => {
+                Self::HttpExchange(http::HttpExchangeAuthorisation::decode(value, cx)?)
             }
             PrivateKind::Hello | PrivateKind::Outcome => {
                 return Err(ProtocolError::schema(
@@ -2132,12 +2134,13 @@ impl Authorisation {
             Self::ProcessStart(_) => PrivateKind::ProcessStart,
             Self::ProcessStatus(_) => PrivateKind::ProcessStatus,
             Self::ProcessKill(_) => PrivateKind::ProcessKill,
-            Self::SecretEgress(_) => PrivateKind::SecretEgress,
             Self::SecretProcessStart(_) => PrivateKind::SecretProcessStart,
             Self::EnvironmentPrepare(_) => PrivateKind::EnvironmentPrepare,
             Self::EnvironmentMeasure(_) => PrivateKind::EnvironmentMeasure,
             Self::EnvironmentDestroy(_) => PrivateKind::EnvironmentDestroy,
             Self::EnvironmentList(_) => PrivateKind::EnvironmentList,
+            Self::HttpResolve(_) => PrivateKind::HttpResolve,
+            Self::HttpExchange(a) => a.kind,
         }
     }
 
@@ -2157,12 +2160,13 @@ impl Authorisation {
             Self::ProcessStart(a) => &a.channel,
             Self::ProcessStatus(a) => &a.channel,
             Self::ProcessKill(a) => &a.channel,
-            Self::SecretEgress(a) => &a.channel,
             Self::SecretProcessStart(a) => &a.channel,
             Self::EnvironmentPrepare(a) => &a.channel,
             Self::EnvironmentMeasure(a) => &a.channel,
             Self::EnvironmentDestroy(a) => &a.channel,
             Self::EnvironmentList(a) => &a.channel,
+            Self::HttpResolve(a) => &a.channel,
+            Self::HttpExchange(a) => &a.channel,
         }
     }
 
@@ -2182,12 +2186,13 @@ impl Authorisation {
             Self::ProcessStart(a) => &a.invocation_id,
             Self::ProcessStatus(a) => &a.invocation_id,
             Self::ProcessKill(a) => &a.invocation_id,
-            Self::SecretEgress(a) => &a.invocation_id,
             Self::SecretProcessStart(a) => &a.invocation_id,
             Self::EnvironmentPrepare(a) => &a.invocation_id,
             Self::EnvironmentMeasure(a) => &a.invocation_id,
             Self::EnvironmentDestroy(a) => &a.invocation_id,
             Self::EnvironmentList(a) => &a.invocation_id,
+            Self::HttpResolve(a) => &a.invocation_id,
+            Self::HttpExchange(a) => &a.invocation_id,
         }
     }
 
@@ -2207,17 +2212,18 @@ impl Authorisation {
             Self::ProcessStart(a) => a.descriptors.get(),
             Self::ProcessStatus(a) => a.descriptors.get(),
             Self::ProcessKill(a) => a.descriptors.get(),
-            Self::SecretEgress(a) => a.descriptors.get(),
             Self::SecretProcessStart(a) => a.descriptors.get(),
             Self::EnvironmentPrepare(a) => a.descriptors.get(),
             Self::EnvironmentMeasure(a) => a.descriptors.get(),
             Self::EnvironmentDestroy(a) => a.descriptors.get(),
             Self::EnvironmentList(a) => a.descriptors.get(),
+            Self::HttpResolve(a) => a.descriptors.get(),
+            Self::HttpExchange(a) => a.descriptors.get(),
         }
     }
 
     fn check(&self) -> Result<(), ProtocolError> {
-        // The protocol version is checked by its type on decode (5 and only 5).
+        // The protocol version is checked by its type on decode (7 and only 7).
         let descriptors = DescriptorCount::new(self.declared_descriptors()).ok_or_else(|| {
             ProtocolError::schema(Violation::OutOfRange, "/descriptors", "no such count")
         })?;
@@ -2297,6 +2303,7 @@ impl Authorisation {
                     ));
                 }
             }
+            Self::HttpExchange(exchange) => http::check_exchange(exchange)?,
             _ => {}
         }
         Ok(())
@@ -2322,12 +2329,13 @@ impl Authorisation {
             Self::ProcessStart(a) => encode_frame(a),
             Self::ProcessStatus(a) => encode_frame(a),
             Self::ProcessKill(a) => encode_frame(a),
-            Self::SecretEgress(a) => encode_frame(a),
             Self::SecretProcessStart(a) => encode_frame(a),
             Self::EnvironmentPrepare(a) => encode_frame(a),
             Self::EnvironmentMeasure(a) => encode_frame(a),
             Self::EnvironmentDestroy(a) => encode_frame(a),
             Self::EnvironmentList(a) => encode_frame(a),
+            Self::HttpResolve(a) => encode_frame(a),
+            Self::HttpExchange(a) => encode_frame(a),
         }
     }
 }
@@ -2688,39 +2696,6 @@ impl ProcessKillAuthorisation {
             invocation_id,
             process_id,
             generation,
-            descriptors,
-        }
-    }
-}
-
-/// What a mode A render names, besides its common fields: nothing secret.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EgressSpec {
-    /// The handle.
-    pub handle: SecretHandle,
-    /// The origin.
-    pub origin: SecretOrigin,
-    /// The header.
-    pub header_name: SecretHeaderName,
-    /// Its prefix, if the metadata has one.
-    pub header_prefix: Option<SecretHeaderPrefix>,
-}
-
-impl SecretEgressAuthorisation {
-    /// A render of `spec`.
-    #[must_use]
-    pub fn new(common: Common, spec: EgressSpec) -> Self {
-        let (kind, protocol, channel, invocation_id, descriptors) =
-            authorisation_head!(PrivateKind::SecretEgress, common);
-        Self {
-            kind,
-            protocol,
-            channel,
-            invocation_id,
-            handle: spec.handle,
-            origin: spec.origin,
-            header_name: spec.header_name,
-            header_prefix: spec.header_prefix,
             descriptors,
         }
     }
@@ -3138,12 +3113,31 @@ impl BrokerDone {
             process_start: None,
             process_status: None,
             process_kill: None,
-            secret_egress: None,
             secret_process_start: None,
             environment_prepare: None,
             environment_measure: None,
             environment_destroy: None,
             environment_list: None,
+            http_resolve: None,
+            http_exchange: None,
+        }
+    }
+
+    /// A `net.http` resolution's result.
+    #[must_use]
+    pub fn http_resolve(done: http::HttpResolveDone) -> Self {
+        Self {
+            http_resolve: Some(done),
+            ..Self::empty()
+        }
+    }
+
+    /// A `net.http` exchange's result.
+    #[must_use]
+    pub fn http_exchange(done: http::HttpExchangeDone) -> Self {
+        Self {
+            http_exchange: Some(done),
+            ..Self::empty()
         }
     }
 
@@ -3246,15 +3240,6 @@ impl BrokerDone {
         }
     }
 
-    /// A mode A render's acknowledgement.
-    #[must_use]
-    pub fn secret_egress() -> Self {
-        Self {
-            secret_egress: Some(SecretEgressDone {}),
-            ..Self::empty()
-        }
-    }
-
     /// A secret launch's confirmation.
     #[must_use]
     pub fn secret_process_start(done: ProcessStartDone) -> Self {
@@ -3327,8 +3312,6 @@ impl BrokerDone {
             PrivateKind::ProcessStatus
         } else if self.process_kill.is_some() {
             PrivateKind::ProcessKill
-        } else if self.secret_egress.is_some() {
-            PrivateKind::SecretEgress
         } else if self.secret_process_start.is_some() {
             PrivateKind::SecretProcessStart
         } else if self.environment_prepare.is_some() {
@@ -3339,6 +3322,12 @@ impl BrokerDone {
             PrivateKind::EnvironmentDestroy
         } else if self.environment_list.is_some() {
             PrivateKind::EnvironmentList
+        } else if self.http_resolve.is_some() {
+            PrivateKind::HttpResolve
+        } else if self.http_exchange.is_some() {
+            // Either exchange kind: the authority checks it against what it
+            // sent.
+            PrivateKind::HttpExchange
         } else {
             return None;
         })

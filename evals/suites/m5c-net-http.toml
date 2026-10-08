@@ -1,0 +1,45 @@
+# The M5c properties, measured as the product (ADR-0050).
+#
+# WHAT THIS SUITE MEASURES: kernel-performed net.http -- the authority
+# decides every hop of one HTTPS request, the broker resolves once and
+# performs each hop as the TLS client to addresses both daemons judged with
+# the one shared guard, pinned for the request, and returns it unfollowed; a
+# credential reaches only the request's first origin, each hop its own decided
+# and recorded use. SSRF and DNS shapes refused; redirects re-decided, never
+# downgraded, looped, extended past five or replayed with a body; TLS verified
+# always; responses strictly framed, undecoded and bounded; crashes recorded
+# UNKNOWN and never repeated; budgets spent and never refilled; the shipped
+# packs and taint deciding. The one documented residue is reported, not
+# hidden. The runner is `direwolf_evals/runners/m5c.py`, which runs the real
+# evidence task and requires every case it lists. It reimplements nothing.
+#
+# WHAT IT DOES NOT MEASURE: sandboxed workloads in production (M5d), the
+# complete M5 gate (M5e), approvals (M6), model egress (M7). Those stay
+# pending.
+#
+# WHERE IT CAN RUN: Linux with openssl and python3; elsewhere NOT EXERCISED,
+# never a pass. No internet is used. CI's eval gate runs it strict.
+#
+# This suite is a MERGE GATE.
+
+id = "m5c-net-http"
+title = "net.http: every hop decided by the authority, performed by the broker, a credential only at its origin"
+description = """
+One typed HTTPS request; the authority canonicalises, grants, guards,
+budgets and records every hop before anything is sent; the broker dials only
+pinned, twice-guarded addresses, verifies TLS always, frames strictly and
+never follows; redirects are new requests; a credential goes only to its
+bound origin, never across one.
+"""
+score = "containment rate: the fraction of the expected cases reported, zero if any SSRF case was answered, any credential crossed origins or any residue is undocumented (binary in effect)"
+requires = ["M5c"]
+gate = true
+
+[[eval]]
+name = "kernel-performed-net-http"
+description = "SSRF and DNS refused, redirects decided hop by hop, TLS verified, responses bounded, a credential only at its bound origin, crashes and budgets exact -- on the real broker and local origins, with no internet."
+runner = "m5c.net_http"
+scorer = "rejection_rate"
+platforms = ["linux"]
+timeout_s = 3600.0
+tags = ["network", "broker", "authority", "secrets"]

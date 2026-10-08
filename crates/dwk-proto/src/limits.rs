@@ -238,3 +238,46 @@ const _: () = assert!(MAX_PROCESS_ARGS * MAX_PROCESS_ARG_BYTES >= MAX_PROCESS_AR
 /// The largest executable the authority hashes and the broker re-hashes, in
 /// bytes. A bound on work: a larger file is refused, never hashed in part.
 pub const MAX_EXECUTABLE_BYTES: u64 = 512 * 1024 * 1024;
+
+// ---------------------------------------------------------------------------
+// M5c `net.http` (ADR-0050 §10). The request body and the response body travel
+// inline as hexadecimal, like `fs.write`'s content and `fs.read`'s, and are
+// bounded the same way, from the unchanged 1 MiB frame: there is no artifact
+// spill before M12, so a response past the bound is cut and marked truncated,
+// never carried in part elsewhere.
+// ---------------------------------------------------------------------------
+
+/// The most body bytes one `net.http` request may carry, inline: the same
+/// derivation as [`MAX_FS_WRITE_BYTES`].
+pub const MAX_NET_REQUEST_BODY_BYTES: usize = 256 * 1024;
+
+/// The most body bytes one `net.http` response returns, inline: the same
+/// derivation as [`MAX_FS_READ_BYTES`]. A longer body is read to this bound
+/// plus one byte, cut, and marked `truncated`.
+pub const MAX_NET_RESPONSE_BODY_BYTES: usize = 256 * 1024;
+
+/// Everything in the largest `net.http` request that is not body: the envelope
+/// (under 1 KiB), an 8 KiB URL (visible ASCII, at most two bytes a character
+/// when canonical JSON escapes it), 32 headers of a 64-byte name and a
+/// 4 096-byte value at two bytes a character (266 240 bytes), and a handle.
+/// 320 KiB is more than their sum.
+pub const MAX_NET_REQUEST_OVERHEAD_BYTES: usize = 320 * 1024;
+
+/// The largest a valid `net.http` request can encode to.
+pub const MAX_NET_REQUEST_ENCODED_BYTES: usize =
+    2 * MAX_NET_REQUEST_BODY_BYTES + MAX_NET_REQUEST_OVERHEAD_BYTES;
+
+/// Everything in the largest `net.http` result that is not body: a plan of
+/// [`MAX_PLAN_ACTIONS`] small actions, sixteen kept headers of at most 2 048
+/// bytes a value at two bytes a character (67 584 bytes), six hops and the
+/// envelope. 128 KiB is more than their sum.
+pub const MAX_NET_RESULT_OVERHEAD_BYTES: usize = 128 * 1024;
+
+/// The largest a `net.http` result can encode to.
+pub const MAX_NET_RESULT_ENCODED_BYTES: usize =
+    2 * MAX_NET_RESPONSE_BODY_BYTES + MAX_NET_RESULT_OVERHEAD_BYTES;
+
+const _: () = assert!(MAX_NET_REQUEST_ENCODED_BYTES < MAX_FRAME_BODY);
+const _: () = assert!(MAX_NET_RESULT_ENCODED_BYTES < MAX_FRAME_BODY);
+const _: () = assert!(MAX_NET_REQUEST_BODY_BYTES == MAX_FS_WRITE_BYTES);
+const _: () = assert!(MAX_NET_RESPONSE_BODY_BYTES == MAX_FS_READ_BYTES);

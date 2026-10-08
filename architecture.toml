@@ -454,6 +454,10 @@ exempt_paths = [
     # unit tests' loopback origin. Named by file, like listener.rs.
     "crates/dwkd-broker/src/egress/proxy.rs",
     "crates/dwkd-broker/src/egress/tests.rs",
+    # M5c (ADR-0050): the HTTPS client's unit tests, whose loopback TLS
+    # origins are the far end of a test exchange. The client listens to
+    # nothing.
+    "crates/dwkd-broker/src/http/tests.rs",
 ]
 suffixes = [".rs"]
 patterns = [
@@ -599,6 +603,14 @@ exempt_paths = [
     "crates/dwkd-broker/src/egress/resolve.rs",
     "crates/dwkd-broker/src/egress/tunnel.rs",
     "crates/dwkd-broker/src/egress/tests.rs",
+    # M5c (ADR-0050): the HTTPS client's files that must name a network type
+    # or TLS's crypto provider -- the pinned dial, the exchange over it, the
+    # trust configuration -- and its unit tests. TX037, TX044 and TX046 bind
+    # them instead, and are stricter about the network than this rule.
+    "crates/dwkd-broker/src/http/connect.rs",
+    "crates/dwkd-broker/src/http/mod.rs",
+    "crates/dwkd-broker/src/http/tls.rs",
+    "crates/dwkd-broker/src/http/tests.rs",
 ]
 suffixes = [".rs"]
 patterns = [
@@ -644,6 +656,16 @@ to `egress/tunnel.rs`, and TX038 keeps TLS, credentials and secrets out of the
 whole egress path. The broker still listens to nothing but the authority and
 its environments' relays (TX009), and still decides nothing: the grant is the
 authority's.
+
+M5c (ADR-0050) gives it a second, `net.http`'s HTTPS client: one exchange per
+hop the authority authorised, to the addresses the guard pinned, re-judged
+before the dial. Its four files that must name a network type or the TLS
+provider are exempt here by name; TX037 confines its dial to
+`http/connect.rs`, TX044 confines every TLS and HTTP crate to the module's
+named files, TX045 confines the credential header to `http/render.rs`, and
+TX046 keeps ambient settings, a resolver of its own, a verifier override, a
+store, a key and `unsafe` out of the whole module. It still decides nothing:
+the hop, its addresses and its credential are the authority's.
 """
 
 [[text_rules]]
@@ -684,7 +706,8 @@ M4e (ADR-0046): `secret/handoff.rs` defines the method that releases a
 `state/secret_use/tests.rs` is the pipeline's unit test, whose fake broker
 reads the pipe it is handed to prove it held exactly the value. The link is
 still the only sender, and a secret pipe leaves only as the last descriptor
-of a `broker.secret_egress` authorisation.
+of a `broker.http_credential_exchange` authorisation (M5c, ADR-0050 §8; the
+render-and-drop `broker.secret_egress` is retired) or of a secret launch.
 
 Hygiene, not containment.
 """
@@ -714,6 +737,9 @@ exempt_paths = [
     "crates/dwkd-broker/src/egress/proxy.rs",
     "crates/dwkd-broker/src/egress/resolve.rs",
     "crates/dwkd-broker/src/egress/tests.rs",
+    # M5c (ADR-0050): the evidence-only trust anchor `--allow-evidence-trust`
+    # names, read once at start; TX046 keeps every other caller away from it.
+    "crates/dwkd-broker/src/http/tls.rs",
 ]
 suffixes = [".rs"]
 patterns = [
@@ -748,6 +774,10 @@ never a workspace name, never anything it did not make (a stale entry that
 is not provably its own is left). `egress/resolve.rs` reads one file: the
 resolver fixture `--allow-evidence-egress` names, which is evidence-only and
 read once at start. `egress/tests.rs` is the module's unit test.
+
+M5c (ADR-0050): `http/tls.rs` reads one file, the test authority
+`--allow-evidence-trust` names -- evidence-only, read once at start, and
+replacing Mozilla's roots rather than joining them.
 
 Hygiene, not containment.
 """
@@ -914,6 +944,10 @@ paths = ["crates/dwkd-broker/src"]
 exempt_paths = [
     "crates/dwkd-broker/src/process/launch.rs",
     "crates/dwkd-broker/src/process/tests.rs",
+    # M5c (ADR-0050): the HTTPS client's unit tests make a throwaway test PKI
+    # once per test process, with `tests/net_http/make-pki.sh` (openssl).
+    # Compiled only under `cfg(test)`; it launches nothing a hop could reach.
+    "crates/dwkd-broker/src/http/tests.rs",
 ]
 suffixes = [".rs"]
 patterns = [
@@ -939,7 +973,11 @@ paths = ["crates/dwkd-broker/src"]
 # The launch's own test module: its Python fixtures fork a child into the
 # target's process group to show that kill reaches the group. `unsafe` is
 # still banned there (TX013).
-exempt_paths = ["crates/dwkd-broker/src/process/tests.rs"]
+exempt_paths = [
+    "crates/dwkd-broker/src/process/tests.rs",
+    # M5c (ADR-0050): runs the test-PKI script with `bash`, under `cfg(test)`.
+    "crates/dwkd-broker/src/http/tests.rs",
+]
 suffixes = [".rs"]
 patterns = [
     # No closure between fork and exec: it is `unsafe` code in disguise.
@@ -1321,6 +1359,7 @@ patterns = [
     '^(?!\s*(//|#)).*\b(attach_sandbox|environment_prepare|environment_measure|environment_destroy|environment_reconcile)\b',
     '^(?!\s*(//|#)).*\bSandboxConfig\b',
     '^(?!\s*(//|#)).*\b(broker\.environment_[a-z]+|EnvironmentPrepare|EnvironmentDestroy)\b',
+    '^(?!\s*(//|#)).*\b(attach_net_evidence|net_exceptions)\b',
 ]
 reason = """
 M5a's execution environments are an in-process authority API with no DWKP
@@ -1328,6 +1367,12 @@ route (ADR-0047 §3): the evidence harness attaches a sandbox and drives the
 lifecycle; nothing a runtime, a CLI user or the DWKP server can reach does.
 A reference here would be the first step of production sandbox execution --
 M5d's, behind its own ADR -- arriving without one.
+
+M5c (ADR-0050 §16) adds the net.http evidence's exception list: addresses
+the authority's own guard lets through although blocked, so the evidence's
+loopback origins are judged as the evidence broker judges them. Attaching
+it from the server, `serve` or anything a runtime reaches would be a
+production loopback bypass; only the in-process evidence harness may.
 
 Hygiene, not containment: the DWKP registry has no operation that names an
 environment, which the protocol corpus checks.
@@ -1345,6 +1390,10 @@ patterns = [
     # M5b (ADR-0048): the egress grant is typed destinations and budgets; no
     # resolver, exception, proxy endpoint or trust material crosses the wire.
     '^(?!\s*//).*\b(resolver|nameservers?|dns_servers?|proxy_url|proxy_address|egress_exceptions?|allow_private(_network)?|ca_cert|trust_store|tls_terminate)\b',
+    # M5c (ADR-0050): a hop is typed facts too -- no switch that weakens TLS,
+    # follows a redirect, re-resolves, proxies, keeps cookies or overrides the
+    # name the certificate must hold crosses the wire.
+    '^(?!\s*//).*\b(insecure|skip_verify|tls_verify|verify_tls|danger\w*|root_certs?|trust_anchors?|trust_roots?|sni_override|server_name_override|host_override|resolve_override|follow_redirects?|max_redirects|use_proxy|via_proxy|https?_proxy|proxy_endpoint|cookie_jar|cookies?)\b',
 ]
 reason = """
 An environment is described on the private wire by typed facts -- its id, run,
@@ -1362,6 +1411,14 @@ proxy endpoint or trust material on the wire would let the message choose
 where the broker resolves, what the guard lets through, or what TLS it
 trusts; the broker's resolver is its own, its exceptions exist only for the
 evidence's local fixture flag, and there is no TLS to configure.
+
+M5c (ADR-0050): version 7's `net.http` hop is typed facts -- a method, an
+origin, a canonical target, judged headers, a body, pinned addresses, a
+bound and at most a credential's handle and header. A field that turned
+verification off, named trust anchors, overrode the server name or the
+`Host`, asked the broker to follow redirects, re-resolve, use a proxy or keep
+cookies would let the message choose what only the broker's fixed
+configuration and the authority's per-hop decision may.
 """
 
 # ===========================================================================
@@ -1373,10 +1430,14 @@ evidence's local fixture flag, and there is no TLS to configure.
 [[text_rules]]
 id = "TX037-the-broker-dials-only-from-the-tunnel"
 paths = ["crates/dwkd-broker/src"]
-# The one dial, and the module's unit tests (their loopback origin).
+# The one dial, and the module's unit tests (their loopback origin). M5c
+# (ADR-0050) adds the HTTPS client's dial to its pinned addresses, and its
+# unit tests' loopback origins -- by file, like the tunnel's.
 exempt_paths = [
     "crates/dwkd-broker/src/egress/tunnel.rs",
     "crates/dwkd-broker/src/egress/tests.rs",
+    "crates/dwkd-broker/src/http/connect.rs",
+    "crates/dwkd-broker/src/http/tests.rs",
 ]
 suffixes = [".rs"]
 patterns = [
@@ -1391,6 +1452,14 @@ host, the IP guard passed and the TLS server name agreed with. That dial is
 spelled once, in `egress/tunnel.rs`, after every check. A second connect
 anywhere in the broker -- a health check, a "direct" fallback, a resolver of
 its own -- would be a path out none of those checks stand in front of.
+
+M5c (ADR-0050) amends this deliberately: the broker has two outbound paths,
+and each dials in one file. `http/connect.rs` connects `net.http`'s hop to
+an address the authority pinned after the shared guard passed it, which the
+client re-judges with the same guard before calling it -- never a name,
+never through a proxy. The two paths share the guard and the resolver and
+nothing else: CONNECT traffic never passes through the HTTPS client, and a
+`net.http` hop never uses the CONNECT proxy.
 
 Hygiene, not containment: the topology gives the environment no other route,
 and the evidence shows each bypass refused.
@@ -1574,6 +1643,194 @@ reader (`server::peer`, `crate::peer`): the authority's broker link and the
 broker's listener and launch helper all do.
 
 Hygiene, not containment.
+"""
+
+# ===========================================================================
+# M5c: net.http (ADR-0050). The authority decides every hop; the broker is the
+# HTTPS client. Hygiene over the source; the controls are the authority's
+# per-hop pipeline, the shared guard, the pinned dial and TLS verification --
+# shown by `make net-http-evidence`.
+# ===========================================================================
+
+[[text_rules]]
+id = "TX044-tls-and-http-crates-only-in-the-brokers-https-client"
+paths = [
+    "crates/dwkd-authority/src",
+    "crates/dwkd-broker/src",
+    "crates/dwk-proto/src",
+    "crates/dwk-sandbox-relay/src",
+    "crates/dwk-sandbox-probe/src",
+    "crates/dwk-sandbox-profile/src",
+    "crates/direwolf-cli/src",
+]
+# FILES, not the module: the trust configuration, the exchange, the
+# credential's render, and the module's unit tests (their TLS origins).
+exempt_paths = [
+    "crates/dwkd-broker/src/http/tls.rs",
+    "crates/dwkd-broker/src/http/mod.rs",
+    "crates/dwkd-broker/src/http/render.rs",
+    "crates/dwkd-broker/src/http/tests.rs",
+]
+suffixes = [".rs"]
+patterns = [
+    '^(?!\s*//).*\b(rustls|rustls_pki_types|webpki|webpki_roots|ureq_proto|ureq|httparse|hyper|reqwest|native_tls|openssl|tokio_rustls|bytes)\s*::',
+    '^(?!\s*//).*\bextern\s+crate\s+(rustls|webpki_roots|ureq_proto|bytes)\b',
+]
+reason = """
+A TLS stack and an HTTP framing library are the broker's, for `net.http`'s
+hops, and nobody else's (ADR-0050 §§9, 18; D1, D2). In the authority they
+would be network code in the process that holds the keys and the decisions --
+and the authority's measured closure must not grow by a byte of them. In the
+egress path they would make the opaque CONNECT proxy an inspecting one
+(TX038 says so for `egress/`). In the protocol crate they would be in every
+peer. Anywhere else in the broker they would be a second client none of the
+per-hop checks stand in front of.
+
+Hygiene, not containment: `dwcheck closure` measures the authority's linked
+crates, and the broker's integration tests acknowledge these crates only as
+`use … as _` for the lint.
+"""
+
+[[text_rules]]
+id = "TX045-a-credential-header-is-composed-in-one-place"
+paths = ["crates/dwkd-broker/src"]
+# The render, and nothing else: M5c retired M4e's render-and-drop with
+# `broker.secret_egress`. The client's unit tests build credentials to hand
+# over.
+exempt_paths = [
+    "crates/dwkd-broker/src/http/render.rs",
+    "crates/dwkd-broker/src/http/tests.rs",
+]
+suffixes = [".rs"]
+patterns = [
+    # The operator's prefix is read where the header is composed, nowhere else.
+    '^(?!\s*//).*\bheader_prefix\b',
+    # A header value built over an owner, and marked sensitive: the render's.
+    '^(?!\s*//).*\bfrom_maybe_shared\b',
+    '^(?!\s*//).*\bset_sensitive\b',
+    '^(?!\s*//).*\bBytes\s*::\s*from_owner\b',
+    # No credential header is spelled as text to be written.
+    '^(?!\s*//).*"(Authorization|Proxy-Authorization|authorization|proxy-authorization)\s*:',
+]
+reason = """
+Mode A's credential becomes a header in exactly one place (ADR-0050 §8,
+ADR-0046 §12): `http/render.rs` reads the value once from the one-shot pipe,
+refuses a byte a header cannot carry, composes `name: prefix value` into a
+`Zeroizing` buffer sized once, and makes the header value over that buffer
+without a copy, marked sensitive. A second place that composed one would be a
+credential path with none of that -- no refusal of CR or LF, no scrubbing,
+a copy in an ordinary `String` -- and a second place a credential could go
+somewhere the authority did not decide.
+
+Hygiene, not containment: the evidence reads the broker's memory after an
+exchange for the value.
+"""
+
+[[text_rules]]
+id = "TX046-the-https-client-reads-no-ambient-setting-and-holds-nothing"
+paths = ["crates/dwkd-broker/src/http", "crates/dwkd-broker/src/main.rs"]
+exempt_paths = []
+suffixes = [".rs"]
+patterns = [
+    # No environment: no proxy variable, no SSL_CERT_FILE, nothing.
+    '^(?!\s*//).*\benv\s*::\s*(var|vars|var_os|vars_os)\b',
+    '^(?!\s*//).*"(HTTPS?_PROXY|ALL_PROXY|NO_PROXY|https?_proxy|all_proxy|no_proxy|SSL_CERT_FILE|SSL_CERT_DIR|SSLKEYLOGFILE)"',
+    # No trust store but the compiled-in roots or the evidence anchor.
+    '^(?!\s*//).*\b(rustls_native_certs|rustls_platform_verifier|load_native_certs)\b',
+    # No verifier override, no key log, no session resumption store.
+    '^(?!\s*//).*\.\s*dangerous\s*\(',
+    '^(?!\s*//).*\b(ServerCertVerifier|with_custom_certificate_verifier|set_certificate_verifier|NoServerVerification|KeyLogFile)\b',
+    # No resolution of its own: names reach the resolver, addresses the dial.
+    '^(?!\s*//).*\b(ToSocketAddrs|to_socket_addrs|lookup_host|getaddrinfo)\b',
+    '^(?!\s*//).*\bTcpStream\s*::\s*connect\s*\(',
+    # No store, no audit, no key material, no DWKP, no unsafe.
+    '^(?!\s*//).*\b(rusqlite|hmac|ed25519_dalek|aws_lc_rs|keyring)\b',
+    '^(?!\s*//).*(?<!crypto::)\bring\s*::',
+    '^(?!\s*//).*(kernel\.db|audit\.log)',
+    '^(?!\s*//).*\bdwk_proto\s*::\s*(dwkp|dwcp|envelope|events)\b',
+    '^(?!\s*//).*\bunsafe\b',
+]
+reason = """
+`net.http`'s client takes nothing from its surroundings (ADR-0050 §9, D1,
+D2): no proxy variable, no `SSL_CERT_FILE`, no host trust store, no key log,
+no verifier override, no resolver of its own -- the hop's addresses are the
+authority's, pinned, and a name reaches only the broker's one resolver. Each
+of these is how a client quietly sends a request somewhere other than where
+it was authorised, or trusts a certificate nobody reviewed. `main.rs` is
+here because it is where the client is built: it may choose the evidence
+anchor only from `--allow-evidence-trust`.
+
+The module is exempt from TX013 for its network types, so TX013's other
+prohibitions are restated here: no store, no audit, no key material, no DWKP,
+no `unsafe`. `rustls::crypto::ring` is the TLS provider D1 chose, not key
+material.
+
+Hygiene, not containment: the evidence starts a broker with hostile proxy
+and certificate variables and shows them unread.
+"""
+
+[[text_rules]]
+id = "TX047-the-authority-opens-no-outbound-socket-and-resolves-no-name"
+paths = ["crates/dwkd-authority/src"]
+exempt_paths = []
+suffixes = [".rs"]
+patterns = [
+    '^(?!\s*//).*\bstd\s*::\s*net\b',
+    '^(?!\s*//).*\bstd\s*::\s*\{[^}]*\bnet\b',
+    '^(?!\s*//).*\b(TcpStream|TcpListener|UdpSocket|SocketAddr|SocketAddrV4|SocketAddrV6|ToSocketAddrs)\b',
+    '^(?!\s*//).*\b(to_socket_addrs|lookup_host|getaddrinfo|gethostbyname)\b',
+    '^(?!\s*//).*\brustix\s*::\s*net\s*::\s*(socket|socket_with|connect|bind)\b',
+]
+reason = """
+The authority never opens an outbound connection and never resolves a name
+(ADR-0050 §§2, 6; ADR-0018). It decides `net.http`'s every hop and records
+it; the broker resolves, once, through its one resolver, and dials the
+addresses the authority pinned. An authority that resolved for itself would
+judge a different answer than the one dialled -- the rebinding window the
+pin exists to close -- and one that connected would put network input in the
+process holding the keys. Its addresses are octets
+(`dwk_proto::wire::guard::Address`, the policy core's `IpAddress`), never a
+`std::net` type, so even the vocabulary for a socket is absent.
+
+Its two Unix-domain endpoints -- the DWKP server and the broker link -- are
+`std::os::unix::net`, which is not this rule's.
+
+Hygiene, not containment.
+"""
+
+[[text_rules]]
+id = "TX048-one-address-guard"
+paths = ["crates/dwkd-authority/src", "crates/dwkd-broker/src", "crates/dwk-proto/src"]
+# The guard itself; the broker's adapter and its address-by-address tests;
+# the egress and HTTPS clients' unit tests, which name blocked addresses and
+# metadata names as inputs.
+exempt_paths = [
+    "crates/dwk-proto/src/wire/guard.rs",
+    "crates/dwkd-broker/src/egress/guard.rs",
+    "crates/dwkd-broker/src/egress/tests.rs",
+    "crates/dwkd-broker/src/http/tests.rs",
+]
+suffixes = [".rs"]
+patterns = [
+    # The standard library's own classifications are a second table.
+    '^(?!\s*//).*\b(is_private|is_loopback|is_link_local|is_unique_local|is_unicast_link_local|is_unicast_global|is_global|is_documentation|is_benchmarking|is_shared|is_reserved|is_unspecified|is_multicast)\s*\(',
+    # A metadata name spelled anywhere but the guard.
+    '^(?!\s*//).*"(metadata\.google\.internal|metadata\.goog|instance-data)"',
+    # A range table: an address and a prefix length, IPv4 or IPv6.
+    '^(?!\s*//).*\(\s*\[\s*\d{1,3}\s*,\s*\d{1,3}\s*,\s*\d{1,3}\s*,\s*\d{1,3}\s*\]\s*,\s*\d{1,2}\s*\)',
+    '^(?!\s*//).*\(\s*\[\s*0x[0-9a-fA-F]+\s*,[^\]]*\]\s*,\s*\d{1,3}\s*\)',
+]
+reason = """
+Which addresses DireWolf may reach is decided by one table, in one pure
+function over octets (`dwk_proto::wire::guard`; ADR-0050 §6), called by the
+CONNECT proxy, by the HTTPS client before it dials and by the authority on
+every hop. A second table -- a copy in the authority, `std`'s
+`is_private()`, a metadata list in a new client -- is a place the two daemons
+can disagree about an address, and the disagreement is always found by an
+attacker first.
+
+Hygiene, not containment: the guard's own tests cover every range, and the
+evidence shows both daemons refusing the same answers.
 """
 
 # ===========================================================================

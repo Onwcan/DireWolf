@@ -234,11 +234,28 @@ pub enum AuditEvent {
     /// A container labelled as one of this store's environments, that no live
     /// record names, was removed (M5a).
     EnvironmentOrphanReaped,
+    /// The broker resolved a `net.http` host a grant covers, and the
+    /// authority judged the answer with the shared guard (M5c): the verdict
+    /// and the addresses pinned. Nothing was sent.
+    NetResolved,
+    /// A `net.http` hop every gate, the guard and the budgets allowed,
+    /// recorded before anything is sent (M5c).
+    NetIntentRecorded,
+    /// A `net.http` hop ended (M5c): how, the status, the bytes each way,
+    /// whether a credential went with it. Never a path, a query, a header
+    /// value or a body.
+    NetHopEnded,
+    /// A redirect a `net.http` response asked for was not followed (M5c), and
+    /// why.
+    NetRedirectEnded,
+    /// A `net.http` request ended (M5c): completed, failed, or unknown —
+    /// never performed again.
+    NetOutcome,
 }
 
 impl AuditEvent {
     /// Every kind, in declaration order.
-    pub const ALL: [Self; 57] = [
+    pub const ALL: [Self; 62] = [
         Self::StoreCreated,
         Self::StoreOpened,
         Self::PolicyInstalled,
@@ -296,6 +313,11 @@ impl AuditEvent {
         Self::EnvironmentLost,
         Self::EnvironmentReconciled,
         Self::EnvironmentOrphanReaped,
+        Self::NetResolved,
+        Self::NetIntentRecorded,
+        Self::NetHopEnded,
+        Self::NetRedirectEnded,
+        Self::NetOutcome,
     ];
 
     /// The spelling in a record's `event` field.
@@ -359,6 +381,11 @@ impl AuditEvent {
             Self::EnvironmentLost => "environment.lost",
             Self::EnvironmentReconciled => "environment.reconciled",
             Self::EnvironmentOrphanReaped => "environment.orphan_reaped",
+            Self::NetResolved => "net.http.resolved",
+            Self::NetIntentRecorded => "net.http.intent",
+            Self::NetHopEnded => "net.http.hop",
+            Self::NetRedirectEnded => "net.http.redirect_ended",
+            Self::NetOutcome => "net.http.outcome",
         }
     }
 }

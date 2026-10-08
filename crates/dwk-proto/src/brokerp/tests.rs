@@ -175,27 +175,28 @@ fn an_outcome_carries_exactly_one_answer() {
     let mut both = BrokerOutcome::new(channel(), invocation(), OutcomeResult::done(done));
     both.refused = Some(BrokerRefusal::ReadFailed);
     assert!(encode_frame(&both).is_err());
-    let none = r#"{"channel":"0123456789abcdef0123456789abcdef","invocation_id":"inv_01M24BB8G3E0A851TRWE3M8FZF","kind":"broker.outcome","protocol":6}"#;
+    let none = r#"{"channel":"0123456789abcdef0123456789abcdef","invocation_id":"inv_01M24BB8G3E0A851TRWE3M8FZF","kind":"broker.outcome","protocol":7}"#;
     assert!(BrokerOutcome::decode_frame_body(none.as_bytes()).is_err());
     // A done names exactly one operation.
-    let two = r#"{"channel":"0123456789abcdef0123456789abcdef","done":{"fs_move":{},"fs_delete":{"debris":false}},"invocation_id":"inv_01M24BB8G3E0A851TRWE3M8FZF","kind":"broker.outcome","protocol":6}"#;
+    let two = r#"{"channel":"0123456789abcdef0123456789abcdef","done":{"fs_move":{},"fs_delete":{"debris":false}},"invocation_id":"inv_01M24BB8G3E0A851TRWE3M8FZF","kind":"broker.outcome","protocol":7}"#;
     assert!(BrokerOutcome::decode_frame_body(two.as_bytes()).is_err());
 }
 
 #[test]
 fn unknown_members_old_versions_and_second_spellings_are_refused() {
     for text in [
-        r#"{"channel":"0123456789abcdef0123456789abcdef","kind":"broker.hello","protocol":6,"extra":1}"#,
-        r#"{"channel":"0123456789ABCDEF0123456789ABCDEF","kind":"broker.hello","protocol":6}"#,
-        // Versions 1 to 5 are not half-understood (ADR-0048 made it 6), and
+        r#"{"channel":"0123456789abcdef0123456789abcdef","kind":"broker.hello","protocol":7,"extra":1}"#,
+        r#"{"channel":"0123456789ABCDEF0123456789ABCDEF","kind":"broker.hello","protocol":7}"#,
+        // Versions 1 to 6 are not half-understood (ADR-0050 made it 7), and
         // a later one is not guessed at.
         r#"{"channel":"0123456789abcdef0123456789abcdef","kind":"broker.hello","protocol":1}"#,
         r#"{"channel":"0123456789abcdef0123456789abcdef","kind":"broker.hello","protocol":2}"#,
         r#"{"channel":"0123456789abcdef0123456789abcdef","kind":"broker.hello","protocol":3}"#,
         r#"{"channel":"0123456789abcdef0123456789abcdef","kind":"broker.hello","protocol":4}"#,
         r#"{"channel":"0123456789abcdef0123456789abcdef","kind":"broker.hello","protocol":5}"#,
-        r#"{"channel":"0123456789abcdef0123456789abcdef","kind":"broker.hello","protocol":7}"#,
-        r#"{"channel":"0123456789abcdef0123456789abcdef","kind":"broker.hello","kind":"broker.hello","protocol":6}"#,
+        r#"{"channel":"0123456789abcdef0123456789abcdef","kind":"broker.hello","protocol":6}"#,
+        r#"{"channel":"0123456789abcdef0123456789abcdef","kind":"broker.hello","protocol":8}"#,
+        r#"{"channel":"0123456789abcdef0123456789abcdef","kind":"broker.hello","kind":"broker.hello","protocol":7}"#,
     ] {
         assert!(
             BrokerHello::decode_frame_body(text.as_bytes()).is_err(),
@@ -203,7 +204,7 @@ fn unknown_members_old_versions_and_second_spellings_are_refused() {
         );
     }
     // An unknown kind is not an authorisation.
-    let unknown = r#"{"kind":"broker.fs_chmod","protocol":6}"#;
+    let unknown = r#"{"kind":"broker.fs_chmod","protocol":7}"#;
     assert!(Authorisation::decode_frame_body(unknown.as_bytes()).is_err());
     for (text, ok) in [
         ("0", true),
@@ -442,16 +443,36 @@ fn a_process_result_names_exactly_one_operation() {
 }
 
 // ---------------------------------------------------------------------------
-// Version 4: the secret primitives (ADR-0046).
+// Version 4: the secret primitives (ADR-0046); version 7: mode A's value
+// travels only with a credential exchange (ADR-0050 §8).
 // ---------------------------------------------------------------------------
 
-fn egress_spec() -> super::EgressSpec {
-    super::EgressSpec {
-        handle: super::SecretHandle::new("github-primary").unwrap_or_else(|| unreachable!()),
-        origin: super::SecretOrigin::new("api.github.com:443").unwrap_or_else(|| unreachable!()),
-        header_name: super::SecretHeaderName::new("Authorization")
-            .unwrap_or_else(|| unreachable!()),
-        header_prefix: super::SecretHeaderPrefix::new("Bearer "),
+/// A `net.http` hop that carries a credential: the handle, the operator's
+/// header and prefix, and — as the one descriptor — the value.
+fn credential_hop() -> super::http::HopSpec {
+    use super::http::{
+        HopNumber, HopSpec, HttpCredential, HttpMethod, HttpTarget, NetAddress, NetAddresses,
+        RequestHeaders, ResponseLimit,
+    };
+    HopSpec {
+        hop: HopNumber::new(1).unwrap_or_else(|| unreachable!()),
+        method: HttpMethod::Get,
+        host: super::egress::EgressHost::new("api.github.com").unwrap_or_else(|| unreachable!()),
+        port: super::egress::EgressPort::new(443).unwrap_or_else(|| unreachable!()),
+        target: HttpTarget::new("/user").unwrap_or_else(|| unreachable!()),
+        headers: RequestHeaders::new(Vec::new()).unwrap_or_else(|| unreachable!()),
+        body: None,
+        addresses: NetAddresses::new(vec![NetAddress::from_address(
+            crate::wire::guard::Address::V4([140, 82, 112, 6]),
+        )])
+        .unwrap_or_else(|| unreachable!()),
+        response_limit: ResponseLimit::new(4096).unwrap_or_else(|| unreachable!()),
+        credential: Some(HttpCredential {
+            handle: super::SecretHandle::new("github-primary").unwrap_or_else(|| unreachable!()),
+            header_name: super::SecretHeaderName::new("Authorization")
+                .unwrap_or_else(|| unreachable!()),
+            header_prefix: super::SecretHeaderPrefix::new("Bearer "),
+        }),
     }
 }
 
@@ -465,11 +486,12 @@ fn spawn_secret(delivery: super::SecretDelivery, env: Option<&str>) -> super::Sp
 
 #[test]
 fn the_secret_operations_round_trip_and_carry_the_value_in_a_descriptor_only() {
-    use super::{SecretDelivery, SecretEgressAuthorisation, SecretProcessStartAuthorisation};
+    use super::http::HttpExchangeAuthorisation;
+    use super::{SecretDelivery, SecretProcessStartAuthorisation};
     for (authorisation, kind, count) in [
         (
-            Authorisation::SecretEgress(SecretEgressAuthorisation::new(common(), egress_spec())),
-            PrivateKind::SecretEgress,
+            Authorisation::HttpExchange(HttpExchangeAuthorisation::new(common(), credential_hop())),
+            PrivateKind::HttpCredentialExchange,
             1,
         ),
         (
@@ -503,8 +525,8 @@ fn the_secret_operations_round_trip_and_carry_the_value_in_a_descriptor_only() {
     }
     // A member for the value, its length or a mode is not part of the
     // language: the strict decoder refuses each.
-    let egress = String::from_utf8(body(
-        &Authorisation::SecretEgress(SecretEgressAuthorisation::new(common(), egress_spec()))
+    let exchange = String::from_utf8(body(
+        &Authorisation::HttpExchange(HttpExchangeAuthorisation::new(common(), credential_hop()))
             .encode_frame()
             .unwrap_or_default(),
     ))
@@ -514,12 +536,16 @@ fn the_secret_operations_round_trip_and_carry_the_value_in_a_descriptor_only() {
         r#""secret_bytes":1,"#,
         r#""injection_mode":"env","#,
     ] {
-        let tampered = egress.replacen('{', &format!("{{{extra}"), 1);
+        let tampered = exchange.replacen('{', &format!("{{{extra}"), 1);
         assert!(
             Authorisation::decode_frame_body(tampered.as_bytes()).is_err(),
             "{extra}"
         );
     }
+    // M4e's render-and-drop is retired: its kind is no longer the language.
+    let retired = exchange.replace("broker.http_credential_exchange", "broker.secret_egress");
+    assert!(retired.contains("broker.secret_egress"));
+    assert!(Authorisation::decode_frame_body(retired.as_bytes()).is_err());
 }
 
 #[test]
@@ -627,29 +653,33 @@ fn the_secret_grammars_refuse_what_could_control_a_process_or_break_a_header() {
 
 #[test]
 fn a_secret_result_names_its_own_operation_and_says_nothing_of_the_value() {
-    use super::{ProcessStartDone, SecretEgressDone};
+    use super::ProcessStartDone;
     use crate::wire::scalar::ProcessState;
+    let done = BrokerDone::secret_process_start(ProcessStartDone {
+        generation: generation(),
+        state: ProcessState::Running,
+        exit_code: None,
+        signal: None,
+    });
+    let kind = done.kind();
+    let outcome = BrokerOutcome::new(channel(), invocation(), OutcomeResult::done(done));
+    let bytes = body(&encode_frame(&outcome).unwrap_or_default());
+    let decoded = BrokerOutcome::decode_frame_body(&bytes).map(|o| o.result());
+    assert!(matches!(decoded, Ok(OutcomeResult::Done(ref d)) if d.kind() == kind));
+    // The retired render's acknowledgement is not an answer any more, with
+    // or without a member that would describe the value.
     for done in [
-        BrokerDone::secret_egress(),
-        BrokerDone::secret_process_start(ProcessStartDone {
-            generation: generation(),
-            state: ProcessState::Running,
-            exit_code: None,
-            signal: None,
-        }),
+        r#"{"secret_egress":{}}"#,
+        r#"{"secret_egress":{"length":8}}"#,
     ] {
-        let kind = done.kind();
-        let outcome = BrokerOutcome::new(channel(), invocation(), OutcomeResult::done(done));
-        let bytes = body(&encode_frame(&outcome).unwrap_or_default());
-        let decoded = BrokerOutcome::decode_frame_body(&bytes).map(|o| o.result());
-        assert!(matches!(decoded, Ok(OutcomeResult::Done(ref d)) if d.kind() == kind));
+        let text = format!(
+            r#"{{"channel":"0123456789abcdef0123456789abcdef","done":{done},"invocation_id":"inv_01M24BB8G3E0A851TRWE3M8FZF","kind":"broker.outcome","protocol":7}}"#
+        );
+        assert!(
+            BrokerOutcome::decode_frame_body(text.as_bytes()).is_err(),
+            "{done}"
+        );
     }
-    assert_eq!(
-        BrokerDone::secret_egress().secret_egress,
-        Some(SecretEgressDone {})
-    );
-    let text = r#"{"channel":"0123456789abcdef0123456789abcdef","done":{"secret_egress":{"length":8}},"invocation_id":"inv_01M24BB8G3E0A851TRWE3M8FZF","kind":"broker.outcome","protocol":6}"#;
-    assert!(BrokerOutcome::decode_frame_body(text.as_bytes()).is_err());
 }
 
 // ---- M5a: the execution environment (ADR-0047) ------------------------------

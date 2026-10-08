@@ -61,9 +61,13 @@ pub(crate) const TOOL_REQUEST: &str = "direwolf.dwkp.tool_invoke.request.v2";
 /// the arguments themselves.
 pub(crate) const PROCESS_ARGV: &str = "direwolf.process.argv.v1";
 
+/// The canonical `net.http` call, with its run, an idempotency key is bound to
+/// (M5c, ADR-0050 §11).
+pub(crate) const NET_REQUEST: &str = "direwolf.dwkp.net_http.request.v1";
+
 /// Every domain, for the test that they are pairwise distinct.
 #[cfg(test)]
-const ALL_DOMAINS: [&str; 11] = [
+const ALL_DOMAINS: [&str; 12] = [
     POLICY_REVISION,
     ADMIT_REQUEST,
     AUDIT_RECORD,
@@ -75,7 +79,16 @@ const ALL_DOMAINS: [&str; 11] = [
     TOOL_CONTENT,
     TOOL_REQUEST,
     PROCESS_ARGV,
+    NET_REQUEST,
 ];
+
+/// The plain SHA-256 of `bytes`, **not** domain-separated: for a digest an
+/// auditor must be able to recompute from the value alone — a `net.http`
+/// plan's `url_sha256` is the SHA-256 of the canonical URL's text (ADR-0050
+/// D8). Never an identity the authority keys anything on.
+pub(crate) fn plain(bytes: &[u8]) -> Sha256Hash {
+    Sha256Hash(Sha256::digest(bytes).into())
+}
 
 /// A full 256-bit SHA-256 value. Never truncated.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]

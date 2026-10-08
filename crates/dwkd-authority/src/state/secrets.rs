@@ -198,6 +198,28 @@ impl SecretsState {
         }
     }
 
+    /// Whether `bytes` hold a configured secret's exact value. An outgoing
+    /// `net.http` request that does is refused (M5c, ADR-0050 §5 step 8):
+    /// the runtime should never hold one. Known credential shapes are not
+    /// consulted — they redact what comes back; they do not decide what may
+    /// leave.
+    pub(crate) fn holds_value(&self, bytes: &[u8]) -> bool {
+        let index = self.index.lock().unwrap_or_else(PoisonError::into_inner);
+        !index.find(bytes).is_empty()
+    }
+
+    /// Every configured secret's header name, lowercase: a `net.http` caller
+    /// may set none of them, whichever secret its request names (ADR-0050
+    /// §4).
+    pub(crate) fn reserved_headers(&self) -> Vec<String> {
+        self.config
+            .secrets
+            .iter()
+            .filter_map(|secret| secret.header.as_ref())
+            .map(|header| header.as_str().to_ascii_lowercase())
+            .collect()
+    }
+
     /// Fingerprint a value just resolved for a use (a secret whose start-up
     /// read failed is indexed from its first use on).
     pub(crate) fn register(
