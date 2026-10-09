@@ -17,6 +17,12 @@ pub(crate) enum Command {
     /// arguments and is not listed in the usage: nothing but the broker
     /// starts it, and started any other way it does nothing.
     ExecHelper,
+    /// `net.http`'s exchange worker (M5c, ADR-0050 §9, D11): one hop over a
+    /// connection the parent broker already made, handed over on the control
+    /// channel it was spawned with; then it exits. Takes no arguments and is
+    /// not listed in the usage: nothing but the broker starts it, and started
+    /// any other way it does nothing.
+    HttpWorker,
 }
 
 /// How to serve.
@@ -116,6 +122,7 @@ pub(crate) fn parse(args: &[String]) -> Result<Command, UsageError> {
         Some("-V" | "--version") if args.len() == 1 => return Ok(Command::Version),
         Some("-h" | "--help") if args.len() == 1 => return Ok(Command::Help),
         Some("exec-helper") if args.len() == 1 => return Ok(Command::ExecHelper),
+        Some("http-worker") if args.len() == 1 => return Ok(Command::HttpWorker),
         Some("serve") => {}
         Some(other) => {
             return Err(UsageError::new(format!(

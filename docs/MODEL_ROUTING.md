@@ -110,11 +110,12 @@ Because the kernel performs the call, cost control is structural: there is no un
 | Policy (admission) | Decides the run's `privacy_class` and `allowed_upstreams` |
 | Router | **Proposes** within those constraints |
 | Kernel model egress | **Enforces** — holds the credential, refuses disallowed origins |
-| Upstream aggregator or cloud platform | **Routes again, on its own side** — OpenRouter, Hugging Face's router or a platform's model catalogue picks the backend. The kernel authorises the aggregator's origin, and policy counts every backend it may forward to as reached: never `LOCAL_ONLY`, and a backend preference sent to it narrows a request without authorising anything |
+| Upstream aggregator or cloud platform | **Routes again, on its own side** — OpenRouter, Hugging Face's router or a platform's model catalogue picks the backend. The kernel authorises the aggregator's origin, and policy counts every backend it may forward to as reached: never `LOCAL_ONLY`, and a backend preference sent to it narrows a request without authorising anything. An operator-run gateway (LiteLLM Proxy; deferred, [ROADMAP.md](ROADMAP.md) M7) is an aggregator too, whatever address it listens on |
+| Local or self-hosted server | **Declared, not discovered** — Ollama, llama.cpp's `llama-server`, vLLM, SGLang, LM Studio, a self-hosted Hugging Face or NVIDIA NIM deployment is reached only through an operator-declared profile naming its exact origin or Unix socket. Being on loopback authorises nothing; a profile's loopback exception is bound to its origin and to model egress alone; `LOCAL_ONLY` admits only origins the kernel resolves to loopback or to an operator-declared local address ([ROADMAP.md](ROADMAP.md) M7) |
 
 A wrong router is a quality problem. A compromised router is still not a confidentiality problem.
 
-Provider breadth ([ROADMAP.md](ROADMAP.md) M7) adds candidates to step 1's eligible set (§3); it never adds a way around it. Fallback (§4) walks only that set, so health-driven failover is constrained routing, never permission to try any available vendor, and a provider family changes which model answers, never what the run may reach.
+Provider breadth ([ROADMAP.md](ROADMAP.md) M7) adds candidates to step 1's eligible set (§3); it never adds a way around it. A candidate's capabilities — tools, parallel tools, vision, structured output, context limit — are what its profile **declares** and a recorded fixture backs, so `needs_tools` or `needs_structured_output` (§2) excludes a local server that has not declared them rather than letting the request degrade silently. Fallback (§4) walks only that set, so health-driven failover is constrained routing, never permission to try any available vendor, and a provider family changes which model answers, never what the run may reach.
 
 ## 8. Testing
 

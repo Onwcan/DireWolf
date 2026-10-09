@@ -90,7 +90,7 @@ mod linux {
 
     use super::broker_support::Broker;
     use super::net_support::{
-        Origin, authorization, body_bytes, fixture, header_names, pki, tools_present,
+        Origin, authorization, body_bytes, fixture, header_names, missing_tool, pki,
     };
     use super::state_support::{
         START_MS, TempDir, admit_msg, decode, id, policy, profile, session,
@@ -151,9 +151,63 @@ mod linux {
         socket: PathBuf,
     }
 
+    /// Hosted run 37855884386: Ubuntu 24.04's OpenSSL 3.0 refuses
+    /// `openssl --version` ("Invalid command", status 1), so a probe that
+    /// asked every tool for `--version` found no OpenSSL where there was one,
+    /// and every real-daemon case reported NOT EXERCISED -- which the strict
+    /// gates rightly refused. Fake tools on a `PATH` of their own: an OpenSSL
+    /// with 3.0's behaviour is usable; a broken one and a missing one are each
+    /// named by the exact command that failed.
+    #[test]
+    fn each_tool_is_probed_by_its_own_spelling_and_a_missing_one_is_named() {
+        use super::net_support::{PREREQUISITES, missing_tool_on};
+        use super::state_support::spawn_guard;
+        use std::os::unix::fs::PermissionsExt as _;
+        use std::process::{Command, Stdio};
+        let dir = TempDir::new("tool-probes");
+        let bin = dir.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        // Written under the spawn guard: no child forked meanwhile inherits a
+        // script still open for writing (ETXTBSY).
+        let tool = |name: &str, script: &str| {
+            let _guard = spawn_guard();
+            let path = bin.join(name);
+            std::fs::write(&path, format!("#!/bin/sh\n{script}\n")).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        };
+        tool("bash", r#"[ "$1" = "--version" ] || exit 2"#);
+        tool("python3", r#"[ "$1" = "--version" ] || exit 2"#);
+        tool(
+            "openssl",
+            r#"[ "$1" = "version" ] && exit 0
+echo "Invalid command '$1'; type \"help\" for a list." >&2
+exit 1"#,
+        );
+        let path = bin.as_os_str();
+        // The fake is faithful: like OpenSSL 3.0, it refuses `--version`.
+        let refused = super::state_support::status(
+            Command::new(bin.join("openssl"))
+                .arg("--version")
+                .stdout(Stdio::null())
+                .stderr(Stdio::null()),
+        )
+        .unwrap();
+        assert!(!refused.success());
+        assert!(PREREQUISITES.contains(&("openssl", &["version"][..])));
+        assert_eq!(missing_tool_on(Some(path)), None, "OpenSSL 3.0 is usable");
+        // A broken OpenSSL is named, with its command.
+        tool("openssl", "exit 1");
+        let why = missing_tool_on(Some(path)).unwrap();
+        assert!(why.starts_with("`openssl version` failed"), "{why}");
+        // So is a missing one.
+        std::fs::remove_file(bin.join("openssl")).unwrap();
+        let why = missing_tool_on(Some(path)).unwrap();
+        assert!(why.starts_with("`openssl version` could not run"), "{why}");
+    }
+
     fn bench(tag: &str) -> Option<Bench> {
-        if !tools_present() {
-            println!("NOT EXERCISED: the net.http evidence needs bash, openssl and python3");
+        if let Some(why) = missing_tool() {
+            println!("NOT EXERCISED: the net.http evidence needs bash, openssl and python3: {why}");
             return None;
         }
         let dir = TempDir::new(tag);
@@ -1164,22 +1218,21 @@ mod linux {
         }
         // Residue: the broker's memory and every durable file.
         std::thread::sleep(std::time::Duration::from_millis(200));
-        // An origin that echoes the credential back hands the broker response
-        // plaintext holding it, and response plaintext passes through
-        // `rustls`'s received-plaintext and deframer buffers and the `http`
-        // crate's header map, which are freed without being zeroed: a
-        // documented residual (ADR-0050 §20, SECRETS.md), measured here and
-        // reported as it is — never asserted away. What the credential's own
-        // path leaves is asserted absent above.
-        let echo_residue = memory_holds(b.broker.pid, value.as_bytes());
-        assert!(echo_residue.is_some(), "the broker's memory was read");
+        // An origin that echoes the credential back hands its exchange worker
+        // response plaintext holding it -- through `rustls`'s record buffers
+        // and the `http` crate's header map, which free without zeroing. The
+        // worker is a short-lived process (D11, ADR-0050 §9): it is gone
+        // before the broker answers, and the long-lived broker never held a
+        // byte of the response. Asserted, as what the credential's own path
+        // leaves is above.
+        assert_eq!(
+            memory_holds(b.broker.pid, value.as_bytes()),
+            Some(false),
+            "broker residue after an echo"
+        );
         evidence(
             "credential-echo-broker-residue",
-            if echo_residue == Some(true) {
-                "PRESENT-documented-limitation-response-library-buffers"
-            } else {
-                "absent"
-            },
+            "absent-the-exchange-worker-is-gone",
         );
         let state = std::fs::read_dir(&h.state).unwrap();
         for entry in state.filter_map(Result::ok) {
@@ -1206,6 +1259,78 @@ mod linux {
                 HookAction::Continue
             }
         })
+    }
+
+    /// The `http-worker` children of `broker`.
+    fn workers_of(broker: u32) -> Vec<u32> {
+        let parent = broker.to_string();
+        let mut found = Vec::new();
+        for entry in std::fs::read_dir("/proc").unwrap().filter_map(Result::ok) {
+            let Some(pid) = entry
+                .file_name()
+                .to_str()
+                .and_then(|n| n.parse::<u32>().ok())
+            else {
+                continue;
+            };
+            let stat = std::fs::read_to_string(entry.path().join("stat")).unwrap_or_default();
+            let ppid = stat
+                .rsplit_once(')')
+                .and_then(|(_, rest)| rest.split_whitespace().nth(1))
+                .unwrap_or_default();
+            let cmdline = std::fs::read(entry.path().join("cmdline")).unwrap_or_default();
+            if ppid == parent && cmdline.split(|b| *b == 0).any(|arg| arg == b"http-worker") {
+                found.push(pid);
+            }
+        }
+        found
+    }
+
+    /// Whether `pid` is a live process: present, and not a zombie.
+    fn alive(pid: u32) -> bool {
+        std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
+            stat.rsplit_once(')')
+                .and_then(|(_, rest)| rest.split_whitespace().next())
+                != Some("Z")
+        })
+    }
+
+    /// D11 (ADR-0050 §9): the exchange worker holds the parent-death signal,
+    /// so a broker killed mid-exchange takes its worker with it -- nothing of
+    /// the hop outlives the broker -- and the hop, begun, is `UNKNOWN`.
+    #[test]
+    fn a_killed_broker_takes_its_exchange_worker_with_it() {
+        use std::time::{Duration, Instant};
+        let Some(b) = bench("net-worker-death") else {
+            return;
+        };
+        let mut h = host(&b, HostSpec::open("worker-death", &["network.https:*"]));
+        let broker = b.broker.pid;
+        let killer = std::thread::spawn(move || {
+            let until = Instant::now() + Duration::from_secs(30);
+            let worker = loop {
+                if let [worker] = workers_of(broker)[..] {
+                    break worker;
+                }
+                assert!(Instant::now() < until, "a worker holds the hop");
+                std::thread::sleep(Duration::from_millis(10));
+            };
+            // `/never` is read and never answered: the worker has sent.
+            std::thread::sleep(Duration::from_millis(500));
+            let pid = rustix::process::Pid::from_raw(i32::try_from(broker).unwrap()).unwrap();
+            rustix::process::kill_process(pid, rustix::process::Signal::KILL).unwrap();
+            let until = Instant::now() + Duration::from_secs(10);
+            while alive(worker) {
+                assert!(Instant::now() < until, "the worker outlived its broker");
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        });
+        let got = h.get(&b.o("/never"), "dies");
+        killer.join().unwrap();
+        assert!(!matches!(got, Got::Done(_)), "{got:?}");
+        assert_eq!(b.origin.to("/never").len(), 1);
+        assert_eq!(h.rows("SELECT state FROM net_request"), ["UNKNOWN"]);
+        evidence("broker-killed-takes-its-worker", "worker-gone-UNKNOWN");
     }
 
     #[test]

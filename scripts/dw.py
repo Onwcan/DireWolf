@@ -1899,6 +1899,13 @@ def task_secret_broker_evidence() -> None:
         raise TaskError(
             "NOT EXERCISED: the secret evidence runs only on Linux (ADR-0046); use WSL2 on Windows"
         )
+    # Mode A's consumer is net.http (ADR-0050 §8): its cases need the same
+    # local HTTPS origins as the net.http evidence.
+    missing = unusable_tool()
+    if missing is not None:
+        raise TaskError(
+            f"NOT EXERCISED: mode A's consumer needs bash, openssl and python3: {missing}"
+        )
     broker_user = os.environ.get("DW_BROKER_AS", "").strip()
     peer_user = os.environ.get("DW_PEER_AS", "").strip()
     core = os.environ.get("DW_M4E_CORE_EVIDENCE", "").strip() == "1"
@@ -2973,16 +2980,20 @@ NET_HTTP_CASES = (
     ("authority-net-pipeline", "taint-seen-destination"),
     ("authority-net-pipeline", "url-digest-only-in-audit"),
     ("authority-net-pipeline", "userinfo-and-literals"),
+    ("authority-net-pipeline", "worker-failed-before-send"),
+    ("authority-net-pipeline", "worker-unconfirmed-after-send"),
     ("broker-http", "bad-chunk-size"),
     ("broker-http", "body-past-bound-cut"),
     ("broker-http", "broker-rejudges-pinned-addresses"),
     ("broker-http", "close-delimited"),
+    ("broker-http", "concurrent-workers"),
     ("broker-http", "credential-composed-in-broker"),
     ("broker-http", "credential-header-injection-refused"),
     ("broker-http", "echo-body-redacted-before-encoding"),
     ("broker-http", "echo-header-dropped-whole"),
     ("broker-http", "echo-in-a-broken-response"),
     ("broker-http", "echo-straddling-the-bound"),
+    ("broker-http", "exchange-in-a-worker"),
     ("broker-http", "evidence-ca-under-production-trust"),
     ("broker-http", "expired"),
     ("broker-http", "gzip"),
@@ -3007,7 +3018,11 @@ NET_HTTP_CASES = (
     ("broker-http", "two-lengths"),
     ("broker-http", "two-locations"),
     ("broker-http", "untrusted-authority"),
+    ("broker-http", "worker-killed-after-sending"),
+    ("broker-http", "worker-refuses-a-stranger"),
+    ("broker-http", "worker-unavailable"),
     ("broker-http", "wrong-name"),
+    ("net-http", "broker-killed-takes-its-worker"),
     ("net-http", "budget-redirect-hop"),
     ("net-http", "budget-requests"),
     ("net-http", "crash-after-exchange"),
@@ -3090,6 +3105,41 @@ NET_HTTP_CASES = (
 )
 
 
+# What the real-daemon net.http and mode A evidence needs, each with the one
+# command that shows it usable here: the tool's own version spelling.
+# OpenSSL's is `openssl version` -- before 3.2 it refuses `--version` with
+# "Invalid command" and status 1, as Ubuntu 24.04's OpenSSL 3.0 does, which is
+# how hosted run 37855884386 lost every real-daemon case to NOT EXERCISED.
+EVIDENCE_TOOLS: tuple[tuple[str, ...], ...] = (
+    ("bash", "--version"),
+    ("openssl", "version"),
+    ("python3", "--version"),
+)
+
+
+def unusable_tool(probes: tuple[tuple[str, ...], ...] = EVIDENCE_TOOLS) -> str | None:
+    """The first probe that does not run and succeed, as its command and why;
+    None when every one does. A name on PATH is not enough: the tool must run."""
+    for probe in probes:
+        shown = " ".join(probe)
+        try:
+            done = subprocess.run(
+                list(probe),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+                timeout=60,
+            )
+        except FileNotFoundError:
+            return f"`{shown}`: not found"
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return f"`{shown}` could not run: {exc}"
+        if done.returncode != 0:
+            return f"`{shown}` exited {done.returncode}"
+    return None
+
+
 def require_net_evidence(output: str, cases: tuple[tuple[str, str], ...]) -> None:
     """Every (suite, case) must have printed its NET-EVIDENCE line, exercised."""
     if not cases:
@@ -3146,9 +3196,11 @@ def task_net_http_evidence() -> None:
             "NOT EXERCISED: the net.http evidence runs only on Linux (ADR-0050 §19); "
             "use WSL2 on Windows"
         )
-    for tool in ("bash", "openssl", "python3"):
-        if shutil.which(tool) is None:
-            raise TaskError(f"NOT EXERCISED: the net.http evidence needs {tool}")
+    missing = unusable_tool()
+    if missing is not None:
+        raise TaskError(
+            f"NOT EXERCISED: the net.http evidence needs bash, openssl and python3: {missing}"
+        )
     contention = os.environ.get("DW_CPU_CONTENTION", "").strip()
     if contention and not contention.isdigit():
         raise TaskError(f"DW_CPU_CONTENTION={contention}: not a count of processes")
@@ -3257,6 +3309,19 @@ NET_HTTP_MUTATIONS = (
         "crates/dwkd-authority/src/state/net_http/ledger.rs",
         "count(DISTINCT host || ':' || port) FROM net_hop WHERE run_id = ?1\",",
         "count(DISTINCT host || ':' || port) FROM net_hop WHERE run_id = ?1 AND 0\",",
+    ),
+    # D11: the broker takes the hop's own credential out of what comes back.
+    (
+        "a response header holding the credential is copied into the answer",
+        "crates/dwkd-broker/src/http/mod.rs",
+        ".is_some_and(|needle| needle.found_in(value.as_bytes()))",
+        ".is_some_and(|needle| needle.found_in(value.as_bytes()) && false)",
+    ),
+    (
+        "an echo straddling the response bound is cut before it is redacted",
+        "crates/dwkd-broker/src/http/mod.rs",
+        "let past = self.needle.as_ref().map_or(0, |needle| needle.len());",
+        "let past = self.needle.as_ref().map_or(0, |_| 0);",
     ),
 )
 

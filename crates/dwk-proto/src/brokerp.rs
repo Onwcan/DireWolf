@@ -777,6 +777,10 @@ wire_enum! {
         /// The broker could not render the request it was authorised to send
         /// (its own re-check failed): nothing was sent.
         HttpRequestInvalid = "HTTP_REQUEST_INVALID",
+        /// The hop's short-lived exchange worker could not be started or
+        /// handed the hop, or ended before a byte of the request was sent:
+        /// nothing was sent (ADR-0050 §9, D11).
+        HttpWorkerFailed = "HTTP_WORKER_FAILED",
     }
 }
 
@@ -798,6 +802,9 @@ wire_enum! {
         /// Sending the kill signal failed in a way that does not prove it was
         /// not delivered.
         SignalUnconfirmed = "SIGNAL_UNCONFIRMED",
+        /// A `net.http` hop's exchange worker began sending the request and
+        /// ended without an answer: the origin may have acted (ADR-0050 §9).
+        ExchangeUnconfirmed = "EXCHANGE_UNCONFIRMED",
         /// The container runtime may have created or removed a container and
         /// the broker cannot prove which: reconciliation decides, by label.
         EnvironmentUnconfirmed = "ENVIRONMENT_UNCONFIRMED",

@@ -882,8 +882,8 @@ M4E:DONE"
 
     #[test]
     fn mode_a_leaves_the_value_in_neither_process() {
-        if !super::net_support::tools_present() {
-            println!("NOT EXERCISED: mode A's consumer needs bash, openssl and python3");
+        if let Some(why) = super::net_support::missing_tool() {
+            println!("NOT EXERCISED: mode A's consumer needs bash, openssl and python3: {why}");
             return;
         }
         let value = fresh("host", 40);
@@ -1034,14 +1034,15 @@ M4E:DONE"
     /// header off the keep-list, a `Location`, a malformed and a truncated
     /// response -- fresh daemons, then: what the runtime would receive holds
     /// no 16-byte window of the value; the authority's process holds neither
-    /// the value nor its hex; the broker never encoded it (no hex form in its
-    /// memory); the audit names the handle's echoes and holds no byte of it.
-    /// What the broker's TLS and HTTP libraries leave in freed memory is
-    /// measured and reported, never asserted away.
+    /// the value nor its hex; the audit names the handle's echoes and holds no
+    /// byte of it. And the long-lived broker holds neither: the exchange ran
+    /// in a short-lived worker (D11, ADR-0050 §9) whose address space --
+    /// every buffer `rustls` and the `http` crate freed unzeroed included --
+    /// was gone before the broker answered.
     #[test]
     fn mode_a_echoed_credentials_stop_at_the_broker() {
-        if !super::net_support::tools_present() {
-            println!("NOT EXERCISED: mode A's consumer needs bash, openssl and python3");
+        if let Some(why) = super::net_support::missing_tool() {
+            println!("NOT EXERCISED: mode A's consumer needs bash, openssl and python3: {why}");
             return;
         }
         let value = fresh("echo", 40);
@@ -1190,11 +1191,12 @@ M4E:DONE"
                 (Some(false), Some(false)),
                 "{case}: the authority holds the echoed value"
             );
-            // The broker never encoded it: its memory holds no hex form.
-            assert_eq!(in_broker.1, Some(false), "{case}: the broker encoded it");
-            assert!(
-                in_broker.0.is_some(),
-                "{case}: the broker's memory was read"
+            // The long-lived broker: neither the value nor its hex. Its
+            // worker held the response, and is gone.
+            assert_eq!(
+                *in_broker,
+                (Some(false), Some(false)),
+                "{case}: the broker holds the echoed value"
             );
             // The audit: never a byte of it.
             assert!(!contains(audit, &value) && !contains(audit, value_hex.as_bytes()));
@@ -1203,14 +1205,7 @@ M4E:DONE"
                 clean,
                 "runtime-audit-authority-clean-broker-never-encoded-it",
             );
-            evidence(
-                residue,
-                if in_broker.0 == Some(true) {
-                    "PRESENT-documented-limitation-rustls-and-http-buffers"
-                } else {
-                    "absent"
-                },
-            );
+            evidence(residue, "absent-the-exchange-worker-is-gone");
         }
         // The audit names the handle for an echo it redacted, as a count.
         let (_, _, _, _, audit) = &measured[0];

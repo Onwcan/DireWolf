@@ -92,6 +92,7 @@ pub(super) struct SecretLaunch {
 /// helper's copy of the secret. The value fits the pipe's buffer (64 KiB on
 /// Linux; the value is at most 32 KiB), so the write never waits.
 fn secret_pipe(value: &[u8]) -> io::Result<OwnedFd> {
+    let _fork = super::fork_guard();
     let (reader, mut writer) = io::pipe()?;
     writer.write_all(value)?;
     drop(writer);
@@ -143,7 +144,11 @@ pub(super) fn launch(
         .stdout(Stdio::from(OwnedFd::from(stdout_w)))
         .stderr(Stdio::from(OwnedFd::from(theirs)))
         .process_group(0);
-    let mut child = command.spawn().map_err(setup)?;
+    let mut child = {
+        let _fork = super::fork_guard();
+        command.spawn()
+    }
+    .map_err(setup)?;
     // The parent's copies of the helper's stdout and control end close here,
     // so end of file on either means the helper's side closed.
     drop(command);

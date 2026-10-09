@@ -20,12 +20,12 @@ use std::collections::{BTreeMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use dwk_proto::brokerp::BrokerRefusal;
 use dwk_proto::brokerp::http::{
     ExchangeDisposition, HeaderCount, HttpExchangeDone, HttpHeader, HttpHeaderName,
     HttpHeaderValue, HttpLocation, HttpResolveDone, HttpStatus, NetAddress, NetAddresses,
     ResolveDisposition, ResponseHeaders,
 };
+use dwk_proto::brokerp::{BrokerRefusal, Indeterminate};
 use dwk_proto::dwkp::netops::{
     HttpHeader as CallHeader, HttpHeaderName as CallName, HttpHeaderValue as CallValue, HttpMethod,
     HttpUrlText, NetDecisionReason, NetHttpCall, RedirectEnd, RequestHeaders, ResponseLimit,
@@ -1441,6 +1441,23 @@ fn what_the_broker_answers_decides_failed_or_unknown_and_nothing_is_retried() {
             "UNKNOWN",
         ),
         (Ok(BrokerDelivery::Move), F::OutcomeUnknown, "UNKNOWN"),
+        // D11's exchange worker: one that could not be started, or that ended
+        // before its first request byte, sent nothing; one that ended after
+        // may have been heard.
+        (
+            Err(BrokerError::after_sending(BrokerFailure::Refused(
+                BrokerRefusal::HttpWorkerFailed,
+            ))),
+            F::BrokerExecutionError,
+            "FAILED",
+        ),
+        (
+            Err(BrokerError::after_sending(BrokerFailure::Indeterminate(
+                Indeterminate::ExchangeUnconfirmed,
+            ))),
+            F::OutcomeUnknown,
+            "UNKNOWN",
+        ),
     ];
     for (n, (answer, want, state)) in cases.into_iter().enumerate() {
         fx.fake.then(answer);
@@ -1463,6 +1480,8 @@ fn what_the_broker_answers_decides_failed_or_unknown_and_nothing_is_retried() {
     }
     evidence("broker-refusal-before-send", "FAILED-typed");
     evidence("broker-lost-after-send", "UNKNOWN-not-retried");
+    evidence("worker-failed-before-send", "FAILED-typed");
+    evidence("worker-unconfirmed-after-send", "UNKNOWN-not-retried");
 }
 
 #[test]

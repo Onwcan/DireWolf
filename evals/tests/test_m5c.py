@@ -32,7 +32,7 @@ def _outcome_for(suite: str, case: str) -> str:
     if case == "credential-cross-origin-redirect":
         return "never-attached"
     if (suite, case) == m5c.ECHO_RESIDUE:
-        return "PRESENT-documented-limitation-response-library-buffers"
+        return "absent-the-exchange-worker-is-gone"
     return "ok"
 
 
@@ -106,9 +106,12 @@ def test_a_credential_across_origins_fails() -> None:
         assert outcome.status is Status.FAIL, suite
 
 
-def test_an_undocumented_residue_fails() -> None:
-    outcome = m5c.judge_net_http(_output(change=(*m5c.ECHO_RESIDUE, "PRESENT")), 0)
-    assert outcome.status is Status.FAIL
+def test_any_broker_residue_fails() -> None:
+    # The exchange worker (D11) leaves the long-lived broker nothing to hold:
+    # a residue reported present -- even the old documented limitation -- fails.
+    for present in ("PRESENT", "PRESENT-documented-limitation-response-library-buffers", "absent"):
+        outcome = m5c.judge_net_http(_output(change=(*m5c.ECHO_RESIDUE, present)), 0)
+        assert outcome.status is Status.FAIL, present
 
 
 def test_a_failed_or_unexercised_task_fails_whatever_it_printed() -> None:

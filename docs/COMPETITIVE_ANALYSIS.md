@@ -276,7 +276,7 @@ experiences as "is the agent contained?", and several projects implement them to
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
 | P1 | Agent loop that completes tasks | PLANNED | M9 | IMPLEMENTED | IMPLEMENTED | IMPLEMENTED (alpha) | IMPLEMENTED | IMPLEMENTED | IMPLEMENTED | N/A | IMPLEMENTED | IMPLEMENTED | N/A | IMPLEMENTED |
 | P2 | Model providers | PLANNED (four families, §7a) | M7 | IMPLEMENTED | IMPLEMENTED | IMPLEMENTED (via host proxy) | IMPLEMENTED | IMPLEMENTED | IMPLEMENTED | N/A | IMPLEMENTED | IMPLEMENTED | N/A | IMPLEMENTED |
-| P3 | Local models | PLANNED (Ollama first-class; vLLM, LM Studio, self-hosted Hugging Face) | M7, M17 | IMPLEMENTED (Ollama, vLLM, SGLang, llama.cpp through its custom endpoint; LM Studio provider) | IMPLEMENTED (Ollama, LM Studio, vLLM, SGLang, llama.cpp) | NOT FOUND | IMPLEMENTED (`ollama` backend; LM Studio and vLLM through `openai_compatible`) | IMPLEMENTED (Ollama, vLLM, LM Studio) | IMPLEMENTED (Ollama) | N/A | NOT FOUND | IMPLEMENTED (Ollama and LM Studio crates) | N/A | UNVERIFIED |
+| P3 | Local models | PLANNED (Ollama and llama.cpp first-class; vLLM, SGLang, LM Studio, self-hosted Hugging Face, NVIDIA NIM) | M7, M17 | IMPLEMENTED (Ollama, vLLM, SGLang, llama.cpp through its custom endpoint; LM Studio provider) | IMPLEMENTED (Ollama, LM Studio, vLLM, SGLang, llama.cpp) | NOT FOUND | IMPLEMENTED (`ollama` backend; LM Studio and vLLM through `openai_compatible`) | IMPLEMENTED (Ollama, vLLM, LM Studio) | IMPLEMENTED (Ollama) | N/A | NOT FOUND | IMPLEMENTED (Ollama and LM Studio crates) | N/A | UNVERIFIED |
 | P4 | File tools | IMPLEMENTED (eight tools through the broker; no agent calls them yet; Linux) | M10 | IMPLEMENTED | IMPLEMENTED | IMPLEMENTED | IMPLEMENTED | IMPLEMENTED | IMPLEMENTED | N/A | IMPLEMENTED | IMPLEMENTED | UNVERIFIED | IMPLEMENTED |
 | P5 | Command execution | PARTIAL (built end to end; no production launch before M6) | M5, M6 | IMPLEMENTED | IMPLEMENTED | IMPLEMENTED | IMPLEMENTED | IMPLEMENTED | IMPLEMENTED | N/A | IMPLEMENTED | IMPLEMENTED | IMPLEMENTED | IMPLEMENTED |
 | P6 | Web fetch / search | PLANNED | M5, M10 | IMPLEMENTED | IMPLEMENTED | IMPLEMENTED (through the egress broker) | IMPLEMENTED | IMPLEMENTED | IMPLEMENTED | N/A | IMPLEMENTED | UNVERIFIED | N/A | UNVERIFIED |
@@ -348,10 +348,13 @@ says "use with any LLM"; its model layer is outside the repository pinned in §4
 | SambaNova | OpenFang |
 | Perplexity | OpenClaw; OpenFang; Hermes (a documented compatible endpoint) |
 
-Also present in the snapshots and **not** named as DireWolf targets: NVIDIA NIM, SGLang and
-llama.cpp's server, LiteLLM as a proxy, regional platforms (Qwen, Moonshot, MiniMax, Z.ai and
-others), hosted gateways, and logins that reuse a consumer subscription (GitHub Copilot,
-ChatGPT, Claude). M7 can reach a compatible one through a reviewed profile; none is a
+Also present in the snapshots: NVIDIA NIM, SGLang and llama.cpp's server, LiteLLM as a
+proxy, regional platforms (Qwen, Moonshot, MiniMax, Z.ai and others), hosted gateways, and
+logins that reuse a consumer subscription (GitHub Copilot, ChatGPT, Claude). **Since
+2026-10-09** llama.cpp's `llama-server` is a first-class DireWolf target and SGLang and NVIDIA
+NIM are named targets, each a declarative profile ([ROADMAP.md](ROADMAP.md) M7); LiteLLM
+Proxy is deferred, as a gateway that would hold upstream credentials outside the authority.
+The rest are not named: M7 can reach a compatible one through a reviewed profile; none is a
 commitment.
 
 **Not counted as verified:** OpenLegion's providers beyond the ten it names; any provider of
@@ -361,14 +364,29 @@ router. **Current vendor documentation** (Hugging Face, read 2026-10-07, not a s
 Text Generation Inference serves an OpenAI-compatible Messages API at
 `/v1/chat/completions`, self-hosted and on Inference Endpoints; the Inference Providers
 router chooses the serving backend on its own side — fastest by default, cheapest or a
-preferred or named provider on request — and fails over automatically.
+preferred or named provider on request — and fails over automatically. **Read 2026-10-09**
+(each project's own documentation, not a snapshot, and no code): llama.cpp's server README —
+an OpenAI-compatible API (chat completions, completions, models, embeddings), server-sent
+events, tool calls through the chat template, JSON-schema output and grammars, a `usage`
+object, loopback by default with an optional API key, `/health`, the context size reported
+by `/props`; SGLang's documentation — an OpenAI-compatible server on loopback port 30000 by
+default, tool calls only with a model-family tool-call parser, JSON-schema output through
+`response_format` and regex or EBNF through non-standard fields; NVIDIA's NIM for LLMs
+documentation and FAQ — OpenAI-compatible chat completions on port 8000 served by vLLM,
+`/v1/health/ready`, GPU model profiles, the model fetched at start unless cached, production
+use under NVIDIA AI Enterprise; LiteLLM's proxy documentation — a self-hosted gateway on port
+4000 that maps public model names to upstream `api_base`s and keys from its own
+configuration, with virtual keys, fallbacks between providers and logging callbacks to
+third-party services.
 
 **DireWolf's planning conclusion.** M7 does not trail the serious agent runtimes on provider
 breadth ([ROADMAP.md](ROADMAP.md) M7): native adapters where protocol semantics require
 them (Anthropic, OpenAI, Gemini); the major cloud model platforms (Bedrock, Vertex AI,
 Azure); **one** reviewed OpenAI-compatible adapter whose per-service profiles cover the
-compatible vendors above; first-class local and self-hosted serving (Ollama, vLLM, LM
-Studio); and Hugging Face explicitly, hosted and self-hosted.
+compatible vendors above; first-class local and self-hosted serving (Ollama and llama.cpp,
+with vLLM, SGLang, LM Studio and NVIDIA NIM as profiles); and Hugging Face explicitly,
+hosted and self-hosted. An operator-run gateway (LiteLLM Proxy) is deferred: if admitted, it
+is an aggregator, never local.
 
 **Breadth does not override the security model.** No provider SDK or adapter gets authority
 or a privileged network path; credentials stay with the authority and are injected only at

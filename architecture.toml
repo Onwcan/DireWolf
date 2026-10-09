@@ -172,6 +172,15 @@ patterns = [
     '(?i)\bperplexity[\s._-]*ai\b',
     '(?i)\bvllm\b',
     '(?i)\blm[\s._-]*studio\b',
+    # Named 2026-10-09 (docs/ROADMAP.md M7): llama.cpp's server, first-class;
+    # SGLang; NVIDIA NIM, qualified by its vendor ("nim" alone is a word and a
+    # language). LiteLLM Proxy is deferred, not a target -- but its name or SDK
+    # in core code would be a provider branch all the same.
+    '(?i)\bllama[\s._-]*cpp\b',
+    '(?i)\bllama[\s._-]*server\b',
+    '(?i)\bsglang\b',
+    '(?i)\bnvidia[\s._-]*nim\b',
+    '(?i)\blitellm\b',
 ]
 reason = """
 Goal G3, model agnosticism: swapping providers changes configuration, not core
@@ -740,6 +749,10 @@ exempt_paths = [
     # M5c (ADR-0050): the evidence-only trust anchor `--allow-evidence-trust`
     # names, read once at start; TX046 keeps every other caller away from it.
     "crates/dwkd-broker/src/http/tls.rs",
+    # M5c D11 (ADR-0050 §9): the HTTPS client's unit tests, compiled only under
+    # `cfg(test)`: they read `/proc` to count the exchange workers they started
+    # and see each one reaped.
+    "crates/dwkd-broker/src/http/tests.rs",
 ]
 suffixes = [".rs"]
 patterns = [
@@ -797,6 +810,8 @@ patterns = [
     '^(?!\s*(//|#)).*\bbroker\.(hello|fs_[a-z]+|process_[a-z]+|outcome)\b',
     # The broker's launch helper (M4d) is its own binary's private mode.
     '^(?!\s*(//|#)).*\bexec-helper\b',
+    # So is its exchange worker (M5c D11).
+    '^(?!\s*(//|#)).*\bhttp-worker\b',
 ]
 reason = """
 The authority-to-broker protocol is private (ADR-0043): no envelope, no
@@ -948,6 +963,12 @@ exempt_paths = [
     # once per test process, with `tests/net_http/make-pki.sh` (openssl).
     # Compiled only under `cfg(test)`; it launches nothing a hop could reach.
     "crates/dwkd-broker/src/http/tests.rs",
+    # M5c D11 (ADR-0050 §9): the exchange worker -- this binary,
+    # `http-worker`, with an empty environment and its own process group,
+    # handed one already-connected socket and the credential's pipe, as the
+    # launch helper is handed its descriptors. It executes nothing a hop
+    # names; TX049 keeps every other file from starting it.
+    "crates/dwkd-broker/src/http/worker.rs",
 ]
 suffixes = [".rs"]
 patterns = [
@@ -1013,7 +1034,9 @@ Hygiene, not containment.
 id = "TX023-only-the-launch-helper-executes"
 paths = ["crates/dwkd-broker/src"]
 # `hardening.rs` sets RLIMIT_CORE on the broker ITSELF at serve start (M4e,
-# ADR-0046 §9): no launch, no target, before the listener exists.
+# ADR-0046 §9): no launch, no target, before the listener exists. M5c D11
+# (ADR-0050 §9): it also hardens the HTTPS exchange worker ITSELF before the
+# worker receives its hop -- the worker executes nothing.
 exempt_paths = [
     "crates/dwkd-broker/src/process/helper.rs",
     "crates/dwkd-broker/src/hardening.rs",
@@ -1831,6 +1854,36 @@ attacker first.
 
 Hygiene, not containment: the guard's own tests cover every range, and the
 evidence shows both daemons refusing the same answers.
+"""
+
+[[text_rules]]
+id = "TX049-the-exchange-worker-is-started-only-by-the-https-client"
+paths = ["crates/dwkd-broker/src"]
+# Where the mode is parsed and dispatched, the one place that spawns it, and
+# the client's unit tests (which start it as a stranger to show it refuses).
+exempt_paths = [
+    "crates/dwkd-broker/src/config.rs",
+    "crates/dwkd-broker/src/main.rs",
+    "crates/dwkd-broker/src/http/worker.rs",
+    "crates/dwkd-broker/src/http/tests.rs",
+]
+suffixes = [".rs"]
+patterns = [
+    '^(?!\s*//).*"http-worker"',
+]
+reason = """
+`net.http`'s exchange worker (M5c D11, ADR-0050 §9) holds a hop's credential,
+request and response so that the long-lived broker never does, and exits when
+the hop does: everything `rustls` and the `http` crate freed unzeroed goes with
+its address space. It is started in one place -- the client, after the broker
+judged the hop and dialled its pinned address -- with an empty environment,
+handed exactly that connection and the credential's pipe, and it refuses any
+caller but its parent broker. A second place that started it would be a
+worker handed something no judgement stood in front of.
+
+Hygiene, not containment: the worker checks its peer, hardens itself and
+inherits no descriptor; the evidence shows the broker's memory clean after an
+echo, the worker reaped, and a stranger's start refused.
 """
 
 # ===========================================================================

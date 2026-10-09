@@ -92,16 +92,20 @@ M5C_CASES: Final = frozenset(
         ("authority-net-pipeline", "taint-seen-destination"),
         ("authority-net-pipeline", "url-digest-only-in-audit"),
         ("authority-net-pipeline", "userinfo-and-literals"),
+        ("authority-net-pipeline", "worker-failed-before-send"),
+        ("authority-net-pipeline", "worker-unconfirmed-after-send"),
         ("broker-http", "bad-chunk-size"),
         ("broker-http", "body-past-bound-cut"),
         ("broker-http", "broker-rejudges-pinned-addresses"),
         ("broker-http", "close-delimited"),
+        ("broker-http", "concurrent-workers"),
         ("broker-http", "credential-composed-in-broker"),
         ("broker-http", "credential-header-injection-refused"),
         ("broker-http", "echo-body-redacted-before-encoding"),
         ("broker-http", "echo-header-dropped-whole"),
         ("broker-http", "echo-in-a-broken-response"),
         ("broker-http", "echo-straddling-the-bound"),
+        ("broker-http", "exchange-in-a-worker"),
         ("broker-http", "evidence-ca-under-production-trust"),
         ("broker-http", "expired"),
         ("broker-http", "gzip"),
@@ -126,7 +130,11 @@ M5C_CASES: Final = frozenset(
         ("broker-http", "two-lengths"),
         ("broker-http", "two-locations"),
         ("broker-http", "untrusted-authority"),
+        ("broker-http", "worker-killed-after-sending"),
+        ("broker-http", "worker-refuses-a-stranger"),
+        ("broker-http", "worker-unavailable"),
         ("broker-http", "wrong-name"),
+        ("net-http", "broker-killed-takes-its-worker"),
         ("net-http", "budget-redirect-hop"),
         ("net-http", "budget-requests"),
         ("net-http", "crash-after-exchange"),
@@ -222,16 +230,14 @@ REFUSALS: Final = frozenset(
     }
 )
 
-# The one residue the evidence reports rather than asserts away: an origin
-# that echoes the credential back hands the broker response plaintext, which
-# `rustls`'s record copies and the `http` crate's header map free without
-# zeroing (ADR-0050 §20, D11). The broker redacts the echo before anything it
-# encodes holds it -- asserted by the cases above -- so this is the library's
-# residue alone. Absent is better.
+# An origin that echoes the credential back hands the exchange response
+# plaintext holding it, which `rustls`'s record copies and the `http` crate's
+# header map free without zeroing. The exchange runs in a short-lived worker
+# (ADR-0050 §9, D11) that is gone before the broker answers, so the evidence
+# asserts the long-lived broker's memory holds none of it -- and this gate
+# accepts that outcome alone: a residue reported present is a failure.
 ECHO_RESIDUE: Final = ("net-http", "credential-echo-broker-residue")
-ECHO_RESIDUE_OUTCOMES: Final = frozenset(
-    {"absent", "PRESENT-documented-limitation-response-library-buffers"}
-)
+ECHO_RESIDUE_OUTCOMES: Final = frozenset({"absent-the-exchange-worker-is-gone"})
 
 
 def _records(output: str) -> list[dict[str, Any]]:

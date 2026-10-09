@@ -59,9 +59,9 @@ fn effects() -> Effects<'static> {
             false,
             no_proxies(),
         ))),
-        http: Box::leak(Box::new(crate::http::Client::new(
+        http: Box::leak(Box::new(crate::http::Client::in_process(
             std::sync::Arc::new(crate::egress::resolve::SystemResolver),
-            crate::http::tls::production().unwrap_or_else(|e| unreachable!("{e}")),
+            crate::http::tls::Trust::Production,
             crate::http::Deadlines::PRODUCTION,
         ))),
     }

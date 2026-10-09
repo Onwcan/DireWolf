@@ -89,8 +89,12 @@
 //! verification always on and Mozilla's roots compiled in, rendered and read
 //! by `ureq-proto`'s framing with DireWolf's stricter checks, every bound and
 //! deadline the broker's own. It follows no redirect, re-resolves nothing,
-//! pools nothing and reads no proxy setting. Mode A's credential is composed
-//! into the one request it was authorised for, from a one-shot pipe, and
+//! pools nothing and reads no proxy setting. Each hop's exchange runs in a
+//! short-lived worker of this binary, `http-worker`, over the connection the
+//! broker made: the long-lived broker never holds the request or a byte of
+//! the response, and what the TLS and HTTP libraries freed goes with the
+//! worker. Mode A's credential is read once from its one-shot pipe, handed to
+//! the worker, composed into the one request it was authorised for and
 //! scrubbed with it; an echo of it in the response is redacted before
 //! anything of the response is encoded. `--allow-evidence-trust` replaces the
 //! roots with a test authority, loudly, and only beside
@@ -175,6 +179,7 @@ fn main() -> ExitCode {
         }
         Ok(Command::Serve(serve_config)) => serve(&serve_config),
         Ok(Command::ExecHelper) => exec_helper(),
+        Ok(Command::HttpWorker) => http_worker(),
         Err(error) => {
             log(&error.to_string());
             eprint!("{}", help());
@@ -332,9 +337,15 @@ fn http_client(
     resolver: egress::resolve::Shared,
 ) -> Result<http::Client, String> {
     let trust = match &config.evidence_trust {
-        None => http::tls::production()?,
+        None => {
+            // Built once here, so a broker that could not trust anything
+            // refuses to start rather than fail each hop.
+            let trust = http::tls::Trust::Production;
+            trust.config()?;
+            trust
+        }
         Some(path) => {
-            let trust = http::tls::evidence(path)?;
+            let trust = http::tls::Trust::evidence(path)?;
             log(
                 "EVIDENCE TRUST: the net.http client trusts the certificates in a test file \
                  INSTEAD OF Mozilla's roots (--allow-evidence-trust); this is the M5c evidence \
@@ -343,10 +354,18 @@ fn http_client(
             trust
         }
     };
+    // Each hop's exchange runs in a short-lived worker of this very binary
+    // (ADR-0050 §9, D11), named now as the launch helper is.
+    let worker = std::env::current_exe()
+        .map_err(|e| format!("cannot name the broker binary for the exchange worker: {e}"))?;
+    if worker.to_string_lossy().ends_with(" (deleted)") {
+        return Err("the broker binary was replaced after it started".to_owned());
+    }
     Ok(http::Client::new(
         resolver,
         trust,
         http::Deadlines::PRODUCTION,
+        worker,
     ))
 }
 
@@ -385,6 +404,16 @@ fn exec_helper() -> ExitCode {
 
 #[cfg(not(target_os = "linux"))]
 fn exec_helper() -> ExitCode {
+    ExitCode::from(2)
+}
+
+#[cfg(target_os = "linux")]
+fn http_worker() -> ExitCode {
+    http::worker::serve()
+}
+
+#[cfg(not(target_os = "linux"))]
+fn http_worker() -> ExitCode {
     ExitCode::from(2)
 }
 

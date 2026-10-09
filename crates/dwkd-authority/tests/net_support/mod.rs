@@ -15,6 +15,7 @@
     clippy::missing_panics_doc
 )]
 
+use std::ffi::OsStr;
 use std::io::{BufRead as _, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -26,17 +27,50 @@ fn root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
-/// Whether this host has what the evidence needs: `bash`, `openssl` and
-/// `python3`. Their absence is NOT EXERCISED, said so, never a pass.
-pub(crate) fn tools_present() -> bool {
-    ["bash", "openssl", "python3"].iter().all(|tool| {
-        Command::new(tool)
-            .arg("--version")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .is_ok_and(|s| s.success())
-    })
+/// What the evidence needs, each with the one command that shows it usable
+/// here: the tool's **own** version spelling. OpenSSL's is `openssl version`
+/// -- before 3.2 it has no `--version` and refuses it with "Invalid command"
+/// and status 1, which is what Ubuntu 24.04's OpenSSL 3.0 does -- while bash
+/// and Python spell it `--version`.
+pub(crate) const PREREQUISITES: [(&str, &[&str]); 3] = [
+    ("bash", &["--version"]),
+    ("openssl", &["version"]),
+    ("python3", &["--version"]),
+];
+
+/// Whether `tool args` runs and succeeds, searching `path` when given (the
+/// regression tests' fake tools) and this process's `PATH` otherwise. The
+/// error names the exact command and why it failed.
+fn probe(tool: &str, args: &[&str], path: Option<&OsStr>) -> Result<(), String> {
+    let shown = format!("`{tool} {}`", args.join(" "));
+    let mut command = Command::new(tool);
+    command
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    if let Some(path) = path {
+        command.env("PATH", path);
+    }
+    match super::state_support::status(&mut command) {
+        Ok(status) if status.success() => Ok(()),
+        Ok(status) => Err(format!("{shown} failed ({status})")),
+        Err(error) => Err(format!("{shown} could not run ({:?})", error.kind())),
+    }
+}
+
+/// The first prerequisite that is missing or unusable, as the command that
+/// failed and why -- on `path` when given. `None` when every one runs.
+pub(crate) fn missing_tool_on(path: Option<&OsStr>) -> Option<String> {
+    PREREQUISITES
+        .iter()
+        .find_map(|(tool, args)| probe(tool, args, path).err())
+}
+
+/// The first prerequisite this host lacks, or `None`: its absence is NOT
+/// EXERCISED, said so with the failing command, never a pass.
+pub(crate) fn missing_tool() -> Option<String> {
+    missing_tool_on(None)
 }
 
 /// Make the run's PKI under `dir/pki`.

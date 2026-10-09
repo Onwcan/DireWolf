@@ -929,12 +929,15 @@ fn the_helper_run_by_anyone_else_does_nothing() {
     let dir = Scratch::new("helper");
     let marker = dir.0.join("ran");
     // stderr a pipe, not a socket whose peer is the parent broker.
-    let output = std::process::Command::new(helper_binary())
-        .arg("exec-helper")
-        .env_clear()
-        .current_dir(&dir.0)
-        .output()
-        .unwrap();
+    let output = {
+        let _fork = super::fork_guard();
+        std::process::Command::new(helper_binary())
+            .arg("exec-helper")
+            .env_clear()
+            .current_dir(&dir.0)
+            .output()
+            .unwrap()
+    };
     assert_eq!(output.status.code(), Some(2));
     assert!(output.stdout.is_empty() && output.stderr.is_empty());
     assert!(!marker.exists());
@@ -1134,14 +1137,17 @@ fn a_peer_in_a_pid_namespace_this_process_cannot_see_is_read_soundly() {
         return;
     }
     let _serial = serial();
-    let available = std::process::Command::new("unshare")
-        .args(HIDDEN_NAMESPACES)
-        .arg("true")
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .is_ok_and(|status| status.success());
+    let available = {
+        let _fork = super::fork_guard();
+        std::process::Command::new("unshare")
+            .args(HIDDEN_NAMESPACES)
+            .arg("true")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+    };
     if !available {
         eprintln!(
             "NOT EXERCISED: unprivileged user and pid namespaces are not available here \
@@ -1150,19 +1156,22 @@ fn a_peer_in_a_pid_namespace_this_process_cannot_see_is_read_soundly() {
         return;
     }
     let (ours, theirs) = std::os::unix::net::UnixStream::pair().unwrap();
-    let output = std::process::Command::new("unshare")
-        .args(HIDDEN_NAMESPACES)
-        .arg(std::env::current_exe().unwrap())
-        .args([
-            "--exact",
-            "process::tests::a_peer_in_a_pid_namespace_this_process_cannot_see_is_read_soundly",
-            "--nocapture",
-            "--test-threads=1",
-        ])
-        .env(HIDDEN_READER, "1")
-        .stdin(std::process::Stdio::from(OwnedFd::from(theirs)))
-        .output()
-        .unwrap();
+    let output = {
+        let _fork = super::fork_guard();
+        std::process::Command::new("unshare")
+            .args(HIDDEN_NAMESPACES)
+            .arg(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "process::tests::a_peer_in_a_pid_namespace_this_process_cannot_see_is_read_soundly",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(HIDDEN_READER, "1")
+            .stdin(std::process::Stdio::from(OwnedFd::from(theirs)))
+            .output()
+            .unwrap()
+    };
     drop(ours);
     let text = String::from_utf8_lossy(&output.stdout);
     assert!(

@@ -410,7 +410,8 @@ pub(super) const fn failure_reason(failure: BrokerFailure) -> ToolFailureReasonV
             | BrokerRefusal::HttpConnectFailed
             | BrokerRefusal::HttpTlsFailed
             | BrokerRefusal::HttpTimeout
-            | BrokerRefusal::HttpRequestInvalid => ToolFailureReasonV3::BrokerExecutionError,
+            | BrokerRefusal::HttpRequestInvalid
+            | BrokerRefusal::HttpWorkerFailed => ToolFailureReasonV3::BrokerExecutionError,
         },
         BrokerFailure::Indeterminate(_) => ToolFailureReasonV3::BrokerExecutionError,
     }

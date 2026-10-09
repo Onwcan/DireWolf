@@ -16,8 +16,16 @@
 //! the process dumpable for a same-uid harness that reads its `/proc`; the
 //! core limit holds regardless. `mlock` and `MADV_DONTDUMP` are not
 //! implemented: this build links no safe API for either.
+//!
+//! The HTTPS exchange worker (M5c D11, `http::worker`) hardens itself here
+//! too, before it receives its hop: never dumpable, whatever the broker's
+//! development flag, and bound to the life of the broker that started it.
 
-use rustix::process::{DumpableBehavior, Resource, Rlimit, set_dumpable_behavior, setrlimit};
+use rustix::process::{
+    DumpableBehavior, Pid, Resource, Rlimit, Signal, getppid, set_dumpable_behavior,
+    set_parent_process_death_signal, setrlimit,
+};
+use rustix::thread::set_no_new_privs;
 
 /// Apply the hardening. `dumpable` keeps the process dumpable (development).
 ///
@@ -39,4 +47,20 @@ pub(crate) fn apply(dumpable: bool) -> Result<(), String> {
             .map_err(|e| format!("cannot make the process non-dumpable: {e}"))?;
     }
     Ok(())
+}
+
+/// The exchange worker's hardening: no core, not dumpable, killed with its
+/// broker, no privilege gained by any later `execve`. `parent` is the broker
+/// as the worker first saw it; a broker that died before the death signal
+/// was armed leaves a different parent, and the worker does not go on.
+pub(crate) fn worker(parent: Option<Pid>) -> bool {
+    let no_core = Rlimit {
+        current: Some(0),
+        maximum: Some(0),
+    };
+    setrlimit(Resource::Core, no_core).is_ok()
+        && set_dumpable_behavior(DumpableBehavior::NotDumpable).is_ok()
+        && set_parent_process_death_signal(Some(Signal::KILL)).is_ok()
+        && getppid() == parent
+        && set_no_new_privs(true).is_ok()
 }

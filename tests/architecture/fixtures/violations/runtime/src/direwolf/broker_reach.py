@@ -3,3 +3,4 @@
 PRIVATE_KIND = "broker.fs_read"
 LAUNCH_KIND = "broker.process_start"
 HELPER = ("dwkd-broker", "exec-helper")
+WORKER = ("dwkd-broker", "http-worker")

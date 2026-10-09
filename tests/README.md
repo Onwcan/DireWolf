@@ -125,7 +125,8 @@ binary as a separate runtime that reads files holding live values through
 the released daemons, receives placeholders, and has its memory scanned, hosts the authority library in a
 child against the real broker for mode A — and, for an echoed credential (M5c, ADR-0050 D11),
 once per way it can come back, with fresh daemons, scanning both for the value and its hex
-form and reporting what the broker's libraries leave as measured — and checks the hardened daemons'
+form and asserting that the long-lived broker holds neither once the hop's exchange worker
+is gone — and checks the hardened daemons'
 core limit and dumpable flag; its three-identity and core-file tests are
 `#[ignore]`d unless the task selects them (`DW_BROKER_AS`, `DW_PEER_AS`,
 `DW_M4E_CORE_EVIDENCE`), and use `sudo` only to stage binaries, read memory

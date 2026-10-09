@@ -1588,6 +1588,43 @@ def _secret_env(monkeypatch: pytest.MonkeyPatch, recorder: _SecretRecorder) -> N
     monkeypatch.setattr(dw, "run_captured", recorder.captured)
     monkeypatch.setattr(dw, "uvrun", recorder.uvrun)
     monkeypatch.setattr(dw, "second_identity", lambda v: (v, 1001, 998 if "BROKER" in v else 65534))
+    # The orchestration is under test here, not this host's tools.
+    monkeypatch.setattr(dw, "unusable_tool", lambda *_args: None)
+
+
+def test_each_evidence_tool_is_probed_by_its_own_spelling() -> None:
+    """Hosted run 37855884386: Ubuntu 24.04's OpenSSL 3.0 refuses `--version`."""
+    probes = {probe[0]: probe[1:] for probe in dw.EVIDENCE_TOOLS}
+    assert probes == {"bash": ("--version",), "openssl": ("version",), "python3": ("--version",)}
+
+
+@pytest.mark.skipif(sys.platform.startswith("win"), reason="the fake tools are POSIX shell scripts")
+def test_an_unusable_evidence_tool_is_named_by_its_command(tmp_path: Path) -> None:
+    fake = tmp_path / "openssl"
+    # OpenSSL 3.0's own behaviour: `version` answers, `--version` is refused.
+    fake.write_text(
+        '#!/bin/sh\n[ "$1" = "version" ] && exit 0\n'
+        'echo "Invalid command \'$1\'; type \\"help\\" for a list." >&2\nexit 1\n',
+        encoding="utf-8",
+    )
+    fake.chmod(0o755)
+    assert dw.unusable_tool(((str(fake), "version"),)) is None
+    assert dw.unusable_tool(((str(fake), "--version"),)) == f"`{fake} --version` exited 1"
+    missing = tmp_path / "absent"
+    assert dw.unusable_tool(((str(missing), "version"),)) == f"`{missing} version`: not found"
+
+
+@pytest.mark.skipif(not LINUX, reason="the tasks run only on Linux")
+@pytest.mark.parametrize("task", ["task_net_http_evidence", "task_secret_broker_evidence"])
+def test_an_evidence_task_without_a_usable_tool_is_not_exercised_and_runs_nothing(
+    monkeypatch: pytest.MonkeyPatch, task: str
+) -> None:
+    recorder = _SecretRecorder()
+    _secret_env(monkeypatch, recorder)
+    monkeypatch.setattr(dw, "unusable_tool", lambda *_args: "`openssl version` exited 1")
+    with pytest.raises(dw.TaskError, match=r"NOT EXERCISED: .*`openssl version` exited 1"):
+        getattr(dw, task)()
+    assert recorder.commands == []
 
 
 @pytest.mark.skipif(not LINUX, reason="the task runs only where the secret evidence does")

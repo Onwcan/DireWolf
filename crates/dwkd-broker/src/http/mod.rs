@@ -47,16 +47,24 @@
 //! by the value's length, so an echo straddling the bound is seen whole — is
 //! redacted into a `Zeroizing` buffer and only then cut to the bound. The
 //! count crosses as `credential_echoes`, for the authority's audit; a response
-//! that did not complete carries no header and no `Location` at all. What
-//! `rustls` and the `http` crate hold of the response in their own
-//! allocations, freed without being zeroed, is the measured residual of
-//! ADR-0050 §20.
+//! that did not complete carries no header and no `Location` at all.
+//!
+//! **The exchange runs in a worker (D11).** What `rustls` and the `http`
+//! crate hold of a response in their own allocations is freed without being
+//! zeroed, and safe code cannot scrub it. So the long-lived broker does the
+//! hop's judging and its dial ([`Client::prepare`]) and hands the connection
+//! and the credential's value to a short-lived worker -- this binary,
+//! `http-worker` ([`worker`]) -- which composes, sends, reads and redacts
+//! ([`converse`]) and exits before the broker answers. The broker never holds
+//! the credential's header, the request or a byte of the response; what the
+//! libraries freed goes with the worker's address space.
 //!
 //! [ADR-0050]: ../../../../docs/adr/0050-m5c-kernel-performed-net-http-ssrf-redirects-and-credential-egress.md
 
 mod connect;
 mod render;
 pub(crate) mod tls;
+pub(crate) mod worker;
 
 #[cfg(test)]
 mod tests;
@@ -64,6 +72,8 @@ mod tests;
 use std::io::{ErrorKind, Read as _, Write as _};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, TcpStream};
 use std::os::fd::OwnedFd;
+use std::os::unix::net::UnixStream;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -134,13 +144,46 @@ impl Deadlines {
     };
 }
 
-/// The client: the broker's one resolver, its one trust configuration and
-/// its deadlines.
+/// Where a hop's exchange runs once the broker has judged it and dialled.
+#[derive(Debug)]
+enum Runner {
+    /// A short-lived worker process -- this binary, `http-worker` -- per hop
+    /// (`worker`): production.
+    Worker(PathBuf),
+    /// This process: this crate's unit tests only, unreachable from any build
+    /// a user runs.
+    #[cfg(test)]
+    InProcess(Arc<ClientConfig>),
+}
+
+/// The client: the broker's one resolver, its one trust choice, its
+/// deadlines, and where exchanges run.
 #[derive(Debug)]
 pub(crate) struct Client {
     resolver: resolve::Shared,
-    tls: Arc<ClientConfig>,
+    trust: tls::Trust,
     deadlines: Deadlines,
+    runner: Runner,
+}
+
+/// What the broker hands a hop's exchange: the connection to a pinned
+/// address, and the credential's value in a fresh pipe when the hop carries
+/// one.
+#[derive(Debug)]
+pub(crate) struct Prepared {
+    pub(crate) socket: TcpStream,
+    pub(crate) credential: Option<OwnedFd>,
+}
+
+impl Prepared {
+    /// What an exchange worker was handed: the descriptor of the connection
+    /// its broker made -- it dials nothing itself -- and the credential's pipe.
+    pub(crate) fn handed(socket: OwnedFd, credential: Option<OwnedFd>) -> Self {
+        Self {
+            socket: TcpStream::from(socket),
+            credential,
+        }
+    }
 }
 
 /// The octets as a standard-library address, for the one place that dials.
@@ -177,16 +220,40 @@ fn arm(socket: &TcpStream, until: Instant) -> Result<(), ()> {
 }
 
 impl Client {
-    /// A client over `resolver`, trusting `tls`'s roots.
+    /// The broker's client over `resolver`, trusting `trust`'s roots, its
+    /// exchanges each run by a worker of `worker_binary` (the running broker
+    /// binary).
     pub(crate) fn new(
         resolver: resolve::Shared,
-        tls: Arc<ClientConfig>,
+        trust: tls::Trust,
         deadlines: Deadlines,
+        worker_binary: PathBuf,
     ) -> Self {
         Self {
             resolver,
-            tls,
+            trust,
             deadlines,
+            runner: Runner::Worker(worker_binary),
+        }
+    }
+
+    /// The same, its exchanges run in this process: this crate's unit tests.
+    #[cfg(test)]
+    #[allow(
+        clippy::panic,
+        reason = "a test fixture that cannot be built is a failed test"
+    )]
+    pub(crate) fn in_process(
+        resolver: resolve::Shared,
+        trust: tls::Trust,
+        deadlines: Deadlines,
+    ) -> Self {
+        let config = trust.config().unwrap_or_else(|e| panic!("{e}"));
+        Self {
+            resolver,
+            trust,
+            deadlines,
+            runner: Runner::InProcess(config),
         }
     }
 
@@ -241,22 +308,38 @@ impl Client {
         // The hop's bound, and never past the channel's: the outcome must
         // still be sent.
         let hop_until = (started + self.deadlines.hop).min(until);
-        match self.perform(authorisation, secret, started, hop_until) {
-            Ok(done) => OutcomeResult::done(BrokerDone::http_exchange(done)),
-            Err(refusal) => OutcomeResult::Refused(refusal),
+        let prepared = match self.prepare(authorisation, secret, started, hop_until) {
+            Ok(prepared) => prepared,
+            Err(refusal) => return OutcomeResult::Refused(refusal),
+        };
+        match &self.runner {
+            Runner::Worker(binary) => {
+                worker::exchange(binary, &self.trust, authorisation, prepared, hop_until)
+            }
+            #[cfg(test)]
+            Runner::InProcess(config) => outcome(converse(
+                config,
+                self.deadlines,
+                authorisation,
+                prepared,
+                hop_until,
+                None,
+            )),
         }
     }
 
-    fn perform(
+    /// The broker's half of a hop, in the long-lived broker: its own
+    /// judgement of where the hop may go, the credential's value handed on,
+    /// and the dial to a pinned address. Nothing of the request is sent here.
+    fn prepare(
         &self,
         authorisation: &HttpExchangeAuthorisation,
         secret: Option<OwnedFd>,
         started: Instant,
         hop_until: Instant,
-    ) -> Result<HttpExchangeDone, BrokerRefusal> {
+    ) -> Result<Prepared, BrokerRefusal> {
         let host = authorisation.host.as_str();
-        // 1. The broker's own judgement of where this may go: the same guard,
-        // the same table, whatever the authority said.
+        // 1. The same guard, the same table, whatever the authority said.
         if guard::name_blocked(host) {
             return Err(BrokerRefusal::HttpAddressBlocked);
         }
@@ -268,26 +351,13 @@ impl Client {
         if guard::judge(&pinned, self.resolver.exceptions()).is_err() {
             return Err(BrokerRefusal::HttpAddressBlocked);
         }
-        // 2. The credential, read once, composed once; the needle its
-        // response is redacted of.
-        let (credential, needle) = match (&authorisation.credential, secret) {
-            (Some(credential), Some(fd)) => {
-                let rendered = render::credential_header(credential, &fd)?;
-                (Some((rendered.name, rendered.value)), Some(rendered.needle))
-            }
-            (None, None) => (None, None),
+        // 2. The credential: read once, checked, handed on in a fresh pipe.
+        let credential = match (&authorisation.credential, secret) {
+            (Some(credential), Some(fd)) => Some(render::hand_on(credential, &fd)?),
+            (None, None) => None,
             _ => return Err(BrokerRefusal::DescriptorCount),
         };
-        // 3. The request, rendered from typed fields. Nothing is dialled yet.
-        let request = request(authorisation, credential)?;
-        let body = Zeroizing::new(
-            authorisation
-                .body
-                .as_ref()
-                .map_or_else(Vec::new, HexContent::to_bytes),
-        );
-        let limit = usize::try_from(authorisation.response_limit.get()).unwrap_or(0);
-        // 4. The pinned addresses, and the handshake.
+        // 3. The pinned addresses.
         let connect_until = (started + self.deadlines.connect).min(hop_until);
         let Some(socket) = connect::dial(&pinned, authorisation.port.get(), connect_until) else {
             return Err(if Instant::now() >= hop_until {
@@ -296,45 +366,92 @@ impl Client {
                 BrokerRefusal::HttpConnectFailed
             });
         };
-        let server_name =
-            ServerName::try_from(host.to_owned()).map_err(|_| BrokerRefusal::HttpRequestInvalid)?;
-        let connection = ClientConnection::new(Arc::clone(&self.tls), server_name)
-            .map_err(|_| BrokerRefusal::HttpTlsFailed)?;
-        let mut stream = StreamOwned::new(connection, socket);
-        let handshake_until = (Instant::now() + self.deadlines.handshake).min(hop_until);
-        handshake(&mut stream, handshake_until)?;
-        crate::crash::point("http_after_handshake");
-        // 5. The request, the response.
-        let mut conversation = Conversation {
-            stream,
-            deadlines: self.deadlines,
-            hop_until,
-            sent: false,
-            bytes_sent: 0,
-            bytes_received: 0,
-            status: None,
-            headers: Vec::new(),
-            location: None,
-            location_seen: false,
-            headers_dropped: 0,
-            cookies_dropped: 0,
-            needle,
-            echoes: 0,
-        };
-        let outcome = conversation.run(request, &body, limit, authorisation.method);
-        conversation.close();
-        let (disposition, kept, truncated) = match outcome {
-            Ok((kept, truncated)) => (ExchangeDisposition::Completed, kept, truncated),
-            Err(Ended::Refused(refusal)) if !conversation.sent => return Err(refusal),
-            Err(Ended::Refused(_)) => (
-                ExchangeDisposition::ResponseMalformed,
-                Zeroizing::new(Vec::new()),
-                false,
-            ),
-            Err(Ended::Sent(disposition)) => (disposition, Zeroizing::new(Vec::new()), false),
-        };
-        conversation.done(disposition, &kept, truncated)
+        Ok(Prepared { socket, credential })
     }
+}
+
+/// An exchange's answer as an outcome.
+pub(crate) fn outcome(result: Result<HttpExchangeDone, BrokerRefusal>) -> OutcomeResult {
+    match result {
+        Ok(done) => OutcomeResult::done(BrokerDone::http_exchange(done)),
+        Err(refusal) => OutcomeResult::Refused(refusal),
+    }
+}
+
+/// The exchange's half of a hop, in its worker: the credential composed from
+/// its pipe, the request rendered from typed fields, the TLS handshake over
+/// the connection the broker made, the conversation, and the answer -- the
+/// response redacted of the credential before any of it is copied into the
+/// answer. `marker` is told, once, immediately before the first byte of the
+/// request is written: from then on the origin may have acted.
+pub(crate) fn converse(
+    config: &Arc<ClientConfig>,
+    deadlines: Deadlines,
+    authorisation: &HttpExchangeAuthorisation,
+    prepared: Prepared,
+    hop_until: Instant,
+    marker: Option<UnixStream>,
+) -> Result<HttpExchangeDone, BrokerRefusal> {
+    let Prepared { socket, credential } = prepared;
+    // 1. The credential, composed once; the needle its response is redacted
+    // of.
+    let (credential, needle) = match (&authorisation.credential, credential) {
+        (Some(credential), Some(fd)) => {
+            let rendered = render::credential_header(credential, &fd)?;
+            (Some((rendered.name, rendered.value)), Some(rendered.needle))
+        }
+        (None, None) => (None, None),
+        _ => return Err(BrokerRefusal::DescriptorCount),
+    };
+    // 2. The request, rendered from typed fields.
+    let request = request(authorisation, credential)?;
+    let body = Zeroizing::new(
+        authorisation
+            .body
+            .as_ref()
+            .map_or_else(Vec::new, HexContent::to_bytes),
+    );
+    let limit = usize::try_from(authorisation.response_limit.get()).unwrap_or(0);
+    // 3. The handshake.
+    let server_name = ServerName::try_from(authorisation.host.as_str().to_owned())
+        .map_err(|_| BrokerRefusal::HttpRequestInvalid)?;
+    let connection = ClientConnection::new(Arc::clone(config), server_name)
+        .map_err(|_| BrokerRefusal::HttpTlsFailed)?;
+    let mut stream = StreamOwned::new(connection, socket);
+    let handshake_until = (Instant::now() + deadlines.handshake).min(hop_until);
+    handshake(&mut stream, handshake_until)?;
+    crate::crash::point("http_after_handshake");
+    // 4. The request, the response.
+    let mut conversation = Conversation {
+        stream,
+        deadlines,
+        hop_until,
+        sent: false,
+        marker,
+        bytes_sent: 0,
+        bytes_received: 0,
+        status: None,
+        headers: Vec::new(),
+        location: None,
+        location_seen: false,
+        headers_dropped: 0,
+        cookies_dropped: 0,
+        needle,
+        echoes: 0,
+    };
+    let outcome = conversation.run(request, &body, limit, authorisation.method);
+    conversation.close();
+    let (disposition, kept, truncated) = match outcome {
+        Ok((kept, truncated)) => (ExchangeDisposition::Completed, kept, truncated),
+        Err(Ended::Refused(refusal)) if !conversation.sent => return Err(refusal),
+        Err(Ended::Refused(_)) => (
+            ExchangeDisposition::ResponseMalformed,
+            Zeroizing::new(Vec::new()),
+            false,
+        ),
+        Err(Ended::Sent(disposition)) => (disposition, Zeroizing::new(Vec::new()), false),
+    };
+    conversation.done(disposition, &kept, truncated)
 }
 
 /// Complete the TLS handshake before `until`, and require `http/1.1` or no
@@ -419,6 +536,9 @@ struct Conversation {
     /// Whether any byte of the request was written: from then on the origin
     /// may have acted.
     sent: bool,
+    /// The worker's control channel: told `S` once, before the first byte of
+    /// the request, so that a worker that then dies is known to have sent.
+    marker: Option<UnixStream>,
     bytes_sent: u64,
     bytes_received: u64,
     status: Option<HttpStatus>,
@@ -462,7 +582,14 @@ impl Conversation {
             return Ok(());
         }
         arm(&self.stream.sock, self.hop_until).map_err(|()| self.deadline())?;
-        // From the first byte on, the origin may act on what it has.
+        // The broker hears it first: from the first byte on, the origin may
+        // act on what it has. Unheard, nothing is sent.
+        if !self.sent
+            && let Some(mut marker) = self.marker.as_ref()
+            && marker.write_all(worker::SENDING).is_err()
+        {
+            return Err(Ended::Refused(BrokerRefusal::HttpWorkerFailed));
+        }
         self.sent = true;
         match self.stream.write_all(bytes) {
             Ok(()) => {

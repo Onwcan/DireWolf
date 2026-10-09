@@ -239,9 +239,12 @@ fronting residual — carried unseen, bounded by the budget.
 M5c is implemented in the working tree and its local gates pass, its closeout review
 included; it is complete only when its owner accepts
 [ADR-0050](adr/0050-m5c-kernel-performed-net-http-ssrf-redirects-and-credential-egress.md)
-(Proposed) — its decisions D1–D12, D11's residual among them — and the required hosted
-`net-http` job, every multi-identity half and the gated `m5c-net-http` eval pass on the
-committed tree.
+(Proposed) — its decisions D1–D12, D11's exchange worker and residual among them — and
+the required hosted `net-http` job, every multi-identity half and the gated `m5c-net-http`
+eval pass on a new commit. Hosted run 37855884386 failed before measuring anything: its tool
+probe asked OpenSSL 3.0 for `openssl --version`, which 3.0 refuses, so every real-daemon
+case was NOT EXERCISED; the probe now asks each tool by its own spelling and names the
+command that failed.
 
 **Deps:** M5b. **Deliverables (as built, pending acceptance):** ToolInvoke and
 CanonicalPreview version 4 with the typed `net.http` call (no address, resolver, proxy,
@@ -256,16 +259,19 @@ are never refilled; private protocol version 7 (`broker.http_resolve`,
 `broker.http_exchange`, `broker.http_credential_exchange`; `broker.secret_egress`
 retired); the broker as the HTTPS client (`rustls` with `ring` and Mozilla's roots, the
 sans-I/O `ureq-proto` engine, pinned dials only, strict framing, no decoding, deadlines,
-never following a redirect); mode A's consumer — a credential attached only at the
+never following a redirect), each hop's TLS and HTTP in a one-hop exchange worker
+(`dwkd-broker http-worker`, hardened, handed only its connection, credential and hop, gone
+before the broker answers); mode A's consumer — a credential attached only at the
 request's first origin, each hop its own decided and recorded `secret.use`, through a
-fresh one-shot pipe, and an echo of it taken out by the broker before anything of the
-response is encoded. The `PROXY_ONLY` tunnel is untouched.
+fresh one-shot pipe, and an echo of it taken out before anything of the response is
+encoded. The `PROXY_ONLY` tunnel is untouched.
 **Acceptance:** `make net-http-evidence` (no internet: real TLS origins, the fixture
-resolver, the released broker) — 166 required cases across SSRF and DNS, HTTP and
-redirects, TLS, secrets and residue, lifecycle and budgets; `make net-http-mutations` —
-six weakened safeguards each caught; M4e's secret evidence moved to `net.http` with every
-case kept, and an echoed credential measured nine ways (178 secret cases); required hosted
-job `net-http` (also under CPU contention) and gated eval `m5c-net-http`.
+resolver, the released broker) — 174 required cases across SSRF and DNS, HTTP and
+redirects, TLS, secrets and residue, the exchange worker's lifecycle, lifecycle and
+budgets; `make net-http-mutations` — eight weakened safeguards each caught; M4e's secret
+evidence moved to `net.http` with every case kept, and an echoed credential asserted absent
+from the broker nine ways (178 secret cases); required hosted job `net-http` (also under
+CPU contention) and gated eval `m5c-net-http`.
 **Adversarial:** every guarded range and its IPv4-mapped, NAT64, 6to4 and Teredo shapes; a
 mixed answer; metadata names and addresses; address literals in every spelling; userinfo,
 case, trailing dots, encoded dot segments, backslashes, port confusion; rebinding within and
@@ -275,9 +281,10 @@ close-delimited and silent responses; wrong-name, expired, self-signed and untru
 certificates, and the test authority under production trust; a credential across origins,
 in the request, echoed back; crashes after resolution, intent and exchange; reused keys;
 spent budgets; the shipped packs and taint.
-**Residual, pending the owner's acceptance:** an origin that echoes the credential can
-leave it in the broker's TLS and HTTP libraries' freed memory (ADR-0050 §20, D11) — never
-in a message, the audit, the authority or the runtime's answer — measured and reported.
+**Residual, pending the owner's acceptance:** an origin that echoes the credential has it
+in that hop's exchange worker until the worker exits, and in the physical pages it freed
+until the kernel reuses them (ADR-0050 §20, D11) — never in a message, the audit, the
+authority, the long-lived broker or the runtime's answer.
 **Deferred:** package-manager routing (M5d/M5e); model egress (M7); approvals (M6).
 
 #### M5d · Production sandboxed `process.exec` — **NOT STARTED**
@@ -325,14 +332,40 @@ merge gates; weakened-profile closure for `PROXY_ONLY`; package-manager acceptan
 | Native protocols | Anthropic; OpenAI; Google Gemini API | One adapter each: their request, streaming and usage semantics differ |
 | Cloud model platforms | AWS Bedrock; Google Vertex AI; Azure OpenAI / Azure AI Foundry | One platform adapter each. Their authentication -- request signing, short-lived tokens minted from a service identity -- is a kernel-side credential mechanism, never something the runtime builds |
 | OpenAI-compatible profiles | OpenRouter; Hugging Face Inference Providers; Groq; Mistral; DeepSeek; xAI; Together AI; Fireworks AI; Cerebras; SambaNova; Perplexity; Cohere | **One** reviewed OpenAI-compatible adapter; each service is a declarative profile (origin, authentication scheme, usage pointers, streaming dialect), admitted only after its compatibility is verified against its own documentation -- a service that needs more gets a native adapter instead |
-| Local and self-hosted | **Ollama** (first-class); vLLM; LM Studio; self-hosted Hugging Face serving (Text Generation Inference, Inference Endpoints) | The OpenAI-compatible adapter against an operator-declared origin, or Ollama's own API where M7's ADR prefers it |
+| Local and self-hosted | **Ollama** (first-class); **llama.cpp's `llama-server`** (first-class); vLLM; SGLang; LM Studio; self-hosted Hugging Face serving (Text Generation Inference, Inference Endpoints); NVIDIA NIM (an operator-run container) | The OpenAI-compatible adapter against an operator-declared origin, or Ollama's own API where M7's ADR prefers it; each server is a declarative profile, admitted only after its compatibility is verified against its own documentation |
+| Operator-run gateways | LiteLLM Proxy -- **deferred**, not an M7 target (below) | -- |
 
 **Ollama remains a first-class local provider** (a project-owner requirement, recorded at M3e) -- no longer the only named local target. An Ollama model reference (`<ollama-model-ref>`: any reference the installed Ollama supports, a model name or a model:tag variant) is passed as **data and configuration**, and nothing matches, branches on or hard-codes a model name: `qwen3.8` in the example below is illustrative, and no model is special. **Hugging Face is a first-class target** (a project-owner requirement, 2026-10-07), both hosted and self-hosted: its Inference Providers router (OpenAI-compatible chat completions) and a self-hosted Text Generation Inference or Inference Endpoints deployment (its OpenAI-compatible Messages API). Neither is a privileged path: each is a profile behind the same model egress, origin binding, privacy-class enforcement, credential injection, metering and stream relay as every other provider.
 
+**llama.cpp is a first-class local target** (a project-owner requirement, 2026-10-09), beside Ollama. Its `llama-server` serves an OpenAI-compatible API -- chat completions, completions, models and embeddings, server-sent-event streaming, tool calls through the model's chat template, `response_format` JSON and JSON-schema output (and its own grammars), a `usage` object -- on loopback by default with an optional API key, a `/health` endpoint, and the context size the operator started it with reported by `/props` (its server README, read 2026-10-09). It is a profile behind the one OpenAI-compatible adapter, not a library: DireWolf links no llama.cpp code and never builds, bundles, launches or downloads the server or a model; a GGUF model reference is data, and no model name is special.
+
+**SGLang and NVIDIA NIM are named targets; LiteLLM Proxy is deferred** (evaluated 2026-10-09 against their own documentation; [COMPETITIVE_ANALYSIS.md](COMPETITIVE_ANALYSIS.md) §7a):
+
+- **SGLang** -- an OpenAI-compatible server (loopback, port 30000 and no API key by default). Tool calls work only when the server is started with the tool-call parser for the model's family; structured output is `response_format` with a JSON schema (its regex and EBNF extensions travel in non-standard fields, which the profile does not use). A declarative profile; its capabilities are declared per deployment, never assumed.
+- **NVIDIA NIM** -- an operator-run inference container whose LLM API is OpenAI-compatible (chat completions and completions, with streaming and tool calls, served in its current release by a vLLM backend; `/v1/models` names the served model; `/v1/health/ready` reports readiness). A declarative profile against the origin the operator declares. DireWolf pulls no container, holds no NGC key and selects no NIM model profile -- that is deployment, the operator's. The container fetches its model at start unless the operator pre-caches it: its own egress, outside DireWolf's model egress and outside a run. NIM needs NVIDIA GPUs and is used under NVIDIA's licence terms (production use under NVIDIA AI Enterprise, by NVIDIA's FAQ) -- both the operator's. NVIDIA's hosted API catalog is a different, remote origin and not a target here.
+- **LiteLLM Proxy -- deferred.** It is a gateway, not an SDK: it holds the upstream providers' keys in its own configuration, forwards to whatever `api_base` that configuration names, falls back between providers, and can send request logs to third-party observability services. Through it, the kernel would authorise one origin while prompts reach any upstream its configuration chooses, with credentials outside the authority's per-origin binding and audit. If it is ever admitted, it is an **aggregator**: remote whatever address it listens on, so never `LOCAL_ONLY`; everything its configuration can reach counts as reached; its own virtual key the only credential DireWolf injects. Its Python SDK is never imported (TX001).
+
+**A local server is not authorised by being local.** A local or self-hosted server is reached only through a profile the operator declares, naming its exact origin (scheme, host, port) or its Unix socket; nothing is discovered by scanning, and a server merely listening on loopback is authorised for nothing. The loopback exception a local profile needs is that profile's own, bound to that origin and to model egress: it never reaches `net.http`, whose production guard refuses loopback (ADR-0050, TX035), or the `PROXY_ONLY` tunnel. `LOCAL_ONLY` admits only origins the kernel itself resolves to loopback or to an address the operator declared local, under a profile declared local; a gateway is never local, and a profile declared local whose origin resolves elsewhere is refused. Any local process can bind a free loopback port before the intended server does, so M7's ADR decides how a local profile proves its server -- a Unix socket whose directory only the server's user can enter, TLS with a pinned certificate, or the listening socket's owner -- and until it does, a local profile carries no credential. A local server's API key (`llama-server --api-key`, SGLang's `--api-key`) is a secret handle like any other, injected only at its origin and never in cleartext over TCP: only over TLS or a Unix socket (ADR-0050 D6). The runtime never reaches a local server itself: it has no network (M9).
+
+**Capability compatibility** (planning; M7's ADR fixes it). A profile declares what its server supports; the adapter refuses a request that needs an undeclared capability with a typed reason -- it never silently degrades a tool call to text or a schema to free text -- and every declared capability is backed by a recorded contract fixture in ordinary CI.
+
+| Capability | M7's plan | llama.cpp `llama-server` | SGLang | NVIDIA NIM |
+|---|---|---|---|---|
+| Chat | `/v1/chat/completions` (Ollama's own API where its ADR prefers it) | yes | yes | yes |
+| Streaming | server-sent events canonicalised through `CanonicalDelta`; the kernel relays, the runtime never holds the socket | yes | yes | yes |
+| Tool calls | OpenAI `tools`; tool calls are proposals the authority gates like any other | through the model's chat template | with the server's tool-call parser for the model family | yes, per the served model |
+| Structured output | `response_format` with a JSON schema; the result is validated by the runtime, never trusted | yes, and its own grammars | yes (JSON schema; regex and EBNF unused) | to verify per release |
+| Context limit | declared by the profile or read once from the server; a request over it refused before sending | `-c`, reported by `/props` | `--context-length` or the model's configuration | the served model's |
+| Usage | the provider's `usage` metered by the kernel; a profile that reports none is metered by request and says so | `usage` object | to verify | to verify |
+| Multimodal | declared per profile and model, never assumed | with a projector file, model-dependent | model-dependent | model-dependent |
+| Cancellation | the kernel closes the stream; nothing more is relayed; whether the server stops computing is measured, not assumed | to verify | to verify | to verify |
+| Errors | HTTP status and the OpenAI error object mapped to typed failures; a provider's error text is untrusted content | OpenAI-style | OpenAI-style | OpenAI-style |
+| Timeouts | the kernel's deadlines per profile (connect, first token, idle, total), bounded; a CPU-only local server may need a longer first token | server-side read/write timeout too | -- | -- |
+
 **Breadth never buys authority.** Local use, like every other, must fit the privacy and model-authority model of [MODEL_ROUTING.md](MODEL_ROUTING.md) and [ADR-0020](adr/0020-provider-request-path-v2.md): the kernel performs the egress, the privacy class is kernel-derived ([ADR-0028](adr/0028-policy-input-ownership.md)), and a local endpoint is an origin like any other. No provider adapter, profile or SDK holds a credential, opens a socket or gets a privileged network path; a credential is injected only into a request to the origin it is bound to, and a cross-origin redirect never carries it. **Aggregators and cloud platforms route on their own side** -- OpenRouter, Hugging Face's router, a platform's model catalogue choose the backend that serves a request -- so the origin the kernel authorises is the aggregator's, policy counts whatever it forwards to as reached, and a `LOCAL_ONLY` run reaches none of them; a backend preference sent to an aggregator narrows a request and authorises nothing. **Health and failover are constrained routing**: a fallback is chosen only among the upstreams the run's policy already allows, at its privacy class, never from "any available vendor". Authentication a declarative profile cannot express is M7's own ADR to decide: it extends ADR-0020's profile format by review, or the provider is left out. **`--model` selects intelligence only**, for every provider. Provider and model choice never select or widen policy, capabilities, approvals, the sandbox, the privacy class, taint, standing grants or the authority profile.
 
-**Acceptance:** no provider or model name outside `providers/` (TX001, CI gate); switching provider or model -- within a family and across families -- changes which model answers and nothing that decides authority; a `LOCAL_ONLY` run cannot reach a remote vendor, an aggregator or a cloud platform; a credential is injected only at the origin it is authorised for, and a cross-origin redirect cannot forward it; metering agrees with the usage each family's provider reports; every family's stream canonicalises through `CanonicalDelta`; router health and failover cannot escape the run's allowed upstreams or privacy class; at least one remote native provider, one OpenAI-compatible provider and one local or self-hosted provider work end to end, and the Hugging Face and Ollama paths are both exercised. The evidence is deterministic, recorded contract fixtures per family in ordinary CI; live calls to paid providers are optional integration jobs kept apart from it, never a pull-request requirement.
-**Adversarial:** router asked to route to an unauthorised upstream; credential-to-wrong-endpoint; cross-origin redirect credential leak; an aggregator's fallback to a backend the policy excludes; a profile or a model reference crafted to select another provider or origin; a profile declared local whose origin is remote.
+**Acceptance:** no provider or model name outside `providers/` (TX001, CI gate); switching provider or model -- within a family and across families -- changes which model answers and nothing that decides authority; a `LOCAL_ONLY` run cannot reach a remote vendor, an aggregator or a cloud platform; a credential is injected only at the origin it is authorised for, and a cross-origin redirect cannot forward it; metering agrees with the usage each family's provider reports; every family's stream canonicalises through `CanonicalDelta`; router health and failover cannot escape the run's allowed upstreams or privacy class; at least one remote native provider, one OpenAI-compatible provider and one local or self-hosted provider work end to end, and the Hugging Face, Ollama and llama.cpp paths are all exercised -- llama.cpp's in a dedicated, CPU-only integration job against a small fixture model; a server listening on loopback without a declared profile is unreachable, and a local profile's origin is bound to model egress alone; every declared capability has its contract fixture, and an undeclared one is refused, typed. The evidence is deterministic, recorded contract fixtures per family and per compatible server's dialect (llama.cpp, SGLang, NIM among them) in ordinary CI; live calls to paid providers, real local servers and anything needing a GPU are optional integration jobs kept apart from it, never a pull-request requirement.
+**Adversarial:** router asked to route to an unauthorised upstream; credential-to-wrong-endpoint; cross-origin redirect credential leak; an aggregator's fallback to a backend the policy excludes; a profile or a model reference crafted to select another provider or origin; a profile declared local whose origin is remote; an undeclared server listening on loopback; another local process bound to a declared local profile's port first; a gateway declared local under `LOCAL_ONLY`; a local server's key over plain HTTP; a `net.http` call aimed at a local profile's origin; a tool call or schema the profile did not declare.
 
 ### M8 · Storage, events, run state machine
 **Deps:** M2, M3. **Deliverables:** `runtime.db` schema + migrations + backup + corruption quarantine; event log + envelope + projections + rebuild; run lifecycle FSM + wait sets; session leases + fencing; idempotent ingress.

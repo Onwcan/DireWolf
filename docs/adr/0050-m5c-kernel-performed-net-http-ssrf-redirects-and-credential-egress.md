@@ -1,6 +1,6 @@
 # ADR-0050: M5c — kernel-performed `net.http`: the authority authorises every hop, the broker is the HTTPS client, and a credential reaches only its bound origin
 
-**Status:** Proposed · **Date:** 2026-10-08 · **Amends (on acceptance):** [ADR-0018](0018-authority-broker-split.md) (the broker gains a second outbound path), [ADR-0019](0019-language-rationale-v2.md) (the broker's dependency set: a TLS client, §18), [ADR-0039](0039-durable-authority-state.md) (schema version 8, §11), [ADR-0043](0043-m4b-private-broker-channel-and-brokered-fs-read.md) (private protocol version 7, §12), [ADR-0046](0046-m4e-secret-handles-backends-injection-and-redaction.md) (§12: mode A gains its consumer; `broker.secret_egress` is retired), [ADR-0048](0048-m5b-proxy-only-topology-and-connect-proxy.md) (the IP guard and the resolver are shared, not forked — its "Revisit if" on `net.http`; TX037's single dial site becomes two) · **Refines:** [ADR-0000](0000-authority-plane-separation.md) (§3 argues why this is not a second path from cognition to effect), [ADR-0005](0005-tool-system.md) and [TOOL_SYSTEM.md](../TOOL_SYSTEM.md) §3 (tool 12, `net.http`), [ADR-0028](0028-policy-input-ownership.md) (destination novelty and the destination address are kernel-derived), [NETWORK_SECURITY.md](../NETWORK_SECURITY.md) §§2–5, 8, 9
+**Status:** Proposed · **Date:** 2026-10-08 · **Amends (on acceptance):** [ADR-0018](0018-authority-broker-split.md) (the broker gains a second outbound path), [ADR-0019](0019-language-rationale-v2.md) (the broker's dependency set: a TLS client, §18), [ADR-0039](0039-durable-authority-state.md) (schema version 8, §11), [ADR-0043](0043-m4b-private-broker-channel-and-brokered-fs-read.md) (private protocol version 7, §12), [ADR-0045](0045-m4d-process-execution-broker.md) (the broker starts a process in a second place: one exchange worker per `net.http` hop, §9, D11; TX021, TX049), [ADR-0046](0046-m4e-secret-handles-backends-injection-and-redaction.md) (§12: mode A gains its consumer; `broker.secret_egress` is retired), [ADR-0048](0048-m5b-proxy-only-topology-and-connect-proxy.md) (the IP guard and the resolver are shared, not forked — its "Revisit if" on `net.http`; TX037's single dial site becomes two) · **Refines:** [ADR-0000](0000-authority-plane-separation.md) (§3 argues why this is not a second path from cognition to effect), [ADR-0005](0005-tool-system.md) and [TOOL_SYSTEM.md](../TOOL_SYSTEM.md) §3 (tool 12, `net.http`), [ADR-0028](0028-policy-input-ownership.md) (destination novelty and the destination address are kernel-derived), [NETWORK_SECURITY.md](../NETWORK_SECURITY.md) §§2–5, 8, 9
 
 > **The runtime asks for one typed HTTPS request; the authority decides every
 > hop of it; the broker performs each hop as the TLS client, to an address
@@ -70,8 +70,8 @@ egress (M20); plain HTTP, WebSocket and HTTP/2 (D6).
 | DNS resolution | asks, only for a granted host | **performs** (its resolver, its deadline) |
 | IP guard | **judges again** (same function) | **judges** (same function) |
 | Durable intent, outcome, `UNKNOWN` | **yes** | no |
-| Secret read, one-shot handoff | **yes** | reads the pipe once, renders, zeroises |
-| TCP dial (pinned addresses only), TLS, HTTP/1.1 | no | **performs** |
+| Secret read, one-shot handoff | **yes** | reads the pipe once and hands the value on, in a fresh pipe, to the hop's exchange worker (§9), which renders it and zeroises |
+| TCP dial (pinned addresses only), TLS, HTTP/1.1 | no | **performs** — the dial in the broker; TLS and HTTP/1.1 in the hop's exchange worker, over that connection (§9, D11) |
 | Follow a redirect | **decides** (new hop) | never |
 | Redaction, taint, the answer, audit | **yes** — every indexed value and known shape; the audit | the hop's **own** credential only, before anything of the response is encoded (§8, D11); counts |
 
@@ -227,12 +227,16 @@ For the request and for each redirect hop, in this order, in the authority:
   therefore carry the credential again, each time decided and recorded (D4);
   a **cross-origin hop never carries it**, whatever the metadata says about the
   other origin, because the request did not ask for it there.
-- The broker renders `Name: prefix value` (ADR-0046 §12) into the request it
-  is about to write — the only place a credential header is composed (TX045)
-  — refuses CR/LF/NUL again, and zeroises the header and the pipe contents when
-  the exchange ends. The credential exists in the broker for one exchange.
-- **An echo stops at the broker (D11).** The broker that put the value on the
-  wire takes it out of what comes back, as M4e's supervisor does for a launch
+- The broker reads the value once from the authority's pipe, refuses a byte
+  a header cannot carry, and hands it on in a fresh pipe to the hop's exchange
+  worker (§9); the worker renders `Name: prefix value` (ADR-0046 §12) into the
+  request it is about to write — the only place a credential header is
+  composed (TX045) — refuses CR/LF/NUL again, and zeroises the header and the
+  pipe contents when the exchange ends. The credential exists in the
+  long-lived broker between its one read and the hand-on, in a buffer zeroed
+  then, and in the worker for one exchange.
+- **An echo stops at the broker (D11).** The exchange worker that put the
+  value on the wire takes it out of what comes back, as M4e's supervisor does for a launch
   (ADR-0046 §16), **before any byte of the response is copied into the
   answer**: the value moves from the pipe's buffer into a `Needle` that lives
   exactly as long as the exchange; every response header holding it is
@@ -269,6 +273,48 @@ For the request and for each redirect hop, in this order, in the authority:
   loudly at start, and is refused unless `--allow-evidence-egress` is given
   too — a broker that resolves real names never trusts a test authority; no
   production configuration names either, and no wire field can (TX036).
+- **One hop, one process: the exchange worker (D11, as built).** The broker
+  judges the hop again, reads the credential once, and dials one pinned
+  address (`http/connect.rs`, the only dial site of this path); TLS and
+  HTTP/1.1 then run in `dwkd-broker http-worker` — this binary, started for
+  that hop alone (`http/worker.rs`): empty environment, stdin and stdout
+  `/dev/null`, its own process group, and for stderr one end of a socket pair
+  that is its only channel. The worker refuses to read anything unless that
+  channel's peer is its parent broker (same uid, pid = parent pid); then,
+  before it receives anything, it makes itself non-dumpable (always — the
+  broker's development `--allow-dumpable` does not reach it), sets
+  `RLIMIT_CORE` 0, arms the parent-death signal (`SIGKILL`) and checks its
+  parent is still the broker, sets `no_new_privs`, and requires that it
+  inherited no descriptor (`hardening::worker`). It is then handed exactly
+  one operation by `SCM_RIGHTS`: the **connected** socket, the credential's
+  pipe when the hop carries one, the trust (Mozilla's roots, or the evidence
+  anchor the broker itself was given), the hop's time left, and the hop's
+  authorisation frame, decoded strictly by the private protocol's decoder.
+  It holds no descriptor for the authority, the store, the CONNECT proxy or
+  any listener; it resolves no name, chooses no address, dials nothing and
+  follows nothing; it reads no environment and no flag, and no file but its
+  own descriptor table (`/proc/self/fd`). It is not a second
+  network path: it can only speak to the one origin its broker already
+  connected it to, under the same strict client as before. It writes `S` on
+  its channel immediately before the first byte of the request, then `A`, a
+  length and one `BrokerOutcome` frame, and exits; the broker reads to end of
+  file under the hop's deadline plus a 5 s grace, reaps it (killing one that
+  overruns), and believes the answer only whole and only for this hop. A
+  worker that ends without an answer sent nothing if it never wrote `S`
+  (`HTTP_WORKER_FAILED`, a refusal) and may have been heard if it did
+  (`EXCHANGE_UNCONFIRMED`, recorded `UNKNOWN`, never repeated). Every spawn
+  in the broker, and every secret pipe while its writer is open, is under one
+  lock (`process::fork_guard`), so no concurrently forked child ever holds a
+  credential pipe's writer. The worker is this binary as the broker found it
+  at start (a broker whose binary was already deleted refuses to serve); an
+  upgrade that replaces the file under a running broker starts workers of the
+  new version, and the hand-over's magic and strict decoding refuse an
+  incompatible one before anything is sent (`HTTP_WORKER_FAILED`) — executing
+  `/proc/self/exe` instead would be executing through procfs, which TX022
+  forbids. **What it buys:** the long-lived broker never
+  holds the credential header, the request or any byte of the response, so
+  what `rustls` and the `http` header map copy and free unzeroed dies with
+  the worker's address space before the broker answers (§§18, 20).
 
 ### 10. Budgets and deadlines
 
@@ -278,7 +324,7 @@ For the request and for each redirect hop, in this order, in the authority:
 | Response header block | 100 headers, 64 KiB | broker |
 | Response body | min(256 KiB, `max_output_bytes` obligation, request's narrowing) | broker reads cap + 1 — cap + the credential's length + 1 on a credential hop, redacting it before the cut (§8); authority marks `truncated` and redacts within the bound |
 | Redirect hops | 5 (6 hops) | authority |
-| Deadlines | resolve 5 s; connect 10 s; TLS 10 s; response head 15 s; body idle 15 s; hop 30 s (broker); request, all hops, 300 s (authority) | broker per hop; authority across hops |
+| Deadlines | resolve 5 s; connect 10 s; TLS 10 s; response head 15 s; body idle 15 s; hop 30 s (broker); the hop's exchange worker, the hop's deadline plus 5 s, then killed (§9); request, all hops, 300 s (authority) | broker per hop; authority across hops |
 | Per run | requests 100, bytes out 8 MiB, bytes in 64 MiB, origins 16 (`StartupConfig::net_budget`) | authority, durable, never refilled |
 
 **As built.** Each hop is **charged at its intent**, before anything is sent,
@@ -328,8 +374,12 @@ credential — a count, never a byte), bytes each way, and a disposition
 Headers and `location` cross only for a `COMPLETED` exchange; one that broke
 off carries its status and counts alone. An ending before a byte of the request
 was sent is a refusal (`HTTP_ADDRESS_BLOCKED`, `HTTP_CONNECT_FAILED`,
-`HTTP_TLS_FAILED`, `HTTP_TIMEOUT`, `HTTP_REQUEST_INVALID`, `SECRET_*`), never
-a disposition. Deadlines are the broker's own constants, never fields.
+`HTTP_TLS_FAILED`, `HTTP_TIMEOUT`, `HTTP_REQUEST_INVALID`,
+`HTTP_WORKER_FAILED` — the hop's exchange worker could not be started or
+handed the hop, or ended before its first request byte (§9) — `SECRET_*`),
+never a disposition. A worker that ended after it began sending is the
+indeterminate `EXCHANGE_UNCONFIRMED`: the authority records the hop and its
+request `UNKNOWN` and never performs them again. Deadlines are the broker's own constants, never fields.
 `broker.secret_egress` is removed — its kind no longer decodes; versions 1–6
 are refused. Nothing on the wire names a resolver, an exception, a proxy
 endpoint or trust material (TX036, extended); no field can hold a secret
@@ -405,24 +455,31 @@ real TLS origin. M5a's and M5b's jobs and evals stay required and green.
 | Policy | each shipped pack's verdict; novelty and taint (`balanced` denies a tainted run's novel destination); `max_requests` and byte budgets spent stay spent |
 | Isolation | the `PROXY_ONLY` evidence unchanged; the runtime has no route (M9's job, not claimed here) |
 
-**As built.** `make net-http-evidence` runs four suites and requires all 166
+**As built.** `make net-http-evidence` runs four suites and requires all 174
 of their cases (`scripts/dw.py`, `NET_HTTP_CASES`): `broker-http` (the
 broker's client against real `rustls` origins in its own process, and its
-response path under mutation, 35),
+response path under mutation; and the exchange worker — a hop answered,
+redacted and reaped, a worker that cannot start sending nothing, a stranger
+refused, a worker killed after it began sending leaving the hop
+`EXCHANGE_UNCONFIRMED`, concurrent hops each in a worker of its own; 40),
 `authority-net-pipeline` (the authority's per-hop state machine against a fake
-broker, crash windows N1–N4, 45), `authority-net-credential` (mode A's
-consumer, real keyring values, 7) and `net-http` (the released broker, local
-HTTPS origins from `tests/net_http/origin.py` under a PKI made per run, the
-fixture resolver and the authority's library, 79). The authority half runs the
+broker, crash windows N1–N4, a worker that failed before sending and one
+unconfirmed after; 47), `authority-net-credential` (mode A's consumer, real
+keyring values, 7) and `net-http` (the released broker, local HTTPS origins
+from `tests/net_http/origin.py` under a PKI made per run, the fixture resolver
+and the authority's library — a broker killed mid-exchange takes its worker
+with it and the request is `UNKNOWN`; 80). The authority half runs the
 library, not `serve`: the authority's guard lets loopback through only on
 `Authority::attach_net_evidence`, which no DWKP operation and no `serve`
 option reaches (TX035); a `serve` flag would be a production loopback bypass.
 `DW_CPU_CONTENTION=n` runs it all beside n spinning processes; CI runs it twice,
-the second time with one per CPU. `make net-http-mutations` weakens six
+the second time with one per CPU. `make net-http-mutations` weakens eight
 safeguards in turn — the IP guard, the pin, per-hop authorisation, the
-credential's origin binding, the response bound, the budget debit — and each
-mutant must compile and fail the evidence; each file is restored and its
-SHA-256 checked. M4e's secret evidence is moved, not weakened: every case of
+credential's origin binding, the response bound, the budget debit, and the
+worker's echo redaction twice (a header holding the credential kept; the body
+no longer read past the bound by the value's length) — and each mutant must
+compile and fail the evidence; each file is restored and its SHA-256
+checked. M4e's secret evidence is moved, not weakened: every case of
 `authority-secret-pipeline`, `broker-secret-primitives` and
 `authority-secret` still reports, through `net.http` (§8), and
 `make secret-broker-evidence` now requires 178 cases: mode A's echo, by each
@@ -430,9 +487,19 @@ of the nine ways it can come back, with fresh daemons and the authority in its
 own process — what the runtime would receive holds no 16-byte window of the
 value, the authority's memory holds neither the value nor its hex, the
 broker's memory holds no hex form (its own encoding never saw it), the audit
-counts the handle's echoes and holds no byte of it — and the broker's library
-residue measured per way (§20). The gated eval is `m5c-net-http`; the
+counts the handle's echoes and holds no byte of it — and, per way, the
+long-lived broker's memory holds neither the value nor its hex once the hop is
+answered: its exchange worker is gone (§§9, 20; asserted, where the first
+build could only measure library residue and report it). The gated eval is `m5c-net-http`; the
 required hosted job is `net-http`.
+
+**The exchange worker's cost**, measured on the working tree (debug build, a
+loopback TLS origin, 24 CPUs, two rounds of 40 hops each way): a hop in a
+worker takes 3.1 ms at the median against 1.9 ms in process — about 1.15 ms
+more, p90 3.4 ms against 2.5–2.8 ms; eight concurrent hops take 5.8 ms of wall
+time against 6.4 ms, so concurrency loses nothing; the release binary starts,
+checks its peer and exits in 0.5 ms at the median (p90 0.9 ms). A hop's
+deadlines dwarf this: its connect alone may take 10 s.
 
 ### 17. Architecture rules
 
@@ -452,8 +519,15 @@ authority opens no outbound socket and resolves no name — `std::net`,
 `rustix::net` are refused across `crates/dwkd-authority/src`), TX048 (one
 address guard: range tables and address classification only in the shared
 `wire/guard.rs` and the broker's adapter); TX036 extended to version 7;
-TX035 extended to the evidence's exception list. Each with a violation
-fixture, and each fixture's exact findings pinned by
+TX035 extended to the evidence's exception list. The exchange worker (§9,
+D11): TX021 exempts `http/worker.rs`, its one spawn site (the broker starts a
+process in two reviewed places: the launch helper and the exchange worker);
+new TX049 lets no other broker file name the `http-worker` mode, so nothing
+else can start one; TX016 bars the cognition side from naming it; the
+worker's self-hardening lives in `hardening.rs`, already TX023's one
+exemption for the broker hardening itself; TX015 exempts the client's unit
+tests, which read `/proc` to count the workers they started. Each with a
+violation fixture, and each fixture's exact findings pinned by
 `tests/architecture/test_boundaries.py`.
 
 ### 18. Dependencies and the TCB
@@ -484,7 +558,9 @@ daemon; `windows-sys` 0.52 and its target crates (`ring`, Windows only; the
 broker serves only on Linux). `cargo deny` is clean: no advisory, no banned
 crate (`reqwest`, `hickory-resolver`, `trust-dns-resolver`,
 `rustls-native-certs` and `rustls-platform-verifier` are banned by name). No
-`unsafe` in DireWolf code.
+`unsafe` in DireWolf code. The exchange worker (§9) adds no crate: it is the
+broker's own binary, its hand-over uses `rustix::net`'s `SCM_RIGHTS` and its
+hardening `rustix::process`, both already linked.
 
 **Trust roots.** Mozilla's, compiled in; never the host's store, never an
 environment variable. `--allow-evidence-trust <pem>` *replaces* them with a
@@ -510,7 +586,12 @@ decrypted application-data record into its own `Vec` (`received_plaintext`;
 its unbuffered API too — `ReadTraffic::next_record` lends a borrow of that
 copy, and in-place decryption is unreleased), and `ureq-proto` builds the
 `http` crate's header map from the response head, copying every header value.
-That is the residual of §20 and D11.
+As first built, those copies stayed in the long-lived broker's freed heap
+until reused. **As built now** they are made in the hop's exchange worker
+(§9), whose whole address space ends before the broker answers: measured
+after every way an echo can come back, the broker's memory holds neither the
+value nor its hex (`mode-a-echo-broker-library-residue-*`,
+`credential-echo-broker-residue`, asserted). What remains is §20's.
 
 ### 19. Platform contract
 
@@ -529,37 +610,38 @@ roots are trusted for what they return; the guard and the verifier judge it.
 - **Corporate HTTP proxies are not used**: a host that can reach the internet
   only through one cannot use `net.http` until a reviewed configuration exists.
 - The host's resolver is trusted for what it returns; the guard judges it.
-- **An echoed credential can remain in freed memory of the broker's TLS and
-  HTTP libraries (D11).** An origin that sends the credential back hands the
-  broker response bytes holding it. Everything DireWolf does with them is
-  closed and measured: the broker redacts the echo before anything of the
-  response is copied into a message (§8); its own buffers are `Zeroizing`;
-  no message, log, audit row, durable file, authority memory or runtime-
-  visible answer holds the value — or, where DireWolf could create one, its
-  hex form (`mode-a-echo-*`, nine ways, asserted). What remains is the
-  libraries': `rustls`'s per-record plaintext copy (`received_plaintext`, the
-  whole response, body and head) and the `http` header map `ureq-proto`
-  builds (each header value), both freed without being zeroed and both
-  beyond DireWolf's reach without `unsafe`. Measured, not asserted: present
-  after every header echo in the evidence runs (`kept-header`,
-  `dropped-header`, `location`, `malformed`), and after a body echo in some
-  runs and not others — whether a freed block is overwritten depends on later
-  allocations, so absence is never claimed. **Reachability**: only to a
-  reader of the broker's memory — root, `CAP_SYS_PTRACE`, or the broker's
-  own uid if it were dumpable; production's broker is not dumpable
-  (`/proc/<pid>/mem` is root's), has `RLIMIT_CORE` 0, its own uid, and no
-  route from the runtime; swap is not excluded (no `mlock`, as ADR-0046 §27).
-  Such a reader can read the credential during any exchange anyway, so the
-  residue widens the window from *during the exchange* to *until the freed
-  block is reused*, and only for an origin that echoes. **Invariant I3
-  holds**: nothing the Cognition Plane receives holds the value. Relative to
-  ADR-0046 §22 — measured on `fs.read` and process output, where no library
-  sits between the broker and the bytes — this is a new, narrower residual
-  that ADR-0046 does not cover; it is the owner's to accept (D11), not an
-  exception assumed. Closing it needs in-place decryption in `rustls`'s
-  unbuffered API over DireWolf's `Zeroizing` buffers and a head parse that
-  copies nothing (`httparse` over the same buffer, without the `http` map);
-  neither is possible with `rustls` 0.23.45.
+- **An echoed credential lives, for one exchange, in that hop's exchange
+  worker (D11).** An origin that sends the credential back hands the worker
+  response bytes holding it. Everything DireWolf does with them is closed
+  and measured: the worker redacts the echo before anything of the response
+  is copied into a message (§8); its own buffers are `Zeroizing`; no message,
+  log, audit row, durable file, authority memory or runtime-visible answer
+  holds the value — or, where DireWolf could create one, its hex form
+  (`mode-a-echo-*`, nine ways, asserted). The libraries' copies — `rustls`'s
+  per-record plaintext (`received_plaintext`, the whole response) and the
+  `http` header map `ureq-proto` builds — are made in the worker, freed
+  without being zeroed **inside the worker**, and gone with its address space
+  when it exits, before the broker answers. **Eliminated:** the residue the
+  first build left in the long-lived broker (present after every header echo
+  and some body echoes); the broker's memory after every echo path now holds
+  neither the value nor its hex — asserted, nine ways and in the end-to-end
+  suite. **What remains:** (a) *during the exchange*, the worker's memory
+  holds the credential and any echo of it, exactly as the broker's did — the
+  worker is never dumpable, has `RLIMIT_CORE` 0, its broker's uid and no
+  route from the runtime, so only root or `CAP_SYS_PTRACE` reads it, a reader
+  who could read the credential during any exchange anyway; (b) *after the
+  worker exits*, the physical pages it freed are not cleared by Linux until
+  they are reused (every page is zeroed before another process receives it,
+  but not on free unless the kernel runs with `init_on_free=1`): readable
+  only from the kernel — a crash dump, a hibernation image, `/dev/mem` where
+  allowed — the same exposure every process's freed memory has, the
+  authority's and the broker's own included; (c) *swap*: a worker page swapped
+  out during the exchange can stay on the swap device (no `mlock`, as
+  ADR-0046 §27). **Invariant I3 holds**: nothing the Cognition Plane receives
+  holds the value. Relative to ADR-0046 §22 this is no longer a new class of
+  residual: the window is the exchange itself, as for every value a broker
+  holds for one invocation. The kernel exposures (b) and (c) are the owner's
+  to accept with D11, not an exception assumed.
 - **The broker redacts only the hop's own credential.** Any other configured
   value appearing in a response is the authority's to redact (index and
   shapes) within the bound it is given; such a value straddling the bound is
@@ -579,7 +661,7 @@ roots are trusted for what they return; the guard and the verifier judge it.
 | # | Decision | Recommendation |
 |---|---|---|
 | D1 | TLS stack and trust roots | **as built: `rustls` 0.23.45** with the `ring` provider and bundled `webpki-roots` (Mozilla's set, reproducible, no OS store), TLS 1.2 and 1.3, `http/1.1` the only ALPN, no resumption, no early data, no key log; the evidence anchor replaces the roots and only beside the fixture resolver (§9). Alternatives: `aws-lc-rs` (a larger C build), the OS store (honours locally added CAs, which is exactly what a CA-planting attacker uses), OpenSSL or `native-tls` (a second TLS implementation, C, ambient configuration) |
-| D2 | HTTP/1.1 implementation | **as built: `ureq-proto` 0.6.4**, a sans-I/O HTTP/1.1 engine — it owns no socket, no resolver, no pool, no proxy, no redirect follower, no decoder — driven by the broker's own strict loop (every bound, every deadline, every framing refusal is the broker's), with `hyper`/`tokio` and `reqwest` not used (`reqwest` banned). It renders the request into DireWolf's `Zeroizing` buffer from a header map whose credential value is the scrubbed buffer itself (no copy); it reads the response head into the `http` crate's header map, which copies each header value (part of D11's residual). The alternative stays a hand-written parser over `httparse`, fuzzed like the CONNECT parser — which would remove the header-map copy but not `rustls`'s record copy |
+| D2 | HTTP/1.1 implementation | **as built: `ureq-proto` 0.6.4**, a sans-I/O HTTP/1.1 engine — it owns no socket, no resolver, no pool, no proxy, no redirect follower, no decoder — driven by the broker's own strict loop (every bound, every deadline, every framing refusal is the broker's), with `hyper`/`tokio` and `reqwest` not used (`reqwest` banned). It renders the request into DireWolf's `Zeroizing` buffer from a header map whose credential value is the scrubbed buffer itself (no copy); it reads the response head into the `http` crate's header map, which copies each header value — in the hop's exchange worker, whose memory ends with the hop (D11). The alternative stays a hand-written parser over `httparse`, fuzzed like the CONNECT parser — which would remove the header-map copy but not `rustls`'s record copy |
 | D3 | Public exposure in M5c | ToolInvoke version 4 now (one tool, typed), so the hostile client and the evals exercise the real path |
 | D4 | Credential on a same-origin redirect | allowed, each time a fresh decided and recorded use; never cross-origin. Stricter alternative: never on any redirect |
 | D5 | Redirects for methods with a body | `303` only (to `GET`); `301`/`302`/`307`/`308` returned unfollowed |
@@ -588,17 +670,17 @@ roots are trusted for what they return; the guard and the verifier judge it.
 | D8 | What the audit keeps of a URL | origin and the SHA-256 of the canonical URL; not the path or query, which may carry personal data |
 | D9 | Request bodies | inline only (≤ 256 KiB, D12); no workspace-file upload in M5c |
 | D10 | Default per-run budgets | requests 100, bytes out 8 MiB, bytes in 64 MiB, origins 16 — never refilled; configurable in `StartupConfig`, not yet in `serve`'s file |
-| D11 | An echoed credential's residue (§§8, 20) | **remediated where DireWolf can reach it**: the broker redacts the hop's own credential from the response before anything of it is encoded, reading past the bound by the value's length; a broken response carries no header; the authority audits the broker's count. **Owner risk acceptance required** for what remains — library-owned copies (`rustls`'s record plaintext, the `http` header map) freed without zeroing in the broker, reachable only by a reader of the broker's memory, I3 intact. Close it when a released `rustls` decrypts unbuffered records in place. Stricter alternatives, rejected for M5c: a zeroizing global allocator (needs `unsafe` or a new allocator dependency in the TCB, and covers only frees); waiting for `rustls` (no release date); a hand-written HTTP parser now (removes the header-map copy, not the record copy) |
+| D11 | An echoed credential's residue (§§8, 9, 20) | **as built: one exchange worker per hop** (§9) — the broker judges, reads the credential once and dials; `dwkd-broker http-worker`, hardened before it receives anything and handed only that connection, that credential and that hop, performs TLS and HTTP/1.1, redacts the echo, answers and exits before the broker answers. The long-lived broker's residue is **eliminated** (asserted, nine ways). **Owner decision required** on the design — a second spawn site in the broker (ADR-0045 amended; TX021, TX049), about 1 ms more per hop (§16) — and on the narrowed residual of §20: the worker's memory during the exchange, freed physical pages until the kernel reuses them, and swap. Alternatives weighed: A, owning every buffer (impossible with `rustls` 0.23.45, whose record copy is internal, and the `http` map); C, another API (`rustls`'s unbuffered API lends the same copy; a hand-written head parser removes only the header map's); D, OS isolation of the worker by seccomp or Landlock (no safe API in the TCB without a new dependency — a later hardening, not a substitute); a zeroizing global allocator (needs `unsafe` or an allocator crate in the TCB, covers only frees) |
 | D12 | The response and request bounds | 256 KiB each way, derived from the 1 MiB frame, instead of 1 MiB and 8 MiB: larger needs streaming results (M12's spill), not a larger frame |
 
-**Closeout review (2026-10-08), against the code and the evidence.**
+**Closeout review (2026-10-08; revised 2026-10-09 for the exchange worker), against the code and the evidence.**
 
 | # | Recommendation | On what |
 |---|---|---|
 | D1 | **ACCEPT** | chain and name verification by `rustls`' WebPKI verifier with no override (TX046); the canonical host as SNI and certificate name; dials only to pinned `SocketAddr`s (`http/connect.rs`); compiled-in roots, no OS store, no environment, no proxy; failures before a byte is sent are refusals; `cargo deny` clean; the authority's closure free of it; the TLS negatives (`expired`, `self-signed`, `untrusted-authority`, `wrong-name`, `http2-only-server`, the test CA under production trust, handshake timeout) |
-| D2 | **ACCEPT**, with the D11 limitation | strict framing on top of `httparse` (one length or `chunked`, never both or neither, no other coding, no `101`, no encoding, 100 headers in 64 KiB, body to the bound with a wire cap, three deadlines); request and credential buffers owned and scrubbed by DireWolf; no panic under 20 000 sans-I/O and 120 TLS mutants; the header-map copy is the one ownership flaw, recorded in D11 |
+| D2 | **ACCEPT** | strict framing on top of `httparse` (one length or `chunked`, never both or neither, no other coding, no `101`, no encoding, 100 headers in 64 KiB, body to the bound with a wire cap, three deadlines); request and credential buffers owned and scrubbed by DireWolf; no panic under 20 000 sans-I/O and 120 TLS mutants; the header-map copy, its one ownership flaw, now lives and dies in the exchange worker (D11) |
 | D3–D10, D12 | **ACCEPT** | each matches the code and is shown by the evidence of §16 |
-| D11 | **OWNER RISK ACCEPTANCE REQUIRED** — not blocking | the remediation above; the residual as worded in §20 |
+| D11 | **OWNER DECISION REQUIRED — recommended: ACCEPT** the exchange worker and its narrowed residual; not blocking | the broker's residue after an echo eliminated and asserted (nine ways, raw and hex; end to end); the worker's lifecycle shown — reaped before the answer, refusing a stranger, `HTTP_WORKER_FAILED` with nothing sent, `EXCHANGE_UNCONFIRMED` after a kill, concurrent hops in workers of their own, killed with its broker; two mutants on the worker's redaction caught; about 1 ms more per hop and no loss in concurrent throughput (§16); the residual as worded in §20 |
 
 ### 22. Implementation sequence
 
@@ -613,13 +695,19 @@ complete when step 5's hosted job passes on the committed tree.
 | **M5c.4** Mode A consumer | §8: credential on `http_exchange`, per-injection use, same-origin rule, `SECRET_IN_REQUEST`, `HEADER_FORBIDDEN`; `secret_egress` retired | the credential rows of §16: the header observed at the bound origin only, never at a redirect target; residue checks; TX045 |
 | **M5c.5** Gate and closeout | `make net-http-evidence`, the `m5c-net-http` gated eval, the required `net-http` CI job; NETWORK_SECURITY.md "as built"; ROADMAP | every case of §16 locally and in hosted CI; M5a/M5b green; this ADR accepted |
 
-**Status of the steps.** M5c.1–M5c.5 are implemented in the working tree and
-their local gates pass, the mutation review included; the closeout review
-(§21) remediated D11 where DireWolf can reach it and tied the evidence trust
-anchor to the fixture resolver. Hosted CI has not run them and this ADR is not
-accepted, so M5c is not complete: acceptance needs the owner's decisions —
-D11's residual above all — and the hosted `net-http` job and every
-multi-identity half green on the committed tree.
+**Status of the steps.** M5c.1–M5c.5 are implemented and their local gates
+pass, the mutation review included; the closeout review (§21) remediated D11
+where DireWolf can reach it and tied the evidence trust anchor to the fixture
+resolver. Hosted run 37855884386 on the committed tree failed before it
+measured anything: its tool probe asked OpenSSL 3.0 for `openssl --version`,
+which 3.0 refuses, so every real-daemon case reported NOT EXERCISED and the
+strict gates rightly refused the run. The probe now asks each tool by its own
+spelling (`openssl version`) and names the command that failed. The recovery
+also moved each hop's TLS and HTTP into an exchange worker (§9, D11). Neither
+change has run in hosted CI and this ADR is not accepted, so M5c is not
+complete: acceptance needs the owner's decisions — D11's worker and residual
+above all — and the hosted `net-http` job and every multi-identity half green
+on a new commit.
 
 ### 23. Security invariants
 
@@ -640,8 +728,8 @@ Each is a row of §16 that must be shown, not argued:
    redacted responses — the hop's own credential by the broker before
    anything of the response is encoded, every indexed value by the authority
    — no `Set-Cookie`, a secret in an outgoing request refused. (What the
-   broker's TLS and HTTP libraries free unzeroed is §20's residual, not a
-   message.)
+   exchange worker's TLS and HTTP libraries free unzeroed ends with the
+   worker: §20's residual, not a message.)
 7. **The runtime chooses no network fact**: no address, resolver, proxy, TLS
    option, credential header, origin or mode is on the public wire.
 8. **Everything is bounded and fails closed**: sizes, hops, deadlines and
@@ -679,9 +767,12 @@ a message, and M5b's tunnel stays exactly as opaque as it was accepted.
 largest new code since M4. Each redirect hop costs a full authorisation and,
 for a new host, a resolution. Strictness refuses some real servers (non-
 identity encodings, HTTP/2-only origins, hosts that need a corporate proxy,
-redirect chains that resend bodies). An origin that echoes the credential can
-leave it in the broker's freed library memory until reused (D11); a redirect
-whose `Location` holds it is answered as a plain 3xx with no `Location`.
+redirect chains that resend bodies). Each hop starts a process — about
+1 ms more per hop, measured, and no loss in concurrent throughput — and the
+broker starts processes in two places instead of one (D11). An origin that
+echoes the credential has it in that hop's worker until the worker exits; a
+redirect whose `Location` holds it is answered as a plain 3xx with no
+`Location`.
 
 ## Alternatives considered
 
@@ -709,7 +800,14 @@ whose `Location` holds it is answered as a plain 3xx with no `Location`.
   (needs `unsafe` in DireWolf or an allocator crate in the TCB, and still
   covers only frees, not live or swapped memory); **`rustls`'s unbuffered API
   now** (0.23.45 still copies each record — no gain); **a hand-written
-  response parser now** (removes the header-map copy, not the record copy).
+  response parser now** (removes the header-map copy, not the record copy);
+  **accepting the long-lived broker's residue** (the first closeout's
+  recommendation — superseded once a worker proved small, safe Rust and
+  measurably sufficient); **a pool of long-lived workers** (would carry one
+  hop's freed memory into the next; one worker per hop is the point);
+  **seccomp or Landlock in the worker now** (no safe API in the TCB without a
+  new dependency; the worker already holds no descriptor but its one
+  connection and its credential pipe, and dials nothing).
 
 ## Revisit if
 
@@ -719,7 +817,10 @@ whose `Location` holds it is answered as a plain 3xx with no `Location`.
 - A supported origin requires HTTP/2 or a compressed response.
 - Approvals (M6) arrive: `REQUIRE_APPROVAL` stops being a denial.
 - A released `rustls` decrypts unbuffered records in place (D11): move the
-  client to the unbuffered API over DireWolf's `Zeroizing` buffers, parse the
-  head with `httparse` over the same buffer, and the echo residual closes —
-  the evidence's `mode-a-echo-broker-library-residue-*` cases then become
-  assertions.
+  worker's client to the unbuffered API over DireWolf's `Zeroizing` buffers
+  and parse the head with `httparse` over the same buffer, so that even the
+  worker's freed memory holds no copy.
+- A reviewed, safe seccomp or Landlock API is in the TCB: confine the
+  exchange worker to the descriptors it was handed (no `socket`, `connect` or
+  `open`).
+- The per-hop process cost matters to a workload (§16 measures it).

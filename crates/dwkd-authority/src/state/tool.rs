@@ -433,7 +433,8 @@ pub(super) const fn failure_reason(failure: BrokerFailure) -> FsFailureReason {
             | BrokerRefusal::HttpConnectFailed
             | BrokerRefusal::HttpTlsFailed
             | BrokerRefusal::HttpTimeout
-            | BrokerRefusal::HttpRequestInvalid => FsFailureReason::BrokerExecutionError,
+            | BrokerRefusal::HttpRequestInvalid
+            | BrokerRefusal::HttpWorkerFailed => FsFailureReason::BrokerExecutionError,
         },
         BrokerFailure::Indeterminate(_) => FsFailureReason::BrokerExecutionError,
     }

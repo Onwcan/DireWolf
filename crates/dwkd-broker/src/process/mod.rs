@@ -50,6 +50,31 @@ pub(crate) mod verify;
 #[cfg(test)]
 mod tests;
 
+/// Every open descriptor numbered 3 or higher whose close-on-exec flag is
+/// clear: what a process this broker started inherited. The launch helper
+/// checks it before its exec; `net.http`'s exchange worker (ADR-0050 §9)
+/// requires it empty before it receives anything.
+///
+/// # Errors
+///
+/// `/proc/self/fd` or an entry's `fdinfo` could not be read.
+pub(crate) fn inheritable_descriptors() -> std::io::Result<Vec<u32>> {
+    fdcheck::inheritable()
+}
+
+/// Held around every spawn -- `Command::spawn` returns once the child has
+/// executed, its close-on-exec copies gone -- and around every secret pipe
+/// while its writer is open. A child forked inside that window would hold a
+/// copy of the writer until it executed, and the reader, which refuses "would
+/// block" as a stalled pipe (`crate::secret::read_value`), could meet it: a
+/// concurrent hop or launch refused for nothing it did.
+static FORK: Mutex<()> = Mutex::new(());
+
+/// Hold [`FORK`].
+pub(crate) fn fork_guard() -> std::sync::MutexGuard<'static, ()> {
+    FORK.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
 use std::collections::hash_map::RandomState;
 use std::hash::{BuildHasher as _, Hasher as _};
 use std::os::fd::OwnedFd;

@@ -200,10 +200,25 @@ def test_every_provider_m7_names_is_a_confined_name() -> None:
         "lm_studio",
         "lmstudio",
         "LM Studio",
+        "llama.cpp",
+        "llama_cpp",
+        "llama-server",
+        "sglang",
+        "nvidia_nim",
+        "NVIDIA NIM",
+        # Deferred, not a target, and confined all the same.
+        "litellm",
     ]
     unmatched = [name for name in targets if not any(p.search(name) for p in patterns)]
     assert not unmatched, f"M7 targets TX001 does not confine: {unmatched}"
-    ordinary = ["work together", "a graph vertex", "the corpus perplexity", "fireworks"]
+    ordinary = [
+        "work together",
+        "a graph vertex",
+        "the corpus perplexity",
+        "fireworks",
+        "a nimble parser",
+        "the llama",
+    ]
     flagged = [text for text in ordinary if any(p.search(text) for p in patterns)]
     assert not flagged, f"ordinary words TX001 would reject: {flagged}"
 
@@ -457,7 +472,7 @@ def test_the_broker_changes_names_only_relative_to_held_directories(
 def test_the_cognition_side_cannot_name_the_private_channel(violation_rules: list[str]) -> None:
     """TX016 (M4b): the runtime or the CLI naming the private protocol's module
     or its message kinds is a finding -- and (M4d) its process messages and the
-    broker's launch-helper mode."""
+    broker's launch-helper mode, and (M5c D11) its exchange-worker mode."""
     rule = "TX016-the-cognition-side-cannot-name-the-private-channel"
     assert rule in violation_rules
     assert _paths(rule) == {
@@ -465,7 +480,7 @@ def test_the_cognition_side_cannot_name_the_private_channel(violation_rules: lis
         "runtime/src/direwolf/broker_reach.py",
     }
     texts = " ".join(m for p, _, m in _findings(rule) if p.endswith("broker_reach.py"))
-    for needle in ("broker.fs_read", "broker.process_start", "exec-helper"):
+    for needle in ("broker.fs_read", "broker.process_start", "exec-helper", "http-worker"):
         assert needle in texts, needle
 
 
@@ -719,6 +734,10 @@ def test_the_m5c_boundaries_each_catch_their_violation(violation_rules: list[str
             "crates/dwkd-authority/src/server/mod.rs",
         },
         "TX048-one-address-guard": {"crates/dwkd-authority/src/policy/private_ranges.rs"},
+        # M5c D11: the exchange worker is started by the HTTPS client alone.
+        "TX049-the-exchange-worker-is-started-only-by-the-https-client": {
+            "crates/dwkd-broker/src/exchange/start_worker.rs"
+        },
     }
     for rule, paths in expected.items():
         assert rule in violation_rules, rule
