@@ -55,11 +55,12 @@ most of it is not yet built.
 | Durable state and audit | `kernel.db` with fenced epochs, durable idempotent admission, kernel-owned policy inputs; hash-chained `audit.log` `fsync`ed before the answer, with a verifier (M3d) | Off-host export of chain heads, for deletion detection: operational guidance ([SECURITY.md](SECURITY.md) §4), not a milestone |
 | Filesystem | Canonical resolution with `openat2` beneath an identity-pinned root; eight filesystem tools through the broker; atomic mutation; `UNKNOWN` never repeated (M4a–M4c). **Linux only.** | Fallback walker for other platforms (own ADR) |
 | Process execution | Executable identity (absolute path, SHA-256), argv normalisation, empty environment, limits, `execveat` of the re-proved descriptor (M4d). **No production build launches anything**: a host launch needs a per-invocation approval, which is M6's | Sandboxed execution (M5); approvals (M6) |
-| Secrets | Opaque handles; no operation returns a value; kernel keyring and age backends; one-shot handoff; return-path redaction; residue evidence; daemons dump no core (M4e). Mode A's consumer `net.http`: implemented and validated locally, pending owner acceptance and hosted CI (M5c) | `net.http` accepted (M5c); mode D (M6) |
+| Secrets | Opaque handles; no operation returns a value; kernel keyring and age backends; one-shot handoff; return-path redaction; residue evidence; daemons dump no core (M4e). Mode A's consumer `net.http`: implemented and green in hosted CI, pending owner acceptance (M5c) | `net.http` accepted (M5c); mode D (M6) |
 | Taint | Run-level, monotone, held by the authority; raised to `LOCAL_UNVERIFIED` by file content and process output; a policy predicate (`when.taint_level`) the shipped packs use (M3d–M4d) | Network-sourced taint (M5); artifact and memory provenance (M12, M13) |
 | Sandbox | **Foundation (M5a) and `PROXY_ONLY` networking (M5b, complete, hosted acceptance passed):** an `oci-strict` environment prepared and **measured** from the runtime's record and by a digest-pinned probe inside it, weakened profiles and topologies shown to be detected; its only network peer the broker's opaque CONNECT proxy, every bypass measured as refused; no public caller can prepare one and no workload runs in it. Policy is told every action runs on the host | Sandboxed workloads (M5d); `net.http` (M5c) |
 | Approvals, budgets | **None.** A decision that would require approval is `DENY` | M6 |
 | Model egress, providers | **None** | M7: native, cloud-platform, OpenAI-compatible and local/self-hosted provider families, Hugging Face and Ollama among them, all behind the authority's model egress (§7a) |
+| External agent interoperability | **None** | M29, post-V1 ([ADR-0051](adr/0051-external-agent-interoperability.md), Proposed): ACP first, external agents as contained workloads or clients, never authorities (§7b) |
 | Agent loop, tools, context, memory, subagents, MCP | **None** | M8–M16 |
 | CLI | `direwolf --version` and `doctor` only | M17 |
 | Channels, scheduler, browser, plugins, web UI, remote workers | **None** | Post-V1 (M19–M28) |
@@ -396,6 +397,140 @@ the origin they are bound to (the failure class of OpenClaw's
 aggregator's such as Hugging Face's router above — never widens what a run may reach. An
 aggregator's origin is authorised as an aggregator: whatever it forwards to counts as
 reached.
+
+### 7b. External agent interoperability (2026-10-10)
+
+The project owner asked whether DireWolf can interoperate with thirteen external agent
+products ([ADR-0051](adr/0051-external-agent-interoperability.md), Proposed). **These are
+not model providers** — each is an agent runtime, coding harness, CLI, IDE integration or
+desktop frontend with its own tools, approvals, credentials and model egress — so they are
+kept out of §7a and out of M7.
+
+**Method.** Each repository's default branch was pinned on 2026-10-10 and read at that
+commit: its README and the documentation files named under *Evidence* below, and for Codex
+CLI its command-line definitions in source. Two CLIs are not open source — Droid and GitHub
+Copilot CLI — and Claude Code's repository holds plugins, examples and the changelog while
+its CLI ships as a binary: for those, the vendor's own documentation, read the same day, is
+the source. Nothing was copied, translated or imported; the interfaces are described, not
+reproduced. Cells about the external product use §2's labels (`NOT FOUND` means not found in
+what was read at that revision). The DireWolf statuses are **VERIFIED INTERFACE** (the
+product documents it; DireWolf implements nothing), **PLANNED INTEGRATION** (owned by M29),
+**CANDIDATE** (eligible once demand and review justify it), **DEFERRED** and **NOT
+APPLICABLE**. **No row claims compatibility**: DireWolf has implemented none of these, and
+none will be called compatible without a recorded contract test (M29).
+
+**Identities.**
+
+| # | Product | Upstream, as read | Licence | What it is |
+|---|---|---|---|---|
+| 1 | Claude Code | [anthropics/claude-code @ 2301018](https://github.com/anthropics/claude-code/tree/2301018b1f61073c501a8e7a4813ef48c239163b); [code.claude.com docs](https://code.claude.com/docs/en/headless) | none reported for the repository; the CLI ships as a binary | Coding agent CLI (with IDE, desktop and cloud surfaces) and the Claude Agent SDK |
+| 2 | OpenClaw | [openclaw/openclaw @ 9449b4e](https://github.com/openclaw/openclaw/tree/9449b4e7dc97cd66a0e787db851c44f2a9ee447a) | MIT | Personal agent runtime and Gateway |
+| 3 | Hermes Agent | [NousResearch/hermes-agent @ 46d7718](https://github.com/NousResearch/hermes-agent/tree/46d7718a52ff33accb15dc0501736fbdb6833cab) | MIT | Personal agent runtime |
+| 4 | Droid (Factory) | [Factory-AI/factory (documentation) @ c6ea470](https://github.com/Factory-AI/factory/tree/c6ea47082007a32a8a76bb99da42e387565f119a); the CLI is not open source | — | Coding agent CLI and cloud agents |
+| 5 | Cline | [cline/cline @ d20b337](https://github.com/cline/cline/tree/d20b337eb591d661b8927e288bb0034d53f1fabb) | Apache-2.0 | IDE extension, CLI and SDK |
+| 6 | Oh My Pi | [can1357/oh-my-pi @ 703a261](https://github.com/can1357/oh-my-pi/tree/703a261df9533e74f16aa8d38e64eb41977ccf89) | MIT | Coding agent CLI (`omp`) by Stencil Labs, **a fork of Pi** by its own README — a separate project from Pi and from other "oh-my-*" packages |
+| 7 | Qwen Code | [QwenLM/qwen-code @ 085a44f](https://github.com/QwenLM/qwen-code/tree/085a44f336dc94ce43e46daaa3a035ff7bf32720) | Apache-2.0 | Coding agent CLI, IDE companion and daemon |
+| 8 | Codex CLI | [openai/codex @ 4aa94dc](https://github.com/openai/codex/tree/4aa94dce270de668eff6e2fa8585c82385e84455) | Apache-2.0 | OpenAI's coding agent CLI, with an app server for its IDE and desktop clients — a different product from Copilot CLI |
+| 9 | OpenCode | [anomalyco/opencode @ b2a3926](https://github.com/anomalyco/opencode/tree/b2a3926e87e35fc7f6308521c4418067cddd5d0e) (default branch `dev`) | MIT | Coding agent TUI/CLI with an HTTP server |
+| 10 | Hermes Desktop | [NousResearch/hermes-agent `apps/desktop` @ 46d7718](https://github.com/NousResearch/hermes-agent/tree/46d7718a52ff33accb15dc0501736fbdb6833cab) | MIT | Electron frontend to the Hermes Agent backend over its gateway (local, remote or cloud) — **not an agent engine** |
+| 11 | Pi | [earendil-works/pi @ 42a3497](https://github.com/earendil-works/pi/tree/42a3497d03ad17e308a2299fa824727894f2c0ec) — `badlogic/pi-mono` answers HTTP 301 to it (a repository transfer, not a substitution) | MIT | Agent toolkit and coding agent CLI (`pi`) — the original of the Pi lineage |
+| 12 | GitHub Copilot CLI | [github/copilot-cli @ dcdc027](https://github.com/github/copilot-cli/tree/dcdc0273c0250d8b32677ca99bc0e1f5006daa89) (README, changelog and installer only); [docs.github.com](https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-programmatic-reference) | not open source; needs a Copilot subscription | Coding agent CLI |
+| 13 | DeepSeek Harness | [deepseek-ai/deepseek-harness @ d743267](https://github.com/deepseek-ai/deepseek-harness/tree/d743267388641bc76f17c45ce8b4c231aed1d32c) (default branch `master`) | MIT | Agent harness, "everything is a plugin", on Cordis; a **developer preview** that announces breaking changes — the harness, not DeepSeek's model API |
+
+**Verified integration surfaces** (the product's own, at the revision read).
+
+| Product | Headless, machine-readable stream | Sessions, cancellation | ACP | MCP | SDK, RPC or server | Its own approvals and sandbox |
+|---|---|---|---|---|---|---|
+| Claude Code | `claude -p`; `text`, `json`, `stream-json` out; `stream-json` in; `--json-schema`; `--max-turns`, `--max-budget-usd` | `--resume`, `--continue`; SIGINT ends the turn, SIGTERM exits 143 | NOT FOUND | client (`--mcp-config`, `--strict-mcp-config`); server NOT FOUND | Agent SDK (TypeScript, Python) with a `canUseTool` callback; `--permission-prompt-tool` hands prompts to an MCP tool | modes `default`, `acceptEdits`, `plan`, `auto` (classifier), `dontAsk`, `bypassPermissions`; `--restricted`; an opt-in sandboxed Bash tool; **without `--bare`, `-p` runs a repository's hooks and MCP servers with no trust prompt** |
+| OpenClaw | `openclaw agent exec --json` (embedded one-shot); Gateway-backed `openclaw agent` | Gateway sessions; ACP `cancel` | **agent** (`openclaw acp`, a bridge to the Gateway) and **client** (`/acp spawn` runs Codex, Claude Code or Gemini as ACP harnesses) | client; **server** (`openclaw mcp serve`: channel conversations) | Gateway WebSocket RPC; CLI backends that run other agents' CLIs behind a loopback MCP bridge | tool policy; sandboxing **off by default** (Docker, Podman, SSH, OpenShell backends) |
+| Hermes Agent | `hermes chat -q --oneshot`; `--format stream-json` | `--resume`, `--continue`; ACP cancel and fork | **agent** (`hermes acp`) | client; **server** (`hermes mcp`) | TUI gateway JSON-RPC (stdio or WebSocket); OpenAI-compatible API server (bearer key, loopback); a Codex app-server runtime | command approval patterns, `--yolo`; terminal backends local, Docker, SSH, Singularity, Modal, Daytona, Vercel Sandbox |
+| Droid | `droid exec`; `-o` text or `json`; `stream-jsonrpc` in and out for multi-turn | `--session-id` | NOT FOUND | client (`droid mcp add`) | `droid daemon` (UNVERIFIED in detail) | read-only by default; `--auto low\|medium\|high`; `--skip-permissions-unsafe`; PreToolUse hooks; worktrees, no OS sandbox found |
+| Cline | `cline` with a prompt, `--json` | `--id <session>`; SDK `abort`, `stop` | **agent** (`cline --acp`) | client (`cline mcp add`) | SDK (`ClineCore`, `Agent`) | **auto-approves every tool by default outside ACP** (`--auto-approve`, default true; false under ACP); hooks; `--data-dir` "sandbox mode" isolates state, not processes |
+| Oh My Pi | `omp -p`; `--mode json` | RPC `abort`; sessions | **agent** (`omp acp`) | client (also reads `.claude`, `.cursor`, `.vscode` MCP files) | Node SDK; RPC (its own JSONL, "not JSON-RPC 2.0") | approval modes `always-ask`, `write`, `yolo`; **its shell (brush) and 58 utilities run in-process with no `fork`/`exec`**, so no per-command OS mediation can see them |
+| Qwen Code | `qwen -p`; `json`, `stream-json` out; `stream-json` in (SDK) | `--continue`, `--resume`; SDK `abortController` | **agent** (`qwen --acp`); its daemon is an ACP client of its own child | client | SDKs (TypeScript, Python, Java) with a `canUseTool` callback (auto-deny after 60 s); `qwen serve` daemon (HTTP over an ACP bridge) | modes Plan, Ask, Auto-Edit, **Auto (an LLM classifier, the default)**, YOLO; opt-in Linux tool sandbox (Bubblewrap) |
+| Codex CLI | `codex exec`; `--json` (JSONL); `--output-schema`; `--ephemeral` | `exec resume`, `exec fork` | NOT FOUND at this revision | client (`codex mcp add`, OAuth login); server NOT FOUND at this revision | `codex app-server` (JSON-RPC, experimental); TypeScript SDK (wraps the CLI's JSONL) | `--sandbox read-only\|workspace-write\|danger-full-access`; approval `on-request\|never`; `--dangerously-bypass-approvals-and-sandbox`; hooks with trust |
+| OpenCode | `opencode run --format json` (raw JSON events) | `--continue`, `--session`, `--fork`; server session API | **agent** (`opencode acp`) | client (local and remote) | `opencode serve` (OpenAPI 3.1, SSE; **no authentication unless `OPENCODE_SERVER_PASSWORD` is set**); JS SDK | permissions `allow`, `ask`, `deny` by pattern; plugins with `tool.execute.before`; no OS sandbox found |
+| Hermes Desktop | N/A — it is a client | — | NOT FOUND | — | a client of the Hermes gateway (WebSocket JSON-RPC) | the backend's |
+| Pi | `pi --print`; `--mode json` (strict JSONL) | `--mode rpc`: `abort`, `steer`, `follow_up` | NOT FOUND | client (`pi mcp add`) | SDK (in-process); RPC (its own JSONL) | **no built-in permission system** (its README); `--tools` allowlist; containerization guidance (Docker, Docker Sandboxes, OpenShell) |
+| GitHub Copilot CLI | `copilot -p`; `--output-format json` (JSONL) | NOT FOUND for `-p` | **agent** (`copilot --acp`, **public preview**; stdio, or TCP bound to loopback with no authentication documented) | client (ships GitHub's MCP server) | — | `--allow-tool`, `--deny-tool`, `--allow-all-tools`, `--yolo`, `--allow-url`, `--deny-url`, `--no-ask-user` |
+| DeepSeek Harness | `dsh headless --json` (NDJSON events) | `--session-id` | **agent** (`dsh acp`) | client | `dsh sdk` (stdio JSON-RPC); `dsh web` (UI on loopback) | approval policies `ask`, `never` (and an experimental auto review); a file-effect process sandbox (`read-only`, `workspace-write`, `danger-full-access`) |
+
+Eight serve ACP as the agent; twelve are MCP clients and two serve MCP; every product but
+Hermes Desktop has a headless mode with a machine-readable stream. Claude Code, Codex CLI,
+Droid and Pi offer no upstream ACP at the revisions read: adapters that others publish for
+them are not counted.
+
+**DireWolf integration directions** (ADR-0051): **A** — DireWolf invokes the agent as a
+contained workload; **B** — the agent uses DireWolf as its enforcement boundary; **C** — a
+client drives DireWolf's own agent; **D** — shared configuration and tooling.
+
+| Product | A | B | C | D | New DireWolf capability needed | Expected security limitation | Owner | Status |
+|---|---|---|---|---|---|---|---|---|
+| Claude Code | vendor adapter over `stream-json` | contained only: in a DireWolf environment, `--bare --tools ""` and DireWolf's MCP server; advisory outside | N/A | MCP definitions as proposals; `CLAUDE.md` as untrusted context | environment-hosted agent profile; MCP server (M29c) | repository hooks and MCP servers run without `--bare`; consumer-login credentials cannot be proxied; code leaves for its provider | M29b (after ACP) | VERIFIED INTERFACE · CANDIDATE |
+| OpenClaw | ACP client (M29b) | contained only; advisory outside | **its ACP client could drive `direwolf acp`** | MCP; its channel MCP server would be one more server under M16's grants | ACP client; ACP agent role (M29a) | sandbox off by default; its Gateway is a second control plane | M29a, M29b | VERIFIED INTERFACE · PLANNED INTEGRATION |
+| Hermes Agent | ACP client | contained only; advisory outside | NOT FOUND (no ACP client role read) | MCP | ACP client | its own approvals and terminal backends are its own, not DireWolf's | M29b | VERIFIED INTERFACE · PLANNED INTEGRATION |
+| Droid | vendor adapter over `stream-jsonrpc` | contained only; advisory outside | N/A | MCP | vendor adapter | closed source; its cloud is its model path | — | VERIFIED INTERFACE (documentation) · DEFERRED |
+| Cline | ACP client (`--acp`, auto-approve off) | contained only; advisory outside | N/A | MCP; `.clinerules` as untrusted context | ACP client | **headless auto-approves everything by default**; no OS sandbox | M29b | VERIFIED INTERFACE · PLANNED INTEGRATION |
+| Oh My Pi | ACP client | contained only — **only whole-process containment works** | N/A | MCP; it reads other agents' MCP files, which must not become grants | ACP client | in-process shell: per-command mediation is impossible | M29b | VERIFIED INTERFACE · PLANNED INTEGRATION |
+| Qwen Code | ACP client | contained, with DireWolf answering its `canUseTool` callback; advisory outside | N/A | MCP | ACP client | its default approval is a classifier, never an operator approval | M29b | VERIFIED INTERFACE · PLANNED INTEGRATION |
+| Codex CLI | vendor adapter over `exec --json` or the app server | contained only; advisory outside | N/A | MCP; `AGENTS.md` as untrusted context | vendor adapter | its sandbox and approvals are its own; app server experimental | M29b (after ACP) | VERIFIED INTERFACE · CANDIDATE |
+| OpenCode | ACP client | contained only; advisory outside | N/A | MCP | ACP client | its HTTP server is unauthenticated by default and must never be exposed | M29b | VERIFIED INTERFACE · PLANNED INTEGRATION |
+| Hermes Desktop | N/A (through Hermes Agent) | N/A | it speaks the Hermes gateway protocol, not one DireWolf serves | through Hermes Agent | none | — | — | NOT APPLICABLE |
+| Pi | vendor adapter over RPC | contained only — no permission system of its own | N/A | MCP | vendor adapter | no permission system: containment is the only boundary | — | VERIFIED INTERFACE · CANDIDATE |
+| GitHub Copilot CLI | ACP client, once its ACP leaves preview | contained only; advisory outside | N/A | MCP | ACP client | ACP in preview; TCP mode unauthenticated, so stdio only; subscription-bound credentials | M29b | VERIFIED INTERFACE (preview) · CANDIDATE |
+| DeepSeek Harness | ACP client | contained only; advisory outside | N/A | MCP | ACP client | developer preview, breaking changes announced | M29b | VERIFIED INTERFACE · CANDIDATE |
+
+**Evidence.** Claude Code: [headless](https://code.claude.com/docs/en/headless) and
+[CLI reference](https://code.claude.com/docs/en/cli-reference) (2026-10-10). OpenClaw:
+[ACP](https://github.com/openclaw/openclaw/blob/9449b4e7dc97cd66a0e787db851c44f2a9ee447a/docs/cli/acp.md), [agent](https://github.com/openclaw/openclaw/blob/9449b4e7dc97cd66a0e787db851c44f2a9ee447a/docs/cli/agent.md),
+[MCP serve](https://github.com/openclaw/openclaw/blob/9449b4e7dc97cd66a0e787db851c44f2a9ee447a/docs/cli/mcp/serve.md),
+[CLI backends](https://github.com/openclaw/openclaw/blob/9449b4e7dc97cd66a0e787db851c44f2a9ee447a/docs/gateway/cli-backends.md),
+[sandboxing](https://github.com/openclaw/openclaw/blob/9449b4e7dc97cd66a0e787db851c44f2a9ee447a/docs/gateway/sandboxing.md). Hermes Agent:
+[programmatic integration](https://github.com/NousResearch/hermes-agent/blob/46d7718a52ff33accb15dc0501736fbdb6833cab/website/docs/developer-guide/programmatic-integration.md),
+[ACP](https://github.com/NousResearch/hermes-agent/blob/46d7718a52ff33accb15dc0501736fbdb6833cab/website/docs/user-guide/features/acp.md),
+[CLI commands](https://github.com/NousResearch/hermes-agent/blob/46d7718a52ff33accb15dc0501736fbdb6833cab/website/docs/reference/cli-commands.md); Hermes Desktop:
+[README](https://github.com/NousResearch/hermes-agent/blob/46d7718a52ff33accb15dc0501736fbdb6833cab/apps/desktop/README.md),
+[AGENTS.md](https://github.com/NousResearch/hermes-agent/blob/46d7718a52ff33accb15dc0501736fbdb6833cab/apps/desktop/AGENTS.md). Droid:
+[droid exec](https://github.com/Factory-AI/factory/blob/c6ea47082007a32a8a76bb99da42e387565f119a/docs/cli/droid-exec/overview.mdx),
+[CLI reference](https://github.com/Factory-AI/factory/blob/c6ea47082007a32a8a76bb99da42e387565f119a/docs/reference/cli-reference.mdx). Cline:
+[ACP](https://github.com/cline/cline/blob/d20b337eb591d661b8927e288bb0034d53f1fabb/docs/usage/acp.mdx), [CLI reference](https://github.com/cline/cline/blob/d20b337eb591d661b8927e288bb0034d53f1fabb/docs/cli/cli-reference.mdx),
+[ClineCore](https://github.com/cline/cline/blob/d20b337eb591d661b8927e288bb0034d53f1fabb/docs/sdk/clinecore.mdx). Oh My Pi:
+[README](https://github.com/can1357/oh-my-pi/blob/703a261df9533e74f16aa8d38e64eb41977ccf89/README.md), [CLI reference](https://github.com/can1357/oh-my-pi/blob/703a261df9533e74f16aa8d38e64eb41977ccf89/docs/cli-reference.md),
+[RPC](https://github.com/can1357/oh-my-pi/blob/703a261df9533e74f16aa8d38e64eb41977ccf89/docs/rpc.md), [approval mode](https://github.com/can1357/oh-my-pi/blob/703a261df9533e74f16aa8d38e64eb41977ccf89/docs/approval-mode.md). Qwen
+Code: [headless](https://github.com/QwenLM/qwen-code/blob/085a44f336dc94ce43e46daaa3a035ff7bf32720/docs/users/features/headless.md),
+[ACP bridge](https://github.com/QwenLM/qwen-code/blob/085a44f336dc94ce43e46daaa3a035ff7bf32720/docs/developers/daemon/03-acp-bridge.md),
+[TypeScript SDK](https://github.com/QwenLM/qwen-code/blob/085a44f336dc94ce43e46daaa3a035ff7bf32720/docs/developers/sdk-typescript.md),
+[approval modes](https://github.com/QwenLM/qwen-code/blob/085a44f336dc94ce43e46daaa3a035ff7bf32720/docs/users/features/approval-mode.md),
+[sandbox](https://github.com/QwenLM/qwen-code/blob/085a44f336dc94ce43e46daaa3a035ff7bf32720/docs/users/features/sandbox.md). Codex CLI:
+[subcommands](https://github.com/openai/codex/blob/4aa94dce270de668eff6e2fa8585c82385e84455/codex-rs/cli/src/main.rs),
+[`exec`](https://github.com/openai/codex/blob/4aa94dce270de668eff6e2fa8585c82385e84455/codex-rs/exec/src/cli.rs),
+[sandbox and approval options](https://github.com/openai/codex/blob/4aa94dce270de668eff6e2fa8585c82385e84455/codex-rs/utils/cli/src/shared_options.rs),
+[`mcp`](https://github.com/openai/codex/blob/4aa94dce270de668eff6e2fa8585c82385e84455/codex-rs/cli/src/mcp_cmd.rs),
+[app server](https://github.com/openai/codex/blob/4aa94dce270de668eff6e2fa8585c82385e84455/codex-rs/app-server/README.md),
+[TypeScript SDK](https://github.com/openai/codex/blob/4aa94dce270de668eff6e2fa8585c82385e84455/sdk/typescript/README.md). OpenCode:
+[ACP](https://github.com/anomalyco/opencode/blob/b2a3926e87e35fc7f6308521c4418067cddd5d0e/packages/web/src/content/docs/acp.mdx),
+[CLI](https://github.com/anomalyco/opencode/blob/b2a3926e87e35fc7f6308521c4418067cddd5d0e/packages/web/src/content/docs/cli.mdx),
+[server](https://github.com/anomalyco/opencode/blob/b2a3926e87e35fc7f6308521c4418067cddd5d0e/packages/web/src/content/docs/server.mdx),
+[permissions](https://github.com/anomalyco/opencode/blob/b2a3926e87e35fc7f6308521c4418067cddd5d0e/packages/web/src/content/docs/permissions.mdx). Pi:
+[README](https://github.com/earendil-works/pi/blob/42a3497d03ad17e308a2299fa824727894f2c0ec/README.md), [RPC](https://github.com/earendil-works/pi/blob/42a3497d03ad17e308a2299fa824727894f2c0ec/packages/coding-agent/docs/rpc.md),
+[JSON](https://github.com/earendil-works/pi/blob/42a3497d03ad17e308a2299fa824727894f2c0ec/packages/coding-agent/docs/json.md),
+[MCP](https://github.com/earendil-works/pi/blob/42a3497d03ad17e308a2299fa824727894f2c0ec/packages/coding-agent/docs/mcp.md). GitHub Copilot CLI:
+[programmatic reference](https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-programmatic-reference),
+[ACP server](https://docs.github.com/en/copilot/reference/copilot-cli-reference/acp-server)
+(2026-10-10), [README](https://github.com/github/copilot-cli/blob/dcdc0273c0250d8b32677ca99bc0e1f5006daa89/README.md). DeepSeek Harness:
+[README](https://github.com/deepseek-ai/deepseek-harness/blob/d743267388641bc76f17c45ce8b4c231aed1d32c/README.md), [CLI help](https://github.com/deepseek-ai/deepseek-harness/blob/d743267388641bc76f17c45ce8b4c231aed1d32c/docs/cli-help.md),
+[sandbox](https://github.com/deepseek-ai/deepseek-harness/blob/d743267388641bc76f17c45ce8b4c231aed1d32c/docs/subsystems/sandbox.md),
+[permission presets](https://github.com/deepseek-ai/deepseek-harness/blob/d743267388641bc76f17c45ce8b4c231aed1d32c/docs/subsystems/permission-presets.md).
+
+**DireWolf's planning conclusion.** Interoperability is **standards-first and post-V1**
+(M29): one reviewed ACP client reaches the eight ACP agents as contained workloads, one ACP
+agent role lets any ACP editor — OpenClaw's client among them — drive DireWolf's own agent,
+and an MCP server mediates only agents DireWolf contains. Vendor adapters for Claude Code,
+Codex CLI, Pi and Droid wait for demand or for their ACP. **No integration is a second route
+around the authority**: an external agent's native tools are contained by its environment
+or the integration is labelled advisory; its approvals are never DireWolf's; its credentials
+are DireWolf secrets injected into its environment, never runtime memory; a `LOCAL_ONLY` run
+never starts an agent whose declared model origins are remote.
 
 ---
 
@@ -850,6 +985,12 @@ Each has a ledger entry in §17 and a roadmap item.
 | # | Idea | Sources | Owner |
 |---|---|---|---|
 | G17 | Provider breadth by protocol family — native, cloud platforms, one reviewed OpenAI-compatible adapter, local and self-hosted, Hugging Face named — behind the one kernel path (§7a) | Hermes Agent, OpenClaw, OpenFang, NEAR AI/IronClaw, OpenLegion, Codex, Claude Code; the project owner | M7 |
+
+### Adopted by the external-agent interoperability pass (2026-10-10)
+
+| # | Idea | Sources | Owner |
+|---|---|---|---|
+| G18 | Interoperate through the Agent Client Protocol first — one reviewed client for the agents that serve it, one agent role for DireWolf — with contained, mediated and advisory kept apart in every claim (§7b, ADR-0051) | OpenClaw, Hermes Agent, Cline, Oh My Pi, Qwen Code, OpenCode, Copilot CLI, DeepSeek Harness (each serves ACP); OpenClaw (ACP client role) | M29 |
 
 ### Studied and rejected
 

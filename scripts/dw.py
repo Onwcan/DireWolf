@@ -3018,8 +3018,12 @@ NET_HTTP_CASES = (
     ("broker-http", "two-lengths"),
     ("broker-http", "two-locations"),
     ("broker-http", "untrusted-authority"),
+    ("broker-http", "worker-closed-to-its-uid"),
     ("broker-http", "worker-killed-after-sending"),
+    ("broker-http", "worker-killed-before-sending"),
+    ("broker-http", "worker-overrun-killed"),
     ("broker-http", "worker-refuses-a-stranger"),
+    ("broker-http", "worker-refuses-an-unpromised-hand-over"),
     ("broker-http", "worker-unavailable"),
     ("broker-http", "wrong-name"),
     ("net-http", "broker-killed-takes-its-worker"),
@@ -3037,6 +3041,7 @@ NET_HTTP_CASES = (
     ("net-http", "credential-port-confusion"),
     ("net-http", "credential-same-origin-redirect"),
     ("net-http", "credential-unbound-origin"),
+    ("net-http", "credential-worker-killed"),
     ("net-http", "dns-rebinding-next-request"),
     ("net-http", "dns-rebinding-pinned-within-request"),
     ("net-http", "dns-resolution-failed"),
@@ -3322,6 +3327,22 @@ NET_HTTP_MUTATIONS = (
         "crates/dwkd-broker/src/http/mod.rs",
         "let past = self.needle.as_ref().map_or(0, |needle| needle.len());",
         "let past = self.needle.as_ref().map_or(0, |_| 0);",
+    ),
+    # D11's worker process: closed to its own uid, and handed only what it
+    # was promised.
+    (
+        "the exchange worker stays dumpable while it holds a hop",
+        "crates/dwkd-broker/src/hardening.rs",
+        "&& set_dumpable_behavior(DumpableBehavior::NotDumpable).is_ok()",
+        "&& true",
+    ),
+    # The count is the gate for one or two descriptors too many: the
+    # ancillary buffer has room for four, so only five or more truncate.
+    (
+        "the exchange worker takes a hand-over with a descriptor too many",
+        "crates/dwkd-broker/src/http/worker.rs",
+        "let credential = if fds.len() == 2 { fds.pop() } else { None };",
+        "fds.truncate(2);\n    let credential = if fds.len() == 2 { fds.pop() } else { None };",
     ),
 )
 

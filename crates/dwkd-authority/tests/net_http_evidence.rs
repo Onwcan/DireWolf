@@ -1333,6 +1333,87 @@ exit 1"#,
         evidence("broker-killed-takes-its-worker", "worker-gone-UNKNOWN");
     }
 
+    /// D11 (ADR-0050 §§9, 20): a credential hop whose exchange worker dies
+    /// once it has begun sending is `UNKNOWN` -- its request and its injection
+    /// -- and is never sent again; and the long-lived broker, which read the
+    /// credential once and handed it on, holds neither the value nor its hex
+    /// afterwards.
+    #[test]
+    fn a_credential_hop_whose_worker_dies_is_unknown_and_leaves_the_broker_clean() {
+        use std::time::{Duration, Instant};
+        let Some(b) = bench("net-worker-credential") else {
+            return;
+        };
+        let value = fresh(40);
+        let Some(seeded) = Seeded::new("wk", value.as_bytes()) else {
+            println!("NOT EXERCISED: no usable kernel keyring on this host");
+            return;
+        };
+        let secrets = format!(
+            "schema_version = 1\n\n[secrets.origin-token]\ntype = \"bearer\"\nstorage = \
+             \"keychain\"\nkeychain = \"{entry}\"\norigins = [\"origin.test:{port}\"]\n\
+             header = \"Authorization\"\nprefix = \"Bearer \"\ninjection = [\"egress\"]\n",
+            entry = seeded.0,
+            port = b.origin.port,
+        );
+        let mut spec = HostSpec::open("wk", &["network.https:*", "secret.use:origin-token"]);
+        spec.secrets = Some(secrets);
+        let mut h = host(&b, spec);
+        let broker = b.broker.pid;
+        let killer = std::thread::spawn(move || {
+            let until = Instant::now() + Duration::from_secs(30);
+            let worker = loop {
+                if let [worker] = workers_of(broker)[..] {
+                    break worker;
+                }
+                assert!(Instant::now() < until, "a worker holds the hop");
+                std::thread::sleep(Duration::from_millis(10));
+            };
+            // `/never` is read and never answered: the worker has sent.
+            std::thread::sleep(Duration::from_millis(500));
+            let pid = rustix::process::Pid::from_raw(i32::try_from(worker).unwrap()).unwrap();
+            rustix::process::kill_process(pid, rustix::process::Signal::KILL).unwrap();
+        });
+        let call = net(
+            "GET",
+            &b.o("/never?credential"),
+            false,
+            r#","credential_handle":"origin-token""#,
+        );
+        let got = h.call(&call, "wk1");
+        killer.join().unwrap();
+        assert!(matches!(got, Got::Failed(F::OutcomeUnknown)), "{got:?}");
+        let seen = b.origin.to("/never?credential");
+        assert_eq!(seen.len(), 1);
+        assert_eq!(
+            authorization(&seen[0]),
+            Some(sha(&format!("Bearer {value}"))),
+            "the credential reached its origin"
+        );
+        assert_eq!(h.rows("SELECT state FROM net_request"), ["UNKNOWN"]);
+        assert_eq!(h.rows("SELECT state FROM secret_injection"), ["UNKNOWN"]);
+        // Never sent again, whatever the caller does with the same key.
+        let _ = h.call(&call, "wk1");
+        assert_eq!(
+            b.origin.to("/never?credential").len(),
+            1,
+            "never sent again"
+        );
+        std::thread::sleep(Duration::from_millis(200));
+        let hex: String = value.bytes().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(
+            memory_holds(broker, value.as_bytes()),
+            Some(false),
+            "broker residue after its worker died"
+        );
+        assert_eq!(memory_holds(broker, hex.as_bytes()), Some(false));
+        evidence(
+            "credential-worker-killed",
+            "UNKNOWN-never-resent-broker-clean",
+        );
+        drop(seeded);
+    }
+
     #[test]
     fn crashes_replays_budgets_and_policies_hold_against_the_real_broker() {
         let Some(b) = bench("net-life") else {

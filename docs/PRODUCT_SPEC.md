@@ -123,7 +123,7 @@ Filesystem 8 · process 3 · network 1 · memory 2 · orchestration 2 · artifac
 
 ### Out of V1 — deferred with extension points reserved
 
-Gateway daemon and channels (Telegram, Discord, Slack) · Web UI · Browser automation · Plugins · Skill learning and any skill registry · Memory consolidation and embeddings/vector search · Scheduler and standing intents · Remote workers · Durable multi-day workflows · WhatsApp, voice, mobile, desktop apps · gVisor/Firecracker · Enterprise SSO, multi-tenancy, billing · Autonomous self-modification (permanent non-goal)
+Gateway daemon and channels (Telegram, Discord, Slack) · Web UI · Browser automation · Plugins · Skill learning and any skill registry · Memory consolidation and embeddings/vector search · Scheduler and standing intents · Remote workers · Durable multi-day workflows · WhatsApp, voice, mobile, desktop apps · gVisor/Firecracker · Enterprise SSO, multi-tenancy, billing · External agent interoperability (ACP, external agents as contained workloads, an MCP server for them — M29) · Autonomous self-modification (permanent non-goal)
 
 ### Why these cuts
 
@@ -133,6 +133,7 @@ The brief's candidate V1 was roughly twice this. Each cut has a reason beyond "l
 - **Browser → V1.2.** Largest single feature, highest dependency weight, and it needs the egress proxy and quarantine to be proven first.
 - **Scheduler → V1.1.** Unattended runs are the highest-risk category. The policy machinery for them should be exercised interactively before anything runs while nobody is watching.
 - **Memory consolidation → V2.** Retrieval quality must be measurable before we let a model rewrite the store.
+- **External agent interoperability → V1.1 (M29; [ADR-0051](adr/0051-external-agent-interoperability.md), Proposed).** Claude Code, Codex CLI, OpenCode and the other coding agents studied are agents with their own tools, approvals and model egress, not model providers. Hosting one safely needs M5d's contained workloads, M6's approvals and M9's runtime first; until then any integration would leave the agent's own shell outside the boundary. ACP first, and enforcement claimed only where DireWolf contains the agent.
 - **Skill learning → V2.** The validation pipeline is most of the work, and shipping synthesis before validation is how agent-written content becomes a persistence mechanism.
 - **Plugins → V2.** See [PLUGINS.md](PLUGINS.md) §1. If MCP proves sufficient, not shipping plugins is a success.
 - **Vectors → optional V1.1.** FTS5 is a strong baseline; embeddings mean either a cloud call (breaking privacy class) or a heavy local dependency.

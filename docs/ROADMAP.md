@@ -155,7 +155,7 @@ and serving on Linux only. **M5 is in progress: M5a and M5b are complete (see M5
 **Adversarial:** the full path-traversal set ([EVALS.md](EVALS.md) §3) including Unicode normalisation and TOCTOU swap races in a tight loop; secret-in-output detection; core-dump inspection for secret residue.
 **Deferred:** remote fs, Windows-native hardening beyond the fallback walker.
 
-### M5 · Sandbox — **IN PROGRESS** (M5a complete, hosted acceptance passed; M5b complete, hosted acceptance passed; M5c implemented and validated locally, owner review and hosted acceptance pending; M5d–M5e not started)
+### M5 · Sandbox — **IN PROGRESS** (M5a complete, hosted acceptance passed; M5b complete, hosted acceptance passed; M5c implemented, hosted CI green, owner acceptance pending; M5d–M5e not started)
 
 M5 is two products in one (a sandbox *and* an egress proxy), so it is decomposed like M4
 ([ADR-0047](adr/0047-m5a-oci-execution-environment-and-measured-assurance.md)). The
@@ -234,17 +234,20 @@ other uids, a tampered relay; any uid but the relay's at the broker's socket; an
 fronting residual — carried unseen, bounded by the budget.
 **Deferred:** `net.http` (M5c); a workload using the proxy (M5d).
 
-#### M5c · `net.http`, SSRF and redirect policy, credential egress — **IN PROGRESS** (implemented and validated locally; owner security review and hosted acceptance pending)
+#### M5c · `net.http`, SSRF and redirect policy, credential egress — **IN PROGRESS** (implemented; hosted CI green on `7b8ba9d`; owner acceptance pending)
 
-M5c is implemented in the working tree and its local gates pass, its closeout review
-included; it is complete only when its owner accepts
+M5c is implemented and committed (`7b8ba9d`), and hosted run [37994995963](https://github.com/Onwcan/DireWolf/actions/runs/37994995963) passed all 21
+jobs on it: `net-http` twice (once under CPU contention), the secret broker with its
+multi-identity half, the gated `m5c-net-http` eval, M5a, M5b, the authority boundary,
+architecture, schemas, dependencies, the three platforms and the release build. (Run
+37855884386 before it failed before measuring anything: its tool probe asked OpenSSL 3.0
+for `openssl --version`, which 3.0 refuses; the probe now asks each tool by its own
+spelling.) The final D11 audit (2026-10-10) found no defect and changed no production byte;
+its new worker tests and mutants need a green hosted run on the commit that carries them.
+M5c is complete only when its owner accepts
 [ADR-0050](adr/0050-m5c-kernel-performed-net-http-ssrf-redirects-and-credential-egress.md)
-(Proposed) — its decisions D1–D12, D11's exchange worker and residual among them — and
-the required hosted `net-http` job, every multi-identity half and the gated `m5c-net-http`
-eval pass on a new commit. Hosted run 37855884386 failed before measuring anything: its tool
-probe asked OpenSSL 3.0 for `openssl --version`, which 3.0 refuses, so every real-daemon
-case was NOT EXERCISED; the probe now asks each tool by its own spelling and names the
-command that failed.
+(Proposed) — its decisions D1–D12, D11's exchange worker and residual among them. The
+accepted ADR and the hosted run are then recorded here as M5c's evidence, and M5d is next.
 
 **Deps:** M5b. **Deliverables (as built, pending acceptance):** ToolInvoke and
 CanonicalPreview version 4 with the typed `net.http` call (no address, resolver, proxy,
@@ -266,9 +269,9 @@ request's first origin, each hop its own decided and recorded `secret.use`, thro
 fresh one-shot pipe, and an echo of it taken out before anything of the response is
 encoded. The `PROXY_ONLY` tunnel is untouched.
 **Acceptance:** `make net-http-evidence` (no internet: real TLS origins, the fixture
-resolver, the released broker) — 174 required cases across SSRF and DNS, HTTP and
+resolver, the released broker) — 179 required cases across SSRF and DNS, HTTP and
 redirects, TLS, secrets and residue, the exchange worker's lifecycle, lifecycle and
-budgets; `make net-http-mutations` — eight weakened safeguards each caught; M4e's secret
+budgets; `make net-http-mutations` — ten weakened safeguards each caught; M4e's secret
 evidence moved to `net.http` with every case kept, and an echoed credential asserted absent
 from the broker nine ways (178 secret cases); required hosted job `net-http` (also under
 CPU contention) and gated eval `m5c-net-http`.
@@ -293,6 +296,11 @@ authority, the long-lived broker or the runtime's answer.
 authority's gates; secret modes B/C wired to sandboxed processes; `workspace_exec_hygiene`
 enforceable in the sandbox; the workspace ownership model; the workload wall clock and
 disk quota; the `local` environment's confinement; lifecycle integration with runs.
+**Interoperability prerequisites** ([ADR-0051](adr/0051-external-agent-interoperability.md), Proposed — no integration in M5d): the escape
+suite covers an agent-shaped workload — a long-lived third-party binary with child processes
+and network to declared origins only; no workload runs as the broker's uid (the exchange
+worker's startup window, ADR-0050 §9); secret modes B/C reach environments, the path an
+external agent's own credential would take (M29).
 **Acceptance:** a real workload runs only in a measured environment at its required level.
 **Adversarial:** full escape suite from a workload; resource exhaustion; persistence.
 **Deferred:** approvals for host execution (M6).
@@ -316,7 +324,7 @@ merge gates; weakened-profile closure for `PROXY_ONLY`; package-manager acceptan
 ### M6 · Approvals and budgets
 **Deps:** M3. **Deliverables:** binding hash; approval registry with scopes, expiry, single-use burn; standing grants with the 90-day cap and `require_untainted_run`; kernel-rendered approval prompts; hierarchical subtractive budget ledger; unattended degradation to DENY.
 **Acceptance:** every property test in [APPROVALS.md](APPROVALS.md) §10; burn is atomic under concurrency; prompts contain no model-authored text in the authoritative region.
-**Adversarial:** replay, substitution, drift (file/DNS/binary swap), laundering parent↔child, environment swap, fatigue spam, budget amplification via fan-out.
+**Adversarial:** replay, substitution, drift (file/DNS/binary swap), laundering parent↔child, environment swap, fatigue spam, budget amplification via fan-out; an external agent's own approval, auto-approve or "yolo" claim presented as an operator approval ([ADR-0051](adr/0051-external-agent-interoperability.md)).
 
 ---
 
@@ -400,11 +408,11 @@ merge gates; weakened-profile closure for `PROXY_ONLY`; package-manager acceptan
 **Deferred:** consolidation, embeddings, dynamic replanning, durable long workflows.
 
 ### M16 · MCP client
-**Deps:** M10. Kernel-spawned sandboxed servers; untrusted descriptions; `toolset_hash` rug-pull invalidation; per-server capability grants.
+**Deps:** M10. Kernel-spawned sandboxed servers; untrusted descriptions; `toolset_hash` rug-pull invalidation; per-server capability grants. A client only: serving MCP tools to another agent is M29c's server, a different role. Another agent's MCP server definitions are imported as untrusted proposals, each still needing its own grant ([ADR-0051](adr/0051-external-agent-interoperability.md)).
 **Adversarial:** malicious description; rug pull; oversized results; server attempting network without a grant.
 
 ### M17 · CLI and doctor
-**Deps:** M9–M16. Full command surface; `doctor` verifying facts not settings, including `doctor --sandbox`, which reports M5's measured assurance; export/import; **`direwolf policy diff`** -- rule-level changes plus the decision delta computed by the same evaluator over the fixture corpus and recorded canonical actions (G4); **`direwolf security demo`** -- a zero-credential scripted hostile runtime that prints each attempt with the audit record that denied it (G5) ([COMPETITIVE_ANALYSIS.md](COMPETITIVE_ANALYSIS.md) §17). The CLI is **not** a `ChannelAdapter` — that claim was retracted in Phase 0.1 ([ARCHITECTURE.md](ARCHITECTURE.md) §27); the interface is designed at M20 against two real channels.
+**Deps:** M9–M16. Full command surface; `doctor` verifying facts not settings, including `doctor --sandbox`, which reports M5's measured assurance; export/import; **`direwolf policy diff`** -- rule-level changes plus the decision delta computed by the same evaluator over the fixture corpus and recorded canonical actions (G4); **`direwolf security demo`** -- a zero-credential scripted hostile runtime that prints each attempt with the audit record that denied it (G5) ([COMPETITIVE_ANALYSIS.md](COMPETITIVE_ANALYSIS.md) §17). The CLI is **not** a `ChannelAdapter` — that claim was retracted in Phase 0.1 ([ARCHITECTURE.md](ARCHITECTURE.md) §27); the interface is designed at M20 against two real channels. Its headless contract — a machine-readable event stream, exit codes, cancellation — is kept stable enough for M29a's ACP agent role to build on ([ADR-0051](adr/0051-external-agent-interoperability.md)).
 **Acceptance:** startup to first prompt **< 400 ms with a warm kernel daemon, 1–2 s cold** ([PRODUCT_SPEC.md](PRODUCT_SPEC.md) §9 — audit verification is incremental against a signed checkpoint, not O(history), and Python import time dominates the cold path); `doctor` detects a deliberately misconfigured permission by attempting the write that should fail; `policy diff` reports a reorder-only change that alters a first match, an `extends` change and a removed obligation; `security demo` exits non-zero if any attempt succeeds, fails when an attempt is NOT EXERCISED, runs in CI, and fails under a deliberately weakened configuration.
 **Ollama launch integration** (a project-owner requirement, recorded at M3e). Target first-class invocation:
 
@@ -427,12 +435,75 @@ Full eval suite green; fuzzing soak; 24 h soak runs; performance targets met; do
 
 | Version | Milestones |
 |---|---|
-| **V1.1** | M19 gateway · M20 channels (Telegram first) · M21 scheduler + standing intents · M22 optional embeddings |
+| **V1.1** | M19 gateway · M20 channels (Telegram first) · M21 scheduler + standing intents · M22 optional embeddings · M29 agent interoperability (ACP first) |
 | **V1.2** | M23 browser (Playwright, sandboxed, quarantined downloads) |
 | **V2.0** | M24 memory consolidation · M25 skill learning pipeline · M26 plugins (out-of-process) · M27 web UI · M28 remote workers |
 | **V2.x** | Stronger isolation (gVisor/Firecracker) · durable workflows · competitive benchmark publication · skill registry (only with signing and revocation) |
 
 **M28 remote workers** carry the items deferred by the 2026-09-28 re-baseline ([COMPETITIVE_ANALYSIS.md](COMPETITIVE_ANALYSIS.md) §17 G8): a workload identity proved by key possession, not by a bearer token; a signed, single-use remote permit bound to the canonical action digest, the epoch, the broker identity and an expiry, with a durable nonce; an encrypted host–worker transport; and the decision whether authority state spans hosts, taken there and not before.
+
+### M29 · Agent interoperability — **PLANNED** (post-V1, V1.1; [ADR-0051](adr/0051-external-agent-interoperability.md), Proposed)
+
+**Objective:** reach external coding agents through shared standards — the Agent Client
+Protocol first, MCP second — without creating any route around the authority. The products
+studied, their interfaces at pinned revisions and their security limits are
+[COMPETITIVE_ANALYSIS.md](COMPETITIVE_ANALYSIS.md) §7b. External agents are workloads or
+clients, never model providers (M7 is unchanged) and never authorities.
+**Deps:** M5 (M5d's contained workloads, M5e's gate), M6, M7, M9, M10, M14, M16, M17. Not a
+V1 commitment: it would add a third-party binary to M5d's escape surface, a protocol to the
+runtime and an MCP server to the authority's edge — none of it before V1's core is proven.
+**Deliverables:**
+- **M29a · DireWolf as an ACP agent.** `direwolf acp` over stdio: an ACP client — an editor,
+  or OpenClaw's ACP client — drives DireWolf's own runtime: sessions, prompts, streaming,
+  tool-call events, cancellation. Every effect still goes through the authority; a
+  permission request carries the kernel-rendered M6 prompt and its binding hash, and the
+  client's answer is only the operator's answer to that prompt.
+- **M29b · External agents as contained workloads.** One reviewed ACP client. An external
+  agent profile — binary digest and version range, declared model origins, credential
+  handles, required capabilities, privacy class — admitted by policy; the agent runs in an
+  M5 environment whose only egress is its declared origins (`PROXY_ONLY` grants), with the
+  run's workspace as M5d mounts it, its credentials by secret mode B or C, a wall clock and
+  budgets; its permission requests answered by policy and approvals, never auto-allowed;
+  ACP `cancel`, then kill; its output untrusted and tainting. Vendor adapters — Claude
+  Code's `stream-json`, Codex CLI's `exec --json` or app server, Pi's RPC, Droid's
+  `stream-jsonrpc` — only on demand, each reviewed on its own, ACP preferred whenever the
+  agent offers it.
+- **M29c · An MCP server for contained agents.** Authority-mediated tools served to an agent
+  running in a DireWolf environment with its native shell, file and network tools disabled or
+  confined there. For an agent outside an environment the bridge is refused by default; an
+  operator who chooses it gets an **advisory** bridge, labelled so in every audit record and
+  in `doctor`, never described as enforcement.
+- Decision point DP-1 answered by the owner (ADR-0051 §8, ADR-0029's revisit trigger):
+  whether the authority's primitives are ever offered to external runtimes outside
+  DireWolf environments.
+**Acceptance — contract:** handshake and protocol-version negotiation; capability
+discovery; session setup over stdio only (no unauthenticated TCP listener, whatever the
+agent offers); streaming event framing within bounds; cancellation and timeouts honoured;
+structured completion; crash recovery — a killed agent, runtime or authority leaves the run
+reconciled and nothing silently retried; output bounds; an unsupported feature refused with
+a typed reason.
+**Acceptance — security:** no effect outside the authority or an environment it prepared;
+no host execution without an M6 approval; no network beyond the declared origins, attempted
+and refused; no external agent's credential in the runtime's memory, a log, an artifact or a
+transcript returned to the run; an agent's "approved" never satisfies an M6 approval; no
+cross-run workspace access; no capability escalation through an agent; no model-provider
+fallback a profile did not declare; every side effect accounted for, at the environment's
+level when the agent's own calls are contained rather than mediated.
+**Acceptance — evidence:** recorded ACP (and vendor-adapter) contract fixtures in ordinary
+CI; version-pinned live smoke tests with real agent binaries in a dedicated integration job,
+never on pull requests; negative protocol tests — oversized frames, malformed JSON-RPC,
+out-of-order events, a forged permission answer or binding hash; real-sandbox tests running a
+native agent process under M5's escape suite; mutations that weaken mediation — a permission
+request auto-allowed, an undeclared egress grant, a credential handed to the runtime — must
+make the gates fail. No CI job installs all thirteen agents; documented potential is never
+reported as tested compatibility.
+**Adversarial:** an agent steered by injected content to leave its environment, reach an
+undeclared origin, read another run's workspace or the host's credentials; an agent
+claiming an approval; children outliving cancellation; a binary changed between admission
+and launch; an ACP client forging a binding hash; an advisory bridge presented as
+enforcement; a `LOCAL_ONLY` run asked to start an agent with remote origins.
+**Deferred:** session interchange between agents; DireWolf as a general agent gateway;
+proxying consumer-subscription logins.
 
 ## Permanently deferred
 

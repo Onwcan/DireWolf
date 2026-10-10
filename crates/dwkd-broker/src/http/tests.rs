@@ -63,7 +63,7 @@ fn pki() -> &'static Path {
     })
 }
 
-fn evidence(case: &str, outcome: &str, layer: &str) {
+pub(crate) fn evidence(case: &str, outcome: &str, layer: &str) {
     println!(
         "NET-EVIDENCE {{\"suite\":\"broker-http\",\"case\":\"{case}\",\"outcome\":\"{outcome}\",\"layer\":\"{layer}\"}}"
     );
@@ -257,9 +257,16 @@ pub(crate) fn authorisation_for_worker_tests() -> HttpExchangeAuthorisation {
     Hop::get(443).authorisation()
 }
 
+/// The same, carrying a credential.
+pub(crate) fn credential_authorisation_for_worker_tests() -> HttpExchangeAuthorisation {
+    let mut hop = Hop::get(443);
+    hop.credential = Some(credential());
+    hop.authorisation()
+}
+
 /// The built broker binary: the exchange worker the worker tests run, as the
 /// process tests run the launch helper. Cargo builds it before any test runs.
-fn broker_binary() -> PathBuf {
+pub(crate) fn broker_binary() -> PathBuf {
     let this = std::env::current_exe().unwrap();
     let binary = this
         .parent()
@@ -679,7 +686,7 @@ fn a_body_is_sent_only_with_a_method_that_carries_one_and_with_its_length() {
 }
 
 /// A pipe holding `value`, its writer closed: what the authority hands over.
-fn pipe_with(value: &[u8]) -> std::os::fd::OwnedFd {
+pub(crate) fn pipe_with(value: &[u8]) -> std::os::fd::OwnedFd {
     // As the broker's own secret pipes: no spawn while the writer is open.
     let _fork = crate::process::fork_guard();
     let (reader, mut writer) = std::io::pipe().unwrap();
@@ -697,7 +704,7 @@ fn credential() -> HttpCredential {
 }
 
 /// The worker tests count this process's workers, so they run one at a time.
-fn one_worker_test() -> std::sync::MutexGuard<'static, ()> {
+pub(crate) fn one_worker_test() -> std::sync::MutexGuard<'static, ()> {
     static ONE: std::sync::Mutex<()> = std::sync::Mutex::new(());
     ONE.lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -736,6 +743,16 @@ fn workers_of_this_process() -> Vec<u32> {
         }
     }
     found
+}
+
+/// Signal the one exchange worker this process has, and return its pid.
+fn signal_the_worker(signal: rustix::process::Signal) -> u32 {
+    let [worker] = workers_of_this_process()[..] else {
+        panic!("one worker holds the hop");
+    };
+    let pid = rustix::process::Pid::from_raw(i32::try_from(worker).unwrap()).unwrap();
+    rustix::process::kill_process(pid, signal).unwrap();
+    worker
 }
 
 /// D11 (ADR-0050 §9): in production a hop runs in a short-lived worker --
@@ -848,11 +865,7 @@ fn a_worker_killed_after_it_began_sending_leaves_the_hop_unconfirmed() {
     let answer = thread::spawn(move || run(&client, &hop, None));
     let heard = request.recv_timeout(Duration::from_secs(20)).unwrap();
     assert!(heard.starts_with(b"GET /v1/items?page=2 HTTP/1.1\r\n"));
-    let [worker] = workers_of_this_process()[..] else {
-        panic!("one worker holds the hop");
-    };
-    let pid = rustix::process::Pid::from_raw(i32::try_from(worker).unwrap()).unwrap();
-    rustix::process::kill_process(pid, rustix::process::Signal::KILL).unwrap();
+    signal_the_worker(rustix::process::Signal::KILL);
     let answer = answer.join().unwrap();
     assert!(
         matches!(
@@ -872,20 +885,27 @@ fn a_worker_killed_after_it_began_sending_leaves_the_hop_unconfirmed() {
     );
 }
 
-/// Hops at the same time run in workers of their own, each answering its own
-/// hop; none outlives its answer.
+/// Hops at the same time run in workers of their own, each with its own
+/// credential: each origin hears only its own, each answer is redacted of
+/// only its own, and none of the workers outlives its answer. (The production
+/// broker serves one connection at a time; this drives its client directly,
+/// so that spawns and credential pipes really do interleave.)
 #[test]
-fn concurrent_hops_run_in_workers_of_their_own() {
+fn concurrent_credential_hops_run_in_workers_of_their_own() {
     let _one = one_worker_test();
     let client = Arc::new(worker_client());
-    let hops: Vec<_> = (0..4)
-        .map(|i| {
-            let body = format!("hop {i}");
+    let values: Vec<String> = (0..4)
+        .map(|i| format!("c0ncurrent-v4lue-{i}-0123456789abcdef"))
+        .collect();
+    let hops: Vec<_> = values
+        .iter()
+        .map(|value| {
+            let body = format!("echo: Bearer {value}");
             let reply = format!(
                 "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{body}",
                 body.len()
             );
-            let (port, _request) = origin(
+            let (port, request) = origin(
                 server("origin", &[b"http/1.1"]),
                 vec![
                     Act::Sleep(Duration::from_millis(1500)),
@@ -893,18 +913,30 @@ fn concurrent_hops_run_in_workers_of_their_own() {
                 ],
             );
             let client = Arc::clone(&client);
-            thread::spawn(move || (body, done(run(&client, &Hop::get(port), None))))
+            let secret = pipe_with(value.as_bytes());
+            let answer = thread::spawn(move || {
+                let mut hop = Hop::get(port);
+                hop.credential = Some(credential());
+                done(run(&client, &hop, Some(secret)))
+            });
+            (answer, request)
         })
         .collect();
     let mut most = 0;
-    while !hops.iter().all(thread::JoinHandle::is_finished) {
+    while !hops.iter().all(|(answer, _)| answer.is_finished()) {
         most = most.max(workers_of_this_process().len());
         thread::sleep(Duration::from_millis(20));
     }
-    for hop in hops {
-        let (body, got) = hop.join().unwrap();
+    for (i, (answer, request)) in hops.into_iter().enumerate() {
+        let got = answer.join().unwrap();
         assert_eq!(got.disposition, ExchangeDisposition::Completed);
-        assert_eq!(got.body.to_bytes(), body.as_bytes());
+        assert_eq!(got.body.to_bytes(), b"echo: Bearer [redacted:api-token]");
+        assert_eq!(got.credential_echoes.get(), 1);
+        let sent = request.recv().unwrap();
+        for (j, value) in values.iter().enumerate() {
+            let carried = sent.windows(value.len()).any(|w| w == value.as_bytes());
+            assert_eq!(carried, i == j, "hop {i} carried credential {j}: {carried}");
+        }
     }
     assert!(most >= 2, "the hops overlapped in workers: {most}");
     assert!(
@@ -913,7 +945,167 @@ fn concurrent_hops_run_in_workers_of_their_own() {
     );
     evidence(
         "concurrent-workers",
-        "each-answered-its-own-hop-reaped",
+        "each-its-own-credential-redacted-reaped",
+        "broker-worker",
+    );
+}
+
+/// While a worker holds a hop -- the credential composed, the request sent --
+/// its memory, environment and descriptors are closed even to its own uid
+/// (here its parent's: Yama would let a parent read a dumpable child), because
+/// it is not dumpable; nothing traces it; it can gain no privilege; and its
+/// command line names its mode and nothing of the hop.
+#[test]
+fn a_worker_is_closed_to_its_own_uid_while_it_holds_a_hop() {
+    const VALUE: &[u8] = b"cl0sed-w0rk3r-v4lue-0123456789";
+    let _one = one_worker_test();
+    let client = worker_client();
+    let (port, request) = origin(
+        server("origin", &[b"http/1.1"]),
+        vec![
+            Act::Sleep(Duration::from_secs(2)),
+            Act::Write(response("HTTP/1.1 204 No Content\n\n", b"")),
+        ],
+    );
+    let mut hop = Hop::get(port);
+    hop.credential = Some(credential());
+    let secret = pipe_with(VALUE);
+    let answer = thread::spawn(move || run(&client, &hop, Some(secret)));
+    request.recv_timeout(Duration::from_secs(20)).unwrap();
+    let [worker] = workers_of_this_process()[..] else {
+        panic!("one worker holds the hop");
+    };
+    let proc = PathBuf::from(format!("/proc/{worker}"));
+    for file in ["environ", "mem", "auxv"] {
+        let error = std::fs::File::open(proc.join(file)).unwrap_err();
+        assert_eq!(
+            error.kind(),
+            std::io::ErrorKind::PermissionDenied,
+            "/proc/<worker>/{file}"
+        );
+    }
+    assert!(
+        std::fs::read_dir(proc.join("fd")).is_err(),
+        "its descriptor table"
+    );
+    let status = std::fs::read_to_string(proc.join("status")).unwrap();
+    let field = |name: &str| {
+        status
+            .lines()
+            .find_map(|line| line.strip_prefix(name))
+            .map(str::trim)
+            .map(str::to_owned)
+    };
+    assert_eq!(field("TracerPid:").as_deref(), Some("0"));
+    assert_eq!(field("NoNewPrivs:").as_deref(), Some("1"));
+    let cmdline = std::fs::read(proc.join("cmdline")).unwrap();
+    let args: Vec<&[u8]> = cmdline
+        .split(|b| *b == 0)
+        .filter(|arg| !arg.is_empty())
+        .collect();
+    assert_eq!(args.len(), 2, "the binary and its mode");
+    assert_eq!(args[1], b"http-worker");
+    assert!(!holds_a_window_of(&cmdline, VALUE));
+    let got = done(answer.join().unwrap());
+    assert_eq!(got.status.map(HttpStatus::get), Some(204));
+    assert!(
+        workers_of_this_process().is_empty(),
+        "the worker was reaped"
+    );
+    evidence(
+        "worker-closed-to-its-uid",
+        "memory-environ-fds-refused-untraced-no-new-privs",
+        "broker-worker",
+    );
+}
+
+/// A worker killed during its TLS handshake -- before the first byte of the
+/// request -- leaves the hop a refusal: nothing of the request was sent.
+#[test]
+fn a_worker_killed_before_it_began_sending_leaves_nothing_sent() {
+    let _one = one_worker_test();
+    let client = worker_client();
+    // An origin that accepts and never answers the handshake.
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (heard, hearing) = mpsc::channel();
+    thread::spawn(move || {
+        let Ok((mut socket, _)) = listener.accept() else {
+            return;
+        };
+        socket
+            .set_read_timeout(Some(Duration::from_secs(20)))
+            .unwrap();
+        let mut got = Vec::new();
+        let mut chunk = [0u8; 4096];
+        while let Ok(n) = socket.read(&mut chunk) {
+            if n == 0 {
+                break;
+            }
+            got.extend_from_slice(&chunk[..n]);
+            let _ = heard.send(got.clone());
+        }
+    });
+    let hop = Hop::get(port);
+    let answer = thread::spawn(move || run(&client, &hop, None));
+    let hello = hearing.recv_timeout(Duration::from_secs(20)).unwrap();
+    assert_eq!(hello.first(), Some(&0x16), "a TLS handshake record");
+    signal_the_worker(rustix::process::Signal::KILL);
+    assert_eq!(
+        refused(answer.join().unwrap()),
+        BrokerRefusal::HttpWorkerFailed
+    );
+    assert!(
+        workers_of_this_process().is_empty(),
+        "the worker was reaped"
+    );
+    evidence(
+        "worker-killed-before-sending",
+        "HTTP_WORKER_FAILED-nothing-sent-reaped",
+        "broker-worker",
+    );
+}
+
+/// A worker that stops answering -- here stopped outright, after it sent --
+/// is killed once its hop's deadline and the grace have passed, reaped, and
+/// the hop is `EXCHANGE_UNCONFIRMED`: the broker never waits on a worker
+/// forever, and never calls an exchange that may have happened a refusal.
+#[test]
+fn a_worker_that_overruns_its_hop_is_killed_and_the_hop_unconfirmed() {
+    let _one = one_worker_test();
+    let resolver: Shared = Arc::new(
+        FixtureResolver::parse("resolve origin.test 127.0.0.1\nallow 127.0.0.1\n").unwrap(),
+    );
+    let trust = tls::Trust::evidence(&pki().join("ca.pem")).unwrap();
+    let client = Client::new(resolver, trust, quick(), broker_binary());
+    let (port, request) = origin(
+        server("origin", &[b"http/1.1"]),
+        vec![Act::Sleep(Duration::from_secs(20))],
+    );
+    let started = Instant::now();
+    let answer = thread::spawn(move || run(&client, &Hop::get(port), None));
+    request.recv_timeout(Duration::from_secs(20)).unwrap();
+    signal_the_worker(rustix::process::Signal::STOP);
+    let answer = answer.join().unwrap();
+    let took = started.elapsed();
+    assert!(
+        matches!(
+            answer,
+            OutcomeResult::Indeterminate(Indeterminate::ExchangeUnconfirmed)
+        ),
+        "{answer:?}"
+    );
+    assert!(
+        took >= quick().hop && took < quick().hop + Duration::from_secs(12),
+        "killed after the hop's deadline and its grace: {took:?}"
+    );
+    assert!(
+        workers_of_this_process().is_empty(),
+        "the worker was killed and reaped"
+    );
+    evidence(
+        "worker-overrun-killed",
+        "EXCHANGE_UNCONFIRMED-killed-reaped",
         "broker-worker",
     );
 }

@@ -440,10 +440,153 @@ mod tests {
     use dwk_proto::brokerp::{BrokerDone, BrokerOutcome, BrokerRefusal, OutcomeResult};
     use dwk_proto::wire::scalar::{ByteCount, HexContent};
 
-    use super::{ANSWER, HandOver, Trust, decode, encode, parse_answer};
+    use super::{ANSWER, HandOver, Trust, decode, encode, parse_answer, send};
 
     fn exchange() -> dwk_proto::brokerp::http::HttpExchangeAuthorisation {
         super::super::tests::authorisation_for_worker_tests()
+    }
+
+    /// What became of one real worker: its exit status, what it wrote on its
+    /// control channel, and every byte it wrote on the connection it was
+    /// handed.
+    struct Ran {
+        status: Option<i32>,
+        answer: Vec<u8>,
+        heard: Vec<u8>,
+    }
+
+    /// Start the real worker binary as this test's own child -- so its peer
+    /// check passes, exactly as for its broker -- and hand it `payload` with
+    /// `descriptors`, the first of which is a socket whose far end is
+    /// `origin`. `leak`, when given, stays open across the spawn without
+    /// close-on-exec, as a careless parent would leave it.
+    #[allow(clippy::unwrap_used)]
+    fn real_worker(
+        payload: &[u8],
+        descriptors: Vec<std::os::fd::OwnedFd>,
+        origin: std::os::unix::net::UnixStream,
+        leak: Option<&std::os::fd::OwnedFd>,
+    ) -> Ran {
+        use std::io::Read as _;
+        let (ours, theirs) = std::os::unix::net::UnixStream::pair().unwrap();
+        let mut command = std::process::Command::new(super::super::tests::broker_binary());
+        command
+            .arg("http-worker")
+            .env_clear()
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::from(std::os::fd::OwnedFd::from(
+                theirs,
+            )));
+        let mut child = {
+            let _fork = crate::process::fork_guard();
+            if let Some(fd) = leak {
+                rustix::io::fcntl_setfd(fd, rustix::io::FdFlags::empty()).unwrap();
+            }
+            let child = command.spawn();
+            if let Some(fd) = leak {
+                rustix::io::fcntl_setfd(fd, rustix::io::FdFlags::CLOEXEC).unwrap();
+            }
+            child.unwrap()
+        };
+        drop(command);
+        let handed: Vec<&std::os::fd::OwnedFd> = descriptors.iter().collect();
+        let _ = send(&ours, payload, &handed);
+        drop(handed);
+        drop(descriptors);
+        let listening = std::thread::spawn(move || {
+            origin
+                .set_read_timeout(Some(Duration::from_secs(10)))
+                .unwrap();
+            let mut heard = Vec::new();
+            let _ = (&origin).read_to_end(&mut heard);
+            heard
+        });
+        ours.set_read_timeout(Some(Duration::from_secs(15)))
+            .unwrap();
+        let mut answer = Vec::new();
+        let _ = (&ours).read_to_end(&mut answer);
+        let status = child.wait().unwrap().code();
+        Ran {
+            status,
+            answer,
+            heard: listening.join().unwrap(),
+        }
+    }
+
+    /// D11 (ADR-0050 §9): the real worker, given anything but the hand-over
+    /// it was promised -- a descriptor too many, a credential the hop does
+    /// not carry, a credential hop without its pipe, or a descriptor it
+    /// inherited -- reads nothing it was not promised, sends nothing on the
+    /// connection, answers nothing and exits. The same harness handing over
+    /// what was promised sees the handshake begin: the refusals are the
+    /// worker's, not the harness's.
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn the_real_worker_takes_only_the_hand_over_it_was_promised() {
+        use std::io::Write as _;
+        let _one = super::super::tests::one_worker_test();
+        let plain = exchange();
+        let carrying = super::super::tests::credential_authorisation_for_worker_tests();
+        let payload = |hop: &dwk_proto::brokerp::http::HttpExchangeAuthorisation| {
+            let frame = dwk_proto::brokerp::Authorisation::HttpExchange(hop.clone())
+                .encode_frame()
+                .unwrap();
+            encode(&Trust::Production, Duration::from_secs(1), &frame)
+        };
+        let pipe = |value: &[u8]| super::super::tests::pipe_with(value);
+        let connection = || {
+            let (origin, handed) = std::os::unix::net::UnixStream::pair().unwrap();
+            (origin, std::os::fd::OwnedFd::from(handed))
+        };
+        // The control: promised, taken -- the handshake begins on the
+        // connection it was handed, and times out against nobody.
+        let (origin, handed) = connection();
+        let ran = real_worker(&payload(&plain), vec![handed], origin, None);
+        assert_eq!(ran.status, Some(0));
+        assert_eq!(ran.heard.first(), Some(&0x16), "a TLS handshake record");
+        assert_eq!(ran.answer.first(), Some(&ANSWER));
+        // Refused, each: nothing sent, nothing answered.
+        let refusals: [(&str, Vec<u8>, Vec<std::os::fd::OwnedFd>); 3] = [
+            (
+                "one descriptor too many",
+                payload(&carrying),
+                vec![pipe(b"t0ken-value-0123"), pipe(b"an-extra-descriptor")],
+            ),
+            (
+                "a credential the hop does not carry",
+                payload(&plain),
+                vec![pipe(b"t0ken-value-0123")],
+            ),
+            (
+                "a credential hop without its pipe",
+                payload(&carrying),
+                vec![],
+            ),
+        ];
+        for (case, payload, more) in refusals {
+            let (origin, handed) = connection();
+            let mut descriptors = vec![handed];
+            descriptors.extend(more);
+            let ran = real_worker(&payload, descriptors, origin, None);
+            assert_eq!(ran.status, Some(4), "{case}");
+            assert!(ran.heard.is_empty(), "{case}: nothing sent");
+            assert!(ran.answer.is_empty(), "{case}: nothing answered");
+        }
+        // An inherited descriptor: refused before anything is received.
+        let (reader, mut writer) = std::io::pipe().unwrap();
+        writer.write_all(b"x").unwrap();
+        let leaked = std::os::fd::OwnedFd::from(writer);
+        let (origin, handed) = connection();
+        let ran = real_worker(&payload(&plain), vec![handed], origin, Some(&leaked));
+        assert_eq!(ran.status, Some(3), "an inherited descriptor");
+        assert!(ran.heard.is_empty() && ran.answer.is_empty());
+        drop((reader, leaked));
+        super::super::tests::evidence(
+            "worker-refuses-an-unpromised-hand-over",
+            "exit-4-or-3-nothing-sent-nothing-answered",
+            "broker-worker",
+        );
     }
 
     #[test]

@@ -55,7 +55,7 @@ until M5.
   networking (one peer: the broker's opaque CONNECT proxy), but no public caller can
   prepare one and nothing but the assurance probe runs in it; every action still runs on
   the host, and policy is told so. `net.http` (M5c), the kernel's own HTTPS request, is
-  implemented and awaits its owner's acceptance and hosted CI;
+  implemented and green in hosted CI, and awaits its owner's acceptance;
 - **approvals and budgets** (M6) — a decision that would need approval is a denial;
 - **model providers** (M7) — native, cloud-platform, OpenAI-compatible and local or
   self-hosted families, Hugging Face, Ollama and llama.cpp among them, every one behind
@@ -63,7 +63,10 @@ until M5.
 - the **agent runtime** — the loop, tools an agent calls, context, memory, skills,
   subagents, MCP (M8–M16) — so the runtime's own confinement is not built either (M9);
 - the full **CLI** (M17): `direwolf` supports `--version` and `doctor`, and nothing else;
-- channels, a scheduler, a browser, plugins, a web UI and remote workers (post-V1).
+- channels, a scheduler, a browser, plugins, a web UI and remote workers (post-V1), and
+  interoperability with external coding agents — ACP first, each one a contained workload
+  or a client, never an authority (M29, post-V1;
+  [ADR-0051](docs/adr/0051-external-agent-interoperability.md), Proposed).
 
 **Platforms.** The authority and the broker serve on **Linux only**; on macOS and native
 Windows `serve` refuses to start rather than guess who is on the other end. The Windows
