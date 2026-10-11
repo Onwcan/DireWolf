@@ -2901,6 +2901,292 @@ def task_sandbox_egress_evidence() -> None:
     uvrun("dwcheck", "closure", "--report")
 
 
+# --- M5d.1: a workload in a READY environment (ADR-0052) ---------------------
+
+WORKLOAD_BROKER_TESTS = (
+    "linux::a_workload_runs_as_the_environment_user_with_exactly_its_arguments",
+    "linux::output_and_the_wall_clock_are_bounded_and_a_timed_out_workload_is_ended",
+    "linux::a_process_tree_is_ended_whatever_it_did_to_leave",
+    "linux::only_the_pinned_bytes_run",
+    "linux::a_workload_runs_only_in_the_clean_recorded_environment",
+    "linux::nothing_outside_the_workspace_is_reachable_from_a_workload",
+    "linux::an_agent_shaped_workload_is_contained_and_ended",
+    "linux::the_broker_refuses_an_environment_identity_and_reports_its_posture",
+    "linux::a_broker_killed_mid_workload_leaves_it_to_the_environments_destruction",
+)
+WORKLOAD_AUTHORITY_TESTS = (
+    "linux::a_workload_is_decided_recorded_run_in_its_environment_and_never_run_twice",
+    "linux::every_gate_refuses_before_anything_runs",
+    "linux::the_budget_is_charged_at_the_intent_and_never_refunded",
+    "linux::a_crash_in_every_workload_window_leaves_it_unknown_and_never_run_again",
+    "linux::an_uncertain_ending_takes_its_environment_down",
+)
+
+# Every (suite, case) the M5d.1 real-container suites must report, exercised.
+#   sandbox-workload            the released broker running workloads in a REAL
+#                               environment it prepared, this process playing
+#                               the authority: identity, arguments, variables,
+#                               bounds, wall clock, process trees ended,
+#                               executable digests, environment drift, escape
+#                               attempts, an agent-shaped workload, the
+#                               broker's start-up identity and posture checks,
+#                               a broker killed mid-workload;
+#   sandbox-authority-workload  the REAL authority, the released broker and the
+#                               REAL runtime: both gates for a sandbox action,
+#                               the ledger, refusals before any intent, the
+#                               budget, crash windows W8-W11, an uncertain
+#                               ending taking its environment down.
+WORKLOAD_CASES = (
+    *(
+        ("sandbox-workload", case)
+        for case in (
+            "workload-runs-as-uid-10001",
+            "workload-no-capabilities",
+            "workload-no-new-privileges",
+            "workload-seccomp-filter",
+            "workload-cwd-workspace",
+            "workload-residue-clean",
+            "workload-arguments-exact-bytes",
+            "workload-flags-in-arguments-inert",
+            "workload-environment-container-only",
+            "workload-exit-code",
+            "workload-killed-by-signal",
+            "workload-ambiguous-exit-unobservable",
+            "workload-log-has-no-argument-or-output",
+            "workload-output-bounded",
+            "workload-output-counted",
+            "workload-wall-clock-timed-out",
+            "workload-timed-out-reaped",
+            "workload-output-held-open-child-reaped",
+            "workload-tree-reaped",
+            "workload-setsid-reaped",
+            "workload-daemon-reaped",
+            "workload-nothing-persists",
+            "workload-no-zombies",
+            "workload-fork-loop-reaped",
+            "workload-environment-reusable-after-reap",
+            "workload-executable-substituted-refused",
+            "workload-executable-missing-refused",
+            "workload-executable-other-file-refused",
+            "workload-refused-ran-nothing",
+            "workload-drifted-environment-refused",
+            "workload-stopped-environment-refused",
+            "workload-foreign-environment-refused",
+            "workload-missing-environment-refused",
+            "workload-nothing-ran-in-a-refused-environment",
+            "workload-root-read-only",
+            "workload-etc-read-only",
+            "workload-dot-dot-escape-refused",
+            "workload-tmp-writable",
+            "workload-workspace-writable-as-10001",
+            "workload-no-runtime-socket",
+            "workload-no-host-path",
+            "workload-direct-tcp-refused",
+            "workload-direct-dns-refused",
+            "agent-shaped-plan-and-workers-wrote",
+            "agent-shaped-network-refused",
+            "agent-shaped-helpers-and-workers-ended",
+            "agent-shaped-residue-clean",
+            "agent-shaped-files-on-host-as-10001",
+            "identity-authority-workload-uid-refused",
+            "identity-authority-relay-uid-refused",
+            "posture-reported-matches-host",
+            "broker-crash-before-exec-nothing-ran",
+            "broker-crash-mid-workload-no-answer",
+            "broker-crash-workload-still-running",
+            "broker-restart-destroy-ends-it",
+        )
+    ),
+    *(
+        ("sandbox-authority-workload", case)
+        for case in (
+            "authority-workload-completed",
+            "authority-workload-ledger-completed",
+            "authority-workload-environment-kept-when-clean",
+            "authority-workload-audited",
+            "authority-workload-taint-raised",
+            "authority-workload-replayed-never-rerun",
+            "authority-workload-key-reused-differently-refused",
+            "authority-workload-no-environment-refused",
+            "authority-workload-never-on-the-host",
+            "authority-workload-not-in-manifest-refused",
+            "authority-workload-bounds-refused",
+            "authority-workload-policy-denied",
+            "authority-workload-obligation-unenforceable-denied",
+            "authority-workload-no-capability-denied",
+            "authority-workload-refusals-record-no-intent",
+            "authority-workload-drifted-environment-destroyed",
+            "authority-workload-no-ready-environment-refused",
+            "authority-workload-budget-seconds-charged-whole",
+            "authority-workload-budget-count-exhausted",
+            "crash-w8-unknown",
+            "crash-w8-environment-destroyed",
+            "crash-w8-never-ran",
+            "crash-w10-unknown-environment-destroyed",
+            "crash-w10-never-rerun",
+            "crash-w11-outcome-kept",
+            "unknown-ending-recorded",
+            "unknown-ending-environment-destroyed",
+            "unknown-ending-never-rerun",
+        )
+    ),
+)
+
+
+def _workload_setup() -> tuple[Path, str, dict[str, str], set[str], dict[str, str]]:
+    """The M5d.1 evidence's setup, separate from the evidence: a trusted
+    runtime client; the probe and the fixture built statically and proved
+    static from their ELF headers, their digests pinned; one image built
+    offline `FROM scratch` holding both and named by content. Returns the
+    client, the socket, the environment the suites read, the containers that
+    predate the evidence, and the images to remove."""
+    if not sys.platform.startswith("linux"):
+        raise TaskError("NOT EXERCISED: the workload evidence needs Linux and an OCI runtime")
+    found = shutil.which("docker")
+    if found is None:
+        raise TaskError("NOT EXERCISED: no container runtime client (`docker`) on PATH")
+    socket = os.environ.get("DW_SANDBOX_SOCKET", "/var/run/docker.sock")
+    target_root = Path(os.environ.get("CARGO_TARGET_DIR", str(ROOT / "target")))
+    work = Path(os.environ.get("DW_WORKLOAD_WORK", str(Path.home() / ".cache" / "dw-m5d")))
+    shutil.rmtree(work, ignore_errors=True)
+    work.mkdir(mode=0o700, parents=True)
+    client, chosen = _trusted_client(Path(found), work / "client")
+    try:
+        server = json.loads(
+            _docker(client, socket, "version", "--format", "{{json .Server}}").strip()
+        )
+    except (TaskError, json.JSONDecodeError) as exc:
+        raise TaskError(f"NOT EXERCISED: the runtime at {socket} does not answer: {exc}") from exc
+    if server.get("Os") != "linux":
+        raise TaskError(f"NOT EXERCISED: the runtime is not a Linux one: {server.get('Os')}")
+    arch = {"amd64": "x86_64", "arm64": "aarch64"}.get(str(server.get("Arch")))
+    if arch is None:
+        raise TaskError(f"the runtime's architecture {server.get('Arch')!r} is not supported")
+    triple = f"{arch}-unknown-linux-gnu"
+    platform_ = f"linux/{server.get('Arch')}"
+    before = set(
+        _docker(client, socket, "container", "ls", "--all", "--no-trunc", "--quiet").split()
+    )
+    static = target_root / "sandbox-static"
+    env = dict(os.environ, RUSTFLAGS="-C target-feature=+crt-static")
+    command = [
+        "cargo",
+        "build",
+        "--locked",
+        "--release",
+        "-p",
+        "dwk-sandbox-probe",
+        "--bin",
+        "dwk-sandbox-probe",
+        "--example",
+        "sandbox_fixture",
+        "--target",
+        triple,
+        "--target-dir",
+        str(static),
+    ]
+    print(f"{DIM}$ RUSTFLAGS='-C target-feature=+crt-static' {' '.join(command)}{OFF}", flush=True)
+    if subprocess.run(command, cwd=str(ROOT), env=env, check=False).returncode != 0:
+        raise TaskError("the static probe and fixture did not build")
+    release = static / triple / "release"
+    probe = release / "dwk-sandbox-probe"
+    fixture = release / "examples" / "sandbox_fixture"
+    linking = {name: _static_elf(path) for name, path in (("probe", probe), ("fixture", fixture))}
+    probe_sha = hashlib.sha256(probe.read_bytes()).hexdigest()
+    fixture_sha = hashlib.sha256(fixture.read_bytes()).hexdigest()
+    images = {
+        "workload": _build_image(
+            client,
+            socket,
+            work / "images" / "workload",
+            probe,
+            platform_,
+            None,
+            {SANDBOX_FIXTURE_PATH: fixture},
+        )
+    }
+    scope = Path("/proc/sys/kernel/yama/ptrace_scope")
+    print(f"{BOLD}workload evidence setup{OFF}")
+    version = f"{server.get('Version')} (api {server.get('ApiVersion')})"
+    print(f"  runtime            {version}, {platform_}")
+    print(f"  runtime client     {chosen}")
+    print(f"  probe              {linking['probe']}, sha256 {probe_sha}")
+    print(f"  fixture            {linking['fixture']}, sha256 {fixture_sha} (the workload)")
+    print(f"  image (content id) {images['workload']}")
+    print(
+        "  yama ptrace_scope  "
+        + (scope.read_text(encoding="utf-8").strip() if scope.exists() else "absent")
+    )
+    variables = {
+        "DW_SANDBOX_RUNTIME": str(client),
+        "DW_SANDBOX_SOCKET": socket,
+        "DW_SANDBOX_WORKLOAD_IMAGE": images["workload"],
+        "DW_SANDBOX_PROBE_SHA256": probe_sha,
+        "DW_SANDBOX_FIXTURE_SHA256": fixture_sha,
+    }
+    return client, socket, variables, before, images
+
+
+def task_sandbox_workload_evidence() -> None:
+    """M5d.1's real-container evidence (ADR-0052 §17): workloads in a real
+    OCI environment -- the released broker running them through its real
+    runtime client, and the real authority deciding and recording them.
+
+    Every suite must run every test and every case must report; no container
+    the evidence made may remain, and every container that was there before
+    must still be there. No runtime: NOT EXERCISED, which fails. Linux only.
+    """
+    client, socket, variables, before, images = _workload_setup()
+    os.environ.update(variables)
+    outputs: list[str] = []
+    try:
+        run("cargo", "build", "--locked", "-p", "dwkd-broker")
+        for package, test, names in (
+            ("dwkd-broker", "sandbox_workload", WORKLOAD_BROKER_TESTS),
+            ("dwkd-authority", "sandbox_workload", WORKLOAD_AUTHORITY_TESTS),
+        ):
+            output = run_captured(
+                "cargo",
+                "test",
+                "--locked",
+                "-p",
+                package,
+                "--test",
+                test,
+                "--",
+                "--ignored",
+                "--exact",
+                "--nocapture",
+                "--test-threads=1",
+                *names,
+            )
+            summaries = [line for line in output.splitlines() if line.startswith("test result: ")]
+            expected = f"test result: ok. {len(names)} passed; 0 failed; 0 ignored"
+            if len(summaries) != 1 or not summaries[0].startswith(expected):
+                raise TaskError(
+                    f"the {package} {test} suite did not run all of its tests: expected "
+                    f"`{expected}`, got {summaries or 'no summary'}"
+                )
+            outputs.append(output)
+    finally:
+        after = set(
+            _docker(client, socket, "container", "ls", "--all", "--no-trunc", "--quiet").split()
+        )
+        for image in set(images.values()):
+            _docker(client, socket, "image", "rm", "--force", image, check=False)
+    left = sorted(after - before)
+    removed = sorted(before - after)
+    if left:
+        raise TaskError(f"the evidence left {len(left)} container(s) behind: {left}")
+    if removed:
+        raise TaskError(
+            f"{len(removed)} container(s) that predate the evidence are gone: {removed}"
+        )
+    print(f"{GREEN}cleanup: no evidence container remains; {len(before)} pre-existing kept{OFF}")
+    require_sandbox_evidence("\n".join(outputs), WORKLOAD_CASES)
+    uvrun("dwcheck", "closure", "--report")
+
+
 # --- M5c: kernel-performed net.http (ADR-0050) --------------------------------
 
 NET_EVIDENCE_PREFIX = "NET-EVIDENCE "
@@ -3691,6 +3977,7 @@ TASKS = {
     "secret-broker-evidence": task_secret_broker_evidence,
     "sandbox-foundation-evidence": task_sandbox_foundation_evidence,
     "sandbox-egress-evidence": task_sandbox_egress_evidence,
+    "sandbox-workload-evidence": task_sandbox_workload_evidence,
     "net-http-evidence": task_net_http_evidence,
     "net-http-mutations": task_net_http_mutations,
     "fuzz-smoke": task_fuzz_smoke,

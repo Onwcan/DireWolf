@@ -18,7 +18,8 @@ DW := $(PY) scripts/dw.py
         authority-state-evidence filesystem-canonicalization-evidence \
         authority-transport-evidence authority-write-probe broker-fs-read-evidence \
         filesystem-operations-evidence process-broker-evidence secret-broker-evidence \
-        sandbox-foundation-evidence sandbox-egress-evidence net-http-evidence net-http-mutations fuzz-smoke fuzz security docs \
+        sandbox-foundation-evidence sandbox-egress-evidence sandbox-workload-evidence \
+        net-http-evidence net-http-mutations fuzz-smoke fuzz security docs \
         preflight tools hooks clean
 
 help:            ## List available commands
@@ -98,6 +99,9 @@ sandbox-foundation-evidence: ## M5a real OCI containers: strict profile measured
 
 sandbox-egress-evidence: ## M5b PROXY_ONLY on real OCI containers: relay, CONNECT proxy, guard, pinning, SNI, budgets, bypasses, weakened topologies
 	@$(DW) sandbox-egress-evidence
+
+sandbox-workload-evidence: ## M5d.1 workloads in real OCI environments: identity, bounds, wall clock, process trees ended, digests, drift, escapes, an agent-shaped workload, the authority's gates, ledger and crash windows
+	@$(DW) sandbox-workload-evidence
 
 net-http-evidence: ## M5c net.http, no internet: SSRF/DNS, redirects, TLS, credential binding and residue, crashes, budgets (DW_CPU_CONTENTION=n adds load)
 	@$(DW) net-http-evidence

@@ -65,8 +65,12 @@ pub(crate) struct Completed {
     pub(crate) stdout: Vec<u8>,
     /// Whether stdout was longer than the bound.
     pub(crate) stdout_cut: bool,
+    /// Every stdout byte read, kept or not.
+    pub(crate) stdout_observed: u64,
     /// Its stderr, at most the bound.
     pub(crate) stderr: Vec<u8>,
+    /// Every stderr byte read, kept or not.
+    pub(crate) stderr_observed: u64,
 }
 
 /// Why a run has no answer.
@@ -83,18 +87,21 @@ struct Drained {
     stdout: bool,
     kept: Vec<u8>,
     cut: bool,
+    observed: u64,
 }
 
 fn drain(reader: impl std::io::Read, stdout: bool, limit: usize, sent: &mpsc::Sender<Drained>) {
     let mut reader = reader;
     let mut kept = Vec::new();
     let mut cut = false;
+    let mut observed = 0u64;
     let mut chunk = vec![0u8; 64 * 1024];
     loop {
         let read = match reader.read(&mut chunk) {
             Ok(0) | Err(_) => break,
             Ok(n) => n,
         };
+        observed = observed.saturating_add(u64::try_from(read).unwrap_or(u64::MAX));
         let bytes = chunk.get(..read).unwrap_or_default();
         let room = limit.saturating_sub(kept.len());
         if bytes.len() > room {
@@ -102,7 +109,12 @@ fn drain(reader: impl std::io::Read, stdout: bool, limit: usize, sent: &mpsc::Se
         }
         kept.extend_from_slice(bytes.get(..room.min(bytes.len())).unwrap_or_default());
     }
-    let _ = sent.send(Drained { stdout, kept, cut });
+    let _ = sent.send(Drained {
+        stdout,
+        kept,
+        cut,
+        observed,
+    });
 }
 
 fn exited(pidfd: &OwnedFd) -> bool {
@@ -218,6 +230,8 @@ pub(crate) fn run(
         ended,
         stdout: out.kept,
         stdout_cut: out.cut,
+        stdout_observed: out.observed,
         stderr: err.kept,
+        stderr_observed: err.observed,
     })
 }

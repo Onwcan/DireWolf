@@ -251,11 +251,24 @@ pub enum AuditEvent {
     /// A `net.http` request ended (M5c): completed, failed, or unknown —
     /// never performed again.
     NetOutcome,
+    /// A workload every gate allowed, recorded before the broker is told
+    /// anything (M5d): the plan, the executable's identity in the image, the
+    /// arguments' digest, the bounds charged.
+    WorkloadIntentRecorded,
+    /// A workload refused before anything was recorded or run (M5d): no
+    /// attached sandbox, no `READY` environment, a bound, the manifest.
+    WorkloadRefused,
+    /// A workload a gate denied (M5d): both gates' records, the reason.
+    WorkloadDenied,
+    /// A workload ended (M5d): completed, failed or unknown — how it ended,
+    /// its output's size, what `reap` found — never its output, never run
+    /// again.
+    WorkloadOutcome,
 }
 
 impl AuditEvent {
     /// Every kind, in declaration order.
-    pub const ALL: [Self; 62] = [
+    pub const ALL: [Self; 66] = [
         Self::StoreCreated,
         Self::StoreOpened,
         Self::PolicyInstalled,
@@ -318,6 +331,10 @@ impl AuditEvent {
         Self::NetHopEnded,
         Self::NetRedirectEnded,
         Self::NetOutcome,
+        Self::WorkloadIntentRecorded,
+        Self::WorkloadRefused,
+        Self::WorkloadDenied,
+        Self::WorkloadOutcome,
     ];
 
     /// The spelling in a record's `event` field.
@@ -386,6 +403,10 @@ impl AuditEvent {
             Self::NetHopEnded => "net.http.hop",
             Self::NetRedirectEnded => "net.http.redirect_ended",
             Self::NetOutcome => "net.http.outcome",
+            Self::WorkloadIntentRecorded => "workload.intent_recorded",
+            Self::WorkloadRefused => "workload.refused",
+            Self::WorkloadDenied => "workload.denied",
+            Self::WorkloadOutcome => "workload.outcome",
         }
     }
 }

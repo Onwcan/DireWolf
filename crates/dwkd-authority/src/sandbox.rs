@@ -39,6 +39,7 @@ use dwk_proto::brokerp::egress::{
 use dwk_proto::brokerp::sandbox::{
     AssuranceLevel, ImageId, NetworkTopology, SandboxInvariant, Verdict, required_invariants,
 };
+use dwk_proto::brokerp::workload::{ImagePath, WORKLOAD_MAX_SECONDS};
 use dwk_proto::wire::scalar::{ContentDigest, HostPath};
 
 use crate::capability::{
@@ -211,6 +212,7 @@ pub const fn refusal_class(refusal: BrokerRefusal) -> &'static str {
         BrokerRefusal::EnvironmentNotFound => "ENVIRONMENT_NOT_FOUND",
         BrokerRefusal::EnvironmentAmbiguous => "ENVIRONMENT_AMBIGUOUS",
         BrokerRefusal::ForeignEnvironment => "FOREIGN_ENVIRONMENT",
+        BrokerRefusal::EnvironmentNotClean => "ENVIRONMENT_NOT_CLEAN",
         BrokerRefusal::DigestMismatch | BrokerRefusal::ExecutableUntrusted => {
             "RUNTIME_CLIENT_CHANGED"
         }
@@ -239,6 +241,35 @@ pub struct SandboxConfig {
     probe_sha256: ContentDigest,
     topology: NetworkTopology,
     egress: Option<EgressConfig>,
+    /// The image's executables a workload may name, each with the SHA-256
+    /// the operator pins for it (M5d.1, ADR-0052 §2). Empty: no workload.
+    executables: Vec<(ImagePath, ContentDigest)>,
+    /// Each run's workload budget (M5d.1, ADR-0052 §10).
+    workload_budget: WorkloadBudget,
+}
+
+/// The most executables one image manifest names.
+pub const MAX_MANIFEST_EXECUTABLES: usize = 64;
+
+/// What one run may spend on workloads (M5d.1, ADR-0052 §10, OD-8): charged
+/// at each workload's intent from its own bounds, read back from the ledger,
+/// never refunded or refilled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WorkloadBudget {
+    /// Workloads, whatever became of them.
+    pub workloads: u64,
+    /// Wall-clock seconds, each workload charged its whole bound.
+    pub seconds: u64,
+}
+
+impl Default for WorkloadBudget {
+    /// OD-8's defaults: 100 workloads, an hour of wall clock.
+    fn default() -> Self {
+        Self {
+            workloads: 100,
+            seconds: 3_600,
+        }
+    }
 }
 
 /// What a `PROXY_ONLY` configuration adds: the relay, by digest, and the
@@ -379,6 +410,12 @@ pub enum SandboxConfigError {
     RelayDigest,
     /// An egress budget outside the protocol's bounds.
     EgressBudget,
+    /// A manifest entry's path is not one plain absolute path in an image.
+    ExecutablePath,
+    /// A manifest entry's digest is not 64 lowercase hexadecimal digits.
+    ExecutableDigest,
+    /// The manifest names a path twice, or more executables than it may.
+    Manifest,
 }
 
 impl SandboxConfigError {
@@ -393,6 +430,9 @@ impl SandboxConfigError {
             Self::EgressUnconfigured => "EGRESS_UNCONFIGURED",
             Self::RelayDigest => "RELAY_DIGEST",
             Self::EgressBudget => "EGRESS_BUDGET",
+            Self::ExecutablePath => "EXECUTABLE_PATH",
+            Self::ExecutableDigest => "EXECUTABLE_DIGEST",
+            Self::Manifest => "MANIFEST",
         }
     }
 }
@@ -475,7 +515,61 @@ impl SandboxConfig {
             probe_sha256,
             topology,
             egress,
+            executables: Vec::new(),
+            workload_budget: WorkloadBudget::default(),
         })
+    }
+
+    /// The same configuration, with the image's manifest — the executables
+    /// a workload may name and the SHA-256 each must have — and each run's
+    /// workload budget (M5d.1, ADR-0052 §§2, 10). Without it, no workload
+    /// runs.
+    ///
+    /// # Errors
+    ///
+    /// [`SandboxConfigError`]: nothing in it is accepted approximately.
+    pub fn with_workloads(
+        mut self,
+        executables: &[(&str, &str)],
+        budget: WorkloadBudget,
+    ) -> Result<Self, SandboxConfigError> {
+        if executables.len() > MAX_MANIFEST_EXECUTABLES {
+            return Err(SandboxConfigError::Manifest);
+        }
+        let mut manifest: Vec<(ImagePath, ContentDigest)> = Vec::new();
+        for (path, sha256) in executables {
+            let path = ImagePath::new(*path).ok_or(SandboxConfigError::ExecutablePath)?;
+            let sha256 = digest(sha256).ok_or(SandboxConfigError::ExecutableDigest)?;
+            if manifest.iter().any(|(known, _)| *known == path) {
+                return Err(SandboxConfigError::Manifest);
+            }
+            manifest.push((path, sha256));
+        }
+        self.executables = manifest;
+        self.workload_budget = budget;
+        Ok(self)
+    }
+
+    /// The executable `path` names in the image, with its pinned SHA-256 —
+    /// or `None`: a path the manifest does not name is not run.
+    #[must_use]
+    pub fn executable(&self, path: &str) -> Option<(&ImagePath, &ContentDigest)> {
+        self.executables
+            .iter()
+            .find(|(known, _)| known.as_str() == path)
+            .map(|(known, sha256)| (known, sha256))
+    }
+
+    /// Each run's workload budget.
+    #[must_use]
+    pub const fn workload_budget(&self) -> WorkloadBudget {
+        self.workload_budget
+    }
+
+    /// The longest wall clock one workload may ask for, in seconds.
+    #[must_use]
+    pub const fn workload_max_seconds(&self) -> u32 {
+        WORKLOAD_MAX_SECONDS
     }
 
     /// The runtime client's path, as configured; resolved and hashed before

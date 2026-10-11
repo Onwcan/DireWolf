@@ -221,6 +221,19 @@ pub enum Operation {
         /// it. Present exactly when `hop.credential` is.
         secret: Option<crate::secret::handoff::SecretPipe>,
     },
+    /// Run one workload in a `READY` environment (M5d, ADR-0052 §5): the
+    /// environment as the authority recorded it, its container, the runtime
+    /// client, and the workload it decided.
+    WorkloadRun {
+        /// What the environment should be.
+        spec: EnvironmentSpec,
+        /// The container recorded for it.
+        container: ContainerRef,
+        /// The runtime client and where it runs.
+        runtime: RuntimeHandoff,
+        /// The workload.
+        workload: dwk_proto::brokerp::workload::WorkloadSpec,
+    },
 }
 
 /// The container runtime's client as the authority checked it (M5a): the
@@ -271,6 +284,7 @@ impl Operation {
             Self::EnvironmentList { .. } => "environment.list",
             Self::HttpResolve { .. } => "http.resolve",
             Self::HttpExchange { .. } => "http.exchange",
+            Self::WorkloadRun { .. } => "workload.run",
         }
     }
 
@@ -285,6 +299,7 @@ impl Operation {
             Self::EnvironmentList { .. } => PrivateKind::EnvironmentList,
             Self::HttpResolve { .. } => PrivateKind::HttpResolve,
             Self::HttpExchange { .. } => PrivateKind::HttpExchange,
+            Self::WorkloadRun { .. } => PrivateKind::WorkloadRun,
             _ => return None,
         };
         Some(Duration::from_secs(kind.deadline_seconds()))
@@ -351,7 +366,8 @@ impl BrokerOrder {
             | Operation::EnvironmentDestroy { .. }
             | Operation::EnvironmentList { .. }
             | Operation::HttpResolve { .. }
-            | Operation::HttpExchange { .. } => return None,
+            | Operation::HttpExchange { .. }
+            | Operation::WorkloadRun { .. } => return None,
         })
     }
 
@@ -513,6 +529,9 @@ pub enum BrokerDelivery {
     EnvironmentDestroyed(EnvironmentDestroyDone),
     /// A listing.
     EnvironmentListed(EnvironmentListDone),
+    /// A workload ran (M5d): how it ended, its output, what was left. The
+    /// link checked it against what was sent.
+    WorkloadRan(Box<dwk_proto::brokerp::workload::WorkloadRunDone>),
     /// A `net.http` resolution, as the broker's guard judged it (M5c).
     HttpResolved(dwk_proto::brokerp::http::HttpResolveDone),
     /// A `net.http` exchange that sent its request (M5c): within every bound

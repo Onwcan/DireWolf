@@ -609,6 +609,8 @@ def test_a_stored_executable_identity_is_read_in_one_module(
     rule = "TX024-an-executable-identity-is-minted-by-the-resolver"
     assert rule in violation_rules
     assert [(p, line) for p, line, _ in _findings(rule)] == [
+        # M5d.1 (ADR-0052 §2): an image identity minted outside the ledger.
+        ("crates/dwkd-authority/src/state/image_exec.rs", 5),
         ("crates/dwkd-authority/src/state/stored_exec.rs", 6),
         ("crates/dwkd-authority/src/state/stored_exec.rs", 13),
     ]
@@ -641,12 +643,16 @@ def test_the_m5a_boundaries_each_catch_their_violation(violation_rules: list[str
         "TX035-no-public-path-reaches-an-execution-environment": {
             "crates/dwkd-authority/src/server/sandbox_route.rs",
             "crates/dwkd-authority/src/server/net_evidence_route.rs",
+            # M5d.1 (ADR-0052 §2): the workload API is in-process too.
+            "crates/dwkd-authority/src/server/workload_route.rs",
         },
         # M5c (ADR-0050) extends TX036 to the net.http hop; its fixture is the
         # second file the rule catches.
         "TX036-no-runtime-flag-crosses-the-private-wire": {
             "crates/dwk-proto/src/brokerp/sandbox_flags.rs",
             "crates/dwk-proto/src/brokerp/http_flags.rs",
+            # M5d.1 (ADR-0052 §3): a workload's run carries no flag either.
+            "crates/dwk-proto/src/brokerp/workload_flags.rs",
         },
     }
     for rule, paths in expected.items():
@@ -759,6 +765,30 @@ def test_the_m5c_boundaries_each_catch_their_violation(violation_rules: list[str
         if path.endswith("brokerp/http_flags.rs")
     }
     assert http_flags == {6, 7, 8, 9}, sorted(http_flags)
+
+
+def test_the_m5d_boundaries_each_catch_their_violation(violation_rules: list[str]) -> None:
+    """M5d.1 (ADR-0052 §15): the workload's command line spells no
+    weakening, a workload carries no flag, user or variable on the private
+    wire, and no public path names the workload API -- each rule firing on
+    exactly its fixture, every banned word on its own line."""
+    rule = "TX050-the-workload-plan-spells-no-weakening"
+    assert rule in violation_rules
+    assert _paths(rule) == {"crates/dwkd-broker/src/sandbox/workload_plan.rs"}
+    # Root, privilege, a variable from the caller, a terminal.
+    assert {line for _, line, _ in _findings(rule)} == {8, 9, 10, 12}
+    workload_flags = {
+        line
+        for path, line, _ in _findings("TX036-no-runtime-flag-crosses-the-private-wire")
+        if path.endswith("brokerp/workload_flags.rs")
+    }
+    assert workload_flags == {5, 6, 7, 8, 9}, sorted(workload_flags)
+    route = {
+        line
+        for path, line, _ in _findings("TX035-no-public-path-reaches-an-execution-environment")
+        if path.endswith("server/workload_route.rs")
+    }
+    assert route == {3, 4}, sorted(route)
 
 
 def test_the_m5c_exemptions_name_files_not_directories() -> None:

@@ -387,6 +387,29 @@ jobs:
           docker info --format '{{.OperatingSystem}} kernel {{.KernelVersion}} cgroup v{{.CgroupVersion}} runtime {{.DefaultRuntime}} {{.SecurityOptions}}'
       - run: make sandbox-egress-evidence
 
+  # M5d.1 (ADR-0052): workloads in a REAL OCI environment -- the released
+  # broker running the sandbox fixture as a workload through its real runtime
+  # client, and the real authority deciding and recording each one: the
+  # environment's user and nothing more, exact arguments, the container's
+  # variables only, bounded output, the wall clock, every process a workload
+  # leaves ended by the environment's init, executable digests, environment
+  # drift, escape attempts, an agent-shaped workload, the broker's start-up
+  # identity and ptrace-posture checks, both gates for a sandbox action, the
+  # ledger, the budget and crash windows W8-W11. Every case required; no
+  # runtime: NOT EXERCISED, which fails. The `ci` job requires it.
+  sandbox-workload:
+    name: sandbox workload (make sandbox-workload-evidence)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v5.0.1
+      - uses: ./.github/actions/setup
+      - name: Show the OCI runtime and the ptrace posture
+        run: |
+          docker version --format 'client {{.Client.Version}} server {{.Server.Version}} api {{.Server.APIVersion}} {{.Server.Os}}/{{.Server.Arch}}'
+          docker info --format '{{.OperatingSystem}} kernel {{.KernelVersion}} cgroup v{{.CgroupVersion}} runtime {{.DefaultRuntime}} {{.SecurityOptions}}'
+          cat /proc/sys/kernel/yama/ptrace_scope || echo "no Yama"
+      - run: make sandbox-workload-evidence
+
   # M5c (ADR-0050): kernel-performed net.http, with no internet -- the
   # broker's HTTPS client against real TLS origins in its own process, the
   # authority's per-hop pipeline and mode A's consumer against a fake broker
@@ -452,7 +475,7 @@ jobs:
   ci:
     name: CI
     runs-on: ubuntu-latest
-    needs: [format, lint, typecheck, architecture, schema, evals, test, authority-transport, filesystem-canonicalization, broker-fs-read, filesystem-operations, process-broker, secret-broker, sandbox-foundation, sandbox-egress, net-http, supply-chain, build]
+    needs: [format, lint, typecheck, architecture, schema, evals, test, authority-transport, filesystem-canonicalization, broker-fs-read, filesystem-operations, process-broker, secret-broker, sandbox-foundation, sandbox-egress, sandbox-workload, net-http, supply-chain, build]
     if: always()
     steps:
       - name: Fail unless every required job succeeded

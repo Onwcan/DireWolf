@@ -85,6 +85,8 @@ mod staging;
 mod tool;
 mod transport;
 pub mod wire;
+mod workload;
+mod workload_ops;
 
 use core::fmt;
 use std::path::Path;
@@ -143,6 +145,8 @@ pub use staging::{MAX_RECLAIMS_PER_SWEEP, Settled};
 pub use tool::{ToolReply, ToolRequest};
 pub use transport::{TransportClass, TransportEvent, Violation};
 pub use wire::WireGap;
+pub use workload::{WorkloadRecord, WorkloadRequest, WorkloadState};
+pub use workload_ops::{WorkloadOutcome, WorkloadReply};
 
 use audit::{AuditWriter, Fields, FlushFailure};
 use db::Class;
@@ -715,6 +719,11 @@ impl Authority {
             // An open `net.http` hop (M5c) may have reached its origin:
             // UNKNOWN, never sent again; its request with it.
             let net_unknown = net_http::reconcile_open(work)?;
+            // A workload a previous incarnation left (M5d) may still be
+            // running in its environment: UNKNOWN, never run again, and the
+            // environment's destruction made durable — reconciliation by
+            // label performs it.
+            let workload_unknown = workload::reconcile_open(work)?;
             // A preparation a previous incarnation left (M5a) may have made a
             // container: UNKNOWN, never prepared again; reconciliation by
             // label ends it.
@@ -724,6 +733,7 @@ impl Authority {
                 .saturating_add(process_unknown)
                 .saturating_add(secret_unknown)
                 .saturating_add(net_unknown)
+                .saturating_add(workload_unknown)
                 .saturating_add(environment_unknown);
             work.audit(
                 AuditEvent::StoreOpened,

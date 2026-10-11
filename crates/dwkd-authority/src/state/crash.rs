@@ -110,6 +110,16 @@ pub enum CrashPoint {
     /// Network N4: the hop's outcome is durable; the next hop is not decided
     /// and the runtime has not been answered.
     NetAfterOutcome,
+    /// Workload W8 (M5d): the workload's intent is durable; the broker has
+    /// been told nothing.
+    WorkloadAfterIntent,
+    /// Workload W10: the broker answered a workload — it ran, or may have —
+    /// and the outcome is not yet durable.
+    WorkloadAfterBroker,
+    /// Workload W11: the workload's outcome — and, when its residue or its
+    /// ending is uncertain, its environment's destruction — is durable; the
+    /// destruction may not have been performed.
+    WorkloadAfterOutcome,
 }
 
 impl CrashPoint {
@@ -157,6 +167,9 @@ impl CrashPoint {
             Self::NetAfterIntent => 'n',
             Self::NetAfterBroker => 'o',
             Self::NetAfterOutcome => 'p',
+            Self::WorkloadAfterIntent => 'q',
+            Self::WorkloadAfterBroker => 'r',
+            Self::WorkloadAfterOutcome => 's',
         }
     }
 }
@@ -210,6 +223,15 @@ impl CrashPoint {
         Self::NetAfterIntent,
         Self::NetAfterBroker,
         Self::NetAfterOutcome,
+    ];
+
+    /// The points of one workload (M5d, ADR-0052 §9), in order: W8 after
+    /// its intent, W10 after the broker's answer, W11 after its outcome.
+    /// (W9 — the broker mid-run — is the broker's own crash point.)
+    pub const WORKLOAD: [Self; 3] = [
+        Self::WorkloadAfterIntent,
+        Self::WorkloadAfterBroker,
+        Self::WorkloadAfterOutcome,
     ];
 }
 

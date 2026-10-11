@@ -238,7 +238,10 @@ pub(crate) fn copy_relay(container: &ContainerRef) -> Vec<String> {
     copy_out(container, RELAY_PATH)
 }
 
-fn copy_out(container: &ContainerRef, path: &str) -> Vec<String> {
+/// One file's bytes, as a tar stream, out of the container's own root:
+/// the probe's, the relay's, a workload's executable (M5d).
+#[must_use]
+pub(crate) fn copy_out(container: &ContainerRef, path: &str) -> Vec<String> {
     let mut argv = words(&["container", "cp"]);
     argv.push(format!("{}:{path}", container.as_str()));
     argv.push("-".to_owned());

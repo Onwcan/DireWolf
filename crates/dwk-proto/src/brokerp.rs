@@ -5,7 +5,8 @@
 //! for the M5b `PROXY_ONLY` topology's relay, egress grant and counters,
 //! ADR-0048; version 7 for M5c's `net.http` — one resolution and one HTTPS
 //! exchange per hop, the broker the client and the authority the decider,
-//! ADR-0050). **Not DWKP.**
+//! ADR-0050; version 8 for M5d's workloads — one bounded program run in a
+//! `READY` environment, ADR-0052). **Not DWKP.**
 //!
 //! One exchange on one connection, and nothing else:
 //!
@@ -81,6 +82,7 @@ pub use crate::dwkp::fsops::{ContentRevision, PatchEdit, PatchEdits};
 pub mod egress;
 pub mod http;
 pub mod sandbox;
+pub mod workload;
 pub use crate::dwkp::procops::{ProcessArgs, ProcessStreamSnapshot};
 use crate::error::{ErrorCode, ProtocolError, Violation};
 use crate::frame::{self, ContentType};
@@ -114,10 +116,11 @@ use sandbox::{
 /// (ADR-0048) the `PROXY_ONLY` topology — the relay's digest and the egress
 /// grant on a preparation, every container's role in a listing, and the
 /// proxy's counters on a measurement and a destruction; version 7 (ADR-0050)
-/// `net.http`'s resolution and exchange. The daemons ship together, so 7 is
-/// the only version either accepts: an older peer is refused by its hello,
-/// never half-understood.
-pub const PROTOCOL: u16 = 7;
+/// `net.http`'s resolution and exchange; version 8 (ADR-0052) a workload run
+/// in a `READY` environment. The daemons ship together, so 8 is the only
+/// version either accepts: an older peer is refused by its hello, never
+/// half-understood.
+pub const PROTOCOL: u16 = 8;
 
 /// The largest authorisation body the broker reads: one DWKP frame, because an
 /// `fs.write` carries its content and an `fs.patch` its edits. Read from the
@@ -345,8 +348,10 @@ pub const PROCESS_BASE_ENVIRONMENT: &[(&str, &str)] = &[
 
 wire_int! {
     /// The private protocol's version.
-    ProtocolVersion(u16), min = 7, max = 7
+    ProtocolVersion(u16), min = 8, max = 8
 }
+
+const _: () = assert!(ProtocolVersion::MIN == PROTOCOL && ProtocolVersion::MAX == PROTOCOL);
 
 wire_int! {
     /// How many descriptors accompany an authorisation: none to three, fixed
@@ -576,6 +581,9 @@ wire_enum! {
         /// Perform one `net.http` hop that carries a credential: the
         /// credential's pipe is the one descriptor (ADR-0050 §8).
         HttpCredentialExchange = "broker.http_credential_exchange",
+        /// Run one workload in a `READY` environment and end every other
+        /// process it left there (ADR-0052 §5).
+        WorkloadRun = "broker.workload_run",
         /// The broker's outcome for an authorisation.
         Outcome = "broker.outcome",
     }
@@ -597,7 +605,7 @@ impl PrivateKind {
     /// | `process_start` | the executable, open for reading; the working directory, open for reading |
     /// | `process_status`, `process_kill` | none: the process is the broker's own child, named by its handle |
     /// | `secret_process_start` | the executable; the working directory; the secret pipe |
-    /// | `environment_*` | the container runtime's executable; the working directory it runs in |
+    /// | `environment_*`, `workload_run` | the container runtime's executable; the working directory it runs in |
     /// | `http_resolve`, `http_exchange` | none: a name to resolve, a hop to perform |
     /// | `http_credential_exchange` | the credential: a pipe's read end, at end of file after the value |
     ///
@@ -622,7 +630,8 @@ impl PrivateKind {
             | Self::EnvironmentPrepare
             | Self::EnvironmentMeasure
             | Self::EnvironmentDestroy
-            | Self::EnvironmentList => Some(2),
+            | Self::EnvironmentList
+            | Self::WorkloadRun => Some(2),
             Self::SecretProcessStart => Some(3),
             Self::Hello | Self::Outcome => None,
         }
@@ -642,6 +651,7 @@ impl PrivateKind {
             Self::HttpExchange | Self::HttpCredentialExchange => {
                 http::HTTP_EXCHANGE_DEADLINE_SECONDS
             }
+            Self::WorkloadRun => workload::WORKLOAD_DEADLINE_SECONDS,
             _ => EXCHANGE_DEADLINE_SECONDS,
         }
     }
@@ -781,6 +791,11 @@ wire_enum! {
         /// handed the hop, or ended before a byte of the request was sent:
         /// nothing was sent (ADR-0050 §9, D11).
         HttpWorkerFailed = "HTTP_WORKER_FAILED",
+        /// The environment, as its runtime record shows it now, is not the
+        /// clean, running environment the authority recorded: a required
+        /// invariant the record shows does not pass, or its trusted probe is
+        /// not the pinned one. Nothing was run (ADR-0052 §5).
+        EnvironmentNotClean = "ENVIRONMENT_NOT_CLEAN",
     }
 }
 
@@ -808,6 +823,10 @@ wire_enum! {
         /// The container runtime may have created or removed a container and
         /// the broker cannot prove which: reconciliation decides, by label.
         EnvironmentUnconfirmed = "ENVIRONMENT_UNCONFIRMED",
+        /// A workload may have started and nothing proves how it ended: the
+        /// authority records it unknown and destroys its environment
+        /// (ADR-0052 §§8, 9).
+        WorkloadUnconfirmed = "WORKLOAD_UNCONFIRMED",
     }
 }
 
@@ -1817,12 +1836,14 @@ wire_struct! {
         optional http_resolve: http::HttpResolveDone,
         /// A `net.http` exchange, with or without a credential.
         optional http_exchange: http::HttpExchangeDone,
+        /// A workload's run.
+        optional workload_run: workload::WorkloadRunDone,
     }
     exactly_one(
         fs_read, fs_stat, fs_list, fs_search, fs_write, fs_patch, fs_move, fs_delete, fs_reclaim,
         process_start, process_status, process_kill, secret_process_start,
         environment_prepare, environment_measure, environment_destroy, environment_list,
-        http_resolve, http_exchange
+        http_resolve, http_exchange, workload_run
     )
 }
 
@@ -2032,6 +2053,8 @@ pub enum Authorisation {
     /// `broker.http_exchange` or `broker.http_credential_exchange`: the
     /// message's own `kind` says which.
     HttpExchange(http::HttpExchangeAuthorisation),
+    /// `broker.workload_run`.
+    WorkloadRun(workload::WorkloadRunAuthorisation),
 }
 
 impl Authorisation {
@@ -2113,6 +2136,9 @@ impl Authorisation {
             PrivateKind::HttpExchange | PrivateKind::HttpCredentialExchange => {
                 Self::HttpExchange(http::HttpExchangeAuthorisation::decode(value, cx)?)
             }
+            PrivateKind::WorkloadRun => {
+                Self::WorkloadRun(workload::WorkloadRunAuthorisation::decode(value, cx)?)
+            }
             PrivateKind::Hello | PrivateKind::Outcome => {
                 return Err(ProtocolError::schema(
                     Violation::Inconsistent,
@@ -2148,6 +2174,7 @@ impl Authorisation {
             Self::EnvironmentList(_) => PrivateKind::EnvironmentList,
             Self::HttpResolve(_) => PrivateKind::HttpResolve,
             Self::HttpExchange(a) => a.kind,
+            Self::WorkloadRun(_) => PrivateKind::WorkloadRun,
         }
     }
 
@@ -2174,6 +2201,7 @@ impl Authorisation {
             Self::EnvironmentList(a) => &a.channel,
             Self::HttpResolve(a) => &a.channel,
             Self::HttpExchange(a) => &a.channel,
+            Self::WorkloadRun(a) => &a.channel,
         }
     }
 
@@ -2200,6 +2228,7 @@ impl Authorisation {
             Self::EnvironmentList(a) => &a.invocation_id,
             Self::HttpResolve(a) => &a.invocation_id,
             Self::HttpExchange(a) => &a.invocation_id,
+            Self::WorkloadRun(a) => &a.invocation_id,
         }
     }
 
@@ -2226,11 +2255,12 @@ impl Authorisation {
             Self::EnvironmentList(a) => a.descriptors.get(),
             Self::HttpResolve(a) => a.descriptors.get(),
             Self::HttpExchange(a) => a.descriptors.get(),
+            Self::WorkloadRun(a) => a.descriptors.get(),
         }
     }
 
     fn check(&self) -> Result<(), ProtocolError> {
-        // The protocol version is checked by its type on decode (7 and only 7).
+        // The protocol version is checked by its type on decode (8 and only 8).
         let descriptors = DescriptorCount::new(self.declared_descriptors()).ok_or_else(|| {
             ProtocolError::schema(Violation::OutOfRange, "/descriptors", "no such count")
         })?;
@@ -2311,6 +2341,7 @@ impl Authorisation {
                 }
             }
             Self::HttpExchange(exchange) => http::check_exchange(exchange)?,
+            Self::WorkloadRun(run) => workload::check_run(run)?,
             _ => {}
         }
         Ok(())
@@ -2343,6 +2374,7 @@ impl Authorisation {
             Self::EnvironmentList(a) => encode_frame(a),
             Self::HttpResolve(a) => encode_frame(a),
             Self::HttpExchange(a) => encode_frame(a),
+            Self::WorkloadRun(a) => encode_frame(a),
         }
     }
 }
@@ -3127,6 +3159,16 @@ impl BrokerDone {
             environment_list: None,
             http_resolve: None,
             http_exchange: None,
+            workload_run: None,
+        }
+    }
+
+    /// A workload's run (M5d, ADR-0052).
+    #[must_use]
+    pub fn workload_run(done: workload::WorkloadRunDone) -> Self {
+        Self {
+            workload_run: Some(done),
+            ..Self::empty()
         }
     }
 
@@ -3335,6 +3377,8 @@ impl BrokerDone {
             // Either exchange kind: the authority checks it against what it
             // sent.
             PrivateKind::HttpExchange
+        } else if self.workload_run.is_some() {
+            PrivateKind::WorkloadRun
         } else {
             return None;
         })

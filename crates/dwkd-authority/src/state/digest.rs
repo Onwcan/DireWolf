@@ -65,9 +65,14 @@ pub(crate) const PROCESS_ARGV: &str = "direwolf.process.argv.v1";
 /// (M5c, ADR-0050 §11).
 pub(crate) const NET_REQUEST: &str = "direwolf.dwkp.net_http.request.v1";
 
+/// A workload as the authority decided it (M5d.1, ADR-0052 §4) — its run,
+/// the executable's path and digest, the arguments' digest, its bounds — that
+/// its idempotency key is bound to.
+pub(crate) const WORKLOAD_REQUEST: &str = "direwolf.workload.request.v1";
+
 /// Every domain, for the test that they are pairwise distinct.
 #[cfg(test)]
-const ALL_DOMAINS: [&str; 12] = [
+const ALL_DOMAINS: [&str; 13] = [
     POLICY_REVISION,
     ADMIT_REQUEST,
     AUDIT_RECORD,
@@ -80,6 +85,7 @@ const ALL_DOMAINS: [&str; 12] = [
     TOOL_REQUEST,
     PROCESS_ARGV,
     NET_REQUEST,
+    WORKLOAD_REQUEST,
 ];
 
 /// The plain SHA-256 of `bytes`, **not** domain-separated: for a digest an

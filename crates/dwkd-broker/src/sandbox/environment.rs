@@ -3,14 +3,16 @@
 //! Designed against exactly two implementations — `oci` and `local` — and no
 //! others (SANDBOX.md §1): not SSH, not a microVM, not a remote worker. M5a
 //! implements `oci` only; `local` is the host execution M4d already has
-//! behind the authority's floor, and it joins this trait when M5d moves host
-//! execution under it. Nothing here decides: the broker prepares what the
-//! authority specified, measures it, and reports; the authority judges the
-//! level.
+//! behind the authority's floor, and stays there until M6 (ADR-0052 §12).
+//! M5d adds `run_workload` (SANDBOX.md §1's spawn, then collect, of one
+//! bounded program). Nothing here decides: the broker prepares what the
+//! authority specified, measures it, runs what it authorised, and reports;
+//! the authority judges the level.
 
 use dwk_proto::brokerp::sandbox::{
-    AssuranceLevel, ContainerRef, Milliseconds, RuntimeVersion, StoreInstance,
+    AssuranceLevel, ContainerRef, Milliseconds, RuntimeVersion, StoreInstance, Verdict,
 };
+use dwk_proto::brokerp::workload::WorkloadSpec;
 use dwk_proto::brokerp::{BrokerRefusal, ContainerState, EnvironmentSpec, OwnedEnvironment};
 use dwk_proto::wire::id::{EnvironmentId, RunId};
 
@@ -77,6 +79,29 @@ pub(crate) enum Destroyed {
     AlreadyGone,
 }
 
+/// What a workload's run produced (M5d, ADR-0052 §5).
+#[derive(Debug)]
+pub(crate) struct Ran {
+    /// How it ended.
+    pub(crate) outcome: ExecOutcome,
+    /// Its standard output, to the bound.
+    pub(crate) stdout: Vec<u8>,
+    /// Every stdout byte it wrote, kept or not.
+    pub(crate) stdout_observed: u64,
+    /// Its standard error, to the bound.
+    pub(crate) stderr: Vec<u8>,
+    /// Every stderr byte it wrote, kept or not.
+    pub(crate) stderr_observed: u64,
+    /// How long it ran.
+    pub(crate) elapsed: Milliseconds,
+    /// Whether every other process of the environment was then proved gone.
+    pub(crate) residue: Verdict,
+    /// How many processes, besides init, were found and ended.
+    pub(crate) ended: u32,
+    /// How many remained.
+    pub(crate) remaining: u32,
+}
+
 /// Why an environment operation has no result.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum EnvFailure {
@@ -119,6 +144,25 @@ pub(crate) trait ExecutionEnvironment {
         handle: &EnvHandle,
         spec: &EnvironmentSpec,
     ) -> Result<(ExecOutcome, Vec<u8>), EnvFailure>;
+
+    /// Run one workload in an environment that exists (M5d, ADR-0052 §5):
+    /// the environment re-judged from the runtime's record, the executable's
+    /// bytes proved, the plan's one command line run within its bounds, and
+    /// then every other process of the environment ended. `until` bounds it
+    /// all.
+    ///
+    /// # Errors
+    ///
+    /// [`EnvFailure::Refused`] when provably nothing ran;
+    /// [`EnvFailure::Unconfirmed`] when it may have, and nothing proves how
+    /// it ended.
+    fn run_workload(
+        &self,
+        handle: &EnvHandle,
+        spec: &EnvironmentSpec,
+        workload: &WorkloadSpec,
+        until: std::time::Instant,
+    ) -> Result<Ran, EnvFailure>;
 
     /// Remove exactly the environment `environment` of `run` in `store` —
     /// `container`, when the authority recorded it. Nothing labelled

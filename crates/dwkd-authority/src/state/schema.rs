@@ -51,7 +51,7 @@ use rusqlite::Connection;
 pub(super) const APPLICATION_ID: i64 = 0x4457_4B44;
 
 /// The schema version this build creates and understands.
-pub(super) const CURRENT_VERSION: i64 = 8;
+pub(super) const CURRENT_VERSION: i64 = 9;
 
 /// Schema version 1, the first. Static text: nothing in it is assembled from a
 /// value, and every value the authority stores is bound as a parameter.
@@ -1178,6 +1178,87 @@ WHEN EXISTS (SELECT 1 FROM net_idempotency WHERE subject = NEW.subject
 BEGIN SELECT RAISE(ABORT, 'an idempotency key names one invocation'); END;
 ";
 
+/// Schema version 9 (M5d.1, ADR-0052 §4): the workload ledger.
+///
+/// One row per workload invocation, written **before** the broker is told
+/// anything — the intent, `LAUNCHING`: the run and its environment, the
+/// executable's path in the image and its pinned SHA-256, the arguments'
+/// digest (never the arguments), the bounds charged — then exactly one
+/// ending: `COMPLETED` (it exited, was killed or outran its wall clock, and
+/// what `reap` found after it), `FAILED` (refused, provably nothing ran) or
+/// `UNKNOWN`. A run's workload budget is read from its rows and never
+/// refunded. A workload is admitted only in its own run's `READY`
+/// environment, and an environment runs one workload at a time — the
+/// database's own statements of both. Its key is bound once per run; the
+/// shared idempotency namespace joins it with the public route (M5d.2).
+///
+/// No column can hold an argument, an environment variable, a byte of
+/// output or a secret value.
+pub(super) const SCHEMA_V9: &str = r"
+CREATE TABLE workload (
+    invocation_id     TEXT    PRIMARY KEY CHECK (length(invocation_id) = 30
+                                                 AND substr(invocation_id, 1, 4) = 'inv_'),
+    run_id            TEXT    NOT NULL REFERENCES run(run_id) ON DELETE RESTRICT,
+    environment_id    TEXT    NOT NULL REFERENCES environment(environment_id) ON DELETE RESTRICT,
+    idempotency_key   TEXT    NOT NULL CHECK (length(idempotency_key) BETWEEN 1 AND 128),
+    request_digest    TEXT    NOT NULL CHECK (length(request_digest) = 64
+                                              AND request_digest NOT GLOB '*[^0-9a-f]*'),
+    executable_path   TEXT    NOT NULL CHECK (length(executable_path) BETWEEN 2 AND 255
+                                              AND substr(executable_path, 1, 1) = '/'),
+    executable_sha256 TEXT    NOT NULL CHECK (length(executable_sha256) = 64
+                                              AND executable_sha256 NOT GLOB '*[^0-9a-f]*'),
+    arg_count         INTEGER NOT NULL CHECK (arg_count BETWEEN 0 AND 128),
+    argv_sha256       TEXT    NOT NULL CHECK (length(argv_sha256) = 64
+                                              AND argv_sha256 NOT GLOB '*[^0-9a-f]*'),
+    stream_limit      INTEGER NOT NULL CHECK (stream_limit BETWEEN 1 AND 131072),
+    wall_clock_s      INTEGER NOT NULL CHECK (wall_clock_s BETWEEN 1 AND 600),
+    incarnation       INTEGER NOT NULL CHECK (incarnation >= 1),
+    state             TEXT    NOT NULL CHECK (state IN ('LAUNCHING', 'COMPLETED', 'FAILED',
+                                                        'UNKNOWN')),
+    failure           TEXT    CHECK (failure IS NULL OR (length(failure) BETWEEN 1 AND 64
+                                                         AND failure NOT GLOB '*[^A-Z0-9_]*')),
+    ending            TEXT    CHECK (ending IS NULL OR ending IN ('EXITED', 'KILLED', 'TIMED_OUT',
+                                     'ENVIRONMENT_GONE', 'RUNTIME_UNAVAILABLE', 'UNOBSERVABLE')),
+    exit_code         INTEGER CHECK (exit_code IS NULL OR exit_code BETWEEN 0 AND 255),
+    signal            INTEGER CHECK (signal IS NULL OR signal BETWEEN 1 AND 64),
+    stdout_bytes      INTEGER CHECK (stdout_bytes IS NULL OR stdout_bytes >= 0),
+    stderr_bytes      INTEGER CHECK (stderr_bytes IS NULL OR stderr_bytes >= 0),
+    output_truncated  INTEGER CHECK (output_truncated IS NULL OR output_truncated IN (0, 1)),
+    residue           TEXT    CHECK (residue IS NULL OR residue IN ('PASS', 'FAIL',
+                                                                    'UNOBSERVABLE')),
+    elapsed_ms        INTEGER CHECK (elapsed_ms IS NULL OR elapsed_ms >= 0),
+    intent_ms         INTEGER NOT NULL,
+    ended_ms          INTEGER,
+    UNIQUE (run_id, idempotency_key),
+    CHECK ((state = 'LAUNCHING') = (ended_ms IS NULL)),
+    CHECK (state != 'LAUNCHING' OR (failure IS NULL AND ending IS NULL AND residue IS NULL)),
+    CHECK (state != 'FAILED' OR (failure IS NOT NULL AND ending IS NULL AND residue IS NULL)),
+    CHECK (state != 'COMPLETED' OR (failure IS NULL AND residue IS NOT NULL
+                                    AND ending IN ('EXITED', 'KILLED', 'TIMED_OUT'))),
+    CHECK (state != 'UNKNOWN' OR failure IS NOT NULL),
+    CHECK ((exit_code IS NOT NULL) = (ending IS 'EXITED')),
+    CHECK ((signal IS NOT NULL) = (ending IS 'KILLED'))
+) STRICT;
+CREATE UNIQUE INDEX workload_one_at_a_time ON workload(environment_id)
+    WHERE state = 'LAUNCHING';
+CREATE INDEX workload_by_run ON workload(run_id);
+CREATE INDEX workload_by_state ON workload(state);
+CREATE TRIGGER workload_in_a_ready_environment BEFORE INSERT ON workload
+WHEN NOT EXISTS (SELECT 1 FROM environment WHERE environment_id = NEW.environment_id
+                 AND run_id = NEW.run_id AND state = 'READY')
+BEGIN SELECT RAISE(ABORT, 'a workload runs only in its own run''s READY environment'); END;
+CREATE TRIGGER workload_intent_fixed BEFORE UPDATE OF invocation_id, run_id, environment_id,
+    idempotency_key, request_digest, executable_path, executable_sha256, arg_count, argv_sha256,
+    stream_limit, wall_clock_s, incarnation, intent_ms ON workload
+BEGIN SELECT RAISE(ABORT, 'a workload''s intent is immutable'); END;
+CREATE TRIGGER workload_ends_once BEFORE UPDATE OF state, failure, ending, exit_code, signal,
+    stdout_bytes, stderr_bytes, output_truncated, residue, elapsed_ms, ended_ms ON workload
+WHEN OLD.state != 'LAUNCHING' OR NEW.state = 'LAUNCHING'
+BEGIN SELECT RAISE(ABORT, 'a workload ends once, from LAUNCHING'); END;
+CREATE TRIGGER workload_no_delete BEFORE DELETE ON workload
+BEGIN SELECT RAISE(ABORT, 'a workload record is never deleted'); END;
+";
+
 /// One step from a version to the next.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct Migration {
@@ -1220,6 +1301,10 @@ pub(super) const MIGRATIONS: &[Migration] = &[
     Migration {
         to: 8,
         sql: SCHEMA_V8,
+    },
+    Migration {
+        to: 9,
+        sql: SCHEMA_V9,
     },
 ];
 
@@ -1375,8 +1460,8 @@ pub(super) fn foreign_key_check(conn: &Connection) -> rusqlite::Result<Result<()
 mod tests {
     use super::{
         APPLICATION_ID, CURRENT_VERSION, MIGRATIONS, Migration, SCHEMA_V1, SCHEMA_V2, SCHEMA_V3,
-        SCHEMA_V4, SCHEMA_V5, SCHEMA_V6, SCHEMA_V7, SCHEMA_V8, Shape, ShapeError, decide, migrate,
-        verify_exact,
+        SCHEMA_V4, SCHEMA_V5, SCHEMA_V6, SCHEMA_V7, SCHEMA_V8, SCHEMA_V9, Shape, ShapeError,
+        decide, migrate, verify_exact,
     };
     use rusqlite::Connection;
 
@@ -1443,6 +1528,7 @@ mod tests {
         assert!(conn.execute_batch(SCHEMA_V6).is_ok());
         assert!(conn.execute_batch(SCHEMA_V7).is_ok());
         assert!(conn.execute_batch(SCHEMA_V8).is_ok());
+        assert!(conn.execute_batch(SCHEMA_V9).is_ok());
         assert!(
             conn.execute_batch("DROP TRIGGER run_never_resurrects")
                 .is_ok()
@@ -1466,6 +1552,7 @@ mod tests {
         assert!(conn.execute_batch(SCHEMA_V6).is_ok());
         assert!(conn.execute_batch(SCHEMA_V7).is_ok());
         assert!(conn.execute_batch(SCHEMA_V8).is_ok());
+        assert!(conn.execute_batch(SCHEMA_V9).is_ok());
         assert!(
             conn.execute_batch("CREATE TABLE backdoor (x INTEGER)")
                 .is_ok()
@@ -2324,6 +2411,139 @@ mod tests {
             .query_row("SELECT count(*) FROM environment", [], |row| row.get(0))
             .unwrap_or(-1);
         assert_eq!(count, 0);
+    }
+
+    fn workload(
+        conn: &Connection,
+        (id, run, environment): (u8, &str, &str),
+        key: &str,
+    ) -> rusqlite::Result<usize> {
+        conn.execute(
+            "INSERT INTO workload (invocation_id, run_id, environment_id, idempotency_key, \
+             request_digest, executable_path, executable_sha256, arg_count, argv_sha256, \
+             stream_limit, wall_clock_s, incarnation, state, intent_ms) \
+             VALUES (?1, ?2, ?3, ?4, ?5, '/usr/bin/x', ?6, 0, ?7, 4096, 30, 1, 'LAUNCHING', 0)",
+            rusqlite::params![
+                inv(id),
+                run,
+                environment,
+                key,
+                "ab".repeat(32),
+                "cd".repeat(32),
+                "ef".repeat(32)
+            ],
+        )
+    }
+
+    #[test]
+    fn a_version_eight_store_migrates_to_nine_and_a_workload_needs_its_ready_environment() {
+        // M5d.1 (ADR-0052 §4): v9 adds the workload ledger. A v8 store's rows
+        // survive and the new table starts empty.
+        let conn = store_at(8);
+        assert!(environment(&conn, ENV, "run_a", "PREPARING").is_ok());
+        {
+            let Ok(tx) = conn.unchecked_transaction() else {
+                unreachable!("a transaction")
+            };
+            assert_eq!(migrate(&tx, 8, MIGRATIONS).ok(), Some(CURRENT_VERSION));
+            assert!(tx.commit().is_ok());
+        }
+        const { assert!(CURRENT_VERSION >= 9) };
+        assert_eq!(verify_exact(&conn).ok(), Some(Ok(())));
+        let count = |sql: &str| conn.query_row(sql, [], |row| row.get::<_, i64>(0)).ok();
+        assert_eq!(count("SELECT count(*) FROM environment"), Some(1));
+        assert_eq!(count("SELECT count(*) FROM workload"), Some(0));
+        let set = |sql: &str| conn.execute(sql, []);
+        // Not READY, another run's, or unknown: no workload.
+        assert!(
+            workload(&conn, (0, "run_a", ENV), "k").is_err(),
+            "preparing"
+        );
+        assert!(
+            set(&format!(
+                "UPDATE environment SET state = 'READY', container = '{}', \
+             effective = 'CONTAINER_ISOLATION'",
+                "c".repeat(64)
+            ))
+            .is_ok()
+        );
+        assert!(
+            workload(&conn, (0, "run_b", ENV), "k").is_err(),
+            "another run's"
+        );
+        assert!(
+            workload(&conn, (0, "run_a", "env_01M24BB8G3E0A851TRWE3M8FZZ"), "k").is_err(),
+            "no such environment"
+        );
+        assert!(workload(&conn, (0, "run_a", ENV), "k").is_ok());
+        // One at a time per environment, one key per run.
+        assert!(
+            workload(&conn, (1, "run_a", ENV), "k2").is_err(),
+            "one at a time"
+        );
+        assert!(
+            set(&format!(
+                "UPDATE workload SET state = 'COMPLETED', ending = 'EXITED', exit_code = 0, \
+             residue = 'PASS', stdout_bytes = 0, stderr_bytes = 0, output_truncated = 0, \
+             elapsed_ms = 5, ended_ms = 9 WHERE invocation_id = '{}'",
+                inv(0)
+            ))
+            .is_ok()
+        );
+        assert!(
+            workload(&conn, (1, "run_a", ENV), "k").is_err(),
+            "the key is bound"
+        );
+        assert!(workload(&conn, (1, "run_a", ENV), "k2").is_ok());
+        // It ends once; its intent never changes; it is never deleted.
+        let first = format!("WHERE invocation_id = '{}'", inv(0));
+        assert!(
+            set(&format!(
+                "UPDATE workload SET state = 'UNKNOWN', failure = 'X' {first}"
+            ))
+            .is_err()
+        );
+        assert!(set(&format!("UPDATE workload SET wall_clock_s = 600 {first}")).is_err());
+        assert!(
+            set(&format!(
+                "UPDATE workload SET argv_sha256 = '{}' {first}",
+                "00".repeat(32)
+            ))
+            .is_err()
+        );
+        assert!(set(&format!("DELETE FROM workload {first}")).is_err());
+        // An ending fits its state: an exit code only for an exit, a signal
+        // only for a kill, an ending a completion cannot have refused, a
+        // failure with no reason refused.
+        let second = format!("WHERE invocation_id = '{}'", inv(1));
+        for bad in [
+            format!(
+                "UPDATE workload SET state = 'COMPLETED', ending = 'KILLED', exit_code = 1, residue = 'PASS', ended_ms = 9 {second}"
+            ),
+            format!(
+                "UPDATE workload SET state = 'COMPLETED', ending = 'EXITED', residue = 'PASS', ended_ms = 9 {second}"
+            ),
+            format!(
+                "UPDATE workload SET state = 'COMPLETED', ending = 'UNOBSERVABLE', residue = 'PASS', ended_ms = 9 {second}"
+            ),
+            format!(
+                "UPDATE workload SET state = 'COMPLETED', ending = 'EXITED', exit_code = 0, ended_ms = 9 {second}"
+            ),
+            format!("UPDATE workload SET state = 'FAILED', ended_ms = 9 {second}"),
+            format!("UPDATE workload SET state = 'UNKNOWN', ended_ms = 9 {second}"),
+            format!(
+                "UPDATE workload SET state = 'FAILED', failure = 'X', ending = 'EXITED', exit_code = 0, ended_ms = 9 {second}"
+            ),
+        ] {
+            assert!(set(&bad).is_err(), "{bad}");
+        }
+        assert!(
+            set(&format!(
+                "UPDATE workload SET state = 'UNKNOWN', failure = 'WORKLOAD_UNCONFIRMED', \
+             ending = 'UNOBSERVABLE', residue = 'UNOBSERVABLE', ended_ms = 9 {second}"
+            ))
+            .is_ok()
+        );
     }
 
     #[test]

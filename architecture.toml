@@ -753,6 +753,10 @@ exempt_paths = [
     # `cfg(test)`: they read `/proc` to count the exchange workers they started
     # and see each one reaped.
     "crates/dwkd-broker/src/http/tests.rs",
+    # M5d.1 (ADR-0052 §13): the deployment check reads two kernel facts about
+    # the broker itself at start -- Yama's ptrace scope and its own binary's
+    # owner and mode -- and nothing a workspace names.
+    "crates/dwkd-broker/src/posture.rs",
 ]
 suffixes = [".rs"]
 patterns = [
@@ -791,6 +795,11 @@ read once at start. `egress/tests.rs` is the module's unit test.
 M5c (ADR-0050): `http/tls.rs` reads one file, the test authority
 `--allow-evidence-trust` names -- evidence-only, read once at start, and
 replacing Mozilla's roots rather than joining them.
+
+M5d.1 (ADR-0052 §13): `posture.rs` reads `/proc/sys/kernel/yama/ptrace_scope`
+and `stat`s the broker's own executable, once, before it serves, to refuse a
+deployment where a process of its uid could trace the processes it starts
+before they harden themselves (ADR-0050 §21). Neither is a workspace name.
 
 Hygiene, not containment.
 """
@@ -1073,11 +1082,15 @@ exempt_paths = [
     "crates/dwkd-authority/src/resource/exec/mod.rs",
     "crates/dwkd-authority/src/resource/mod.rs",
     "crates/dwkd-authority/src/state/scopes.rs",
+    # M5d.1 (ADR-0052 §2): the one module that pairs an image's path with the
+    # digest the operator's manifest pins for it.
+    "crates/dwkd-authority/src/state/workload.rs",
 ]
 suffixes = [".rs"]
 patterns = [
     '^(?!\s*//).*\bstored_executable_identity\b',
     '^(?!\s*//).*\bExecutableIdentity\s*::\s*new\b',
+    '^(?!\s*//).*\bimage_executable_identity\b',
 ]
 reason = """
 An executable in a NEW declaration -- a request, a profile, a policy match --
@@ -1088,6 +1101,13 @@ filesystem again. One module may use it. A second caller would mint an
 executable identity nobody resolved or hashed: TX017's rule, for executables.
 The constructor is visible only inside `crate::resource`; this is the second
 lock on it.
+
+M5d.1 (ADR-0052 §2): an executable in a content-addressed image is not
+resolved on this host -- its identity is its path in the image and the
+digest the operator's manifest pins, which the broker proves from outside the
+environment before every run. `image_executable_identity` mints it, and only
+the workload ledger may name it: a second caller would make an image
+identity no manifest pinned.
 
 Hygiene, not containment: the resolver's own refusals are the control.
 """
@@ -1383,6 +1403,8 @@ patterns = [
     '^(?!\s*(//|#)).*\bSandboxConfig\b',
     '^(?!\s*(//|#)).*\b(broker\.environment_[a-z]+|EnvironmentPrepare|EnvironmentDestroy)\b',
     '^(?!\s*(//|#)).*\b(attach_net_evidence|net_exceptions)\b',
+    # M5d.1 (ADR-0052 §2): the workload API is in-process too.
+    '^(?!\s*(//|#)).*\b(workload_run|workload_record|WorkloadRequest|broker\.workload_run)\b',
 ]
 reason = """
 M5a's execution environments are an in-process authority API with no DWKP
@@ -1396,6 +1418,12 @@ the authority's own guard lets through although blocked, so the evidence's
 loopback origins are judged as the evidence broker judges them. Attaching
 it from the server, `serve` or anything a runtime reaches would be a
 production loopback bypass; only the in-process evidence harness may.
+
+M5d.1 (ADR-0052 §2) adds the workload API: one bounded program in a
+`READY` environment, decided by both gates. It is the evidence harness's
+until M5d.2 gives sandboxed `process.exec` its own reviewed public route; a
+reference from the server, `serve`, the CLI or the runtime before then would
+be that route arriving without its review.
 
 Hygiene, not containment: the DWKP registry has no operation that names an
 environment, which the protocol corpus checks.
@@ -1417,6 +1445,9 @@ patterns = [
     # follows a redirect, re-resolves, proxies, keeps cookies or overrides the
     # name the certificate must hold crosses the wire.
     '^(?!\s*//).*\b(insecure|skip_verify|tls_verify|verify_tls|danger\w*|root_certs?|trust_anchors?|trust_roots?|sni_override|server_name_override|host_override|resolve_override|follow_redirects?|max_redirects|use_proxy|via_proxy|https?_proxy|proxy_endpoint|cookie_jar|cookies?)\b',
+    # M5d.1 (ADR-0052 §3): a workload is typed facts -- no user to run as, no
+    # variable, no entrypoint, no shell string, no terminal, no privilege.
+    '^(?!\s*//).*\b(exec_user|run_as|run_as_user|exec_env|extra_env|env_vars|environment_variables|entrypoint|shell_command|workdir_override|tty|interactive|detach|privileged)\b',
 ]
 reason = """
 An environment is described on the private wire by typed facts -- its id, run,
@@ -1884,6 +1915,48 @@ worker handed something no judgement stood in front of.
 Hygiene, not containment: the worker checks its peer, hardens itself and
 inherits no descriptor; the evidence shows the broker's memory clean after an
 echo, the worker reaped, and a stranger's start refused.
+"""
+
+# ===========================================================================
+# M5d.1: a workload in a READY environment (ADR-0052). Hygiene over the
+# source; the controls are the broker's re-judgement of the environment from
+# the runtime's record, the executable's digest proved from outside, the
+# probe's `reap`, and the authority's gates -- measured by
+# `make sandbox-workload-evidence` against a real OCI runtime.
+# ===========================================================================
+
+[[text_rules]]
+id = "TX050-the-workload-plan-spells-no-weakening"
+paths = ["crates/dwkd-broker/src/sandbox/workload_plan.rs"]
+# The plan's own tests (`workload_plan_tests.rs`) name every banned word, to
+# assert none is in a plan.
+exempt_paths = []
+suffixes = [".rs"]
+patterns = [
+    # Privilege, capabilities, devices, variables, a terminal or stdin, a
+    # second filesystem path, a security option.
+    '^(?!\s*//).*"--(privileged|cap-add|device|device-cgroup-rule|group-add|env|env-file|interactive|tty|detach|detach-keys|security-opt|volume|mount)\b',
+    # Their short spellings, alone or combined (`-e`, `-it`, `-d`, `-v`, `-u`).
+    '^(?!\s*//).*"-[eitdvuw]+"',
+    # Root, by number or name.
+    '^(?!\s*//).*"(0|root)(:(0|root))?"',
+    # A shell, or a command string for one.
+    '^(?!\s*//).*"(/usr)?(/bin/)?(sh|bash|dash|zsh|ksh|busybox)"',
+    '^(?!\s*//).*"-c"',
+]
+reason = """
+`workload_plan.rs` is the one place the broker spells a workload's command
+line (ADR-0052 §5): `container exec --user 10001:10001 --workdir /workspace`
+on the recorded container, then the executable's path and exactly its
+arguments -- and, after it, the trusted probe's `reap` as the same user.
+The user is the profile's, never root; nothing is added to the environment;
+no terminal, no standard input, no detaching; and no word of the caller's is
+placed before the container's name, where the client still reads options.
+A weakening word here is a stronger workload in the product.
+
+Hygiene, not containment: before every run the broker re-judges the
+environment from the runtime's record and proves the executable's bytes, and
+the evidence shows the workload's uid, capabilities and arguments from inside.
 """
 
 # ===========================================================================

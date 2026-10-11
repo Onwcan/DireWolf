@@ -171,7 +171,10 @@ fn store(shared: &Shared) -> Result<StoreInstance, AuthorityError> {
 /// The runtime client, resolved and hashed now, and the neutral directory
 /// it runs in (`/`, opened and proved like any directory handed over). No
 /// transaction may be open: hashing reads the whole client.
-fn runtime(shared: &Shared, config: &SandboxConfig) -> Result<RuntimeHandoff, &'static str> {
+pub(super) fn runtime(
+    shared: &Shared,
+    config: &SandboxConfig,
+) -> Result<RuntimeHandoff, &'static str> {
     let resolved = crate::resource::exec::resolve(config.runtime(), shared.authority_uid)
         .map_err(|_| "RUNTIME_CLIENT_UNTRUSTED")?;
     let executable = resolved
@@ -195,7 +198,7 @@ fn runtime(shared: &Shared, config: &SandboxConfig) -> Result<RuntimeHandoff, &'
 /// that directory's identity, which the probe proves from inside. A
 /// `PROXY_ONLY` one carries the relay's digest and, to be prepared, its
 /// grant (M5b); a measurement needs no grant.
-fn specification(
+pub(super) fn specification(
     shared: &Shared,
     config: &SandboxConfig,
     (environment, run): (&EnvironmentId, &RunId),
@@ -225,14 +228,14 @@ fn elapsed(since: Instant) -> u64 {
 }
 
 /// What the harness needs of the attached configuration and the broker.
-struct Attached {
-    shared: Arc<Shared>,
-    config: SandboxConfig,
-    broker: Arc<dyn EffectBroker>,
+pub(super) struct Attached {
+    pub(super) shared: Arc<Shared>,
+    pub(super) config: SandboxConfig,
+    pub(super) broker: Arc<dyn EffectBroker>,
 }
 
 impl Authority {
-    fn attached(&self) -> Option<Attached> {
+    pub(super) fn attached(&self) -> Option<Attached> {
         let config = self.shared.sandbox.get()?.clone();
         let broker = self.shared.broker.clone()?;
         Some(Attached {
@@ -513,7 +516,7 @@ impl Authority {
     }
 
     /// The broker's half of a recorded destruction, and its outcome.
-    fn perform_destroy(
+    pub(super) fn perform_destroy(
         &mut self,
         record: EnvironmentRecord,
         invocation: InvocationId,

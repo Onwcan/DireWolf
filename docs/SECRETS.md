@@ -89,7 +89,7 @@ Ordered by preference. The kernel selects the most restrictive mode the secret a
 > **M4e:** the secret side is real — gates, durable intent, one backend read,
 > one handoff (ADR-0046 §12).
 >
-> **M5c (in progress, pending acceptance — [ADR-0050](adr/0050-m5c-kernel-performed-net-http-ssrf-redirects-and-credential-egress.md) §8):**
+> **M5c (complete — [ADR-0050](adr/0050-m5c-kernel-performed-net-http-ssrf-redirects-and-credential-egress.md) §8, accepted):**
 > mode A's consumer is `net.http`. A credential is attached only to a hop at
 > the request's first origin, and only when its metadata names that origin
 > exactly; every attachment is its own `secret.use` through both gates, its own
@@ -112,10 +112,12 @@ Ordered by preference. The kernel selects the most restrictive mode the secret a
 > `http` header map) are made in the worker and end with it, before the
 > broker answers. Asserted, nine ways: the runtime's answer, the audit,
 > durable state, the authority's memory and the long-lived broker's memory
-> never hold it, raw or hex. **Residual, pending the owner's acceptance:** the
-> worker's memory during the exchange, and the physical pages it freed until
-> the kernel reuses them (or swap) — readable only by root or the kernel
-> (ADR-0050 §20, D11).
+> never hold it, raw or hex. **Residual, accepted with D11:** the worker's
+> memory during the exchange (root or `CAP_SYS_PTRACE`), the physical pages it
+> freed until the kernel reuses them, swap, and the worker's startup window
+> before it hardens itself — the last closed by Yama `ptrace_scope` ≥ 1 or an
+> execute-only broker binary, a deployment prerequisite the broker does not
+> yet verify (ADR-0050 §§20–21).
 
 `dwkd-broker` adds the header when connecting to an allowlisted origin, using a **one-shot injection handed to it by `dwkd-authority`** for that invocation only. The secret at rest exists in exactly one process — `dwkd-authority` — and never in a child, an environment, a file, or any memory the agent can influence. The broker holds the value only for the duration of the request and holds no long-lived key ([ADR-0018](adr/0018-authority-broker-split.md)).
 

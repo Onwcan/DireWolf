@@ -1,0 +1,54 @@
+//! Every argument vector a workload's run hands the container runtime (M5d,
+//! ADR-0052 §5) — the `exec` that runs it and the `exec` that ends what it
+//! left — built from the typed workload and the profile's constants, and
+//! nothing else (TX050).
+//!
+//! The words are this module's literals. The user is the profile's numeric
+//! `10001:10001` — never a name the image's `/etc/passwd` could map, never
+//! root — the working directory is the workspace's mount, and nothing is
+//! added to the environment: the process sees exactly the container's own
+//! variables (for `PROXY_ONLY`, the proxy's). No `--privileged`, no extra
+//! capability, no environment option, no standard input, no terminal, no
+//! detaching. The runtime client stops reading its own options at the
+//! container's name, so every word after it is the program's: an argument
+//! reaches the workload as exactly its bytes, whatever it spells.
+
+use dwk_proto::brokerp::sandbox::ContainerRef;
+use dwk_proto::brokerp::workload::WorkloadSpec;
+use dwk_sandbox_profile::{PROBE_PATH, PROBE_REAP, SANDBOX_GID, SANDBOX_UID, WORKSPACE_TARGET};
+
+use super::plan::words;
+
+/// `user:group`, numerically: the profile's, and nobody else's.
+fn user() -> String {
+    format!("{SANDBOX_UID}:{SANDBOX_GID}")
+}
+
+/// Run the workload: `container exec`, as the environment's user, in the
+/// workspace, with exactly its arguments.
+#[must_use]
+pub(crate) fn run(container: &ContainerRef, workload: &WorkloadSpec) -> Vec<String> {
+    let mut argv = words(&["container", "exec", "--user"]);
+    argv.push(user());
+    argv.extend(words(&["--workdir", WORKSPACE_TARGET]));
+    argv.push(container.as_str().to_owned());
+    argv.push(workload.executable.as_str().to_owned());
+    argv.extend(workload.args.iter().map(|arg| arg.as_str().to_owned()));
+    argv
+}
+
+/// End every other process of the environment: the trusted probe's `reap`,
+/// as the environment's user, who owns every process a workload can start.
+#[must_use]
+pub(crate) fn reap(container: &ContainerRef) -> Vec<String> {
+    let mut argv = words(&["container", "exec", "--user"]);
+    argv.push(user());
+    argv.push(container.as_str().to_owned());
+    argv.push(PROBE_PATH.to_owned());
+    argv.push(PROBE_REAP.to_owned());
+    argv
+}
+
+#[cfg(test)]
+#[path = "workload_plan_tests.rs"]
+mod tests;

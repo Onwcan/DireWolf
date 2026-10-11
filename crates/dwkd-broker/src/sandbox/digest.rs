@@ -154,6 +154,16 @@ pub(crate) fn relay(archive: &[u8], expected: &str) -> Verdict {
     named(archive, RELAY_NAME, expected)
 }
 
+/// Whether `archive` holds exactly a workload's executable — one regular
+/// file named `name`, the path's last component — whose SHA-256 is
+/// `expected`, the digest the operator's image manifest pins (M5d,
+/// ADR-0052 §5). The same rules as the probe's: a symbolic link, a directory,
+/// a second entry or other bytes are `FAIL`.
+#[must_use]
+pub(crate) fn executable(archive: &[u8], name: &str, expected: &str) -> Verdict {
+    named(archive, name, expected)
+}
+
 fn named(archive: &[u8], name: &str, expected: &str) -> Verdict {
     match one_file(archive, name) {
         Ok(file) if hex(file) == expected => Verdict::Pass,
@@ -171,7 +181,7 @@ fn named(archive: &[u8], name: &str, expected: &str) -> Verdict {
 mod tests {
     use dwk_proto::brokerp::sandbox::Verdict;
 
-    use super::{BLOCK, hex, probe, relay};
+    use super::{BLOCK, executable, hex, probe, relay};
 
     /// One ustar entry.
     fn entry(name: &str, kind: u8, content: &[u8]) -> Vec<u8> {
@@ -272,6 +282,32 @@ mod tests {
             probe(&archive(&[entry("sandbox-relay", b'0', &bytes)]), &want),
             Verdict::Fail
         );
+    }
+
+    #[test]
+    fn a_workload_executable_is_its_own_named_file_with_the_pinned_bytes() {
+        let bytes = b"\x7fELF a workload".to_vec();
+        let want = hex(&bytes);
+        let name = "sandbox-fixture";
+        assert_eq!(
+            executable(&archive(&[entry(name, b'0', &bytes)]), name, &want),
+            Verdict::Pass
+        );
+        // Other bytes, a link or a directory in its place, a second entry,
+        // another file's name: none is the executable the manifest pinned.
+        let mut changed = bytes.clone();
+        changed[0] ^= 1;
+        for bad in [
+            archive(&[entry(name, b'0', &changed)]),
+            archive(&[entry(name, b'2', b"")]),
+            archive(&[entry(name, b'1', b"")]),
+            archive(&[entry(name, b'5', b"")]),
+            archive(&[entry(name, b'0', &bytes), entry("extra", b'0', b"x")]),
+            archive(&[entry("sandbox-probe", b'0', &bytes)]),
+        ] {
+            assert_eq!(executable(&bad, name, &want), Verdict::Fail);
+        }
+        assert_eq!(executable(b"not tar", name, &want), Verdict::Unobservable);
     }
 
     #[test]

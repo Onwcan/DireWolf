@@ -43,6 +43,24 @@
 //! | `egress-env` | print the proxy variables the process was given |
 //! | `egress-listen <ip> <port>` | (a weakened topology's extra peer) accept and close, forever |
 //! | `egress-dns-answer <ip>` | (a weakened topology's fake resolver) answer every question on `ip:53`, forever |
+//!
+//! M5d's workload evidence (ADR-0052) runs it as a **workload** — still a
+//! fixture, run only by `make sandbox-workload-evidence`, through the
+//! broker's `workload_run`:
+//!
+//! | argv | what |
+//! |---|---|
+//! | `workload-identity` | print its uid, gid, groups, capabilities, `NoNewPrivs`, seccomp mode and working directory |
+//! | `workload-args <args…>` | print how many arguments it got and each one, hex-encoded |
+//! | `workload-env` | print the names of the variables it was given |
+//! | `workload-print <stdout> <stderr>` | write that many bytes to each stream |
+//! | `workload-sleep <s>`, `workload-exit <code>`, `workload-kill-self` | sleep; exit with a code; end itself with `SIGKILL` |
+//! | `workload-tree` | start a child, a process that leaves its session and a daemonised grandchild, all long-lived, and exit |
+//! | `workload-fork-loop <n>` | start `n` long-lived children and exit |
+//! | `workload-hold-stdout` | leave a child holding its standard output open, and exit |
+//! | `workload-ps` | print every other process its pid namespace holds |
+//! | `workload-escape <host paths…>` | try to write outside the workspace, look for the runtime's sockets and for the host's paths it is given; print each result |
+//! | `workload-agent <s>` | an agent-shaped workload: a plan and two long-lived workers writing in the workspace, a daemonised helper, direct network attempts, its files read back, `s` seconds of work, then exit leaving workers and helper running |
 
 // The probe crate's other dependencies, which the fixture does not use.
 #[cfg(not(target_os = "linux"))]
@@ -234,6 +252,9 @@ mod linux {
     pub(super) fn main() -> ExitCode {
         let args: Vec<String> = std::env::args().collect();
         if let Some(code) = super::egress::main(&args) {
+            return code;
+        }
+        if let Some(code) = super::workload::main(&args) {
             return code;
         }
         match args.get(1).map(String::as_str) {
@@ -631,6 +652,318 @@ mod egress {
                 Ok(_) => say("connected"),
                 Err(error) => say(&io_errno(&error)),
             },
+            _ => return None,
+        })
+    }
+}
+
+#[cfg(target_os = "linux")]
+mod workload {
+    use std::io::Write as _;
+    use std::net::{SocketAddr, TcpStream, UdpSocket};
+    use std::process::{Command, ExitCode, Stdio};
+    use std::time::{Duration, Instant};
+
+    fn say(text: &str) -> ExitCode {
+        let mut out = std::io::stdout().lock();
+        if writeln!(out, "{text}").and_then(|()| out.flush()).is_ok() {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::from(3)
+        }
+    }
+
+    fn errno(error: &std::io::Error) -> String {
+        format!("errno={}", error.raw_os_error().unwrap_or(0))
+    }
+
+    fn sleep(seconds: &str) -> ExitCode {
+        let seconds = seconds.parse::<u64>().unwrap_or(0);
+        std::thread::sleep(Duration::from_secs(seconds));
+        ExitCode::SUCCESS
+    }
+
+    /// Start this program again with `args`, every stream `/dev/null`, and
+    /// do not wait for it.
+    fn detach(args: &[&str]) -> bool {
+        let Ok(me) = std::env::current_exe() else {
+            return false;
+        };
+        Command::new(me)
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .is_ok()
+    }
+
+    /// Its own identity, as the kernel reports it.
+    fn identity() -> ExitCode {
+        let status = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
+        let field = |key: &str| {
+            status
+                .lines()
+                .find_map(|line| line.strip_prefix(&format!("{key}:")))
+                .map_or_else(String::new, |v| {
+                    v.split_whitespace().collect::<Vec<_>>().join(",")
+                })
+        };
+        let cwd =
+            std::env::current_dir().map_or_else(|_| "?".to_owned(), |d| d.display().to_string());
+        say(&format!(
+            "uid={}\ngid={}\ngroups={}\ncapeff={}\ncapprm={}\ncapbnd={}\nnonewprivs={}\nseccomp={}\ncwd={cwd}",
+            field("Uid"),
+            field("Gid"),
+            field("Groups"),
+            field("CapEff"),
+            field("CapPrm"),
+            field("CapBnd"),
+            field("NoNewPrivs"),
+            field("Seccomp"),
+        ))
+    }
+
+    /// Every argument after the mode, hex-encoded, one per line.
+    fn args(args: &[String]) -> ExitCode {
+        let rest = args.get(2..).unwrap_or_default();
+        let mut text = format!("argc={}", rest.len());
+        for arg in rest {
+            text.push('\n');
+            for byte in arg.as_bytes() {
+                text.push_str(&format!("{byte:02x}"));
+            }
+            if arg.is_empty() {
+                text.push('-');
+            }
+        }
+        say(&text)
+    }
+
+    /// The names of the variables it was given, sorted.
+    fn environment() -> ExitCode {
+        let mut names: Vec<String> = std::env::vars_os()
+            .map(|(name, _)| name.to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        say(&format!("names={}", names.join(",")))
+    }
+
+    fn print(stdout: &str, stderr: &str) -> ExitCode {
+        let (Ok(out), Ok(err)) = (stdout.parse::<usize>(), stderr.parse::<usize>()) else {
+            return ExitCode::from(2);
+        };
+        let ok = std::io::stdout().lock().write_all(&vec![b'o'; out]).is_ok()
+            && std::io::stderr().lock().write_all(&vec![b'e'; err]).is_ok();
+        if ok {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::from(3)
+        }
+    }
+
+    /// A child, a process that left its session, and a daemonised
+    /// grandchild — all long-lived, none waited for — and then exit.
+    fn tree() -> ExitCode {
+        let started = [
+            detach(&["workload-sleep", "600"]),
+            detach(&["workload-setsid-sleep", "600"]),
+            detach(&["workload-daemon"]),
+        ];
+        say(&format!(
+            "spawned={}",
+            started.iter().filter(|s| **s).count()
+        ))
+    }
+
+    /// Leave its session, then sleep.
+    fn setsid_sleep(seconds: &str) -> ExitCode {
+        let _ = nix::unistd::setsid();
+        sleep(seconds)
+    }
+
+    /// The classic daemon: a new session, a long-lived child, and exit, so
+    /// the child is orphaned to the environment's init.
+    fn daemon() -> ExitCode {
+        let _ = nix::unistd::setsid();
+        let _ = detach(&["workload-sleep", "600"]);
+        ExitCode::SUCCESS
+    }
+
+    /// `count` long-lived children, then exit.
+    fn fork_loop(count: &str) -> ExitCode {
+        let count = count.parse::<usize>().unwrap_or(0);
+        let started = (0..count)
+            .filter(|_| detach(&["workload-sleep", "600"]))
+            .count();
+        say(&format!("spawned={started}"))
+    }
+
+    /// A child that keeps this workload's standard output open, then exit:
+    /// the runtime's client waits for the stream, so the wall clock ends it.
+    fn hold_stdout() -> ExitCode {
+        let Ok(me) = std::env::current_exe() else {
+            return ExitCode::from(3);
+        };
+        let held = Command::new(me)
+            .args(["workload-sleep", "600"])
+            .stdin(Stdio::null())
+            .spawn()
+            .is_ok();
+        say(&format!("held={held}"))
+    }
+
+    /// Every process this one sees in its pid namespace but itself: what a
+    /// reaped environment must leave — init alone.
+    fn ps() -> ExitCode {
+        let me = std::process::id();
+        let mut found: Vec<String> = Vec::new();
+        if let Ok(entries) = std::fs::read_dir("/proc") {
+            for entry in entries.flatten() {
+                let Some(pid) = entry
+                    .file_name()
+                    .to_str()
+                    .and_then(|n| n.parse::<u32>().ok())
+                else {
+                    continue;
+                };
+                if pid == me {
+                    continue;
+                }
+                let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
+                let state = stat
+                    .rsplit_once(')')
+                    .and_then(|(_, rest)| rest.split_whitespace().next())
+                    .unwrap_or("?")
+                    .to_owned();
+                found.push(format!("{pid}:{state}"));
+            }
+        }
+        found.sort();
+        say(&format!("others={}\npids={}", found.len(), found.join(",")))
+    }
+
+    /// Writes and reads outside the workspace, the runtime's sockets, and
+    /// the host's paths it is given: each attempt and what happened.
+    fn escape(host_paths: &[String]) -> ExitCode {
+        let write = |path: &str| match std::fs::write(path, b"x") {
+            Ok(()) => "written".to_owned(),
+            Err(error) => errno(&error),
+        };
+        let mut lines = vec![
+            format!("root={}", write("/direwolf-escape")),
+            format!("usr={}", write("/usr/direwolf-escape")),
+            format!("etc={}", write("/etc/direwolf-escape")),
+            format!(
+                "dotdot={}",
+                std::fs::create_dir("/workspace/../direwolf-escape")
+                    .map_or_else(|e| errno(&e), |()| "created".to_owned())
+            ),
+            format!("tmp={}", write("/tmp/direwolf-inside")),
+            format!("workspace={}", write("/workspace/direwolf-inside")),
+        ];
+        let sockets = [
+            "/var/run/docker.sock",
+            "/run/docker.sock",
+            "/run/containerd/containerd.sock",
+            "/run/podman/podman.sock",
+            "/var/run/crio/crio.sock",
+        ];
+        let present = sockets
+            .iter()
+            .filter(|s| std::path::Path::new(s).exists())
+            .count();
+        lines.push(format!("runtime_sockets={present}"));
+        for path in host_paths {
+            lines.push(format!(
+                "host_path={path} exists={}",
+                std::path::Path::new(path).exists()
+            ));
+        }
+        say(&lines.join("\n"))
+    }
+
+    fn tcp(ip: [u8; 4], port: u16) -> String {
+        match TcpStream::connect_timeout(&SocketAddr::from((ip, port)), Duration::from_secs(3)) {
+            Ok(_) => "connected".to_owned(),
+            Err(error) => errno(&error),
+        }
+    }
+
+    fn udp(ip: [u8; 4], port: u16) -> String {
+        match UdpSocket::bind("0.0.0.0:0")
+            .and_then(|socket| socket.send_to(b"direwolf", SocketAddr::from((ip, port))))
+        {
+            Ok(_) => "sent".to_owned(),
+            Err(error) => errno(&error),
+        }
+    }
+
+    /// An agent-shaped workload: a plan written to the workspace, two
+    /// long-lived workers each writing their own file, a daemonised helper,
+    /// direct network attempts, its own files read back, and a while of
+    /// work — then exit, leaving the workers and the helper running.
+    fn agent(seconds: &str) -> ExitCode {
+        let base = "/workspace/agent";
+        // Open to every uid, so the evidence on the host can clean it up.
+        let made = std::fs::create_dir_all(base).is_ok()
+            && std::fs::set_permissions(
+                base,
+                <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o777),
+            )
+            .is_ok()
+            && std::fs::write(format!("{base}/plan.txt"), b"plan").is_ok();
+        let workers = ["1", "2"]
+            .iter()
+            .filter(|n| detach(&["workload-agent-worker", n]))
+            .count();
+        let helper = detach(&["workload-daemon"]);
+        let tcp = tcp([1, 1, 1, 1], 443);
+        let udp = udp([8, 8, 8, 8], 53);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut files = 0;
+        while Instant::now() < deadline {
+            files = std::fs::read_dir(base).map_or(0, Iterator::count);
+            if files >= 3 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let read = std::fs::read(format!("{base}/plan.txt")).is_ok_and(|b| b == b"plan");
+        let _ = sleep(seconds);
+        say(&format!(
+            "made={made}\nworkers={workers}\nhelper={helper}\nfiles={files}\nread={read}\ntcp={tcp}\nudp={udp}"
+        ))
+    }
+
+    /// One of the agent's workers: its own file, then a long sleep.
+    fn agent_worker(n: &str) -> ExitCode {
+        let _ = std::fs::write(format!("/workspace/agent/worker-{n}.txt"), n.as_bytes());
+        sleep("600")
+    }
+
+    pub(super) fn main(args: &[String]) -> Option<ExitCode> {
+        let arg = |n: usize| args.get(n).map_or("", String::as_str);
+        Some(match arg(1) {
+            "workload-identity" => identity(),
+            "workload-args" => self::args(args),
+            "workload-env" => environment(),
+            "workload-print" => print(arg(2), arg(3)),
+            "workload-sleep" => sleep(arg(2)),
+            "workload-exit" => ExitCode::from(arg(2).parse::<u8>().unwrap_or(2)),
+            "workload-kill-self" => {
+                let _ = nix::sys::signal::raise(nix::sys::signal::Signal::SIGKILL);
+                ExitCode::from(3)
+            }
+            "workload-tree" => tree(),
+            "workload-setsid-sleep" => setsid_sleep(arg(2)),
+            "workload-daemon" => daemon(),
+            "workload-fork-loop" => fork_loop(arg(2)),
+            "workload-hold-stdout" => hold_stdout(),
+            "workload-ps" => ps(),
+            "workload-escape" => escape(args.get(2..).unwrap_or_default()),
+            "workload-agent" => agent(arg(2)),
+            "workload-agent-worker" => agent_worker(arg(2)),
             _ => return None,
         })
     }

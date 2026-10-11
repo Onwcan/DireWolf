@@ -411,7 +411,10 @@ pub(super) const fn failure_reason(failure: BrokerFailure) -> ToolFailureReasonV
             | BrokerRefusal::HttpTlsFailed
             | BrokerRefusal::HttpTimeout
             | BrokerRefusal::HttpRequestInvalid
-            | BrokerRefusal::HttpWorkerFailed => ToolFailureReasonV3::BrokerExecutionError,
+            | BrokerRefusal::HttpWorkerFailed
+            // The workload refusal (M5d) answers a workload's run, which no
+            // filesystem or process tool sends.
+            | BrokerRefusal::EnvironmentNotClean => ToolFailureReasonV3::BrokerExecutionError,
         },
         BrokerFailure::Indeterminate(_) => ToolFailureReasonV3::BrokerExecutionError,
     }

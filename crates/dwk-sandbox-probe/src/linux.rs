@@ -12,7 +12,7 @@ use std::io::{IoSliceMut, Read as _, Write as _};
 use std::os::unix::fs::{FileTypeExt as _, MetadataExt as _};
 use std::path::Path;
 use std::process::{ExitCode, Stdio};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use dwk_proto::brokerp::KernelNumber;
 use dwk_proto::brokerp::sandbox::{
@@ -32,6 +32,7 @@ pub(crate) fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
     match args.get(1).map(String::as_str) {
         Some(profile::PROBE_HOLD) if args.len() == 2 => hold(),
+        Some(profile::PROBE_REAP) if args.len() == 2 => reap(),
         Some(profile::PROBE_TARGET) if args.len() == 2 => target(),
         Some(profile::PROBE_MEASURE) if args.len() == 4 => {
             let environment = args.get(2).and_then(|s| EnvironmentId::parse(s));
@@ -56,16 +57,89 @@ pub(crate) fn main() -> ExitCode {
 
 fn usage() -> ExitCode {
     eprintln!(
-        "usage: dwk-sandbox-probe hold | measure <environment-id> <topology> | ptrace-target"
+        "usage: dwk-sandbox-probe hold | measure <environment-id> <topology> | reap | ptrace-target"
     );
     ExitCode::from(2)
 }
 
-/// The environment's first process: hold it open, do nothing.
+/// The environment's first process: hold it open and, as the init of its
+/// pid namespace, reap every process orphaned to it (M5d, ADR-0052 §5) — a
+/// workload's abandoned children, and whatever `reap` ended — so none lingers
+/// as a zombie holding the pids limit. Nothing else.
 fn hold() -> ExitCode {
     loop {
-        std::thread::sleep(Duration::from_secs(3600));
+        match nix::sys::wait::waitpid(Pid::from_raw(-1), None) {
+            Ok(_) | Err(Errno::EINTR) => {}
+            // No child at all: nothing to reap until one is orphaned here.
+            Err(_) => std::thread::sleep(Duration::from_millis(100)),
+        }
     }
+}
+
+/// End every other process of the environment (M5d, ADR-0052 §5), as the
+/// environment's user, after a workload. `kill(-1, SIGKILL)` reaches every
+/// process this uid may signal in this pid namespace but its init and this
+/// process, and a process with a fatal signal pending cannot fork, so one
+/// round also ends a forking loop; each round signals again, for anything
+/// that was being created as the last one ran. Init (`hold`) reaps what was
+/// killed, so the environment holds nothing else once `/proc` names only init
+/// and this process — or the step's bound passes.
+///
+/// Prints `reaped <found> <remaining>`: how many other processes it found
+/// before the first signal, and how many remained at the end. Exits 0 only
+/// when none remains; 1 when some did; 3 when `/proc` could not be listed.
+fn reap() -> ExitCode {
+    let me = std::process::id();
+    let Some(found) = others(me) else {
+        return ExitCode::from(3);
+    };
+    let deadline = Instant::now() + Duration::from_millis(profile::REAP_MILLIS);
+    let remaining = loop {
+        // Every process this uid may signal, but init and this one.
+        let _ = nix::sys::signal::kill(Pid::from_raw(-1), nix::sys::signal::Signal::SIGKILL);
+        let Some(left) = others(me) else {
+            return ExitCode::from(3);
+        };
+        if left.is_empty() || Instant::now() >= deadline {
+            break left.len();
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    let line = format!("reaped {} {remaining}\n", found.len());
+    let mut out = std::io::stdout().lock();
+    if out
+        .write_all(line.as_bytes())
+        .and_then(|()| out.flush())
+        .is_err()
+    {
+        return ExitCode::from(3);
+    }
+    if remaining == 0 {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(1)
+    }
+}
+
+/// Every process this process sees in its pid namespace's `/proc` — zombies
+/// included, until init reaps them — but init and itself. `None` when `/proc`
+/// cannot be listed.
+fn others(me: u32) -> Option<Vec<u32>> {
+    let mut found = Vec::new();
+    for entry in fs::read_dir("/proc").ok()? {
+        let entry = entry.ok()?;
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        if pid != 1 && pid != me {
+            found.push(pid);
+        }
+    }
+    Some(found)
 }
 
 /// The ptrace canary's child: exist briefly, do nothing.

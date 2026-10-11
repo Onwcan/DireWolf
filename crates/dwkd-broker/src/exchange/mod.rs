@@ -337,12 +337,14 @@ fn execute(
                 _ => OutcomeResult::Refused(BrokerRefusal::DescriptorCount),
             };
         }
-        // The environment operations (M5a): the container runtime's client
-        // and the directory it runs in, in that order.
+        // The environment operations (M5a) and a workload's run (M5d): the
+        // container runtime's client and the directory it runs in, in that
+        // order.
         Authorisation::EnvironmentPrepare(_)
         | Authorisation::EnvironmentMeasure(_)
         | Authorisation::EnvironmentDestroy(_)
-        | Authorisation::EnvironmentList(_) => {
+        | Authorisation::EnvironmentList(_)
+        | Authorisation::WorkloadRun(_) => {
             let (Some(runtime), Some(cwd), None) = (fds.next(), fds.next(), fds.next()) else {
                 return OutcomeResult::Refused(BrokerRefusal::DescriptorCount);
             };
@@ -353,6 +355,7 @@ fn execute(
                 Authorisation::EnvironmentMeasure(a) => sandbox.measure(a, held, until),
                 Authorisation::EnvironmentDestroy(a) => sandbox.destroy(a, held, until),
                 Authorisation::EnvironmentList(a) => sandbox.list(a, held, until),
+                Authorisation::WorkloadRun(a) => sandbox.workload_run(a, held, until),
                 _ => OutcomeResult::Refused(BrokerRefusal::DescriptorCount),
             };
         }

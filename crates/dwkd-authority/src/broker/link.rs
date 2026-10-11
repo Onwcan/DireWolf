@@ -96,6 +96,9 @@ enum Sent {
         /// count echoes of one.
         credential: bool,
     },
+    WorkloadRun {
+        stream_limit: u32,
+    },
 }
 
 /// Perform one operation through the broker at `socket`, which must be served
@@ -195,7 +198,8 @@ fn authorise(common: Common, operation: Operation) -> Result<Prepared, BrokerFai
         Operation::EnvironmentPrepare { .. }
         | Operation::EnvironmentMeasure { .. }
         | Operation::EnvironmentDestroy { .. }
-        | Operation::EnvironmentList { .. } => environment(common, operation),
+        | Operation::EnvironmentList { .. }
+        | Operation::WorkloadRun { .. } => environment(common, operation),
         // `net.http` (M5c): a resolution carries nothing; an exchange carries
         // the credential's pipe, and only it, when the hop has one.
         Operation::HttpResolve { host } => Ok((
@@ -582,6 +586,26 @@ fn environment(common: Common, operation: Operation) -> Result<Prepared, BrokerF
                 Sent::EnvironmentList,
             )
         }
+        // A workload (M5d, ADR-0052 §3): the same two descriptors, typed
+        // fields, and no field that is a flag, a user or a variable.
+        Operation::WorkloadRun {
+            spec,
+            container,
+            runtime,
+            workload,
+        } => {
+            let (runtime, fds) = runtime_of(runtime)?;
+            let stream_limit = workload.stream_limit.get();
+            (
+                Authorisation::WorkloadRun(
+                    dwk_proto::brokerp::workload::WorkloadRunAuthorisation::new(
+                        common, spec, container, runtime, workload,
+                    ),
+                ),
+                fds,
+                Sent::WorkloadRun { stream_limit },
+            )
+        }
         _ => return Err(BrokerFailure::Protocol("not an environment operation")),
     })
 }
@@ -699,7 +723,25 @@ fn deliver(sent: &Sent, done: BrokerDone) -> Result<BrokerDelivery, BrokerFailur
         | Sent::EnvironmentDestroy { .. }
         | Sent::EnvironmentList => environment_delivery(sent, done)?,
         Sent::HttpResolve | Sent::HttpExchange { .. } => http_delivery(sent, done)?,
+        Sent::WorkloadRun { stream_limit } => {
+            workload_delivery(done.workload_run.ok_or(wrong)?, *stream_limit)?
+        }
     })
+}
+
+/// A workload's answer (M5d, ADR-0052 §3), if it agrees with itself and
+/// with the bound it was sent with: an exit code exactly for an exit, a
+/// signal exactly for a kill, a clean residue only with nothing remaining,
+/// and each stream within its bound with its counts consistent.
+fn workload_delivery(
+    done: dwk_proto::brokerp::workload::WorkloadRunDone,
+    stream_limit: u32,
+) -> Result<BrokerDelivery, BrokerFailure> {
+    dwk_proto::brokerp::workload::check_done(&done)
+        .map_err(|_| BrokerFailure::Protocol("a workload's answer contradicts itself"))?;
+    stream(&done.stdout, stream_limit)?;
+    stream(&done.stderr, stream_limit)?;
+    Ok(BrokerDelivery::WorkloadRan(Box::new(done)))
 }
 
 /// A `net.http` operation's answer (M5c), if it is this operation's and

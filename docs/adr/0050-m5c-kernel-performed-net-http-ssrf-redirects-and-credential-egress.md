@@ -1,6 +1,6 @@
 # ADR-0050: M5c — kernel-performed `net.http`: the authority authorises every hop, the broker is the HTTPS client, and a credential reaches only its bound origin
 
-**Status:** Proposed · **Date:** 2026-10-08 · **Amends (on acceptance):** [ADR-0018](0018-authority-broker-split.md) (the broker gains a second outbound path), [ADR-0019](0019-language-rationale-v2.md) (the broker's dependency set: a TLS client, §18), [ADR-0039](0039-durable-authority-state.md) (schema version 8, §11), [ADR-0043](0043-m4b-private-broker-channel-and-brokered-fs-read.md) (private protocol version 7, §12), [ADR-0045](0045-m4d-process-execution-broker.md) (the broker starts a process in a second place: one exchange worker per `net.http` hop, §9, D11; TX021, TX049), [ADR-0046](0046-m4e-secret-handles-backends-injection-and-redaction.md) (§12: mode A gains its consumer; `broker.secret_egress` is retired), [ADR-0048](0048-m5b-proxy-only-topology-and-connect-proxy.md) (the IP guard and the resolver are shared, not forked — its "Revisit if" on `net.http`; TX037's single dial site becomes two) · **Refines:** [ADR-0000](0000-authority-plane-separation.md) (§3 argues why this is not a second path from cognition to effect), [ADR-0005](0005-tool-system.md) and [TOOL_SYSTEM.md](../TOOL_SYSTEM.md) §3 (tool 12, `net.http`), [ADR-0028](0028-policy-input-ownership.md) (destination novelty and the destination address are kernel-derived), [NETWORK_SECURITY.md](../NETWORK_SECURITY.md) §§2–5, 8, 9
+**Status:** Accepted · **Date:** 2026-10-11 (proposed 2026-10-08; D11 accepted with the conditions of §21) · **Amends:** [ADR-0018](0018-authority-broker-split.md) (the broker gains a second outbound path), [ADR-0019](0019-language-rationale-v2.md) (the broker's dependency set: a TLS client, §18), [ADR-0039](0039-durable-authority-state.md) (schema version 8, §11), [ADR-0043](0043-m4b-private-broker-channel-and-brokered-fs-read.md) (private protocol version 7, §12), [ADR-0045](0045-m4d-process-execution-broker.md) (the broker starts a process in a second place: one exchange worker per `net.http` hop, §9, D11; TX021, TX049), [ADR-0046](0046-m4e-secret-handles-backends-injection-and-redaction.md) (§12: mode A gains its consumer; `broker.secret_egress` is retired), [ADR-0048](0048-m5b-proxy-only-topology-and-connect-proxy.md) (the IP guard and the resolver are shared, not forked — its "Revisit if" on `net.http`; TX037's single dial site becomes two) · **Refines:** [ADR-0000](0000-authority-plane-separation.md) (§3 argues why this is not a second path from cognition to effect), [ADR-0005](0005-tool-system.md) and [TOOL_SYSTEM.md](../TOOL_SYSTEM.md) §3 (tool 12, `net.http`), [ADR-0028](0028-policy-input-ownership.md) (destination novelty and the destination address are kernel-derived), [NETWORK_SECURITY.md](../NETWORK_SECURITY.md) §§2–5, 8, 9
 
 > **The runtime asks for one typed HTTPS request; the authority decides every
 > hop of it; the broker performs each hop as the TLS client, to an address
@@ -335,7 +335,8 @@ For the request and for each redirect hop, in this order, in the authority:
   could do in the long-lived broker before D11, which also held the
   authority channel; no seccomp or Landlock filter confines it (Revisit).
   *The startup window:* from `execve` until it hardens itself (about half a
-  millisecond, §16) the worker is an ordinary process of the broker's uid,
+  millisecond at the median on the development host, §16 — a measurement,
+  not a bound) the worker is an ordinary process of the broker's uid,
   dumpable like M4d's launch helper; it holds no secret then — the hand-over
   waits in its socket — but a process of the same uid that may trace it
   (Yama `ptrace_scope` 0, or `CAP_SYS_PTRACE`) could take control of it in
@@ -679,16 +680,21 @@ roots are trusted for what they return; the guard and the verifier judge it.
   allowed — the same exposure every process's freed memory has, the
   authority's and the broker's own included; (c) *swap*: a worker page swapped
   out during the exchange can stay on the swap device (no `mlock`, as
-  ADR-0046 §27); (d) *the startup window* of §9: a process of the broker's
+  ADR-0046 §27) — no swap protection is claimed or enforced; (d) *the startup
+  window* of §9: a process of the broker's
   uid allowed to trace the worker before it hardens could take it over —
   closed by Yama `ptrace_scope` ≥ 1 for non-ancestors and entirely by an
-  execute-only broker binary, and today no untrusted code runs as that uid.
+  execute-only broker binary, and today no untrusted code runs as that uid;
+  (e) *no OS-level network confinement of the worker*: that it reaches only
+  the one origin its broker connected it to is a property of its code (§9),
+  not a kernel prohibition on a new socket — the worker is not independently
+  network-sandboxed.
   **Invariant I3 holds**: nothing the Cognition Plane receives
   holds the value. Relative to ADR-0046 §22 this is no longer a new class of
   residual: the window is the exchange itself, as for every value a broker
-  holds for one invocation. The kernel exposures (b) and (c), and the
-  deployment condition of (d), are the owner's to accept with D11, not an
-  exception assumed.
+  holds for one invocation. The kernel exposures (b) and (c), the deployment
+  condition of (d) and the code-level confinement of (e) were the owner's to
+  accept with D11, not exceptions assumed: accepted, with conditions (§21).
 - **The broker redacts only the hop's own credential.** Any other configured
   value appearing in a response is the authority's to redact (index and
   shapes) within the bound it is given; such a value straddling the bound is
@@ -727,7 +733,53 @@ roots are trusted for what they return; the guard and the verifier judge it.
 | D1 | **ACCEPT** | chain and name verification by `rustls`' WebPKI verifier with no override (TX046); the canonical host as SNI and certificate name; dials only to pinned `SocketAddr`s (`http/connect.rs`); compiled-in roots, no OS store, no environment, no proxy; failures before a byte is sent are refusals; `cargo deny` clean; the authority's closure free of it; the TLS negatives (`expired`, `self-signed`, `untrusted-authority`, `wrong-name`, `http2-only-server`, the test CA under production trust, handshake timeout) |
 | D2 | **ACCEPT** | strict framing on top of `httparse` (one length or `chunked`, never both or neither, no other coding, no `101`, no encoding, 100 headers in 64 KiB, body to the bound with a wire cap, three deadlines); request and credential buffers owned and scrubbed by DireWolf; no panic under 20 000 sans-I/O and 120 TLS mutants; the header-map copy, its one ownership flaw, now lives and dies in the exchange worker (D11) |
 | D3–D10, D12 | **ACCEPT** | each matches the code and is shown by the evidence of §16 |
-| D11 | **OWNER DECISION REQUIRED — recommended: ACCEPT** the exchange worker and its narrowed residual; not blocking | the broker's residue after an echo eliminated and asserted (nine ways, raw and hex; end to end, a killed worker's included); the worker's lifecycle shown — reaped before the answer, refusing a stranger and every unpromised hand-over, closed to its own uid while it holds a hop, `HTTP_WORKER_FAILED` with nothing sent when killed in its handshake, `EXCHANGE_UNCONFIRMED` when killed after sending or stopped past its deadline, concurrent credential hops kept apart, killed with its broker; four mutants on the worker caught; about 1 ms more per hop and no loss in concurrent throughput (§16). The final audit found no defect; it states what the isolation rests on (§9) and adds the startup window to the residual (§20 (d)) |
+| D11 | **ACCEPTED by the owner (2026-10-11), with the conditions below** — recommended at closeout: accept the exchange worker and its narrowed residual; not blocking | the broker's residue after an echo eliminated and asserted (nine ways, raw and hex; end to end, a killed worker's included); the worker's lifecycle shown — reaped before the answer, refusing a stranger and every unpromised hand-over, closed to its own uid while it holds a hop, `HTTP_WORKER_FAILED` with nothing sent when killed in its handshake, `EXCHANGE_UNCONFIRMED` when killed after sending or stopped past its deadline, concurrent credential hops kept apart, killed with its broker; four mutants on the worker caught; about 1 ms more per hop and no loss in concurrent throughput (§16). The final audit found no defect; it states what the isolation rests on (§9) and adds the startup window to the residual (§20 (d)) |
+
+**Owner decision (2026-10-11).** The owner accepted this ADR: D1–D10 and D12
+as built, and D11's one-hop exchange worker **within the threat model stated
+here and on the conditions below**. Accepted on the hosted evidence of run
+[38086715241](https://github.com/Onwcan/DireWolf/actions/runs/38086715241) on
+`cc98a71` — all 21 jobs, the commit that carries the final audit's worker
+tests and end-to-end case — and the local evidence of §16; the mutation
+campaign (`make net-http-mutations`, ten of ten caught) is a local target, not
+a hosted job. Each decision was checked again against the committed source
+at acceptance: no production byte changed after run 37994995963 (`7b8ba9d`).
+
+What D11's acceptance rests on — each shown by §16's evidence in the tested
+configurations, and claimed no further: (1) the long-lived broker holds no
+credential echo after an exchange completes; (2) the runtime never receives
+an injected credential's plaintext; (3) the authority never receives a
+response's plaintext echo of it; (4) neither the audit nor durable state holds
+it; (5) TLS and HTTP response buffers live in a short-lived worker process;
+(6) each worker is handed one authorised, pinned connection and one bounded
+hop; (7) each worker exits and is reaped before the broker answers; (8) an
+unexpected descriptor or hand-over is refused; (9) a crash of either daemon,
+or a worker killed or overrunning, after the first request byte leaves the
+hop and its request `UNKNOWN`; (10) nothing is replayed automatically.
+
+Accepted as residual risks, not exceptions assumed (§20):
+
+| | Residual | As accepted |
+|---|---|---|
+| R1 | Live worker memory | The credential is in the authorised worker while its exchange runs. Its hardening closes that memory to ordinary same-uid inspection once it has hardened; root and a process with `CAP_SYS_PTRACE` are outside this boundary (§20 (a)) |
+| R2 | Freed physical memory | The worker's exit ends its address space; it does not overwrite the physical pages it freed. No zeroisation of physical memory is claimed (§20 (b)) |
+| R3 | Swap | A page swapped out while the worker lived can stay on the swap device; no swap protection is claimed or enforced (§20 (c); ADR-0046 §27) |
+| R4 | The startup window | Between `execve` and self-hardening — measured at about 0.5 ms at the median on the development host, not a bound — a process with ptrace authority over the worker could interfere with it before it receives anything (§§9, 20 (d)) |
+| R5 | No OS network confinement of the worker | It has no program path to resolve or dial; a compromise of its own code could open a socket where the kernel lets its uid (§§9, 20 (e)). It is not described as network-sandboxed |
+
+**The conditions of D11's acceptance**, and how each stands at acceptance —
+an assumption that is only documented is named a deployment prerequisite,
+never a passing check:
+
+| Condition | How it stands |
+|---|---|
+| The broker runs as its own trusted OS identity, never root | **Enforced at start-up**: the broker refuses root and an authority uid equal to its own; the authority refuses a broker uid equal to its own or to a DWKP peer's (ADR-0043 §1); the development overrides log `REDUCED ASSURANCE`. The hosted broker jobs run three real users (ADR-0043 §13) |
+| No untrusted workload runs as the broker's uid | **Structural today, not a check**: no production path starts anything on the host — M4d's floor needs an M6 approval, `broker.secret_process_start` has no production caller, and M5a/M5b run only the probe, the setup container and the relay, each in a container. **M5d must prove the workload/broker uid boundary with real multi-identity evidence** before any workload runs |
+| The authority's state and the secret stores stay out of workload users' reach | Shown for the broker's uid by the three-identity evidence (ADR-0043 §13); for a workload's identity, M5d's evidence |
+| A ptrace posture that closes R4 | **Deployment prerequisite — documented, not enforced, not tested**: Yama `ptrace_scope` ≥ 1, or an execute-only broker binary (root-owned, `0711`), or no process of the broker's uid but the broker's own. The development host's setting (WSL2, scope 1, measured) is assumed of no deployment, and no hosted job asserts the runners'. **Recommended fail-closed verification**: at `serve` start the broker reads `/proc/sys/kernel/yama/ptrace_scope` and the mode of its own executable, and refuses to serve when the scope is 0 or unreadable and its binary is readable by its own uid, unless a development flag logs `REDUCED ASSURANCE`; an evidence case starts the broker under each posture and the refused ones must refuse. Planned in M5d, before any workload runs ([ROADMAP.md](../ROADMAP.md)) |
+| R5 stays documented | §§9, 20 (e); [THREAT_MODEL.md](../THREAT_MODEL.md) R15; [SECURITY.md](../SECURITY.md) |
+| Re-review before change | Before any change gives the worker more privilege or a descriptor, or introduces untrusted code that runs as the broker's uid, D11's residual is reviewed again (Revisit) |
+| Worker seccomp | Evaluated and implemented once a reviewed, safe filter API is in the TCB, if it gives a sound, measurable benefit without losing supported function (Revisit; M9) |
 
 ### 22. Implementation sequence
 
@@ -757,9 +809,12 @@ contention), the secret broker with its multi-identity half, the evals, M5a
 and M5b, the authority boundary, architecture, schemas, dependencies, the
 three platforms and the release build. The final D11 audit (2026-10-10)
 changed no production byte: it added worker tests, one end-to-end case and two
-mutants, which need a green hosted run on the commit that carries them. This
-ADR is not accepted, so M5c is not complete: acceptance is the owner's
-decision — D11's worker and residual above all.
+mutants, and hosted run
+[38086715241](https://github.com/Onwcan/DireWolf/actions/runs/38086715241) on
+`cc98a71`, the commit that carries them, passed all 21 jobs. The owner
+accepted this ADR on 2026-10-11 — D11 with the conditions of §21 — and M5c is
+complete. The deployment prerequisite of §21 (the ptrace posture) and the
+uid boundary M5d must prove are carried by M5d ([ROADMAP.md](../ROADMAP.md)).
 
 ### 23. Security invariants
 
@@ -878,4 +933,8 @@ redirect whose `Location` holds it is answered as a plain 3xx with no
   TLS stack in it could reach nothing new.
 - A production path runs untrusted code as the broker's uid (M5d's `local`
   environment, for instance): close §9's startup window for it first.
+- A change gives the exchange worker more privilege or another descriptor:
+  review D11's residual again before it lands (§21).
+- The broker verifies its ptrace posture at start (§21's recommended check):
+  R4's deployment prerequisite becomes an enforced condition.
 - The per-hop process cost matters to a workload (§16 measures it).

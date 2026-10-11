@@ -75,8 +75,17 @@ pub const OOM_SCORE_ADJ: i32 = 500;
 /// by its own SHA-256.
 pub const PROBE_PATH: &str = "/usr/libexec/direwolf/sandbox-probe";
 /// The probe's argument for the environment's first process: hold the
-/// environment open and do nothing else.
+/// environment open and, as the init of its pid namespace, reap every process
+/// orphaned to it (M5d, ADR-0052 §5) — nothing else.
 pub const PROBE_HOLD: &str = "hold";
+/// The probe's argument for ending every other process of the environment
+/// after a workload (M5d, ADR-0052 §5): run as the environment's user, it
+/// signals every process that user may signal but init and itself, waits
+/// until none remains, and prints `reaped <found> <remaining>`.
+pub const PROBE_REAP: &str = "reap";
+/// The longest `reap` waits for the environment to hold nothing but init, in
+/// milliseconds.
+pub const REAP_MILLIS: u64 = 5_000;
 /// The probe's argument for a measurement.
 pub const PROBE_MEASURE: &str = "measure";
 /// The probe's argument for the child its ptrace canary attaches to.

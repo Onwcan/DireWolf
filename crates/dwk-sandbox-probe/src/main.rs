@@ -17,8 +17,9 @@
 //!
 //! | argv | what |
 //! |---|---|
-//! | `hold` | the environment's first process: wait, do nothing, until killed |
+//! | `hold` | the environment's first process: until killed, reap every process orphaned to it, and nothing else |
 //! | `measure <environment-id> <topology>` | print one report and exit |
+//! | `reap` | after a workload (M5d, ADR-0052 §5): end every other process of the environment, print `reaped <found> <remaining>` |
 //! | `ptrace-target` | the child the ptrace canary attaches to |
 //!
 //! [ADR-0047]: ../../../docs/adr/0047-m5a-oci-execution-environment-and-measured-assurance.md

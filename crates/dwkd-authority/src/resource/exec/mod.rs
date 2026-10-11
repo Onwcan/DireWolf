@@ -448,6 +448,30 @@ pub(crate) fn stored_executable_identity(
     Ok(ExecutableIdentity::new(canonical, digest))
 }
 
+/// The identity of an executable in a content-addressed image (M5d.1,
+/// ADR-0052 §§2, 5): its path inside the image and the SHA-256 the
+/// operator's image manifest pins for it.
+///
+/// **Never resolved on this host**: the image is named by its content digest
+/// and its root is read-only, so the path means one file in every
+/// environment made from it, and the broker proves that file's bytes —
+/// copied out of the environment — against this digest before every run. A
+/// host file at the same path means nothing here. One module may name this
+/// function: the workload ledger, from the attached manifest (TX024).
+///
+/// # Errors
+///
+/// [`ExecError::PathInvalid`] for a path the grammar refuses or a digest that
+/// is not sixty-four lowercase hex characters.
+pub(crate) fn image_executable_identity(
+    path: &str,
+    sha256: &str,
+) -> Result<ExecutableIdentity, ExecError> {
+    let canonical = canonical_path(parse(path)?)?;
+    let digest = Sha256Digest::parse_hex(sha256).ok_or(ExecError::PathInvalid)?;
+    Ok(ExecutableIdentity::new(canonical, digest))
+}
+
 #[cfg(test)]
 mod grammar_tests {
     use super::{ExecError, parse, stored_executable_identity};

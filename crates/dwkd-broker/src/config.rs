@@ -42,6 +42,11 @@ pub(crate) struct ServeConfig {
     /// development harness that reads its `/proc`. Reduced assurance, stated
     /// at start-up; never implied. `RLIMIT_CORE` is 0 either way.
     pub(crate) dumpable_permitted: bool,
+    /// Whether the broker may serve where a process of its own uid could
+    /// trace a process it starts before that process hardens itself —
+    /// Yama's `ptrace_scope` 0, or no Yama, and a broker binary its uid can
+    /// read (ADR-0050 §§9, 20 (d), 21; ADR-0052 §13).
+    pub(crate) traceable_workers: TraceableWorkers,
     /// The operator's acknowledgement that the evidence harness's `NO_NETWORK`
     /// environment topology may be built (M5a, ADR-0047 §10). Without it the
     /// broker builds `PROXY_ONLY` environments only (M5b). Stated at
@@ -60,6 +65,17 @@ pub(crate) struct ServeConfig {
     /// real one can. Evidence only, stated loudly at start-up, never implied,
     /// and absent from every production configuration.
     pub(crate) evidence_trust: Option<PathBuf>,
+}
+
+/// What the broker does where a process of its uid could trace the
+/// processes it starts before they harden themselves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TraceableWorkers {
+    /// It refuses to serve: the default, and the only production answer.
+    Refused,
+    /// It serves, logging `REDUCED ASSURANCE`: the operator's development
+    /// acknowledgement, `--allow-traceable-workers`. Never implied.
+    Permitted,
 }
 
 /// A command line that does not describe a configuration.
@@ -136,7 +152,16 @@ pub(crate) fn parse(args: &[String]) -> Result<Command, UsageError> {
     let mut authority_uid: Option<u32> = None;
     let mut shared = false;
     let mut dumpable = false;
+    let mut traceable = false;
     let mut evidence_topology = false;
+    // An acknowledgement is a flag with no value, given at most once.
+    let acknowledge = |seen: &mut bool, flag: &str| {
+        if std::mem::replace(seen, true) {
+            Err(UsageError::new(format!("{flag} is given more than once")))
+        } else {
+            Ok(())
+        }
+    };
     let mut evidence_egress: Option<PathBuf> = None;
     let mut evidence_trust: Option<PathBuf> = None;
     while let Some(flag) = rest.next() {
@@ -157,28 +182,10 @@ pub(crate) fn parse(args: &[String]) -> Result<Command, UsageError> {
                     return Err(UsageError::new("--authority-uid is given more than once"));
                 }
             }
-            "--allow-shared-authority-uid" => {
-                if shared {
-                    return Err(UsageError::new(
-                        "--allow-shared-authority-uid is given more than once",
-                    ));
-                }
-                shared = true;
-            }
-            "--allow-dumpable" => {
-                if dumpable {
-                    return Err(UsageError::new("--allow-dumpable is given more than once"));
-                }
-                dumpable = true;
-            }
-            "--allow-evidence-topology" => {
-                if evidence_topology {
-                    return Err(UsageError::new(
-                        "--allow-evidence-topology is given more than once",
-                    ));
-                }
-                evidence_topology = true;
-            }
+            "--allow-shared-authority-uid" => acknowledge(&mut shared, flag)?,
+            "--allow-dumpable" => acknowledge(&mut dumpable, flag)?,
+            "--allow-traceable-workers" => acknowledge(&mut traceable, flag)?,
+            "--allow-evidence-topology" => acknowledge(&mut evidence_topology, flag)?,
             "--allow-evidence-egress" => evidence_path(flag, value()?, &mut evidence_egress)?,
             "--allow-evidence-trust" => evidence_path(flag, value()?, &mut evidence_trust)?,
             other => {
@@ -210,6 +217,11 @@ pub(crate) fn parse(args: &[String]) -> Result<Command, UsageError> {
         authority_uid,
         shared_uid_permitted: shared,
         dumpable_permitted: dumpable,
+        traceable_workers: if traceable {
+            TraceableWorkers::Permitted
+        } else {
+            TraceableWorkers::Refused
+        },
         evidence_topology_permitted: evidence_topology,
         evidence_egress,
         evidence_trust,
@@ -220,7 +232,7 @@ pub(crate) fn parse(args: &[String]) -> Result<Command, UsageError> {
 mod tests {
     use std::path::PathBuf;
 
-    use super::{Command, ServeConfig, parse};
+    use super::{Command, ServeConfig, TraceableWorkers, parse};
 
     /// A socket path that is absolute on this platform: `/b` is not, on
     /// Windows, and the parser is portable even though serving is not.
@@ -259,6 +271,7 @@ mod tests {
                 authority_uid: 1001,
                 shared_uid_permitted: false,
                 dumpable_permitted: false,
+                traceable_workers: TraceableWorkers::Refused,
                 evidence_topology_permitted: false,
                 evidence_egress: None,
                 evidence_trust: None,
@@ -325,6 +338,29 @@ mod tests {
                 ..
             }))
         ));
+    }
+
+    #[test]
+    fn traceable_workers_are_an_explicit_acknowledgement_given_once() {
+        let base = ["serve", "--socket", "ABS", "--authority-uid", "7"];
+        assert!(matches!(
+            parse(&args(&base)),
+            Ok(Command::Serve(ServeConfig {
+                traceable_workers: TraceableWorkers::Refused,
+                ..
+            }))
+        ));
+        let mut with = base.to_vec();
+        with.push("--allow-traceable-workers");
+        assert!(matches!(
+            parse(&args(&with)),
+            Ok(Command::Serve(ServeConfig {
+                traceable_workers: TraceableWorkers::Permitted,
+                ..
+            }))
+        ));
+        with.push("--allow-traceable-workers");
+        assert!(parse(&args(&with)).is_err());
     }
 
     #[test]

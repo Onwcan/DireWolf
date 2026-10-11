@@ -175,19 +175,19 @@ fn an_outcome_carries_exactly_one_answer() {
     let mut both = BrokerOutcome::new(channel(), invocation(), OutcomeResult::done(done));
     both.refused = Some(BrokerRefusal::ReadFailed);
     assert!(encode_frame(&both).is_err());
-    let none = r#"{"channel":"0123456789abcdef0123456789abcdef","invocation_id":"inv_01M24BB8G3E0A851TRWE3M8FZF","kind":"broker.outcome","protocol":7}"#;
+    let none = r#"{"channel":"0123456789abcdef0123456789abcdef","invocation_id":"inv_01M24BB8G3E0A851TRWE3M8FZF","kind":"broker.outcome","protocol":8}"#;
     assert!(BrokerOutcome::decode_frame_body(none.as_bytes()).is_err());
     // A done names exactly one operation.
-    let two = r#"{"channel":"0123456789abcdef0123456789abcdef","done":{"fs_move":{},"fs_delete":{"debris":false}},"invocation_id":"inv_01M24BB8G3E0A851TRWE3M8FZF","kind":"broker.outcome","protocol":7}"#;
+    let two = r#"{"channel":"0123456789abcdef0123456789abcdef","done":{"fs_move":{},"fs_delete":{"debris":false}},"invocation_id":"inv_01M24BB8G3E0A851TRWE3M8FZF","kind":"broker.outcome","protocol":8}"#;
     assert!(BrokerOutcome::decode_frame_body(two.as_bytes()).is_err());
 }
 
 #[test]
 fn unknown_members_old_versions_and_second_spellings_are_refused() {
     for text in [
-        r#"{"channel":"0123456789abcdef0123456789abcdef","kind":"broker.hello","protocol":7,"extra":1}"#,
-        r#"{"channel":"0123456789ABCDEF0123456789ABCDEF","kind":"broker.hello","protocol":7}"#,
-        // Versions 1 to 6 are not half-understood (ADR-0050 made it 7), and
+        r#"{"channel":"0123456789abcdef0123456789abcdef","kind":"broker.hello","protocol":8,"extra":1}"#,
+        r#"{"channel":"0123456789ABCDEF0123456789ABCDEF","kind":"broker.hello","protocol":8}"#,
+        // Versions 1 to 7 are not half-understood (ADR-0052 made it 8), and
         // a later one is not guessed at.
         r#"{"channel":"0123456789abcdef0123456789abcdef","kind":"broker.hello","protocol":1}"#,
         r#"{"channel":"0123456789abcdef0123456789abcdef","kind":"broker.hello","protocol":2}"#,
@@ -195,16 +195,21 @@ fn unknown_members_old_versions_and_second_spellings_are_refused() {
         r#"{"channel":"0123456789abcdef0123456789abcdef","kind":"broker.hello","protocol":4}"#,
         r#"{"channel":"0123456789abcdef0123456789abcdef","kind":"broker.hello","protocol":5}"#,
         r#"{"channel":"0123456789abcdef0123456789abcdef","kind":"broker.hello","protocol":6}"#,
-        r#"{"channel":"0123456789abcdef0123456789abcdef","kind":"broker.hello","protocol":8}"#,
-        r#"{"channel":"0123456789abcdef0123456789abcdef","kind":"broker.hello","kind":"broker.hello","protocol":7}"#,
+        r#"{"channel":"0123456789abcdef0123456789abcdef","kind":"broker.hello","protocol":7}"#,
+        r#"{"channel":"0123456789abcdef0123456789abcdef","kind":"broker.hello","protocol":9}"#,
+        r#"{"channel":"0123456789abcdef0123456789abcdef","kind":"broker.hello","kind":"broker.hello","protocol":8}"#,
     ] {
         assert!(
             BrokerHello::decode_frame_body(text.as_bytes()).is_err(),
             "{text}"
         );
     }
+    // The current version is.
+    let current =
+        r#"{"channel":"0123456789abcdef0123456789abcdef","kind":"broker.hello","protocol":8}"#;
+    assert!(BrokerHello::decode_frame_body(current.as_bytes()).is_ok());
     // An unknown kind is not an authorisation.
-    let unknown = r#"{"kind":"broker.fs_chmod","protocol":7}"#;
+    let unknown = r#"{"kind":"broker.fs_chmod","protocol":8}"#;
     assert!(Authorisation::decode_frame_body(unknown.as_bytes()).is_err());
     for (text, ok) in [
         ("0", true),
@@ -673,7 +678,7 @@ fn a_secret_result_names_its_own_operation_and_says_nothing_of_the_value() {
         r#"{"secret_egress":{"length":8}}"#,
     ] {
         let text = format!(
-            r#"{{"channel":"0123456789abcdef0123456789abcdef","done":{done},"invocation_id":"inv_01M24BB8G3E0A851TRWE3M8FZF","kind":"broker.outcome","protocol":7}}"#
+            r#"{{"channel":"0123456789abcdef0123456789abcdef","done":{done},"invocation_id":"inv_01M24BB8G3E0A851TRWE3M8FZF","kind":"broker.outcome","protocol":8}}"#
         );
         assert!(
             BrokerOutcome::decode_frame_body(text.as_bytes()).is_err(),
@@ -982,6 +987,250 @@ fn an_environment_result_names_exactly_one_operation() {
         channel(),
         invocation(),
         OutcomeResult::Indeterminate(Indeterminate::EnvironmentUnconfirmed),
+    );
+    assert!(encode_frame(&unknown).is_ok());
+}
+
+// ---------------------------------------------------------------------------
+// Version 8: a workload in a `READY` environment (ADR-0052).
+// ---------------------------------------------------------------------------
+
+fn workload(args: &[&str]) -> super::workload::WorkloadSpec {
+    use crate::wire::scalar::{ContentDigest, ProcessArg};
+    let args: Vec<ProcessArg> = args
+        .iter()
+        .map(|a| ProcessArg::new(*a).unwrap_or_else(|| unreachable!("{a}")))
+        .collect();
+    super::workload::WorkloadSpec {
+        executable: super::workload::ImagePath::new("/usr/libexec/direwolf/sandbox-fixture")
+            .unwrap_or_else(|| unreachable!()),
+        executable_sha256: ContentDigest::new("ab".repeat(32)).unwrap_or_else(|| unreachable!()),
+        args: super::ProcessArgs::new(args).unwrap_or_else(|| unreachable!()),
+        stream_limit: super::StreamLimit::new(131_072).unwrap_or_else(|| unreachable!()),
+        wall_clock: super::workload::WorkloadSeconds::new(600).unwrap_or_else(|| unreachable!()),
+    }
+}
+
+fn workload_run(
+    spec: super::EnvironmentSpec,
+    args: &[&str],
+) -> super::workload::WorkloadRunAuthorisation {
+    use super::sandbox::ContainerRef;
+    super::workload::WorkloadRunAuthorisation::new(
+        common(),
+        spec,
+        ContainerRef::new("e".repeat(64)).unwrap_or_else(|| unreachable!()),
+        runtime_spec(),
+        workload(args),
+    )
+}
+
+#[test]
+fn a_workload_run_round_trips_with_two_descriptors_and_the_longest_deadline() {
+    for spec in [environment_spec(), proxy_spec()] {
+        let run = workload_run(spec.clone(), &["--user", "0", "--privileged", "$(id)"]);
+        let authorisation = Authorisation::WorkloadRun(run.clone());
+        let bytes = body(&authorisation.encode_frame().unwrap_or_default());
+        let decoded = Authorisation::decode_frame_body(&bytes);
+        assert_eq!(
+            decoded.as_ref().map(Authorisation::kind),
+            Ok(PrivateKind::WorkloadRun)
+        );
+        assert_eq!(decoded, Ok(authorisation));
+        // The environment and the workload come back exactly, and a workload
+        // carries no grant: the proxy holds the one it was prepared with.
+        let mut expected = spec;
+        expected.egress = None;
+        assert_eq!(run.environment(), expected);
+        assert_eq!(
+            run.workload(),
+            workload(&["--user", "0", "--privileged", "$(id)"])
+        );
+        assert_eq!(run.runtime(), runtime_spec());
+        // No user, environment variable, entrypoint, shell or runtime flag
+        // has a field to ride in.
+        let text = String::from_utf8(bytes).unwrap_or_default();
+        for smuggled in [
+            r#""user":"0:0","#,
+            r#""uid":0,"#,
+            r#""env":{"LD_PRELOAD":"/tmp/x.so"},"#,
+            r#""entrypoint":"/bin/sh","#,
+            r#""shell":"id","#,
+            r#""workdir":"/","#,
+            r#""privileged":true,"#,
+            r#""docker_args":["--privileged"],"#,
+        ] {
+            let bad = text.replacen('{', &format!("{{{smuggled}"), 1);
+            assert!(
+                Authorisation::decode_frame_body(bad.as_bytes()).is_err(),
+                "{smuggled}"
+            );
+        }
+    }
+    assert_eq!(PrivateKind::WorkloadRun.descriptors(), Some(2));
+    assert_eq!(
+        PrivateKind::WorkloadRun.deadline_seconds(),
+        u64::from(super::workload::WORKLOAD_MAX_SECONDS) + super::ENVIRONMENT_DEADLINE_SECONDS
+    );
+    assert!(
+        PrivateKind::WorkloadRun.deadline_seconds()
+            > PrivateKind::EnvironmentPrepare.deadline_seconds()
+    );
+}
+
+#[test]
+fn a_workload_names_its_relay_exactly_for_proxy_only_and_its_bounds_hold() {
+    // `PROXY_ONLY` without the relay's digest, or `NO_NETWORK` with one, is
+    // inconsistent, whoever built it.
+    let mut no_relay = proxy_spec();
+    no_relay.relay_sha256 = None;
+    let mut stray_relay = environment_spec();
+    stray_relay.relay_sha256 = proxy_spec().relay_sha256;
+    for spec in [no_relay, stray_relay] {
+        let authorisation = Authorisation::WorkloadRun(workload_run(spec, &[]));
+        assert!(authorisation.encode_frame().is_err());
+    }
+    // A wall clock past ten minutes, an empty one, a stream past its bound.
+    let text = String::from_utf8(body(
+        &Authorisation::WorkloadRun(workload_run(environment_spec(), &["a"]))
+            .encode_frame()
+            .unwrap_or_default(),
+    ))
+    .unwrap_or_default();
+    for (from, to) in [
+        (r#""wall_clock":600"#, r#""wall_clock":601"#),
+        (r#""wall_clock":600"#, r#""wall_clock":0"#),
+        (r#""stream_limit":131072"#, r#""stream_limit":131073"#),
+        (r#""descriptors":2"#, r#""descriptors":3"#),
+    ] {
+        assert!(text.contains(from), "{from}");
+        let bad = text.replace(from, to);
+        assert!(
+            Authorisation::decode_frame_body(bad.as_bytes()).is_err(),
+            "{to}"
+        );
+    }
+}
+
+#[test]
+fn an_image_path_has_one_plain_spelling() {
+    use super::workload::ImagePath;
+    for good in [
+        "/usr/bin/python3",
+        "/usr/libexec/direwolf/sandbox-fixture",
+        "/opt/tool-1.2/bin/run_it",
+        "/a",
+        "/usr/bin/g++",
+    ] {
+        assert!(ImagePath::new(good).is_some(), "{good}");
+    }
+    for bad in [
+        "",
+        "/",
+        "usr/bin/git",
+        "/usr/bin/",
+        "/usr//bin/git",
+        "/usr/./bin/git",
+        "/usr/../bin/git",
+        "/usr/bin/..",
+        "/usr/bin/git ",
+        "/usr/bin/git;id",
+        "/usr/bin/a:b",
+        "/usr/bin/a=b",
+        "/usr/bin/a,b",
+        "/usr/bin/a\nb",
+        "/usr/bin/\u{e9}",
+        "/usr/bin/$(id)",
+    ] {
+        assert!(ImagePath::new(bad).is_none(), "{bad:?}");
+    }
+    let long = format!("/{}", "a".repeat(254));
+    assert!(ImagePath::new(long.as_str()).is_some());
+    assert!(ImagePath::new(format!("{long}b")).is_none());
+    assert_eq!(
+        ImagePath::new("/usr/libexec/direwolf/sandbox-fixture").map(|p| p.file_name().to_owned()),
+        Some("sandbox-fixture".to_owned())
+    );
+}
+
+#[test]
+fn a_workload_result_is_consistent_and_its_largest_fits_one_frame() {
+    use super::sandbox::{Milliseconds, Verdict};
+    use super::workload::{ProcessCount, WorkloadEnding, WorkloadRunDone, check_done};
+    use crate::wire::scalar::{ByteCount, ExitCode, SignalNumber, StreamContent};
+    let stream = |n: usize| super::ProcessStreamSnapshot {
+        content: StreamContent::from_bytes(&vec![0xffu8; n]).unwrap_or_else(|| unreachable!()),
+        observed: ByteCount::new(u64::MAX >> 12).unwrap_or_else(|| unreachable!()),
+        truncated: true,
+    };
+    let done = WorkloadRunDone {
+        ending: WorkloadEnding::Exited,
+        exit_code: ExitCode::new(0),
+        signal: None,
+        stdout: stream(131_072),
+        stderr: stream(131_072),
+        elapsed_ms: Milliseconds::new(600_000).unwrap_or_else(|| unreachable!()),
+        residue: Verdict::Pass,
+        ended_processes: ProcessCount::new(4096).unwrap_or_else(|| unreachable!()),
+        remaining_processes: ProcessCount::new(0).unwrap_or_else(|| unreachable!()),
+    };
+    assert_eq!(check_done(&done), Ok(()));
+    let outcome = BrokerOutcome::new(
+        channel(),
+        invocation(),
+        OutcomeResult::done(BrokerDone::workload_run(done.clone())),
+    );
+    let frame = encode_frame(&outcome).unwrap_or_default();
+    assert!(frame.len() > HEADER_LEN + 4 * 131_072);
+    assert!(frame.len() <= HEADER_LEN + MAX_FRAME_BODY);
+    let bytes = body(&frame);
+    let decoded = BrokerOutcome::decode_frame_body(&bytes).map(|o| o.result());
+    assert_eq!(
+        decoded,
+        Ok(OutcomeResult::done(BrokerDone::workload_run(done.clone())))
+    );
+    if let Ok(OutcomeResult::Done(answer)) = decoded {
+        assert_eq!(answer.kind(), Some(PrivateKind::WorkloadRun));
+    }
+    // An exit code exactly for EXITED, a signal exactly for KILLED, and a
+    // clean residue leaves nothing.
+    let mut killed_with_code = done.clone();
+    killed_with_code.ending = WorkloadEnding::Killed;
+    let mut exited_without = done.clone();
+    exited_without.exit_code = None;
+    let mut timed_out_signal = done.clone();
+    timed_out_signal.ending = WorkloadEnding::TimedOut;
+    timed_out_signal.exit_code = None;
+    timed_out_signal.signal = SignalNumber::new(9);
+    let mut clean_but_left = done.clone();
+    clean_but_left.remaining_processes = ProcessCount::new(1).unwrap_or_else(|| unreachable!());
+    for bad in [
+        killed_with_code,
+        exited_without,
+        timed_out_signal,
+        clean_but_left,
+    ] {
+        assert!(check_done(&bad).is_err(), "{bad:?}");
+    }
+    let mut killed = done;
+    killed.ending = WorkloadEnding::Killed;
+    killed.exit_code = None;
+    killed.signal = SignalNumber::new(9);
+    killed.residue = Verdict::Fail;
+    killed.remaining_processes = ProcessCount::new(2).unwrap_or_else(|| unreachable!());
+    assert_eq!(check_done(&killed), Ok(()));
+    for refusal in [
+        BrokerRefusal::EnvironmentNotClean,
+        BrokerRefusal::DigestMismatch,
+        BrokerRefusal::ForeignEnvironment,
+    ] {
+        let outcome = BrokerOutcome::new(channel(), invocation(), OutcomeResult::Refused(refusal));
+        assert!(encode_frame(&outcome).is_ok());
+    }
+    let unknown = BrokerOutcome::new(
+        channel(),
+        invocation(),
+        OutcomeResult::Indeterminate(Indeterminate::WorkloadUnconfirmed),
     );
     assert!(encode_frame(&unknown).is_ok());
 }

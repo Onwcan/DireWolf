@@ -148,14 +148,14 @@ the harness's deterministic suite; the security suites gate, unscoped, in `make
 eval-check`. What M4 does **not** provide is stated once, here: no sandbox or execution
 environment and no network path, so secret injection has no consumer (M5); no approvals,
 so no production build launches a process (M6); no model provider (M7); no runtime (M9);
-and serving on Linux only. **M5 is in progress: M5a and M5b are complete (see M5 below).**
+and serving on Linux only. **M5 is in progress: M5a, M5b and M5c are complete (see M5 below).**
 
 **Deps:** M3. **Deliverables:** canonicaliser (NFC, `openat2` + fallback walker, inode identity -- M4a delivers `openat2` and identity; a fallback walker needs its own ADR); fd-relative fs ops; exec broker with env scrub, rlimits, argv normalisation, executable hashing; secret broker with keychain/age backends and injection modes A–C; redaction index.
 **Acceptance:** no path string reaches policy; every op uses the fd it checked; no secret in argv, ever.
 **Adversarial:** the full path-traversal set ([EVALS.md](EVALS.md) §3) including Unicode normalisation and TOCTOU swap races in a tight loop; secret-in-output detection; core-dump inspection for secret residue.
 **Deferred:** remote fs, Windows-native hardening beyond the fallback walker.
 
-### M5 · Sandbox — **IN PROGRESS** (M5a complete, hosted acceptance passed; M5b complete, hosted acceptance passed; M5c implemented, hosted CI green, owner acceptance pending; M5d–M5e not started)
+### M5 · Sandbox — **IN PROGRESS** (M5a complete, hosted acceptance passed; M5b complete, hosted acceptance passed; M5c complete, ADR-0050 accepted, hosted acceptance passed; M5d–M5e not started)
 
 M5 is two products in one (a sandbox *and* an egress proxy), so it is decomposed like M4
 ([ADR-0047](adr/0047-m5a-oci-execution-environment-and-measured-assurance.md)). The
@@ -234,22 +234,24 @@ other uids, a tampered relay; any uid but the relay's at the broker's socket; an
 fronting residual — carried unseen, bounded by the budget.
 **Deferred:** `net.http` (M5c); a workload using the proxy (M5d).
 
-#### M5c · `net.http`, SSRF and redirect policy, credential egress — **IN PROGRESS** (implemented; hosted CI green on `7b8ba9d`; owner acceptance pending)
+#### M5c · `net.http`, SSRF and redirect policy, credential egress — **COMPLETE**
 
-M5c is implemented and committed (`7b8ba9d`), and hosted run [37994995963](https://github.com/Onwcan/DireWolf/actions/runs/37994995963) passed all 21
-jobs on it: `net-http` twice (once under CPU contention), the secret broker with its
-multi-identity half, the gated `m5c-net-http` eval, M5a, M5b, the authority boundary,
-architecture, schemas, dependencies, the three platforms and the release build. (Run
-37855884386 before it failed before measuring anything: its tool probe asked OpenSSL 3.0
-for `openssl --version`, which 3.0 refuses; the probe now asks each tool by its own
-spelling.) The final D11 audit (2026-10-10) found no defect and changed no production byte;
-its new worker tests and mutants need a green hosted run on the commit that carries them.
-M5c is complete only when its owner accepts
-[ADR-0050](adr/0050-m5c-kernel-performed-net-http-ssrf-redirects-and-credential-egress.md)
-(Proposed) — its decisions D1–D12, D11's exchange worker and residual among them. The
-accepted ADR and the hosted run are then recorded here as M5c's evidence, and M5d is next.
+M5c is complete: its owner accepted
+[ADR-0050](adr/0050-m5c-kernel-performed-net-http-ssrf-redirects-and-credential-egress.md) on 2026-10-11 — D1–D10 and D12 as built, and D11's one-hop exchange
+worker with its residual and the conditions of ADR-0050 §21 — on hosted run [38086715241](https://github.com/Onwcan/DireWolf/actions/runs/38086715241) on
+`cc98a71`, which passed all 21 jobs: `net-http` twice (once under CPU contention), the
+secret broker with its multi-identity half, the gated `m5c-net-http` eval, M5a, M5b, the
+authority boundary, architecture, schemas, dependencies, the three platforms and the
+release build. That commit carries the final D11 audit (2026-10-10), which found no defect
+and changed no production byte: its worker tests and end-to-end case passed hosted there.
+The mutation campaign (`make net-http-mutations`, ten of ten caught) is a local target,
+not a hosted job. History: run 37855884386 on the first implementation failed before it
+measured anything — its tool probe asked OpenSSL 3.0 for `openssl --version`, which 3.0
+refuses; the probe now asks each tool by its own spelling — and run
+[37994995963](https://github.com/Onwcan/DireWolf/actions/runs/37994995963) on `7b8ba9d`, the
+recovery that moved each hop's TLS and HTTP into an exchange worker, passed all 21 jobs.
 
-**Deps:** M5b. **Deliverables (as built, pending acceptance):** ToolInvoke and
+**Deps:** M5b. **Deliverables (as built):** ToolInvoke and
 CanonicalPreview version 4 with the typed `net.http` call (no address, resolver, proxy,
 timeout, trust material or credential value on the wire); one canonical URL parser shared
 with the capability grammar (`dwk_proto::wire::url`); the address guard moved to
@@ -284,10 +286,20 @@ close-delimited and silent responses; wrong-name, expired, self-signed and untru
 certificates, and the test authority under production trust; a credential across origins,
 in the request, echoed back; crashes after resolution, intent and exchange; reused keys;
 spent budgets; the shipped packs and taint.
-**Residual, pending the owner's acceptance:** an origin that echoes the credential has it
-in that hop's exchange worker until the worker exits, and in the physical pages it freed
-until the kernel reuses them (ADR-0050 §20, D11) — never in a message, the audit, the
-authority, the long-lived broker or the runtime's answer.
+**Residual, accepted with D11** (ADR-0050 §§20–21): an origin that echoes the credential
+has it in that hop's exchange worker until the worker exits (root or `CAP_SYS_PTRACE` can
+read it meanwhile), in the physical pages it freed until the kernel reuses them, and on
+swap if a page was swapped out — never in a message, the audit, the authority, the
+long-lived broker or the runtime's answer; the worker's startup window before it hardens
+itself; and no OS-level network confinement of the worker, whose single connection is a
+property of its code.
+**Conditions of acceptance** (ADR-0050 §21): the broker runs as its own uid, never root —
+enforced at start-up by both daemons; no untrusted workload runs as the broker's uid —
+structural today (nothing is launched in production), and **M5d must prove it with real
+multi-identity evidence**; a ptrace posture that closes the startup window (Yama
+`ptrace_scope` ≥ 1 or an execute-only broker binary) — a **deployment prerequisite,
+documented and not yet verified**, whose fail-closed check at the broker's start M5d adds
+before any workload runs.
 **Deferred:** package-manager routing (M5d/M5e); model egress (M7); approvals (M6).
 
 #### M5d · Production sandboxed `process.exec` — **NOT STARTED**
@@ -301,6 +313,9 @@ suite covers an agent-shaped workload — a long-lived third-party binary with c
 and network to declared origins only; no workload runs as the broker's uid (the exchange
 worker's startup window, ADR-0050 §9); secret modes B/C reach environments, the path an
 external agent's own credential would take (M29).
+**Carried from M5c's acceptance** ([ADR-0050](adr/0050-m5c-kernel-performed-net-http-ssrf-redirects-and-credential-egress.md) §21): real multi-identity evidence that
+no workload runs as the broker's uid or reaches the authority's state or a secret store;
+the broker's fail-closed check of its ptrace posture at start, before any workload runs.
 **Acceptance:** a real workload runs only in a measured environment at its required level.
 **Adversarial:** full escape suite from a workload; resource exhaustion; persistence.
 **Deferred:** approvals for host execution (M6).

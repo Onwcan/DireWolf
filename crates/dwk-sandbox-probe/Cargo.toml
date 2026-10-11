@@ -34,11 +34,14 @@ dwk-sandbox-profile = { workspace = true }
 # `bpf`, `userfaultfd`, `io_uring_setup`, and `add_key`/`request_key`, which
 # need a keyring handle only `keyctl` gives -- is not attempted, and the
 # profile's measured content and its active-filter canaries stand for it
-# (ADR-0047 §7: PROFILE-MEASURED ONLY). In a whole-workspace build Cargo
-# unifies these `nix` features into the broker's `nix` (code, not crates);
-# the broker names none of them (TX023).
+# (ADR-0047 §7: PROFILE-MEASURED ONLY). As the environment's init the probe
+# reaps what is orphaned to it (`waitpid`, `process`), and its `reap` ends
+# every other process of the environment with `kill(-1, SIGKILL)` (`signal`;
+# M5d, ADR-0052 §5). In a whole-workspace build Cargo unifies these `nix`
+# features into the broker's `nix` (code, not crates); the broker names none
+# of them (TX023).
 [target.'cfg(target_os = "linux")'.dependencies]
-nix = { workspace = true, features = ["process", "fs", "sched", "mount", "ptrace", "uio"] }
+nix = { workspace = true, features = ["process", "fs", "sched", "mount", "ptrace", "uio", "signal"] }
 # The `AF_VSOCK` attempt: the socket call through the same maintained safe
 # wrapper, and features, the authority already locks -- no new crate.
 rustix = { workspace = true, features = ["net"] }

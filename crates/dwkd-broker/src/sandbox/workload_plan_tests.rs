@@ -1,0 +1,99 @@
+//! `workload_plan.rs`'s own tests (M5d.1): they name every word TX050
+//! bans, to assert none is in a plan, so they live beside it, outside the
+//! rule.
+
+#![allow(clippy::unwrap_used, reason = "test assertions")]
+
+use dwk_proto::brokerp::sandbox::ContainerRef;
+use dwk_proto::brokerp::workload::{ImagePath, WorkloadSeconds, WorkloadSpec};
+use dwk_proto::brokerp::{ProcessArgs, StreamLimit};
+use dwk_proto::wire::scalar::{ContentDigest, ProcessArg};
+
+use super::{reap, run};
+
+fn container() -> ContainerRef {
+    ContainerRef::new("c".repeat(64)).unwrap()
+}
+
+fn workload(args: &[&str]) -> WorkloadSpec {
+    WorkloadSpec {
+        executable: ImagePath::new("/usr/libexec/direwolf/sandbox-fixture").unwrap(),
+        executable_sha256: ContentDigest::new("ab".repeat(32)).unwrap(),
+        args: ProcessArgs::new(args.iter().map(|a| ProcessArg::new(*a).unwrap()).collect())
+            .unwrap(),
+        stream_limit: StreamLimit::new(4096).unwrap(),
+        wall_clock: WorkloadSeconds::new(30).unwrap(),
+    }
+}
+
+#[test]
+fn a_workload_runs_as_the_environment_user_in_the_workspace_with_exactly_its_arguments() {
+    let hostile = [
+        "--user",
+        "0:0",
+        "--privileged",
+        "-e",
+        "LD_PRELOAD=/x",
+        "$(id)",
+        "",
+    ];
+    let argv = run(&container(), &workload(&hostile));
+    let mut expected: Vec<String> = [
+        "container",
+        "exec",
+        "--user",
+        "10001:10001",
+        "--workdir",
+        "/workspace",
+    ]
+    .iter()
+    .map(|w| (*w).to_owned())
+    .collect();
+    expected.push("c".repeat(64));
+    expected.push("/usr/libexec/direwolf/sandbox-fixture".to_owned());
+    expected.extend(hostile.iter().map(|a| (*a).to_owned()));
+    assert_eq!(argv, expected);
+    // Before the container's name, only the plan's own words: the client
+    // reads options there and nowhere after it.
+    let name = argv.iter().position(|w| *w == "c".repeat(64)).unwrap();
+    let options = argv.get(..name).unwrap();
+    for banned in [
+        "--privileged",
+        "--env",
+        "-e",
+        "--env-file",
+        "--interactive",
+        "-i",
+        "--tty",
+        "-t",
+        "--detach",
+        "-d",
+        "--cap-add",
+        "--security-opt",
+        "--device",
+    ] {
+        assert!(!options.iter().any(|w| w == banned), "{banned}");
+    }
+    assert_eq!(options.iter().filter(|w| *w == "--user").count(), 1);
+    assert!(
+        !options
+            .iter()
+            .any(|w| w == "0" || w.starts_with("0:") || w == "root")
+    );
+}
+
+#[test]
+fn reap_is_the_trusted_probe_as_the_environment_user_and_nothing_else() {
+    assert_eq!(
+        reap(&container()),
+        vec![
+            "container".to_owned(),
+            "exec".to_owned(),
+            "--user".to_owned(),
+            "10001:10001".to_owned(),
+            "c".repeat(64),
+            "/usr/libexec/direwolf/sandbox-probe".to_owned(),
+            "reap".to_owned(),
+        ]
+    );
+}

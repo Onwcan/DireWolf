@@ -28,6 +28,16 @@
 //! that does not happen shows in the measurement, and an environment that
 //! does not measure clean is taken down whole — helpers, environment and
 //! listener.
+//!
+//! A workload (M5d, ADR-0052 §5) runs only in a container this broker has
+//! just re-judged from the runtime's record — the recorded one, labelled as
+//! exactly this environment, running, every required invariant the record
+//! shows passing, the trusted probe still the pinned one — and only once its
+//! executable's bytes, copied out of the image, are the ones the operator's
+//! manifest pins. It is run by `sandbox/workload_plan.rs`'s one command line,
+//! within its bounds; then the probe, the environment's init, ends every
+//! other process of the environment (`reap`): a runtime keeps an `exec`'d
+//! process when its client dies, so the deadline alone would not.
 
 use std::os::fd::OwnedFd;
 use std::path::Path;
@@ -35,8 +45,10 @@ use std::time::{Duration, Instant};
 
 use dwk_proto::brokerp::sandbox::{
     AssuranceLevel, ContainerRef, ContainerRole, MAX_PROBE_REPORT_BYTES, Milliseconds,
-    NetworkTopology, ProbeReport, RuntimeVersion, SandboxInvariant, StoreInstance, Verdict,
+    NetworkTopology, ProbeReport, RuntimeVersion, SandboxInvariant, StoreInstance, Vantage,
+    Verdict,
 };
+use dwk_proto::brokerp::workload::{MAX_REAPED_PROCESSES, WorkloadSpec};
 use dwk_proto::brokerp::{BrokerRefusal, ContainerState, EnvironmentSpec, RuntimeSpec};
 use dwk_proto::wire::id::{EnvironmentId, RunId};
 use rustix::fs::Stat;
@@ -47,9 +59,10 @@ use crate::process::run::{self, Bounds, Completed, Ended};
 use crate::process::verify::{self, Authorised};
 
 use super::environment::{
-    Destroyed, EnvFailure, EnvHandle, ExecOutcome, ExecutionEnvironment, Listed, Measured, Prepared,
+    Destroyed, EnvFailure, EnvHandle, ExecOutcome, ExecutionEnvironment, Listed, Measured,
+    Prepared, Ran,
 };
-use super::{Checks, digest, inspect, plan, relay_plan};
+use super::{Checks, digest, inspect, plan, relay_plan, workload_plan};
 
 /// The longest one runtime step may take.
 const STEP: Duration = Duration::from_secs(60);
@@ -68,6 +81,13 @@ const STDERR: usize = 4096;
 
 /// The most environments one listing reports.
 const MAX_LISTED: usize = 64;
+
+/// The longest `reap` may take, through the client: the probe's own bound
+/// and the `exec`'s overhead.
+const REAP_STEP: Duration = Duration::from_millis(dwk_sandbox_profile::REAP_MILLIS + 15_000);
+
+/// What a workload's exchange keeps, at its end, for `reap` and the answer.
+const WORKLOAD_RESERVE: Duration = Duration::from_secs(30);
 
 /// The container runtime's client, re-proved and held for one exchange.
 pub(crate) struct Runtime<'a> {
@@ -151,8 +171,36 @@ impl<'a> Runtime<'a> {
         stdout: usize,
         step: Duration,
     ) -> Result<Completed, run::Failure> {
-        let limit = step;
-        let step = step_name(&words);
+        let name = step_name(&words);
+        let deadline = self.until.min(Instant::now() + step);
+        let result = self.launch(words, (stdout, STDERR), deadline);
+        if let Ok(done) = &result
+            && done.ended != Ended::Exited(0)
+        {
+            report(&name, done);
+        }
+        result
+    }
+
+    /// A workload's run: both streams kept to `limit`, and nothing either
+    /// says reaches a log — not even a debug build's first line of stderr,
+    /// which is the program's, not the runtime's.
+    fn call_workload(
+        &self,
+        words: Vec<String>,
+        limit: usize,
+        deadline: Instant,
+    ) -> Result<Completed, run::Failure> {
+        self.launch(words, (limit, limit), self.until.min(deadline))
+    }
+
+    /// Launch the client once with `words` after its fixed global options.
+    fn launch(
+        &self,
+        words: Vec<String>,
+        (stdout, stderr): (usize, usize),
+        deadline: Instant,
+    ) -> Result<Completed, run::Failure> {
         let refused = |why| run::Failure::Refused(why);
         let now =
             rustix::fs::fstat(&self.executable).map_err(|_| refused(BrokerRefusal::ReadFailed))?;
@@ -177,24 +225,17 @@ impl<'a> Runtime<'a> {
             // user configuration, credential helper or context is read.
             envp: vec![format!("HOME={}", self.config).into_bytes()],
         };
-        let deadline = self.until.min(Instant::now() + limit);
-        let result = run::run(
+        run::run(
             self.helper,
             &program,
             executable,
             cwd,
             &Bounds {
                 stdout,
-                stderr: STDERR,
+                stderr,
                 deadline,
             },
-        );
-        if let Ok(done) = &result
-            && done.ended != Ended::Exited(0)
-        {
-            report(&step, done);
-        }
-        result
+        )
     }
 }
 
@@ -600,6 +641,16 @@ impl<'a> Oci<'a> {
     /// why that cannot be said. The client's own failures share exit codes
     /// with the program's, so the runtime and the container are asked.
     fn after(&self, container: &ContainerRef, ended: Ended) -> ExecOutcome {
+        self.after_with(container, ended, classify)
+    }
+
+    /// [`Self::after`], with the classification of a non-zero exit given.
+    fn after_with(
+        &self,
+        container: &ContainerRef,
+        ended: Ended,
+        classify: fn(u8, bool) -> ExecOutcome,
+    ) -> ExecOutcome {
         match ended {
             Ended::Exited(0) => return ExecOutcome::Exited(0),
             Ended::TimedOut => return ExecOutcome::TimedOut,
@@ -673,6 +724,125 @@ impl<'a> Oci<'a> {
         }
         Ok(order(&checks))
     }
+}
+
+impl Oci<'_> {
+    /// The environment as its record shows it now, before a workload: the
+    /// recorded container, labelled as exactly this environment, running,
+    /// and every required invariant the record can show passing — the
+    /// probe's bytes among them, because `reap` runs it. The probe's own
+    /// `CONTAINER_*` facts and the workspace's identity from inside were
+    /// measured when the environment was prepared and at every measurement
+    /// since; what they govern is what the record shows has not changed.
+    /// Nothing is run inside.
+    fn judged_for_work(
+        &self,
+        handle: &EnvHandle,
+        spec: &EnvironmentSpec,
+    ) -> Result<(), EnvFailure> {
+        self.version()?;
+        let Some(object) = self.record(&handle.container)? else {
+            return Err(EnvFailure::Refused(BrokerRefusal::EnvironmentNotFound));
+        };
+        let record = inspect::Record::new(&object);
+        if !record.is(&spec.store, (&spec.environment_id, &spec.run_id))
+            || record.role() != Some(ContainerRole::Environment)
+        {
+            return Err(EnvFailure::Refused(BrokerRefusal::ForeignEnvironment));
+        }
+        let not_clean = EnvFailure::Refused(BrokerRefusal::EnvironmentNotClean);
+        if record.state() != Some(ContainerState::Running) {
+            return Err(not_clean);
+        }
+        let mut checks = record.judge(spec, self.seccomp_profile, &self.socket);
+        checks.push((
+            SandboxInvariant::HostProbeDigest,
+            self.probe_digest(&handle.container, spec),
+        ));
+        checks.push((SandboxInvariant::HostProxyRelay, self.peers(handle, spec)));
+        checks.push((
+            SandboxInvariant::HostRelayDigest,
+            self.running_relay_digest(spec),
+        ));
+        let clean = dwk_proto::brokerp::sandbox::required_invariants(spec.network)
+            .iter()
+            .filter(|invariant| {
+                invariant.vantage() == Vantage::Host
+                    && **invariant != SandboxInvariant::HostWorkspaceIdentity
+            })
+            .all(|invariant| checks.contains(&(*invariant, Verdict::Pass)));
+        if clean { Ok(()) } else { Err(not_clean) }
+    }
+
+    /// The executable's bytes, copied out of the container's own root,
+    /// against the digest the operator's manifest pins.
+    fn executable_digest(&self, container: &ContainerRef, workload: &WorkloadSpec) -> Verdict {
+        match self.runtime.call(
+            plan::copy_out(container, workload.executable.as_str()),
+            digest::MAX_ARCHIVE_BYTES,
+        ) {
+            Ok(done) if done.stdout_cut => Verdict::Fail,
+            Ok(done) if succeeded(&done) => digest::executable(
+                &done.stdout,
+                workload.executable.file_name(),
+                workload.executable_sha256.as_str(),
+            ),
+            _ => Verdict::Unobservable,
+        }
+    }
+
+    /// `reap`: every other process of the environment ended, and what was
+    /// found — `PASS` only on the probe's own clean answer.
+    fn reap(&self, container: &ContainerRef) -> (Verdict, u32, u32) {
+        let unobservable = (Verdict::Unobservable, 0, 0);
+        let Ok(done) = self
+            .runtime
+            .call_within(workload_plan::reap(container), LINE, REAP_STEP)
+        else {
+            return unobservable;
+        };
+        if done.stdout_cut {
+            return unobservable;
+        }
+        let Some((found, remaining)) = one_line(&done.stdout).and_then(reaped) else {
+            return unobservable;
+        };
+        match (done.ended, remaining) {
+            (Ended::Exited(0), 0) => (Verdict::Pass, found, 0),
+            (_, 0) => unobservable,
+            (_, remaining) => (Verdict::Fail, found, remaining),
+        }
+    }
+}
+
+/// The probe's `reaped <found> <remaining>`, exactly.
+fn reaped(line: &str) -> Option<(u32, u32)> {
+    let mut words = line.split(' ');
+    let (Some("reaped"), Some(found), Some(remaining), None) =
+        (words.next(), words.next(), words.next(), words.next())
+    else {
+        return None;
+    };
+    let number = |word: &str| -> Option<u32> {
+        if word.is_empty() || word.len() > 5 || !word.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        word.parse::<u32>()
+            .ok()
+            .filter(|n| *n <= MAX_REAPED_PROCESSES)
+    };
+    Some((number(found)?, number(remaining)?))
+}
+
+/// How a workload's `exec` that did not exit 0 ended. The runtime's client
+/// answers 125 when the runtime itself failed the `exec`, and 126 or 127
+/// when the program could not be started — codes a program may also exit
+/// with — so none of them is believed (`UNOBSERVABLE`).
+fn workload_classify(code: u8, running: bool) -> ExecOutcome {
+    if running && code == 125 {
+        return ExecOutcome::Unobservable;
+    }
+    classify(code, running)
 }
 
 /// A non-zero exit of a step inside a container that is still `running`
@@ -843,6 +1013,74 @@ impl ExecutionEnvironment for Oci<'_> {
         }
     }
 
+    fn run_workload(
+        &self,
+        handle: &EnvHandle,
+        spec: &EnvironmentSpec,
+        workload: &WorkloadSpec,
+        until: Instant,
+    ) -> Result<Ran, EnvFailure> {
+        self.judged_for_work(handle, spec)?;
+        if self.executable_digest(&handle.container, workload) != Verdict::Pass {
+            return Err(EnvFailure::Refused(BrokerRefusal::DigestMismatch));
+        }
+        crate::crash::point("workload_judged");
+        let wall_clock = Duration::from_secs(u64::from(workload.wall_clock.get()));
+        let reserve = until.checked_sub(WORKLOAD_RESERVE).unwrap_or(until);
+        let since = Instant::now();
+        let deadline = (since + wall_clock).min(reserve);
+        let limit = usize::try_from(workload.stream_limit.get()).unwrap_or(usize::MAX);
+        crate::event(&format!(
+            "workload_started args={} wall_clock_s={}",
+            workload.args.len(),
+            workload.wall_clock.get()
+        ));
+        let ran = self.runtime.call_workload(
+            workload_plan::run(&handle.container, workload),
+            limit,
+            deadline,
+        );
+        let elapsed = Milliseconds::of(since.elapsed());
+        crate::crash::point("workload_ended");
+        let done = match ran {
+            // The client never ran: nothing was executed, nothing to end.
+            Err(run::Failure::Refused(why)) => return Err(EnvFailure::Refused(why)),
+            Err(run::Failure::Unconfirmed) => {
+                // It may have started. End whatever is there, and say only
+                // that nothing proves how it ended.
+                let (residue, _, remaining) = self.reap(&handle.container);
+                crate::event(&format!(
+                    "workload_unconfirmed residue={} remaining={remaining}",
+                    residue.as_str()
+                ));
+                return Err(EnvFailure::Unconfirmed);
+            }
+            Ok(done) => done,
+        };
+        // How it ended, asked of the runtime and the container before
+        // anything else changes there; then everything else is ended.
+        let outcome = self.after_with(&handle.container, done.ended, workload_classify);
+        let (residue, ended, remaining) = self.reap(&handle.container);
+        crate::event(&format!(
+            "workload_ended outcome={outcome:?} stdout_bytes={} stderr_bytes={} residue={} \
+             ended={ended} remaining={remaining}",
+            done.stdout_observed,
+            done.stderr_observed,
+            residue.as_str()
+        ));
+        Ok(Ran {
+            outcome,
+            stdout: done.stdout,
+            stdout_observed: done.stdout_observed,
+            stderr: done.stderr,
+            stderr_observed: done.stderr_observed,
+            elapsed,
+            residue,
+            ended,
+            remaining,
+        })
+    }
+
     fn destroy(
         &self,
         store: &StoreInstance,
@@ -935,7 +1173,40 @@ impl ExecutionEnvironment for Oci<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ExecOutcome, classify, lines, one_line};
+    use super::{ExecOutcome, classify, lines, one_line, reaped, workload_classify};
+
+    #[test]
+    fn reap_is_believed_only_in_its_one_spelling() {
+        assert_eq!(reaped("reaped 0 0"), Some((0, 0)));
+        assert_eq!(reaped("reaped 12 1"), Some((12, 1)));
+        assert_eq!(reaped("reaped 4096 0"), Some((4096, 0)));
+        for bad in [
+            "",
+            "reaped",
+            "reaped 1",
+            "reaped 1 2 3",
+            "reaped -1 0",
+            "reaped 1 +0",
+            "reaped 4097 0",
+            "reaped 100000 0",
+            "reaped  1 0",
+            "Reaped 1 0",
+            "reaped 1 0 ",
+            "reaped 0x1 0",
+        ] {
+            assert_eq!(reaped(bad), None, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn a_workload_exit_the_client_also_uses_is_not_believed() {
+        for code in [125, 126, 127] {
+            assert_eq!(workload_classify(code, true), ExecOutcome::Unobservable);
+        }
+        assert_eq!(workload_classify(3, true), ExecOutcome::Exited(3));
+        assert_eq!(workload_classify(137, true), ExecOutcome::Killed(9));
+        assert_eq!(workload_classify(125, false), ExecOutcome::EnvironmentGone);
+    }
 
     #[test]
     fn a_step_that_did_not_exit_zero_is_classified_by_what_is_still_there() {

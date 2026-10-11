@@ -27,9 +27,9 @@
 //! authority's uid, and it speaks only the private protocol
 //! ([`dwk_proto::brokerp`]), which no cognition-side code can name.
 //!
-//! # Status: M5c — `net.http` (in progress); M5b — `PROXY_ONLY` egress; M5a —
-//! execution environments; M4e — secret handoff; M4d — process execution,
-//! the filesystem tools
+//! # Status: M5d — sandboxed workloads (in progress); M5c — `net.http`; M5b —
+//! `PROXY_ONLY` egress; M5a — execution environments; M4e — secret handoff;
+//! M4d — process execution, the filesystem tools
 //!
 //! [ADR-0043]: one private Unix-domain listener (`listener`), one exchange per
 //! connection (`exchange`): a hello naming a fresh channel, one authorisation
@@ -71,9 +71,8 @@
 //! a digest-pinned probe inside it, destroyed and listed — through the
 //! container runtime's client the authority resolved and hashed, re-proved
 //! and executed by descriptor through the launch helper with a typed
-//! argument vector. Nothing is run inside an environment but the probe; the
-//! only topology built is the evidence harness's `NO_NETWORK`, and only with
-//! `--allow-evidence-topology`. Sandboxed workloads are M5d's.
+//! argument vector. The `NO_NETWORK` topology is built only with
+//! `--allow-evidence-topology`.
 //!
 //! [ADR-0048] adds `PROXY_ONLY` (`egress`): the broker's opaque CONNECT
 //! proxy, one Unix socket per environment reached only through that
@@ -100,12 +99,24 @@
 //! roots with a test authority, loudly, and only beside
 //! `--allow-evidence-egress`'s fixture resolver; production has none.
 //!
+//! [ADR-0052] (M5d, in progress) runs one workload at a time in a `READY`
+//! environment (`sandbox`, `workload_run`): the recorded container re-judged
+//! from the runtime's record, the executable's bytes proved in the image,
+//! exactly one command line run as the environment's user in `/workspace`
+//! within its bounds, and then every other process of the environment ended
+//! by its init, the trusted probe. And before it serves, the broker refuses
+//! an identity an environment has (its own uid or the authority's being the
+//! workload's or the relay's), and a deployment where a process of its uid
+//! could trace a process it starts before that process hardens itself
+//! (`posture`; ADR-0050 §21).
+//!
 //! [ADR-0044]: ../../../docs/adr/0044-m4c-filesystem-operations-plans-and-atomic-mutation.md
 //! [ADR-0045]: ../../../docs/adr/0045-m4d-process-execution-broker.md
 //! [ADR-0046]: ../../../docs/adr/0046-m4e-secret-handles-backends-injection-and-redaction.md
 //! [ADR-0047]: ../../../docs/adr/0047-m5a-oci-execution-environment-and-measured-assurance.md
 //! [ADR-0048]: ../../../docs/adr/0048-m5b-proxy-only-topology-and-connect-proxy.md
 //! [ADR-0050]: ../../../docs/adr/0050-m5c-kernel-performed-net-http-ssrf-redirects-and-credential-egress.md
+//! [ADR-0052]: ../../../docs/adr/0052-m5d-sandboxed-process-exec.md
 //!
 //! [ADR-0018]: ../../../docs/adr/0018-authority-broker-split.md
 //! [ADR-0043]: ../../../docs/adr/0043-m4b-private-broker-channel-and-brokered-fs-read.md
@@ -134,6 +145,8 @@ mod listener;
 mod nonce;
 #[cfg(target_os = "linux")]
 mod peer;
+#[cfg(target_os = "linux")]
+mod posture;
 #[cfg(target_os = "linux")]
 mod process;
 #[cfg(target_os = "linux")]
@@ -215,19 +228,9 @@ fn serve(config: &config::ServeConfig) -> ExitCode {
         );
         return ExitCode::FAILURE;
     }
-    if own_uid == config.authority_uid {
-        if !config.shared_uid_permitted {
-            log(&format!(
-                "the authority uid {} is the broker's own; run the broker as its own user, or \
-                 pass --allow-shared-authority-uid for development",
-                config.authority_uid
-            ));
-            return ExitCode::FAILURE;
-        }
-        log(&format!(
-            "REDUCED ASSURANCE: the broker shares uid {own_uid} with the authority \
-             (--allow-shared-authority-uid)"
-        ));
+    if let Err(why) = deployment(config, own_uid) {
+        log(&why);
+        return ExitCode::FAILURE;
     }
     let bound = match listener::bind(&place) {
         Ok(bound) => bound,
@@ -292,6 +295,61 @@ fn serve(config: &config::ServeConfig) -> ExitCode {
         },
     );
     ExitCode::SUCCESS
+}
+
+/// What the broker verifies about its own deployment before it serves: an
+/// authority uid that is not its own unless the operator acknowledged it
+/// for development (ADR-0043 §1); no daemon with an identity every
+/// environment's workload or relay has — no flag overrides that (M5d,
+/// ADR-0052 §13); and, as ADR-0050 §21 requires, no process of its uid able
+/// to trace a process it starts before that process hardens itself, unless
+/// the operator acknowledged it for development.
+#[cfg(target_os = "linux")]
+fn deployment(config: &config::ServeConfig, own_uid: u32) -> Result<(), String> {
+    if own_uid == config.authority_uid {
+        if !config.shared_uid_permitted {
+            return Err(format!(
+                "the authority uid {} is the broker's own; run the broker as its own user, or \
+                 pass --allow-shared-authority-uid for development",
+                config.authority_uid
+            ));
+        }
+        log(&format!(
+            "REDUCED ASSURANCE: the broker shares uid {own_uid} with the authority \
+             (--allow-shared-authority-uid)"
+        ));
+    }
+    if let Some(clash) = posture::sandbox_identity_clash(own_uid, config.authority_uid) {
+        return Err(format!("cannot serve: {clash}"));
+    }
+    let posture = std::env::current_exe().map_or(
+        posture::Posture {
+            scope: None,
+            execute_only: false,
+        },
+        |binary| posture::read(&binary),
+    );
+    crate::event(&format!("deployment_posture {}", posture.describe()));
+    if posture.startup_window_closed() {
+        return Ok(());
+    }
+    match config.traceable_workers {
+        config::TraceableWorkers::Refused => Err(
+            "cannot serve: Yama's ptrace_scope is 0 or absent and this binary is readable by its own uid, so a \
+             process of the broker's uid could take over an exchange worker or a launch helper \
+             before it hardens itself (ADR-0050 §21). Set kernel.yama.ptrace_scope to 1 or \
+             more, install the broker root-owned and execute-only, or pass \
+             --allow-traceable-workers for development"
+                .to_owned(),
+        ),
+        config::TraceableWorkers::Permitted => {
+            log(
+                "REDUCED ASSURANCE: a process of the broker's uid may trace the processes it \
+                 starts before they harden themselves (--allow-traceable-workers)",
+            );
+            Ok(())
+        }
+    }
 }
 
 /// The network side: one resolver for the CONNECT proxy and the HTTPS
@@ -436,6 +494,7 @@ fn help() -> String {
          \n\
          USAGE:\n    \
              {NAME} serve --socket <PATH> --authority-uid <UID> [--allow-shared-authority-uid] [--allow-dumpable]\n    \
+                              [--allow-traceable-workers]\n    \
                               [--allow-evidence-topology] [--allow-evidence-egress <FILE>]\n    \
                               [--allow-evidence-trust <PEM>]\n    \
              {NAME} [-V | --version] [-h | --help]\n\
@@ -445,6 +504,7 @@ fn help() -> String {
              --authority-uid <UID>           the only uid the broker reads from\n    \
              --allow-shared-authority-uid    permit the authority to be the broker's own uid (development only)\n    \
              --allow-dumpable                leave the process dumpable, its memory readable by its uid (development only)\n    \
+             --allow-traceable-workers       serve where its uid could trace the processes it starts (development only)\n    \
              --allow-evidence-topology       permit NO_NETWORK execution environments (M5a evidence only)\n    \
              --allow-evidence-egress <FILE>  resolve egress names from a fixture file (M5b, M5c evidence only)\n    \
              --allow-evidence-trust <PEM>    trust a test authority instead of Mozilla's roots; needs --allow-evidence-egress (M5c evidence only)\n\
@@ -464,8 +524,11 @@ fn help() -> String {
          NO_NETWORK only for evidence. M5c - net.http: one HTTPS exchange\n\
          per authorised hop to the pinned addresses, re-judged, with TLS\n\
          verification always on; no redirect followed, nothing re-resolved,\n\
-         pooled or proxied; a credential composed into its one request. Linux\n\
-         only. No sandboxed workload: M5d-M5e.\n",
+         pooled or proxied; a credential composed into its one request. M5d\n\
+         (in progress) - one authorised workload at a time in a READY\n\
+         oci-strict environment, as uid 10001, bounded, every process it left\n\
+         then ended; no daemon with an environment's uid; no traceable start-up\n\
+         window. Linux only.\n",
         env!("CARGO_PKG_VERSION")
     )
 }

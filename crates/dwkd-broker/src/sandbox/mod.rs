@@ -1,6 +1,6 @@
-//! The sandbox supervisor's first slice (M5a, [ADR-0047]): execution
-//! environments — prepared, measured, destroyed and listed — and nothing run
-//! inside them but the trusted probe.
+//! The sandbox supervisor (M5a, [ADR-0047]): execution environments —
+//! prepared, measured, destroyed and listed — and, since M5d ([ADR-0052]),
+//! one authorised workload at a time run inside one.
 //!
 //! | operation | what the broker does | what it never does |
 //! |---|---|---|
@@ -8,6 +8,7 @@
 //! | `environment_measure` | the same measurement, of a container the authority recorded, after proving it carries this environment's labels | measure or touch a container labelled otherwise |
 //! | `environment_destroy` | remove the one container labelled as this environment of this store | touch anything labelled otherwise, or guess between two |
 //! | `environment_list` | report every container labelled as this store's | report or touch another store's, or an unlabelled one |
+//! | `workload_run` | re-judge the recorded container from the runtime's record; prove the executable's bytes in the image; run exactly the plan's command line as uid 10001 in `/workspace`, bounded; then end every other process of the environment | run anything in a container that is not the clean, running, recorded one; run as anyone else; take a flag, a variable or a shell string from the authorisation; leave a process of the workload behind unreported |
 //!
 //! The broker judges no assurance level. It reports every invariant with its
 //! verdict; the authority takes the level from them, and never higher than
@@ -22,10 +23,11 @@
 //! returned with the destruction. `NO_NETWORK` is still the M5a evidence
 //! harness's topology, built only by a broker started with
 //! `--allow-evidence-topology` (ADR-0047 §10). Nothing runs inside either
-//! but the probe: workloads are M5d's.
+//! but the probe and, from M5d, the workloads the authority authorises.
 //!
 //! [ADR-0047]: ../../../../docs/adr/0047-m5a-oci-execution-environment-and-measured-assurance.md
 //! [ADR-0048]: ../../../../docs/adr/0048-m5b-proxy-only-topology-and-connect-proxy.md
+//! [ADR-0052]: ../../../../docs/adr/0052-m5d-sandboxed-process-exec.md
 
 mod digest;
 mod environment;
@@ -33,6 +35,7 @@ mod inspect;
 mod oci;
 mod plan;
 mod relay_plan;
+mod workload_plan;
 
 use std::os::fd::OwnedFd;
 use std::path::PathBuf;
@@ -43,15 +46,21 @@ use dwk_proto::brokerp::sandbox::{
     ContainerRef, InvariantCheck, InvariantChecks, Milliseconds, NetworkTopology, SandboxInvariant,
     Verdict,
 };
+use dwk_proto::brokerp::workload::{
+    ProcessCount, WorkloadEnding, WorkloadRunAuthorisation, WorkloadRunDone,
+};
 use dwk_proto::brokerp::{
     BrokerDone, BrokerRefusal, DestroyState, EnvironmentDestroyAuthorisation,
     EnvironmentDestroyDone, EnvironmentListAuthorisation, EnvironmentListDone,
     EnvironmentMeasureAuthorisation, EnvironmentMeasureDone, EnvironmentMeasurement,
     EnvironmentPrepareAuthorisation, EnvironmentPrepareDone, Indeterminate, OutcomeResult,
-    OwnedEnvironments, RuntimeSpec,
+    OwnedEnvironments, ProcessStreamSnapshot, RuntimeSpec,
 };
+use dwk_proto::wire::scalar::{ByteCount, ExitCode, SignalNumber, StreamContent};
 
-use environment::{Destroyed, EnvFailure, EnvHandle, ExecutionEnvironment, Measured};
+use environment::{
+    Destroyed, EnvFailure, EnvHandle, ExecOutcome, ExecutionEnvironment, Measured, Ran,
+};
 
 use crate::egress::proxy::Proxies;
 
@@ -92,6 +101,50 @@ fn failure(failure: EnvFailure) -> OutcomeResult {
             OutcomeResult::Indeterminate(Indeterminate::EnvironmentUnconfirmed)
         }
     }
+}
+
+/// One stream as it crosses the wire: what was kept, every byte observed.
+fn stream(kept: &[u8], observed: u64) -> Option<ProcessStreamSnapshot> {
+    let kept_len = u64::try_from(kept.len()).ok()?;
+    Some(ProcessStreamSnapshot {
+        content: StreamContent::from_bytes(kept)?,
+        observed: ByteCount::new(observed.max(kept_len))?,
+        truncated: observed > kept_len,
+    })
+}
+
+/// A run's answer, or `None` when it cannot be stated in the protocol's own
+/// terms (a count past its bound): the caller says nothing proves how it
+/// ended.
+fn ran_done(ran: &Ran) -> Option<WorkloadRunDone> {
+    let (ending, exit_code, signal) = match ran.outcome {
+        ExecOutcome::Exited(code) => (WorkloadEnding::Exited, ExitCode::new(code), None),
+        ExecOutcome::Killed(signal) => (
+            WorkloadEnding::Killed,
+            None,
+            Some(SignalNumber::new(signal)?),
+        ),
+        ExecOutcome::TimedOut => (WorkloadEnding::TimedOut, None, None),
+        ExecOutcome::EnvironmentGone => (WorkloadEnding::EnvironmentGone, None, None),
+        ExecOutcome::RuntimeUnavailable => (WorkloadEnding::RuntimeUnavailable, None, None),
+        ExecOutcome::Unobservable => (WorkloadEnding::Unobservable, None, None),
+    };
+    if ending == WorkloadEnding::Exited && exit_code.is_none() {
+        return None;
+    }
+    let done = WorkloadRunDone {
+        ending,
+        exit_code,
+        signal,
+        stdout: stream(&ran.stdout, ran.stdout_observed)?,
+        stderr: stream(&ran.stderr, ran.stderr_observed)?,
+        elapsed_ms: ran.elapsed,
+        residue: ran.residue,
+        ended_processes: ProcessCount::new(ran.ended)?,
+        remaining_processes: ProcessCount::new(ran.remaining)?,
+    };
+    dwk_proto::brokerp::workload::check_done(&done).ok()?;
+    Some(done)
 }
 
 fn measurement(measured: &Measured) -> Option<EnvironmentMeasurement> {
@@ -290,6 +343,41 @@ impl Sandbox {
                     )))
                 }
                 Err(why) => failure(why),
+            }
+        })
+    }
+
+    /// `broker.workload_run` (M5d, ADR-0052 §5): one workload, in the
+    /// recorded container of a `READY` environment. The authority decided
+    /// it; this re-judges the environment and proves the executable before
+    /// anything runs, and ends whatever the workload left.
+    pub(crate) fn workload_run(
+        &self,
+        authorisation: &WorkloadRunAuthorisation,
+        descriptors: (OwnedFd, OwnedFd),
+        until: Instant,
+    ) -> OutcomeResult {
+        let spec = authorisation.environment();
+        if let Err(why) = self.topology(spec.network) {
+            return OutcomeResult::Refused(why);
+        }
+        let handle = EnvHandle {
+            environment: spec.environment_id.clone(),
+            container: authorisation.container.clone(),
+        };
+        let workload = authorisation.workload();
+        self.with_oci(descriptors, &authorisation.runtime(), until, |env| {
+            match env.run_workload(&handle, &spec, &workload, until) {
+                Ok(ran) => match ran_done(&ran) {
+                    Some(done) => OutcomeResult::Done(Box::new(BrokerDone::workload_run(done))),
+                    // It ran and its answer cannot be stated: nothing proves
+                    // how it ended.
+                    None => OutcomeResult::Indeterminate(Indeterminate::WorkloadUnconfirmed),
+                },
+                Err(EnvFailure::Refused(why)) => OutcomeResult::Refused(why),
+                Err(EnvFailure::Unconfirmed) => {
+                    OutcomeResult::Indeterminate(Indeterminate::WorkloadUnconfirmed)
+                }
             }
         })
     }

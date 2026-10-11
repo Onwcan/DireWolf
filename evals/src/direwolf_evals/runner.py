@@ -59,11 +59,10 @@ waiting for the whole milestone stays pending.
 CONNECT proxy. It turns on exactly the suite that requires it; the complete
 M5 gate -- sandboxed workloads, net.http -- still waits for "M5".
 
-"M5c" is the third (ADR-0050, Proposed until its owner accepts it):
-kernel-performed net.http and mode A's credential egress. It turns on exactly
-the suite that requires it, which must pass in CI's gate; M5c is complete
-only when its owner accepts the ADR and the hosted job passes, and the
-complete M5 gate -- sandboxed workloads in production -- still waits for "M5".
+"M5c" is the third (ADR-0050, accepted): kernel-performed net.http and
+mode A's credential egress. It turns on exactly the suite that requires it,
+which must pass in CI's gate; M5c is complete, and the complete M5 gate --
+sandboxed workloads in production -- still waits for "M5".
 """
 
 
