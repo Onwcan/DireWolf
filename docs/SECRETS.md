@@ -116,8 +116,23 @@ Ordered by preference. The kernel selects the most restrictive mode the secret a
 > memory during the exchange (root or `CAP_SYS_PTRACE`), the physical pages it
 > freed until the kernel reuses them, swap, and the worker's startup window
 > before it hardens itself — the last closed by Yama `ptrace_scope` ≥ 1 or an
-> execute-only broker binary, a deployment prerequisite the broker does not
-> yet verify (ADR-0050 §§20–21).
+> execute-only broker binary, a deployment prerequisite the broker did not
+> yet verify at M5c's acceptance (ADR-0050 §§20–21); M5d.1 checks it at the
+> broker's start.
+>
+> **D11 hardening** ([ADR-0053](adr/0053-d11-exchange-worker-confinement-and-secret-memory.md), Proposed; [BROKER_HARDENING.md](BROKER_HARDENING.md)):
+> each worker installs its own syscall filter before it can receive anything
+> — no socket, `connect`, `execve`, `fork`, `ptrace`, `open` or signal to
+> another process — and proves it by attempting each and requiring `EPERM`;
+> the broker reads the worker's `/proc` itself (filter, `no_new_privs`,
+> untraced, not dumpable) before it hands over the connection and the
+> credential's pipe, and reads the start-up posture again before every
+> worker. A credential hop runs only where the broker's memory and its
+> worker's cannot be written to swap (no swap device, or a cgroup whose
+> `memory.swap.max` is 0) and is refused otherwise, unless acknowledged
+> for development. What remains: hibernation, a hypervisor's paging and a
+> crash dump, which no cgroup reaches; freed physical pages until reused
+> (`init_on_free=1` recommended); root and the kernel.
 
 `dwkd-broker` adds the header when connecting to an allowlisted origin, using a **one-shot injection handed to it by `dwkd-authority`** for that invocation only. The secret at rest exists in exactly one process — `dwkd-authority` — and never in a child, an environment, a file, or any memory the agent can influence. The broker holds the value only for the duration of the request and holds no long-lived key ([ADR-0018](adr/0018-authority-broker-split.md)).
 

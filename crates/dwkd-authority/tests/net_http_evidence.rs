@@ -225,6 +225,10 @@ exit 1"#,
             &[
                 "--allow-shared-authority-uid",
                 "--allow-dumpable",
+                // Development and CI hosts have swap: credential hops here run
+                // under the acknowledgement; the strict refusal is D11
+                // hardening's own evidence (ADR-0053 §7).
+                "--allow-swappable-workers",
                 "--allow-evidence-egress",
                 fixture.to_str().unwrap(),
                 "--allow-evidence-trust",

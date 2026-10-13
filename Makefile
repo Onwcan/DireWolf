@@ -19,7 +19,7 @@ DW := $(PY) scripts/dw.py
         authority-transport-evidence authority-write-probe broker-fs-read-evidence \
         filesystem-operations-evidence process-broker-evidence secret-broker-evidence \
         sandbox-foundation-evidence sandbox-egress-evidence sandbox-workload-evidence \
-        net-http-evidence net-http-mutations sandbox-workload-mutations fuzz-smoke fuzz security docs \
+        net-http-evidence net-http-mutations sandbox-workload-mutations d11-hardening-evidence d11-hardening-mutations d11-posture fuzz-smoke fuzz security docs \
         preflight tools hooks clean
 
 help:            ## List available commands
@@ -105,6 +105,15 @@ sandbox-workload-evidence: ## M5d.1 workloads in real OCI environments: identity
 
 sandbox-workload-mutations: ## M5d.1 mutation review: each workload guard weakened in turn must fail a unit suite or sandbox-workload-evidence (slow)
 	@$(DW) sandbox-workload-mutations
+
+d11-hardening-evidence: ## D11 hardening: the worker's syscall filter, vouching from the kernel, start-up window, swap posture; real workers, observers, cgroups; root-only cases need DW_D11_PRIVILEGED=1
+	@$(DW) d11-hardening-evidence
+
+d11-hardening-mutations: ## D11 hardening mutation review: each guard weakened in turn must fail the broker's suites (slow)
+	@$(DW) d11-hardening-mutations
+
+d11-posture:     ## Read-only: what this host gives D11 hardening (Yama, binary mode, swap, cgroup, page zeroing, WSL2)
+	@$(DW) d11-posture
 
 net-http-evidence: ## M5c net.http, no internet: SSRF/DNS, redirects, TLS, credential binding and residue, crashes, budgets (DW_CPU_CONTENTION=n adds load)
 	@$(DW) net-http-evidence

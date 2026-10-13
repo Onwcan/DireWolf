@@ -56,6 +56,11 @@ use rustls as _;
 use ureq_proto as _;
 #[cfg(target_os = "linux")]
 use webpki_roots as _;
+// D11 hardening's syscall filter (ADR-0053), reached only through the binary.
+#[cfg(target_os = "linux")]
+use libc as _;
+#[cfg(target_os = "linux")]
+use seccompiler as _;
 
 #[cfg(target_os = "linux")]
 mod linux {
@@ -465,7 +470,14 @@ mod linux {
             &scratch.socket(),
             true,
             crash,
-            &["--allow-evidence-egress", fixture.to_str().unwrap()],
+            // Development and CI hosts have swap: credential exchanges here
+            // run under the acknowledgement; the strict refusal is D11
+            // hardening's own evidence (ADR-0053 §7).
+            &[
+                "--allow-swappable-workers",
+                "--allow-evidence-egress",
+                fixture.to_str().unwrap(),
+            ],
         )
     }
 
@@ -615,10 +627,14 @@ mod linux {
             "{result:?}"
         );
         let read = broker.rchar() - before;
+        // Besides the value, a hop reads exactly one host fact: Yama's setting,
+        // the start-up window's (D11 hardening, ADR-0053 §4). Swap is not read
+        // under the acknowledgement this broker runs with.
+        let yama = std::fs::read("/proc/sys/kernel/yama/ptrace_scope").map_or(0, |b| b.len());
         assert_eq!(
             read,
-            u64::try_from(value.len()).unwrap(),
-            "exactly the value was read"
+            u64::try_from(value.len() + yama).unwrap(),
+            "exactly the value was read, once, and Yama's setting"
         );
         assert!(
             !body.windows(value.len()).any(|w| w == value),

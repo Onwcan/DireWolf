@@ -184,6 +184,23 @@ ureq-proto = { version = "=0.6.4", default-features = false, features = ["client
 # `http`, whose request and header types `ureq-proto` speaks and re-exports.
 bytes = { version = "=1.12.1", default-features = false, features = ["std"] }
 
+# --- D11 hardening: the exchange worker's syscall filter (ADR-0053) ---------
+# Broker only, and named only in `src/http/confine.rs` (TX051). The workspace
+# forbids `unsafe`; installing a seccomp program hands the kernel a pointer,
+# which no API of `std`, `rustix` or `nix` offers safely. `seccompiler`'s
+# `apply_filter` is that one call, maintained by rust-vmm and used in
+# production by Firecracker and Cloud Hypervisor. Only the installation is
+# used: the program itself is the broker's own, built and tested in
+# `confine.rs`. No default features (its JSON front end and `serde` stay
+# out); its one dependency, `libc`, is already in the tree.
+# Apache-2.0 OR BSD-3-Clause.
+seccompiler = { version = "=0.5.0", default-features = false }
+# The target's own syscall numbers and seccomp constants for that program
+# (`SYS_*`, `SECCOMP_RET_*`, `F_*`, `SO_*`, `PROT_*`): bindings only, no C,
+# and already in the tree (`nix`, `seccompiler`). A direct edge, not a new
+# crate.
+libc = { version = "=0.2.189", default-features = false }
+
 # --- dev-only: tests, property tests, differential oracles ------------------
 # Never linked into a shipped binary. dwcheck excludes dev-only edges from the
 # TCB closure and a fixture proves it does not exclude normal ones.

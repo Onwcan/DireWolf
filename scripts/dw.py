@@ -3456,6 +3456,622 @@ def task_sandbox_workload_mutations() -> None:
     )
 
 
+# --- D11 hardening (ADR-0053) ---------------------------------------------------
+
+D11_EVIDENCE_PREFIX = "D11-EVIDENCE "
+
+# The cases the broker's own suites print on any Linux host with Yama at 1 or
+# more (`crates/dwkd-broker/src/http/hardening_tests.rs`): real workers, a real
+# same-uid observer, stand-ins weakened one property at a time, and the host
+# facts read before every hop.
+D11_CASES = (
+    "worker-confined-before-hand-over",
+    "worker-forbidden-attempts-refused",
+    "worker-image-at-exec-readable-binary",
+    "same-uid-observer-refused",
+    "worker-cut-off-before-hand-over",
+    "stand-in-without-everything",
+    "stand-in-without-a-filter",
+    "stand-in-without-non-dumpability",
+    "stand-in-without-an-untraced-state",
+    "stand-in-without-an-honest-ready-line",
+    "stand-in-complete",
+    "startup-window-open-hop-refused",
+    "swappable-credential-hop-refused",
+    "swappable-plain-hop-performed",
+    "swappable-worker-handed-nothing",
+    "capped-credential-hop-performed",
+)
+
+# The cases that need a host the suites cannot make for themselves, and what
+# makes each. Absent, each is NOT EXERCISED -- listed, and a failure.
+D11_HOST_CASES = (
+    ("host-swap-refusal", "a host with swap, outside any no-swap cgroup"),
+    (
+        "credential-hop-under-a-real-no-swap-cap",
+        "a transient cgroup with memory.swap.max 0 (systemd-run)",
+    ),
+    (
+        "memory-pressure-under-cap",
+        "a transient cgroup with memory.swap.max 0 and a memory limit (systemd-run)",
+    ),
+    (
+        "execute-only-image-non-dumpable-at-exec",
+        "a root-owned execute-only broker binary (DW_D11_PRIVILEGED=1 and passwordless sudo)",
+    ),
+    (
+        "yama-0-counterexample",
+        "Yama lowered to 0 for one run, then restored (DW_D11_PRIVILEGED=1 and passwordless sudo)",
+    ),
+)
+
+# The broker's unit suites that carry D11 hardening: the program, the
+# vouching, the posture, the configuration, the deployment decision, the
+# worker, and the real-worker evidence.
+D11_SUITES = (
+    "http::confine",
+    "http::vouch",
+    "posture::",
+    "config::",
+    "tests::the_broker_serves_only",
+    "tests::swappable_memory",
+    "http::worker::",
+    "http::tests::hardening",
+)
+
+HARDENING = "http::tests::hardening::"
+
+# Where the privileged half installs a root-owned execute-only broker for
+# one case, and removes it after (`hardening_tests.rs`, `XONLY_BINARY`).
+D11_XONLY_DIRECTORY = "/usr/local/libexec/direwolf-d11-evidence"
+
+
+def broker_unit_binary() -> str:
+    """Build the broker's unit-test binary and return its path."""
+    built = subprocess.run(
+        [
+            "cargo",
+            "test",
+            "--locked",
+            "-p",
+            "dwkd-broker",
+            "--bin",
+            "dwkd-broker",
+            "--no-run",
+            "--message-format=json",
+        ],
+        cwd=str(ROOT),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if built.returncode != 0:
+        raise TaskError(f"the broker's unit tests did not build:\n{built.stderr[-2000:]}")
+    for line in built.stdout.splitlines():
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        target = record.get("target") or {}
+        if (
+            record.get("reason") == "compiler-artifact"
+            and (record.get("profile") or {}).get("test")
+            and target.get("name") == "dwkd-broker"
+            and record.get("executable")
+        ):
+            return str(record["executable"])
+    raise TaskError("the broker's unit-test binary was not found in cargo's output")
+
+
+def d11_privileged() -> bool:
+    """Whether this run may use passwordless sudo to make the hosts a case
+    needs (a root-owned binary, Yama at 0, a system cgroup). Never inferred:
+    only `DW_D11_PRIVILEGED=1` says so, and a developer's machine is never
+    changed without it."""
+    if os.environ.get("DW_D11_PRIVILEGED", "").strip() != "1":
+        return False
+    return subprocess.run(["sudo", "-n", "true"], capture_output=True, check=False).returncode == 0
+
+
+def no_swap_scope(*properties: str) -> list[str] | None:
+    """A command prefix that runs a command in a fresh transient cgroup whose
+    `memory.swap.max` is 0 (and `properties`), proved by reading it from
+    inside -- or `None`. The user's own systemd first, needing no privilege;
+    then, only where `d11_privileged`, the system's with `setpriv` back to
+    this user."""
+    props = [f"--property={p}" for p in ("MemorySwapMax=0", *properties)]
+    probe = [
+        "sh",
+        "-c",
+        'cat "/sys/fs/cgroup$(sed -n "s/^0:://p" /proc/self/cgroup)/memory.swap.max"',
+    ]
+    candidates = [["systemd-run", "--user", "--scope", "--quiet", *props, "--"]]
+    if d11_privileged():
+        candidates.append(
+            [
+                "sudo",
+                "-n",
+                "systemd-run",
+                "--scope",
+                "--quiet",
+                *props,
+                "--",
+                "setpriv",
+                f"--reuid={os.getuid()}",
+                f"--regid={os.getgid()}",
+                "--init-groups",
+                "--",
+            ]
+        )
+    for prefix in candidates:
+        if shutil.which(prefix[0]) is None:
+            continue
+        try:
+            inside = subprocess.run(
+                [*prefix, *probe], capture_output=True, text=True, timeout=60, check=False
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        if inside.returncode == 0 and inside.stdout.strip() == "0":
+            return prefix
+    return None
+
+
+def d11_reported(output: str) -> dict[str, str]:
+    """Every `D11-EVIDENCE` case printed, and its outcome."""
+    reported: dict[str, str] = {}
+    for line in output.splitlines():
+        at = line.find(D11_EVIDENCE_PREFIX)
+        if at < 0:
+            continue
+        try:
+            record = json.loads(line[at + len(D11_EVIDENCE_PREFIX) :])
+        except json.JSONDecodeError as exc:
+            raise TaskError(f"unreadable evidence line: {line[:200]}") from exc
+        reported[str(record.get("case"))] = str(record.get("outcome"))
+    return reported
+
+
+def d11_privileged_cases(test_binary: str, outputs: list[str]) -> None:
+    """The cases only root can set up, each undone whatever happens: a
+    root-owned execute-only copy of the broker, and Yama at 0 for one run."""
+    broker = Path(test_binary).parent.parent / "dwkd-broker"
+    # The fixed path the case reads (the broker's tests read nothing ambient).
+    directory = Path(D11_XONLY_DIRECTORY)
+    xonly = directory / "dwkd-broker"
+    run("sudo", "-n", "install", "-d", "-o", "root", "-g", "root", "-m", "0755", str(directory))
+    run("sudo", "-n", "install", "-o", "root", "-g", "root", "-m", "0711", str(broker), str(xonly))
+    try:
+        outputs.append(
+            run_captured(
+                test_binary,
+                "--ignored",
+                "--exact",
+                "--nocapture",
+                "--test-threads=1",
+                HARDENING + "an_execute_only_binary_starts_its_worker_non_dumpable",
+            )
+        )
+    finally:
+        run("sudo", "-n", "rm", "-f", str(xonly))
+        run("sudo", "-n", "rmdir", str(directory))
+    yama = Path("/proc/sys/kernel/yama/ptrace_scope")
+    original = yama.read_text(encoding="utf-8").strip()
+    run("sudo", "-n", "sysctl", "-q", "-w", "kernel.yama.ptrace_scope=0")
+    try:
+        outputs.append(
+            run_captured(
+                test_binary,
+                "--exact",
+                "--nocapture",
+                "--test-threads=1",
+                HARDENING + "a_same_uid_observer_cannot_reach_a_worker_whatever_yama_allows",
+            )
+        )
+    finally:
+        run("sudo", "-n", "sysctl", "-q", "-w", f"kernel.yama.ptrace_scope={original}")
+
+
+def task_d11_hardening_evidence() -> None:
+    """D11 hardening's evidence (ADR-0053 §18): the exchange worker's
+    syscall filter, the broker's vouching from the kernel, the start-up
+    window and the swap posture -- on real workers and real hosts.
+
+    The broker's suites run first: the program evaluated for every syscall
+    number and both other calling conventions; real workers proving their
+    confinement before they are handed anything, as the kernel shows it; a
+    same-uid observer refused; stand-ins lacking one property each, handed
+    nothing; the host facts read before every hop. Then the host: a
+    credential hop refused on this host's swap; one performed in a real
+    cgroup that allows no swap, its worker in it; memory pressure there ending
+    in the OOM killer, never in swap. Then, only with `DW_D11_PRIVILEGED=1`
+    and passwordless sudo (the hosted job), a root-owned execute-only binary
+    whose worker is non-dumpable from `execve`, and Yama at 0 for one run --
+    the counterexample, restored at once. What the host cannot provide is
+    NOT EXERCISED, listed, and fails the task after everything else ran.
+    Linux only.
+    """
+    if not sys.platform.startswith("linux"):
+        raise TaskError(
+            "NOT EXERCISED: D11 hardening is Linux's (seccomp, Yama, cgroup v2); "
+            "use WSL2 on Windows"
+        )
+    run("cargo", "build", "--locked", "-p", "dwkd-broker")
+    test_binary = broker_unit_binary()
+    outputs: list[str] = []
+    suites = run_captured(test_binary, "--test-threads=1", "--nocapture", *D11_SUITES)
+    require_tests_ran(suites)
+    outputs.append(suites)
+    outputs.append(
+        run_captured(
+            test_binary,
+            "--ignored",
+            "--exact",
+            "--nocapture",
+            "--test-threads=1",
+            HARDENING + "on_a_host_with_swap_the_production_policy_refuses_a_credential_hop",
+        )
+    )
+    capped = no_swap_scope()
+    if capped is not None:
+        outputs.append(
+            run_captured(
+                *capped,
+                test_binary,
+                "--ignored",
+                "--exact",
+                "--nocapture",
+                "--test-threads=1",
+                HARDENING + "a_credential_hop_runs_under_a_real_no_swap_cap",
+            )
+        )
+    # `OOMPolicy=continue`: the OOM killer ends the allocating process, and
+    # the transient unit -- the test with it -- carries on to read what it did.
+    pressured = no_swap_scope("MemoryMax=256M", "OOMPolicy=continue")
+    if pressured is not None:
+        outputs.append(
+            run_captured(
+                *pressured,
+                test_binary,
+                "--ignored",
+                "--exact",
+                "--nocapture",
+                "--test-threads=1",
+                HARDENING + "memory_pressure_under_the_cap_ends_in_the_oom_killer_never_in_swap",
+            )
+        )
+    if d11_privileged():
+        d11_privileged_cases(test_binary, outputs)
+    reported = d11_reported("\n".join(outputs))
+    missing = [case for case in D11_CASES if case not in reported]
+    if missing:
+        raise TaskError(f"{len(missing)} D11 case(s) did not report: " + ", ".join(missing))
+    unexercised = [
+        f"{case} ({needs})"
+        for case, needs in D11_HOST_CASES
+        if case not in reported or reported[case].startswith("NOT-EXERCISED")
+    ]
+    exercised = len(D11_CASES) + len(D11_HOST_CASES) - len(unexercised)
+    print(
+        f"{GREEN}D11 hardening: {exercised} of {len(D11_CASES) + len(D11_HOST_CASES)} "
+        f"cases exercised{OFF}"
+    )
+    uvrun("dwcheck", "closure", "--report")
+    if unexercised:
+        raise TaskError("NOT EXERCISED on this host: " + "; ".join(unexercised))
+
+
+def _read(path: str) -> str | None:
+    try:
+        return Path(path).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+
+
+def _syscall_available(number: int, *args: int) -> str:
+    """Whether a syscall exists here, by calling it with harmless arguments
+    (`memfd_secret(0)` makes a descriptor, closed at once;
+    `landlock_create_ruleset(NULL, 0, VERSION)` only asks the ABI)."""
+    import ctypes
+
+    libc = ctypes.CDLL(None, use_errno=True)
+    result = libc.syscall(number, *args)
+    if result < 0:
+        return f"unavailable ({os.strerror(ctypes.get_errno())})"
+    if number == 447:
+        os.close(result)
+        return "available"
+    return f"available, ABI {result}"
+
+
+def task_d11_posture() -> None:
+    """Report, read-only, what this host gives D11 hardening (ADR-0053 §13).
+
+    Changes nothing: no sysctl, no cgroup, no service, no file. Prints Yama,
+    the broker binary's owner and mode, swap devices and this shell's
+    effective swap cap, page zeroing, hibernation, memory locking, whether
+    `memfd_secret` and Landlock exist, and on WSL2 the `.wslconfig` swap
+    setting -- and what each means for the broker's start-up and its
+    credential hops. Linux only.
+    """
+    if not sys.platform.startswith("linux"):
+        raise TaskError("the posture of a Linux host: run it in WSL2 on Windows")
+    import resource
+
+    yama = (_read("/proc/sys/kernel/yama/ptrace_scope") or "absent").strip()
+    print(f"Yama ptrace_scope: {yama}  (1 or more closes the start-up window by itself)")
+    for candidate in (
+        os.environ.get("DW_BROKER_BINARY", ""),
+        "/usr/libexec/direwolf/dwkd-broker",
+        "/usr/local/libexec/direwolf/dwkd-broker",
+        str(ROOT / "target" / "release" / "dwkd-broker"),
+    ):
+        if candidate and Path(candidate).exists():
+            st = Path(candidate).stat()
+            execute_only = st.st_uid == 0 and st.st_mode & 0o044 == 0
+            print(
+                f"broker binary {candidate}: owner uid {st.st_uid}, mode {st.st_mode & 0o7777:04o}"
+                f" -> execute-only {execute_only}  (closes the window from execve)"
+            )
+    swaps = [line for line in (_read("/proc/swaps") or "").splitlines()[1:] if line.strip()]
+    print(f"swap devices: {len(swaps)}" + "".join(f"\n  {line}" for line in swaps))
+    cgroup = next(
+        (
+            line[3:]
+            for line in (_read("/proc/self/cgroup") or "").splitlines()
+            if line.startswith("0::")
+        ),
+        None,
+    )
+    capped_at = None
+    if cgroup:
+        at = cgroup.rstrip("/")
+        while at:
+            if (_read(f"/sys/fs/cgroup{at}/memory.swap.max") or "").strip() == "0":
+                capped_at = at
+                break
+            at = at.rsplit("/", 1)[0]
+    print(f"this shell's cgroup: {cgroup}; swap capped to 0 at: {capped_at or 'nowhere'}")
+    if not swaps:
+        print("  -> no swap device: credential hops are performed (re-checked every hop)")
+    elif capped_at:
+        print("  -> a broker started here may perform credential hops")
+    else:
+        print(
+            "  -> a broker started here refuses credential hops unless --allow-swappable-workers "
+            "(development only); run it under MemorySwapMax=0 instead"
+        )
+    zswap = (_read("/sys/module/zswap/parameters/enabled") or "absent").strip()
+    print(f"zswap enabled: {zswap}")
+    cmdline = (_read("/proc/cmdline") or "").split()
+    zeroing = {
+        k: v
+        for k, _, v in (w.partition("=") for w in cmdline)
+        if k in ("init_on_alloc", "init_on_free")
+    }
+    print(
+        f"page zeroing on the kernel command line: {zeroing or 'none (the build default applies)'}"
+    )
+    print(f"hibernation (/sys/power/disk): {(_read('/sys/power/disk') or 'absent').strip()}")
+    print(f"suid_dumpable: {(_read('/proc/sys/fs/suid_dumpable') or 'absent').strip()}")
+    soft, hard = resource.getrlimit(resource.RLIMIT_MEMLOCK)
+    print(f"RLIMIT_MEMLOCK: soft {soft}, hard {hard}")
+    if platform.machine() == "x86_64":
+        print(f"memfd_secret: {_syscall_available(447, 0)}")
+        print(f"Landlock: {_syscall_available(444, 0, 0, 1)}")
+    release = (_read("/proc/version") or "").lower()
+    if "microsoft" in release:
+        print(
+            "WSL2: the guest's swap is the VM's; the Windows pagefile and the hypervisor "
+            "are outside it"
+        )
+        configs = sorted(Path("/mnt/c/Users").glob("*/.wslconfig"))
+        if not configs:
+            print("  no %UserProfile%\\.wslconfig: WSL's defaults (a swap file of 25% of memory)")
+        for config in configs:
+            text = _read(str(config)) or ""
+            settings = [
+                line.strip()
+                for line in text.splitlines()
+                if line.strip().lower().startswith(("swap", "kernelcommandline"))
+            ]
+            print(f"  {config}: {settings or 'no swap setting (the default: 25% of memory)'}")
+
+
+# The mutation review (ADR-0053 §18): each line weakens one D11 guard; each
+# mutant must compile and must fail the broker's suites -- the program's
+# evaluation, the vouching's tests, the real workers and the stand-ins, the
+# host facts. Files are restored and checked byte for byte.
+D11_MUTATIONS = (
+    (
+        "the worker installs no filter",
+        "crates/dwkd-broker/src/http/confine.rs",
+        "seccompiler::apply_filter_all_threads(&program)"
+        '.map_err(|_| "the kernel refused the filter")',
+        "{\n        let _ = program;\n        Ok(())\n    }",
+    ),
+    (
+        "the program allows a new socket",
+        "crates/dwkd-broker/src/http/confine.rs",
+        '    ("read", libc::SYS_read),\n',
+        '    ("read", libc::SYS_read),\n    ("socket", libc::SYS_socket),\n',
+    ),
+    (
+        "the program allows execve",
+        "crates/dwkd-broker/src/http/confine.rs",
+        '    ("write", libc::SYS_write),\n',
+        '    ("write", libc::SYS_write),\n    ("execve", libc::SYS_execve),\n',
+    ),
+    (
+        "another architecture's table is allowed",
+        "crates/dwkd-broker/src/http/confine.rs",
+        "jump(JEQ_K, AUDIT_ARCH, To::Next, To::Kill)",
+        "jump(JEQ_K, AUDIT_ARCH, To::Next, To::Next)",
+    ),
+    (
+        "the x32 convention is allowed",
+        "crates/dwkd-broker/src/http/confine.rs",
+        "jump(JGE_K, X32_SYSCALL_BIT, To::Kill, To::Next)",
+        "jump(JGE_K, X32_SYSCALL_BIT, To::Next, To::Next)",
+    ),
+    (
+        "an executable mapping is allowed",
+        "crates/dwkd-broker/src/http/confine.rs",
+        '("mmap", libc::SYS_mmap, vec![Check::Clear(2, exec)])',
+        '("mmap", libc::SYS_mmap, vec![Check::Clear(2, 0)])',
+    ),
+    (
+        "fcntl may set another process as the signal owner",
+        "crates/dwkd-broker/src/http/confine.rs",
+        "        libc::F_DUPFD_CLOEXEC,\n    ]",
+        "        libc::F_DUPFD_CLOEXEC,\n        libc::F_SETOWN,\n    ]",
+    ),
+    (
+        "tgkill may signal any process",
+        "crates/dwkd-broker/src/http/confine.rs",
+        "vec![Check::AnyOf(0, vec![own_pid])]",
+        "vec![Check::Clear(0, 0)]",
+    ),
+    (
+        "the broker hands over whatever the worker said",
+        "crates/dwkd-broker/src/http/worker.rs",
+        "    match vouched(&ours, &child, authorisation.credential.is_some(), policy) {",
+        "    match vouched(&ours, &child, authorisation.credential.is_some(), policy)\n"
+        "        .or_else(|_| Ok::<Ready, String>(Ready { at_exec: 255, answers: Vec::new() }))\n"
+        "    {",
+    ),
+    (
+        "a worker without a filter is vouched for",
+        "crates/dwkd-broker/src/http/vouch.rs",
+        '    if field(status, "Seccomp") != Some(2) {',
+        '    if false && field(status, "Seccomp") != Some(2) {',
+    ),
+    (
+        "a worker without no_new_privs is vouched for",
+        "crates/dwkd-broker/src/http/vouch.rs",
+        '    if field(status, "NoNewPrivs") != Some(1) {',
+        '    if false && field(status, "NoNewPrivs") != Some(1) {',
+    ),
+    (
+        "a traced worker is vouched for",
+        "crates/dwkd-broker/src/http/vouch.rs",
+        '    if field(status, "TracerPid") != Some(0) {',
+        '    if false && field(status, "TracerPid") != Some(0) {',
+    ),
+    (
+        "a dumpable worker is vouched for",
+        "crates/dwkd-broker/src/http/vouch.rs",
+        "    if owner == worker_uid {",
+        "    if false && owner == worker_uid {",
+    ),
+    (
+        "an attempt the worker reports not refused is believed",
+        "crates/dwkd-broker/src/http/vouch.rs",
+        "    if answers.iter().any(|code| *code != 0) {",
+        "    if false && answers.iter().any(|code| *code != 0) {",
+    ),
+    (
+        "an open start-up window is not read before a hop",
+        "crates/dwkd-broker/src/http/mod.rs",
+        "        if posture.startup_window_closed() {",
+        "        if true || posture.startup_window_closed() {",
+    ),
+    (
+        "an open start-up window counts as acknowledged",
+        "crates/dwkd-broker/src/http/mod.rs",
+        "        if self.traceable == TraceableWorkers::Permitted {",
+        "        if true || self.traceable == TraceableWorkers::Permitted {",
+    ),
+    (
+        "swappable memory does not stop a credential hop",
+        "crates/dwkd-broker/src/http/mod.rs",
+        "        if swap.protected() {",
+        "        if true || swap.protected() {",
+    ),
+    (
+        "swappable memory counts as acknowledged",
+        "crates/dwkd-broker/src/http/mod.rs",
+        "        if self.swappable == SwappableWorkers::Permitted {",
+        "        if true || self.swappable == SwappableWorkers::Permitted {",
+    ),
+    (
+        "the broker's own memory is not judged before it reads a credential",
+        "crates/dwkd-broker/src/http/mod.rs",
+        "                    self.policy.admits_credential(None)\n",
+        "                    Ok(())\n",
+    ),
+    (
+        "the worker's memory is not judged before it is handed a credential",
+        "crates/dwkd-broker/src/http/worker.rs",
+        "        policy.admits_credential(Some(child.id()))?;\n",
+        "        let _ = policy;\n",
+    ),
+    (
+        "a non-zero swap cap counts as none",
+        "crates/dwkd-broker/src/posture.rs",
+        '.find(|(_, limit)| limit.as_deref().map(str::trim) == Some("0"))',
+        ".find(|(_, limit)| limit.is_some())",
+    ),
+    (
+        "unreadable swap counts as no swap device",
+        "crates/dwkd-broker/src/posture.rs",
+        "    if total_kib == Some(0) {",
+        "    if total_kib.is_none() || total_kib == Some(0) {",
+    ),
+)
+
+
+def task_d11_hardening_mutations() -> None:
+    """Weaken each D11 guard in turn; the broker's suites must catch every
+    one. Every file is restored byte-identically whatever happens, and
+    checked. Never run it beside another build."""
+    killed: list[str] = []
+    for what, rel, old, new in D11_MUTATIONS:
+        path = ROOT / rel
+        original = path.read_bytes()
+        digest = hashlib.sha256(original).hexdigest()
+        text = original.decode("utf-8")
+        if text.count(old) != 1:
+            raise TaskError(f"mutation `{what}`: its target is not in {rel} exactly once")
+        print(f"{BOLD}mutant: {what}{OFF}")
+        outcome = "survived"
+        try:
+            path.write_bytes(text.replace(old, new).encode("utf-8"))
+            try:
+                run("cargo", "build", "--locked", "-p", "dwkd-broker")
+                test_binary = broker_unit_binary()
+            except TaskError:
+                outcome = "did not compile"
+            else:
+                try:
+                    output = run_captured(
+                        test_binary,
+                        "--test-threads=1",
+                        "http::",
+                        "posture::",
+                        "config::",
+                        "tests::the_broker_serves_only",
+                        "tests::swappable_memory",
+                    )
+                    require_tests_ran(output)
+                except TaskError as exc:
+                    outcome = f"killed by the broker's suites: {str(exc)[:160]}"
+        finally:
+            path.write_bytes(original)
+        if hashlib.sha256(path.read_bytes()).hexdigest() != digest:
+            raise TaskError(f"{rel} was not restored byte-identically")
+        print(f"{DIM}restored {rel} (sha256 {digest[:16]}...){OFF}")
+        if not outcome.startswith("killed"):
+            raise TaskError(f"mutant `{what}` {outcome}: nothing guards it")
+        killed.append(what)
+        print(f"{GREEN}mutant {outcome[:60]}: {what}{OFF}")
+    print(
+        f"{GREEN}D11 hardening mutation review: {len(killed)} of {len(D11_MUTATIONS)} killed{OFF}"
+    )
+    # The binary the suites last built was a mutant's: rebuild the original.
+    run("cargo", "build", "--locked", "-p", "dwkd-broker")
+
+
 # --- M5c: kernel-performed net.http (ADR-0050) --------------------------------
 
 NET_EVIDENCE_PREFIX = "NET-EVIDENCE "
@@ -4250,6 +4866,9 @@ TASKS = {
     "net-http-evidence": task_net_http_evidence,
     "net-http-mutations": task_net_http_mutations,
     "sandbox-workload-mutations": task_sandbox_workload_mutations,
+    "d11-hardening-evidence": task_d11_hardening_evidence,
+    "d11-hardening-mutations": task_d11_hardening_mutations,
+    "d11-posture": task_d11_posture,
     "fuzz-smoke": task_fuzz_smoke,
     "fuzz": task_fuzz,
     "security": task_security,

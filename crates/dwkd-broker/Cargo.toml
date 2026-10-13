@@ -51,6 +51,12 @@ dwk-sandbox-profile = { workspace = true }
 # `AtFlags`), and the kernel's peer credentials on the private channel and the
 # helper's control socket (ADR-0049; `socket`): see the workspace manifest.
 nix = { workspace = true, features = ["process", "fs", "socket"] }
+# D11 hardening (ADR-0053): the exchange worker installs its own syscall
+# filter before it can receive anything. Only `apply_filter` is used; the
+# program is `src/http/confine.rs`'s, and nothing else names the crate (TX051).
+seccompiler = { workspace = true }
+# That program's numbers and constants, as the target defines them.
+libc = { workspace = true }
 # M4c (ADR-0044 §12): `fs.patch` proves a file holds its base revision, and
 # its result the post revision, by SHA-256 -- the digest the runtime states
 # them by. The same pinned, pure-Rust crate and features the authority uses.

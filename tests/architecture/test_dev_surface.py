@@ -52,7 +52,7 @@ def _without_comments(text: str) -> str:
 
 def _makefile_targets() -> set[str]:
     text = (REPO_ROOT / "Makefile").read_text(encoding="utf-8")
-    return set(re.findall(r"^([a-z][a-z-]*):\s", text, re.MULTILINE))
+    return set(re.findall(r"^([a-z][a-z0-9-]*):\s", text, re.MULTILINE))
 
 
 # --- the documented surface matches the implemented one --------------------

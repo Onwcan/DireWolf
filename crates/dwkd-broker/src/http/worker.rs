@@ -20,11 +20,17 @@
 //!
 //! | step | the worker | the broker |
 //! |---|---|---|
-//! | 1 | its stderr is the control channel (a socket pair); its peer must be its parent broker: same uid, pid = parent pid | spawns it: empty environment, stdin and stdout `/dev/null`, its own process group |
-//! | 2 | `RLIMIT_CORE` 0, not dumpable, the parent-death signal (`SIGKILL`), `no_new_privs`; no inheritable descriptor | sends the hand-over and the descriptors, then closes its copies |
-//! | 3 | receives the hand-over: the trust, the hop's time left, the authorisation frame; and one or two descriptors | -- |
-//! | 4 | `super::converse`: credential, request, TLS, response, redaction; `S` on the channel before the first request byte | reads the channel to end of file, under the hop's deadline and a grace |
-//! | 5 | `A`, the answer's length, the outcome frame; exits | reaps it, decodes the outcome strictly, checks it answers this hop |
+//! | 0 | -- | reads the host: the start-up window closed, and for a credential hop memory that cannot reach swap (`super::WorkerPolicy`) |
+//! | 1 | notes how its image began (`PR_GET_DUMPABLE`); its stderr is the control channel (a socket pair); its peer must be its parent broker: same uid, pid = parent pid | spawns it: empty environment, stdin and stdout `/dev/null`, its own process group |
+//! | 2 | `RLIMIT_CORE` 0, not dumpable, the parent-death signal (`SIGKILL`), `no_new_privs`; no inheritable descriptor | -- |
+//! | 3 | installs its syscall filter (`super::confine`), attempts every forbidden operation it can name and requires each refused; writes `R` and the answers | reads the ready line; reads the worker's `/proc` itself -- filter, `no_new_privs`, untraced, not dumpable (`super::vouch`) -- and for a credential hop its memory's swap; anything short and it hands over nothing |
+//! | 4 | receives the hand-over: the trust, the hop's time left, the authorisation frame; and one or two descriptors | sends the hand-over and the descriptors, then closes its copies |
+//! | 5 | `super::converse`: credential, request, TLS, response, redaction; `S` on the channel before the first request byte | reads the channel to end of file, under the hop's deadline and a grace |
+//! | 6 | `A`, the answer's length, the outcome frame; exits | reaps it, decodes the outcome strictly, checks it answers this hop |
+//!
+//! Nothing reaches a worker -- no connection, no credential, no byte of the
+//! authorisation -- before the broker has seen, from the kernel, that it is
+//! confined, untraced and closed to its own uid (ADR-0053 §4).
 //!
 //! **What the broker concludes** when no answer comes: a worker that never
 //! wrote `S` sent nothing (`HTTP_WORKER_FAILED`); one that did may have been
@@ -55,8 +61,10 @@ use rustix::net::{
     SendAncillaryMessage, SendFlags,
 };
 
+use super::confine::{ATTEMPTS, Answer};
 use super::tls::{ANCHOR_MAX_BYTES, Trust};
-use super::{Deadlines, Prepared, converse, outcome};
+use super::vouch::{self, Ready};
+use super::{Deadlines, Prepared, WorkerPolicy, converse, outcome};
 
 /// The hand-over's magic and version.
 const MAGIC: &[u8; 5] = b"DWHW1";
@@ -251,15 +259,44 @@ fn answer_of(bytes: &[u8], exchange: &HttpExchangeAuthorisation) -> Option<Outco
         .then(|| outcome.result())
 }
 
-/// Run one hop's exchange in a worker of `binary`: hand it `prepared` -- the
-/// connection and the credential's pipe -- and the hop, and return its
-/// answer. The broker's copies of both descriptors are closed once sent.
+/// The worker's ready line, then the kernel's own word for it: confined,
+/// untraced, not dumpable -- and, for a hop that carries a credential,
+/// memory that cannot reach swap. Read while the worker waits for its
+/// hand-over, before it has been handed anything.
+fn vouched(
+    control: &UnixStream,
+    child: &Child,
+    carries: bool,
+    policy: &WorkerPolicy,
+) -> Result<Ready, String> {
+    let mut line = vec![0u8; vouch::ready_len(ATTEMPTS)];
+    control
+        .set_read_timeout(Some(HAND_OVER))
+        .map_err(|_| "the control channel".to_owned())?;
+    let mut reader = control;
+    reader
+        .read_exact(&mut line)
+        .map_err(|_| "no ready line".to_owned())?;
+    let ready = vouch::judge_ready(&line, ATTEMPTS)?;
+    vouch::worker(child.id())?;
+    if carries {
+        policy.admits_credential(Some(child.id()))?;
+    }
+    Ok(ready)
+}
+
+/// Run one hop's exchange in a worker of `binary`: once the worker is
+/// vouched for, hand it `prepared` -- the connection and the credential's
+/// pipe -- and the hop, and return its answer. The broker's copies of both
+/// descriptors are closed once sent, or dropped unsent when the worker is
+/// not vouched for.
 pub(super) fn exchange(
     binary: &Path,
     trust: &Trust,
     authorisation: &HttpExchangeAuthorisation,
     prepared: Prepared,
     hop_until: Instant,
+    policy: &WorkerPolicy,
 ) -> OutcomeResult {
     let failed = OutcomeResult::Refused(BrokerRefusal::HttpWorkerFailed);
     let Ok(frame) = Authorisation::HttpExchange(authorisation.clone()).encode_frame() else {
@@ -288,6 +325,19 @@ pub(super) fn exchange(
     // The parent's copy of the worker's end closes here: end of file on ours
     // means the worker's side closed.
     drop(command);
+    match vouched(&ours, &child, authorisation.credential.is_some(), policy) {
+        Ok(ready) => crate::event(&format!(
+            "http_worker_vouched pid={} at_exec_dumpable={} attempts_refused={}",
+            child.id(),
+            ready.at_exec,
+            ready.answers.len()
+        )),
+        Err(why) => {
+            crate::event(&format!("http_worker_refused reason=\"{why}\""));
+            abandon(&mut child);
+            return failed;
+        }
+    }
     let Prepared { socket, credential } = prepared;
     let socket = OwnedFd::from(socket);
     let mut descriptors = vec![&socket];
@@ -376,8 +426,24 @@ fn harden(parent: Option<rustix::process::Pid>) -> bool {
         && crate::process::inheritable_descriptors().is_ok_and(|found| found.is_empty())
 }
 
+/// `PR_GET_DUMPABLE` as one byte: 0 not dumpable, 1 dumpable, 2 root-only,
+/// 255 unknown.
+fn dumpable_code() -> u8 {
+    use rustix::process::DumpableBehavior;
+    match rustix::process::dumpable_behavior() {
+        Ok(DumpableBehavior::NotDumpable) => 0,
+        Ok(DumpableBehavior::Dumpable) => 1,
+        Ok(DumpableBehavior::DumpableReadableOnlyByRoot) => 2,
+        Err(_) => u8::MAX,
+    }
+}
+
 /// The worker's whole life: one hop, answered, or nothing at all.
 pub(crate) fn serve() -> ExitCode {
+    // 0. How the kernel made this image at `execve`, before anything here
+    // changes it: not dumpable from its first instruction when its binary
+    // is execute-only (ADR-0053 §4).
+    let at_exec = dumpable_code();
     // 1. The control channel: stderr, as the broker spawned it, and its peer
     // the parent broker.
     let Ok(control) = std::io::stderr().as_fd().try_clone_to_owned() else {
@@ -397,7 +463,24 @@ pub(crate) fn serve() -> ExitCode {
     if !harden(parent) {
         return ExitCode::from(3);
     }
-    // 3. The hop.
+    // 3. Confined before anything is received, and proved so: every
+    // forbidden attempt refused by the kernel, or the worker goes no further.
+    let ids = super::confine::Ids::now();
+    if super::confine::install().is_err() {
+        return ExitCode::from(7);
+    }
+    let answers = super::confine::attempt(&control, &ids);
+    if answers.len() != ATTEMPTS || answers.iter().any(|(_, a)| *a != Answer::Refused) {
+        return ExitCode::from(8);
+    }
+    let ready = vouch::encode_ready(&Ready {
+        at_exec,
+        answers: answers.iter().map(|(_, a)| a.code()).collect(),
+    });
+    if control.write_all(&ready).is_err() {
+        return ExitCode::from(6);
+    }
+    // 4. The hop, once the broker has vouched for this worker.
     let Some((hand_over, prepared)) = receive(&control) else {
         return ExitCode::from(4);
     };
@@ -414,7 +497,7 @@ pub(crate) fn serve() -> ExitCode {
         )),
         Err(_) => OutcomeResult::Refused(BrokerRefusal::HttpRequestInvalid),
     };
-    // 4. The answer, and the end.
+    // 5. The answer, and the end.
     let exchange = hand_over.exchange;
     let answer = BrokerOutcome::new(exchange.channel, exchange.invocation_id, result);
     let Ok(frame) = dwk_proto::brokerp::encode_frame(&answer) else {
@@ -451,6 +534,8 @@ mod tests {
     /// handed.
     struct Ran {
         status: Option<i32>,
+        /// The ready line, when the worker got as far as writing it.
+        ready: Vec<u8>,
         answer: Vec<u8>,
         heard: Vec<u8>,
     }
@@ -507,8 +592,17 @@ mod tests {
         let mut answer = Vec::new();
         let _ = (&ours).read_to_end(&mut answer);
         let status = child.wait().unwrap().code();
+        let whole = super::vouch::ready_len(super::ATTEMPTS);
+        let (ready, answer) =
+            if answer.first() == Some(&super::vouch::READY) && answer.len() >= whole {
+                let rest = answer.split_off(whole);
+                (answer, rest)
+            } else {
+                (Vec::new(), answer)
+            };
         Ran {
             status,
+            ready,
             answer,
             heard: listening.join().unwrap(),
         }
@@ -544,6 +638,11 @@ mod tests {
         let (origin, handed) = connection();
         let ran = real_worker(&payload(&plain), vec![handed], origin, None);
         assert_eq!(ran.status, Some(0));
+        assert!(
+            super::vouch::judge_ready(&ran.ready, super::ATTEMPTS).is_ok(),
+            "confined and proved so: {:?}",
+            ran.ready
+        );
         assert_eq!(ran.heard.first(), Some(&0x16), "a TLS handshake record");
         assert_eq!(ran.answer.first(), Some(&ANSWER));
         // Refused, each: nothing sent, nothing answered.
@@ -581,6 +680,7 @@ mod tests {
         let ran = real_worker(&payload(&plain), vec![handed], origin, Some(&leaked));
         assert_eq!(ran.status, Some(3), "an inherited descriptor");
         assert!(ran.heard.is_empty() && ran.answer.is_empty());
+        assert!(ran.ready.is_empty(), "refused before it was confined");
         drop((reader, leaked));
         super::super::tests::evidence(
             "worker-refuses-an-unpromised-hand-over",

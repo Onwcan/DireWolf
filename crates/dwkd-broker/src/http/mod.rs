@@ -61,9 +61,11 @@
 //!
 //! [ADR-0050]: ../../../../docs/adr/0050-m5c-kernel-performed-net-http-ssrf-redirects-and-credential-egress.md
 
+pub(crate) mod confine;
 mod connect;
 mod render;
 pub(crate) mod tls;
+mod vouch;
 pub(crate) mod worker;
 
 #[cfg(test)]
@@ -73,7 +75,7 @@ use std::io::{ErrorKind, Read as _, Write as _};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, TcpStream};
 use std::os::fd::OwnedFd;
 use std::os::unix::net::UnixStream;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -94,6 +96,7 @@ use ureq_proto::client::{Call, RecvResponseResult, SendRequestResult};
 use ureq_proto::http::{HeaderMap, HeaderName, HeaderValue, Method, Request, Response, Version};
 use zeroize::Zeroizing;
 
+use crate::config::{SwappableWorkers, TraceableWorkers};
 use crate::egress::{guard, resolve};
 use crate::secret::{Needle, Redactor};
 
@@ -156,14 +159,88 @@ enum Runner {
     InProcess(Arc<ClientConfig>),
 }
 
+/// What the broker requires of the host before a hop's exchange worker is
+/// started, beyond the worker's own confinement (ADR-0053 §§4, 7): the
+/// start-up window closed, and -- for a hop that carries a credential --
+/// memory that cannot be written to swap, this broker's and then the
+/// worker's. Read from the host at every hop, never cached; refused unless
+/// the operator acknowledged it at start (`--allow-traceable-workers`,
+/// `--allow-swappable-workers`, each logged `REDUCED ASSURANCE`).
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct WorkerPolicy {
+    pub(crate) traceable: TraceableWorkers,
+    pub(crate) swappable: SwappableWorkers,
+    /// The start-up window's facts, for the worker's binary.
+    pub(crate) startup: fn(&Path) -> crate::posture::Posture,
+    /// Where a process's anonymous memory can go (`None`: this broker's).
+    pub(crate) swap: fn(Option<u32>) -> crate::posture::Swap,
+}
+
+impl WorkerPolicy {
+    /// The host's own facts, read live, under the operator's
+    /// acknowledgements.
+    #[must_use]
+    pub(crate) fn of_host(traceable: TraceableWorkers, swappable: SwappableWorkers) -> Self {
+        Self {
+            traceable,
+            swappable,
+            startup: crate::posture::read,
+            swap: crate::posture::swap_of,
+        }
+    }
+
+    /// Whether a worker of `binary` may be started now.
+    ///
+    /// # Errors
+    ///
+    /// The window is open and nobody acknowledged it.
+    pub(crate) fn admits_start(&self, binary: &Path) -> Result<(), String> {
+        // Acknowledged: nothing the host says changes the answer, so nothing
+        // is read.
+        if self.traceable == TraceableWorkers::Permitted {
+            return Ok(());
+        }
+        let posture = (self.startup)(binary);
+        if posture.startup_window_closed() {
+            Ok(())
+        } else {
+            Err(format!("startup window open: {}", posture.describe()))
+        }
+    }
+
+    /// Whether process `pid` -- this broker for `None` -- may hold a
+    /// credential now.
+    ///
+    /// # Errors
+    ///
+    /// Its memory can be written to swap and nobody acknowledged it.
+    pub(crate) fn admits_credential(&self, pid: Option<u32>) -> Result<(), String> {
+        // Acknowledged: as above.
+        if self.swappable == SwappableWorkers::Permitted {
+            return Ok(());
+        }
+        let swap = (self.swap)(pid);
+        if swap.protected() {
+            Ok(())
+        } else {
+            Err(format!(
+                "a credential's memory could reach swap ({}): set memory.swap.max to 0 \
+                 (MemorySwapMax=0) or run without swap",
+                swap.describe()
+            ))
+        }
+    }
+}
+
 /// The client: the broker's one resolver, its one trust choice, its
-/// deadlines, and where exchanges run.
+/// deadlines, where exchanges run, and what it requires of a worker's host.
 #[derive(Debug)]
 pub(crate) struct Client {
     resolver: resolve::Shared,
     trust: tls::Trust,
     deadlines: Deadlines,
     runner: Runner,
+    policy: WorkerPolicy,
 }
 
 /// What the broker hands a hop's exchange: the connection to a pinned
@@ -228,12 +305,14 @@ impl Client {
         trust: tls::Trust,
         deadlines: Deadlines,
         worker_binary: PathBuf,
+        policy: WorkerPolicy,
     ) -> Self {
         Self {
             resolver,
             trust,
             deadlines,
             runner: Runner::Worker(worker_binary),
+            policy,
         }
     }
 
@@ -254,6 +333,8 @@ impl Client {
             trust,
             deadlines,
             runner: Runner::InProcess(config),
+            // Never consulted: no worker is started in process.
+            policy: WorkerPolicy::of_host(TraceableWorkers::Refused, SwappableWorkers::Refused),
         }
     }
 
@@ -308,14 +389,36 @@ impl Client {
         // The hop's bound, and never past the channel's: the outcome must
         // still be sent.
         let hop_until = (started + self.deadlines.hop).min(until);
+        // The host as it is now, before anything of the hop -- the
+        // credential included -- is touched (ADR-0053 §§4, 7).
+        let admitted = match &self.runner {
+            Runner::Worker(binary) => self.policy.admits_start(binary).and_then(|()| {
+                if authorisation.credential.is_some() {
+                    self.policy.admits_credential(None)
+                } else {
+                    Ok(())
+                }
+            }),
+            #[cfg(test)]
+            Runner::InProcess(_) => Ok(()),
+        };
+        if let Err(why) = admitted {
+            crate::event(&format!("http_worker_refused reason=\"{why}\""));
+            return OutcomeResult::Refused(BrokerRefusal::HttpWorkerFailed);
+        }
         let prepared = match self.prepare(authorisation, secret, started, hop_until) {
             Ok(prepared) => prepared,
             Err(refusal) => return OutcomeResult::Refused(refusal),
         };
         match &self.runner {
-            Runner::Worker(binary) => {
-                worker::exchange(binary, &self.trust, authorisation, prepared, hop_until)
-            }
+            Runner::Worker(binary) => worker::exchange(
+                binary,
+                &self.trust,
+                authorisation,
+                prepared,
+                hop_until,
+                &self.policy,
+            ),
             #[cfg(test)]
             Runner::InProcess(config) => outcome(converse(
                 config,

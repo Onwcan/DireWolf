@@ -909,6 +909,10 @@ M4E:DONE"
             &[
                 "--allow-shared-authority-uid",
                 "--allow-dumpable",
+                // Development and CI hosts have swap: credential hops here run
+                // under the acknowledgement; the strict refusal is D11
+                // hardening's own evidence (ADR-0053 §7).
+                "--allow-swappable-workers",
                 "--allow-evidence-egress",
                 fixture.to_str().unwrap(),
                 "--allow-evidence-trust",
@@ -942,14 +946,18 @@ M4E:DONE"
         );
         // A second use, towards a port nothing listens on: the broker reads
         // the value once, renders it, and fails to connect. Nothing else is
-        // read: `rchar` grows by exactly the value.
+        // read but the one host fact a hop reads first -- Yama's setting, the
+        // start-up window's (D11 hardening, ADR-0053 §4); this broker runs
+        // with swap acknowledged, so swap is not read: `rchar` grows by
+        // exactly the value and that setting.
+        let yama = std::fs::read("/proc/sys/kernel/yama/ptrace_scope").map_or(0, |b| b.len());
         let before = rchar(broker.pid);
         host.stdin.as_mut().unwrap().write_all(b"go\n").unwrap();
         let answers = until_marker(&lines, "DONE");
         assert_eq!(answers, ["FAILED CONNECT_FAILED"]);
         assert_eq!(
             rchar(broker.pid) - before,
-            u64::try_from(value.len()).unwrap()
+            u64::try_from(value.len() + yama).unwrap()
         );
         evidence("mode-a-one-shot", "rchar-exactly-one-value");
         std::thread::sleep(Duration::from_millis(100));
@@ -1094,6 +1102,8 @@ M4E:DONE"
                 &[
                     "--allow-shared-authority-uid",
                     "--allow-dumpable",
+                    // As above: the acknowledgement on hosts with swap.
+                    "--allow-swappable-workers",
                     "--allow-evidence-egress",
                     fixture.to_str().unwrap(),
                     "--allow-evidence-trust",

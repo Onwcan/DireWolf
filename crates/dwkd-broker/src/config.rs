@@ -47,6 +47,10 @@ pub(crate) struct ServeConfig {
     /// Yama's `ptrace_scope` 0, or no Yama, and a broker binary its uid can
     /// read (ADR-0050 §§9, 20 (d), 21; ADR-0052 §13).
     pub(crate) traceable_workers: TraceableWorkers,
+    /// Whether a hop that carries a credential may run where this broker's
+    /// memory, or its exchange worker's, can be written to swap (ADR-0053
+    /// §7).
+    pub(crate) swappable_workers: SwappableWorkers,
     /// The operator's acknowledgement that the evidence harness's `NO_NETWORK`
     /// environment topology may be built (M5a, ADR-0047 §10). Without it the
     /// broker builds `PROXY_ONLY` environments only (M5b). Stated at
@@ -75,6 +79,18 @@ pub(crate) enum TraceableWorkers {
     Refused,
     /// It serves, logging `REDUCED ASSURANCE`: the operator's development
     /// acknowledgement, `--allow-traceable-workers`. Never implied.
+    Permitted,
+}
+
+/// What the broker does with a hop that carries a credential where its
+/// memory, or its exchange worker's, can be written to swap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SwappableWorkers {
+    /// It refuses the hop: the default, and the only production answer.
+    Refused,
+    /// It performs it, having logged `REDUCED ASSURANCE` at start: the
+    /// operator's development acknowledgement, `--allow-swappable-workers`.
+    /// Never implied.
     Permitted,
 }
 
@@ -153,6 +169,7 @@ pub(crate) fn parse(args: &[String]) -> Result<Command, UsageError> {
     let mut shared = false;
     let mut dumpable = false;
     let mut traceable = false;
+    let mut swappable = false;
     let mut evidence_topology = false;
     // An acknowledgement is a flag with no value, given at most once.
     let acknowledge = |seen: &mut bool, flag: &str| {
@@ -185,6 +202,7 @@ pub(crate) fn parse(args: &[String]) -> Result<Command, UsageError> {
             "--allow-shared-authority-uid" => acknowledge(&mut shared, flag)?,
             "--allow-dumpable" => acknowledge(&mut dumpable, flag)?,
             "--allow-traceable-workers" => acknowledge(&mut traceable, flag)?,
+            "--allow-swappable-workers" => acknowledge(&mut swappable, flag)?,
             "--allow-evidence-topology" => acknowledge(&mut evidence_topology, flag)?,
             "--allow-evidence-egress" => evidence_path(flag, value()?, &mut evidence_egress)?,
             "--allow-evidence-trust" => evidence_path(flag, value()?, &mut evidence_trust)?,
@@ -222,6 +240,11 @@ pub(crate) fn parse(args: &[String]) -> Result<Command, UsageError> {
         } else {
             TraceableWorkers::Refused
         },
+        swappable_workers: if swappable {
+            SwappableWorkers::Permitted
+        } else {
+            SwappableWorkers::Refused
+        },
         evidence_topology_permitted: evidence_topology,
         evidence_egress,
         evidence_trust,
@@ -232,7 +255,7 @@ pub(crate) fn parse(args: &[String]) -> Result<Command, UsageError> {
 mod tests {
     use std::path::PathBuf;
 
-    use super::{Command, ServeConfig, TraceableWorkers, parse};
+    use super::{Command, ServeConfig, SwappableWorkers, TraceableWorkers, parse};
 
     /// A socket path that is absolute on this platform: `/b` is not, on
     /// Windows, and the parser is portable even though serving is not.
@@ -272,6 +295,7 @@ mod tests {
                 shared_uid_permitted: false,
                 dumpable_permitted: false,
                 traceable_workers: TraceableWorkers::Refused,
+                swappable_workers: SwappableWorkers::Refused,
                 evidence_topology_permitted: false,
                 evidence_egress: None,
                 evidence_trust: None,
@@ -360,6 +384,29 @@ mod tests {
             }))
         ));
         with.push("--allow-traceable-workers");
+        assert!(parse(&args(&with)).is_err());
+    }
+
+    #[test]
+    fn swappable_workers_are_an_explicit_acknowledgement_given_once() {
+        let base = ["serve", "--socket", "ABS", "--authority-uid", "7"];
+        assert!(matches!(
+            parse(&args(&base)),
+            Ok(Command::Serve(ServeConfig {
+                swappable_workers: SwappableWorkers::Refused,
+                ..
+            }))
+        ));
+        let mut with = base.to_vec();
+        with.push("--allow-swappable-workers");
+        assert!(matches!(
+            parse(&args(&with)),
+            Ok(Command::Serve(ServeConfig {
+                swappable_workers: SwappableWorkers::Permitted,
+                ..
+            }))
+        ));
+        with.push("--allow-swappable-workers");
         assert!(parse(&args(&with)).is_err());
     }
 

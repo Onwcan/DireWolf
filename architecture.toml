@@ -467,6 +467,9 @@ exempt_paths = [
     # origins are the far end of a test exchange. The client listens to
     # nothing.
     "crates/dwkd-broker/src/http/tests.rs",
+    # D11 hardening's tests (ADR-0053 §18), under `cfg(test)`: real workers,
+    # stand-ins, observers and cgroups -- exempt as `http/tests.rs` is.
+    "crates/dwkd-broker/src/http/hardening_tests.rs",
 ]
 suffixes = [".rs"]
 patterns = [
@@ -620,6 +623,9 @@ exempt_paths = [
     "crates/dwkd-broker/src/http/mod.rs",
     "crates/dwkd-broker/src/http/tls.rs",
     "crates/dwkd-broker/src/http/tests.rs",
+    # D11 hardening's tests (ADR-0053 §18), under `cfg(test)`: real workers,
+    # stand-ins, observers and cgroups -- exempt as `http/tests.rs` is.
+    "crates/dwkd-broker/src/http/hardening_tests.rs",
 ]
 suffixes = [".rs"]
 patterns = [
@@ -757,6 +763,16 @@ exempt_paths = [
     # the broker itself at start -- Yama's ptrace scope and its own binary's
     # owner and mode -- and nothing a workspace names.
     "crates/dwkd-broker/src/posture.rs",
+    # D11 hardening's tests (ADR-0053 §18), under `cfg(test)`: real workers,
+    # stand-ins, observers and cgroups -- exempt as `http/tests.rs` is.
+    "crates/dwkd-broker/src/http/hardening_tests.rs",
+    # D11 hardening (ADR-0053 §5): the worker's proof attempts to open
+    # `/proc/self/mem`, which its filter must refuse.
+    "crates/dwkd-broker/src/http/confine.rs",
+    # D11 hardening (ADR-0053 §4): the broker reads its own worker's
+    # `/proc/<pid>/status` and the owner of `/proc/<pid>/mem` -- the
+    # kernel's word that the worker is confined -- and nothing else.
+    "crates/dwkd-broker/src/http/vouch.rs",
 ]
 suffixes = [".rs"]
 patterns = [
@@ -978,6 +994,9 @@ exempt_paths = [
     # launch helper is handed its descriptors. It executes nothing a hop
     # names; TX049 keeps every other file from starting it.
     "crates/dwkd-broker/src/http/worker.rs",
+    # D11 hardening's tests (ADR-0053 §18), under `cfg(test)`: real workers,
+    # stand-ins, observers and cgroups -- exempt as `http/tests.rs` is.
+    "crates/dwkd-broker/src/http/hardening_tests.rs",
 ]
 suffixes = [".rs"]
 patterns = [
@@ -1007,6 +1026,15 @@ exempt_paths = [
     "crates/dwkd-broker/src/process/tests.rs",
     # M5c (ADR-0050): runs the test-PKI script with `bash`, under `cfg(test)`.
     "crates/dwkd-broker/src/http/tests.rs",
+    # D11 hardening's tests (ADR-0053 §18), under `cfg(test)`: real workers,
+    # stand-ins, observers and cgroups -- exempt as `http/tests.rs` is.
+    "crates/dwkd-broker/src/http/hardening_tests.rs",
+    "crates/dwkd-broker/src/http/confine_tests.rs",
+    # D11 hardening (ADR-0053 §5): the filter is built from the target's
+    # `libc` constants -- never a `libc` call (TX052) -- and the worker's
+    # proof attempts one `execve` of a path that cannot exist, which the
+    # filter must refuse. Nothing here spawns or executes.
+    "crates/dwkd-broker/src/http/confine.rs",
 ]
 suffixes = [".rs"]
 patterns = [
@@ -1049,6 +1077,8 @@ paths = ["crates/dwkd-broker/src"]
 exempt_paths = [
     "crates/dwkd-broker/src/process/helper.rs",
     "crates/dwkd-broker/src/hardening.rs",
+    # The program's evaluation names `execveat` among the calls it refuses.
+    "crates/dwkd-broker/src/http/confine_tests.rs",
 ]
 suffixes = [".rs"]
 patterns = [
@@ -1492,6 +1522,11 @@ exempt_paths = [
     "crates/dwkd-broker/src/egress/tests.rs",
     "crates/dwkd-broker/src/http/connect.rs",
     "crates/dwkd-broker/src/http/tests.rs",
+    # D11 hardening (ADR-0053 §5): the worker's proof attempts a socket of
+    # three families, a socket pair, and connect/bind/listen/accept on its
+    # own control channel -- every one refused by the filter it has just
+    # installed, or the worker goes no further. Nothing is dialled.
+    "crates/dwkd-broker/src/http/confine.rs",
 ]
 suffixes = [".rs"]
 patterns = [
@@ -1675,6 +1710,10 @@ exempt_paths = [
     "crates/dwkd-authority/src/server/peer.rs",
     "crates/dwkd-broker/src/peer.rs",
     "crates/dwkd-broker/src/process/helper.rs",
+    # D11 hardening (ADR-0053 §5): the exchange worker's proof of its own
+    # filter attempts one `execve` -- of a path that cannot exist -- which
+    # the filter must refuse; `nix::unistd::execv` is the safe call for it.
+    "crates/dwkd-broker/src/http/confine.rs",
 ]
 suffixes = [".rs"]
 # A binary's `use nix as _;` acknowledges the manifest edge for
@@ -1747,6 +1786,82 @@ crates, and the broker's integration tests acknowledge these crates only as
 """
 
 [[text_rules]]
+id = "TX051-the-exchange-workers-syscall-filter-is-one-module"
+paths = [
+    "crates/dwkd-authority/src",
+    "crates/dwkd-broker/src",
+    "crates/dwk-proto/src",
+    "crates/dwk-sandbox-relay/src",
+    "crates/dwk-sandbox-probe/src",
+    "crates/dwk-sandbox-profile/src",
+    "crates/direwolf-cli/src",
+]
+# FILES: the program and its installation, the program's evaluation, and
+# the real-worker evidence (which names errnos and syscalls to attempt).
+exempt_paths = [
+    "crates/dwkd-broker/src/http/confine.rs",
+    "crates/dwkd-broker/src/http/confine_tests.rs",
+    "crates/dwkd-broker/src/http/hardening_tests.rs",
+]
+suffixes = [".rs"]
+# A binary's or a test crate's `use … as _;` acknowledges the manifest edge
+# for `unused_crate_dependencies`; it is not a finding.
+patterns = [
+    '^(?!\s*//)(?!\s*use\s+(seccompiler|libc)\s+as\s+_\s*;).*\b(seccompiler|libc)\b',
+    '^(?!\s*//).*\b(PR_SET_SECCOMP|SECCOMP_SET_MODE_FILTER|SECCOMP_RET_[A-Z_]+|SECCOMP_FILTER_FLAG_[A-Z_]+)\b',
+    # An installation however it was imported.
+    '^(?!\s*//).*\bapply_filter\w*\s*\(',
+]
+reason = """
+The exchange worker's syscall filter is the one seccomp program DireWolf's
+daemons install (ADR-0053 §5): measured, evaluated instruction by
+instruction for every syscall number in `confine_tests.rs`, proved by every
+real worker before it is handed anything, and vouched for by the broker from
+the kernel. It is built and installed in one module, from the target's own
+constants, through the one reviewed call that hands the kernel a pointer.
+
+A second program elsewhere would be a filter nobody evaluated; raw `libc`
+elsewhere would be a way below `std`, `rustix` and `nix` around their
+reviewed uses (TX043); a seccomp constant elsewhere would be the start of
+either. The broker's integration tests acknowledge both crates only as
+`use … as _`.
+
+Hygiene, not containment: the containment is the filter itself, shown by
+`make d11-hardening-evidence`.
+"""
+
+[[text_rules]]
+id = "TX052-the-filter-module-only-names-constants-and-attempts"
+# The one file TX022, TX037, TX015 and TX043 exempt for its attempts: here,
+# and only here, the exemptions' bounds are enforced.
+paths = ["crates/dwkd-broker/src/http/confine.rs"]
+exempt_paths = []
+suffixes = [".rs"]
+patterns = [
+    # A `libc` function, called: the module names constants only.
+    '^(?!\s*//).*\blibc\s*::\s*[a-z_][a-z0-9_]*\s*\(',
+    # A process started, a closure between fork and exec, a shell.
+    '^(?!\s*//).*\b(Command|pre_exec|spawn|posix_spawn\w*|fork|vfork)\b',
+    # Anything ambient: the environment, a file other than the one attempt.
+    '^(?!\s*//).*\benv\s*::\s*(var|vars|var_os|vars_os)\b',
+    '^(?!\s*//).*\bstd\s*::\s*fs\s*::',
+    # A dial: an IP address, a port, a resolver.
+    '^(?!\s*//).*\b(TcpStream|TcpListener|UdpSocket|ToSocketAddrs|SocketAddrV4|SocketAddrV6|Ipv4Addr|Ipv6Addr)\b',
+]
+reason = """
+`http/confine.rs` is exempt from the rules that keep raw `libc`, `execve`,
+sockets and file reads out of the broker (TX015, TX022, TX037, TX043)
+because the worker's proof must attempt each forbidden operation -- and
+because the filter is built from the target's `libc` constants (ADR-0053
+§5). Those exemptions are for constants and refused attempts, and this rule
+holds them to that: no `libc` function is called, nothing is spawned or
+executed, nothing ambient is read, and nothing is dialled. An attempt that
+succeeded would be a worker that refuses to go on, not a capability.
+
+Hygiene, not containment.
+"""
+
+[[text_rules]]
 id = "TX045-a-credential-header-is-composed-in-one-place"
 paths = ["crates/dwkd-broker/src"]
 # The render, and nothing else: M5c retired M4e's render-and-drop with
@@ -1755,6 +1870,9 @@ paths = ["crates/dwkd-broker/src"]
 exempt_paths = [
     "crates/dwkd-broker/src/http/render.rs",
     "crates/dwkd-broker/src/http/tests.rs",
+    # D11 hardening's tests (ADR-0053 §18), under `cfg(test)`: real workers,
+    # stand-ins, observers and cgroups -- exempt as `http/tests.rs` is.
+    "crates/dwkd-broker/src/http/hardening_tests.rs",
 ]
 suffixes = [".rs"]
 patterns = [
@@ -1898,6 +2016,9 @@ exempt_paths = [
     "crates/dwkd-broker/src/main.rs",
     "crates/dwkd-broker/src/http/worker.rs",
     "crates/dwkd-broker/src/http/tests.rs",
+    # D11 hardening's tests (ADR-0053 §18), under `cfg(test)`: real workers,
+    # stand-ins, observers and cgroups -- exempt as `http/tests.rs` is.
+    "crates/dwkd-broker/src/http/hardening_tests.rs",
 ]
 suffixes = [".rs"]
 patterns = [

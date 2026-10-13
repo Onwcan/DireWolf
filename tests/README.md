@@ -166,6 +166,22 @@ the task. The broker's tests need a clean descriptor table — run them through
 `make`, which closes inherited descriptors. Locally the three-identity half is
 NOT EXERCISED; CI's Linux job creates the broker user.
 
+**D11 hardening tests** are the evidence behind `make d11-hardening-evidence`
+([ADR-0053](../docs/adr/0053-d11-exchange-worker-confinement-and-secret-memory.md) §18). `crates/dwkd-broker/src/http/confine_tests.rs`
+evaluates the exchange worker's seccomp program instruction by instruction for
+every syscall number, both other calling conventions and every argument rule,
+and makes the worker's forbidden attempts unconfined to show the refusals are
+the filter's. `crates/dwkd-broker/src/http/hardening_tests.rs` runs real
+workers -- confined and proved so before they are handed anything, as `/proc`
+shows; refused to a same-uid observer by every way in -- Python stand-ins that
+each lack one property and are handed nothing, the host facts read before every
+hop, and, `#[ignore]`d for the task to run where the host allows, a credential
+hop under a real `MemorySwapMax=0` cgroup, memory pressure there, an
+execute-only binary and Yama at 0 (the last two only with
+`DW_D11_PRIVILEGED=1` and passwordless sudo, undone after). Every case prints a
+`D11-EVIDENCE` line; what the host cannot provide is NOT EXERCISED and fails.
+`make d11-hardening-mutations` weakens each guard in turn; it is slow and local.
+
 **Sandbox workload tests (M5d.1)** are the evidence behind
 `make sandbox-workload-evidence` ([ADR-0052](../docs/adr/0052-m5d-sandboxed-process-exec.md) §17), on a real OCI
 runtime. `crates/dwkd-broker/tests/sandbox_workload.rs` drives the released broker

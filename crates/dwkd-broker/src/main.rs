@@ -303,8 +303,11 @@ fn serve(config: &config::ServeConfig) -> ExitCode {
 /// environment's workload or relay has — no flag overrides that (M5d,
 /// ADR-0052 §13); and, as ADR-0050 §21 requires, no process of its uid able
 /// to trace a process it starts before that process hardens itself, unless
-/// the operator acknowledged it for development. The facts are read here;
-/// the decision is [`admit`]'s.
+/// the operator acknowledged it for development. Where its memory can go is
+/// reported too (ADR-0053 §7): a broker whose memory can reach swap serves,
+/// and refuses every hop that carries a credential unless the operator
+/// acknowledged it -- a refusal said at start, never discovered by a hop.
+/// The facts are read here; the decision is [`admit`]'s.
 #[cfg(target_os = "linux")]
 fn deployment(config: &config::ServeConfig, own_uid: u32) -> Result<(), String> {
     let posture = std::env::current_exe().map_or(
@@ -314,9 +317,23 @@ fn deployment(config: &config::ServeConfig, own_uid: u32) -> Result<(), String> 
         },
         |binary| posture::read(&binary),
     );
-    crate::event(&format!("deployment_posture {}", posture.describe()));
-    for reduced in admit(config, own_uid, posture)? {
+    let swap = posture::swap_of(None);
+    crate::event(&format!(
+        "deployment_posture {} swap={} {}",
+        posture.describe(),
+        swap.describe(),
+        posture::page_zeroing_now()
+    ));
+    for reduced in admit(config, own_uid, posture, &swap)? {
         log(&format!("REDUCED ASSURANCE: {reduced}"));
+    }
+    if !swap.protected() && config.swappable_workers == config::SwappableWorkers::Refused {
+        log(
+            "NOTICE: this broker's memory can be written to swap, so every net.http hop \
+             that carries a credential is refused until it cannot: run the broker under \
+             memory.swap.max = 0 (systemd: MemorySwapMax=0) or on a host without swap \
+             (ADR-0053 §7)",
+        );
     }
     Ok(())
 }
@@ -328,6 +345,7 @@ fn admit(
     config: &config::ServeConfig,
     own_uid: u32,
     posture: posture::Posture,
+    swap: &posture::Swap,
 ) -> Result<Vec<String>, String> {
     let mut reduced = Vec::new();
     if own_uid == config.authority_uid {
@@ -364,6 +382,13 @@ fn admit(
                     .to_owned(),
             ),
         }
+    }
+    if !swap.protected() && config.swappable_workers == config::SwappableWorkers::Permitted {
+        reduced.push(format!(
+            "a credential exchange's memory, the broker's and its worker's, may be written to \
+             swap ({}; --allow-swappable-workers)",
+            swap.describe()
+        ));
     }
     Ok(reduced)
 }
@@ -440,6 +465,7 @@ fn http_client(
         trust,
         http::Deadlines::PRODUCTION,
         worker,
+        http::WorkerPolicy::of_host(config.traceable_workers, config.swappable_workers),
     ))
 }
 
@@ -510,7 +536,7 @@ fn help() -> String {
          \n\
          USAGE:\n    \
              {NAME} serve --socket <PATH> --authority-uid <UID> [--allow-shared-authority-uid] [--allow-dumpable]\n    \
-                              [--allow-traceable-workers]\n    \
+                              [--allow-traceable-workers] [--allow-swappable-workers]\n    \
                               [--allow-evidence-topology] [--allow-evidence-egress <FILE>]\n    \
                               [--allow-evidence-trust <PEM>]\n    \
              {NAME} [-V | --version] [-h | --help]\n\
@@ -521,6 +547,7 @@ fn help() -> String {
              --allow-shared-authority-uid    permit the authority to be the broker's own uid (development only)\n    \
              --allow-dumpable                leave the process dumpable, its memory readable by its uid (development only)\n    \
              --allow-traceable-workers       serve where its uid could trace the processes it starts (development only)\n    \
+             --allow-swappable-workers       perform credential hops where their memory could reach swap (development only)\n    \
              --allow-evidence-topology       permit NO_NETWORK execution environments (M5a evidence only)\n    \
              --allow-evidence-egress <FILE>  resolve egress names from a fixture file (M5b, M5c evidence only)\n    \
              --allow-evidence-trust <PEM>    trust a test authority instead of Mozilla's roots; needs --allow-evidence-egress (M5c evidence only)\n\
@@ -560,7 +587,7 @@ mod tests {
     fn the_broker_serves_only_a_deployment_it_can_vouch_for_or_one_acknowledged() {
         use super::admit;
         use super::config::{Command, ServeConfig, parse};
-        use super::posture::Posture;
+        use super::posture::{Posture, Swap};
 
         let serve = |authority: u32, flags: &[&str]| -> ServeConfig {
             let socket = std::env::temp_dir()
@@ -578,6 +605,9 @@ mod tests {
             };
             config
         };
+        // Where memory can go matters only to credential hops (below): every
+        // case here is under a cap.
+        let capped = Swap::Capped("/system.slice/dwkd-broker.service".to_owned());
         let open = Posture {
             scope: Some(0),
             execute_only: false,
@@ -596,18 +626,26 @@ mod tests {
         };
         // A posture that closes the window serves, with nothing reduced.
         for posture in [yama, sealed] {
-            assert_eq!(admit(&serve(1000, &[]), 1001, posture), Ok(Vec::new()));
+            assert_eq!(
+                admit(&serve(1000, &[]), 1001, posture, &capped),
+                Ok(Vec::new())
+            );
         }
         // An open window refuses, whatever else is right, unless acknowledged.
         for posture in [open, absent] {
-            let refused = admit(&serve(1000, &[]), 1001, posture);
+            let refused = admit(&serve(1000, &[]), 1001, posture, &capped);
             assert!(
                 refused
                     .as_ref()
                     .is_err_and(|why| why.contains("ptrace_scope") && why.contains("ADR-0050")),
                 "{refused:?}"
             );
-            let acknowledged = admit(&serve(1000, &["--allow-traceable-workers"]), 1001, posture);
+            let acknowledged = admit(
+                &serve(1000, &["--allow-traceable-workers"]),
+                1001,
+                posture,
+                &capped,
+            );
             assert!(
                 acknowledged.as_ref().is_ok_and(|reduced| reduced.len() == 1
                     && reduced
@@ -617,10 +655,18 @@ mod tests {
             );
         }
         // A shared uid refuses unless acknowledged, and is then reduced.
-        assert!(admit(&serve(1001, &[]), 1001, yama).is_err_and(|why| why.contains("own user")));
         assert!(
-            admit(&serve(1001, &["--allow-shared-authority-uid"]), 1001, yama)
-                .is_ok_and(|reduced| reduced.len() == 1)
+            admit(&serve(1001, &[]), 1001, yama, &capped)
+                .is_err_and(|why| why.contains("own user"))
+        );
+        assert!(
+            admit(
+                &serve(1001, &["--allow-shared-authority-uid"]),
+                1001,
+                yama,
+                &capped
+            )
+            .is_ok_and(|reduced| reduced.len() == 1)
         );
         // An environment's identity refuses, every flag and posture
         // notwithstanding: no acknowledgement covers it.
@@ -636,7 +682,7 @@ mod tests {
             (1001, 10_002),
         ] {
             for posture in [yama, sealed, open] {
-                let refused = admit(&serve(authority, &every), own, posture);
+                let refused = admit(&serve(authority, &every), own, posture, &capped);
                 assert!(
                     refused
                         .as_ref()
@@ -645,7 +691,61 @@ mod tests {
                 );
             }
         }
-        assert!(admit(&serve(10_001, &every), 10_001, yama).is_err());
+        assert!(admit(&serve(10_001, &every), 10_001, yama, &capped).is_err());
+    }
+
+    /// Memory that can reach swap never stops the broker serving: it stops
+    /// credential hops (`http::WorkerPolicy`), unless acknowledged -- and the
+    /// acknowledgement is reduced assurance, said at start.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn swappable_memory_is_reduced_assurance_only_when_acknowledged() {
+        use super::admit;
+        use super::config::{Command, parse};
+        use super::posture::{Posture, Swap};
+
+        let serve = |flags: &[&str]| {
+            let socket = std::env::temp_dir()
+                .join("broker.sock")
+                .display()
+                .to_string();
+            let mut args: Vec<String> = ["serve", "--socket", socket.as_str()]
+                .iter()
+                .map(|s| (*s).to_owned())
+                .collect();
+            args.extend(["--authority-uid".to_owned(), "1000".to_owned()]);
+            args.extend(flags.iter().map(|s| (*s).to_owned()));
+            let Ok(Command::Serve(config)) = parse(&args) else {
+                unreachable!("a serve configuration")
+            };
+            config
+        };
+        let yama = Posture {
+            scope: Some(1),
+            execute_only: false,
+        };
+        for protected in [Swap::NoDevice, Swap::Capped("/a".to_owned())] {
+            for flags in [&[][..], &["--allow-swappable-workers"][..]] {
+                assert_eq!(admit(&serve(flags), 1001, yama, &protected), Ok(Vec::new()));
+            }
+        }
+        assert_eq!(
+            admit(&serve(&[]), 1001, yama, &Swap::Possible),
+            Ok(Vec::new())
+        );
+        let reduced = admit(
+            &serve(&["--allow-swappable-workers"]),
+            1001,
+            yama,
+            &Swap::Possible,
+        );
+        assert!(
+            reduced.as_ref().is_ok_and(|lines| lines.len() == 1
+                && lines
+                    .iter()
+                    .all(|l| l.contains("--allow-swappable-workers"))),
+            "{reduced:?}"
+        );
     }
 
     #[test]

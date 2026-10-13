@@ -565,7 +565,11 @@ def test_no_shell_no_pre_exec_no_raw_exec_no_inherited_environment(
     texts = " ".join(m for _, _, m in findings)
     for needle in ("/bin/sh", "pre_exec", "libc", "/proc/self/fd/", "envs"):
         assert needle in texts, needle
-    assert _paths(rule) == {"crates/dwkd-broker/src/dispatch.rs", shell}, sorted(_paths(rule))
+    # D11 hardening's TX051 fixture names `libc` outside the filter module too.
+    second_filter = "crates/dwkd-broker/src/http/second_filter.rs"
+    assert _paths(rule) == {"crates/dwkd-broker/src/dispatch.rs", shell, second_filter}, sorted(
+        _paths(rule)
+    )
 
 
 def test_only_the_launch_helper_executes(violation_rules: list[str]) -> None:
@@ -791,10 +795,33 @@ def test_the_m5d_boundaries_each_catch_their_violation(violation_rules: list[str
     assert route == {3, 4}, sorted(route)
 
 
+def test_the_d11_hardening_boundary_catches_its_violation(violation_rules: list[str]) -> None:
+    """D11 hardening (ADR-0053 §15): the exchange worker's syscall filter is
+    one module -- a second program, raw `libc` or a seccomp constant
+    anywhere else is a finding, each on its own line; a comment or a
+    `use … as _;` acknowledgement is not."""
+    rule = "TX051-the-exchange-workers-syscall-filter-is-one-module"
+    assert rule in violation_rules
+    second_filter = "crates/dwkd-broker/src/http/second_filter.rs"
+    # TX022's shell fixture names raw `libc` too, which TX051 forbids
+    # everywhere but the filter module.
+    assert _paths(rule) == {second_filter, "crates/dwkd-broker/src/process/shell.rs"}
+    assert {line for path, line, _ in _findings(rule) if path == second_filter} == {4, 7, 8, 9}
+    # The filter module's own exemptions are bounded: constants and attempts,
+    # never a `libc` call or a process started.
+    bound = "TX052-the-filter-module-only-names-constants-and-attempts"
+    assert bound in violation_rules
+    assert _paths(bound) == {"crates/dwkd-broker/src/http/confine.rs"}
+    assert {line for _, line, _ in _findings(bound)} == {7, 8}
+
+
 def test_the_m5c_exemptions_name_files_not_directories() -> None:
     """The reviewed HTTPS client's files are exempt by name: a sibling dropped
     into `http/` is not reviewed by being there, and the client dials from
-    `http/connect.rs` alone."""
+    `http/connect.rs` alone. D11 hardening's filter module is exempt from the
+    dial rule for one reason -- the worker's proof attempts `socket` and
+    `connect` to see the filter refuse them -- and TX052 holds it to that: no
+    TCP or UDP type, no address, no resolver."""
     import tomllib
 
     raw = tomllib.loads(RULES.read_text(encoding="utf-8"))
@@ -804,9 +831,14 @@ def test_the_m5c_exemptions_name_files_not_directories() -> None:
                 assert exempt.endswith(".rs"), (rule["id"], exempt)
     dial = next(r for r in raw["text_rules"] if r["id"].startswith("TX037-"))
     assert sorted(e for e in dial["exempt_paths"] if "/http/" in e) == [
+        "crates/dwkd-broker/src/http/confine.rs",
         "crates/dwkd-broker/src/http/connect.rs",
         "crates/dwkd-broker/src/http/tests.rs",
     ]
+    bound = next(r for r in raw["text_rules"] if r["id"].startswith("TX052-"))
+    assert bound["paths"] == ["crates/dwkd-broker/src/http/confine.rs"]
+    assert bound["exempt_paths"] == []
+    assert any("TcpStream" in pattern and "Ipv4Addr" in pattern for pattern in bound["patterns"])
     tls = next(r for r in raw["text_rules"] if r["id"].startswith("TX038-"))
     assert tls["exempt_paths"] == [], "the egress path stays TLS-free"
 
@@ -924,6 +956,8 @@ def test_the_required_boundary_rules_are_all_declared() -> None:
         "TX046-the-https-client-reads-no-ambient-setting-and-holds-nothing",
         "TX047-the-authority-opens-no-outbound-socket-and-resolves-no-name",
         "TX048-one-address-guard",
+        "TX051-the-exchange-workers-syscall-filter-is-one-module",
+        "TX052-the-filter-module-only-names-constants-and-attempts",
         "DEP001-no-agent-framework-dependency",
         "DEP002-runtime-has-no-transport-dependency",
         "RS001-authority-depends-on-nothing-in-tree",

@@ -37,6 +37,11 @@ use rustls as _;
 use ureq_proto as _;
 #[cfg(target_os = "linux")]
 use webpki_roots as _;
+// D11 hardening's syscall filter (ADR-0053), reached only through the binary.
+#[cfg(target_os = "linux")]
+use libc as _;
+#[cfg(target_os = "linux")]
+use seccompiler as _;
 
 #[cfg(target_os = "linux")]
 mod linux {

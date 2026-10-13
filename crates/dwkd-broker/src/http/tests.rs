@@ -40,7 +40,8 @@ use rustls::pki_types::pem::PemObject as _;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::{ServerConfig, ServerConnection, StreamOwned};
 
-use super::{Client, Deadlines, tls};
+use super::{Client, Deadlines, WorkerPolicy, tls};
+use crate::config::{SwappableWorkers, TraceableWorkers};
 use crate::egress::resolve::{FixtureResolver, Shared};
 
 /// This run's PKI, made once.
@@ -703,6 +704,14 @@ fn credential() -> HttpCredential {
     }
 }
 
+/// The policy the suites' workers run under: the host's own start-up window
+/// (closed wherever these suites run, or no broker could serve there) and
+/// swap acknowledged, as development and CI hosts have it -- except where a
+/// test says otherwise (ADR-0053 §7).
+pub(crate) fn test_policy() -> WorkerPolicy {
+    WorkerPolicy::of_host(TraceableWorkers::Refused, SwappableWorkers::Permitted)
+}
+
 /// The worker tests count this process's workers, so they run one at a time.
 pub(crate) fn one_worker_test() -> std::sync::MutexGuard<'static, ()> {
     static ONE: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -717,7 +726,13 @@ fn worker_client() -> Client {
         FixtureResolver::parse("resolve origin.test 127.0.0.1\nallow 127.0.0.1\n").unwrap(),
     );
     let trust = tls::Trust::evidence(&pki().join("ca.pem")).unwrap();
-    Client::new(resolver, trust, Deadlines::PRODUCTION, broker_binary())
+    Client::new(
+        resolver,
+        trust,
+        Deadlines::PRODUCTION,
+        broker_binary(),
+        test_policy(),
+    )
 }
 
 /// The `http-worker` processes whose parent is this test process.
@@ -775,6 +790,7 @@ fn a_hop_runs_in_a_worker_that_is_gone_before_the_answer() {
         trust.clone(),
         Deadlines::PRODUCTION,
         broker_binary(),
+        test_policy(),
     );
     let body = format!("echo: Bearer {value}");
     let reply = format!(
@@ -810,6 +826,7 @@ fn a_hop_runs_in_a_worker_that_is_gone_before_the_answer() {
         trust,
         Deadlines::PRODUCTION,
         PathBuf::from("/nonexistent/dwkd-broker"),
+        test_policy(),
     );
     assert_eq!(
         refused(run(&missing, &Hop::get(port), None)),
@@ -1077,7 +1094,7 @@ fn a_worker_that_overruns_its_hop_is_killed_and_the_hop_unconfirmed() {
         FixtureResolver::parse("resolve origin.test 127.0.0.1\nallow 127.0.0.1\n").unwrap(),
     );
     let trust = tls::Trust::evidence(&pki().join("ca.pem")).unwrap();
-    let client = Client::new(resolver, trust, quick(), broker_binary());
+    let client = Client::new(resolver, trust, quick(), broker_binary(), test_policy());
     let (port, request) = origin(
         server("origin", &[b"http/1.1"]),
         vec![Act::Sleep(Duration::from_secs(20))],
@@ -1583,3 +1600,6 @@ fn a_mutated_response_never_panics_and_never_exceeds_its_bounds() {
         "broker-fuzz",
     );
 }
+
+#[path = "hardening_tests.rs"]
+mod hardening;
