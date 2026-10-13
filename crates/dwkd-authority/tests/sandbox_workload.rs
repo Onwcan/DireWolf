@@ -245,7 +245,6 @@ reason = "NO_MATCHING_RULE"
         next_session: u64,
         runtime: Runtime,
         reaper: Reaper,
-        fixture: String,
     }
 
     fn stop_at(point: CrashPoint) -> CrashHook {
@@ -322,7 +321,6 @@ reason = "NO_MATCHING_RULE"
                 next_session: 1,
                 runtime,
                 reaper,
-                fixture,
             };
             lab.start(None);
             let authority = lab.authority();
@@ -523,6 +521,35 @@ reason = "NO_MATCHING_RULE"
         evidence("authority-workload-audited", "intent-outcome-no-output");
         evidence("authority-workload-taint-raised", "local-unverified");
 
+        // The policy's `max_output_bytes=65536` is kept: each stream holds
+        // its first half, whatever the request asked, and the intent is
+        // charged at that bound.
+        let reply = lab
+            .authority()
+            .workload_run(
+                &run,
+                &fixture(&["workload-print", "40000", "40000"], "w-out"),
+            )
+            .unwrap();
+        let WorkloadReply::Completed(bounded) = reply else {
+            panic!("not completed: {reply:?}")
+        };
+        assert_eq!(bounded.stdout.len(), 32_768);
+        assert_eq!(bounded.stderr.len(), 32_768);
+        assert!(bounded.truncated);
+        let charged: i64 = super::state_support::raw(&lab.dir.state())
+            .query_row(
+                "SELECT stream_limit FROM workload WHERE invocation_id = ?1",
+                [bounded.invocation.as_str()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(charged, 32_768);
+        evidence(
+            "authority-workload-obligation-output-bound",
+            "32768-per-stream",
+        );
+
         // The same key: the record, never a second run.
         let marker = lab.workspace.join("once");
         let first = lab
@@ -679,7 +706,7 @@ reason = "NO_MATCHING_RULE"
             "m5d-budget",
             WorkloadBudget {
                 workloads: 2,
-                seconds: 90,
+                seconds: 120,
             },
         );
         let run = lab.operator_run();
@@ -690,9 +717,9 @@ reason = "NO_MATCHING_RULE"
             lab.authority().workload_run(&run, &first).unwrap(),
             WorkloadReply::Completed(_)
         ));
-        // 60 of 90 seconds are spent though it ran for milliseconds.
+        // 60 of 120 seconds are spent though it ran for milliseconds.
         let mut second = fixture(&["workload-exit", "0"], "b-2");
-        second.wall_clock_seconds = 31;
+        second.wall_clock_seconds = 61;
         assert_eq!(
             lab.authority().workload_run(&run, &second).unwrap(),
             WorkloadReply::Refused("BUDGET_EXHAUSTED")
@@ -703,7 +730,9 @@ reason = "NO_MATCHING_RULE"
             lab.authority().workload_run(&run, &second).unwrap(),
             WorkloadReply::Completed(_)
         ));
-        let third = fixture(&["workload-exit", "0"], "b-3");
+        // 90 of 120 seconds spent: ten more fit the seconds, not the count.
+        let mut third = fixture(&["workload-exit", "0"], "b-3");
+        third.wall_clock_seconds = 10;
         assert_eq!(
             lab.authority().workload_run(&run, &third).unwrap(),
             WorkloadReply::Refused("BUDGET_EXHAUSTED")

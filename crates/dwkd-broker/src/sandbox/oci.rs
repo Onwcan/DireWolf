@@ -807,11 +807,18 @@ impl Oci<'_> {
         let Some((found, remaining)) = one_line(&done.stdout).and_then(reaped) else {
             return unobservable;
         };
-        match (done.ended, remaining) {
-            (Ended::Exited(0), 0) => (Verdict::Pass, found, 0),
-            (_, 0) => unobservable,
-            (_, remaining) => (Verdict::Fail, found, remaining),
-        }
+        residue(done.ended, found, remaining)
+    }
+}
+
+/// The residue verdict from `reap`'s own ending and its counts: `PASS` only
+/// when it exited 0 having found nothing remaining; `FAIL` whenever it
+/// names a survivor, however it ended; `UNOBSERVABLE` otherwise.
+fn residue(ended: Ended, found: u32, remaining: u32) -> (Verdict, u32, u32) {
+    match (ended, remaining) {
+        (Ended::Exited(0), 0) => (Verdict::Pass, found, 0),
+        (_, 0) => (Verdict::Unobservable, 0, 0),
+        (_, remaining) => (Verdict::Fail, found, remaining),
     }
 }
 
@@ -1173,7 +1180,9 @@ impl ExecutionEnvironment for Oci<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ExecOutcome, classify, lines, one_line, reaped, workload_classify};
+    use super::{
+        Ended, ExecOutcome, Verdict, classify, lines, one_line, reaped, residue, workload_classify,
+    };
 
     #[test]
     fn reap_is_believed_only_in_its_one_spelling() {
@@ -1195,6 +1204,28 @@ mod tests {
             "reaped 0x1 0",
         ] {
             assert_eq!(reaped(bad), None, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn a_residue_is_clean_only_when_reap_exited_zero_and_names_no_survivor() {
+        assert_eq!(residue(Ended::Exited(0), 3, 0), (Verdict::Pass, 3, 0));
+        // A survivor is FAIL however reap ended.
+        for ended in [
+            Ended::Exited(0),
+            Ended::Exited(1),
+            Ended::Signaled(9),
+            Ended::TimedOut,
+        ] {
+            assert_eq!(residue(ended, 3, 2), (Verdict::Fail, 3, 2), "{ended:?}");
+        }
+        // Nothing named, but reap did not exit 0: nothing is proved.
+        for ended in [Ended::Exited(1), Ended::Signaled(9), Ended::TimedOut] {
+            assert_eq!(
+                residue(ended, 3, 0),
+                (Verdict::Unobservable, 0, 0),
+                "{ended:?}"
+            );
         }
     }
 

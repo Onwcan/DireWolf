@@ -155,7 +155,7 @@ and serving on Linux only. **M5 is in progress: M5a, M5b and M5c are complete (s
 **Adversarial:** the full path-traversal set ([EVALS.md](EVALS.md) §3) including Unicode normalisation and TOCTOU swap races in a tight loop; secret-in-output detection; core-dump inspection for secret residue.
 **Deferred:** remote fs, Windows-native hardening beyond the fallback walker.
 
-### M5 · Sandbox — **IN PROGRESS** (M5a complete, hosted acceptance passed; M5b complete, hosted acceptance passed; M5c complete, ADR-0050 accepted, hosted acceptance passed; M5d–M5e not started)
+### M5 · Sandbox — **IN PROGRESS** (M5a complete, hosted acceptance passed; M5b complete, hosted acceptance passed; M5c complete, ADR-0050 accepted, hosted acceptance passed; M5d in progress — M5d.1 built, ADR-0052 Proposed; M5e not started)
 
 M5 is two products in one (a sandbox *and* an egress proxy), so it is decomposed like M4
 ([ADR-0047](adr/0047-m5a-oci-execution-environment-and-measured-assurance.md)). The
@@ -302,7 +302,7 @@ documented and not yet verified**, whose fail-closed check at the broker's start
 before any workload runs.
 **Deferred:** package-manager routing (M5d/M5e); model egress (M7); approvals (M6).
 
-#### M5d · Production sandboxed `process.exec` — **NOT STARTED**
+#### M5d · Production sandboxed `process.exec` — **IN PROGRESS** (M5d.1 built; [ADR-0052](adr/0052-m5d-sandboxed-process-exec.md) Proposed)
 
 **Deps:** M5a, M5b. **Deliverables:** `process.exec` in an environment through the
 authority's gates; secret modes B/C wired to sandboxed processes; `workspace_exec_hygiene`
@@ -318,7 +318,29 @@ no workload runs as the broker's uid or reaches the authority's state or a secre
 the broker's fail-closed check of its ptrace posture at start, before any workload runs.
 **Acceptance:** a real workload runs only in a measured environment at its required level.
 **Adversarial:** full escape suite from a workload; resource exhaustion; persistence.
-**Deferred:** approvals for host execution (M6).
+**Deferred:** approvals for host execution (M6); the `local` environment (with M6, by its
+own ADR — ADR-0052 OD-7).
+
+**Checkpoints** ([ADR-0052](adr/0052-m5d-sandboxed-process-exec.md) §18; each is
+accepted only when its evidence, its mutants and every earlier evidence pass locally and in
+hosted CI):
+
+| Checkpoint | Delivers | Status |
+|---|---|---|
+| **M5d.1** Authorised OCI workload lifecycle | private protocol 8's `broker.workload_run`; the broker's re-judgement of the recorded environment, the executable's digest proved from the image, a fixed plan as uid 10001 in `/workspace`, bounded output, the wall clock, and `reap` by the environment's init; schema 9's workload ledger; `Authority::workload_run` (in-process, no DWKP route) behind both gates for a sandbox action, the measured level, the budget and the obligations; fail-closed environment destruction; the broker's start-up identity and ptrace-posture refusals | **BUILT** — `make sandbox-workload-evidence` (real containers, an agent-shaped workload) and `make sandbox-workload-mutations` (30 mutants); hosted job `sandbox-workload`; awaiting hosted CI and the owner |
+| M5d.2 Public sandboxed `process.exec` | the DWKP route, the shared idempotency namespace, results naming environment and level; `workspace_exec_hygiene` in the environment; concrete `process.exec:<path>` grants resolved against the image manifest (OD-9) | not started |
+| M5d.3 Secrets B/C in the sandbox | the trusted launcher over the `exec`'s standard input; mode C's descendants recorded as a residual | not started |
+| M5d.4 Workspace ownership and disk quota | OD-3, OD-6 | not started |
+| M5d.5 Agent-shaped escape suite and multi-identity evidence | a long-lived agent-shaped workload in `PROXY_ONLY` with declared origins; the hosted three-identity job | not started |
+| M5d.6 Closeout | run release destroys its environment; the gated eval; ADR-0052 accepted | not started |
+
+**M5d.1 as built.** The ptrace-posture check carried from M5c is made: the broker reads
+Yama's `ptrace_scope` and its own binary's owner and mode at start and refuses to serve
+unless one closes the startup window (`--allow-traceable-workers` logs `REDUCED
+ASSURANCE`), and refuses outright when its uid or the authority's is a sandbox identity
+(10001, 10002). The multi-identity evidence is not: M5d.1 shows separation in one identity,
+where the environment's mount namespace names no daemon's state; real users are M5d.5's.
+No production host launch exists or is added; the runtime cannot reach a workload.
 
 #### M5e · The M5 adversarial gate and closeout — **NOT STARTED**
 

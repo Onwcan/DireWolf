@@ -1581,11 +1581,12 @@ Hygiene, not containment.
 [[text_rules]]
 id = "TX040-only-the-setup-holds-a-capability"
 paths = ["crates/dwkd-broker/src"]
-# The relay plan spells the one `--cap-add`; the plan's tests name the word
-# to assert no other plan has it.
+# The relay plan spells the one `--cap-add`; the plans' tests name the word
+# to assert no other plan has it -- the workload plan's too (M5d.1).
 exempt_paths = [
     "crates/dwkd-broker/src/sandbox/relay_plan.rs",
     "crates/dwkd-broker/src/sandbox/plan_tests.rs",
+    "crates/dwkd-broker/src/sandbox/workload_plan_tests.rs",
 ]
 suffixes = [".rs"]
 patterns = [

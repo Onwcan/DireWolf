@@ -3005,6 +3005,7 @@ WORKLOAD_CASES = (
             "authority-workload-environment-kept-when-clean",
             "authority-workload-audited",
             "authority-workload-taint-raised",
+            "authority-workload-obligation-output-bound",
             "authority-workload-replayed-never-rerun",
             "authority-workload-key-reused-differently-refused",
             "authority-workload-no-environment-refused",
@@ -3185,6 +3186,274 @@ def task_sandbox_workload_evidence() -> None:
     print(f"{GREEN}cleanup: no evidence container remains; {len(before)} pre-existing kept{OFF}")
     require_sandbox_evidence("\n".join(outputs), WORKLOAD_CASES)
     uvrun("dwcheck", "closure", "--report")
+
+
+# The mutation review (ADR-0052 §17): each line weakens one guard M5d.1's
+# evidence exists to prove, in the source, one at a time. Each mutant must
+# compile and must fail either the guards' unit suites or
+# `sandbox-workload-evidence`; the file is then restored, and its SHA-256
+# proves it byte-identical. A mutant that survives, or does not compile,
+# fails the review.
+WORKLOAD_MUTATIONS = (
+    # The broker's deployment (ADR-0052 §13).
+    (
+        "a daemon may have the workload's uid",
+        "crates/dwkd-broker/src/posture.rs",
+        '            SANDBOX_UID => "every workload\'s",',
+        '            SANDBOX_UID if false => "every workload\'s",',
+    ),
+    (
+        "a daemon may have the relay's uid",
+        "crates/dwkd-broker/src/posture.rs",
+        '            RELAY_UID => "every relay\'s",',
+        '            RELAY_UID if false => "every relay\'s",',
+    ),
+    (
+        "Yama's ptrace_scope 0 counts as a closed startup window",
+        "crates/dwkd-broker/src/posture.rs",
+        "self.scope.is_some_and(|scope| scope >= 1) || self.execute_only",
+        "self.scope.is_some_and(|scope| scope < 4) || self.execute_only",
+    ),
+    (
+        "a binary its own uid owns counts as execute-only",
+        "crates/dwkd-broker/src/posture.rs",
+        "    owner == 0 && mode & 0o044 == 0",
+        "    mode & 0o044 == 0",
+    ),
+    (
+        "the broker serves with its startup window open",
+        "crates/dwkd-broker/src/main.rs",
+        "    if !posture.startup_window_closed() {",
+        "    if false && !posture.startup_window_closed() {",
+    ),
+    # The broker's plan and its checks before anything runs (§5).
+    (
+        "a workload runs as root",
+        "crates/dwkd-broker/src/sandbox/workload_plan.rs",
+        '    format!("{SANDBOX_UID}:{SANDBOX_GID}")',
+        '    "0:0".to_owned()',
+    ),
+    (
+        "a workload runs outside the workspace",
+        "crates/dwkd-broker/src/sandbox/workload_plan.rs",
+        '    argv.extend(words(&["--workdir", WORKSPACE_TARGET]));',
+        '    argv.extend(words(&["--workdir", "/"]));',
+    ),
+    (
+        "the executable's bytes are not proved",
+        "crates/dwkd-broker/src/sandbox/oci.rs",
+        "        if self.executable_digest(&handle.container, workload) != Verdict::Pass {",
+        "        if false\n            && self.executable_digest(&handle.container, workload)"
+        " != Verdict::Pass {",
+    ),
+    (
+        "a drifted environment is worked in",
+        "crates/dwkd-broker/src/sandbox/oci.rs",
+        "        if clean { Ok(()) } else { Err(not_clean) }",
+        "        if clean || true { Ok(()) } else { Err(not_clean) }",
+    ),
+    (
+        "the output bound is not the workload's",
+        "crates/dwkd-broker/src/sandbox/oci.rs",
+        "        let limit = usize::try_from(workload.stream_limit.get()).unwrap_or(usize::MAX);",
+        "        let limit = 4\n            * usize::try_from(workload.stream_limit.get())"
+        ".unwrap_or(usize::MAX);",
+    ),
+    (
+        "the wall clock is not the workload's",
+        "crates/dwkd-broker/src/sandbox/oci.rs",
+        "        let deadline = (since + wall_clock).min(reserve);",
+        "        let deadline = (since + 4 * wall_clock).min(reserve);",
+    ),
+    (
+        "an exit the runtime client also uses is believed",
+        "crates/dwkd-broker/src/sandbox/oci.rs",
+        "    if running && code == 125 {",
+        "    if running && code == 125 && false {",
+    ),
+    # What is left after it (§5 step 5).
+    (
+        "reap signals nothing",
+        "crates/dwk-sandbox-probe/src/linux.rs",
+        "let _ = nix::sys::signal::kill(Pid::from_raw(-1), nix::sys::signal::Signal::SIGKILL);",
+        "let _ = nix::sys::signal::kill(Pid::from_raw(-1), None);",
+    ),
+    (
+        "the environment's init reaps no orphan",
+        "crates/dwk-sandbox-probe/src/linux.rs",
+        "        match nix::sys::wait::waitpid(Pid::from_raw(-1), None) {",
+        "        match Err::<(), Errno>(Errno::ECHILD) {",
+    ),
+    (
+        "a survivor reap names is a clean residue",
+        "crates/dwkd-broker/src/sandbox/oci.rs",
+        "        (_, remaining) => (Verdict::Fail, found, remaining),",
+        "        (_, remaining) => (Verdict::Pass, found, remaining),",
+    ),
+    # The authority's decision (§§2, 4, 8, 10).
+    (
+        "a workload runs below container isolation",
+        "crates/dwkd-authority/src/state/workload.rs",
+        "    level.rank() >= AssuranceLevel::ContainerIsolation.rank()",
+        "    level.rank() >= AssuranceLevel::ProcessIsolation.rank()",
+    ),
+    (
+        "a workload runs in an environment that is not READY",
+        "crates/dwkd-authority/src/state/workload.rs",
+        '    if state != "READY" {',
+        '    if state == "NEVER" {',
+    ),
+    (
+        "the capability gate is not consulted",
+        "crates/dwkd-authority/src/state/workload.rs",
+        "        self.record.capability_satisfied()\n            && self.record.policy_satisfied()",
+        "        self.record.policy_satisfied()",
+    ),
+    (
+        "policy is not consulted",
+        "crates/dwkd-authority/src/state/workload.rs",
+        "            && self.record.policy_satisfied()\n            && self.obligations_enforced",
+        "            && self.obligations_enforced",
+    ),
+    (
+        "a workload is decided as a host action",
+        "crates/dwkd-authority/src/state/workload.rs",
+        "CanonicalAction::new(capability, Environment::Sandbox)",
+        "CanonicalAction::new(capability, Environment::Host)",
+    ),
+    (
+        "an obligation the authority cannot keep is accepted",
+        "crates/dwkd-authority/src/state/workload.rs",
+        "            Obligation::AuditLevel(_) => true,\n            _ => false,",
+        "            Obligation::AuditLevel(_) => true,\n            _ => true,",
+    ),
+    (
+        "the output obligation does not bound the streams",
+        "crates/dwkd-authority/src/state/workload.rs",
+        "stream_limit = stream_limit.min(u32::try_from(per_stream).unwrap_or(u32::MAX));",
+        "stream_limit = stream_limit.max(u32::try_from(per_stream).unwrap_or(u32::MAX));",
+    ),
+    (
+        "the run's workload count is not charged",
+        "crates/dwkd-authority/src/state/workload.rs",
+        "    if count.saturating_add(1) > budget.workloads",
+        "    if count > budget.workloads",
+    ),
+    (
+        "the run's wall-clock seconds are not charged",
+        "crates/dwkd-authority/src/state/workload.rs",
+        "        || seconds.saturating_add(u64::from(checked.wall_clock.get())) > budget.seconds",
+        "        || seconds > budget.seconds",
+    ),
+    (
+        "a repeated key runs the workload again",
+        "crates/dwkd-authority/src/state/workload.rs",
+        "    if let Some((invocation, bound_digest)) = bound {",
+        "    if let Some((invocation, bound_digest)) = bound.filter(|_| false) {",
+    ),
+    # Fail-closed endings (§§8, 9).
+    (
+        "an uncertain ending keeps its environment",
+        "crates/dwkd-authority/src/state/workload.rs",
+        '        Ending::Unknown { .. } => Some("WORKLOAD_UNKNOWN"),',
+        "        Ending::Unknown { .. } => None,",
+    ),
+    (
+        "an unobservable residue keeps its environment",
+        "crates/dwkd-authority/src/state/workload.rs",
+        '(done.residue != Verdict::Pass).then_some("WORKLOAD_RESIDUE")',
+        '(done.residue == Verdict::Fail).then_some("WORKLOAD_RESIDUE")',
+    ),
+    (
+        "an environment the broker found drifted is kept",
+        "crates/dwkd-authority/src/state/workload.rs",
+        '        Ending::Failed { reason } => environment_drifted(reason).then_some("DRIFTED"),',
+        "        Ending::Failed { reason } => environment_drifted(reason)\n"
+        '            .then_some("DRIFTED")\n            .filter(|_| false),',
+    ),
+    (
+        "an interrupted workload keeps its environment",
+        "crates/dwkd-authority/src/state/workload.rs",
+        "    for (invocation, run, environment) in &found {",
+        "    for (invocation, run, environment) in found.iter().take(0) {",
+    ),
+    (
+        "an interrupted workload is not ended UNKNOWN",
+        "crates/dwkd-authority/src/state/workload.rs",
+        "WHERE state = 'LAUNCHING' RETURNING invocation_id,",
+        "WHERE state = 'COMPLETED' AND 0 RETURNING invocation_id,",
+    ),
+)
+
+
+def _workload_guard_suites() -> None:
+    """The suites that prove M5d.1's guards without a runtime: the broker's
+    plan, posture, deployment and classification, and the authority's
+    ledger and schema."""
+    run("cargo", "test", "--locked", "-p", "dwkd-broker", "--bin", "dwkd-broker")
+    run("cargo", "test", "--locked", "-p", "dwkd-authority", "--lib", "state::")
+
+
+def task_sandbox_workload_mutations() -> None:
+    """Weaken each M5d.1 guard in turn; a unit suite or the evidence must
+    catch every one.
+
+    Slow: a mutant no unit suite catches runs the whole
+    sandbox-workload-evidence. Every file is restored byte-identically
+    whatever happens, and checked. Never run it beside another build.
+    """
+    killed: list[str] = []
+    for what, rel, old, new in WORKLOAD_MUTATIONS:
+        path = ROOT / rel
+        original = path.read_bytes()
+        digest = hashlib.sha256(original).hexdigest()
+        text = original.decode("utf-8")
+        if text.count(old) != 1:
+            raise TaskError(f"mutation `{what}`: its target is not in {rel} exactly once")
+        print(f"{BOLD}mutant: {what}{OFF}")
+        outcome = "survived"
+        try:
+            path.write_bytes(text.replace(old, new).encode("utf-8"))
+            try:
+                run(
+                    "cargo",
+                    "test",
+                    "--locked",
+                    "--no-run",
+                    "-p",
+                    "dwk-proto",
+                    "-p",
+                    "dwk-sandbox-probe",
+                    "-p",
+                    "dwkd-broker",
+                    "-p",
+                    "dwkd-authority",
+                )
+            except TaskError:
+                outcome = "did not compile"
+            else:
+                try:
+                    _workload_guard_suites()
+                except TaskError as exc:
+                    outcome = f"killed by a unit suite: {str(exc)[:160]}"
+                else:
+                    try:
+                        task_sandbox_workload_evidence()
+                    except TaskError as exc:
+                        outcome = f"killed by the evidence: {str(exc)[:160]}"
+        finally:
+            path.write_bytes(original)
+        if hashlib.sha256(path.read_bytes()).hexdigest() != digest:
+            raise TaskError(f"{rel} was not restored byte-identically")
+        print(f"{DIM}restored {rel} (sha256 {digest[:16]}...){OFF}")
+        if not outcome.startswith("killed"):
+            raise TaskError(f"mutant `{what}` {outcome}: nothing guards it")
+        killed.append(what)
+        print(f"{GREEN}mutant {outcome[:60]}: {what}{OFF}")
+    print(
+        f"{GREEN}sandbox workload mutation review: {len(killed)} of "
+        f"{len(WORKLOAD_MUTATIONS)} killed{OFF}"
+    )
 
 
 # --- M5c: kernel-performed net.http (ADR-0050) --------------------------------
@@ -3980,6 +4249,7 @@ TASKS = {
     "sandbox-workload-evidence": task_sandbox_workload_evidence,
     "net-http-evidence": task_net_http_evidence,
     "net-http-mutations": task_net_http_mutations,
+    "sandbox-workload-mutations": task_sandbox_workload_mutations,
     "fuzz-smoke": task_fuzz_smoke,
     "fuzz": task_fuzz,
     "security": task_security,

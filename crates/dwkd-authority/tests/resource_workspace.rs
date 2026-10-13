@@ -529,11 +529,14 @@ mod linux {
         // run_withheld's reasons, which an older store's rows satisfy), and
         // schema 7 (M5a) adds the environment ledger, and schema 8 (M5c) adds
         // the net.http request, hop and idempotency tables, whose triggers go
-        // with them or with the older idempotency tables they sit on.
+        // with them or with the older idempotency tables they sit on, and
+        // schema 9 (M5d.1) adds the workload ledger, which references the
+        // environment ledger and so goes first.
         {
             let conn = raw(&h.state());
             conn.execute_batch(
-                "DROP TABLE net_idempotency; DROP TABLE net_hop; DROP TABLE net_request; \
+                "DROP TABLE workload; \
+                 DROP TABLE net_idempotency; DROP TABLE net_hop; DROP TABLE net_request; \
                  DROP TABLE environment; DROP TABLE secret_use; \
                  DROP TABLE secret_injection; \
                  DROP TABLE secret_run_binding; DROP TABLE secret_revision; \
@@ -579,7 +582,7 @@ mod linux {
         {
             let conn = raw(&h.state());
             conn.execute_batch(
-                "DROP TABLE net_idempotency; DROP TABLE net_hop; DROP TABLE net_request;                  DROP TABLE environment; DROP TABLE secret_use; DROP TABLE secret_injection; DROP TABLE secret_run_binding;                  DROP TABLE secret_revision; DROP TABLE process_idempotency; DROP TABLE tool_process;                  DROP TABLE process_invocation; DROP TABLE tool_staging;                  DROP TABLE tool_idempotency; DROP TABLE tool_invocation;                  PRAGMA user_version = 2;",
+                "DROP TABLE workload; DROP TABLE net_idempotency; DROP TABLE net_hop; DROP TABLE net_request;                  DROP TABLE environment; DROP TABLE secret_use; DROP TABLE secret_injection; DROP TABLE secret_run_binding;                  DROP TABLE secret_revision; DROP TABLE process_idempotency; DROP TABLE tool_process;                  DROP TABLE process_invocation; DROP TABLE tool_staging;                  DROP TABLE tool_idempotency; DROP TABLE tool_invocation;                  PRAGMA user_version = 2;",
             )
             .unwrap();
         }

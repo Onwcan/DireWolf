@@ -303,25 +303,10 @@ fn serve(config: &config::ServeConfig) -> ExitCode {
 /// environment's workload or relay has — no flag overrides that (M5d,
 /// ADR-0052 §13); and, as ADR-0050 §21 requires, no process of its uid able
 /// to trace a process it starts before that process hardens itself, unless
-/// the operator acknowledged it for development.
+/// the operator acknowledged it for development. The facts are read here;
+/// the decision is [`admit`]'s.
 #[cfg(target_os = "linux")]
 fn deployment(config: &config::ServeConfig, own_uid: u32) -> Result<(), String> {
-    if own_uid == config.authority_uid {
-        if !config.shared_uid_permitted {
-            return Err(format!(
-                "the authority uid {} is the broker's own; run the broker as its own user, or \
-                 pass --allow-shared-authority-uid for development",
-                config.authority_uid
-            ));
-        }
-        log(&format!(
-            "REDUCED ASSURANCE: the broker shares uid {own_uid} with the authority \
-             (--allow-shared-authority-uid)"
-        ));
-    }
-    if let Some(clash) = posture::sandbox_identity_clash(own_uid, config.authority_uid) {
-        return Err(format!("cannot serve: {clash}"));
-    }
     let posture = std::env::current_exe().map_or(
         posture::Posture {
             scope: None,
@@ -330,26 +315,57 @@ fn deployment(config: &config::ServeConfig, own_uid: u32) -> Result<(), String> 
         |binary| posture::read(&binary),
     );
     crate::event(&format!("deployment_posture {}", posture.describe()));
-    if posture.startup_window_closed() {
-        return Ok(());
+    for reduced in admit(config, own_uid, posture)? {
+        log(&format!("REDUCED ASSURANCE: {reduced}"));
     }
-    match config.traceable_workers {
-        config::TraceableWorkers::Refused => Err(
-            "cannot serve: Yama's ptrace_scope is 0 or absent and this binary is readable by its own uid, so a \
-             process of the broker's uid could take over an exchange worker or a launch helper \
-             before it hardens itself (ADR-0050 §21). Set kernel.yama.ptrace_scope to 1 or \
-             more, install the broker root-owned and execute-only, or pass \
-             --allow-traceable-workers for development"
-                .to_owned(),
-        ),
-        config::TraceableWorkers::Permitted => {
-            log(
-                "REDUCED ASSURANCE: a process of the broker's uid may trace the processes it \
-                 starts before they harden themselves (--allow-traceable-workers)",
-            );
-            Ok(())
+    Ok(())
+}
+
+/// The deployment decision, from the facts: why the broker may not serve,
+/// or every reduced assurance the operator acknowledged, to be logged.
+#[cfg(target_os = "linux")]
+fn admit(
+    config: &config::ServeConfig,
+    own_uid: u32,
+    posture: posture::Posture,
+) -> Result<Vec<String>, String> {
+    let mut reduced = Vec::new();
+    if own_uid == config.authority_uid {
+        if !config.shared_uid_permitted {
+            return Err(format!(
+                "the authority uid {} is the broker's own; run the broker as its own user, or \
+                 pass --allow-shared-authority-uid for development",
+                config.authority_uid
+            ));
+        }
+        reduced.push(format!(
+            "the broker shares uid {own_uid} with the authority (--allow-shared-authority-uid)"
+        ));
+    }
+    if let Some(clash) = posture::sandbox_identity_clash(own_uid, config.authority_uid) {
+        return Err(format!("cannot serve: {clash}"));
+    }
+    if !posture.startup_window_closed() {
+        match config.traceable_workers {
+            config::TraceableWorkers::Refused => {
+                return Err(
+                    "cannot serve: Yama's ptrace_scope is 0 or absent and this binary is \
+                     readable by its own uid, so a process of the broker's uid could take over \
+                     an exchange worker or a launch helper before it hardens itself (ADR-0050 \
+                     §21). Set kernel.yama.ptrace_scope to 1 or more, install the broker \
+                     root-owned and execute-only, or pass --allow-traceable-workers for \
+                     development"
+                        .to_owned(),
+                );
+            }
+            config::TraceableWorkers::Permitted => reduced.push(
+                "a process of the broker's uid may trace the processes it starts before they \
+                 harden themselves (--allow-traceable-workers)"
+                    .to_owned(),
+            ),
         }
     }
+    Ok(reduced)
 }
 
 /// The network side: one resolver for the CONNECT proxy and the HTTPS
@@ -536,6 +552,101 @@ fn help() -> String {
 #[cfg(test)]
 mod tests {
     use super::{NAME, help};
+
+    /// The deployment decision against every posture, on any host: what
+    /// this machine's own Yama says does not decide what the test proves.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_broker_serves_only_a_deployment_it_can_vouch_for_or_one_acknowledged() {
+        use super::admit;
+        use super::config::{Command, ServeConfig, parse};
+        use super::posture::Posture;
+
+        let serve = |authority: u32, flags: &[&str]| -> ServeConfig {
+            let socket = std::env::temp_dir()
+                .join("broker.sock")
+                .display()
+                .to_string();
+            let mut args: Vec<String> = ["serve", "--socket", socket.as_str(), "--authority-uid"]
+                .iter()
+                .map(|s| (*s).to_owned())
+                .collect();
+            args.push(authority.to_string());
+            args.extend(flags.iter().map(|s| (*s).to_owned()));
+            let Ok(Command::Serve(config)) = parse(&args) else {
+                unreachable!("a serve configuration")
+            };
+            config
+        };
+        let open = Posture {
+            scope: Some(0),
+            execute_only: false,
+        };
+        let absent = Posture {
+            scope: None,
+            execute_only: false,
+        };
+        let yama = Posture {
+            scope: Some(1),
+            execute_only: false,
+        };
+        let sealed = Posture {
+            scope: Some(0),
+            execute_only: true,
+        };
+        // A posture that closes the window serves, with nothing reduced.
+        for posture in [yama, sealed] {
+            assert_eq!(admit(&serve(1000, &[]), 1001, posture), Ok(Vec::new()));
+        }
+        // An open window refuses, whatever else is right, unless acknowledged.
+        for posture in [open, absent] {
+            let refused = admit(&serve(1000, &[]), 1001, posture);
+            assert!(
+                refused
+                    .as_ref()
+                    .is_err_and(|why| why.contains("ptrace_scope") && why.contains("ADR-0050")),
+                "{refused:?}"
+            );
+            let acknowledged = admit(&serve(1000, &["--allow-traceable-workers"]), 1001, posture);
+            assert!(
+                acknowledged.as_ref().is_ok_and(|reduced| reduced.len() == 1
+                    && reduced
+                        .iter()
+                        .all(|r| r.contains("--allow-traceable-workers"))),
+                "{acknowledged:?}"
+            );
+        }
+        // A shared uid refuses unless acknowledged, and is then reduced.
+        assert!(admit(&serve(1001, &[]), 1001, yama).is_err_and(|why| why.contains("own user")));
+        assert!(
+            admit(&serve(1001, &["--allow-shared-authority-uid"]), 1001, yama)
+                .is_ok_and(|reduced| reduced.len() == 1)
+        );
+        // An environment's identity refuses, every flag and posture
+        // notwithstanding: no acknowledgement covers it.
+        let every = [
+            "--allow-shared-authority-uid",
+            "--allow-traceable-workers",
+            "--allow-dumpable",
+        ];
+        for (own, authority) in [
+            (10_001, 1000),
+            (10_002, 1000),
+            (1001, 10_001),
+            (1001, 10_002),
+        ] {
+            for posture in [yama, sealed, open] {
+                let refused = admit(&serve(authority, &every), own, posture);
+                assert!(
+                    refused
+                        .as_ref()
+                        .is_err_and(|why| why.contains("cannot serve")),
+                    "{own} {authority} {posture:?}: {refused:?}"
+                );
+            }
+        }
+        assert!(admit(&serve(10_001, &every), 10_001, yama).is_err());
+    }
 
     #[test]
     fn help_names_the_component_its_one_effect_and_what_comes_later() {

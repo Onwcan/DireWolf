@@ -2453,18 +2453,19 @@ mod tests {
         let count = |sql: &str| conn.query_row(sql, [], |row| row.get::<_, i64>(0)).ok();
         assert_eq!(count("SELECT count(*) FROM environment"), Some(1));
         assert_eq!(count("SELECT count(*) FROM workload"), Some(0));
-        let set = |sql: &str| conn.execute(sql, []);
+        // Static statements, the row they act on bound as a parameter.
+        let on = |sql: &str, id: &str| conn.execute(sql, [id]);
         // Not READY, another run's, or unknown: no workload.
         assert!(
             workload(&conn, (0, "run_a", ENV), "k").is_err(),
             "preparing"
         );
         assert!(
-            set(&format!(
-                "UPDATE environment SET state = 'READY', container = '{}', \
-             effective = 'CONTAINER_ISOLATION'",
-                "c".repeat(64)
-            ))
+            conn.execute(
+                "UPDATE environment SET state = 'READY', container = ?1, \
+                 effective = 'CONTAINER_ISOLATION'",
+                ["c".repeat(64)],
+            )
             .is_ok()
         );
         assert!(
@@ -2481,13 +2482,14 @@ mod tests {
             workload(&conn, (1, "run_a", ENV), "k2").is_err(),
             "one at a time"
         );
+        let first = inv(0);
         assert!(
-            set(&format!(
+            on(
                 "UPDATE workload SET state = 'COMPLETED', ending = 'EXITED', exit_code = 0, \
-             residue = 'PASS', stdout_bytes = 0, stderr_bytes = 0, output_truncated = 0, \
-             elapsed_ms = 5, ended_ms = 9 WHERE invocation_id = '{}'",
-                inv(0)
-            ))
+                 residue = 'PASS', stdout_bytes = 0, stderr_bytes = 0, output_truncated = 0, \
+                 elapsed_ms = 5, ended_ms = 9 WHERE invocation_id = ?1",
+                &first,
+            )
             .is_ok()
         );
         assert!(
@@ -2496,52 +2498,42 @@ mod tests {
         );
         assert!(workload(&conn, (1, "run_a", ENV), "k2").is_ok());
         // It ends once; its intent never changes; it is never deleted.
-        let first = format!("WHERE invocation_id = '{}'", inv(0));
-        assert!(
-            set(&format!(
-                "UPDATE workload SET state = 'UNKNOWN', failure = 'X' {first}"
-            ))
-            .is_err()
-        );
-        assert!(set(&format!("UPDATE workload SET wall_clock_s = 600 {first}")).is_err());
-        assert!(
-            set(&format!(
-                "UPDATE workload SET argv_sha256 = '{}' {first}",
-                "00".repeat(32)
-            ))
-            .is_err()
-        );
-        assert!(set(&format!("DELETE FROM workload {first}")).is_err());
+        for bad in [
+            "UPDATE workload SET state = 'UNKNOWN', failure = 'X' WHERE invocation_id = ?1",
+            "UPDATE workload SET wall_clock_s = 600 WHERE invocation_id = ?1",
+            "UPDATE workload SET argv_sha256 = '0000000000000000000000000000000000000000000000000000000000000000' \
+             WHERE invocation_id = ?1",
+            "DELETE FROM workload WHERE invocation_id = ?1",
+        ] {
+            assert!(on(bad, &first).is_err(), "{bad}");
+        }
         // An ending fits its state: an exit code only for an exit, a signal
         // only for a kill, an ending a completion cannot have refused, a
         // failure with no reason refused.
-        let second = format!("WHERE invocation_id = '{}'", inv(1));
+        let second = inv(1);
         for bad in [
-            format!(
-                "UPDATE workload SET state = 'COMPLETED', ending = 'KILLED', exit_code = 1, residue = 'PASS', ended_ms = 9 {second}"
-            ),
-            format!(
-                "UPDATE workload SET state = 'COMPLETED', ending = 'EXITED', residue = 'PASS', ended_ms = 9 {second}"
-            ),
-            format!(
-                "UPDATE workload SET state = 'COMPLETED', ending = 'UNOBSERVABLE', residue = 'PASS', ended_ms = 9 {second}"
-            ),
-            format!(
-                "UPDATE workload SET state = 'COMPLETED', ending = 'EXITED', exit_code = 0, ended_ms = 9 {second}"
-            ),
-            format!("UPDATE workload SET state = 'FAILED', ended_ms = 9 {second}"),
-            format!("UPDATE workload SET state = 'UNKNOWN', ended_ms = 9 {second}"),
-            format!(
-                "UPDATE workload SET state = 'FAILED', failure = 'X', ending = 'EXITED', exit_code = 0, ended_ms = 9 {second}"
-            ),
+            "UPDATE workload SET state = 'COMPLETED', ending = 'KILLED', exit_code = 1, \
+             residue = 'PASS', ended_ms = 9 WHERE invocation_id = ?1",
+            "UPDATE workload SET state = 'COMPLETED', ending = 'EXITED', residue = 'PASS', \
+             ended_ms = 9 WHERE invocation_id = ?1",
+            "UPDATE workload SET state = 'COMPLETED', ending = 'UNOBSERVABLE', residue = 'PASS', \
+             ended_ms = 9 WHERE invocation_id = ?1",
+            "UPDATE workload SET state = 'COMPLETED', ending = 'EXITED', exit_code = 0, \
+             ended_ms = 9 WHERE invocation_id = ?1",
+            "UPDATE workload SET state = 'FAILED', ended_ms = 9 WHERE invocation_id = ?1",
+            "UPDATE workload SET state = 'UNKNOWN', ended_ms = 9 WHERE invocation_id = ?1",
+            "UPDATE workload SET state = 'FAILED', failure = 'X', ending = 'EXITED', \
+             exit_code = 0, ended_ms = 9 WHERE invocation_id = ?1",
         ] {
-            assert!(set(&bad).is_err(), "{bad}");
+            assert!(on(bad, &second).is_err(), "{bad}");
         }
         assert!(
-            set(&format!(
+            on(
                 "UPDATE workload SET state = 'UNKNOWN', failure = 'WORKLOAD_UNCONFIRMED', \
-             ending = 'UNOBSERVABLE', residue = 'UNOBSERVABLE', ended_ms = 9 {second}"
-            ))
+                 ending = 'UNOBSERVABLE', residue = 'UNOBSERVABLE', ended_ms = 9 \
+                 WHERE invocation_id = ?1",
+                &second,
+            )
             .is_ok()
         );
     }

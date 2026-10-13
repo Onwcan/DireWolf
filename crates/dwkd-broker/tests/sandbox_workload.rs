@@ -748,6 +748,10 @@ mod linux {
         .workload_run
         .unwrap();
         assert_eq!(slow.ending, WorkloadEnding::TimedOut);
+        // The workload's own clock, as the broker measured it: it ran its
+        // three seconds and was ended then — not at a later deadline.
+        let ran = slow.elapsed_ms.get();
+        assert!((2_900..6_000).contains(&ran), "elapsed {ran} ms");
         assert!(
             since.elapsed() < Duration::from_secs(60),
             "{:?}",

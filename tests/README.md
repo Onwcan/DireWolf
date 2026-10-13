@@ -166,6 +166,21 @@ the task. The broker's tests need a clean descriptor table — run them through
 `make`, which closes inherited descriptors. Locally the three-identity half is
 NOT EXERCISED; CI's Linux job creates the broker user.
 
+**Sandbox workload tests (M5d.1)** are the evidence behind
+`make sandbox-workload-evidence` ([ADR-0052](../docs/adr/0052-m5d-sandboxed-process-exec.md) §17), on a real OCI
+runtime. `crates/dwkd-broker/tests/sandbox_workload.rs` drives the released broker
+over the private protocol: the plan's identity and bounds, the digest proof, the
+environment's re-judgement, process trees ended by `reap`, escapes, an
+agent-shaped workload, the broker's identity and posture refusals, and a broker
+killed mid-workload. `crates/dwkd-authority/tests/sandbox_workload.rs` drives the
+real authority with the real broker: decided, recorded, run and never run twice;
+every gate refusing before anything runs; the budget; crash windows W8–W11; and
+uncertain endings destroying the environment. Both are `#[ignore]`d unless the
+task selects them by name, every case must print its `SANDBOX-EVIDENCE` line, and
+no container may be left behind. `make sandbox-workload-mutations` weakens each
+guard in turn and requires a unit suite or the evidence to fail; it is slow, runs
+locally, and is not part of the hosted workflow.
+
 **Brokered `fs.read` tests (M4b)** are real-process evidence for the private
 channel ([ADR-0043](../docs/adr/0043-m4b-private-broker-channel-and-brokered-fs-read.md)):
 `crates/dwkd-authority/tests/broker_fs_read.rs` drives the released authority and

@@ -442,8 +442,10 @@ fn record_of(row: RecordRow) -> Result<WorkloadRecord, AuthorityError> {
     })
 }
 
-const RECORD_COLUMNS: &str = "invocation_id, run_id, environment_id, state, failure, ending, \
-                              exit_code, signal, residue";
+/// One workload's record, by its invocation: static text, the id bound.
+const RECORD_BY_INVOCATION: &str = "SELECT invocation_id, run_id, environment_id, state, \
+                                    failure, ending, exit_code, signal, residue FROM workload \
+                                    WHERE invocation_id = ?1";
 
 fn read_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RecordRow> {
     Ok((
@@ -466,11 +468,7 @@ pub(super) fn record(
 ) -> Result<Option<WorkloadRecord>, AuthorityError> {
     let row: Option<RecordRow> = work.db(work
         .tx
-        .query_row(
-            &format!("SELECT {RECORD_COLUMNS} FROM workload WHERE invocation_id = ?1"),
-            [invocation.as_str()],
-            read_row,
-        )
+        .query_row(RECORD_BY_INVOCATION, [invocation.as_str()], read_row)
         .optional())?;
     row.map(record_of).transpose()
 }
@@ -555,27 +553,46 @@ fn ready_environment(
     let Some((environment, state, container, effective)) = row else {
         return Ok(Err("NO_ENVIRONMENT"));
     };
+    if let Err(reason) = readiness(&state, effective.as_deref())? {
+        return Ok(Err(reason));
+    }
+    let malformed = AuthorityError::Invariant("a ready environment is malformed");
+    Ok(Ok(ReadyEnvironment {
+        environment: EnvironmentId::parse(&environment).ok_or_else(|| malformed.clone())?,
+        container: container.and_then(ContainerRef::new).ok_or(malformed)?,
+    }))
+}
+
+/// Whether a live environment in `state`, measured at `effective`, may run
+/// a workload — `READY`, at a level [`workload_may_run_at`] accepts — or
+/// why not. A `READY` environment without a known level is malformed.
+fn readiness(
+    state: &str,
+    effective: Option<&str>,
+) -> Result<Result<(), &'static str>, AuthorityError> {
     if state != "READY" {
         return Ok(Err("ENVIRONMENT_NOT_READY"));
     }
-    let malformed = AuthorityError::Invariant("a ready environment is malformed");
     let level = effective
-        .as_deref()
         .and_then(|text| {
             AssuranceLevel::ALL
                 .iter()
                 .copied()
                 .find(|level| level.as_str() == text)
         })
-        .ok_or_else(|| malformed.clone())?;
-    // A workload needs the container's isolation, measured: never less.
-    if level.rank() < AssuranceLevel::ContainerIsolation.rank() {
+        .ok_or(AuthorityError::Invariant(
+            "a ready environment is malformed",
+        ))?;
+    if !workload_may_run_at(level) {
         return Ok(Err("ASSURANCE_INSUFFICIENT"));
     }
-    Ok(Ok(ReadyEnvironment {
-        environment: EnvironmentId::parse(&environment).ok_or_else(|| malformed.clone())?,
-        container: container.and_then(ContainerRef::new).ok_or(malformed)?,
-    }))
+    Ok(Ok(()))
+}
+
+/// Whether a workload may run in an environment measured at `level`: the
+/// container's isolation, measured, and never less.
+const fn workload_may_run_at(level: AssuranceLevel) -> bool {
+    level.rank() >= AssuranceLevel::ContainerIsolation.rank()
 }
 
 /// Step 2: decide the workload and record its intent.
@@ -703,6 +720,18 @@ pub(super) enum Ending {
     Failed { reason: &'static str },
 }
 
+/// Why a workload's ending takes its environment down, if it does: a
+/// completion whose residue `reap` did not prove clean, every uncertain
+/// ending, and a refusal that found the environment not what was recorded.
+/// Only a clean completion, or a refusal of something else, keeps it.
+fn destroy_reason(ending: &Ending) -> Option<&'static str> {
+    match ending {
+        Ending::Completed(done) => (done.residue != Verdict::Pass).then_some("WORKLOAD_RESIDUE"),
+        Ending::Unknown { .. } => Some("WORKLOAD_UNKNOWN"),
+        Ending::Failed { reason } => environment_drifted(reason).then_some("DRIFTED"),
+    }
+}
+
 /// Whether a refusal says the environment is not what was recorded: it is
 /// then destroyed, as a drifted measurement is.
 const fn environment_drifted(reason: &str) -> bool {
@@ -766,8 +795,7 @@ pub(super) fn record_outcome(
                 .int("stdout_bytes", stdout)
                 .int("stderr_bytes", stderr)
                 .flag("output_truncated", truncated);
-            let destroy = (done.residue != Verdict::Pass).then_some("WORKLOAD_RESIDUE");
-            (destroy, WorkloadState::Completed)
+            (destroy_reason(ending), WorkloadState::Completed)
         }
         Ending::Unknown { reason, done } => {
             work.db(work.tx.execute(
@@ -786,7 +814,7 @@ pub(super) fn record_outcome(
             if let Some(done) = done {
                 fields = done_fields(fields, done);
             }
-            (Some("WORKLOAD_UNKNOWN"), WorkloadState::Unknown)
+            (destroy_reason(ending), WorkloadState::Unknown)
         }
         Ending::Failed { reason } => {
             work.db(work.tx.execute(
@@ -795,10 +823,7 @@ pub(super) fn record_outcome(
                 rusqlite::params![invocation, reason, now],
             ))?;
             fields = fields.text("reason", *reason);
-            (
-                environment_drifted(reason).then_some("DRIFTED"),
-                WorkloadState::Failed,
-            )
+            (destroy_reason(ending), WorkloadState::Failed)
         }
     };
     if output.is_some_and(|(stdout, stderr, _)| stdout > 0 || stderr > 0) {
@@ -885,9 +910,13 @@ pub(super) fn reconcile_open(work: &mut Work<'_>) -> Result<u64, AuthorityError>
 
 #[cfg(test)]
 mod tests {
-    use super::{WorkloadRequest, WorkloadState, check};
+    use super::{
+        Ending, WorkloadRequest, WorkloadState, check, destroy_reason, readiness,
+        workload_may_run_at,
+    };
     use crate::sandbox::{SandboxConfig, WorkloadBudget};
-    use dwk_proto::brokerp::sandbox::NetworkTopology;
+    use dwk_proto::brokerp::sandbox::{AssuranceLevel, Milliseconds, NetworkTopology, Verdict};
+    use dwk_proto::brokerp::workload::{ProcessCount, WorkloadEnding, WorkloadRunDone};
 
     fn config() -> SandboxConfig {
         let Ok(config) = SandboxConfig::new(
@@ -966,6 +995,104 @@ mod tests {
             refused(|r| r.args = vec!["x".to_owned(); 129]),
             Some("ARGV_TOO_LARGE")
         );
+    }
+
+    #[test]
+    fn a_workload_runs_only_at_container_isolation_or_above() {
+        for level in AssuranceLevel::ALL {
+            assert_eq!(
+                workload_may_run_at(*level),
+                matches!(
+                    level,
+                    AssuranceLevel::ContainerIsolation | AssuranceLevel::VmIsolation
+                ),
+                "{level:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn only_a_ready_environment_at_container_isolation_runs_a_workload() {
+        let container = Some("CONTAINER_ISOLATION");
+        assert_eq!(readiness("READY", container).ok(), Some(Ok(())));
+        assert_eq!(readiness("READY", Some("VM_ISOLATION")).ok(), Some(Ok(())));
+        // Every other live state, whatever it was measured at.
+        for state in ["PREPARING", "DESTROYING", "UNKNOWN"] {
+            for effective in [container, None] {
+                assert_eq!(
+                    readiness(state, effective).ok(),
+                    Some(Err("ENVIRONMENT_NOT_READY")),
+                    "{state} {effective:?}"
+                );
+            }
+        }
+        for lower in ["NONE", "PROCESS_ISOLATION"] {
+            assert_eq!(
+                readiness("READY", Some(lower)).ok(),
+                Some(Err("ASSURANCE_INSUFFICIENT")),
+                "{lower}"
+            );
+        }
+        // READY with no level, or one nobody spells: malformed, never run.
+        for effective in [None, Some("CONTAINER"), Some("container_isolation")] {
+            assert!(readiness("READY", effective).is_err(), "{effective:?}");
+        }
+    }
+
+    #[test]
+    fn only_a_clean_completion_or_an_unrelated_refusal_keeps_the_environment() {
+        let empty = || dwk_proto::brokerp::ProcessStreamSnapshot {
+            content: dwk_proto::wire::scalar::StreamContent::from_bytes(&[])
+                .unwrap_or_else(|| unreachable!("no bytes")),
+            observed: dwk_proto::wire::scalar::ByteCount::new(0)
+                .unwrap_or_else(|| unreachable!("zero bytes")),
+            truncated: false,
+        };
+        let completed = |residue| {
+            let Some(none) = ProcessCount::new(0) else {
+                unreachable!("zero processes")
+            };
+            Ending::Completed(Box::new(WorkloadRunDone {
+                ending: WorkloadEnding::Exited,
+                exit_code: dwk_proto::wire::scalar::ExitCode::new(0),
+                signal: None,
+                stdout: empty(),
+                stderr: empty(),
+                elapsed_ms: Milliseconds::new(5).unwrap_or_else(|| unreachable!("5 ms")),
+                residue,
+                ended_processes: none,
+                remaining_processes: none,
+            }))
+        };
+        assert_eq!(destroy_reason(&completed(Verdict::Pass)), None);
+        for residue in [Verdict::Fail, Verdict::Unobservable] {
+            assert_eq!(
+                destroy_reason(&completed(residue)),
+                Some("WORKLOAD_RESIDUE"),
+                "{residue:?}"
+            );
+        }
+        for reason in ["WORKLOAD_UNCONFIRMED", "BROKER_UNAVAILABLE", "INTERRUPTED"] {
+            assert_eq!(
+                destroy_reason(&Ending::Unknown { reason, done: None }),
+                Some("WORKLOAD_UNKNOWN"),
+                "{reason}"
+            );
+        }
+        for reason in [
+            "ENVIRONMENT_NOT_CLEAN",
+            "ENVIRONMENT_NOT_FOUND",
+            "FOREIGN_ENVIRONMENT",
+        ] {
+            assert_eq!(
+                destroy_reason(&Ending::Failed { reason }),
+                Some("DRIFTED"),
+                "{reason}"
+            );
+        }
+        for reason in ["DIGEST_MISMATCH", "BROKER_UNAVAILABLE"] {
+            assert_eq!(destroy_reason(&Ending::Failed { reason }), None, "{reason}");
+        }
     }
 
     #[test]
