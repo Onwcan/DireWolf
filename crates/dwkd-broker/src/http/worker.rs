@@ -441,8 +441,8 @@ fn dumpable_code() -> u8 {
 /// The worker's whole life: one hop, answered, or nothing at all.
 pub(crate) fn serve() -> ExitCode {
     // 0. How the kernel made this image at `execve`, before anything here
-    // changes it: not dumpable from its first instruction when its binary
-    // is execute-only (ADR-0053 §4).
+    // changes it: closed to its own uid from its first instruction when its
+    // binary is execute-only and `fs.suid_dumpable` is 0 or 2 (ADR-0053 §4).
     let at_exec = dumpable_code();
     // 1. The control channel: stderr, as the broker spawned it, and its peer
     // the parent broker.

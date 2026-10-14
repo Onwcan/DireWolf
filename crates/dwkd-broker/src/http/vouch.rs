@@ -35,8 +35,12 @@ pub(crate) const READY: u8 = b'R';
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Ready {
     /// `PR_GET_DUMPABLE` as the worker first read it, before it changed
-    /// anything: 0 when the kernel made the image non-dumpable at `execve`
-    /// (an execute-only broker binary), 1 when it did not, 255 unknown.
+    /// anything: 1 (dumpable by its own uid) for an image its uid could
+    /// read; for one it could not (an execute-only broker binary),
+    /// `fs.suid_dumpable`'s value -- 0 (not dumpable) or 2 (dumpable by root
+    /// only), each closed to its uid, or 1; 255 unknown. Reported, never
+    /// judged: it is the worker's own word, and the host's posture decides
+    /// the window (ADR-0053 §4).
     pub(crate) at_exec: u8,
     /// One code per attempt (`super::confine::Answer::code`): 0 refused.
     pub(crate) answers: Vec<u8>,

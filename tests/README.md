@@ -173,12 +173,15 @@ every syscall number, both other calling conventions and every argument rule,
 and makes the worker's forbidden attempts unconfined to show the refusals are
 the filter's. `crates/dwkd-broker/src/http/hardening_tests.rs` runs real
 workers -- confined and proved so before they are handed anything, as `/proc`
-shows; refused to a same-uid observer by every way in -- Python stand-ins that
-each lack one property and are handed nothing, the host facts read before every
+shows; refused to a same-uid observer by every way in -- workers held at their
+first instruction (a readable image open to its own uid, the control; one its
+uid cannot read closed to it, even to its parent), Python stand-ins that each
+lack one property and are handed nothing, the host facts read before every
 hop, and, `#[ignore]`d for the task to run where the host allows, a credential
-hop under a real `MemorySwapMax=0` cgroup, memory pressure there, an
+hop under a real `MemorySwapMax=0` cgroup, memory pressure there, a root-owned
 execute-only binary and Yama at 0 (the last two only with
-`DW_D11_PRIVILEGED=1` and passwordless sudo, undone after). Every case prints a
+`DW_D11_PRIVILEGED=1` and passwordless sudo, undone after, each run whatever
+became of the other; `fs.suid_dumpable` is read, never changed). Every case prints a
 `D11-EVIDENCE` line; what the host cannot provide is NOT EXERCISED and fails.
 `make d11-hardening-mutations` weakens each guard in turn; it is slow and local.
 

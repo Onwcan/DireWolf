@@ -430,6 +430,11 @@ jobs:
         run: |
           uname -r
           cat /proc/sys/kernel/yama/ptrace_scope || echo "no Yama"
+          # Read, never changed: what execve gives an image its uid cannot
+          # read (0 or 2 close it to that uid; 1 does not), and where a core
+          # of a process dumpable by root only would go.
+          cat /proc/sys/fs/suid_dumpable
+          cat /proc/sys/kernel/core_pattern
           cat /proc/swaps
           head -1 /proc/self/cgroup
           cat /sys/fs/cgroup/cgroup.controllers

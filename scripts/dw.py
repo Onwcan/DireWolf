@@ -3211,8 +3211,8 @@ WORKLOAD_MUTATIONS = (
     (
         "Yama's ptrace_scope 0 counts as a closed startup window",
         "crates/dwkd-broker/src/posture.rs",
-        "self.scope.is_some_and(|scope| scope >= 1) || self.execute_only",
-        "self.scope.is_some_and(|scope| scope < 4) || self.execute_only",
+        "self.scope.is_some_and(|scope| scope >= 1)\n",
+        "self.scope.is_some_and(|scope| scope < 4)\n",
     ),
     (
         "a binary its own uid owns counts as execute-only",
@@ -3460,14 +3460,18 @@ def task_sandbox_workload_mutations() -> None:
 
 D11_EVIDENCE_PREFIX = "D11-EVIDENCE "
 
-# The cases the broker's own suites print on any Linux host with Yama at 1 or
-# more (`crates/dwkd-broker/src/http/hardening_tests.rs`): real workers, a real
-# same-uid observer, stand-ins weakened one property at a time, and the host
-# facts read before every hop.
+# The cases the broker's own suites print on any Linux host with Yama at 1
+# and fs.suid_dumpable 0 or 2 (`crates/dwkd-broker/src/http/hardening_tests.rs`):
+# real workers, a real same-uid observer, workers held at their first
+# instruction -- a readable image (the control) and one its uid cannot read --
+# stand-ins weakened one property at a time, and the host facts read before
+# every hop.
 D11_CASES = (
     "worker-confined-before-hand-over",
     "worker-forbidden-attempts-refused",
     "worker-image-at-exec-readable-binary",
+    "readable-image-open-to-its-uid-at-exec",
+    "unreadable-image-closed-to-its-uid-at-exec",
     "same-uid-observer-refused",
     "worker-cut-off-before-hand-over",
     "stand-in-without-everything",
@@ -3477,6 +3481,7 @@ D11_CASES = (
     "stand-in-without-an-honest-ready-line",
     "stand-in-complete",
     "startup-window-open-hop-refused",
+    "execute-only-under-suid-dumpable-1-hop-refused",
     "swappable-credential-hop-refused",
     "swappable-plain-hop-performed",
     "swappable-worker-handed-nothing",
@@ -3496,7 +3501,7 @@ D11_HOST_CASES = (
         "a transient cgroup with memory.swap.max 0 and a memory limit (systemd-run)",
     ),
     (
-        "execute-only-image-non-dumpable-at-exec",
+        "execute-only-image-closed-to-its-uid-at-exec",
         "a root-owned execute-only broker binary (DW_D11_PRIVILEGED=1 and passwordless sudo)",
     ),
     (
@@ -3632,16 +3637,25 @@ def d11_reported(output: str) -> dict[str, str]:
     return reported
 
 
-def d11_privileged_cases(test_binary: str, outputs: list[str]) -> None:
+def d11_privileged_cases(test_binary: str, outputs: list[str]) -> list[str]:
     """The cases only root can set up, each undone whatever happens: a
-    root-owned execute-only copy of the broker, and Yama at 0 for one run."""
+    root-owned execute-only copy of the broker, and Yama at 0 for one run.
+    Each runs whatever became of the other; what failed is returned, for the
+    task to fail on once everything ran. `fs.suid_dumpable` and the core
+    pattern are read and printed, never changed: they decide what the
+    execute-only case can show."""
+    failed: list[str] = []
+    for name in ("fs/suid_dumpable", "kernel/core_pattern"):
+        value = (_read(f"/proc/sys/{name}") or "unreadable").strip()
+        print(f"{name.replace('/', '.')}: {value}  (read only)")
     broker = Path(test_binary).parent.parent / "dwkd-broker"
     # The fixed path the case reads (the broker's tests read nothing ambient).
     directory = Path(D11_XONLY_DIRECTORY)
     xonly = directory / "dwkd-broker"
-    run("sudo", "-n", "install", "-d", "-o", "root", "-g", "root", "-m", "0755", str(directory))
-    run("sudo", "-n", "install", "-o", "root", "-g", "root", "-m", "0711", str(broker), str(xonly))
+    owned = ("-o", "root", "-g", "root")
     try:
+        run("sudo", "-n", "install", "-d", *owned, "-m", "0755", str(directory))
+        run("sudo", "-n", "install", *owned, "-m", "0711", str(broker), str(xonly))
         outputs.append(
             run_captured(
                 test_binary,
@@ -3649,16 +3663,19 @@ def d11_privileged_cases(test_binary: str, outputs: list[str]) -> None:
                 "--exact",
                 "--nocapture",
                 "--test-threads=1",
-                HARDENING + "an_execute_only_binary_starts_its_worker_non_dumpable",
+                HARDENING + "an_execute_only_binary_starts_its_worker_closed_to_its_uid",
             )
         )
+    except TaskError as exc:
+        failed.append(f"the execute-only binary: {exc}")
     finally:
         run("sudo", "-n", "rm", "-f", str(xonly))
-        run("sudo", "-n", "rmdir", str(directory))
+        if directory.exists():
+            run("sudo", "-n", "rmdir", str(directory))
     yama = Path("/proc/sys/kernel/yama/ptrace_scope")
     original = yama.read_text(encoding="utf-8").strip()
-    run("sudo", "-n", "sysctl", "-q", "-w", "kernel.yama.ptrace_scope=0")
     try:
+        run("sudo", "-n", "sysctl", "-q", "-w", "kernel.yama.ptrace_scope=0")
         outputs.append(
             run_captured(
                 test_binary,
@@ -3668,8 +3685,11 @@ def d11_privileged_cases(test_binary: str, outputs: list[str]) -> None:
                 HARDENING + "a_same_uid_observer_cannot_reach_a_worker_whatever_yama_allows",
             )
         )
+    except TaskError as exc:
+        failed.append(f"the Yama-0 counterexample: {exc}")
     finally:
         run("sudo", "-n", "sysctl", "-q", "-w", f"kernel.yama.ptrace_scope={original}")
+    return failed
 
 
 def task_d11_hardening_evidence() -> None:
@@ -3680,15 +3700,20 @@ def task_d11_hardening_evidence() -> None:
     The broker's suites run first: the program evaluated for every syscall
     number and both other calling conventions; real workers proving their
     confinement before they are handed anything, as the kernel shows it; a
-    same-uid observer refused; stand-ins lacking one property each, handed
-    nothing; the host facts read before every hop. Then the host: a
+    same-uid observer refused; workers held at their first instruction --
+    a readable image open to its own uid (the control), and one its uid
+    cannot read closed to it, even to its parent; stand-ins lacking one
+    property each, handed nothing; the host facts read before every hop.
+    Then the host: a
     credential hop refused on this host's swap; one performed in a real
     cgroup that allows no swap, its worker in it; memory pressure there ending
     in the OOM killer, never in swap. Then, only with `DW_D11_PRIVILEGED=1`
     and passwordless sudo (the hosted job), a root-owned execute-only binary
-    whose worker is non-dumpable from `execve`, and Yama at 0 for one run --
-    the counterexample, restored at once. What the host cannot provide is
-    NOT EXERCISED, listed, and fails the task after everything else ran.
+    whose worker is closed to its uid from `execve` -- under the host's own
+    `fs.suid_dumpable`, read and never changed -- and Yama at 0 for one run --
+    the counterexample, restored at once; each runs whatever became of the
+    other. What the host cannot provide is NOT EXERCISED, listed, and fails
+    the task after everything else ran.
     Linux only.
     """
     if not sys.platform.startswith("linux"):
@@ -3740,9 +3765,10 @@ def task_d11_hardening_evidence() -> None:
                 HARDENING + "memory_pressure_under_the_cap_ends_in_the_oom_killer_never_in_swap",
             )
         )
-    if d11_privileged():
-        d11_privileged_cases(test_binary, outputs)
+    failed = d11_privileged_cases(test_binary, outputs) if d11_privileged() else []
     reported = d11_reported("\n".join(outputs))
+    if failed:
+        raise TaskError("privileged D11 case(s) FAILED: " + "; ".join(failed))
     missing = [case for case in D11_CASES if case not in reported]
     if missing:
         raise TaskError(f"{len(missing)} D11 case(s) did not report: " + ", ".join(missing))
@@ -3811,7 +3837,8 @@ def task_d11_posture() -> None:
             execute_only = st.st_uid == 0 and st.st_mode & 0o044 == 0
             print(
                 f"broker binary {candidate}: owner uid {st.st_uid}, mode {st.st_mode & 0o7777:04o}"
-                f" -> execute-only {execute_only}  (closes the window from execve)"
+                f" -> execute-only {execute_only}  (closes the window from execve where"
+                " fs.suid_dumpable is 0 or 2)"
             )
     swaps = [line for line in (_read("/proc/swaps") or "").splitlines()[1:] if line.strip()]
     print(f"swap devices: {len(swaps)}" + "".join(f"\n  {line}" for line in swaps))
@@ -3853,7 +3880,13 @@ def task_d11_posture() -> None:
         f"page zeroing on the kernel command line: {zeroing or 'none (the build default applies)'}"
     )
     print(f"hibernation (/sys/power/disk): {(_read('/sys/power/disk') or 'absent').strip()}")
-    print(f"suid_dumpable: {(_read('/proc/sys/fs/suid_dumpable') or 'absent').strip()}")
+    suid_dumpable = (_read("/proc/sys/fs/suid_dumpable") or "absent").strip()
+    meaning = {
+        "0": "an execute-only image starts not dumpable: closed to its uid",
+        "1": "an execute-only image starts dumpable by its uid: it closes nothing",
+        "2": "an execute-only image starts dumpable by root only: closed to its uid",
+    }.get(suid_dumpable, "unknown: an execute-only binary closes nothing")
+    print(f"suid_dumpable: {suid_dumpable}  ({meaning})")
     soft, hard = resource.getrlimit(resource.RLIMIT_MEMLOCK)
     print(f"RLIMIT_MEMLOCK: soft {soft}, hard {hard}")
     if platform.machine() == "x86_64":
@@ -3969,6 +4002,24 @@ D11_MUTATIONS = (
         "crates/dwkd-broker/src/http/vouch.rs",
         "    if answers.iter().any(|code| *code != 0) {",
         "    if false && answers.iter().any(|code| *code != 0) {",
+    ),
+    (
+        "an execute-only image fs.suid_dumpable starts dumpable by its uid closes the window",
+        "crates/dwkd-broker/src/posture.rs",
+        "matches!(self.suid_dumpable, Some(0 | 2))",
+        "matches!(self.suid_dumpable, Some(0 | 1 | 2))",
+    ),
+    (
+        "an execute-only binary closes the window whatever fs.suid_dumpable says",
+        "crates/dwkd-broker/src/posture.rs",
+        "(self.execute_only && matches!(self.suid_dumpable, Some(0 | 2)))",
+        "self.execute_only",
+    ),
+    (
+        "an unreadable fs.suid_dumpable counts as 0",
+        "crates/dwkd-broker/src/posture.rs",
+        '        "2" => Some(2),\n        _ => None,\n    }\n}\n\n/// Whether `(owner, mode)`',
+        '        "2" => Some(2),\n        _ => Some(0),\n    }\n}\n\n/// Whether `(owner, mode)`',
     ),
     (
         "an open start-up window is not read before a hop",

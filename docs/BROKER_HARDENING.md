@@ -23,8 +23,13 @@ Each refusal can be acknowledged for development only, and is logged
 
 1. **A dedicated system user** for the broker, running nothing else, never
    root, never uid 10001 or 10002 (the sandbox's), never the authority's.
-2. **The binary root-owned and execute-only**, so the kernel makes every
-   worker non-dumpable at `execve`:
+2. **The binary root-owned and execute-only, on a host whose
+   `fs.suid_dumpable` is 0 or 2**, so `execve` starts every worker closed
+   to the broker's uid before its first instruction: not dumpable (0), or
+   dumpable by root only (2, which systemd-coredump's and apport's defaults
+   set). Under 1, a debugging setting, an execute-only image starts dumpable
+   by its own uid and the broker does not count the binary; it reads the
+   setting, and never changes it:
 
    ```bash
    sudo install -o root -g root -m 0711 dwkd-broker /usr/libexec/direwolf/dwkd-broker
@@ -81,7 +86,7 @@ added later is seen at the next hop.
 
 | Missing | Effect |
 |---|---|
-| Yama | the binary must be execute-only, or the broker refuses to serve (and every hop) |
+| Yama | the binary must be execute-only and `fs.suid_dumpable` 0 or 2, or the broker refuses to serve (and every hop) |
 | cgroup v2's memory controller | a host with swap refuses credential hops; add `MemorySwapMax=0` on a v2 host or run without swap |
 | `x86_64` or `aarch64` | no reviewed syscall program: no worker starts, `net.http` is refused |
 | `init_on_free` | reported `default`; nothing refused |
@@ -124,4 +129,5 @@ on hosts that have it; the strict refusal is shown by
 `make d11-hardening-evidence` runs on any Linux host and reports what it could
 not exercise; `DW_D11_PRIVILEGED=1` with passwordless sudo (the hosted job)
 adds a root-owned execute-only binary and the Yama-0 counterexample, each
-undone after. `make d11-hardening-mutations` weakens each guard in turn.
+undone after and each run whatever became of the other; `fs.suid_dumpable`
+is read and printed there, never changed. `make d11-hardening-mutations` weakens each guard in turn.

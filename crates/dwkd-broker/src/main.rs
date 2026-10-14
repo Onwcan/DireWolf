@@ -314,6 +314,7 @@ fn deployment(config: &config::ServeConfig, own_uid: u32) -> Result<(), String> 
         posture::Posture {
             scope: None,
             execute_only: false,
+            suid_dumpable: None,
         },
         |binary| posture::read(&binary),
     );
@@ -367,11 +368,13 @@ fn admit(
         match config.traceable_workers {
             config::TraceableWorkers::Refused => {
                 return Err(
-                    "cannot serve: Yama's ptrace_scope is 0 or absent and this binary is \
-                     readable by its own uid, so a process of the broker's uid could take over \
-                     an exchange worker or a launch helper before it hardens itself (ADR-0050 \
-                     §21). Set kernel.yama.ptrace_scope to 1 or more, install the broker \
-                     root-owned and execute-only, or pass --allow-traceable-workers for \
+                    "cannot serve: Yama's ptrace_scope is 0 or absent, and this binary is \
+                     readable by its own uid or fs.suid_dumpable is not 0 or 2 (1 starts even an \
+                     execute-only image dumpable by its uid), so a process of the broker's uid \
+                     could take over an exchange worker or a launch helper before it hardens \
+                     itself (ADR-0050 §21, ADR-0053 §4). Set kernel.yama.ptrace_scope to 1 or \
+                     more, install the broker root-owned and execute-only on a host whose \
+                     fs.suid_dumpable is 0 or 2, or pass --allow-traceable-workers for \
                      development"
                         .to_owned(),
                 );
@@ -608,31 +611,32 @@ mod tests {
         // Where memory can go matters only to credential hops (below): every
         // case here is under a cap.
         let capped = Swap::Capped("/system.slice/dwkd-broker.service".to_owned());
-        let open = Posture {
-            scope: Some(0),
-            execute_only: false,
+        let posture = |scope, execute_only, suid_dumpable| Posture {
+            scope,
+            execute_only,
+            suid_dumpable,
         };
-        let absent = Posture {
-            scope: None,
-            execute_only: false,
-        };
-        let yama = Posture {
-            scope: Some(1),
-            execute_only: false,
-        };
-        let sealed = Posture {
-            scope: Some(0),
-            execute_only: true,
-        };
+        let (open, absent, yama) = (
+            posture(Some(0), false, None),
+            posture(None, false, None),
+            posture(Some(1), false, None),
+        );
+        // An execute-only binary closes the window where `fs.suid_dumpable` is
+        // 0 or 2 (dumpable by root only: closed to the broker's uid alike); 1
+        // starts the image dumpable by its own uid, and unread is no better.
+        let sealed = posture(Some(0), true, Some(0));
+        let sealed_root_only = posture(Some(0), true, Some(2));
+        let unsealed = posture(Some(0), true, Some(1));
+        let unknown = posture(Some(0), true, None);
         // A posture that closes the window serves, with nothing reduced.
-        for posture in [yama, sealed] {
+        for posture in [yama, sealed, sealed_root_only] {
             assert_eq!(
                 admit(&serve(1000, &[]), 1001, posture, &capped),
                 Ok(Vec::new())
             );
         }
         // An open window refuses, whatever else is right, unless acknowledged.
-        for posture in [open, absent] {
+        for posture in [open, absent, unsealed, unknown] {
             let refused = admit(&serve(1000, &[]), 1001, posture, &capped);
             assert!(
                 refused
@@ -723,6 +727,7 @@ mod tests {
         let yama = Posture {
             scope: Some(1),
             execute_only: false,
+            suid_dumpable: None,
         };
         for protected in [Swap::NoDevice, Swap::Capped("/a".to_owned())] {
             for flags in [&[][..], &["--allow-swappable-workers"][..]] {

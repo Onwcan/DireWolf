@@ -1,6 +1,6 @@
 # ADR-0053: D11 hardening — the HTTPS exchange worker confines itself with an exact syscall filter and is vouched for from the kernel before it is handed anything; a credential hop runs only where its memory cannot reach swap
 
-**Status:** Proposed · **Date:** 2026-10-13 · **Would amend (on acceptance):** [ADR-0050](0050-m5c-kernel-performed-net-http-ssrf-redirects-and-credential-egress.md) (§9's worker gains a syscall filter and a broker-side vouching before its hand-over; §21's ptrace posture is read again before every worker, and a swap condition joins the conditions), [ADR-0046](0046-m4e-secret-handles-backends-injection-and-redaction.md) (§10: where a credential's memory may be, for mode A), [ADR-0019](0019-language-rationale-v2.md) and [ADR-0033](0033-protocol-source-of-truth-and-tcb-dependencies.md) (the broker's dependency set: `seccompiler`, and a direct edge to `libc`) · **Refines:** [ADR-0018](0018-authority-broker-split.md), [ADR-0045](0045-m4d-process-execution-broker.md) (the launch helper is unchanged), [ADR-0052](0052-m5d-sandboxed-process-exec.md) (Proposed; M5d.1's start-up posture check, now per hop for exchange workers) · **Leaves unchanged:** every accepted ADR's body; ADR-0052 stays Proposed and M5d.1 a historical checkpoint.
+**Status:** Proposed · **Date:** 2026-10-13 · **Would amend (on acceptance):** [ADR-0050](0050-m5c-kernel-performed-net-http-ssrf-redirects-and-credential-egress.md) (§9's worker gains a syscall filter and a broker-side vouching before its hand-over; §21's ptrace posture is read again before every worker, and a swap condition joins the conditions), [ADR-0046](0046-m4e-secret-handles-backends-injection-and-redaction.md) (§10: where a credential's memory may be, for mode A), [ADR-0019](0019-language-rationale-v2.md) and [ADR-0033](0033-protocol-source-of-truth-and-tcb-dependencies.md) (the broker's dependency set: `seccompiler`, and a direct edge to `libc`) · **Refines:** [ADR-0018](0018-authority-broker-split.md), [ADR-0045](0045-m4d-process-execution-broker.md) (the launch helper is unchanged), [ADR-0052](0052-m5d-sandboxed-process-exec.md) (Proposed; M5d.1's start-up posture check, now per hop for exchange workers, and an execute-only binary counted only where `fs.suid_dumpable` is 0 or 2) · **Leaves unchanged:** every accepted ADR's body; ADR-0052 stays Proposed and M5d.1 a historical checkpoint.
 
 > **A worker that a malicious origin compromises can no longer reach
 > anything its broker's uid could.** Before it can receive a byte, the
@@ -48,7 +48,8 @@ What that did not give:
   an open `mem` descriptor are not re-checked), and a tracer attached in it
   stays attached.
 - **The start-up posture** (Yama `ptrace_scope` ≥ 1 or an execute-only
-  binary) was read once, at the broker's start (M5d.1).
+  binary) was read once, at the broker's start (M5d.1) -- the binary by its
+  owner and mode alone, whatever `fs.suid_dumpable` said.
 - **Swap** was not considered: the credential's memory, in the broker and
   in the worker, could be written to a swap device.
 
@@ -70,6 +71,8 @@ access and cold boot -- named where a deployment measure reduces them
 |---|---|---|---|---|
 | [Linux seccomp filter](https://www.kernel.org/doc/html/latest/userspace-api/seccomp_filter.html), [seccomp(2)](https://man7.org/linux/man-pages/man2/seccomp.2.html) | BPF over `seccomp_data`; `no_new_privs` or `CAP_SYS_ADMIN` to install; inherited; most restrictive action wins | the worker's program | the architecture must be checked or numbers overlap across conventions; pointers cannot be inspected; vDSO calls are not seen | §5: arch check, x32 refused, argument rules only on values |
 | [execve(2)](https://man7.org/linux/man-pages/man2/execve.2.html), [PR_SET_DUMPABLE](https://man7.org/linux/man-pages/man2/PR_SET_DUMPABLE.2const.html), kernel `fs/exec.c` (`would_dump`, `begin_new_exec`, master) | `execve` resets dumpable to 1, or to `suid_dumpable` when the executing user cannot read the binary | the window, and the execute-only deployment | a parent's `PR_SET_DUMPABLE` is not inherited across `execve` | §4 |
+| [`fs.suid_dumpable`](https://www.kernel.org/doc/html/latest/admin-guide/sysctl/fs.html), [proc_sys_fs(5)](https://man7.org/linux/man-pages/man5/proc_sys_fs.5.html), [core(5)](https://man7.org/linux/man-pages/man5/core.5.html) (studied 2026-10-14) | 0: an image its user cannot read is not dumped; 1 (debug): dumped with no security applied; 2: dumped readable by root only, and only to an absolute path or a pipe | the execute-only deployment | host-wide; systemd's `50-coredump.conf` and apport's `start_apport()` set 2; a pipe handler is not bound by `RLIMIT_CORE` | §4: 0 or 2 required of an execute-only binary, read, never set |
+| [ptrace(2)](https://man7.org/linux/man-pages/man2/ptrace.2.html) access mode checking; kernel `kernel/ptrace.c` (`__ptrace_may_access`), `fs/proc/base.c` (`task_dump_owner`, `mem_open`), `mm/process_vm_access.c`, `fs/coredump.c` (master, 2026-10-14) | a target whose dumpable attribute is not 1 is refused to a caller without `CAP_SYS_PTRACE` -- `PTRACE_ATTACH`, `/proc/<pid>/mem` (attach mode, filesystem credentials), `process_vm_readv` (attach mode) -- and its restricted `/proc` entries are root's; at 2 the kernel dumps a core as root, at 0 not at all, a pipe handler included | the window | a tracer attached before `execve` keeps the registers; `CAP_SYS_PTRACE` is outside the model | §4: 0 and 2 close the image alike |
 | [Yama](https://www.kernel.org/doc/html/latest/admin-guide/LSM/Yama.html) | scope 1: attach only to descendants or a declared tracer; scope 3 cannot be lowered | the window | host-global; an ancestor may still attach | §4: required unless the binary is execute-only |
 | [cgroup v2](https://www.kernel.org/doc/html/latest/admin-guide/cgroup-v2.html) | `memory.swap.max` hard cap; `swap.current`, `swap.events`; lowering the cap does not recall existing swap | §7 | needs the memory controller delegated; hibernation is outside it | §7 |
 | systemd [`systemd.resource-control`](https://github.com/systemd/systemd/blob/main/man/systemd.resource-control.xml) (source of the man page; the freedesktop page refused the connection) | `MemorySwapMax=` → `memory.swap.max`; transient scopes by `systemd-run` | the deployment and the evidence | a unit file is not proof: the cap is read from the cgroup | §§7, 13 |
@@ -137,14 +140,40 @@ every worker confined.
 - **The window has no observer** under either posture the broker requires,
   read at start **and before every worker**: Yama ≥ 1 (a process of the
   broker's uid that is not an ancestor cannot open the worker's memory) or
-  an execute-only binary (root-owned, no read bit: the kernel makes the image
-  non-dumpable at `execve`, `would_dump()`, so there is no window at all --
-  the worker reports `dumpable=0` from its first instruction, shown by the
-  hosted job). An open window refuses the hop unless
-  `--allow-traceable-workers`. The ancestor exception of Yama scope 1 adds
-  nothing: an ancestor of the broker can already trace the broker. A posture
-  changed after start needs root (outside the model) and is seen at the next
-  hop anyway.
+  an execute-only binary (root-owned, no read bit) **on a host whose
+  `fs.suid_dumpable` is 0 or 2**. `would_dump()` marks an image its user
+  cannot read, and `begin_new_exec` gives it the setting's dumpability
+  instead of its uid's, so it starts closed to that uid -- no window at all.
+  0 is not dumpable; 2 is dumpable by root only, and closes it alike:
+  `ptrace(2)`'s access check refuses a target whose dumpable attribute is
+  not 1 to every caller without `CAP_SYS_PTRACE` (`PTRACE_ATTACH`,
+  `/proc/<pid>/mem`, `process_vm_readv`), and `/proc` gives its restricted
+  entries to root. **1 does not:** it starts an execute-only image dumpable
+  by its own uid, exactly as a readable one. So the broker reads
+  `fs.suid_dumpable` with the binary's owner and mode, and counts the binary
+  only under 0 or 2; under any other value, or none it can read, the binary
+  closes nothing (*corrected 2026-10-14:* this section claimed 0 -- the
+  first hosted run's worker began at 2, the runner's setting -- and the
+  check had counted the mode alone). 2 differs from 0 only for a core: a
+  worker that crashes, or that a process of its uid signals to dump, before
+  it hardens itself is dumped by the kernel as root, only to an absolute
+  path or a pipe handler (which `RLIMIT_CORE` does not bind; it receives the
+  limit as `%c`), readable by root only -- and holding nothing but its own
+  image, since nothing is handed over before it has made itself not
+  dumpable, after which the kernel dumps nothing at all, a pipe handler's
+  included. Shown on real workers held at their first instruction (§18). An
+  open window refuses the hop unless `--allow-traceable-workers`. The
+  ancestor exception of Yama scope 1 adds nothing: an ancestor of the
+  broker can already trace the broker. A posture changed after start needs
+  root (outside the model) and is seen at the next hop anyway.
+- **Nothing attaches before `execve` either.** A tracer attached before
+  `execve` would stay attached across it and keep the registers, though not
+  the memory, of even a closed image (the evidence's holder attaches itself
+  that way to stop the worker at its first instruction). The broker's child
+  between `fork` and `execve` is no such opening: it inherits the broker's
+  own non-dumpability (checked 2026-10-14 on Linux 6.18: a forked child of a non-dumpable
+  process is not dumpable and is closed even to its ancestor), and a tracer
+  still attached at the hand-over is refused by `TracerPid`.
 - **No worker can be that observer.** Every other worker is filtered: no
   `open`, `ptrace`, `process_vm_readv`, `pidfd_getfd`. In a deployment whose
   broker uid runs nothing else, no process of that uid can observe a worker.
@@ -300,8 +329,9 @@ requirement for an ordinary installation.
 Production (native Linux; [BROKER_HARDENING.md](../BROKER_HARDENING.md)): the
 broker as a dedicated, non-root system user that runs nothing else; started
 by systemd with `MemoryAccounting=yes`, `MemorySwapMax=0`, `LimitCORE=0`,
-`NoNewPrivileges=yes`; its binary root-owned `0711` **and** Yama ≥ 1
-(either suffices for the broker, both recommended); hibernation disabled or
+`NoNewPrivileges=yes`; its binary root-owned `0711` on a host whose
+`fs.suid_dumpable` is 0 or 2 **and** Yama ≥ 1 (either suffices for the
+broker, both recommended); hibernation disabled or
 its image encrypted; `init_on_free=1` recommended. Verified on the host by
 the broker itself (its start-up event and every hop) and, read-only, by
 `make d11-posture`. Development (WSL2, a workstation): the acknowledgements,
@@ -313,7 +343,8 @@ the tooling's.
 
 Linux with seccomp filters and `TSYNC` (3.17+); `Seccomp_filters` is read
 where reported (5.9+). cgroup v2 for a cap; on v1 a host with swap refuses
-credential hops. Without Yama, the binary must be execute-only. `x86_64` is
+credential hops. Without Yama, the binary must be execute-only and
+`fs.suid_dumpable` 0 or 2. `x86_64` is
 the exercised architecture.
 
 ### 15. Cost
@@ -353,7 +384,10 @@ does not change. TX051 keeps the filter in one module.
   bypasses the filter: the worker is still the broker's uid (OD-1).
 - The window between `execve` and the worker's hardening, where neither
   posture holds and the operator acknowledged it (development only).
-- Hibernation, a hypervisor's paging, a crash dump: outside §7.
+- Hibernation, a hypervisor's paging, a crash dump: outside §7. Under
+  `fs.suid_dumpable` 2, a worker dumped before it hardens itself leaves a
+  core the kernel wrote as root and a pipe handler keeps by its own policy:
+  it holds the worker's image and nothing it was handed (§4).
 - Library-owned plaintext until the worker exits; physical memory until a
   freed page is reused, unless `init_on_free=1`.
 - Root, `CAP_SYS_PTRACE`, the kernel.
@@ -369,10 +403,19 @@ property -- a filter, non-dumpability, an untraced state, an honest ready
 line -- handed nothing, and a complete one handed its connection; an open
 window and swappable memory refusing hops (the credential provably unread);
 a credential hop under a real `MemorySwapMax=0` cgroup, its worker in it;
-memory pressure there ending in the OOM killer with `swap.current` 0; and,
-in the hosted job, an execute-only binary whose worker is non-dumpable at
-`execve` and the Yama-0 counterexample. `make d11-hardening-mutations`: 22
-guards weakened one at a time, each killed.
+memory pressure there ending in the OOM killer with `swap.current` 0;
+workers held at their first instruction by a parent that traced them from
+before `execve` -- a readable image open to its own uid every way (the
+control: the state `fs.suid_dumpable` 1 would give an execute-only one),
+and a copy its uid cannot read closed to it every way, even to that parent,
+which keeps only the registers, the worker then confining itself and
+reporting the setting's dumpability; an execute-only binary under
+`fs.suid_dumpable` 1 refusing hops; and, in the hosted job, a root-owned
+execute-only binary that the posture counts and whose worker is closed to
+its uid from `execve` under the runner's own `fs.suid_dumpable` (read and
+printed, never changed), and the Yama-0 counterexample -- each run whatever
+became of the other. `make d11-hardening-mutations`: 25 guards weakened one
+at a time, each killed.
 
 ### 19. Revisit if
 
@@ -388,7 +431,7 @@ deployment (OD-1); Landlock or a seccomp API without `unsafe` joins the tree;
 | OD-1 | A dedicated worker uid | **later**, as a systemd socket-activated worker service under its own user, with its own crash-semantics design |
 | OD-2 | A forbidden call: `EPERM` or kill | **`EPERM`** (self-proof, measurable); kill for a wrong architecture or x32 |
 | OD-3 | Swap: refuse credential hops, or refuse to serve | **refuse credential hops**, report at start |
-| OD-4 | Start-up posture | **either** Yama ≥ 1 or an execute-only binary, **both** recommended |
+| OD-4 | Start-up posture | **either** Yama ≥ 1 or an execute-only binary on a host whose `fs.suid_dumpable` is 0 or 2, **both** recommended |
 | OD-5 | `init_on_free=1` | **recommended**, reported, not required |
 | OD-6 | Landlock | **later**, with M6's host launches |
 | OD-7 | `aarch64` | ship the compiled program, fail closed if it lacks a call; or refuse `net.http` there until a job exercises it |

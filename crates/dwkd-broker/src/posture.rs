@@ -13,12 +13,17 @@
 //! broker's uid from `execve` until it hardens itself (ADR-0050 §§9, 20 (d)).
 //! Nothing can take it over in that window unless a process of the same uid
 //! may trace it: Yama's `ptrace_scope` at least 1 forbids that to every
-//! non-ancestor, and a broker binary its uid cannot read (root-owned, no
-//! read bit) makes the kernel start those processes non-dumpable from
-//! `execve`. The broker reads both facts at start and refuses to serve when
-//! neither holds, unless the operator acknowledged it for development
+//! non-ancestor; and a broker binary its uid cannot read (root-owned, no
+//! read bit) makes `execve` give those processes the dumpability
+//! `fs.suid_dumpable` names instead of their own uid's. That closes them to
+//! the uid when it is 0 (not dumpable) or 2 (dumpable by root only) --
+//! `ptrace(2)` refuses a target whose dumpable attribute is not 1 to every
+//! caller without `CAP_SYS_PTRACE` -- but not when it is 1, which starts even
+//! an execute-only image dumpable by its own uid (ADR-0053 §4). The broker
+//! reads these facts at start and refuses to serve when none closes the
+//! window, unless the operator acknowledged it for development
 //! (`--allow-traceable-workers`, logged `REDUCED ASSURANCE`). Root and
-//! `CAP_SYS_PTRACE` remain outside this boundary either way. Both facts are
+//! `CAP_SYS_PTRACE` remain outside this boundary either way. The facts are
 //! read again before every exchange worker is started (ADR-0053 §4): a
 //! posture changed after start -- by root, outside the threat model -- is
 //! seen at the next hop, not only at the next start.
@@ -42,6 +47,10 @@ use dwk_sandbox_profile::{RELAY_UID, SANDBOX_UID};
 /// Where Yama publishes its setting.
 const YAMA: &str = "/proc/sys/kernel/yama/ptrace_scope";
 
+/// Where the kernel publishes the dumpability `execve` gives an image its
+/// uid cannot read.
+const SUID_DUMPABLE: &str = "/proc/sys/fs/suid_dumpable";
+
 /// Why `own_uid` or `authority_uid` may not be the broker's or its
 /// authority's: it is an environment's own identity. `None` when neither is.
 #[must_use]
@@ -63,31 +72,47 @@ pub(crate) fn sandbox_identity_clash(own_uid: u32, authority_uid: u32) -> Option
     None
 }
 
-/// The two facts the startup window depends on.
+/// The facts the startup window depends on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Posture {
     /// Yama's `ptrace_scope` (0–3), or `None` without Yama or when it
     /// cannot be read.
     pub(crate) scope: Option<u8>,
     /// Whether the broker's binary is root-owned with no read bit for
-    /// group or others — so no uid but root's can read it, and the kernel
-    /// starts what it executes non-dumpable.
+    /// group or others — so no uid but root's can read it, and `execve`
+    /// gives what it starts the dumpability `fs.suid_dumpable` names.
     pub(crate) execute_only: bool,
+    /// `fs.suid_dumpable` (0–2): that dumpability. Read only for an
+    /// execute-only binary -- `execve` gives an image its uid can read that
+    /// uid's own dumpability, whatever the setting says -- so `None` for any
+    /// other, and when it cannot be read or is not one of 0–2.
+    pub(crate) suid_dumpable: Option<u8>,
 }
 
 impl Posture {
     /// Whether no process of the broker's uid but an ancestor may trace a
-    /// process it starts before that process hardens itself.
+    /// process it starts before that process hardens itself: Yama at least
+    /// 1, or an execute-only binary under an `fs.suid_dumpable` of 0 or 2,
+    /// which start the image closed to its uid. Under 1 -- dumpable by its
+    /// own uid, as though readable -- or a setting not read, an
+    /// execute-only binary closes nothing.
     #[must_use]
     pub(crate) fn startup_window_closed(self) -> bool {
-        self.scope.is_some_and(|scope| scope >= 1) || self.execute_only
+        self.scope.is_some_and(|scope| scope >= 1)
+            || (self.execute_only && matches!(self.suid_dumpable, Some(0 | 2)))
     }
 
     /// How the event line spells it.
     #[must_use]
     pub(crate) fn describe(self) -> String {
+        let suid_dumpable = match (self.suid_dumpable, self.execute_only) {
+            (Some(value), _) => value.to_string(),
+            (None, true) => "unknown".to_owned(),
+            (None, false) => "not-read".to_owned(),
+        };
         format!(
-            "ptrace_scope={} execute_only={} startup_window_closed={}",
+            "ptrace_scope={} execute_only={} suid_dumpable={suid_dumpable} \
+             startup_window_closed={}",
             self.scope
                 .map_or_else(|| "absent".to_owned(), |s| s.to_string()),
             self.execute_only,
@@ -232,29 +257,49 @@ fn scope_of(text: &str) -> Option<u8> {
     }
 }
 
+/// `fs.suid_dumpable`, from its text: one digit 0–2 and a newline.
+fn suid_dumpable_of(text: &str) -> Option<u8> {
+    let digit = text.strip_suffix('\n').unwrap_or(text);
+    match digit {
+        "0" => Some(0),
+        "1" => Some(1),
+        "2" => Some(2),
+        _ => None,
+    }
+}
+
 /// Whether `(owner, mode)` is an execute-only binary for every uid but
 /// root's.
 const fn execute_only(owner: u32, mode: u32) -> bool {
     owner == 0 && mode & 0o044 == 0
 }
 
-/// Read both facts: Yama's setting, and the owner and mode of `binary`, the
-/// broker's own executable as it found it at start.
+/// Read the facts: Yama's setting, the owner and mode of `binary` (the
+/// broker's own executable as it found it at start), and -- only where it
+/// decides anything, for an execute-only binary -- `fs.suid_dumpable`.
 #[must_use]
 pub(crate) fn read(binary: &Path) -> Posture {
     let scope = std::fs::read_to_string(YAMA)
         .ok()
         .and_then(|text| scope_of(&text));
     let execute_only = rustix::fs::stat(binary).is_ok_and(|st| execute_only(st.st_uid, st.st_mode));
+    let suid_dumpable = if execute_only {
+        std::fs::read_to_string(SUID_DUMPABLE)
+            .ok()
+            .and_then(|text| suid_dumpable_of(&text))
+    } else {
+        None
+    };
     Posture {
         scope,
         execute_only,
+        suid_dumpable,
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Posture, execute_only, sandbox_identity_clash, scope_of};
+    use super::{Posture, execute_only, sandbox_identity_clash, scope_of, suid_dumpable_of};
 
     #[test]
     fn no_daemon_may_have_an_environment_identity() {
@@ -336,16 +381,57 @@ mod tests {
 
     #[test]
     fn the_startup_window_is_closed_by_yama_or_an_execute_only_binary_and_nothing_else() {
-        let posture = |scope, execute_only| Posture {
+        let posture = |scope, execute_only, suid_dumpable| Posture {
             scope,
             execute_only,
+            suid_dumpable,
         };
         for scope in [Some(1), Some(2), Some(3)] {
-            assert!(posture(scope, false).startup_window_closed());
+            for (execute_only, suid_dumpable) in [(false, None), (true, Some(1)), (true, None)] {
+                assert!(posture(scope, execute_only, suid_dumpable).startup_window_closed());
+            }
         }
         for scope in [None, Some(0)] {
-            assert!(!posture(scope, false).startup_window_closed(), "{scope:?}");
-            assert!(posture(scope, true).startup_window_closed(), "{scope:?}");
+            assert!(
+                !posture(scope, false, None).startup_window_closed(),
+                "{scope:?}"
+            );
+            // An execute-only binary closes it where `execve` starts the image
+            // closed to its uid: not dumpable (0), or dumpable by root only (2).
+            for suid_dumpable in [Some(0), Some(2)] {
+                assert!(
+                    posture(scope, true, suid_dumpable).startup_window_closed(),
+                    "{scope:?} {suid_dumpable:?}"
+                );
+                // The setting with a readable binary changes nothing.
+                assert!(!posture(scope, false, suid_dumpable).startup_window_closed());
+            }
+            // Under 1 the image starts dumpable by its own uid, exactly as a
+            // readable one; a setting not read closes nothing either.
+            for suid_dumpable in [Some(1), None, Some(3)] {
+                assert!(
+                    !posture(scope, true, suid_dumpable).startup_window_closed(),
+                    "{scope:?} {suid_dumpable:?}"
+                );
+            }
+        }
+        assert_eq!(
+            posture(Some(0), true, Some(2)).describe(),
+            "ptrace_scope=0 execute_only=true suid_dumpable=2 startup_window_closed=true"
+        );
+        assert_eq!(
+            posture(None, true, None).describe(),
+            "ptrace_scope=absent execute_only=true suid_dumpable=unknown startup_window_closed=false"
+        );
+        assert_eq!(
+            posture(Some(1), false, None).describe(),
+            "ptrace_scope=1 execute_only=false suid_dumpable=not-read startup_window_closed=true"
+        );
+        for (text, value) in [("0\n", 0), ("1\n", 1), ("2\n", 2), ("2", 2)] {
+            assert_eq!(suid_dumpable_of(text), Some(value), "{text:?}");
+        }
+        for bad in ["", "\n", "3\n", "02\n", " 2\n", "2\n\n", "-1\n"] {
+            assert_eq!(suid_dumpable_of(bad), None, "{bad:?}");
         }
         assert_eq!(scope_of("1\n"), Some(1));
         assert_eq!(scope_of("0"), Some(0));

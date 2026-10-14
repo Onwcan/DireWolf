@@ -9,6 +9,7 @@
 //! task where the host provides them; anywhere else they report NOT
 //! EXERCISED, which is never a pass.
 
+use std::collections::HashMap;
 use std::io::{Read as _, Write as _};
 use std::net::{IpAddr, Ipv4Addr, TcpListener};
 use std::os::fd::OwnedFd;
@@ -148,19 +149,253 @@ fn a_real_worker_is_confined_untraced_and_closed_before_it_is_handed_anything() 
     );
 }
 
+/// `fs.suid_dumpable` here, which must be one under which `execve` starts
+/// an image its uid cannot read closed to that uid: 0 (not dumpable) or 2
+/// (dumpable by root only). Under 1 the image starts dumpable by that uid,
+/// as though readable -- a host whose start-up window `posture` leaves to
+/// Yama alone -- and these cases have nothing to show.
+fn closing_suid_dumpable() -> u8 {
+    let text = std::fs::read_to_string("/proc/sys/fs/suid_dumpable").unwrap_or_default();
+    match text.trim() {
+        "0" => 0,
+        "2" => 2,
+        other => panic!(
+            "NOT EXERCISED: fs.suid_dumpable is {other:?} here; an image its uid cannot read \
+             starts closed to that uid only under 0 or 2"
+        ),
+    }
+}
+
+/// The holder: this test's child, which starts `<binary> http-worker` as its
+/// own traced child -- its stderr a socket pair whose peer is the holder, so
+/// the worker's peer check passes as it does for its broker -- and holds it
+/// at the stop a traced `execve` raises, before the new image's first
+/// instruction. There, as its tracer since before `execve`, it reads the
+/// registers and peeks at the instruction they point to. Detached into a
+/// stop -- untraced, still before that instruction -- it tries each way into
+/// the worker's memory as its parent: an ancestor, which Yama 1 lets
+/// through, so only the worker's dumpability decides. A worker it could
+/// attach to is killed where it stands; any other is let go, and its ready
+/// line read. Test-only, written for each run.
+const HOLDER: &str = r#"
+import ctypes, os, platform, signal, socket, sys
+libc = ctypes.CDLL(None, use_errno=True)
+libc.ptrace.restype = ctypes.c_long
+TRACEME, PEEKDATA, ATTACH, DETACH, GETREGSET, NT_PRSTATUS = 0, 2, 16, 17, 0x4204, 1
+PC = {"x86_64": 16 * 8, "aarch64": 32 * 8}[platform.machine()]
+class IoVec(ctypes.Structure):
+    _fields_ = [("base", ctypes.c_void_p), ("len", ctypes.c_size_t)]
+def ptrace(request, pid, addr=0, data=0):
+    ctypes.set_errno(0)
+    libc.ptrace(ctypes.c_int(request), ctypes.c_int(pid), ctypes.c_void_p(addr), ctypes.c_void_p(data))
+    return "ok" if ctypes.get_errno() == 0 else str(ctypes.get_errno())
+def stopped(pid, sig, flags=0):
+    _, status = os.waitpid(pid, flags)
+    if not (os.WIFSTOPPED(status) and os.WSTOPSIG(status) == sig):
+        print(f"error=not-stopped-by-{sig}-but-{status}")
+        sys.exit(1)
+binary, ready_len = sys.argv[1], int(sys.argv[2])
+ours, theirs = socket.socketpair()
+null = os.open(os.devnull, os.O_RDWR)
+pid = os.fork()
+if pid == 0:
+    try:
+        os.dup2(null, 0)
+        os.dup2(null, 1)
+        os.dup2(theirs.fileno(), 2)
+        if ptrace(TRACEME, 0) == "ok":
+            os.execve(binary, [binary, "http-worker"], {})
+    finally:
+        os._exit(127)
+theirs.close()
+os.close(null)
+seen = {}
+stopped(pid, signal.SIGTRAP)
+mem = os.stat(f"/proc/{pid}/mem")
+seen["owner"] = mem.st_uid
+seen["mode"] = oct(mem.st_mode & 0o7777)
+regs = ctypes.create_string_buffer(1024)
+iov = IoVec(ctypes.addressof(regs), 1024)
+seen["regs"] = ptrace(GETREGSET, pid, NT_PRSTATUS, ctypes.addressof(iov))
+pc = int.from_bytes(regs.raw[PC:PC + 8], "little")
+seen["peek"] = ptrace(PEEKDATA, pid, pc)
+seen["detach"] = ptrace(DETACH, pid, 0, signal.SIGSTOP)
+stopped(pid, signal.SIGSTOP, os.WUNTRACED)
+with open(f"/proc/{pid}/status") as status:
+    seen["tracer"] = next(l.split()[1] for l in status if l.startswith("TracerPid:"))
+try:
+    os.close(os.open(f"/proc/{pid}/mem", os.O_RDONLY))
+    seen["open"] = "ok"
+except OSError as error:
+    seen["open"] = str(error.errno)
+buf = ctypes.create_string_buffer(8)
+local, remote = IoVec(ctypes.addressof(buf), 8), IoVec(pc, 8)
+ctypes.set_errno(0)
+read = libc.process_vm_readv(pid, ctypes.byref(local), 1, ctypes.byref(remote), 1, 0)
+seen["vm"] = "ok" if read == 8 else str(ctypes.get_errno())
+seen["attach"] = ptrace(ATTACH, pid)
+if seen["attach"] == "ok":
+    os.kill(pid, signal.SIGKILL)
+    while True:
+        _, status = os.waitpid(pid, 0)
+        if os.WIFEXITED(status) or os.WIFSIGNALED(status):
+            break
+    seen["ready"] = "none"
+else:
+    os.kill(pid, signal.SIGCONT)
+    ours.settimeout(10)
+    line = b""
+    while len(line) < ready_len:
+        chunk = ours.recv(ready_len - len(line))
+        if not chunk:
+            break
+        line += chunk
+    seen["ready"] = "R" if len(line) == ready_len and line[:1] == b"R" else "none"
+    seen["at_exec"] = line[1] if len(line) > 1 else "none"
+    ours.close()
+    _, status = os.waitpid(pid, 0)
+    seen["exit"] = os.WEXITSTATUS(status) if os.WIFEXITED(status) else f"signal-{os.WTERMSIG(status)}"
+print(" ".join(f"{key}={value}" for key, value in seen.items()))
+"#;
+
+/// What `HOLDER` saw of a worker of `binary` held at its first instruction.
+#[allow(clippy::unwrap_used)]
+fn held_at_exec(binary: &Path) -> HashMap<String, String> {
+    let dir = std::env::temp_dir().join(format!("dw-d11-holder-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let script = dir.join("holder.py");
+    std::fs::write(&script, HOLDER).unwrap();
+    let mut command = Command::new("/usr/bin/python3");
+    command
+        .arg(&script)
+        .arg(binary)
+        .arg(vouch::ready_len(ATTEMPTS).to_string())
+        .stdin(Stdio::null());
+    let output = {
+        let _fork = crate::process::fork_guard();
+        command.output().unwrap()
+    };
+    let _ = std::fs::remove_dir_all(&dir);
+    let text = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        output.status.success(),
+        "{text} {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    text.split_whitespace()
+        .filter_map(|item| item.split_once('='))
+        .map(|(key, value)| (key.to_owned(), value.to_owned()))
+        .collect()
+}
+
+/// What a held worker shows when `execve` closed it to this uid: its
+/// `/proc/<pid>/mem` root's; the tracer it had since before `execve` keeps
+/// the registers but reads no memory (`EIO`); untraced, its own parent --
+/// the ancestor Yama allows -- refused by `open`, `process_vm_readv` and
+/// `PTRACE_ATTACH`; and, let go, a worker that confined itself, handed
+/// nothing, and began with `fs.suid_dumpable`'s dumpability.
+fn assert_closed_at_exec(seen: &HashMap<String, String>, suid_dumpable: u8) {
+    let at = |key: &str| seen.get(key).map_or("", String::as_str);
+    assert_eq!(at("owner"), "0", "root's: {seen:?}");
+    assert_eq!(at("mode"), "0o600", "{seen:?}");
+    assert_eq!(at("regs"), "ok", "{seen:?}");
+    assert_eq!(at("peek"), libc::EIO.to_string(), "{seen:?}");
+    assert_eq!(at("tracer"), "0", "untraced when observed: {seen:?}");
+    for way in ["open", "vm", "attach"] {
+        let errno = at(way).parse::<i32>().unwrap_or(0);
+        assert!(refused_access(errno), "{way}: {seen:?}");
+    }
+    assert_eq!(at("ready"), "R", "{seen:?}");
+    assert_eq!(at("at_exec"), suid_dumpable.to_string(), "{seen:?}");
+    assert_eq!(at("exit"), "4", "handed nothing, it ends: {seen:?}");
+}
+
+/// The control: a binary this uid can read starts its worker dumpable by
+/// this uid -- the state `fs.suid_dumpable` 1 gives an unreadable one too
+/// (`begin_new_exec`) -- and, held at its first instruction, its parent
+/// reads its memory every way and attaches to it. Only the worker's own
+/// hardening closes that, after the window; hence the broker requires the
+/// window closed besides (`posture`).
+#[test]
+#[allow(clippy::unwrap_used)]
+fn a_readable_binary_starts_its_worker_open_to_its_uid() {
+    let scope = yama();
+    assert!(
+        scope.is_none_or(|s| s <= 1),
+        "NOT EXERCISED: Yama {scope:?} refuses even a parent; the control needs 0 or 1"
+    );
+    let _one = one_worker_test();
+    let seen = held_at_exec(&broker_binary());
+    let own = std::fs::metadata("/proc/self").unwrap().uid();
+    let at = |key: &str| seen.get(key).map_or("", String::as_str);
+    assert_eq!(at("owner"), own.to_string(), "its own uid's: {seen:?}");
+    assert_eq!(at("tracer"), "0", "untraced when observed: {seen:?}");
+    for way in ["regs", "peek", "open", "vm", "attach"] {
+        assert_eq!(at(way), "ok", "{way}: {seen:?}");
+    }
+    d11(
+        "readable-image-open-to-its-uid-at-exec",
+        "dumpable-1-mem-own-uid-peek-open-vm-attach-ok",
+    );
+}
+
+/// The kernel's rule itself, without root: a copy of the broker its uid
+/// cannot read (mode 0111) starts its worker with `fs.suid_dumpable`'s
+/// dumpability from `execve` -- 0 or 2, each closed to that uid. Held at
+/// its first instruction, even its parent is refused every way in, and the
+/// tracer it had since before `execve` reads none of its memory. This uid
+/// owns the copy and could give the read bit back, so no deployment rests
+/// on it: `posture` never counts it execute-only; the root-owned case below
+/// is the deployment's.
+#[test]
+#[allow(clippy::unwrap_used)]
+fn an_image_its_uid_cannot_read_starts_its_worker_closed_to_that_uid() {
+    let suid_dumpable = closing_suid_dumpable();
+    let _one = one_worker_test();
+    let dir = broker_binary()
+        .parent()
+        .unwrap()
+        .join(format!("dw-d11-unreadable-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let copy = dir.join("dwkd-broker");
+    std::fs::copy(broker_binary(), &copy).unwrap();
+    std::fs::set_permissions(&copy, std::fs::Permissions::from_mode(0o111)).unwrap();
+    let unreadable = std::fs::File::open(&copy).is_err();
+    let counted = crate::posture::read(&copy).execute_only;
+    let seen = held_at_exec(&copy);
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(unreadable, "unreadable by this uid");
+    assert!(!counted, "this uid's own: never execute-only");
+    assert_closed_at_exec(&seen, suid_dumpable);
+    d11(
+        "unreadable-image-closed-to-its-uid-at-exec",
+        &format!(
+            "suid_dumpable-{suid_dumpable}-at_exec-{suid_dumpable}-mem-root-0600-peek-eio-open-vm-attach-refused"
+        ),
+    );
+}
+
 /// Where `make d11-hardening-evidence`, given `DW_D11_PRIVILEGED=1`,
 /// installs a root-owned, execute-only copy of the broker for one case, and
 /// removes it after. A fixed path, not a variable: this module reads nothing
 /// ambient (TX046).
 const XONLY_BINARY: &str = "/usr/local/libexec/direwolf-d11-evidence/dwkd-broker";
 
-/// A root-owned, execute-only copy of the broker binary: the kernel makes
-/// the worker's image non-dumpable at `execve` itself, before its first
-/// instruction -- no window at all.
+/// The deployment: a root-owned, execute-only copy of the broker binary.
+/// The broker's own posture counts it as closing the start-up window --
+/// Yama aside -- because `fs.suid_dumpable` here is 0 or 2; held at its
+/// first instruction its worker is closed to this uid as above; and run as
+/// its broker runs it, it is confined before its hand-over and began with
+/// that dumpability. 0 (not dumpable) and 2 (dumpable by root only) close
+/// it alike: `ptrace(2)` refuses a target whose dumpable attribute is not 1
+/// to every caller without `CAP_SYS_PTRACE`, and `/proc` gives its memory
+/// to root. 2 differs only in a core dump, which the kernel then writes as
+/// root, readable by root only -- and the worker holds nothing until it has
+/// made itself not dumpable at all.
 #[test]
 #[ignore = "needs a root-owned execute-only broker binary: make d11-hardening-evidence with DW_D11_PRIVILEGED=1"]
 #[allow(clippy::unwrap_used)]
-fn an_execute_only_binary_starts_its_worker_non_dumpable() {
+fn an_execute_only_binary_starts_its_worker_closed_to_its_uid() {
     let binary = PathBuf::from(XONLY_BINARY);
     assert!(
         binary.exists(),
@@ -173,11 +408,37 @@ fn an_execute_only_binary_starts_its_worker_non_dumpable() {
         std::fs::File::open(&binary).is_err(),
         "unreadable by this uid"
     );
-    assert!(crate::posture::read(&binary).execute_only);
+    let suid_dumpable = closing_suid_dumpable();
+    let posture = crate::posture::read(&binary);
+    assert!(posture.execute_only, "{}", posture.describe());
+    assert_eq!(
+        posture.suid_dumpable,
+        Some(suid_dumpable),
+        "{}",
+        posture.describe()
+    );
+    let without_yama = Posture {
+        scope: Some(0),
+        ..posture
+    };
+    assert!(
+        without_yama.startup_window_closed(),
+        "the binary alone closes the window: {}",
+        without_yama.describe()
+    );
     let _one = one_worker_test();
+    assert_closed_at_exec(&held_at_exec(&binary), suid_dumpable);
     let at_exec = confined_before_hand_over(&binary);
-    assert_eq!(at_exec, 0, "non-dumpable from execve");
-    d11("execute-only-image-non-dumpable-at-exec", "dumpable=0");
+    assert_eq!(
+        at_exec, suid_dumpable,
+        "began with fs.suid_dumpable's dumpability"
+    );
+    d11(
+        "execute-only-image-closed-to-its-uid-at-exec",
+        &format!(
+            "suid_dumpable-{suid_dumpable}-at_exec-{suid_dumpable}-posture-closed-mem-root-0600-peek-eio-open-vm-attach-refused"
+        ),
+    );
 }
 
 /// What an observer process made of a target: each of `open
@@ -444,6 +705,17 @@ fn window_open(_: &Path) -> Posture {
     Posture {
         scope: Some(0),
         execute_only: false,
+        suid_dumpable: None,
+    }
+}
+
+/// An execute-only binary where `fs.suid_dumpable` is 1: `execve` starts its
+/// image dumpable by its own uid, as though readable.
+fn execute_only_under_suid_dumpable_1(_: &Path) -> Posture {
+    Posture {
+        scope: Some(0),
+        execute_only: true,
+        suid_dumpable: Some(1),
     }
 }
 
@@ -516,6 +788,22 @@ fn the_host_is_read_before_every_hop_and_refuses_what_it_cannot_vouch_for() {
     assert!(workers_of_this_process().is_empty());
     d11(
         "startup-window-open-hop-refused",
+        "HTTP_WORKER_FAILED-nothing-sent",
+    );
+    // An execute-only binary closes nothing where `fs.suid_dumpable` is 1.
+    let unsealed = client_under(WorkerPolicy {
+        startup: execute_only_under_suid_dumpable_1,
+        ..test_policy()
+    });
+    let (port, request) = quiet_origin();
+    assert_eq!(
+        refused(run(&unsealed, &Hop::get(port), None)),
+        BrokerRefusal::HttpWorkerFailed
+    );
+    assert!(heard_nothing(&request));
+    assert!(workers_of_this_process().is_empty());
+    d11(
+        "execute-only-under-suid-dumpable-1-hop-refused",
         "HTTP_WORKER_FAILED-nothing-sent",
     );
     let acknowledged = client_under(WorkerPolicy {
