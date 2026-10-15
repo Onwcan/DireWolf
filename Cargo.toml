@@ -167,8 +167,13 @@ nix = { version = "=0.31.3", default-features = false }
 # `rustls` with `ring` (D1): TLS 1.2 and 1.3, certificate verification always
 # on through `rustls-webpki`, no `aws-lc-rs`, no logging, no post-quantum
 # preference crate. `ring` builds C and assembly with `cc` at build time: the
-# one native component, reviewed in ADR-0050 §18.
-rustls = { version = "=0.23.45", default-features = false, features = ["ring", "std", "tls12"] }
+# one native component, reviewed in ADR-0050 §18. 0.23.46 (2026-10-14), from
+# the 0.23.45 ADR-0050 reviewed: the fix for RUSTSEC-2026-0346 to -0349, with
+# the same dependency requirements and features. None of the four paths is
+# reachable here -- resumption is disabled (no session value, no key-exchange
+# hint is stored), there is no ECH and no `brotli` -- and the fix is taken
+# anyway: the gate is the advisory, not a reachability argument.
+rustls = { version = "=0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
 # Mozilla's root store, compiled in (D1): fixed and reproducible, never the
 # host's trust store or `SSL_CERT_FILE` (TX046). CDLA-Permissive-2.0, the one
 # licence exception in deny.toml.
