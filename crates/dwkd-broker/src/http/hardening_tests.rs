@@ -701,6 +701,48 @@ fn the_broker_hands_nothing_to_a_worker_it_cannot_vouch_for() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// An architecture whose syscall program has no kernel evidence (ADR-0053
+/// OD-7: every one but `x86_64`): every hop refused before the credential
+/// is read or anything dialled, whatever the operator acknowledged -- no
+/// worker runs that no verified program confines.
+#[test]
+#[allow(clippy::unwrap_used)]
+fn an_unverified_architecture_refuses_every_hop_before_it_dials() {
+    const VALUE: &[u8] = b"unv3rified-4rch-v4lue-0123456789";
+    let _one = one_worker_test();
+    let unverified = client_under(WorkerPolicy {
+        architecture_verified: false,
+        traceable: TraceableWorkers::Permitted,
+        swappable: SwappableWorkers::Permitted,
+        ..test_policy()
+    });
+    // A listener nobody accepts from: any dial, even one abandoned at once,
+    // would leave its connection in the accept queue.
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let mut hop = Hop::get(listener.local_addr().unwrap().port());
+    hop.credential = Some(credential());
+    let secret = pipe_with(VALUE);
+    let kept = rustix::io::dup(&secret).unwrap();
+    assert_eq!(
+        refused(run(&unverified, &hop, Some(secret))),
+        BrokerRefusal::HttpWorkerFailed
+    );
+    let mut unread = Vec::new();
+    std::fs::File::from(kept).read_to_end(&mut unread).unwrap();
+    assert_eq!(unread, VALUE, "the broker never read the credential");
+    assert_eq!(
+        listener.accept().map(|_| ()).map_err(|error| error.kind()),
+        Err(std::io::ErrorKind::WouldBlock),
+        "nothing was dialled"
+    );
+    assert!(workers_of_this_process().is_empty());
+    d11(
+        "unverified-architecture-hop-refused",
+        "HTTP_WORKER_FAILED-credential-unread-nothing-dialled",
+    );
+}
+
 fn window_open(_: &Path) -> Posture {
     Posture {
         scope: Some(0),

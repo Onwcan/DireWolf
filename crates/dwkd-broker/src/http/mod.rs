@@ -159,15 +159,20 @@ enum Runner {
     InProcess(Arc<ClientConfig>),
 }
 
-/// What the broker requires of the host before a hop's exchange worker is
-/// started, beyond the worker's own confinement (ADR-0053 §§4, 7): the
-/// start-up window closed, and -- for a hop that carries a credential --
-/// memory that cannot be written to swap, this broker's and then the
-/// worker's. Read from the host at every hop, never cached; refused unless
-/// the operator acknowledged it at start (`--allow-traceable-workers`,
-/// `--allow-swappable-workers`, each logged `REDUCED ASSURANCE`).
+/// What the broker requires before a hop's exchange worker is started,
+/// beyond the worker's own confinement (ADR-0053 §§4, 5, 7): an architecture
+/// whose syscall program has kernel evidence (OD-7; nothing acknowledges its
+/// absence), the start-up window closed, and -- for a hop that carries a
+/// credential -- memory that cannot be written to swap, this broker's and
+/// then the worker's. The host's facts are read at every hop, never cached;
+/// the last two are refused unless the operator acknowledged them at start
+/// (`--allow-traceable-workers`, `--allow-swappable-workers`, each logged
+/// `REDUCED ASSURANCE`).
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct WorkerPolicy {
+    /// Whether this build's architecture has kernel evidence for the
+    /// worker's syscall program (`confine::VERIFIED_ARCHITECTURE`).
+    pub(crate) architecture_verified: bool,
     pub(crate) traceable: TraceableWorkers,
     pub(crate) swappable: SwappableWorkers,
     /// The start-up window's facts, for the worker's binary.
@@ -182,6 +187,7 @@ impl WorkerPolicy {
     #[must_use]
     pub(crate) fn of_host(traceable: TraceableWorkers, swappable: SwappableWorkers) -> Self {
         Self {
+            architecture_verified: confine::VERIFIED_ARCHITECTURE,
             traceable,
             swappable,
             startup: crate::posture::read,
@@ -193,8 +199,17 @@ impl WorkerPolicy {
     ///
     /// # Errors
     ///
-    /// The window is open and nobody acknowledged it.
+    /// No program with kernel evidence confines a worker here, or the window
+    /// is open and nobody acknowledged it.
     pub(crate) fn admits_start(&self, binary: &Path) -> Result<(), String> {
+        // No acknowledgement admits a worker that no verified program
+        // confines (OD-7).
+        if !self.architecture_verified {
+            return Err(format!(
+                "no kernel-verified syscall program for {} (ADR-0053 OD-7)",
+                std::env::consts::ARCH
+            ));
+        }
         // Acknowledged: nothing the host says changes the answer, so nothing
         // is read.
         if self.traceable == TraceableWorkers::Permitted {

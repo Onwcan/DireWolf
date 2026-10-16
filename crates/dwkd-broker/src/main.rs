@@ -325,6 +325,14 @@ fn deployment(config: &config::ServeConfig, own_uid: u32) -> Result<(), String> 
         swap.describe(),
         posture::page_zeroing_now()
     ));
+    if !http::confine::VERIFIED_ARCHITECTURE {
+        log(&format!(
+            "NOTICE: net.http is refused on {}: the exchange worker's syscall program has no \
+             kernel evidence on this architecture, and no worker runs without one (ADR-0053 \
+             OD-7); every other tool is unaffected",
+            std::env::consts::ARCH
+        ));
+    }
     for reduced in admit(config, own_uid, posture, &swap)? {
         log(&format!("REDUCED ASSURANCE: {reduced}"));
     }

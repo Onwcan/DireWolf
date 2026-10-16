@@ -3481,6 +3481,7 @@ D11_CASES = (
     "stand-in-without-an-honest-ready-line",
     "stand-in-complete",
     "startup-window-open-hop-refused",
+    "unverified-architecture-hop-refused",
     "execute-only-under-suid-dumpable-1-hop-refused",
     "swappable-credential-hop-refused",
     "swappable-plain-hop-performed",
@@ -4020,6 +4021,12 @@ D11_MUTATIONS = (
         "crates/dwkd-broker/src/posture.rs",
         '        "2" => Some(2),\n        _ => None,\n    }\n}\n\n/// Whether `(owner, mode)`',
         '        "2" => Some(2),\n        _ => Some(0),\n    }\n}\n\n/// Whether `(owner, mode)`',
+    ),
+    (
+        "a worker is started where no verified program confines it",
+        "crates/dwkd-broker/src/http/mod.rs",
+        "        if !self.architecture_verified {",
+        "        if false && !self.architecture_verified {",
     ),
     (
         "an open start-up window is not read before a hop",

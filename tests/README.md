@@ -177,7 +177,7 @@ shows; refused to a same-uid observer by every way in -- workers held at their
 first instruction (a readable image open to its own uid, the control; one its
 uid cannot read closed to it, even to its parent), Python stand-ins that each
 lack one property and are handed nothing, the host facts read before every
-hop, and, `#[ignore]`d for the task to run where the host allows, a credential
+hop (an architecture without a verified program refused before it dials), and, `#[ignore]`d for the task to run where the host allows, a credential
 hop under a real `MemorySwapMax=0` cgroup, memory pressure there, a root-owned
 execute-only binary and Yama at 0 (the last two only with
 `DW_D11_PRIVILEGED=1` and passwordless sudo, undone after, each run whatever

@@ -1,6 +1,6 @@
 # ADR-0053: D11 hardening — the HTTPS exchange worker confines itself with an exact syscall filter and is vouched for from the kernel before it is handed anything; a credential hop runs only where its memory cannot reach swap
 
-**Status:** Proposed · **Date:** 2026-10-13 · **Would amend (on acceptance):** [ADR-0050](0050-m5c-kernel-performed-net-http-ssrf-redirects-and-credential-egress.md) (§9's worker gains a syscall filter and a broker-side vouching before its hand-over; §21's ptrace posture is read again before every worker, and a swap condition joins the conditions), [ADR-0046](0046-m4e-secret-handles-backends-injection-and-redaction.md) (§10: where a credential's memory may be, for mode A), [ADR-0019](0019-language-rationale-v2.md) and [ADR-0033](0033-protocol-source-of-truth-and-tcb-dependencies.md) (the broker's dependency set: `seccompiler`, and a direct edge to `libc`) · **Refines:** [ADR-0018](0018-authority-broker-split.md), [ADR-0045](0045-m4d-process-execution-broker.md) (the launch helper is unchanged), [ADR-0052](0052-m5d-sandboxed-process-exec.md) (Proposed; M5d.1's start-up posture check, now per hop for exchange workers, and an execute-only binary counted only where `fs.suid_dumpable` is 0 or 2) · **Leaves unchanged:** every accepted ADR's body; ADR-0052 stays Proposed and M5d.1 a historical checkpoint.
+**Status:** Proposed · **Date:** 2026-10-13 · **Would amend (on acceptance):** [ADR-0050](0050-m5c-kernel-performed-net-http-ssrf-redirects-and-credential-egress.md) (§9's worker gains a syscall filter and a broker-side vouching before its hand-over, and §9's measurement that an execute-only binary starts the worker and the launch helper not dumpable holds where `fs.suid_dumpable` is 0 -- at 2 they start dumpable by root only, closed to their uid alike, and at 1 not closed at all (§4); §21's ptrace posture is read again before every worker and counts an execute-only binary only under `fs.suid_dumpable` 0 or 2, and a swap condition joins the conditions; `net.http` runs only where the worker's program has kernel evidence, today `x86_64` (OD-7)), [ADR-0046](0046-m4e-secret-handles-backends-injection-and-redaction.md) (§10: where a credential's memory may be, for mode A), [ADR-0019](0019-language-rationale-v2.md) (the broker's dependency set: `seccompiler`, and a direct edge to `libc` -- as ADR-0050 amended it for the TLS client; ADR-0033's dependency review was the protocol's, and ADR-0034 retired it) · **Refines:** [ADR-0018](0018-authority-broker-split.md), [ADR-0045](0045-m4d-process-execution-broker.md) (the launch helper is unchanged), [ADR-0052](0052-m5d-sandboxed-process-exec.md) (Proposed; M5d.1's start-up posture check, now per hop for exchange workers, and an execute-only binary counted only where `fs.suid_dumpable` is 0 or 2) · **Leaves unchanged:** every accepted ADR's body; ADR-0052 stays Proposed and M5d.1 a historical checkpoint.
 
 > **A worker that a malicious origin compromises can no longer reach
 > anything its broker's uid could.** Before it can receive a byte, the
@@ -191,8 +191,9 @@ every worker confined.
   state an attacker controls precedes the filter; a pre-exec stage would
   need code between `fork` and `execve`.
 - **The program** (`http/confine.rs`, built from the target's own `libc`
-  constants): the architecture must be this build's (`AUDIT_ARCH_X86_64` or
-  `_AARCH64`), else **`KILL_PROCESS`**; on `x86_64` a number with the x32
+  constants): the architecture must be this build's (`AUDIT_ARCH_X86_64`;
+  `_AARCH64` is kept for the day `aarch64` is admitted, OD-7), else
+  **`KILL_PROCESS`**; on `x86_64` a number with the x32
   bit set kills too. Allowed with no argument rule (28): `read`, `write`,
   `readv`, `writev`, `recvfrom`, `sendto`, `recvmsg`, `sendmsg`,
   `shutdown`, `close`, `fstat`, `getrandom`, `munmap`, `mremap`, `brk`,
@@ -227,9 +228,17 @@ every worker confined.
   fail for their own reasons (a test shows it).
 - **Evaluation**: `confine_tests.rs` interprets the installed program for
   every number below 1024, both other conventions and every argument rule.
-- **Architectures**: `x86_64` exercised; `aarch64` compiled from the same
-  names, **not exercised** by any job; any other: no program, so no worker
-  runs and `net.http` is refused there -- fail-closed (OD-7).
+- **Architectures** (OD-7): **`x86_64` only.** A program is installed only
+  where a required job has run real workers under it on a kernel of that
+  architecture (`confine::VERIFIED_ARCHITECTURE`). `aarch64`'s program is
+  assembled from the same names and kept, but not installed: cross-compiling
+  it would show that it builds, not what a kernel enforces or which calls a
+  hop needs there (it was not cross-compiled for this review). On every
+  architecture but `x86_64` the broker says at start that `net.http` is
+  refused, and refuses every hop before it reads a credential or dials
+  (`HTTP_WORKER_FAILED`, an event naming why; no acknowledgement admits it);
+  a worker started anyway finds no program and exits before it can receive
+  anything.
 
 ### 6. Identity: a dedicated worker uid -- deferred
 
@@ -344,8 +353,8 @@ the tooling's.
 Linux with seccomp filters and `TSYNC` (3.17+); `Seccomp_filters` is read
 where reported (5.9+). cgroup v2 for a cap; on v1 a host with swap refuses
 credential hops. Without Yama, the binary must be execute-only and
-`fs.suid_dumpable` 0 or 2. `x86_64` is
-the exercised architecture.
+`fs.suid_dumpable` 0 or 2. `net.http` runs on `x86_64` only (OD-7); every
+other tool runs wherever it did.
 
 ### 15. Cost
 
@@ -376,7 +385,9 @@ copies. Its one dependency, `libc`, was already in the tree. **`libc`
 0.2.189**: a direct edge (no new crate) for the program's numbers and
 constants. **`nix`**: one reviewed new use, `execv` for the proof's
 attempt (TX043 exempts `http/confine.rs` by name). The authority's closure
-does not change. TX051 keeps the filter in one module.
+does not change. TX051 keeps the filter in one module. The worker's TLS
+library is `rustls` 0.23.46 since 2026-10-15 (RUSTSEC-2026-0346 to -0349;
+the same dependencies and features as the 0.23.45 ADR-0050 reviewed).
 
 ### 17. Residual risks
 
@@ -391,7 +402,8 @@ does not change. TX051 keeps the filter in one module.
 - Library-owned plaintext until the worker exits; physical memory until a
   freed page is reused, unless `init_on_free=1`.
 - Root, `CAP_SYS_PTRACE`, the kernel.
-- `aarch64`'s program is not exercised.
+- No `net.http` on `aarch64` or any architecture but `x86_64` (OD-7): a
+  loss of function, not of protection.
 
 ### 18. Negative tests
 
@@ -410,11 +422,13 @@ control: the state `fs.suid_dumpable` 1 would give an execute-only one),
 and a copy its uid cannot read closed to it every way, even to that parent,
 which keeps only the registers, the worker then confining itself and
 reporting the setting's dumpability; an execute-only binary under
-`fs.suid_dumpable` 1 refusing hops; and, in the hosted job, a root-owned
+`fs.suid_dumpable` 1 refusing hops; an architecture without a verified
+program refusing every hop before it reads the credential or dials,
+whatever was acknowledged; and, in the hosted job, a root-owned
 execute-only binary that the posture counts and whose worker is closed to
 its uid from `execve` under the runner's own `fs.suid_dumpable` (read and
 printed, never changed), and the Yama-0 counterexample -- each run whatever
-became of the other. `make d11-hardening-mutations`: 25 guards weakened one
+became of the other. `make d11-hardening-mutations`: 26 guards weakened one
 at a time, each killed.
 
 ### 19. Revisit if
@@ -422,9 +436,15 @@ at a time, each killed.
 The kernel offers a way to make an exec'd image non-dumpable without root
 ownership of the binary; systemd socket activation is part of the supported
 deployment (OD-1); Landlock or a seccomp API without `unsafe` joins the tree;
-`aarch64` gains a job; M6 makes host launches reachable.
+a required job runs this evidence on an ARM64 Linux kernel -- then
+`aarch64` may be admitted (OD-7), by a decision of its own; M6 makes host
+launches reachable.
 
 ### 20. Owner decisions
+
+Pending: the owner has not yet decided these. OD-7's recommendation is
+implemented ahead of that decision because it is the fail-closed one (§5);
+another choice would loosen it in a change of its own.
 
 | # | Decision | Recommendation |
 |---|---|---|
@@ -434,7 +454,7 @@ deployment (OD-1); Landlock or a seccomp API without `unsafe` joins the tree;
 | OD-4 | Start-up posture | **either** Yama ≥ 1 or an execute-only binary on a host whose `fs.suid_dumpable` is 0 or 2, **both** recommended |
 | OD-5 | `init_on_free=1` | **recommended**, reported, not required |
 | OD-6 | Landlock | **later**, with M6's host launches |
-| OD-7 | `aarch64` | ship the compiled program, fail closed if it lacks a call; or refuse `net.http` there until a job exercises it |
+| OD-7 | `aarch64` | **refuse `net.http`** on every architecture whose program has no kernel evidence, until a required job establishes it -- cross-compiling is not evidence (revised at the acceptance review, 2026-10-16; first recorded as: ship the compiled program and fail closed if it lacks a call, or refuse) |
 
 ## Consequences
 
@@ -444,8 +464,9 @@ hands nothing to a process it has not seen confined. A credential's memory
 is kept off swap, or the hop does not happen.
 
 **Negative.** A new dependency in the broker. A small cost per hop. A
-deployment with swap must cap the broker's cgroup or acknowledge it. Other
-architectures than `x86_64`/`aarch64` lose `net.http` until reviewed.
+deployment with swap must cap the broker's cgroup or acknowledge it. Every
+architecture but `x86_64` -- `aarch64` included -- loses `net.http` until a
+required job gives its program kernel evidence (OD-7).
 
 ## Alternatives considered
 

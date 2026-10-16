@@ -88,7 +88,7 @@ added later is seen at the next hop.
 |---|---|
 | Yama | the binary must be execute-only and `fs.suid_dumpable` 0 or 2, or the broker refuses to serve (and every hop) |
 | cgroup v2's memory controller | a host with swap refuses credential hops; add `MemorySwapMax=0` on a v2 host or run without swap |
-| `x86_64` or `aarch64` | no reviewed syscall program: no worker starts, `net.http` is refused |
+| `x86_64` | the only architecture whose worker program has kernel evidence (ADR-0053 OD-7): on any other -- `aarch64` included, whose program has never run under a kernel in a required job -- the broker says so at start and refuses every `net.http` hop before it reads a credential or dials; every other tool is unaffected |
 | `init_on_free` | reported `default`; nothing refused |
 
 ## WSL2 (development)

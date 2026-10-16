@@ -57,6 +57,15 @@ const AUDIT_ARCH: u32 = 0xC000_00B7;
 #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
 const AUDIT_ARCH: u32 = 0;
 
+/// Whether this architecture's program has kernel evidence: a required CI
+/// job that runs real workers under it (ADR-0053 OD-7). Only `x86_64` has
+/// one. `aarch64`'s program is assembled from the same names but has never
+/// run under a kernel -- that it would build is not that a kernel was seen
+/// to enforce it -- so [`program`] gives none there, no worker runs, and
+/// the broker refuses `net.http` before it dials (`super::WorkerPolicy`).
+/// Any other architecture has no program at all.
+pub(crate) const VERIFIED_ARCHITECTURE: bool = cfg!(target_arch = "x86_64");
+
 /// `x86_64`'s x32 convention: the same architecture value, the syscall
 /// number with this bit set. Never legitimate here.
 #[cfg(target_arch = "x86_64")]
@@ -241,10 +250,11 @@ fn block(number: u32, checks: &[Check]) -> Vec<Op> {
 }
 
 /// The worker's program for this process (`own_pid` for `tgkill`), or
-/// `None` on an architecture this broker has no reviewed program for.
+/// `None` on an architecture whose program has no kernel evidence
+/// ([`VERIFIED_ARCHITECTURE`]).
 #[must_use]
 pub(crate) fn program(own_pid: u32) -> Option<Vec<sock_filter>> {
-    if !cfg!(any(target_arch = "x86_64", target_arch = "aarch64")) {
+    if !VERIFIED_ARCHITECTURE {
         return None;
     }
     let mut ops = vec![load(DATA_ARCH), jump(JEQ_K, AUDIT_ARCH, To::Next, To::Kill)];
