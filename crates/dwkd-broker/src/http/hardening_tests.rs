@@ -723,7 +723,9 @@ fn an_unverified_architecture_refuses_every_hop_before_it_dials() {
     let mut hop = Hop::get(listener.local_addr().unwrap().port());
     hop.credential = Some(credential());
     let secret = pipe_with(VALUE);
-    let kept = rustix::io::dup(&secret).unwrap();
+    // Close-on-exec: a plain `dup` is inheritable, and another test's child
+    // spawned meanwhile would inherit it.
+    let kept = rustix::io::fcntl_dupfd_cloexec(&secret, 0).unwrap();
     assert_eq!(
         refused(run(&unverified, &hop, Some(secret))),
         BrokerRefusal::HttpWorkerFailed
@@ -867,7 +869,9 @@ fn the_host_is_read_before_every_hop_and_refuses_what_it_cannot_vouch_for() {
     let mut hop = Hop::get(port);
     hop.credential = Some(credential());
     let secret = pipe_with(VALUE);
-    let kept = rustix::io::dup(&secret).unwrap();
+    // Close-on-exec: a plain `dup` is inheritable, and another test's child
+    // spawned meanwhile would inherit it.
+    let kept = rustix::io::fcntl_dupfd_cloexec(&secret, 0).unwrap();
     assert_eq!(
         refused(run(&strict, &hop, Some(secret))),
         BrokerRefusal::HttpWorkerFailed

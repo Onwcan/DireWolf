@@ -843,16 +843,23 @@ fn an_inherited_descriptor_refuses_the_launch_rather_than_reaching_the_target() 
     let _serial = serial();
     let p = processes(Duration::from_secs(60));
     let dir = Scratch::new("inherit");
-    let leaked = fs::File::create(dir.0.join("leak")).unwrap();
-    // Clear FD_CLOEXEC, as a careless launcher would have.
-    rustix::io::fcntl_setfd(&leaked, rustix::io::FdFlags::empty()).unwrap();
-    assert!(!fdcheck::inheritable().unwrap().is_empty());
     let launch = Launch::new(PYTHON, &["-I", "-c", "pass"], &dir.0);
-    assert_eq!(
-        start(&p, &launch).err(),
-        Some(BrokerRefusal::InheritedDescriptor)
-    );
-    drop(leaked);
+    {
+        // While the leak is inheritable nothing in this process may fork, or
+        // another test's worker or helper would inherit it: every spawn takes
+        // the fork guard. The refused launch never reaches its spawn, so it
+        // never asks for the guard itself.
+        let _fork = super::fork_guard();
+        let leaked = fs::File::create(dir.0.join("leak")).unwrap();
+        // Clear FD_CLOEXEC, as a careless launcher would have.
+        rustix::io::fcntl_setfd(&leaked, rustix::io::FdFlags::empty()).unwrap();
+        assert!(!fdcheck::inheritable().unwrap().is_empty());
+        assert_eq!(
+            start(&p, &launch).err(),
+            Some(BrokerRefusal::InheritedDescriptor)
+        );
+        drop(leaked);
+    }
     assert!(fdcheck::inheritable().unwrap().is_empty());
     assert!(start(&p, &launch).is_ok());
     evidence("inherited-descriptor", "refused-zero-exec");

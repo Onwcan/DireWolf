@@ -68,6 +68,11 @@ pub(crate) fn inheritable_descriptors() -> std::io::Result<Vec<u32>> {
 /// copy of the writer until it executed, and the reader, which refuses "would
 /// block" as a stalled pipe (`crate::secret::read_value`), could meet it: a
 /// concurrent hop or launch refused for nothing it did.
+///
+/// And for as long as a test makes a descriptor of this process inheritable
+/// (no `FD_CLOEXEC`): any child forked meanwhile -- another test's worker or
+/// launch helper -- would inherit it and rightly refuse to start
+/// (`fdcheck`). The production broker makes none.
 static FORK: Mutex<()> = Mutex::new(());
 
 /// Hold [`FORK`].
