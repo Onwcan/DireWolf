@@ -16,7 +16,7 @@
 name = "direwolf"
 version = "0.0.0"
 description = "DireWolf cognition runtime - proposes; holds no authority"
-readme = "../README.md"
+readme = "README.md"
 requires-python = ">=3.12"
 license = "Apache-2.0"
 authors = [{ name = "The DireWolf authors" }]
