@@ -2,7 +2,7 @@
 
 What the host must give `dwkd-broker` so that its `net.http` exchange workers
 run as [ADR-0053](adr/0053-d11-exchange-worker-confinement-and-secret-memory.md)
-decides (Proposed), how the broker checks it, and how to check it yourself.
+decides (accepted 2026-10-18), how the broker checks it, and how to check it yourself.
 Nothing here is applied by DireWolf's tooling to a machine on its own: every
 setting is the operator's action.
 

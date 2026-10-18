@@ -120,7 +120,7 @@ Ordered by preference. The kernel selects the most restrictive mode the secret a
 > yet verify at M5c's acceptance (ADR-0050 §§20–21); M5d.1 checks it at the
 > broker's start.
 >
-> **D11 hardening** ([ADR-0053](adr/0053-d11-exchange-worker-confinement-and-secret-memory.md), Proposed; [BROKER_HARDENING.md](BROKER_HARDENING.md)):
+> **D11 hardening** ([ADR-0053](adr/0053-d11-exchange-worker-confinement-and-secret-memory.md), accepted 2026-10-18; [BROKER_HARDENING.md](BROKER_HARDENING.md)):
 > each worker installs its own syscall filter before it can receive anything
 > — no socket, `connect`, `execve`, `fork`, `ptrace`, `open` or signal to
 > another process — and proves it by attempting each and requiring `EPERM`;

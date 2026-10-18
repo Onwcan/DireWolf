@@ -1,6 +1,6 @@
 # ADR-0053: D11 hardening — the HTTPS exchange worker confines itself with an exact syscall filter and is vouched for from the kernel before it is handed anything; a credential hop runs only where its memory cannot reach swap
 
-**Status:** Proposed · **Date:** 2026-10-13 · **Would amend (on acceptance):** [ADR-0050](0050-m5c-kernel-performed-net-http-ssrf-redirects-and-credential-egress.md) (§9's worker gains a syscall filter and a broker-side vouching before its hand-over, and §9's measurement that an execute-only binary starts the worker and the launch helper not dumpable holds where `fs.suid_dumpable` is 0 -- at 2 they start dumpable by root only, closed to their uid alike, and at 1 not closed at all (§4); §21's ptrace posture is read again before every worker and counts an execute-only binary only under `fs.suid_dumpable` 0 or 2, and a swap condition joins the conditions; `net.http` runs only where the worker's program has kernel evidence, today `x86_64` (OD-7)), [ADR-0046](0046-m4e-secret-handles-backends-injection-and-redaction.md) (§10: where a credential's memory may be, for mode A), [ADR-0019](0019-language-rationale-v2.md) (the broker's dependency set: `seccompiler`, and a direct edge to `libc` -- as ADR-0050 amended it for the TLS client; ADR-0033's dependency review was the protocol's, and ADR-0034 retired it) · **Refines:** [ADR-0018](0018-authority-broker-split.md), [ADR-0045](0045-m4d-process-execution-broker.md) (the launch helper is unchanged), [ADR-0052](0052-m5d-sandboxed-process-exec.md) (Proposed; M5d.1's start-up posture check, now per hop for exchange workers, and an execute-only binary counted only where `fs.suid_dumpable` is 0 or 2) · **Leaves unchanged:** every accepted ADR's body; ADR-0052 stays Proposed and M5d.1 a historical checkpoint.
+**Status:** Accepted · **Date:** 2026-10-18 (proposed 2026-10-13; the owner's decisions in §20) · **Amends:** [ADR-0050](0050-m5c-kernel-performed-net-http-ssrf-redirects-and-credential-egress.md) (§9's worker gains a syscall filter and a broker-side vouching before its hand-over, and §9's measurement that an execute-only binary starts the worker and the launch helper not dumpable holds where `fs.suid_dumpable` is 0 -- at 2 they start dumpable by root only, closed to their uid alike, and at 1 not closed at all (§4); §21's ptrace posture is read again before every worker and counts an execute-only binary only under `fs.suid_dumpable` 0 or 2, and a swap condition joins the conditions; `net.http` runs only where the worker's program has kernel evidence, today `x86_64` (OD-7)), [ADR-0046](0046-m4e-secret-handles-backends-injection-and-redaction.md) (§10: where a credential's memory may be, for mode A), [ADR-0019](0019-language-rationale-v2.md) (the broker's dependency set: `seccompiler`, and a direct edge to `libc` -- as ADR-0050 amended it for the TLS client; ADR-0033's dependency review was the protocol's, and ADR-0034 retired it) · **Refines:** [ADR-0018](0018-authority-broker-split.md), [ADR-0045](0045-m4d-process-execution-broker.md) (the launch helper is unchanged), [ADR-0052](0052-m5d-sandboxed-process-exec.md) (Proposed; M5d.1's start-up posture check, now per hop for exchange workers, and an execute-only binary counted only where `fs.suid_dumpable` is 0 or 2) · **Leaves unchanged:** every accepted ADR's body; ADR-0052 stays Proposed and M5d.1 a historical checkpoint.
 
 > **A worker that a malicious origin compromises can no longer reach
 > anything its broker's uid could.** Before it can receive a byte, the
@@ -440,21 +440,36 @@ a required job runs this evidence on an ARM64 Linux kernel -- then
 `aarch64` may be admitted (OD-7), by a decision of its own; M6 makes host
 launches reachable.
 
-### 20. Owner decisions
+### 20. Owner decisions (decided 2026-10-18)
 
-Pending: the owner has not yet decided these. OD-7's recommendation is
-implemented ahead of that decision because it is the fail-closed one (§5);
-another choice would loosen it in a change of its own.
+| # | Decision | Recommendation | Owner decision, and the residual it accepts |
+|---|---|---|---|
+| OD-1 | A dedicated worker uid | **later**, as a systemd socket-activated worker service under its own user, with its own crash-semantics design | **later**, as recommended. Until then the worker is the broker's uid: code that bypassed the filter through a kernel bug could do what that uid can -- open its files, signal the broker, connect where the egress guard never looks (§§6, 17) |
+| OD-2 | A forbidden call: `EPERM` or kill | **`EPERM`** (self-proof, measurable); kill for a wrong architecture or x32 | as recommended. Code an origin injected keeps running after a refusal, within the allowed calls: its own descriptors and its answer, which the broker decodes strictly and checks against the hop |
+| OD-3 | Swap: refuse credential hops, or refuse to serve | **refuse credential hops**, report at start | as recommended. A credential hop runs only where the broker's memory and its worker's cannot reach swap, unless acknowledged for development (`--allow-swappable-workers`, `REDUCED ASSURANCE`); a hop without a credential is unaffected. Not covered: hibernation, a hypervisor's paging, pages swapped before the cap took effect (§7) |
+| OD-4 | Start-up posture | **either** Yama ≥ 1 or an execute-only binary on a host whose `fs.suid_dumpable` is 0 or 2, **both** recommended | as recommended. `fs.suid_dumpable` 1 never counts; an open window refuses unless acknowledged for development (`--allow-traceable-workers`, `REDUCED ASSURANCE`). Under Yama alone the broker's own launcher, if it is the broker's uid, is trusted: it could have traced the broker from its first instruction (§4) |
+| OD-5 | `init_on_free=1` | **recommended**, reported, not required | as recommended. Where it is off, a freed page keeps its contents until it is reused (§§10, 17) |
+| OD-6 | Landlock | **later**, with M6's host launches | as recommended. No second kernel layer behind the filter (§9) |
+| OD-7 | `aarch64` | **refuse `net.http`** on every architecture whose program has no kernel evidence, until a required job establishes it -- cross-compiling is not evidence (revised at the acceptance review, 2026-10-16; first recorded as: ship the compiled program and fail closed if it lacks a call, or refuse) | **refuse** (§5). `net.http` runs on `x86_64` alone; on every other architecture, `aarch64` included, each hop is refused before a credential is read or anything dialled, and no acknowledgement admits it. Admitting `aarch64` needs a required job on an ARM64 Linux kernel and a decision of its own; a loss of function there, not of protection |
 
-| # | Decision | Recommendation |
-|---|---|---|
-| OD-1 | A dedicated worker uid | **later**, as a systemd socket-activated worker service under its own user, with its own crash-semantics design |
-| OD-2 | A forbidden call: `EPERM` or kill | **`EPERM`** (self-proof, measurable); kill for a wrong architecture or x32 |
-| OD-3 | Swap: refuse credential hops, or refuse to serve | **refuse credential hops**, report at start |
-| OD-4 | Start-up posture | **either** Yama ≥ 1 or an execute-only binary on a host whose `fs.suid_dumpable` is 0 or 2, **both** recommended |
-| OD-5 | `init_on_free=1` | **recommended**, reported, not required |
-| OD-6 | Landlock | **later**, with M6's host launches |
-| OD-7 | `aarch64` | **refuse `net.http`** on every architecture whose program has no kernel evidence, until a required job establishes it -- cross-compiling is not evidence (revised at the acceptance review, 2026-10-16; first recorded as: ship the compiled program and fail closed if it lacks a call, or refuse) |
+**Owner decision (2026-10-18).** The owner accepted this ADR with OD-1 to OD-7
+as decided above, on the hosted evidence of run
+[39074450443](https://github.com/Onwcan/DireWolf/actions/runs/39074450443) on `4784e05` -- all 23 required jobs. Its
+`d11-hardening` job exercised all 25 of its required cases, and its task
+passes only when every one reported and none was NOT EXERCISED: there the
+runner itself made the root-owned execute-only binary and the Yama-0
+counterexample and read its own `fs.suid_dumpable`; real workers ran in a
+`MemorySwapMax=0` cgroup and under memory pressure there; the syscall filter
+was proved on real workers; and an architecture without a verified program
+was refused before it dials. The same run's `make security` passes with
+`rustls` 0.23.46, clear of RUSTSEC-2026-0346 to -0349. Before it: run
+[39069742578](https://github.com/Onwcan/DireWolf/actions/runs/39069742578) on `4a5ab62`, the first green run after
+the worker's hand-over test was isolated from another test's deliberately
+inheritable descriptor, and the local evidence of §18. The mutation campaign
+(`make d11-hardening-mutations`, 26 of 26) is a local target, not a hosted
+job. What this rests on is claimed no further than §§4–7 and 17 state: not
+against root, `CAP_SYS_PTRACE` or the kernel; no erasure of physical memory;
+no `net.http`, and no claim, on any architecture but `x86_64`.
 
 ## Consequences
 
