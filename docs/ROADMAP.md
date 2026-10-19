@@ -155,7 +155,7 @@ and serving on Linux only. **M5 is in progress: M5a, M5b and M5c are complete (s
 **Adversarial:** the full path-traversal set ([EVALS.md](EVALS.md) §3) including Unicode normalisation and TOCTOU swap races in a tight loop; secret-in-output detection; core-dump inspection for secret residue.
 **Deferred:** remote fs, Windows-native hardening beyond the fallback walker.
 
-### M5 · Sandbox — **IN PROGRESS** (M5a complete, hosted acceptance passed; M5b complete, hosted acceptance passed; M5c complete, ADR-0050 accepted, hosted acceptance passed; M5d in progress — M5d.1 built, ADR-0052 Proposed; M5e not started)
+### M5 · Sandbox — **IN PROGRESS** (M5a complete, hosted acceptance passed; M5b complete, hosted acceptance passed; M5c complete, ADR-0050 accepted, hosted acceptance passed; M5d in progress — M5d.1 and M5d.2 built, ADR-0052 Proposed; M5e not started)
 
 M5 is two products in one (a sandbox *and* an egress proxy), so it is decomposed like M4
 ([ADR-0047](adr/0047-m5a-oci-execution-environment-and-measured-assurance.md)). The
@@ -302,7 +302,7 @@ documented and not yet verified**, whose fail-closed check at the broker's start
 before any workload runs.
 **Deferred:** package-manager routing (M5d/M5e); model egress (M7); approvals (M6).
 
-#### M5d · Production sandboxed `process.exec` — **IN PROGRESS** (M5d.1 built; [ADR-0052](adr/0052-m5d-sandboxed-process-exec.md) Proposed)
+#### M5d · Production sandboxed `process.exec` — **IN PROGRESS** (M5d.1 and M5d.2 built; [ADR-0052](adr/0052-m5d-sandboxed-process-exec.md) Proposed)
 
 **Deps:** M5a, M5b. **Deliverables:** `process.exec` in an environment through the
 authority's gates; secret modes B/C wired to sandboxed processes; `workspace_exec_hygiene`
@@ -328,8 +328,8 @@ hosted CI):
 | Checkpoint | Delivers | Status |
 |---|---|---|
 | **M5d.1** Authorised OCI workload lifecycle | private protocol 8's `broker.workload_run`; the broker's re-judgement of the recorded environment, the executable's digest proved from the image, a fixed plan as uid 10001 in `/workspace`, bounded output, the wall clock, and `reap` by the environment's init; schema 9's workload ledger; `Authority::workload_run` (in-process, no DWKP route) behind both gates for a sandbox action, the measured level, the budget and the obligations; fail-closed environment destruction; the broker's start-up identity and ptrace-posture refusals | **BUILT** — `make sandbox-workload-evidence` (real containers, an agent-shaped workload) and `make sandbox-workload-mutations` (30 mutants); hosted job `sandbox-workload`; awaiting hosted CI and the owner |
-| D11 hardening (a security checkpoint between M5d.1 and M5d.2; [ADR-0053](adr/0053-d11-exchange-worker-confinement-and-secret-memory.md), accepted 2026-10-18) | the HTTPS exchange worker's own syscall filter, measured and proved per worker; the broker vouching for each worker from the kernel before its hand-over; the start-up posture read before every worker; credential hops only where memory cannot reach swap | **ACCEPTED** (2026-10-18, on hosted run [39074450443](https://github.com/Onwcan/DireWolf/actions/runs/39074450443), `4784e05`) -- `make d11-hardening-evidence`, `make d11-hardening-mutations`; required hosted job `d11-hardening`; `net.http` on `x86_64` only (OD-7). M5d.2 has not started |
-| M5d.2 Public sandboxed `process.exec` | the DWKP route, the shared idempotency namespace, results naming environment and level; `workspace_exec_hygiene` in the environment; concrete `process.exec:<path>` grants resolved against the image manifest (OD-9) | not started |
+| D11 hardening (a security checkpoint between M5d.1 and M5d.2; [ADR-0053](adr/0053-d11-exchange-worker-confinement-and-secret-memory.md), accepted 2026-10-18) | the HTTPS exchange worker's own syscall filter, measured and proved per worker; the broker vouching for each worker from the kernel before its hand-over; the start-up posture read before every worker; credential hops only where memory cannot reach swap | **ACCEPTED** (2026-10-18, on hosted run [39074450443](https://github.com/Onwcan/DireWolf/actions/runs/39074450443), `4784e05`) -- `make d11-hardening-evidence`, `make d11-hardening-mutations`; required hosted job `d11-hardening`; `net.http` on `x86_64` only (OD-7) |
+| **M5d.2** Public sandboxed `process.exec` | the DWKP route (tool messages version 5), the shared idempotency namespace, results naming environment and level; `workspace_exec_hygiene` in the environment; concrete `process.exec:<path>` grants resolved against the image manifest (OD-9); as built also private protocol 9's workload start and collection, schema 10, `serve --sandbox-config` with the authority preparing a run's environment (ADR-0052 §2a) and the probe as the hygiene launcher (§5a) | **BUILT, local gates** — `make sandbox-workload-evidence` (eleven broker and eleven authority real-container tests, a real DWKP client and the released `serve`), `make sandbox-workload-mutations` (52 mutants); OD-10 and OD-11 approved by the owner (2026-10-19, with conditions); awaiting hosted CI |
 | M5d.3 Secrets B/C in the sandbox | the trusted launcher over the `exec`'s standard input; mode C's descendants recorded as a residual | not started |
 | M5d.4 Workspace ownership and disk quota | OD-3, OD-6 | not started |
 | M5d.5 Agent-shaped escape suite and multi-identity evidence | a long-lived agent-shaped workload in `PROXY_ONLY` with declared origins; the hosted three-identity job | not started |
@@ -342,6 +342,20 @@ ASSURANCE`), and refuses outright when its uid or the authority's is a sandbox i
 (10001, 10002). The multi-identity evidence is not: M5d.1 shows separation in one identity,
 where the environment's mount namespace names no daemon's state; real users are M5d.5's.
 No production host launch exists or is added; the runtime cannot reach a workload.
+
+**M5d.2 as built.** A runtime reaches a workload through `process.exec` at version 5, and only
+where the authority decides: with `serve --sandbox-config` the run's `READY` environment (the
+authority prepares one on the run's first permitted launch), never the host; without it,
+version 4's host floor. The broker starts a workload and answers, and the authority parks the
+request and collects it between its other requests, so a long workload holds neither. The
+owner approved ADR-0052's two refinements on 2026-10-19, with conditions: the production
+environment (§2a, OD-10; a preparation holds the authority's worker for at most the 120 s
+environment deadline, about 3 s measured; environments of ended runs are reclaimed and at most
+16 are live) and `workspace_exec_hygiene` kept by the probe as a trusted launcher (§5a, OD-11;
+`npm`-family tools and `cargo`, directly or through a wrapper, stay refused until evidenced; a
+repository's own configuration, hooks and `conftest.py` are contained by the environment, not
+neutralised — OCI containment is the boundary). Not exercised by
+M5d.2: a workload in `PROXY_ONLY`, three real identities, real secrets in a workload (M5d.3–5).
 
 #### M5e · The M5 adversarial gate and closeout — **NOT STARTED**
 

@@ -58,24 +58,41 @@ pub fn read(
 ///
 /// A message naming the refusal.
 pub fn read_metadata_file(path: &str, trusted_owner: u32) -> Result<String, String> {
+    let limit = u64::try_from(super::metadata::MAX_CONFIG_BYTES).unwrap_or(u64::MAX);
+    read_operator_file(path, trusted_owner, limit, "--secrets-file")
+}
+
+/// Read one operator configuration file named by `flag` (`--secrets-file`,
+/// `--sandbox-config`): the trusted reader of [`read_metadata_file`], with
+/// its bound. It holds no secret value.
+///
+/// # Errors
+///
+/// Why the file cannot be trusted or read, naming `flag` and `path`.
+pub fn read_operator_file(
+    path: &str,
+    trusted_owner: u32,
+    max_bytes: u64,
+    flag: &str,
+) -> Result<String, String> {
     let file = super::metadata::AgeFile::new(path).ok_or_else(|| {
-        format!("--secrets-file {path}: not an absolute path of plain components ([A-Za-z0-9._-])")
+        format!("{flag} {path}: not an absolute path of plain components ([A-Za-z0-9._-])")
     })?;
     #[cfg(target_os = "linux")]
     {
-        let limit = u64::try_from(super::metadata::MAX_CONFIG_BYTES).unwrap_or(u64::MAX);
-        let bytes = trusted_file::read(&file, trusted_owner, limit, 0o022).map_err(|error| {
-            format!(
-                "--secrets-file {path}: {error} (a regular file owned by root or the authority, \
+        let bytes =
+            trusted_file::read(&file, trusted_owner, max_bytes, 0o022).map_err(|error| {
+                format!(
+                    "{flag} {path}: {error} (a regular file owned by root or the authority, \
                  writable by nobody else, under directories only they can change)"
-            )
-        })?;
-        String::from_utf8(bytes).map_err(|_| format!("--secrets-file {path}: not UTF-8"))
+                )
+            })?;
+        String::from_utf8(bytes).map_err(|_| format!("{flag} {path}: not UTF-8"))
     }
     #[cfg(not(target_os = "linux"))]
     {
-        let _ = (file, trusted_owner);
-        Err("--secrets-file is supported on Linux only".to_owned())
+        let _ = (file, trusted_owner, max_bytes);
+        Err(format!("{flag} is supported on Linux only"))
     }
 }
 

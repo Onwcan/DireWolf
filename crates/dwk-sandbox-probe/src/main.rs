@@ -20,6 +20,7 @@
 //! | `hold` | the environment's first process: until killed, reap every process orphaned to it, and nothing else |
 //! | `measure <environment-id> <topology>` | print one report and exit |
 //! | `reap` | after a workload (M5d, ADR-0052 §5): end every other process of the environment, print `reaped <found> <remaining>` |
+//! | `launch hygiene <path> <args...>` | the trusted launcher (M5d.2, ADR-0052 §5a): set `workspace_exec_hygiene`'s variables over the environment's own and execute `<path>` with exactly `<args...>`, replacing itself |
 //! | `ptrace-target` | the child the ptrace canary attaches to |
 //!
 //! [ADR-0047]: ../../../docs/adr/0047-m5a-oci-execution-environment-and-measured-assurance.md

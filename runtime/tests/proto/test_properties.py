@@ -860,7 +860,137 @@ def _payload_v4(rng: random.Random, schema: str) -> object:
     raise AssertionError(f"no version-4 generator for {schema}")
 
 
+def _tool_call_v5(rng: random.Random) -> dwkp.ToolCallV5:
+    """Version 5 (M5d.2): version 4's twelve members, `process_exec` with its
+    two optional narrowings."""
+    v4 = _tool_call_v4(rng)
+    members = {name: getattr(v4, name) for name in v4.__slots__ if getattr(v4, name) is not None}
+    if "process_exec" in members:
+        exec_ = members["process_exec"]
+        members["process_exec"] = dwkp.ProcessExecCallV5(
+            executable=exec_.executable,
+            args=exec_.args,
+            cwd=exec_.cwd,
+            timeout_seconds=rng.choice([None, 1, rng.randint(1, 600), 600]),
+            max_stream_bytes=rng.choice([None, 1, rng.randint(1, 131072), 131072]),
+        )
+    return dwkp.ToolCallV5(**members)
+
+
+def _image_executable(rng: random.Random) -> dwkp.ImageExecutableRef:
+    return dwkp.ImageExecutableRef(
+        image="sha256:" + _digest(rng), path=_host_path(rng), sha256=_digest(rng)
+    )
+
+
+def _workload_action(rng: random.Random) -> dwkp.PlannedWorkloadAction:
+    process = _process_action(rng)
+    located = rng.random() < 0.7
+    return dwkp.PlannedWorkloadAction(
+        role="TARGET",
+        verb="process.exec",
+        executable=_image_executable(rng),
+        environment_id=_id(rng, "env") if located else None,
+        assurance=rng.choice(["NONE", "PROCESS_ISOLATION", "CONTAINER_ISOLATION", "VM_ISOLATION"])
+        if located
+        else None,
+        launch=rng.choice(["DIRECT", "HYGIENE"]),
+        arg_count=rng.randint(0, 128),
+        argv_sha256=_digest(rng),
+        argv_safety=rng.choice(["SAFE", "REINTERPRETING"]),
+        timeout_seconds=rng.randint(1, 600),
+        max_stream_bytes=rng.randint(1, 131072),
+        decision=process.decision,
+    )
+
+
+def _tool_plan_v5(rng: random.Random) -> dwkp.ToolPlanV5:
+    if rng.random() < 0.4:
+        return dwkp.ToolPlanV5(
+            tool="process.exec",
+            environment="SANDBOX",
+            effect=rng.choice(["ALLOW", "DENY"]),
+            actions=[dwkp.PlannedActionV5(workload=_workload_action(rng))],
+        )
+    v4 = _tool_plan_v4(rng)
+    return dwkp.ToolPlanV5(
+        tool=v4.tool,
+        environment=v4.environment,
+        effect=v4.effect,
+        actions=[
+            dwkp.PlannedActionV5(fs=a.fs, process=a.process, net=a.net, injection=a.injection)
+            for a in v4.actions
+        ],
+    )
+
+
+def _sandboxed_result(rng: random.Random) -> dwkp.SandboxedExecResult:
+    ending = rng.choice(["EXITED", "KILLED", "TIMED_OUT"])
+    return dwkp.SandboxedExecResult(
+        environment_id=_id(rng, "env"),
+        assurance=rng.choice(["NONE", "PROCESS_ISOLATION", "CONTAINER_ISOLATION", "VM_ISOLATION"]),
+        executable=_image_executable(rng),
+        ending=ending,
+        exit_code=rng.randint(0, 255) if ending == "EXITED" else None,
+        signal=rng.randint(1, 64) if ending == "KILLED" else None,
+        stdout=_stream(rng),
+        stderr=_stream(rng),
+        elapsed_ms=rng.randint(0, 4294967295),
+        residue=rng.choice(["PASS", "FAIL", "UNOBSERVABLE"]),
+        ended_processes=rng.randint(0, 4096),
+        environment_destroyed=rng.random() < 0.5,
+    )
+
+
+def _tool_output_v5(rng: random.Random) -> dwkp.ToolOutputV5:
+    if rng.random() < 0.4:
+        return dwkp.ToolOutputV5(process_exec_sandboxed=_sandboxed_result(rng))
+    v4 = _tool_output_v4(rng)
+    return dwkp.ToolOutputV5(
+        **{name: getattr(v4, name) for name in v4.__slots__ if getattr(v4, name) is not None}
+    )
+
+
+def _payload_v5(rng: random.Random, schema: str) -> object:
+    if schema in ("direwolf.tool.invoke", "direwolf.tool.preview"):
+        return _tool_call_v5(rng)
+    if schema == "direwolf.tool.result":
+        return dwkp.ToolResultV5(
+            invocation_id=_id(rng, "inv"), plan=_tool_plan_v5(rng), output=_tool_output_v5(rng)
+        )
+    if schema == "direwolf.tool.denied":
+        return dwkp.ToolDenialV5(plan=_tool_plan_v5(rng))
+    if schema == "direwolf.tool.previewed":
+        return dwkp.CanonicalPreviewResultV5(plan=_tool_plan_v5(rng))
+    if schema == "direwolf.tool.refused":
+        operation = rng.choice(sorted(dwkp._TOOLREFUSALV5_PAIRING))
+        return dwkp.ToolRefusalV5(
+            operation=operation, reason=rng.choice(dwkp._TOOLREFUSALV5_PAIRING[operation])
+        )
+    if schema == "direwolf.tool.failed":
+        destroyed = rng.choice([None, True, False])
+        return dwkp.ToolFailureV5(
+            invocation_id=_id(rng, "inv"),
+            reason=rng.choice(
+                [
+                    "OUTCOME_UNKNOWN",
+                    "EXEC_FAILED",
+                    "EXECUTABLE_CHANGED",
+                    "ENVIRONMENT_NOT_CLEAN",
+                    "ENVIRONMENT_UNAVAILABLE",
+                    "RUNTIME_UNAVAILABLE",
+                    "TIMEOUT",
+                ]
+            ),
+            environment_id=None if destroyed is None else _id(rng, "env"),
+            environment_destroyed=destroyed,
+        )
+    raise AssertionError(f"no version-5 generator for {schema}")
+
+
 def _payload(rng: random.Random, schema: str, version: int = 1) -> object:
+    if version == 5 and schema.startswith("direwolf.tool."):
+        return _payload_v5(rng, schema)
     if version == 4 and schema.startswith("direwolf.tool."):
         return _payload_v4(rng, schema)
     if version == 3 and schema.startswith("direwolf.tool."):

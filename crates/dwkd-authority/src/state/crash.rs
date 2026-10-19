@@ -113,6 +113,9 @@ pub enum CrashPoint {
     /// Workload W8 (M5d): the workload's intent is durable; the broker has
     /// been told nothing.
     WorkloadAfterIntent,
+    /// Workload W9 (M5d.2): the broker answered the workload's start — its
+    /// supervisor runs it — and nothing more is durable.
+    WorkloadAfterStart,
     /// Workload W10: the broker answered a workload — it ran, or may have —
     /// and the outcome is not yet durable.
     WorkloadAfterBroker,
@@ -168,6 +171,7 @@ impl CrashPoint {
             Self::NetAfterBroker => 'o',
             Self::NetAfterOutcome => 'p',
             Self::WorkloadAfterIntent => 'q',
+            Self::WorkloadAfterStart => 't',
             Self::WorkloadAfterBroker => 'r',
             Self::WorkloadAfterOutcome => 's',
         }
@@ -226,10 +230,12 @@ impl CrashPoint {
     ];
 
     /// The points of one workload (M5d, ADR-0052 §9), in order: W8 after
-    /// its intent, W10 after the broker's answer, W11 after its outcome.
-    /// (W9 — the broker mid-run — is the broker's own crash point.)
-    pub const WORKLOAD: [Self; 3] = [
+    /// its intent, W9 after the broker answered its start (the broker's
+    /// own points are inside it), W10 after its ending was collected, W11
+    /// after its outcome.
+    pub const WORKLOAD: [Self; 4] = [
         Self::WorkloadAfterIntent,
+        Self::WorkloadAfterStart,
         Self::WorkloadAfterBroker,
         Self::WorkloadAfterOutcome,
     ];

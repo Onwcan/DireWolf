@@ -4,8 +4,9 @@
 //! others (SANDBOX.md §1): not SSH, not a microVM, not a remote worker. M5a
 //! implements `oci` only; `local` is the host execution M4d already has
 //! behind the authority's floor, and stays there until M6 (ADR-0052 §12).
-//! M5d adds `run_workload` (SANDBOX.md §1's spawn, then collect, of one
-//! bounded program). Nothing here decides: the broker prepares what the
+//! M5d adds a workload (SANDBOX.md §1's spawn, then collect, of one
+//! bounded program): `ready_workload`, then -- supervised, once the start
+//! is answered (M5d.2) -- `exec_workload`. Nothing here decides: the broker prepares what the
 //! authority specified, measures it, runs what it authorised, and reports;
 //! the authority judges the level.
 
@@ -145,21 +146,33 @@ pub(crate) trait ExecutionEnvironment {
         spec: &EnvironmentSpec,
     ) -> Result<(ExecOutcome, Vec<u8>), EnvFailure>;
 
-    /// Run one workload in an environment that exists (M5d, ADR-0052 §5):
-    /// the environment re-judged from the runtime's record, the executable's
-    /// bytes proved, the plan's one command line run within its bounds, and
-    /// then every other process of the environment ended. `until` bounds it
-    /// all.
+    /// Whether one workload may run in an environment that exists (M5d,
+    /// ADR-0052 §5, steps 1-3): the environment re-judged from the
+    /// runtime's record, and the executable's bytes proved. Nothing is run
+    /// inside.
+    ///
+    /// # Errors
+    ///
+    /// [`EnvFailure::Refused`]: it may not, and nothing ran.
+    fn ready_workload(
+        &self,
+        handle: &EnvHandle,
+        spec: &EnvironmentSpec,
+        workload: &WorkloadSpec,
+    ) -> Result<(), EnvFailure>;
+
+    /// Run one workload [`Self::ready_workload`] passed (steps 4-6): the
+    /// plan's one command line within its bounds, then every other process
+    /// of the environment ended. `until` bounds it all.
     ///
     /// # Errors
     ///
     /// [`EnvFailure::Refused`] when provably nothing ran;
     /// [`EnvFailure::Unconfirmed`] when it may have, and nothing proves how
     /// it ended.
-    fn run_workload(
+    fn exec_workload(
         &self,
         handle: &EnvHandle,
-        spec: &EnvironmentSpec,
         workload: &WorkloadSpec,
         until: std::time::Instant,
     ) -> Result<Ran, EnvFailure>;

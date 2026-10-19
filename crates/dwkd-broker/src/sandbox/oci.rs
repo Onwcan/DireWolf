@@ -1020,18 +1020,26 @@ impl ExecutionEnvironment for Oci<'_> {
         }
     }
 
-    fn run_workload(
+    fn ready_workload(
         &self,
         handle: &EnvHandle,
         spec: &EnvironmentSpec,
         workload: &WorkloadSpec,
-        until: Instant,
-    ) -> Result<Ran, EnvFailure> {
+    ) -> Result<(), EnvFailure> {
         self.judged_for_work(handle, spec)?;
         if self.executable_digest(&handle.container, workload) != Verdict::Pass {
             return Err(EnvFailure::Refused(BrokerRefusal::DigestMismatch));
         }
         crate::crash::point("workload_judged");
+        Ok(())
+    }
+
+    fn exec_workload(
+        &self,
+        handle: &EnvHandle,
+        workload: &WorkloadSpec,
+        until: Instant,
+    ) -> Result<Ran, EnvFailure> {
         let wall_clock = Duration::from_secs(u64::from(workload.wall_clock.get()));
         let reserve = until.checked_sub(WORKLOAD_RESERVE).unwrap_or(until);
         let since = Instant::now();

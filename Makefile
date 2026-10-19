@@ -100,10 +100,10 @@ sandbox-foundation-evidence: ## M5a real OCI containers: strict profile measured
 sandbox-egress-evidence: ## M5b PROXY_ONLY on real OCI containers: relay, CONNECT proxy, guard, pinning, SNI, budgets, bypasses, weakened topologies
 	@$(DW) sandbox-egress-evidence
 
-sandbox-workload-evidence: ## M5d.1 workloads in real OCI environments: identity, bounds, wall clock, process trees ended, digests, drift, escapes, an agent-shaped workload, the authority's gates, ledger and crash windows
+sandbox-workload-evidence: ## M5d.1-M5d.2 workloads in real OCI environments: identity, bounds, wall clock, process trees ended, digests, drift, escapes, an agent-shaped workload, the authority's gates, ledger and crash windows; the public process.exec over real DWKP, serve --sandbox-config, the hygiene launcher with real git/Python/pytest
 	@$(DW) sandbox-workload-evidence
 
-sandbox-workload-mutations: ## M5d.1 mutation review: each workload guard weakened in turn must fail a unit suite or sandbox-workload-evidence (slow)
+sandbox-workload-mutations: ## M5d.1-M5d.2 mutation review: each workload guard weakened in turn must fail a unit suite or sandbox-workload-evidence (slow)
 	@$(DW) sandbox-workload-mutations
 
 d11-hardening-evidence: ## D11 hardening: the worker's syscall filter, vouching from the kernel, start-up window, swap posture; real workers, observers, cgroups; root-only cases need DW_D11_PRIVILEGED=1

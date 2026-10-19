@@ -779,20 +779,47 @@ def test_the_m5d_boundaries_each_catch_their_violation(violation_rules: list[str
     rule = "TX050-the-workload-plan-spells-no-weakening"
     assert rule in violation_rules
     assert _paths(rule) == {"crates/dwkd-broker/src/sandbox/workload_plan.rs"}
-    # Root, privilege, a variable from the caller, a terminal.
-    assert {line for _, line, _ in _findings(rule)} == {8, 9, 10, 12}
+    # Root, privilege, a variable from the caller, a terminal -- and
+    # (M5d.2) the variable's word itself, a launcher that is not the probe,
+    # and an obligation's variable spelled on the command line.
+    assert {line for _, line, _ in _findings(rule)} == {8, 9, 10, 11, 12, 14, 15}
     workload_flags = {
         line
         for path, line, _ in _findings("TX036-no-runtime-flag-crosses-the-private-wire")
         if path.endswith("brokerp/workload_flags.rs")
     }
-    assert workload_flags == {5, 6, 7, 8, 9}, sorted(workload_flags)
+    # M5d.2: a launcher, and the obligation's variables, too.
+    assert workload_flags == {5, 6, 7, 8, 9, 10, 11}, sorted(workload_flags)
     route = {
         line
         for path, line, _ in _findings("TX035-no-public-path-reaches-an-execution-environment")
         if path.endswith("server/workload_route.rs")
     }
-    assert route == {3, 4}, sorted(route)
+    # M5d.2: the private start's name is the broker link's alone, too.
+    assert route == {3, 4, 7}, sorted(route)
+
+
+def test_the_server_seam_is_named_only_by_the_server(violation_rules: list[str]) -> None:
+    """M5d.2 (ADR-0052 §17): `serve_authority` and `Served::operate` -- the
+    evidence's door -- are named by the server module alone; the CLI fixture
+    naming them is caught on every line."""
+    rule = "TX054-the-server-seam-is-named-only-by-the-server"
+    assert rule in violation_rules
+    assert _paths(rule) == {"crates/direwolf-cli/src/seam.rs"}
+    assert {line for _, line, _ in _findings(rule)} == {3, 4, 5}
+
+
+def test_the_operator_sandbox_is_attached_in_one_place(violation_rules: list[str]) -> None:
+    """M5d.2 (ADR-0052 §2a): only `server/sandbox.rs` attaches the operator's
+    execution environment; the server naming the attachment or the
+    configuration anywhere else is a finding -- and the lifecycle itself is
+    still TX035's, wherever it is named."""
+    rule = "TX053-the-operator-sandbox-is-attached-in-one-place"
+    assert rule in violation_rules
+    assert [(p, line) for p, line, _ in _findings(rule)] == [
+        ("crates/dwkd-authority/src/server/sandbox_attach.rs", 3),
+        ("crates/dwkd-authority/src/server/sandbox_attach.rs", 4),
+    ]
 
 
 def test_the_d11_hardening_boundary_catches_its_violation(violation_rules: list[str]) -> None:

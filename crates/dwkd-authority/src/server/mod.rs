@@ -18,7 +18,7 @@
 //!                 full → closed before a byte is read; audited
 //!        ──▶ Authority::connect(subject): one fresh holder  worker.rs
 //!        ──▶ frames, strict DWKP decode, handshake first    connection.rs, protocol.rs
-//!        ──▶ Authority::dispatch(caller, request)           worker.rs → crate::state
+//!        ──▶ Authority::dispatch_parkable(caller, request)  worker.rs → crate::state
 //!        ◀── the response body, in a response envelope     envelope.rs
 //! ```
 //!
@@ -65,6 +65,8 @@ mod config;
 // The one reader of a peer's credentials (TX043), which the broker link
 // asks too.
 pub(crate) mod peer;
+// The one place the operator's execution environment is attached (TX035).
+mod sandbox;
 
 #[cfg(unix)]
 mod connection;
@@ -141,6 +143,129 @@ pub enum Stopped {
 pub fn serve(config: &ServeConfig) -> Result<Stopped, ServeError> {
     peer::support().map_err(ServeError::Unsupported)?;
     run(config)
+}
+
+/// A DWKP server for an authority the caller built and configured: the
+/// evidence harness's door (M5d.2). Everything after the authority's start
+/// is [`serve`]'s own — the socket's place checked and bound, the operator's
+/// peer policy, the connection limit, the worker, the strict connection
+/// protocol — so what the harness proves over it is what a peer meets.
+///
+/// It is the one way an authority with an execution environment attached is
+/// reached over DWKP: [`serve`] has no option that attaches one (ADR-0047
+/// §3), and nothing in this module names how one is attached (TX035). A
+/// production deployment of the sandboxed `process.exec` needs that option,
+/// which is an owner decision this milestone does not make.
+#[cfg(unix)]
+#[derive(Debug)]
+pub struct Served {
+    handle: worker::WorkerHandle,
+    shutdown: std::sync::Arc<worker::Shutdown>,
+    path: std::path::PathBuf,
+    accept: Option<std::thread::JoinHandle<()>>,
+    worker: Option<std::thread::JoinHandle<()>>,
+}
+
+#[cfg(unix)]
+impl Served {
+    /// The socket it serves.
+    #[must_use]
+    pub fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+
+    /// Run `work` on the served authority between requests — the harness's
+    /// own in-process operations, which no peer can reach — and return what
+    /// it returned. `None` once the server has stopped.
+    pub fn operate<R: Send + 'static>(
+        &self,
+        work: impl FnOnce(&mut crate::state::Authority) -> R + Send + 'static,
+    ) -> Option<R> {
+        self.handle.operate(work)
+    }
+
+    /// Whether it has stopped: a poisoned store, or [`Served::stop`].
+    #[must_use]
+    pub fn stopped(&self) -> bool {
+        self.shutdown.stopping()
+    }
+
+    /// Stop serving and wait for the server's threads: the socket is removed
+    /// and the authority — every parked launch with it — is dropped.
+    pub fn stop(mut self) {
+        self.halt();
+    }
+
+    fn halt(&mut self) {
+        self.shutdown.request_stop();
+        // Wake the accept loop and the worker so both see it.
+        let _ = std::os::unix::net::UnixStream::connect(&self.path);
+        let _ = self.handle.operate(|_| ());
+        if let Some(accept) = self.accept.take() {
+            let _ = accept.join();
+        }
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for Served {
+    fn drop(&mut self) {
+        self.halt();
+    }
+}
+
+/// Serve DWKP on `socket` for `authority`, admitting `peers` (M5d.2): see
+/// [`Served`].
+///
+/// # Errors
+///
+/// [`ServeError`] when the server does not start; nothing is bound then.
+#[cfg(unix)]
+pub fn serve_authority(
+    authority: crate::state::Authority,
+    socket: &std::path::Path,
+    peers: PeerPolicy,
+    lease_ttl_ms: u64,
+) -> Result<Served, ServeError> {
+    use std::sync::Arc;
+
+    peer::support().map_err(ServeError::Unsupported)?;
+    let (place, authority_uid, _) =
+        socket::prepare(socket).map_err(|e| ServeError::Socket(e.to_string()))?;
+    if peers.allows(authority_uid) && !peers.authority_uid_permitted() {
+        return Err(ServeError::Configuration(format!(
+            "uid {authority_uid} is the authority's own; the peer policy does not permit it"
+        )));
+    }
+    let bound = socket::bind(&place).map_err(|e| ServeError::Socket(e.to_string()))?;
+    let path = place.path().to_path_buf();
+    let shutdown = Arc::new(worker::Shutdown::default());
+    let wake_path = path.clone();
+    let (handle, worker_thread) = worker::spawn(authority, Arc::clone(&shutdown), move || {
+        let _ = std::os::unix::net::UnixStream::connect(&wake_path);
+    })
+    .map_err(|e| ServeError::Io(format!("starting the authority worker: {e}")))?;
+    let accepting = handle.clone();
+    let stopping = Arc::clone(&shutdown);
+    let limits = connection::Limits::for_lease_ttl(lease_ttl_ms);
+    let accept_thread = std::thread::Builder::new()
+        .name("dwkp-accept".to_owned())
+        .spawn(move || {
+            accept(bound.listener(), &peers, &accepting, &stopping, limits);
+            drop(bound);
+            drop(place);
+        })
+        .map_err(|e| ServeError::Io(format!("starting the accept loop: {e}")))?;
+    Ok(Served {
+        handle,
+        shutdown,
+        path,
+        accept: Some(accept_thread),
+        worker: Some(worker_thread),
+    })
 }
 
 /// One operational log line on stderr. Bounded, and never a peer's bytes: it
@@ -302,17 +427,7 @@ fn start(
             Some(link)
         }
     };
-    let secrets = match &config.secrets_file {
-        None => crate::secret::metadata::SecretConfig::default(),
-        Some(path) => {
-            let text =
-                crate::secret::backend::read_metadata_file(&path.to_string_lossy(), authority_uid)
-                    .map_err(ServeError::Configuration)?;
-            crate::secret::metadata::parse(&text).map_err(|error| {
-                ServeError::Configuration(format!("--secrets-file {}: {error}", path.display()))
-            })?
-        }
-    };
+    let secrets = secret_config(config.secrets_file.as_deref(), authority_uid)?;
     let startup = StartupConfig {
         policy,
         mode: config.mode,
@@ -326,8 +441,13 @@ fn start(
         broker,
         ..StartOptions::default()
     };
-    let (authority, report) =
+    let (mut authority, report) =
         Authority::start(&config.state_dir, &startup, options).map_err(ServeError::Start)?;
+    sandbox::attach(
+        &mut authority,
+        config.sandbox_config.as_deref(),
+        authority_uid,
+    )?;
     let owner = std::fs::metadata(authority.state_dir())
         .map_err(|e| ServeError::Io(format!("inspecting the state directory: {e}")))?
         .uid();
@@ -338,6 +458,23 @@ fn start(
         )));
     }
     Ok((place, authority, report))
+}
+
+/// The operator's secret metadata (`--secrets-file`), read through the
+/// trusted reader: none configured, none known.
+#[cfg(unix)]
+fn secret_config(
+    path: Option<&std::path::Path>,
+    authority_uid: u32,
+) -> Result<crate::secret::metadata::SecretConfig, ServeError> {
+    let Some(path) = path else {
+        return Ok(crate::secret::metadata::SecretConfig::default());
+    };
+    let text = crate::secret::backend::read_metadata_file(&path.to_string_lossy(), authority_uid)
+        .map_err(ServeError::Configuration)?;
+    crate::secret::metadata::parse(&text).map_err(|error| {
+        ServeError::Configuration(format!("--secrets-file {}: {error}", path.display()))
+    })
 }
 
 /// Accept connections until the worker stops.

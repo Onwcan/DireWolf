@@ -99,9 +99,13 @@ pub(crate) struct TempDir(PathBuf);
 
 impl TempDir {
     pub(crate) fn new(tag: &str) -> Self {
+        // Twelve digits of the clock, not all twenty: a Unix socket's path
+        // is at most 107 bytes, and the M5b proxy's lies four levels below
+        // this directory -- with a seven-digit pid the full count crossed it.
+        // The pid and the counter keep the name unique.
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_nanos());
+            .map_or(0, |d| d.as_nanos() % 1_000_000_000_000);
         let n = UNIQUE.fetch_add(1, Ordering::SeqCst);
         let path =
             std::env::temp_dir().join(format!("dw-m3d-{tag}-{}-{nanos}-{n}", std::process::id()));

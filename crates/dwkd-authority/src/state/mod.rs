@@ -87,6 +87,7 @@ mod transport;
 pub mod wire;
 mod workload;
 mod workload_ops;
+mod workload_route;
 
 use core::fmt;
 use std::path::Path;
@@ -147,6 +148,7 @@ pub use transport::{TransportClass, TransportEvent, Violation};
 pub use wire::WireGap;
 pub use workload::{WorkloadRecord, WorkloadRequest, WorkloadState};
 pub use workload_ops::{WorkloadOutcome, WorkloadReply};
+pub use workload_route::{Dispatched, MAX_PARKED, Parked};
 
 use audit::{AuditWriter, Fields, FlushFailure};
 use db::Class;
@@ -954,11 +956,22 @@ impl Authority {
     ) -> Result<Reply<Admission>, AuthorityError> {
         let shared = Arc::clone(&self.shared);
         let active = shared.active()?;
+        // With an execution environment configured, a run's executables are
+        // the image's (OD-9), and the run is bound to it.
+        let sandbox = shared.sandbox.get();
+        let image = sandbox.map(workload::ImageBinding::of);
         let mut resolved: Option<scopes::Resolutions> = None;
         for pass in 1..=admission::PASSES {
             let last = pass == admission::PASSES;
             let answer = self.transact(|work| {
-                admission::admit(work, caller, message, active, resolved.as_ref(), last)
+                admission::admit(
+                    work,
+                    caller,
+                    message,
+                    active,
+                    resolved.as_ref(),
+                    (last, image.as_ref()),
+                )
             })?;
             match answer {
                 admission::Pass::Answered(reply) => return Ok(reply),
@@ -976,10 +989,11 @@ impl Authority {
                         Some(binding) => scopes::resolve_paths(&binding, &paths),
                         None => previous.clone().unwrap_or_else(scopes::Resolutions::empty),
                     };
-                    let answers = if executables.is_empty() {
-                        previous.map_or_else(scopes::Executables::new, |p| p.executables().clone())
-                    } else {
-                        scopes::resolve_executables(&executables, shared.authority_uid)
+                    let answers = match sandbox {
+                        _ if executables.is_empty() => previous
+                            .map_or_else(scopes::Executables::new, |p| p.executables().clone()),
+                        Some(config) => scopes::resolve_executables_in_image(&executables, config),
+                        None => scopes::resolve_executables(&executables, shared.authority_uid),
                     };
                     resolved = Some(fs.with_executables(answers));
                 }
@@ -1630,6 +1644,20 @@ impl Authority {
         caller: &CallerContext,
         message: &DwkpMessage,
     ) -> Result<DwkpBody, AuthorityError> {
+        match self.dispatch_parkable(caller, message)? {
+            Dispatched::Answer(body) => Ok(body),
+            // Waited for here; the server parks it instead.
+            Dispatched::Parked(parked) => self.finish(parked),
+        }
+    }
+
+    /// [`Authority::dispatch`]'s answer for every request but a sandboxed
+    /// launch's start.
+    fn dispatch_answer(
+        &mut self,
+        caller: &CallerContext,
+        message: &DwkpMessage,
+    ) -> Result<DwkpBody, AuthorityError> {
         let header = &message.header;
         let missing = || AuthorityError::Invariant("a decoded request lacks an envelope field");
         let unrepresentable = |_: WireGap| {
@@ -1732,7 +1760,7 @@ impl Authority {
         }
     }
 
-    /// The typed tool messages of versions 3 and 4; anything else is not an
+    /// The typed tool messages of versions 3 to 5; anything else is not an
     /// authority request.
     fn dispatch_typed(
         &mut self,
@@ -1744,6 +1772,8 @@ impl Authority {
             DwkpBody::CanonicalPreviewV3(call) => self.dispatch_v3(caller, message, call, false),
             DwkpBody::ToolInvokeV4(call) => self.dispatch_v4(caller, message, call, true),
             DwkpBody::CanonicalPreviewV4(call) => self.dispatch_v4(caller, message, call, false),
+            DwkpBody::ToolInvokeV5(call) => self.dispatch_v5(caller, message, call, true),
+            DwkpBody::CanonicalPreviewV5(call) => self.dispatch_v5(caller, message, call, false),
             _ => Err(AuthorityError::NotAnAuthorityRequest),
         }
     }

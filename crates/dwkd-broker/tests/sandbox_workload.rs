@@ -63,13 +63,14 @@ mod linux {
         ContainerRef, EnvironmentProfile, ImageId, NetworkTopology, StoreInstance, Verdict,
     };
     use dwk_proto::brokerp::workload::{
-        ImagePath, WorkloadEnding, WorkloadRunAuthorisation, WorkloadRunDone, WorkloadSeconds,
-        WorkloadSpec,
+        ImagePath, WorkloadCollectAuthorisation, WorkloadEnding, WorkloadLaunch, WorkloadProgress,
+        WorkloadRunDone, WorkloadSeconds, WorkloadSpec, WorkloadStartAuthorisation,
     };
     use dwk_proto::brokerp::{
-        Authorisation, BrokerDone, BrokerHello, BrokerOutcome, BrokerRefusal, Common,
-        EnvironmentDestroyAuthorisation, EnvironmentPrepareAuthorisation, EnvironmentSpec,
-        OutcomeResult, ProcessArgs, RuntimeSpec, StreamLimit,
+        Authorisation, BrokerDone, BrokerGeneration, BrokerHello, BrokerOutcome, BrokerRefusal,
+        Common, EnvironmentDestroyAuthorisation, EnvironmentMeasureAuthorisation,
+        EnvironmentPrepareAuthorisation, EnvironmentSpec, Indeterminate, OutcomeResult,
+        ProcessArgs, RuntimeSpec, StreamLimit,
     };
     use dwk_proto::frame::FrameDecoder;
     use dwk_proto::wire::id::{EnvironmentId, InvocationId, RunId};
@@ -246,6 +247,28 @@ mod linux {
     }
 
     impl Broker {
+        /// What the broker holds, from the kernel: open descriptors, threads,
+        /// and child processes (each runtime client it started).
+        fn census(&self) -> (usize, usize, usize) {
+            let pid = self.child.id();
+            let count = |dir: String| std::fs::read_dir(dir).unwrap().count();
+            let children = std::fs::read_dir(format!("/proc/{pid}/task"))
+                .unwrap()
+                .map(|task| {
+                    let task = task.unwrap().path();
+                    std::fs::read_to_string(task.join("children"))
+                        .unwrap_or_default()
+                        .split_whitespace()
+                        .count()
+                })
+                .sum();
+            (
+                count(format!("/proc/{pid}/fd")),
+                count(format!("/proc/{pid}/task")),
+                children,
+            )
+        }
+
         fn command(socket: &Path, authority_uid: u32, extra: &[&str]) -> Command {
             let mut command = Command::new(BIN);
             command.env_clear();
@@ -261,7 +284,13 @@ mod linux {
         }
 
         fn start(socket: &Path, crash: Option<&str>) -> Self {
-            let mut command = Self::command(socket, own_uid(), &["--allow-evidence-topology"]);
+            Self::start_with(socket, crash, &[])
+        }
+
+        fn start_with(socket: &Path, crash: Option<&str>, extra: &[&str]) -> Self {
+            let mut flags = vec!["--allow-evidence-topology"];
+            flags.extend_from_slice(extra);
+            let mut command = Self::command(socket, own_uid(), &flags);
             if let Some(point) = crash {
                 command.env("DWKD_BROKER_CRASH_AT", point);
             }
@@ -423,7 +452,18 @@ mod linux {
         make: impl FnOnce(Common) -> Authorisation,
         fds: (OwnedFd, OwnedFd),
     ) -> Option<OutcomeResult> {
-        let mut stream = UnixStream::connect(socket).unwrap();
+        try_exchange_as(socket, invocation(), make, Some(fds))
+    }
+
+    /// One exchange for `invocation`, with the two descriptors or none — or
+    /// `None` when no broker answers or it closes without an outcome.
+    fn try_exchange_as(
+        socket: &Path,
+        invocation: InvocationId,
+        make: impl FnOnce(Common) -> Authorisation,
+        fds: Option<(OwnedFd, OwnedFd)>,
+    ) -> Option<OutcomeResult> {
+        let mut stream = UnixStream::connect(socket).ok()?;
         stream.set_read_timeout(Some(PEER_WAIT)).unwrap();
         let mut decoder = FrameDecoder::new();
         let mut pending = Vec::new();
@@ -444,12 +484,17 @@ mod linux {
             }
         };
         let hello = BrokerHello::decode_frame_body(&frame(&mut stream)?).unwrap();
-        let authorisation = make(Common::new(hello.channel.clone(), invocation()));
+        let authorisation = make(Common::new(hello.channel.clone(), invocation));
         let bytes = authorisation.encode_frame().unwrap();
-        let descriptors = [fds.0.as_fd(), fds.1.as_fd()];
+        let descriptors: Vec<_> = fds
+            .iter()
+            .flat_map(|(a, b)| [a.as_fd(), b.as_fd()])
+            .collect();
         let mut space = [MaybeUninit::<u8>::uninit(); rustix::cmsg_space!(ScmRights(2))];
         let mut control = SendAncillaryBuffer::new(&mut space);
-        assert!(control.push(SendAncillaryMessage::ScmRights(&descriptors)));
+        if !descriptors.is_empty() {
+            assert!(control.push(SendAncillaryMessage::ScmRights(&descriptors)));
+        }
         let sent = rustix::net::sendmsg(
             &stream,
             &[IoSlice::new(&bytes)],
@@ -540,26 +585,93 @@ mod linux {
                 .unwrap(),
             stream_limit: StreamLimit::new(limit).unwrap(),
             wall_clock: WorkloadSeconds::new(wall_clock).unwrap(),
+            launch: WorkloadLaunch::Direct,
         }
     }
 
-    fn try_run(
+    /// `broker.workload_start` for `invocation`: its answer, or `None`.
+    fn try_start(
         socket: &Path,
         ev: &Evidence,
         (s, container): (&EnvironmentSpec, &ContainerRef),
+        invocation: InvocationId,
         spec: WorkloadSpec,
     ) -> Option<OutcomeResult> {
         let (runtime, exe, cwd) = runtime(ev);
         let (s, container) = (s.clone(), container.clone());
-        try_exchange(
+        try_exchange_as(
             socket,
+            invocation,
             move |common| {
-                Authorisation::WorkloadRun(WorkloadRunAuthorisation::new(
+                Authorisation::WorkloadStart(WorkloadStartAuthorisation::new(
                     common, s, container, runtime, spec,
                 ))
             },
-            (exe, cwd),
+            Some((exe, cwd)),
         )
+    }
+
+    /// A start that must have been answered for: the generation that
+    /// supervises it.
+    fn started(
+        socket: &Path,
+        ev: &Evidence,
+        env: (&EnvironmentSpec, &ContainerRef),
+        invocation: InvocationId,
+        spec: WorkloadSpec,
+    ) -> BrokerGeneration {
+        let answer = try_start(socket, ev, env, invocation, spec).expect("no answer to a start");
+        done(answer).workload_start.unwrap().generation
+    }
+
+    /// `broker.workload_collect`: one collection, carrying no descriptor.
+    fn try_collect(
+        socket: &Path,
+        invocation: &InvocationId,
+        generation: &BrokerGeneration,
+    ) -> Option<OutcomeResult> {
+        let generation = generation.clone();
+        try_exchange_as(
+            socket,
+            invocation.clone(),
+            move |common| {
+                Authorisation::WorkloadCollect(WorkloadCollectAuthorisation::new(
+                    common, generation,
+                ))
+            },
+            None,
+        )
+    }
+
+    fn is_running(answer: &OutcomeResult) -> bool {
+        matches!(answer, OutcomeResult::Done(done)
+            if done.workload_collect.as_ref().map(|c| c.progress) == Some(WorkloadProgress::Running))
+    }
+
+    /// A workload's whole run, as the authority drives it: the start, then
+    /// collections until it is no longer `RUNNING` -- the start's refusal,
+    /// the ending, or `None` when an answer never came.
+    fn try_run(
+        socket: &Path,
+        ev: &Evidence,
+        env: (&EnvironmentSpec, &ContainerRef),
+        spec: WorkloadSpec,
+    ) -> Option<OutcomeResult> {
+        let invocation = invocation();
+        let answer = try_start(socket, ev, env, invocation.clone(), spec)?;
+        let OutcomeResult::Done(start) = &answer else {
+            return Some(answer);
+        };
+        let generation = start.workload_start.as_ref().unwrap().generation.clone();
+        let deadline = Instant::now() + PEER_WAIT;
+        loop {
+            let collected = try_collect(socket, &invocation, &generation)?;
+            if !is_running(&collected) {
+                return Some(collected);
+            }
+            assert!(Instant::now() < deadline, "the workload never ended");
+            std::thread::sleep(Duration::from_millis(100));
+        }
     }
 
     fn run_workload(
@@ -569,6 +681,13 @@ mod linux {
         spec: WorkloadSpec,
     ) -> OutcomeResult {
         try_run(socket, ev, env, spec).expect("the broker closed without an answer")
+    }
+
+    /// A collection's ending.
+    fn ended(answer: OutcomeResult) -> WorkloadRunDone {
+        let collected = done(answer).workload_collect.unwrap();
+        assert_eq!(collected.progress, WorkloadProgress::Ended);
+        collected.result.unwrap()
     }
 
     /// A fixture run that must have completed: its answer.
@@ -584,7 +703,7 @@ mod linux {
             env,
             workload((FIXTURE, &ev.fixture_sha256), args, 65_536, 60),
         );
-        done(answer).workload_run.unwrap()
+        ended(answer)
     }
 
     fn text(done: &WorkloadRunDone) -> String {
@@ -717,7 +836,7 @@ mod linux {
         let (s, container) = prepared(&socket, &ev, &workspace);
         let env = (&s, &container);
 
-        let flood = done(run_workload(
+        let flood = ended(run_workload(
             &socket,
             &ev,
             env,
@@ -727,9 +846,7 @@ mod linux {
                 4096,
                 60,
             ),
-        ))
-        .workload_run
-        .unwrap();
+        ));
         assert_eq!(flood.stdout.content.to_bytes().len(), 4096);
         assert_eq!(flood.stderr.content.to_bytes().len(), 4096);
         assert!(flood.stdout.truncated && flood.stderr.truncated);
@@ -739,7 +856,7 @@ mod linux {
         evidence("workload-output-counted", "300000+200000");
 
         let since = Instant::now();
-        let slow = done(run_workload(
+        let slow = ended(run_workload(
             &socket,
             &ev,
             env,
@@ -749,9 +866,7 @@ mod linux {
                 4096,
                 3,
             ),
-        ))
-        .workload_run
-        .unwrap();
+        ));
         assert_eq!(slow.ending, WorkloadEnding::TimedOut);
         // The workload's own clock, as the broker measured it: it ran its
         // three seconds and was ended then — not at a later deadline.
@@ -774,7 +889,7 @@ mod linux {
         // A child left holding the output open: the runtime ends the `exec`
         // when the program exits (measured: it does not wait for the
         // stream), and `reap` ends the child.
-        let held = done(run_workload(
+        let held = ended(run_workload(
             &socket,
             &ev,
             env,
@@ -784,9 +899,7 @@ mod linux {
                 4096,
                 30,
             ),
-        ))
-        .workload_run
-        .unwrap();
+        ));
         assert_eq!(held.ending, WorkloadEnding::Exited, "{held:?}");
         assert_eq!(held.exit_code.map(|c| c.get()), Some(0));
         assert!(held.ended_processes.get() >= 1, "{held:?}");
@@ -798,6 +911,348 @@ mod linux {
             "exited-child-reaped",
         );
         destroy(&socket, &ev, &s, &container);
+    }
+
+    #[test]
+    #[ignore = "needs a real OCI runtime: make sandbox-workload-evidence"]
+    fn a_running_workload_holds_no_connection_and_its_environment_takes_no_second() {
+        let ev = Evidence::load();
+        let _reaper = Reaper(ev.clone());
+        let dir = Scratch::new("concurrent");
+        let socket = dir.socket();
+        // Its census is read from `/proc/<pid>/` as the same uid, which a
+        // hardened broker refuses (M4e): this one is started
+        // `--allow-dumpable`; nothing else here depends on that.
+        let broker = Broker::start_with(&socket, None, &["--allow-dumpable"]);
+        let workspace = dir.workspace("ws");
+        let (s, container) = prepared(&socket, &ev, &workspace);
+        let env = (&s, &container);
+        let idle = broker.census();
+        let sleeper = invocation();
+        let since = Instant::now();
+        let generation = started(
+            &socket,
+            &ev,
+            env,
+            sleeper.clone(),
+            workload(
+                (FIXTURE, &ev.fixture_sha256),
+                &["workload-sleep", "600"],
+                4096,
+                30,
+            ),
+        );
+        // Answered after the judgement, not after the workload.
+        let answered = since.elapsed();
+        assert!(answered < Duration::from_secs(15), "{answered:?}");
+        evidence("workload-start-answered-before-it-ends", "under-15s");
+        // The broker serves the next exchange while the workload runs: a
+        // measurement of the very environment, and a collection.
+        let (runtime, exe, cwd) = runtime(&ev);
+        let (measured_spec, measured_container) = (s.clone(), container.clone());
+        let since = Instant::now();
+        let measured = done(exchange(
+            &socket,
+            move |common| {
+                Authorisation::EnvironmentMeasure(EnvironmentMeasureAuthorisation::new(
+                    common,
+                    measured_spec,
+                    measured_container,
+                    runtime,
+                ))
+            },
+            (exe, cwd),
+        ))
+        .environment_measure
+        .unwrap();
+        assert!(measured.measurement.is_some(), "{measured:?}");
+        let collected = try_collect(&socket, &sleeper, &generation).unwrap();
+        assert!(is_running(&collected), "{collected:?}");
+        let served = since.elapsed();
+        assert!(served < Duration::from_secs(15), "{served:?}");
+        evidence(
+            "broker-serves-others-while-a-workload-runs",
+            "measure+collect",
+        );
+        // One workload at a time in an environment: a second is refused
+        // before anything runs (`reap` would end the first's processes).
+        let second = try_start(
+            &socket,
+            &ev,
+            env,
+            invocation(),
+            workload(
+                (FIXTURE, &ev.fixture_sha256),
+                &["mark", "/workspace/second"],
+                4096,
+                30,
+            ),
+        )
+        .unwrap();
+        assert_eq!(refusal(second), BrokerRefusal::WorkloadInUse);
+        assert!(!workspace.join("second").exists());
+        evidence("workload-second-in-environment-refused", "WORKLOAD_IN_USE");
+        // A collection naming another generation is indeterminate.
+        let stranger = BrokerGeneration::new("0".repeat(32)).unwrap();
+        assert_eq!(
+            try_collect(&socket, &sleeper, &stranger),
+            Some(OutcomeResult::Indeterminate(
+                Indeterminate::WorkloadUnconfirmed
+            ))
+        );
+        evidence(
+            "workload-collect-other-generation-indeterminate",
+            "WORKLOAD_UNCONFIRMED",
+        );
+        // It ends on its own clock, and every collection after says how.
+        let deadline = Instant::now() + PEER_WAIT;
+        let ending = loop {
+            let answer = try_collect(&socket, &sleeper, &generation).unwrap();
+            if !is_running(&answer) {
+                break ended(answer);
+            }
+            assert!(Instant::now() < deadline, "it never ended");
+            std::thread::sleep(Duration::from_millis(200));
+        };
+        assert_eq!(ending.ending, WorkloadEnding::TimedOut, "{ending:?}");
+        assert_eq!(ending.residue, Verdict::Pass);
+        let again = ended(try_collect(&socket, &sleeper, &generation).unwrap());
+        assert_eq!(again, ending);
+        evidence("workload-collected-ending-repeats", "same-ending");
+        // The environment removed from outside while a workload runs in it:
+        // collections say how it ended without ever calling the residue
+        // clean, so the authority destroys what is left.
+        let doomed = invocation();
+        let generation = started(
+            &socket,
+            &ev,
+            env,
+            doomed.clone(),
+            workload(
+                (FIXTURE, &ev.fixture_sha256),
+                &["workload-sleep", "600"],
+                4096,
+                60,
+            ),
+        );
+        ev.remove(container.as_str());
+        let deadline = Instant::now() + PEER_WAIT;
+        let gone = loop {
+            let answer = try_collect(&socket, &doomed, &generation).unwrap();
+            if !is_running(&answer) {
+                break ended(answer);
+            }
+            assert!(Instant::now() < deadline, "it never ended");
+            std::thread::sleep(Duration::from_millis(200));
+        };
+        assert_ne!(gone.residue, Verdict::Pass, "{gone:?}");
+        assert_ne!(gone.ending, WorkloadEnding::Exited, "{gone:?}");
+        evidence(
+            "workload-environment-removed-mid-run-not-clean",
+            &format!("{}-{}", gone.ending.as_str(), gone.residue.as_str()),
+        );
+        // Every workload ended: the broker holds what it held idle -- no
+        // descriptor, supervising thread or runtime client is left.
+        let deadline = Instant::now() + PEER_WAIT;
+        while broker.census() != idle {
+            assert!(
+                Instant::now() < deadline,
+                "{:?} != {idle:?}",
+                broker.census()
+            );
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        evidence(
+            "broker-holds-nothing-after-its-workloads",
+            &format!("fds-{}-threads-{}-children-{}", idle.0, idle.1, idle.2),
+        );
+    }
+
+    /// A workload of `executable` (with its pinned `sha256`), launched as
+    /// `launch` -- what the authority decides; the prefix is its to add.
+    fn launched(
+        (executable, sha256): (&str, &str),
+        args: &[&str],
+        launch: WorkloadLaunch,
+    ) -> WorkloadSpec {
+        let mut spec = workload((executable, sha256), args, 65_536, 120);
+        spec.launch = launch;
+        spec
+    }
+
+    /// The names a workload's environment holds, as the fixture lists them.
+    fn names(done: &WorkloadRunDone) -> Vec<String> {
+        line(&text(done), "names")
+            .split(',')
+            .filter(|n| !n.is_empty())
+            .map(str::to_owned)
+            .collect()
+    }
+
+    #[test]
+    #[ignore = "needs a real OCI runtime: make sandbox-workload-evidence"]
+    fn the_trusted_launcher_keeps_workspace_exec_hygiene_with_the_real_tools() {
+        let ev = Evidence::load();
+        let _reaper = Reaper(ev.clone());
+        let mut tools = ev.clone();
+        tools.image = var("DW_SANDBOX_TOOLS_IMAGE");
+        let git = ("/usr/bin/git", var("DW_SANDBOX_GIT_SHA256"));
+        let python = (var("DW_SANDBOX_PYTHON"), var("DW_SANDBOX_PYTHON_SHA256"));
+        let pytest = ("/usr/local/bin/pytest", var("DW_SANDBOX_PYTEST_SHA256"));
+        let dir = Scratch::new("hygiene");
+        let socket = dir.socket();
+        let _broker = Broker::start(&socket, None);
+        let workspace = dir.workspace("ws");
+        let (s, container) = prepared(&socket, &tools, &workspace);
+        let env = (&s, &container);
+        let run = |spec: WorkloadSpec| ended(run_workload(&socket, &tools, env, spec));
+        let fixture = (FIXTURE, ev.fixture_sha256.as_str());
+
+        // The launcher adds exactly the obligation's variables to the
+        // environment's own, and nothing else: no `--env` on the client's
+        // command line, no variable of the broker's or a caller's.
+        let direct = names(&run(launched(
+            fixture,
+            &["workload-env"],
+            WorkloadLaunch::Direct,
+        )));
+        let kept = names(&run(launched(
+            fixture,
+            &["workload-env"],
+            WorkloadLaunch::Hygiene,
+        )));
+        let mut expected: Vec<String> = direct.clone();
+        expected.extend(
+            profile::HYGIENE_ENVIRONMENT
+                .iter()
+                .map(|(name, _)| (*name).to_owned()),
+        );
+        expected.sort();
+        expected.dedup();
+        assert_eq!(kept, expected, "direct: {direct:?}");
+        evidence(
+            "hygiene-launcher-adds-exactly-its-variables",
+            &kept.len().to_string(),
+        );
+
+        // git: the image's system configuration is read directly, and not
+        // through the launcher (`GIT_CONFIG_NOSYSTEM`, `GIT_CONFIG_GLOBAL`).
+        let git_spec = (git.0, git.1.as_str());
+        let read = |launch| {
+            run(launched(
+                git_spec,
+                &["config", "--get", "direwolf.marker"],
+                launch,
+            ))
+        };
+        let plain = read(WorkloadLaunch::Direct);
+        assert_eq!(text(&plain).trim(), "system", "{plain:?}");
+        let hygienic = read(WorkloadLaunch::Hygiene);
+        assert_eq!(hygienic.exit_code.map(|c| c.get()), Some(1), "{hygienic:?}");
+        assert_eq!(text(&hygienic), "");
+        evidence("hygiene-git-system-config-not-read", "exit-1-empty");
+        // What the obligation never reaches: a repository's own
+        // configuration, which the environment contains instead.
+        let made = run(launched(
+            git_spec,
+            &["init", "-q", "/workspace/repo"],
+            WorkloadLaunch::Hygiene,
+        ));
+        assert_eq!(made.exit_code.map(|c| c.get()), Some(0), "{made:?}");
+        let set = run(launched(
+            git_spec,
+            &[
+                "-C",
+                "/workspace/repo",
+                "config",
+                "direwolf.marker",
+                "repository",
+            ],
+            WorkloadLaunch::Hygiene,
+        ));
+        assert_eq!(set.exit_code.map(|c| c.get()), Some(0), "{set:?}");
+        let local = run(launched(
+            git_spec,
+            &[
+                "-C",
+                "/workspace/repo",
+                "config",
+                "--get",
+                "direwolf.marker",
+            ],
+            WorkloadLaunch::Hygiene,
+        ));
+        assert_eq!(text(&local).trim(), "repository", "{local:?}");
+        evidence("hygiene-residual-repository-config-read", "contained");
+
+        // Python: a module in the working directory shadows the standard
+        // library when the working directory is on `sys.path` -- and is
+        // never imported through the launcher (`PYTHONSAFEPATH`).
+        std::fs::write(
+            workspace.join("json.py"),
+            "open('/workspace/shadowed', 'w').write('ran')\n",
+        )
+        .unwrap();
+        std::fs::write(workspace.join("in.json"), "{\"a\": 1}").unwrap();
+        let python_spec = (python.0.as_str(), python.1.as_str());
+        let module = &["-m", "json.tool", "/workspace/in.json"];
+        let _ = run(launched(python_spec, module, WorkloadLaunch::Direct));
+        assert!(
+            workspace.join("shadowed").exists(),
+            "the direct run imported the shadow"
+        );
+        std::fs::remove_file(workspace.join("shadowed")).unwrap();
+        let kept = run(launched(python_spec, module, WorkloadLaunch::Hygiene));
+        assert_eq!(kept.exit_code.map(|c| c.get()), Some(0), "{kept:?}");
+        assert!(text(&kept).contains("\"a\": 1"), "{kept:?}");
+        assert!(
+            !workspace.join("shadowed").exists(),
+            "the launcher's run imported it"
+        );
+        evidence(
+            "hygiene-python-working-directory-not-on-path",
+            "stdlib-imported",
+        );
+
+        // pytest: no cache in the workspace with the obligation's arguments,
+        // and the workspace's `conftest.py` still runs -- workspace code,
+        // contained by the environment, never neutralised by the obligation.
+        for (name, launch, prefix) in [
+            ("direct", WorkloadLaunch::Direct, &[][..]),
+            (
+                "hygiene",
+                WorkloadLaunch::Hygiene,
+                &["-p", "no:cacheprovider"][..],
+            ),
+        ] {
+            let tests = workspace.join(name);
+            std::fs::create_dir(&tests).unwrap();
+            std::fs::set_permissions(&tests, std::fs::Permissions::from_mode(0o777)).unwrap();
+            std::fs::write(
+                tests.join("test_ok.py"),
+                "def test_ok():\n    assert True\n",
+            )
+            .unwrap();
+            std::fs::write(
+                tests.join("conftest.py"),
+                format!("open('/workspace/{name}-conftest-ran', 'w').write('ran')\n"),
+            )
+            .unwrap();
+            let target = format!("/workspace/{name}");
+            let mut args: Vec<&str> = prefix.to_vec();
+            args.extend(["-q", "--rootdir", target.as_str(), target.as_str()]);
+            let done = run(launched((pytest.0, pytest.1.as_str()), &args, launch));
+            assert_eq!(done.exit_code.map(|c| c.get()), Some(0), "{name}: {done:?}");
+            let cache = tests.join(".pytest_cache").exists();
+            assert_eq!(cache, launch == WorkloadLaunch::Direct, "{name}");
+            assert!(
+                workspace.join(format!("{name}-conftest-ran")).exists(),
+                "{name}"
+            );
+        }
+        evidence("hygiene-pytest-cache-not-written", "no-pytest-cache");
+        evidence("hygiene-residual-conftest-runs", "contained");
+        destroy(&socket, &tools, &s, &container);
     }
 
     // ---- what it leaves ----------------------------------------------------
@@ -1207,21 +1662,23 @@ mod linux {
         assert!(!workspace.join("judged").exists());
         evidence("broker-crash-before-exec-nothing-ran", "no-marker");
 
-        // During it: no answer, and the workload runs on in its environment —
-        // the runtime keeps an `exec`'d process when its client dies.
+        // During it: the start was answered; then no collection is, and the
+        // workload runs on in its environment — the runtime keeps an
+        // `exec`'d process when its client dies.
         let mut broker = Broker::start(&socket, None);
-        let (sent, got) = mpsc::channel();
-        let (socket2, ev2, s2, container2) =
-            (socket.clone(), ev.clone(), s.clone(), container.clone());
-        let fixture = ev.fixture_sha256.clone();
-        std::thread::spawn(move || {
-            let _ = sent.send(try_run(
-                &socket2,
-                &ev2,
-                (&s2, &container2),
-                workload((FIXTURE, &fixture), &["workload-sleep", "120"], 4096, 120),
-            ));
-        });
+        let crashed = invocation();
+        let generation = started(
+            &socket,
+            &ev,
+            (&s, &container),
+            crashed.clone(),
+            workload(
+                (FIXTURE, &ev.fixture_sha256),
+                &["workload-sleep", "120"],
+                4096,
+                120,
+            ),
+        );
         let deadline = Instant::now() + Duration::from_secs(30);
         loop {
             let seen = ev.look(container.as_str(), &["workload-ps"]);
@@ -1235,14 +1692,26 @@ mod linux {
             std::thread::sleep(Duration::from_millis(100));
         }
         broker.kill();
-        let answer = got.recv_timeout(Duration::from_secs(30)).unwrap();
+        let answer = try_collect(&socket, &crashed, &generation);
         assert!(answer.is_none(), "an answer from a dead broker: {answer:?}");
         evidence("broker-crash-mid-workload-no-answer", "none");
         let seen = ev.look(container.as_str(), &["workload-ps"]);
         assert!(line(&seen, "others").parse::<u32>().unwrap() >= 2, "{seen}");
         evidence("broker-crash-workload-still-running", "outlived-its-client");
-        // What ends it is the environment's destruction.
+        // A restarted broker supervises nothing of the dead one's: its
+        // collection is indeterminate, never an ending it did not see.
         let _broker = Broker::start(&socket, None);
+        assert_eq!(
+            try_collect(&socket, &crashed, &generation),
+            Some(OutcomeResult::Indeterminate(
+                Indeterminate::WorkloadUnconfirmed
+            ))
+        );
+        evidence(
+            "broker-restart-collection-indeterminate",
+            "WORKLOAD_UNCONFIRMED",
+        );
+        // What ends it is the environment's destruction.
         destroy(&socket, &ev, &s, &container);
         assert!(!ev.exists(container.as_str()));
         evidence("broker-restart-destroy-ends-it", "container-removed");

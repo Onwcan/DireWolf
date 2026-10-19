@@ -331,20 +331,24 @@ fn execute(
         // `net.http` (M5c): a resolution and a plain exchange carry nothing;
         // a credential exchange carries the credential's pipe, and only it.
         Authorisation::HttpResolve(resolve) => return effects.http.resolve(resolve),
+        // A workload's collection (M5d.2) carries nothing: it is named.
+        Authorisation::WorkloadCollect(collect) => {
+            return effects.sandbox.workload_collect(collect);
+        }
         Authorisation::HttpExchange(exchange) => {
             return match (fds.next(), fds.next()) {
                 (secret, None) => effects.http.exchange(exchange, secret, until),
                 _ => OutcomeResult::Refused(BrokerRefusal::DescriptorCount),
             };
         }
-        // The environment operations (M5a) and a workload's run (M5d): the
-        // container runtime's client and the directory it runs in, in that
-        // order.
+        // The environment operations (M5a) and a workload's start (M5d):
+        // the container runtime's client and the directory it runs in, in
+        // that order.
         Authorisation::EnvironmentPrepare(_)
         | Authorisation::EnvironmentMeasure(_)
         | Authorisation::EnvironmentDestroy(_)
         | Authorisation::EnvironmentList(_)
-        | Authorisation::WorkloadRun(_) => {
+        | Authorisation::WorkloadStart(_) => {
             let (Some(runtime), Some(cwd), None) = (fds.next(), fds.next(), fds.next()) else {
                 return OutcomeResult::Refused(BrokerRefusal::DescriptorCount);
             };
@@ -355,7 +359,7 @@ fn execute(
                 Authorisation::EnvironmentMeasure(a) => sandbox.measure(a, held, until),
                 Authorisation::EnvironmentDestroy(a) => sandbox.destroy(a, held, until),
                 Authorisation::EnvironmentList(a) => sandbox.list(a, held, until),
-                Authorisation::WorkloadRun(a) => sandbox.workload_run(a, held, until),
+                Authorisation::WorkloadStart(a) => sandbox.workload_start(a, held, until),
                 _ => OutcomeResult::Refused(BrokerRefusal::DescriptorCount),
             };
         }

@@ -1105,8 +1105,8 @@ mod linux {
                 Box::new(move |c| {
                     let a = authorisation(c, 1, id, 7);
                     let text = String::from_utf8(a[5..].to_vec()).unwrap();
-                    assert!(text.contains(r#""protocol":8"#));
-                    json(&text.replace(r#""protocol":8"#, r#""protocol":1"#))
+                    assert!(text.contains(r#""protocol":9"#));
+                    json(&text.replace(r#""protocol":9"#, r#""protocol":1"#))
                 }),
             ),
             (
@@ -1115,7 +1115,7 @@ mod linux {
                 Box::new(move |c| {
                     let a = authorisation(c, 1, id, 7);
                     let text = String::from_utf8(a[5..].to_vec()).unwrap();
-                    json(&text.replace(r#""protocol":8"#, r#""protocol":2"#))
+                    json(&text.replace(r#""protocol":9"#, r#""protocol":2"#))
                 }),
             ),
             (
@@ -1125,7 +1125,7 @@ mod linux {
                 Box::new(move |c| {
                     let a = authorisation(c, 1, id, 7);
                     let text = String::from_utf8(a[5..].to_vec()).unwrap();
-                    json(&text.replace(r#""protocol":8"#, r#""protocol":3"#))
+                    json(&text.replace(r#""protocol":9"#, r#""protocol":3"#))
                 }),
             ),
             (
@@ -1134,7 +1134,7 @@ mod linux {
                 Box::new(move |c| {
                     let a = authorisation(c, 1, id, 7);
                     let text = String::from_utf8(a[5..].to_vec()).unwrap();
-                    json(&text.replace(r#""protocol":8"#, r#""protocol":4"#))
+                    json(&text.replace(r#""protocol":9"#, r#""protocol":4"#))
                 }),
             ),
             (
@@ -1143,7 +1143,7 @@ mod linux {
                 Box::new(move |c| {
                     let a = authorisation(c, 1, id, 7);
                     let text = String::from_utf8(a[5..].to_vec()).unwrap();
-                    json(&text.replace(r#""protocol":8"#, r#""protocol":5"#))
+                    json(&text.replace(r#""protocol":9"#, r#""protocol":5"#))
                 }),
             ),
             (
@@ -1152,7 +1152,7 @@ mod linux {
                 Box::new(move |c| {
                     let a = authorisation(c, 1, id, 7);
                     let text = String::from_utf8(a[5..].to_vec()).unwrap();
-                    json(&text.replace(r#""protocol":8"#, r#""protocol":6"#))
+                    json(&text.replace(r#""protocol":9"#, r#""protocol":6"#))
                 }),
             ),
             (
@@ -1161,7 +1161,17 @@ mod linux {
                 Box::new(move |c| {
                     let a = authorisation(c, 1, id, 7);
                     let text = String::from_utf8(a[5..].to_vec()).unwrap();
-                    json(&text.replace(r#""protocol":8"#, r#""protocol":7"#))
+                    json(&text.replace(r#""protocol":9"#, r#""protocol":7"#))
+                }),
+            ),
+            (
+                // M5d.1's protocol, whose `broker.workload_run` M5d.2's
+                // start and collection replaced (ADR-0052 §3).
+                "protocol-eight",
+                Box::new(move |c| {
+                    let a = authorisation(c, 1, id, 7);
+                    let text = String::from_utf8(a[5..].to_vec()).unwrap();
+                    json(&text.replace(r#""protocol":9"#, r#""protocol":8"#))
                 }),
             ),
             (

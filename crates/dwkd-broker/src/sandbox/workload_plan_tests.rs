@@ -5,7 +5,7 @@
 #![allow(clippy::unwrap_used, reason = "test assertions")]
 
 use dwk_proto::brokerp::sandbox::ContainerRef;
-use dwk_proto::brokerp::workload::{ImagePath, WorkloadSeconds, WorkloadSpec};
+use dwk_proto::brokerp::workload::{ImagePath, WorkloadLaunch, WorkloadSeconds, WorkloadSpec};
 use dwk_proto::brokerp::{ProcessArgs, StreamLimit};
 use dwk_proto::wire::scalar::{ContentDigest, ProcessArg};
 
@@ -23,6 +23,7 @@ fn workload(args: &[&str]) -> WorkloadSpec {
             .unwrap(),
         stream_limit: StreamLimit::new(4096).unwrap(),
         wall_clock: WorkloadSeconds::new(30).unwrap(),
+        launch: WorkloadLaunch::Direct,
     }
 }
 
@@ -79,6 +80,32 @@ fn a_workload_runs_as_the_environment_user_in_the_workspace_with_exactly_its_arg
         !options
             .iter()
             .any(|w| w == "0" || w.starts_with("0:") || w == "root")
+    );
+}
+
+#[test]
+fn a_hygiene_launch_runs_the_trusted_probe_as_the_launcher_and_adds_no_option() {
+    // M5d.2 (ADR-0052 §5a): the launcher's words follow the container's
+    // name, where the client reads no option; before it, exactly the direct
+    // plan's words. No `--env`: the probe sets the variables itself.
+    let hostile = ["--env", "A=B", "-e", "PYTHONSAFEPATH=", "$(id)"];
+    let mut hygienic = workload(&hostile);
+    hygienic.launch = WorkloadLaunch::Hygiene;
+    let argv = run(&container(), &hygienic);
+    let direct = run(&container(), &workload(&hostile));
+    let name = argv.iter().position(|w| *w == "c".repeat(64)).unwrap();
+    assert_eq!(argv.get(..=name), direct.get(..=name));
+    assert_eq!(
+        argv.get(name + 1..name + 4).unwrap(),
+        ["/usr/libexec/direwolf/sandbox-probe", "launch", "hygiene"]
+    );
+    assert_eq!(argv.get(name + 4..), direct.get(name + 1..));
+    assert!(
+        !argv
+            .get(..name)
+            .unwrap()
+            .iter()
+            .any(|w| w == "--env" || w == "-e")
     );
 }
 

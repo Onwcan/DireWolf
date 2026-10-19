@@ -7,5 +7,7 @@ wire_struct! {
         optional entrypoint: ImagePath,
         required privileged: bool,
         required tty: bool,
+        optional launcher: ImagePath,
+        optional hygiene_env: EnvList,
     }
 }

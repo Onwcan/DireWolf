@@ -25,6 +25,9 @@ use crate::dwkp::procops::{
     CanonicalPreviewResultV3, ToolCallV3, ToolDenialV3, ToolFailureV3, ToolRefusalV3, ToolResultV3,
 };
 use crate::dwkp::registry::{self, OPERATIONS};
+use crate::dwkp::sandboxops::{
+    CanonicalPreviewResultV5, ToolCallV5, ToolDenialV5, ToolFailureV5, ToolRefusalV5, ToolResultV5,
+};
 use crate::envelope::{EnvelopeRules, MessageType, Presence, field_schema};
 use crate::events::{self, LeaseAcquired};
 use crate::json::{Object, Value};
@@ -105,6 +108,12 @@ pub fn payload_schema(name: &str, defs: &mut Defs) -> Option<Value> {
         "CanonicalPreviewResultV4" => CanonicalPreviewResultV4::schema(defs),
         "ToolRefusalV4" => ToolRefusalV4::schema(defs),
         "ToolFailureV4" => ToolFailureV4::schema(defs),
+        "ToolCallV5" => ToolCallV5::schema(defs),
+        "ToolResultV5" => ToolResultV5::schema(defs),
+        "ToolDenialV5" => ToolDenialV5::schema(defs),
+        "CanonicalPreviewResultV5" => CanonicalPreviewResultV5::schema(defs),
+        "ToolRefusalV5" => ToolRefusalV5::schema(defs),
+        "ToolFailureV5" => ToolFailureV5::schema(defs),
         "Ack" => Ack::schema(defs),
         "ProtocolErrorPayload" => ProtocolErrorPayload::schema(defs),
         "ClientError" => dwcp::ClientError::schema(defs),

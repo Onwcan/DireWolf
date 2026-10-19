@@ -31,11 +31,13 @@
 //! without a `READY` environment is refused, never redirected to M4d's host
 //! path (whose floor is unchanged: no production host launch before M6).
 
-use dwk_proto::brokerp::sandbox::{AssuranceLevel, ContainerRef, Verdict};
-use dwk_proto::brokerp::workload::{ImagePath, WorkloadEnding, WorkloadRunDone, WorkloadSeconds};
+use dwk_proto::brokerp::sandbox::{AssuranceLevel, ContainerRef, ImageId, Verdict};
+use dwk_proto::brokerp::workload::{
+    ImagePath, WorkloadEnding, WorkloadLaunch, WorkloadRunDone, WorkloadSeconds, WorkloadSpec,
+};
 use dwk_proto::brokerp::{ProcessArgs, StreamLimit};
 use dwk_proto::limits::{MAX_PROCESS_ARG_BYTES, MAX_PROCESS_ARGV_BYTES};
-use dwk_proto::wire::id::{EnvironmentId, InvocationId, RunId};
+use dwk_proto::wire::id::{EnvironmentId, InvocationId, RunId, SessionId};
 use dwk_proto::wire::scalar::{ContentDigest, ProcessArg};
 use rusqlite::OptionalExtension as _;
 
@@ -45,6 +47,7 @@ use crate::capability::{
 use crate::policy::{ArgvSafety, CanonicalAction, Effect, Environment, Obligation, TaintLevel};
 use crate::resource::ExecutableIdentity;
 use crate::resource::exec::argv::{self, ArgvClass};
+use crate::resource::exec::hygiene::{self, Hygiene};
 use crate::sandbox::{SandboxConfig, WorkloadBudget};
 
 use super::Work;
@@ -121,7 +124,6 @@ pub(super) struct Checked {
     pub(super) sha256: ContentDigest,
     pub(super) identity: ExecutableIdentity,
     pub(super) args: Vec<String>,
-    pub(super) wire_args: ProcessArgs,
     pub(super) stream_limit: StreamLimit,
     pub(super) wall_clock: WorkloadSeconds,
     pub(super) key: String,
@@ -129,6 +131,104 @@ pub(super) struct Checked {
 
 /// The longest idempotency key, in bytes.
 const MAX_KEY_BYTES: usize = 128;
+
+/// What a run's grants were resolved against when it was admitted with an
+/// execution environment configured (M5d.2, OD-9): the image, by content
+/// digest, and the digest of the operator's manifest.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ImageBinding {
+    pub(super) image: ImageId,
+    pub(super) manifest_sha256: String,
+}
+
+impl ImageBinding {
+    /// The binding `config` gives a run admitted now.
+    pub(super) fn of(config: &SandboxConfig) -> Self {
+        let executables = config.executables();
+        let mut hash = DomainHash::new(digest::IMAGE_MANIFEST)
+            .text(config.image().as_str())
+            .int(u64::try_from(executables.len()).unwrap_or(u64::MAX));
+        for (path, sha256) in executables {
+            hash = hash.text(path.as_str()).text(sha256.as_str());
+        }
+        Self {
+            image: config.image().clone(),
+            manifest_sha256: hash.finish().to_hex(),
+        }
+    }
+}
+
+/// Why a declaration names no executable of the image.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ManifestMiss {
+    /// The manifest does not name the path.
+    NotInImage,
+    /// The declaration pins a digest the manifest does not.
+    DigestMismatch,
+}
+
+/// What a concrete process declaration means for a run admitted with an
+/// execution environment configured (OD-9): the executable the manifest
+/// names at `path` in the image, with the SHA-256 it pins -- never the host
+/// file at that path. A declaration that pins a digest means it only if the
+/// manifest pins the same one.
+///
+/// # Errors
+///
+/// [`ManifestMiss`]: the declaration covers nothing.
+pub(super) fn manifest_identity(
+    config: &SandboxConfig,
+    path: &str,
+    pinned: Option<&str>,
+) -> Result<ExecutableIdentity, ManifestMiss> {
+    let (executable, sha256) = config.executable(path).ok_or(ManifestMiss::NotInImage)?;
+    if pinned.is_some_and(|digest| digest != sha256.as_str()) {
+        return Err(ManifestMiss::DigestMismatch);
+    }
+    crate::resource::exec::image_executable_identity(executable.as_str(), sha256.as_str())
+        .map_err(|_| ManifestMiss::NotInImage)
+}
+
+/// Bind `run` to the image its grants were resolved against (OD-9). Once,
+/// at admission.
+pub(super) fn bind_run_image(
+    work: &Work<'_>,
+    run: &RunId,
+    binding: &ImageBinding,
+) -> Result<(), AuthorityError> {
+    work.db(work.tx.execute(
+        "INSERT INTO run_image (run_id, image, manifest_sha256, recorded_ms) \
+         VALUES (?1, ?2, ?3, ?4)",
+        rusqlite::params![
+            run.as_str(),
+            binding.image.as_str(),
+            binding.manifest_sha256,
+            to_sql(work.now)?
+        ],
+    ))?;
+    Ok(())
+}
+
+/// The image `run` is bound to, if it was admitted with one.
+fn run_image(work: &Work<'_>, run: &RunId) -> Result<Option<ImageBinding>, AuthorityError> {
+    let row: Option<(String, String)> = work.db(work
+        .tx
+        .query_row(
+            "SELECT image, manifest_sha256 FROM run_image WHERE run_id = ?1",
+            [run.as_str()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional())?;
+    row.map(|(image, manifest_sha256)| {
+        Ok(ImageBinding {
+            image: ImageId::new(image).ok_or(AuthorityError::Invariant(
+                "a stored image binding is malformed",
+            ))?,
+            manifest_sha256,
+        })
+    })
+    .transpose()
+}
 
 /// Step 1: the request's own bounds, and the executable the manifest names.
 /// Pure; nothing is recorded.
@@ -162,7 +262,8 @@ pub(super) fn check(
     if total > MAX_PROCESS_ARGV_BYTES {
         return Err("ARGV_TOO_LARGE");
     }
-    let wire_args = ProcessArgs::new(wire).ok_or("ARGV_TOO_LARGE")?;
+    // Within the protocol's bounds as the broker will be told them.
+    ProcessArgs::new(wire).ok_or("ARGV_TOO_LARGE")?;
     let stream_limit = StreamLimit::new(request.stream_limit).ok_or("STREAM_LIMIT_INVALID")?;
     let wall_clock =
         WorkloadSeconds::new(request.wall_clock_seconds).ok_or("WALL_CLOCK_INVALID")?;
@@ -171,7 +272,6 @@ pub(super) fn check(
         sha256: sha256.clone(),
         identity,
         args: request.args.clone(),
-        wire_args,
         stream_limit,
         wall_clock,
         key: key.clone(),
@@ -181,7 +281,7 @@ pub(super) fn check(
 /// The arguments' digest: their count, then each, length-prefixed — the
 /// process tools' domain, so a workload's and a launch's arguments digest
 /// alike.
-fn argv_digest(args: &[String]) -> Sha256Hash {
+pub(super) fn argv_digest(args: &[String]) -> Sha256Hash {
     let mut hash =
         DomainHash::new(digest::PROCESS_ARGV).int(u64::try_from(args.len()).unwrap_or(u64::MAX));
     for arg in args {
@@ -212,6 +312,23 @@ pub(super) struct WorkloadPlan {
     pub(super) class: ArgvClass,
     pub(super) obligations_enforced: bool,
     pub(super) stream_limit: u32,
+    /// How the broker starts it: through the trusted launcher when
+    /// `workspace_exec_hygiene` is kept.
+    pub(super) launch: WorkloadLaunch,
+    /// The arguments the kept obligation puts before the invocation's own.
+    pub(super) prefix: &'static [&'static str],
+}
+
+impl WorkloadPlan {
+    /// The arguments the broker is told: the obligation's, then the
+    /// invocation's own.
+    pub(super) fn executed(&self, checked: &Checked) -> Vec<String> {
+        self.prefix
+            .iter()
+            .map(|a| (*a).to_owned())
+            .chain(checked.args.iter().cloned())
+            .collect()
+    }
 }
 
 impl WorkloadPlan {
@@ -267,18 +384,31 @@ fn required_capability(checked: &Checked) -> Result<Capability, AuthorityError> 
     .map_err(|_| AuthorityError::Invariant("a workload capability does not assemble"))
 }
 
+/// What keeping a plan's obligations needs of its workload.
+struct Kept {
+    enforced: bool,
+    stream_limit: u32,
+    launch: WorkloadLaunch,
+    prefix: &'static [&'static str],
+}
+
 /// Whether the authority keeps every obligation, for a workload in an
-/// environment, and the per-stream bound it leaves (ADR-0052 §10):
+/// environment, and what keeping them needs (ADR-0052 §§5a, 10):
 ///
 /// | obligation | a workload |
 /// |---|---|
 /// | `max_output_bytes=N` | each stream keeps its first `N / 2` bytes (`N >= 2`) |
 /// | `audit_level=full` | the intent record carries the full argv |
-/// | `workspace_exec_hygiene` | **not yet enforceable** (M5d.2): denied |
+/// | `workspace_exec_hygiene` | kept by the trusted launcher and the tool's arguments, unless the invocation's own arguments undo it or the tool has no real-tool evidence (`resource::exec::hygiene`): then denied |
 /// | anything else | **not enforceable**: denied |
-fn obligations(record: &DecisionRecord, requested: u32) -> (bool, u32) {
-    let mut stream_limit = requested;
-    let mut enforced = true;
+fn obligations(record: &DecisionRecord, checked: &Checked) -> Kept {
+    let mut kept = Kept {
+        enforced: true,
+        stream_limit: checked.stream_limit.get(),
+        launch: WorkloadLaunch::Direct,
+        prefix: &[],
+    };
+    let (mut stream_limit, mut enforced) = (kept.stream_limit, true);
     for obligation in record.policy().obligations().as_slice() {
         let ok = match obligation {
             Obligation::MaxOutputBytes(limit) => {
@@ -291,11 +421,24 @@ fn obligations(record: &DecisionRecord, requested: u32) -> (bool, u32) {
                 }
             }
             Obligation::AuditLevel(_) => true,
+            Obligation::WorkspaceExecHygiene => {
+                let args: Vec<&str> = checked.args.iter().map(String::as_str).collect();
+                match hygiene::hygiene(&checked.identity, &args) {
+                    Hygiene::Kept { prefix } => {
+                        kept.launch = WorkloadLaunch::Hygiene;
+                        kept.prefix = prefix;
+                        true
+                    }
+                    Hygiene::Unenforceable(_) => false,
+                }
+            }
             _ => false,
         };
         enforced &= ok;
     }
-    (enforced, stream_limit)
+    kept.enforced = enforced;
+    kept.stream_limit = stream_limit;
+    kept
 }
 
 /// Both gates for a **sandbox** action. Pure: reads what the caller loaded.
@@ -314,13 +457,15 @@ fn decide_plan(
             ArgvClass::Reinterpreting { .. } => ArgvSafety::Reinterpreting,
         });
     let record = query::decide(&action, admission, context, active);
-    let (obligations_enforced, stream_limit) = obligations(&record, checked.stream_limit.get());
+    let kept = obligations(&record, checked);
     Ok(WorkloadPlan {
         action,
         record,
         class,
-        obligations_enforced,
-        stream_limit,
+        obligations_enforced: kept.enforced,
+        stream_limit: kept.stream_limit,
+        launch: kept.launch,
+        prefix: kept.prefix,
     })
 }
 
@@ -368,16 +513,25 @@ fn plan_fields(active: &ActiveAuthority, checked: &Checked, plan: &WorkloadPlan)
         .maybe_text("unevaluable", policy.unevaluable().map(|u| u.to_string()))
         .int(
             "arg_count",
-            u64::try_from(checked.args.len()).unwrap_or(u64::MAX),
+            u64::try_from(plan.executed(checked).len()).unwrap_or(u64::MAX),
         )
-        .text("argv_sha256", argv_digest(&checked.args).to_hex())
+        .text("argv_sha256", argv_digest(&plan.executed(checked)).to_hex())
         // The full canonical command (SANDBOX.md §4): argv is an array,
-        // recorded as one. Output is never recorded.
+        // recorded as one -- what ran, the obligation's arguments first.
+        // Output is never recorded.
         .list(
             "argv",
             std::iter::once(checked.executable.as_str().to_owned())
-                .chain(checked.args.iter().cloned())
+                .chain(plan.executed(checked))
                 .map(Field::Text)
+                .collect(),
+        )
+        .text("launch", plan.launch.as_str())
+        .list(
+            "hygiene_args",
+            plan.prefix
+                .iter()
+                .map(|a| Field::Text((*a).to_owned()))
                 .collect(),
         )
         .int("stream_limit", u64::from(plan.stream_limit))
@@ -478,6 +632,10 @@ pub(super) fn record(
 pub(super) struct ReadyEnvironment {
     pub(super) environment: EnvironmentId,
     pub(super) container: ContainerRef,
+    /// The image it was prepared from.
+    pub(super) image: String,
+    /// Its measured, effective level.
+    pub(super) level: AssuranceLevel,
 }
 
 /// What starting a workload decided.
@@ -485,10 +643,13 @@ pub(super) struct ReadyEnvironment {
 pub(super) enum Begun {
     /// Refused before anything was recorded; audited.
     Refused(&'static str),
-    /// A gate denied it; audited.
-    Denied(&'static str),
+    /// A gate denied it; audited. The plan says how.
+    Denied(Box<Decided>),
     /// Its key is bound to a workload already: that one's record.
     Replayed(Box<WorkloadRecord>),
+    /// Permitted, and its run has no live environment: the public route
+    /// prepares one and asks again. Nothing was recorded.
+    NeedsEnvironment,
     /// The intent is durable.
     Intent(Box<Intent>),
 }
@@ -500,6 +661,8 @@ pub(super) struct Intent {
     pub(super) environment: ReadyEnvironment,
     pub(super) binding: RootBinding,
     pub(super) stream_limit: u32,
+    /// The plan both gates allowed: what the answer states.
+    pub(super) plan: WorkloadPlan,
 }
 
 const fn resolution_class(refused: &ResolutionRefused) -> &'static str {
@@ -541,25 +704,37 @@ fn ready_environment(
     work: &Work<'_>,
     run: &RunId,
 ) -> Result<Result<ReadyEnvironment, &'static str>, AuthorityError> {
-    let row: Option<(String, String, Option<String>, Option<String>)> = work.db(work
+    type Row = (String, String, Option<String>, Option<String>, String);
+    let row: Option<Row> = work.db(work
         .tx
         .query_row(
-            "SELECT environment_id, state, container, effective FROM environment \
+            "SELECT environment_id, state, container, effective, image FROM environment \
              WHERE run_id = ?1 AND state IN ('PREPARING', 'READY', 'DESTROYING', 'UNKNOWN')",
             [run.as_str()],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
         )
         .optional())?;
-    let Some((environment, state, container, effective)) = row else {
+    let Some((environment, state, container, effective, image)) = row else {
         return Ok(Err("NO_ENVIRONMENT"));
     };
-    if let Err(reason) = readiness(&state, effective.as_deref())? {
-        return Ok(Err(reason));
-    }
+    let level = match readiness(&state, effective.as_deref())? {
+        Ok(level) => level,
+        Err(reason) => return Ok(Err(reason)),
+    };
     let malformed = AuthorityError::Invariant("a ready environment is malformed");
     Ok(Ok(ReadyEnvironment {
         environment: EnvironmentId::parse(&environment).ok_or_else(|| malformed.clone())?,
         container: container.and_then(ContainerRef::new).ok_or(malformed)?,
+        image,
+        level,
     }))
 }
 
@@ -569,7 +744,7 @@ fn ready_environment(
 fn readiness(
     state: &str,
     effective: Option<&str>,
-) -> Result<Result<(), &'static str>, AuthorityError> {
+) -> Result<Result<AssuranceLevel, &'static str>, AuthorityError> {
     if state != "READY" {
         return Ok(Err("ENVIRONMENT_NOT_READY"));
     }
@@ -586,7 +761,7 @@ fn readiness(
     if !workload_may_run_at(level) {
         return Ok(Err("ASSURANCE_INSUFFICIENT"));
     }
-    Ok(Ok(()))
+    Ok(Ok(level))
 }
 
 /// Whether a workload may run in an environment measured at `level`: the
@@ -595,13 +770,285 @@ const fn workload_may_run_at(level: AssuranceLevel) -> bool {
     level.rank() >= AssuranceLevel::ContainerIsolation.rank()
 }
 
+/// Where a workload's idempotency key is bound.
+#[derive(Debug, Clone, Copy)]
+pub(super) enum Binding<'a> {
+    /// The in-process API's (M5d.1): once per run, a repeat answered from
+    /// the record.
+    Run,
+    /// The public route's (M5d.2): the session's one namespace, shared with
+    /// every tool -- the caller's subject, the session, the envelope's key.
+    Session {
+        /// The caller's subject, as stored.
+        subject: &'a str,
+        /// The session.
+        session: &'a SessionId,
+    },
+}
+
+/// The workload as the broker is told it: the checked request, with the
+/// per-stream bound its plan left.
+///
+/// # Errors
+///
+/// [`AuthorityError::Invariant`] for a decided bound out of range: a bug.
+pub(super) fn spec(checked: &Checked, intent: &Intent) -> Result<WorkloadSpec, AuthorityError> {
+    let stream_limit = StreamLimit::new(intent.stream_limit).ok_or(AuthorityError::Invariant(
+        "a decided stream bound is out of range",
+    ))?;
+    let mut args = Vec::with_capacity(intent.plan.prefix.len() + checked.args.len());
+    for arg in intent.plan.executed(checked) {
+        args.push(ProcessArg::new(arg).ok_or(AuthorityError::Invariant(
+            "a checked argument is not an argument",
+        ))?);
+    }
+    Ok(WorkloadSpec {
+        executable: checked.executable.clone(),
+        executable_sha256: checked.sha256.clone(),
+        args: ProcessArgs::new(args)
+            .ok_or(AuthorityError::Invariant("a decided argv is out of bounds"))?,
+        stream_limit,
+        wall_clock: checked.wall_clock,
+        launch: intent.plan.launch,
+    })
+}
+
+/// What both gates decided for a workload, in the environment the authority
+/// chose for it.
+#[derive(Debug, Clone)]
+pub(super) struct Decided {
+    pub(super) binding: RootBinding,
+    /// The run's `READY` environment -- absent only from a denial, or from a
+    /// preview of a run whose environment the public route would prepare.
+    pub(super) environment: Option<ReadyEnvironment>,
+    pub(super) plan: WorkloadPlan,
+}
+
+/// The most environments one run may have had, live or ended: the public
+/// route prepares one when a run has none (M5d.2), and a run whose
+/// environments keep failing or being destroyed runs no more of them.
+pub(super) const MAX_ENVIRONMENTS_PER_RUN: i64 = 8;
+
+/// At most this many environments are live at once, across every run
+/// (M5d.2, ADR-0052 §2a): the broker supervises at most as many workloads,
+/// one per environment. A launch that would need another is refused.
+pub(super) const MAX_LIVE_ENVIRONMENTS: i64 = 16;
+
+/// How many environments are live -- preparing, ready, being destroyed or
+/// of an uncertain end -- across every run.
+pub(super) fn live_environments(work: &Work<'_>) -> Result<i64, AuthorityError> {
+    work.db(work.tx.query_row(
+        "SELECT count(*) FROM environment \
+         WHERE state IN ('PREPARING', 'READY', 'DESTROYING', 'UNKNOWN')",
+        [],
+        |row| row.get(0),
+    ))
+}
+
+/// The oldest environment that can never run a workload again, if one is
+/// live: `READY` in a run that is no longer `ACTIVE`, or `UNKNOWN` or
+/// `DESTROYING` in any run -- never one a workload is `LAUNCHING` in. Its
+/// destruction is its only end; until M5d.6 a run's release does not
+/// perform it, so the authority does before it prepares another.
+pub(super) fn reclaimable(work: &Work<'_>) -> Result<Option<EnvironmentId>, AuthorityError> {
+    let found: Option<String> = work.db(work
+        .tx
+        .query_row(
+            "SELECT e.environment_id FROM environment e JOIN run r ON r.run_id = e.run_id \
+             WHERE (e.state IN ('UNKNOWN', 'DESTROYING') \
+                    OR (e.state = 'READY' AND r.state <> 'ACTIVE')) \
+             AND NOT EXISTS (SELECT 1 FROM workload w \
+                             WHERE w.environment_id = e.environment_id AND w.state = 'LAUNCHING') \
+             ORDER BY e.intent_ms, e.environment_id LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .optional())?;
+    found
+        .map(|id| {
+            EnvironmentId::parse(&id).ok_or(AuthorityError::Invariant(
+                "a stored environment id is malformed",
+            ))
+        })
+        .transpose()
+}
+
+/// What the public route may do when a permitted workload's run has no live
+/// environment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Missing {
+    /// Refuse it (`NO_ENVIRONMENT`): the in-process API, and a preview.
+    Refuse,
+    /// Say so ([`Begun::NeedsEnvironment`]): the public route prepares one,
+    /// within [`MAX_ENVIRONMENTS_PER_RUN`], and asks again.
+    Prepare,
+}
+
+/// The decision a workload's invocation and its preview share: **both gates
+/// first**, for a sandbox action -- a denial needs, prepares and reveals no
+/// environment -- then the run's `READY` environment at a level a workload
+/// needs, of the image the run was admitted against (OD-9), idle
+/// (`busy_matters`), and within the budget. Nothing is recorded but what the
+/// caller audits.
+fn decide(
+    work: &Work<'_>,
+    run: &RunId,
+    checked: &Checked,
+    (budget, active, image): (WorkloadBudget, &ActiveAuthority, &ImageBinding),
+    (binding, busy_matters): (RootBinding, bool),
+) -> Result<Result<Decided, &'static str>, AuthorityError> {
+    let admission = super::admission::load(work, run.as_str())?;
+    let context = query::policy_context(work, run.as_str(), active)?;
+    let plan = decide_plan(checked, &admission, &context, active)?;
+    let found = ready_environment(work, run)?;
+    if !plan.permits() {
+        return Ok(Ok(Decided {
+            binding,
+            environment: found.ok(),
+            plan,
+        }));
+    }
+    let environment = match found {
+        Ok(environment) => environment,
+        Err(reason) => return Ok(Err(reason)),
+    };
+    // OD-9: a run whose grants were resolved against an image runs only in
+    // an environment of that image, under that manifest.
+    if let Some(bound) = run_image(work, run)?
+        && (bound != *image || bound.image.as_str() != environment.image)
+    {
+        return Ok(Err("IMAGE_CHANGED"));
+    }
+    if busy_matters {
+        let busy: Option<i64> = work.db(work
+            .tx
+            .query_row(
+                "SELECT 1 FROM workload WHERE environment_id = ?1 AND state = 'LAUNCHING'",
+                [environment.environment.as_str()],
+                |row| row.get(0),
+            )
+            .optional())?;
+        if busy.is_some() {
+            return Ok(Err("ENVIRONMENT_BUSY"));
+        }
+    }
+    // The budget: what the run's rows were charged, never refunded.
+    let (count, seconds): (i64, i64) = work.db(work.tx.query_row(
+        "SELECT count(*), COALESCE(sum(wall_clock_s), 0) FROM workload WHERE run_id = ?1",
+        [run.as_str()],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    ))?;
+    let count = u64::try_from(count).unwrap_or(u64::MAX);
+    let seconds = u64::try_from(seconds).unwrap_or(u64::MAX);
+    if count.saturating_add(1) > budget.workloads
+        || seconds.saturating_add(u64::from(checked.wall_clock.get())) > budget.seconds
+    {
+        return Ok(Err("BUDGET_EXHAUSTED"));
+    }
+    Ok(Ok(Decided {
+        binding,
+        environment: Some(environment),
+        plan,
+    }))
+}
+
+/// How many environments `run` has had, live or ended.
+fn environments(work: &Work<'_>, run: &RunId) -> Result<i64, AuthorityError> {
+    work.db(work.tx.query_row(
+        "SELECT count(*) FROM environment WHERE run_id = ?1",
+        [run.as_str()],
+        |row| row.get(0),
+    ))
+}
+
+/// Who asked, for the audit: the public route's caller, or nothing more
+/// than the run for the in-process API.
+fn caller_fields(binding_key: &Binding<'_>) -> Fields {
+    match binding_key {
+        Binding::Run => Fields::new(),
+        Binding::Session { subject, session } => Fields::new()
+            .text("subject", *subject)
+            .text("session_id", session.as_str())
+            .int("protocol_version", 5),
+    }
+}
+
+/// What a workload's preview decided: refused, or the plan an invocation
+/// would decide on. Nothing is recorded but the audit.
+#[derive(Debug)]
+pub(super) enum Previewed {
+    /// Refused before any gate; audited.
+    Refused(&'static str),
+    /// The plan.
+    Decided(Box<Decided>),
+}
+
+/// A workload's preview (M5d.2): every check an invocation makes but the
+/// key and whether the environment is idle, and both gates. Records the plan
+/// it decided on, and nothing else.
+pub(super) fn preview(
+    work: &mut Work<'_>,
+    run: &RunId,
+    checked: &Checked,
+    (budget, active, image): (WorkloadBudget, &ActiveAuthority, &ImageBinding),
+    binding_key: &Binding<'_>,
+) -> Result<Previewed, AuthorityError> {
+    let executable = checked.executable.as_str();
+    let binding = match resolution::run_root(work, run.as_str())? {
+        Ok(binding) => binding,
+        Err(refused) => {
+            refuse(work, run, executable, resolution_class(&refused))?;
+            return Ok(Previewed::Refused(resolution_class(&refused)));
+        }
+    };
+    let decided = match decide(
+        work,
+        run,
+        checked,
+        (budget, active, image),
+        (binding.clone(), false),
+    )? {
+        Ok(decided) => decided,
+        // Nothing to run in yet: the plan an invocation would decide on, in
+        // the environment it would prepare -- a preview prepares nothing.
+        Err("NO_ENVIRONMENT") => {
+            let admission = super::admission::load(work, run.as_str())?;
+            let context = query::policy_context(work, run.as_str(), active)?;
+            Decided {
+                binding,
+                environment: None,
+                plan: decide_plan(checked, &admission, &context, active)?,
+            }
+        }
+        Err(reason) => {
+            refuse(work, run, executable, reason)?;
+            return Ok(Previewed::Refused(reason));
+        }
+    };
+    let mut fields = Fields::new()
+        .text("operation", "CANONICAL_PREVIEW")
+        .text("tool", "process.exec")
+        .text("run_id", run.as_str())
+        .maybe_text(
+            "environment_id",
+            decided
+                .environment
+                .as_ref()
+                .map(|e| e.environment.as_str().to_owned()),
+        );
+    fields.extend(caller_fields(binding_key));
+    fields.extend(plan_fields(active, checked, &decided.plan));
+    work.audit(AuditEvent::ToolPreviewed, fields)?;
+    Ok(Previewed::Decided(Box::new(decided)))
+}
+
 /// Step 2: decide the workload and record its intent.
 pub(super) fn begin(
     work: &mut Work<'_>,
     run: &RunId,
     checked: &Checked,
-    budget: WorkloadBudget,
-    active: &ActiveAuthority,
+    (budget, active, image): (WorkloadBudget, &ActiveAuthority, &ImageBinding),
+    (binding_key, missing): (&Binding<'_>, Missing),
 ) -> Result<Begun, AuthorityError> {
     let executable = checked.executable.as_str();
     let binding = match resolution::run_root(work, run.as_str())? {
@@ -628,45 +1075,76 @@ pub(super) fn begin(
             .ok_or(AuthorityError::Invariant("a bound key names no workload"))?;
         return Ok(Begun::Replayed(Box::new(found)));
     }
-    let environment = match ready_environment(work, run)? {
-        Ok(environment) => environment,
+    let decided = match decide(work, run, checked, (budget, active, image), (binding, true))? {
+        Ok(decided) => decided,
+        // Permitted, and nothing to run in: the public route prepares the
+        // run's environment -- within its bound -- and asks again.
+        Err("NO_ENVIRONMENT") if missing == Missing::Prepare => {
+            if environments(work, run)? >= MAX_ENVIRONMENTS_PER_RUN {
+                return refuse(work, run, executable, "ENVIRONMENT_BUDGET_EXHAUSTED");
+            }
+            return Ok(Begun::NeedsEnvironment);
+        }
         Err(reason) => return refuse(work, run, executable, reason),
     };
-    let busy: Option<i64> = work.db(work
-        .tx
-        .query_row(
-            "SELECT 1 FROM workload WHERE environment_id = ?1 AND state = 'LAUNCHING'",
-            [environment.environment.as_str()],
-            |row| row.get(0),
-        )
-        .optional())?;
-    if busy.is_some() {
-        return refuse(work, run, executable, "ENVIRONMENT_BUSY");
-    }
-    // The budget: what the run's rows were charged, never refunded.
-    let (count, seconds): (i64, i64) = work.db(work.tx.query_row(
-        "SELECT count(*), COALESCE(sum(wall_clock_s), 0) FROM workload WHERE run_id = ?1",
-        [run.as_str()],
-        |row| Ok((row.get(0)?, row.get(1)?)),
-    ))?;
-    let count = u64::try_from(count).unwrap_or(u64::MAX);
-    let seconds = u64::try_from(seconds).unwrap_or(u64::MAX);
-    if count.saturating_add(1) > budget.workloads
-        || seconds.saturating_add(u64::from(checked.wall_clock.get())) > budget.seconds
-    {
-        return refuse(work, run, executable, "BUDGET_EXHAUSTED");
-    }
-    let admission = super::admission::load(work, run.as_str())?;
-    let context = query::policy_context(work, run.as_str(), active)?;
-    let plan = decide_plan(checked, &admission, &context, active)?;
-    let mut fields = Fields::new()
-        .text("run_id", run.as_str())
-        .text("environment_id", environment.environment.as_str());
+    let Decided {
+        binding,
+        environment,
+        plan,
+    } = decided;
+    let mut fields = Fields::new().text("run_id", run.as_str()).maybe_text(
+        "environment_id",
+        environment
+            .as_ref()
+            .map(|e| e.environment.as_str().to_owned()),
+    );
+    fields.extend(caller_fields(binding_key));
     fields.extend(plan_fields(active, checked, &plan));
     if !plan.permits() {
         work.audit(AuditEvent::WorkloadDenied, fields)?;
-        return Ok(Begun::Denied(plan.reason()));
+        return Ok(Begun::Denied(Box::new(Decided {
+            binding,
+            environment,
+            plan,
+        })));
     }
+    let Some(environment) = environment else {
+        return Err(AuthorityError::Invariant(
+            "a permitted workload was decided without its environment",
+        ));
+    };
+    let invocation = record_intent(
+        work,
+        (run, checked, &digest),
+        (&environment, &plan),
+        binding_key,
+    )?;
+    fields.extend(
+        Fields::new()
+            .text("invocation_id", invocation.as_str())
+            .text("idempotency_key", checked.key.as_str())
+            .text("request_digest", digest.to_hex())
+            .text("container", environment.container.as_str()),
+    );
+    work.audit(AuditEvent::WorkloadIntentRecorded, fields)?;
+    Ok(Begun::Intent(Box::new(Intent {
+        invocation,
+        stream_limit: plan.stream_limit,
+        environment,
+        binding,
+        plan,
+    })))
+}
+
+/// The intent's rows: the workload, `LAUNCHING`, and -- for the public
+/// route -- its key in the namespace every tool shares, in the same
+/// transaction, so a crash leaves both or neither.
+fn record_intent(
+    work: &mut Work<'_>,
+    (run, checked, digest): (&RunId, &Checked, &Sha256Hash),
+    (environment, plan): (&ReadyEnvironment, &WorkloadPlan),
+    binding_key: &Binding<'_>,
+) -> Result<InvocationId, AuthorityError> {
     let invocation = work.invocation_id()?;
     work.db(work.tx.execute(
         "INSERT INTO workload (invocation_id, run_id, environment_id, idempotency_key, \
@@ -681,28 +1159,31 @@ pub(super) fn begin(
             digest.to_hex(),
             checked.executable.as_str(),
             checked.sha256.as_str(),
-            i64::try_from(checked.args.len()).unwrap_or(i64::MAX),
-            argv_digest(&checked.args).to_hex(),
+            i64::try_from(plan.executed(checked).len()).unwrap_or(i64::MAX),
+            argv_digest(&plan.executed(checked)).to_hex(),
             i64::from(plan.stream_limit),
             i64::from(checked.wall_clock.get()),
             to_sql(work.incarnation())?,
             to_sql(work.now)?
         ],
     ))?;
-    fields.extend(
-        Fields::new()
-            .text("invocation_id", invocation.as_str())
-            .text("idempotency_key", checked.key.as_str())
-            .text("request_digest", digest.to_hex())
-            .text("container", environment.container.as_str()),
-    );
-    work.audit(AuditEvent::WorkloadIntentRecorded, fields)?;
-    Ok(Begun::Intent(Box::new(Intent {
-        invocation,
-        environment,
-        binding,
-        stream_limit: plan.stream_limit,
-    })))
+    // The public route's key, in the namespace every tool shares: bound with
+    // the intent, in the same transaction, so a crash leaves both or neither.
+    if let Binding::Session { subject, session } = binding_key {
+        work.db(work.tx.execute(
+            "INSERT INTO workload_idempotency (subject, session_id, idempotency_key, \
+             request_digest, invocation_id, recorded_ms) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![
+                subject,
+                session.as_str(),
+                checked.key,
+                digest.to_hex(),
+                invocation.as_str(),
+                to_sql(work.now)?
+            ],
+        ))?;
+    }
+    Ok(invocation)
 }
 
 /// How a workload ended, before it is recorded.
@@ -1014,8 +1495,14 @@ mod tests {
     #[test]
     fn only_a_ready_environment_at_container_isolation_runs_a_workload() {
         let container = Some("CONTAINER_ISOLATION");
-        assert_eq!(readiness("READY", container).ok(), Some(Ok(())));
-        assert_eq!(readiness("READY", Some("VM_ISOLATION")).ok(), Some(Ok(())));
+        assert_eq!(
+            readiness("READY", container).ok(),
+            Some(Ok(AssuranceLevel::ContainerIsolation))
+        );
+        assert_eq!(
+            readiness("READY", Some("VM_ISOLATION")).ok(),
+            Some(Ok(AssuranceLevel::VmIsolation))
+        );
         // Every other live state, whatever it was measured at.
         for state in ["PREPARING", "DESTROYING", "UNKNOWN"] {
             for effective in [container, None] {

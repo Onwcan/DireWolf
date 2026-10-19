@@ -16,7 +16,7 @@
 
 use core::fmt;
 use std::collections::BTreeSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::state::{
     ConfigFlags, DEFAULT_LEASE_TTL_MS, MAX_CEILING_CAPABILITIES, MAX_LEASE_TTL_MS,
@@ -132,6 +132,10 @@ pub struct ServeConfig {
     /// The operator's secret metadata file (M4e), if any secrets are
     /// configured: handles and where their values live, never a value.
     pub secrets_file: Option<PathBuf>,
+    /// The operator's sandbox configuration file (M5d.2), if this authority
+    /// runs `process.exec` in an execution environment: the runtime, the
+    /// image and probe by digest, the topology, the image's manifest.
+    pub sandbox_config: Option<PathBuf>,
     /// The operator's acknowledgement that the process may stay dumpable
     /// (M4e, ADR-0046 §9): its memory readable by other processes of its uid,
     /// for a development harness that counts its descriptors. Reduced
@@ -175,6 +179,7 @@ pub const SERVE_USAGE: &str = "\
     --broker-uid <UID>         the uid the kernel must report for the broker (with --broker-socket)
     --allow-shared-broker-uid  permit a broker uid that is the authority's or a peer's (development only)
     --secrets-file <PATH>      the operator's secret metadata (absolute; handles, never values)
+    --sandbox-config <PATH>    the operator's execution environment (absolute; needs a broker)
     --allow-dumpable           leave the process dumpable, its memory readable by its uid (development only)
 ";
 
@@ -210,6 +215,7 @@ struct Parsed {
     broker_uid: Option<u32>,
     shared_broker_uid: bool,
     secrets_file: Option<PathBuf>,
+    sandbox_config: Option<PathBuf>,
     dumpable: bool,
 }
 
@@ -267,6 +273,7 @@ impl Parsed {
             }
             "--allow-shared-broker-uid" => switch(&mut self.shared_broker_uid, flag),
             "--secrets-file" => once(&mut self.secrets_file, flag, PathBuf::from(value()?)),
+            "--sandbox-config" => once(&mut self.sandbox_config, flag, PathBuf::from(value()?)),
             "--allow-dumpable" => switch(&mut self.dumpable, flag),
             other => Err(UsageError::new(format!(
                 "unknown serve argument {}",
@@ -357,8 +364,10 @@ impl Parsed {
         {
             return Err(UsageError::new("--secrets-file must be an absolute path"));
         }
+        sandbox_config_fits(self.sandbox_config.as_deref(), broker.is_some())?;
         Ok(ServeConfig {
             secrets_file: self.secrets_file,
+            sandbox_config: self.sandbox_config,
             dumpable_permitted: self.dumpable,
             state_dir,
             socket,
@@ -371,6 +380,24 @@ impl Parsed {
             broker,
         })
     }
+}
+
+/// `--sandbox-config`, if given: absolute, and beside a broker -- an
+/// execution environment is the broker's to prepare.
+fn sandbox_config_fits(path: Option<&Path>, broker: bool) -> Result<(), UsageError> {
+    let Some(path) = path else {
+        return Ok(());
+    };
+    if !path.is_absolute() {
+        return Err(UsageError::new("--sandbox-config must be an absolute path"));
+    }
+    if !broker {
+        return Err(UsageError::new(
+            "--sandbox-config needs --broker-socket and --broker-uid: an execution environment \
+             is the broker's to prepare",
+        ));
+    }
+    Ok(())
 }
 
 fn switch(slot: &mut bool, flag: &str) -> Result<(), UsageError> {

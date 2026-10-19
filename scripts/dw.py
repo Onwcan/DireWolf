@@ -2389,6 +2389,170 @@ def _build_image(
     return image
 
 
+# The real tools the hygiene evidence runs (M5d.2, ADR-0052 §5a), at their
+# paths in the tools image.
+TOOLS_GIT_PATH = "/usr/bin/git"
+TOOLS_PYTEST_PATH = "/usr/local/bin/pytest"
+# The pure-Python packages pytest needs, taken from the locked environment.
+TOOLS_PYTEST_PACKAGES = (
+    "pytest",
+    "_pytest",
+    "pluggy",
+    "iniconfig",
+    "packaging",
+    "pygments",
+    "py.py",
+)
+# A marker git reads from the image's system configuration: what
+# `GIT_CONFIG_NOSYSTEM` must keep it from reading.
+TOOLS_GIT_SYSTEM_MARKER = "system"
+
+
+def _ldd_closure(binaries: list[Path]) -> set[Path]:
+    """Every shared object `binaries` load, and the loader, as the host's
+    `ldd` names them: what a `FROM scratch` image must hold for them to run."""
+    found: set[Path] = set()
+    for binary in binaries:
+        out = subprocess.run(
+            ["ldd", str(binary)], capture_output=True, text=True, check=False
+        ).stdout
+        for line in out.splitlines():
+            words = line.split()
+            if "=>" in words:
+                path = words[words.index("=>") + 1]
+            elif words and words[0].startswith("/"):
+                path = words[0]
+            else:
+                continue
+            if path.startswith("/"):
+                found.add(Path(path))
+    return found
+
+
+def _place(rootfs: Path, source: Path, target: str, mode: int | None = None) -> None:
+    """Copy `source`'s bytes -- through any symlink -- to `target` under
+    `rootfs`."""
+    destination = rootfs / target.lstrip("/")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(source.resolve(), destination)
+    shutil.copymode(source.resolve(), destination)
+    if mode is not None:
+        destination.chmod(mode)
+
+
+def _tools_image(
+    client: Path,
+    socket: str,
+    context: Path,
+    binaries: tuple[Path, Path],
+    platform_: str,
+) -> tuple[str, dict[str, str]]:
+    """M5d.2's tools image (ADR-0052 §5a): the probe and the fixture, the
+    host's real `git` and Python with its standard library, pytest from the
+    locked environment, every shared object they load, and a system git
+    configuration carrying a marker -- built offline `FROM scratch` from
+    local bytes and named by content. Returns the image and the variables the
+    suites read (paths and digests). Without git or Python: NOT EXERCISED."""
+    probe, fixture = binaries
+    git = Path(TOOLS_GIT_PATH)
+    python_link = Path("/usr/bin/python3")
+    if not git.exists() or not python_link.exists():
+        raise TaskError(
+            "NOT EXERCISED: the hygiene evidence needs the host's /usr/bin/git and python3"
+        )
+    python = python_link.resolve()
+    if not re.fullmatch(r"python3\.\d+", python.name) or python.parent != Path("/usr/bin"):
+        raise TaskError(
+            f"NOT EXERCISED: /usr/bin/python3 resolves to {python}, not /usr/bin/python3.N"
+        )
+    stdlib = Path("/usr/lib") / python.name
+    found = subprocess.run(
+        [
+            _uv_bin(),
+            "run",
+            "--frozen",
+            "python",
+            "-c",
+            "import os, pytest; print(os.path.dirname(os.path.dirname(pytest.__file__)))",
+        ],
+        cwd=str(ROOT),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    site = Path(found.stdout.strip())
+    if found.returncode != 0 or not (site / "pytest").is_dir():
+        raise TaskError("NOT EXERCISED: pytest is not in the locked environment")
+    shutil.rmtree(context, ignore_errors=True)
+    rootfs = context / "rootfs"
+    rootfs.mkdir(parents=True)
+    _place(rootfs, probe, "/usr/libexec/direwolf/sandbox-probe", 0o755)
+    _place(rootfs, fixture, SANDBOX_FIXTURE_PATH, 0o755)
+    _place(rootfs, git, TOOLS_GIT_PATH, 0o755)
+    _place(rootfs, python, str(python), 0o755)
+    shutil.copytree(
+        stdlib,
+        rootfs / str(stdlib).lstrip("/"),
+        symlinks=False,
+        ignore=shutil.ignore_patterns(
+            "__pycache__", "test", "tests", "idlelib", "tkinter", "turtledemo", "ensurepip"
+        ),
+        ignore_dangling_symlinks=True,
+    )
+    packages = rootfs / "usr/lib/python3/dist-packages"
+    packages.mkdir(parents=True, exist_ok=True)
+    for name in TOOLS_PYTEST_PACKAGES:
+        source = site / name
+        if source.is_dir():
+            shutil.copytree(source, packages / name, ignore=shutil.ignore_patterns("__pycache__"))
+        elif source.is_file():
+            shutil.copyfile(source, packages / name)
+    pytest = rootfs / TOOLS_PYTEST_PATH.lstrip("/")
+    pytest.parent.mkdir(parents=True, exist_ok=True)
+    pytest.write_text(
+        f"#!{python}\nimport sys\nfrom pytest import console_main\nsys.exit(console_main())\n",
+        encoding="utf-8",
+    )
+    pytest.chmod(0o755)
+    loaded = [git, python, *sorted((stdlib / "lib-dynload").glob("*.so"))]
+    for library in sorted(_ldd_closure(loaded)):
+        _place(rootfs, library, str(library))
+    gitconfig = rootfs / "etc/gitconfig"
+    gitconfig.parent.mkdir(parents=True, exist_ok=True)
+    gitconfig.write_text(f"[direwolf]\n\tmarker = {TOOLS_GIT_SYSTEM_MARKER}\n", encoding="utf-8")
+    (context / "Dockerfile").write_text("FROM scratch\nCOPY rootfs/ /\n", encoding="utf-8")
+    iid = context / "iid"
+    _docker(
+        client,
+        socket,
+        "build",
+        "--quiet",
+        "--pull=false",
+        "--network",
+        "none",
+        "--platform",
+        platform_,
+        "--iidfile",
+        str(iid),
+        str(context),
+    )
+    image = iid.read_text(encoding="utf-8").strip()
+    if not re.fullmatch(r"sha256:[0-9a-f]{64}", image):
+        raise TaskError(f"the built image has no content identity: {image!r}")
+
+    def digest(path: Path) -> str:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+
+    variables = {
+        "DW_SANDBOX_TOOLS_IMAGE": image,
+        "DW_SANDBOX_GIT_SHA256": digest(git.resolve()),
+        "DW_SANDBOX_PYTHON": str(python),
+        "DW_SANDBOX_PYTHON_SHA256": digest(python),
+        "DW_SANDBOX_PYTEST_SHA256": digest(pytest),
+    }
+    return image, variables
+
+
 def task_sandbox_foundation_evidence() -> None:
     """M5a's real-container evidence (ADR-0047): a real OCI runtime, real
     containers, the real broker -- and, for the lifecycle, the real authority.
@@ -2913,6 +3077,10 @@ WORKLOAD_BROKER_TESTS = (
     "linux::an_agent_shaped_workload_is_contained_and_ended",
     "linux::the_broker_refuses_an_environment_identity_and_reports_its_posture",
     "linux::a_broker_killed_mid_workload_leaves_it_to_the_environments_destruction",
+    # M5d.2: started and collected, one at a time per environment; the
+    # trusted launcher with the real tools.
+    "linux::a_running_workload_holds_no_connection_and_its_environment_takes_no_second",
+    "linux::the_trusted_launcher_keeps_workspace_exec_hygiene_with_the_real_tools",
 )
 WORKLOAD_AUTHORITY_TESTS = (
     "linux::a_workload_is_decided_recorded_run_in_its_environment_and_never_run_twice",
@@ -2920,6 +3088,13 @@ WORKLOAD_AUTHORITY_TESTS = (
     "linux::the_budget_is_charged_at_the_intent_and_never_refunded",
     "linux::a_crash_in_every_workload_window_leaves_it_unknown_and_never_run_again",
     "linux::an_uncertain_ending_takes_its_environment_down",
+    # M5d.2: the public route, through a real DWKP client.
+    "linux::the_public_route_runs_process_exec_where_the_authority_decides",
+    "linux::an_uncertain_public_launch_is_unknown_and_takes_its_environment_down",
+    "linux::od9_a_concrete_grant_runs_only_the_manifests_bytes_in_the_image",
+    "linux::a_public_launch_is_refused_by_its_budget_and_by_bytes_that_are_not_pinned",
+    "linux::the_shipped_packs_run_git_and_pytest_with_hygiene_kept_by_the_launcher",
+    "linux::production_serve_prepares_its_own_environment_and_survives_its_own_death",
 )
 
 # Every (suite, case) the M5d.1 real-container suites must report, exercised.
@@ -2935,7 +3110,10 @@ WORKLOAD_AUTHORITY_TESTS = (
 #                               REAL runtime: both gates for a sandbox action,
 #                               the ledger, refusals before any intent, the
 #                               budget, crash windows W8-W11, an uncertain
-#                               ending taking its environment down.
+#                               ending taking its environment down; and (M5d.2)
+#                               the public route through a REAL DWKP client --
+#                               the server seam and the released `serve
+#                               --sandbox-config` -- OD-9, the shipped packs.
 WORKLOAD_CASES = (
     *(
         ("sandbox-workload", case)
@@ -2995,6 +3173,24 @@ WORKLOAD_CASES = (
             "broker-crash-mid-workload-no-answer",
             "broker-crash-workload-still-running",
             "broker-restart-destroy-ends-it",
+            # M5d.2: start and collect.
+            "workload-start-answered-before-it-ends",
+            "workload-second-in-environment-refused",
+            "broker-serves-others-while-a-workload-runs",
+            "workload-collected-ending-repeats",
+            "workload-collect-other-generation-indeterminate",
+            "broker-restart-collection-indeterminate",
+            "workload-environment-removed-mid-run-not-clean",
+            "broker-holds-nothing-after-its-workloads",
+            # M5d.2: workspace_exec_hygiene by the trusted launcher, with the
+            # real git, Python and pytest (ADR-0052 §5a) -- and what it
+            # leaves to the environment.
+            "hygiene-launcher-adds-exactly-its-variables",
+            "hygiene-git-system-config-not-read",
+            "hygiene-python-working-directory-not-on-path",
+            "hygiene-pytest-cache-not-written",
+            "hygiene-residual-repository-config-read",
+            "hygiene-residual-conftest-runs",
         )
     ),
     *(
@@ -3029,6 +3225,48 @@ WORKLOAD_CASES = (
             "unknown-ending-recorded",
             "unknown-ending-environment-destroyed",
             "unknown-ending-never-rerun",
+            "crash-w9-unknown-environment-destroyed",
+            # M5d.2: the public route over DWKP (the server seam).
+            "public-exec-environment-prepared-by-the-authority",
+            "public-exec-result-names-environment-assurance-identity",
+            "public-exec-runs-as-the-sandbox-user",
+            "public-exec-caller-from-the-transport",
+            "public-exec-never-on-the-host",
+            "public-exec-output-bounded",
+            "public-exec-detached-child-reaped",
+            "public-exec-authority-answers-during-a-workload",
+            "public-exec-broker-answers-during-a-workload",
+            "public-exec-two-runs-at-once-in-two-environments",
+            "public-exec-key-from-another-holder-fenced",
+            "public-exec-long-workload-timed-out-and-reaped",
+            "public-exec-key-never-runs-twice",
+            "public-exec-cross-tool-key-refused",
+            "public-exec-smuggled-environment-refused",
+            "public-no-lifecycle-operation",
+            "public-exec-unknown-outcome-reported",
+            "public-exec-unknown-destroys-environment",
+            "public-exec-budget-exhausted-refused",
+            "public-exec-unpinned-image-bytes-refused",
+            "public-exec-ended-runs-environment-reclaimed",
+            # OD-9: a concrete grant is the manifest's executable.
+            "od9-concrete-grant-runs-the-manifests-executable",
+            "od9-concrete-grant-covers-nothing-else",
+            "od9-host-resolved-grant-covers-no-image-executable",
+            # The shipped packs, with the tools image.
+            *(
+                f"shipped-{pack}-{case}"
+                for pack in ("balanced", "power")
+                for case in (
+                    "git-runs-with-hygiene",
+                    "pytest-runs-with-its-cache-off",
+                    "hygiene-undone-or-unevidenced-denied",
+                )
+            ),
+            # The released `dwkd-authority serve --sandbox-config`.
+            "production-serve-attaches-the-operators-environment",
+            "production-serve-prepares-and-runs",
+            "production-crash-mid-workload-unknown-destroyed",
+            "production-replay-after-restart-refused",
         )
     ),
 )
@@ -3103,9 +3341,15 @@ def _workload_setup() -> tuple[Path, str, dict[str, str], set[str], dict[str, st
             probe,
             platform_,
             None,
-            {SANDBOX_FIXTURE_PATH: fixture},
+            # M5d.2 (OD-9): the fixture again at a path the host also has, so
+            # a grant resolved on the host is shown to cover nothing in it.
+            {SANDBOX_FIXTURE_PATH: fixture, "/usr/bin/true": fixture},
         )
     }
+    tools, tool_variables = _tools_image(
+        client, socket, work / "images" / "tools", (probe, fixture), platform_
+    )
+    images["tools"] = tools
     scope = Path("/proc/sys/kernel/yama/ptrace_scope")
     print(f"{BOLD}workload evidence setup{OFF}")
     version = f"{server.get('Version')} (api {server.get('ApiVersion')})"
@@ -3114,6 +3358,10 @@ def _workload_setup() -> tuple[Path, str, dict[str, str], set[str], dict[str, st
     print(f"  probe              {linking['probe']}, sha256 {probe_sha}")
     print(f"  fixture            {linking['fixture']}, sha256 {fixture_sha} (the workload)")
     print(f"  image (content id) {images['workload']}")
+    print(
+        f"  tools image        {images['tools']} "
+        f"(git, {tool_variables['DW_SANDBOX_PYTHON']}, pytest)"
+    )
     print(
         "  yama ptrace_scope  "
         + (scope.read_text(encoding="utf-8").strip() if scope.exists() else "absent")
@@ -3124,14 +3372,17 @@ def _workload_setup() -> tuple[Path, str, dict[str, str], set[str], dict[str, st
         "DW_SANDBOX_WORKLOAD_IMAGE": images["workload"],
         "DW_SANDBOX_PROBE_SHA256": probe_sha,
         "DW_SANDBOX_FIXTURE_SHA256": fixture_sha,
+        **tool_variables,
     }
     return client, socket, variables, before, images
 
 
 def task_sandbox_workload_evidence() -> None:
-    """M5d.1's real-container evidence (ADR-0052 §17): workloads in a real
-    OCI environment -- the released broker running them through its real
-    runtime client, and the real authority deciding and recording them.
+    """M5d.1's and M5d.2's real-container evidence (ADR-0052 §17): workloads
+    in a real OCI environment -- the released broker running them through its
+    real runtime client, the real authority deciding and recording them, and
+    (M5d.2) a real DWKP client reaching them through the public route, the
+    released `serve --sandbox-config` included.
 
     Every suite must run every test and every case must report; no container
     the evidence made may remain, and every container that was there before
@@ -3324,8 +3575,8 @@ WORKLOAD_MUTATIONS = (
     (
         "an obligation the authority cannot keep is accepted",
         "crates/dwkd-authority/src/state/workload.rs",
-        "            Obligation::AuditLevel(_) => true,\n            _ => false,",
-        "            Obligation::AuditLevel(_) => true,\n            _ => true,",
+        "            _ => false,\n        };\n        enforced &= ok;",
+        "            _ => true,\n        };\n        enforced &= ok;",
     ),
     (
         "the output obligation does not bound the streams",
@@ -3383,20 +3634,179 @@ WORKLOAD_MUTATIONS = (
         "WHERE state = 'LAUNCHING' RETURNING invocation_id,",
         "WHERE state = 'COMPLETED' AND 0 RETURNING invocation_id,",
     ),
+    # M5d.2: the public route (ADR-0052 §2). Where it runs.
+    (
+        "a sandboxed launch is decided by the host floor",
+        "crates/dwkd-authority/src/state/workload_route.rs",
+        "        if let Some(exec) = &call.process_exec\n            && self.attached().is_some()\n"
+        "        {\n            return match",
+        "        if let Some(exec) = &call.process_exec\n            && self.attached().is_some()\n"
+        "            && false\n        {\n            return match",
+    ),
+    (
+        "a denied launch prepares an environment",
+        "crates/dwkd-authority/src/state/workload.rs",
+        "    if !plan.permits() {\n        return Ok(Ok(Decided {",
+        "    if false && !plan.permits() {\n        return Ok(Ok(Decided {",
+    ),
+    (
+        "a run prepares environments without bound",
+        "crates/dwkd-authority/src/state/workload.rs",
+        "            if environments(work, run)? >= MAX_ENVIRONMENTS_PER_RUN {",
+        "            if environments(work, run)? >= i64::MAX {",
+    ),
+    (
+        "a run bound to another image runs in this one",
+        "crates/dwkd-authority/src/state/workload.rs",
+        "        && (bound != *image || bound.image.as_str() != environment.image)",
+        "        && false\n"
+        "        && (bound != *image || bound.image.as_str() != environment.image)",
+    ),
+    (
+        "an environment that can never run again is never reclaimed",
+        "crates/dwkd-authority/src/state/workload_route.rs",
+        "        self.reclaim_one()?;\n        let full",
+        "        let full",
+    ),
+    (
+        "live environments are unbounded across runs",
+        "crates/dwkd-authority/src/state/workload_route.rs",
+        "Ok(workload::live_environments(work)? >= workload::MAX_LIVE_ENVIRONMENTS)",
+        "Ok(workload::live_environments(work)? >= i64::MAX)",
+    ),
+    (
+        "a busy environment takes a second launch",
+        "crates/dwkd-authority/src/state/workload.rs",
+        "        if busy.is_some() {",
+        "        if busy.is_some() && false {",
+    ),
+    # Keys (§2): one namespace, both directions.
+    (
+        "a key another tool bound is not refused for a launch",
+        "crates/dwkd-authority/src/state/workload_route.rs",
+        "    Ok(found.is_some())\n}\n\n/// Record a refusal of the fence",
+        "    Ok(found.is_some() && false)\n}\n\n/// Record a refusal of the fence",
+    ),
+    (
+        "a launch's key is not refused for another tool",
+        "crates/dwkd-authority/src/state/tool.rs",
+        "SELECT invocation_id FROM workload_idempotency \\\n             WHERE subject = ?1",
+        "SELECT invocation_id FROM workload_idempotency \\\n             WHERE 0 AND subject = ?1",
+    ),
+    # Starvation (§8): a running launch holds neither the worker nor the
+    # broker's channel.
+    (
+        "a running sandboxed launch holds the authority's worker",
+        "crates/dwkd-authority/src/state/workload_route.rs",
+        "            && self.attached().is_some()\n        {\n"
+        "            return self.sandboxed(caller, message, exec, true);",
+        "            && self.attached().is_some()\n            && false\n        {\n"
+        "            return self.sandboxed(caller, message, exec, true);",
+    ),
+    # The broker's supervisor (§3): bounded, one per environment, one
+    # generation.
+    (
+        "a second workload shares an environment",
+        "crates/dwkd-broker/src/sandbox/supervisor.rs",
+        "            &slot.invocation == invocation"
+        " || (&slot.environment == environment && !slot.ended())",
+        "            &slot.invocation == invocation",
+    ),
+    (
+        "the supervisor's table is unbounded",
+        "crates/dwkd-broker/src/sandbox/supervisor.rs",
+        "        if table.len() >= MAX_SUPERVISED_WORKLOADS {",
+        "        if table.len() >= usize::MAX {",
+    ),
+    (
+        "another generation's collection is believed",
+        "crates/dwkd-broker/src/sandbox/supervisor.rs",
+        "        if collect.generation != self.generation {",
+        "        if false && collect.generation != self.generation {",
+    ),
+    # workspace_exec_hygiene (§5a).
+    (
+        "the broker ignores the hygiene launch",
+        "crates/dwkd-broker/src/sandbox/workload_plan.rs",
+        "    if workload.launch == WorkloadLaunch::Hygiene {",
+        "    if false && workload.launch == WorkloadLaunch::Hygiene {",
+    ),
+    (
+        "the launcher sets none of the obligation's variables",
+        "crates/dwk-sandbox-probe/src/linux.rs",
+        "    for (variable, value) in profile::HYGIENE_ENVIRONMENT {",
+        "    for (variable, value) in profile::HYGIENE_ENVIRONMENT.iter().take(0) {",
+    ),
+    (
+        "an invocation that undoes the obligation keeps it",
+        "crates/dwkd-authority/src/state/workload.rs",
+        "                    Hygiene::Unenforceable(_) => false,",
+        "                    Hygiene::Unenforceable(_) => true,",
+    ),
+    (
+        "git's configuration overrides are not refused",
+        "crates/dwkd-authority/src/resource/exec/hygiene.rs",
+        "        if GIT_OVERRIDES.iter().any(|option| is_option(arg, option)) {",
+        "        if false && GIT_OVERRIDES.iter().any(|option| is_option(arg, option)) {",
+    ),
+    (
+        "pytest's cache is not turned off",
+        "crates/dwkd-authority/src/resource/exec/hygiene.rs",
+        'const PYTEST_PREFIX: &[&str] = &["-p", "no:cacheprovider"];',
+        "const PYTEST_PREFIX: &[&str] = &[];",
+    ),
+    (
+        "a tool without real-tool evidence keeps the obligation",
+        "crates/dwkd-authority/src/resource/exec/hygiene.rs",
+        'const UNEVIDENCED: &[&str] = &["npm", "npx", "pnpm", "yarn", "bun", "cargo"];',
+        "const UNEVIDENCED: &[&str] = &[];",
+    ),
+    # The operator's file (§2a).
+    (
+        "a wrapper or runner of an unevidenced tool keeps the obligation",
+        "crates/dwkd-authority/src/resource/exec/hygiene.rs",
+        '    if (super::argv::is_runner(name) || name == "uv") && names_unevidenced(args) {',
+        "    if false\n"
+        '        && (super::argv::is_runner(name) || name == "uv") && names_unevidenced(args) {',
+    ),
+    (
+        "an unknown member of the operator's file is accepted",
+        "crates/dwkd-authority/src/sandbox/operator.rs",
+        "        if !allowed.contains(&name) {",
+        "        if false && !allowed.contains(&name) {",
+    ),
+    (
+        "the operator's file may write its version in another base",
+        "crates/dwkd-authority/src/sandbox/operator.rs",
+        'if version.radix() == 10 && version.as_str() == "1" => {}',
+        'if version.as_str() == "1" => {}',
+    ),
 )
 
 
 def _workload_guard_suites() -> None:
-    """The suites that prove M5d.1's guards without a runtime: the broker's
-    plan, posture, deployment and classification, and the authority's
-    ledger and schema."""
+    """The suites that prove M5d.1's and M5d.2's guards without a runtime:
+    the broker's plan, posture, deployment, classification and supervisor,
+    and the authority's ledger, schema and route (against a fake broker),
+    its hygiene families and the operator's file."""
     run("cargo", "test", "--locked", "-p", "dwkd-broker", "--bin", "dwkd-broker")
-    run("cargo", "test", "--locked", "-p", "dwkd-authority", "--lib", "state::")
+    run(
+        "cargo",
+        "test",
+        "--locked",
+        "-p",
+        "dwkd-authority",
+        "--lib",
+        "--",
+        "state::",
+        "resource::exec::hygiene",
+        "sandbox::operator",
+    )
 
 
 def task_sandbox_workload_mutations() -> None:
-    """Weaken each M5d.1 guard in turn; a unit suite or the evidence must
-    catch every one.
+    """Weaken each M5d.1 and M5d.2 guard in turn; a unit suite or the
+    evidence must catch every one.
 
     Slow: a mutant no unit suite catches runs the whole
     sandbox-workload-evidence. Every file is restored byte-identically

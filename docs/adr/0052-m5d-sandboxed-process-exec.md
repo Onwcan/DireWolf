@@ -1,6 +1,6 @@
 # ADR-0052: M5d — production sandboxed `process.exec`: the authority decides a workload, the broker runs exactly that plan in a measured `oci-strict` environment, as the environment's own identity, and nothing of it outlives its invocation
 
-**Status:** Proposed · **Date:** 2026-10-13 · **Would amend (on acceptance):** [ADR-0018](0018-authority-broker-split.md) (the broker runs workloads, never as its own uid), [ADR-0039](0039-durable-authority-state.md) (schema version 9: the workload ledger, §4), [ADR-0043](0043-m4b-private-broker-channel-and-brokered-fs-read.md) (private protocol version 8, §3), [ADR-0045](0045-m4d-process-execution-broker.md) (a process can run in an environment; the host floor is unchanged), [ADR-0047](0047-m5a-oci-execution-environment-and-measured-assurance.md) (the probe becomes the environment's init: it reaps orphans and, asked, ends every other process; `run_probe` gains a sibling, `run_workload`), [ADR-0050](0050-m5c-kernel-performed-net-http-ssrf-redirects-and-credential-egress.md) (§21's ptrace-posture prerequisite becomes a check the broker makes at start) · **Refines:** [ADR-0008](0008-sandbox-default.md) and [ADR-0024](0024-sandbox-network-topology.md) (as realised by [ADR-0048](0048-m5b-proxy-only-topology-and-connect-proxy.md)), [ADR-0046](0046-m4e-secret-handles-backends-injection-and-redaction.md) §13 (modes B/C reach a sandboxed target, M5d.3), [ADR-0051](0051-external-agent-interoperability.md) (Proposed; its M5d prerequisites), [SANDBOX.md](../SANDBOX.md) §§1–4, [POLICY.md](../POLICY.md) (`when.environment = "sandbox"`)
+**Status:** Proposed (M5d.1 and M5d.2 built; M5d.2's refinements §§2a and 5a — OD-10 and OD-11 — approved by the owner on 2026-10-19 with conditions, §19; this ADR's acceptance remains M5d.6's) · **Date:** 2026-10-13 · **Revised:** 2026-10-19 · **Would amend (on acceptance):** [ADR-0018](0018-authority-broker-split.md) (the broker runs workloads, never as its own uid), [ADR-0039](0039-durable-authority-state.md) (schema version 9: the workload ledger, §4), [ADR-0043](0043-m4b-private-broker-channel-and-brokered-fs-read.md) (private protocol version 8, §3), [ADR-0045](0045-m4d-process-execution-broker.md) (a process can run in an environment; the host floor is unchanged), [ADR-0047](0047-m5a-oci-execution-environment-and-measured-assurance.md) (the probe becomes the environment's init: it reaps orphans and, asked, ends every other process; `run_probe` gains a sibling, `run_workload`), [ADR-0050](0050-m5c-kernel-performed-net-http-ssrf-redirects-and-credential-egress.md) (§21's ptrace-posture prerequisite becomes a check the broker makes at start) · **Refines:** [ADR-0008](0008-sandbox-default.md) and [ADR-0024](0024-sandbox-network-topology.md) (as realised by [ADR-0048](0048-m5b-proxy-only-topology-and-connect-proxy.md)), [ADR-0046](0046-m4e-secret-handles-backends-injection-and-redaction.md) §13 (modes B/C reach a sandboxed target, M5d.3), [ADR-0051](0051-external-agent-interoperability.md) (Proposed; its M5d prerequisites), [SANDBOX.md](../SANDBOX.md) §§1–4, [POLICY.md](../POLICY.md) (`when.environment = "sandbox"`)
 
 > **A workload runs only where the authority decided it may, as the
 > environment's own user, and is gone when its invocation is.** The authority
@@ -90,6 +90,144 @@ grant runs no workload.
 server, `serve`, the CLI and the runtime from naming it). M5d.2 adds the DWKP
 route (§18).
 
+**As built in M5d.2.** The route is the tool messages at **version 5**
+(`direwolf.tool.invoke` and `direwolf.tool.preview` and their answers;
+versions 1–4 unchanged, and a version-4 `process.exec` is still the host
+floor's). Version 5's call is version 3's plus at most two narrowings —
+`timeout_seconds` (1–600) and `max_stream_bytes` (1–131 072) — and no member
+that names an environment, an image, a user, a variable or a launcher: any
+other member is a schema violation at the decoder
+(`public-exec-smuggled-environment-refused`). With an execution environment
+attached (§2a) a version-5 `process.exec` is sandboxed and never reaches the
+host (`public-exec-never-on-the-host`); without one it is version 4's,
+decided and denied by the floor; every other version-5 tool is version 4's
+call, answered at version 5.
+
+*The order.* Both gates first, for a **sandbox** action: a launch the
+capability gate or policy denies prepares no environment (its plan names the
+run's environment only when the run already has one, from an earlier
+permitted launch). A permitted
+launch is then refused before any intent when its executable is not in the
+manifest (`EXECUTABLE_NOT_IN_IMAGE`), its working directory is not the
+workspace root (`WORKING_DIRECTORY_UNSUPPORTED`), its run has no environment
+and none can be prepared (`NO_ENVIRONMENT`, `ENVIRONMENT_UNAVAILABLE`), the
+environment is not `READY` (`ENVIRONMENT_NOT_READY`) or is below
+`CONTAINER_ISOLATION` (`ASSURANCE_INSUFFICIENT`), it is running a workload
+(`ENVIRONMENT_BUSY`), the run was admitted against another image or manifest
+(`IMAGE_CHANGED`), or the budget is spent (`BUDGET_EXHAUSTED`). The result,
+`process_exec_sandboxed`, names the environment, the measured level, the
+executable as (image, path, SHA-256), how it ended, both bounded streams, the
+residue and whether the environment was destroyed; a failure names the
+environment and whether it was destroyed. The plan's action states the launch
+(`DIRECT` or `HYGIENE`, §5a) and the count and SHA-256 of the argv **as
+executed** — any hygiene arguments included — never the arguments.
+
+*Long workloads.* The broker answers a start once it has judged the
+environment, proved the bytes and started the workload; the authority's
+worker **parks** the request (at most 16 at once) and collects it every
+250 ms between its other requests. Other connections, other runs and the
+broker's other clients are served while it runs
+(`public-exec-authority-answers-during-a-workload`,
+`public-exec-broker-answers-during-a-workload`,
+`public-exec-two-runs-at-once-in-two-environments`).
+
+*Idempotency.* A key names one invocation in **one namespace every tool
+shares**: schema 10's `workload_idempotency` (subject, session, key →
+invocation) and triggers on it and the three other ledgers (file operations,
+host processes, `net.http`) that refuse a key any of them holds. A key used
+again — by the same tool or another, before or after a restart — is
+`IDEMPOTENCY_KEY_REUSED`, and nothing runs again
+(`public-exec-key-never-runs-twice`, `public-exec-cross-tool-key-refused`,
+`production-replay-after-restart-refused`). A sandboxed launch's own repeat
+is refused, not replayed: its answer carries output the runtime produced
+once. A key belongs to the session's lease holder: the same key from another
+connection is fenced (`STALE_EPOCH`) before anything is decided.
+
+*OD-9, as built.* An admission made with an execution environment
+configured resolves the run's concrete `process.exec:<path>` declarations
+**against the manifest**: the grant is the manifest's (path, SHA-256), and a
+path the manifest lacks refuses the admission. The run is bound to the
+attached image and manifest (schema 10's `run_image`, the manifest's digest
+under the domain `direwolf.sandbox.image_manifest.v1`), and a launch in a run
+bound to another is `IMAGE_CHANGED`. A run admitted before any environment
+was configured keeps its host-resolved grant, which covers no image
+executable (`od9-host-resolved-grant-covers-no-image-executable`); a concrete
+grant covers its one executable and nothing else
+(`od9-concrete-grant-covers-nothing-else`).
+
+### 2a. A production environment (M5d.2; OD-10, approved by the owner 2026-10-19)
+
+ADR-0047 gave the environment lifecycle no production caller "until M5d".
+M5d.2 gives it exactly one — the authority itself — and the runtime none.
+This extends ADR-0047 as that ADR anticipated, rather than contradicting it:
+its lifecycle, measurement, judgement, crash windows and reconciliation are
+used unchanged, and no new way to reach them is public.
+
+- **The operator attaches one at start.** `dwkd-authority serve
+  --sandbox-config <file>`: an absolute path, read once through the trusted
+  operator-file reader (a regular file owned by root or the authority's uid,
+  writable by nobody else, under directories only they can change, at most
+  64 KiB), strict TOML — every member known, every integer base 10 — naming
+  the runtime client and its socket, the image and the probe by digest, the
+  topology (`PROXY_ONLY` for production, with its relay digest and egress
+  budgets; `NO_NETWORK` only where the broker was started for evidence), the
+  workload budget and the manifest (path → SHA-256). It requires a broker. A
+  file that is not trusted or does not parse stops the server before its
+  socket is bound. There is no reload, and no DWKP operation, flag of the
+  runtime's or variable that attaches, prepares, measures, destroys or
+  reconciles an environment (`public-no-lifecycle-operation`). TX053 confines
+  the attachment to `server/sandbox.rs`; TX035 keeps every other public path
+  from naming the lifecycle.
+- **The authority prepares a run's environment when a permitted launch needs
+  one** and the run has none live (§2's step 2a): recorded, measured from both
+  vantages and judged by ADR-0047's lifecycle, W1–W7 included, then the launch
+  decided again from the fence on. At most eight environments per run
+  (`ENVIRONMENT_BUDGET_EXHAUSTED`); a preview never prepares; a preparation
+  that does not end `READY` refuses the launch (`ENVIRONMENT_UNAVAILABLE`) and
+  nothing is tried on the host.
+- **A preparation's deadline and failure.** The exchange is bounded by the
+  environment deadline, **120 s**, on both sides (ADR-0047 §4). A refusal is
+  recorded and nothing remains. A deadline that expires after the order left
+  proves nothing about the container: the environment is recorded `UNKNOWN`,
+  the launch refused `ENVIRONMENT_UNAVAILABLE`, nothing runs and nothing is
+  tried on the host; the run's next launches are refused
+  `ENVIRONMENT_NOT_READY` at once, with no new exchange, and the uncertain
+  environment is destroyed before any other is prepared (below) or at the
+  next start (unit evidence against a fake broker,
+  `a_preparation_past_its_deadline_is_unknown_refused_and_never_on_the_host`).
+- **Environments are bounded across runs** (found in the M5d.2 review). A
+  run's release does not destroy its environment before M5d.6, and
+  reconciliation keeps a `READY` one; preparation reachable from production
+  would therefore let a runtime that admits, launches and releases runs leave
+  idle environments without bound. So before the authority prepares one, it
+  destroys **at most one** environment that can never run a workload again —
+  `READY` in a run no longer `ACTIVE`, or `UNKNOWN` or `DESTROYING` in any
+  run, never one a workload is `LAUNCHING` in — durably first, as every
+  destruction (reason `RECLAIMED`); and at most **16** environments are live
+  at once across every run (as many as the broker supervises), a launch that
+  would need another being refused `BUDGET_EXHAUSTED` before anything is
+  prepared (`ended-runs-environment-reclaimed`, `live-environments-bounded`,
+  unit; `public-exec-ended-runs-environment-reclaimed`, real).
+- **Preserved:** the kernel's decision of where it runs (OD-1);
+  `CONTAINER_ISOLATION` as the minimum; no host fallback; the operator's
+  pinned digests; the durable lifecycle and its reconciliation at start; no
+  user mount, flag or profile; no host launch before M6.
+- **Residuals, as approved.** A preparation is one broker exchange: it holds
+  the authority's worker and its broker link for its duration — **at most
+  the 120 s environment deadline**; about 3 s for the preparation and the
+  first launch together on the evidence host (Docker Engine 29.8.2,
+  `public-exec-environment-prepared-by-the-authority` reports it) — so other
+  requests wait for it as they wait for any brokered call (a workload, by
+  contrast, never holds either, §8). A launch that reclaims an environment
+  first holds the worker for that destruction too, bounded the same way, so
+  a launch that needs an environment holds it for at most one destruction and
+  one preparation. An ended run's environment idles until the next
+  preparation or start (M5d.6 makes the release destroy it); at most 16 are
+  live, so the 17th concurrently active run with an environment is refused
+  until one ends. The configuration is fixed for the server's life, so
+  `IMAGE_CHANGED` guards a binding that today changes only across restarts
+  (shown with a planted binding).
+
 ### 3. The private protocol: version 8
 
 `broker.workload_run` carries, with exactly two descriptors (the runtime
@@ -116,6 +254,24 @@ started and whose end nothing proves is `indeterminate`
 M5d.3 adds `broker.workload_secret_run`: the same, with the secret's pipe as a
 third descriptor (§7).
 
+**As built in M5d.2: version 9.** `broker.workload_run` is replaced by a
+start and a collection, as M4d's `process_start`/`process_status`.
+`broker.workload_start` carries the same two descriptors and the same
+authorisation plus one closed word, the **launch** (`DIRECT` or `HYGIENE`,
+§5a); the broker judges the environment, proves the bytes, admits the
+workload to its supervisor and starts it, and answers once it has started —
+within the environment deadline (120 s), not the wall clock.
+`broker.workload_collect` carries no descriptor, names the invocation and the
+broker generation that started it, and is answered within the exchange
+deadline (10 s) with the workload's progress — still running, or its ending
+with the residue exactly as version 8's result — or, when nothing ran, why.
+The supervisor holds at most 16 workloads and **one unended workload per
+environment** (`WORKLOAD_TABLE_FULL`, `WORKLOAD_IN_USE`); an ending is kept
+until it is collected, and a collection repeats it. A collection for a
+workload the broker does not hold, or for another generation's, is
+`indeterminate` (`WORKLOAD_UNCONFIRMED`): a restarted broker cannot say what
+its predecessor's workload did.
+
 ### 4. Authority state: schema version 9
 
 Append-only by trigger, migrated transactionally from 8 with data:
@@ -129,6 +285,14 @@ is read from its rows (count and wall-clock seconds charged), never refilled,
 like `net.http`'s (§10). A `LAUNCHING` row a dead incarnation left is ended
 `UNKNOWN` at start and **its environment is destroyed** (§9): nothing proves
 the workload is not still running in it.
+
+**As built in M5d.2: schema version 10**, migrated transactionally from 9:
+`workload_idempotency` — the key namespace every tool shares (§2), its rows
+never updated or deleted, with triggers here and on the file-operation,
+process and `net.http` ledgers refusing a key another holds — and `run_image`
+— a run's image and manifest digest, fixed at admission (no update, no
+delete), with a trigger refusing a workload intent in a run whose environment
+is of another image.
 
 ### 5. OCI workload execution
 
@@ -185,6 +349,75 @@ environment (`broker-restart-destroy-ends-it`). Exit codes 125, 126 and 127
 are the client's own as well as a program's, so none is believed
 (`workload-ambiguous-exit-unobservable`). The workload's standard error is
 returned bounded and never logged by the broker.
+
+### 5a. `workspace_exec_hygiene` in an environment (M5d.2; OD-11, approved by the owner 2026-10-19)
+
+The shipped `balanced` and `power` packs allow sandboxed `process.exec` only
+with `workspace_exec_hygiene` (SANDBOX.md §4a). M4d showed the obligation
+cannot be kept on the host; §5's step 4 forbids `--env` and any other
+variable on the runtime's command line. Three mechanisms were weighed:
+
+| Mechanism | What it prevents | What hostile argv can still do | What workspace configuration stays active |
+|---|---|---|---|
+| **A trusted launcher in the image** (chosen) | configuration from outside the invocation: git's global and system files and any injected by variable, Python's user site and the implicit script or working directory on `sys.path`, pytest's cache, Cargo's network, npm's lifecycle scripts | undo a setting with an option the tool ranks above the environment — so those invocations are refused (below) | a repository's `.git/config` and hooks, `conftest.py`, `build.rs`, `package.json` scripts the invocation runs, a script named as an argument |
+| An immutable profile (the variables in the environment's configuration when it is prepared) | the same variables, for every process of the environment | the same | the same — and every workload gets them, obligated or not; no per-tool arguments; the measured environment changes |
+| Explicit denial | everything the obligation covers | nothing runs | — but the shipped packs could perform none of their authorised workloads |
+
+**Chosen: the launcher.** The broker starts a workload carrying the
+obligation as `container exec --user 10001:10001 --workdir /workspace
+<container> /usr/libexec/direwolf/sandbox-probe launch hygiene <path>
+<args…>`: the digest-pinned probe, proved before every workload like `reap`,
+sets exactly the profile's `HYGIENE_ENVIRONMENT` — `GIT_CONFIG_GLOBAL=/dev/null`,
+`GIT_CONFIG_NOSYSTEM=1`, `GIT_CONFIG_COUNT=0`, `PYTHONNOUSERSITE=1`,
+`PYTHONSAFEPATH=1`, `CARGO_NET_OFFLINE=1`, `npm_config_ignore_scripts=true` —
+over the environment's own, and executes the program with `argv[0]` its path
+(exit 127 if it cannot). No variable is spelled on the runtime's command line
+or carried on the wire (TX050, TX036); the launch is one closed word the
+authority decides. The authority puts the tool's own neutralising arguments
+first in the argv it records and hashes (pytest: `-p no:cacheprovider`), and
+refuses as `OBLIGATION_UNENFORCEABLE`, before any intent:
+
+- an invocation whose own arguments undo a setting — git's `-c`,
+  `--config-env` or `--exec-path` before its subcommand, `clone -c` or
+  `--config`; Python's `-E`; pytest's `-p cacheprovider`;
+- a tool with no real-tool evidence in an environment yet — `npm`, `npx`,
+  `pnpm`, `yarn`, `bun`, `cargo` — which therefore stays fail-closed; and
+  (found in the M5d.2 review) the same tools reached through a wrapper: a
+  `cargo-*` subcommand binary, `rustup` and `corepack` whatever they are
+  asked, and a runner (`env`, `time`, `xargs`, …) or `uv` whose arguments
+  name one of them to run (`rustup run stable cargo build`, `corepack pnpm
+  install` and `env cargo build` were otherwise argv-safe and would have run
+  under the launcher as if the obligation were kept).
+
+The shipped packs also require `when.argv_safe`, so an interpreter (R1), a
+runner (R2) or an exec-style option (R3: `git -c`) is denied by policy before
+the obligation is considered; the refusals above hold for operator policies
+that do not. A shell or interpreter such a policy allows runs whatever its
+own code says — `npm` included — and the obligation makes no claim about it.
+
+**Measured with the real tools** (`make sandbox-workload-evidence`, the host's
+`git` and Python and the locked pytest in a `FROM scratch` image): the
+launcher adds exactly its variables to the environment's
+(`hygiene-launcher-adds-exactly-its-variables`); git reads the image's system
+configuration directly and not through the launcher
+(`hygiene-git-system-config-not-read`); a `json.py` in the working directory
+shadows the standard library directly and not through the launcher
+(`hygiene-python-working-directory-not-on-path`); pytest writes its cache
+directly and not with the prefix (`hygiene-pytest-cache-not-written`); and
+the shipped packs run `git` and `pytest` that way, deny the undoing and the
+unevidenced forms, and run nothing for them (`shipped-*`).
+
+**What it does not claim.** Interpreter flags and variables do not make
+untrusted code safe. A repository's own configuration is still read
+(`hygiene-residual-repository-config-read`), and its hooks, `core.fsmonitor`
+or `core.sshCommand` can run; a `conftest.py` still runs
+(`hygiene-residual-conftest-runs`); so would a `build.rs` or a lifecycle
+script the invocation names. These are workspace content executed by a tool
+the run was allowed to start: the obligation does not reach them, and the
+environment — uid 10001, no capability, read-only root, its network, its
+limits, `reap` — is what bounds them (SANDBOX.md §4a, consequence 1). The
+environment's `HOME` is `/`, read-only, so no user file there is workspace
+content either way.
 
 ### 6. Workspace ownership
 
@@ -259,6 +492,20 @@ and performed at once, so no later workload of the run shares an environment
 with a process nothing accounts for. A run's release destroys its environment
 (M5d.6); reconciliation at start removes environments a dead incarnation left.
 
+**As built in M5d.2.** Start and collection (§3): a running workload holds
+neither the private channel nor the authority's worker. In the broker each
+started workload has one supervising thread — it waits for the runtime
+client the launch helper started, drains its streams to their bounds, runs
+`reap` and records the ending — at most 16 at once, and the table's slot is
+the only shared state (a mutex, never held across a wait). Every descriptor
+of a workload is the launch helper's, close-on-exec, and the runtime client is
+spawned under the broker's fork guard, so none reaches another workload's
+client. **D11 reviewed again** (ADR-0050 §21): the broker still serves one
+connection at a time and starts at most one exchange worker; a supervising
+thread runs no untrusted code (the runtime client is the pinned one, the
+workload runs in the environment as uid 10001), so the worker count and its
+conditions are unchanged.
+
 ### 9. Crash windows
 
 | Window | Durable state | On restart | Semantics |
@@ -271,6 +518,16 @@ with a process nothing accounts for. A run's release destroys its environment
 A broker killed while a workload runs leaves the workload running in its
 environment until the authority destroys it; the authority's answer is
 `UNKNOWN`, never a retry.
+
+**As built in M5d.2**, W9 has its own crash point (`WorkloadAfterStart`,
+after the start's answer and before the first collection): an authority
+killed there leaves the workload running; the next incarnation finds the row
+`LAUNCHING`, ends it `UNKNOWN` and destroys the environment, which ends the
+workload (`crash-w9-unknown-environment-destroyed`; through the released
+binary, `production-crash-mid-workload-unknown-destroyed`). A broker killed
+during a public launch answers `OUTCOME_UNKNOWN` with the environment's
+destruction durable, completed when a broker answers again
+(`public-exec-unknown-destroys-environment`).
 
 ### 10. Resource quotas
 
@@ -366,6 +623,15 @@ the workload's forbidden field names (a user, an environment, an entrypoint, a
 shell); TX033 keeps the probe connecting to nothing — `reap` signals and reads
 `/proc`, nothing else. Each with a violation fixture and its findings pinned.
 
+**M5d.2:** TX035 narrowed — the route may name the private start and
+collection only through the broker link, and nothing public names the
+lifecycle; **TX053** (new) — only `server/sandbox.rs` attaches the operator's
+configuration; TX036 extended to a launcher, its arguments and the
+obligation's variables on the wire; TX050 extended to any launcher but the
+probe's own words (`env`) and to a `NAME=value` word in the plan;
+**TX054** (new) — `serve_authority` and `Served::operate`, the evidence's door
+to the public route (§17), are named by the server module alone.
+
 ### 16. Dependencies and the TCB
 
 **No new crate.** The probe's `nix` gains the `signal` feature (code of a
@@ -418,6 +684,33 @@ weak before it passed — the wall clock was bounded only by the round trip,
 the budget's count was masked by its seconds, and "no ready environment"
 was exercised only by a destroyed one — and each was tightened.
 
+**As built (M5d.2).** The same task runs eleven broker and eleven authority
+real-container tests. The broker's add the start/collect split — a start
+answered before its workload ends, a second workload in an environment
+refused, the broker serving others meanwhile, a collected ending repeated, a
+collection of another generation's workload and after a broker restart
+`WORKLOAD_UNCONFIRMED` — and the trusted launcher with the real `git`,
+Python and pytest. The authority's reach the public route through a **real
+DWKP client**: through the server seam serving an authority the test built
+(`serve_authority`, the evidence's door), and through the released
+`dwkd-authority serve --sandbox-config` itself; the caller is the transport's
+peer credential, the environment the authority's own preparation, the
+result's identity the image's, the user 10001; a long workload timed out and
+reaped while other runtimes are served; key reuse, cross-tool reuse, a key
+from another connection; bounded output and a reaped daemon; a smuggled
+field and a lifecycle operation refused by the decoder; a broker killed
+mid-launch; the budget; image bytes that are not the pinned ones; OD-9's
+three cases; the shipped `balanced` and `power` packs with the tools image;
+and W9 in-process and through the released binary. `make
+sandbox-workload-mutations` grows to 52 mutants: M5d.1's thirty and
+twenty-two of M5d.2's guards — the host floor deciding a sandboxed launch, a
+denied launch preparing, unbounded preparation per run and across runs, the
+reclamation of environments that can never run again, the image binding, a
+busy environment, the key namespace in both directions, a launch holding the
+worker, the supervisor's per-environment, table and generation bounds, the
+launcher ignored or setting nothing, the hygiene refusals (wrappers included)
+and prefix, and the operator file's strictness.
+
 **Not evidenced by M5d.1, and not claimed:** a workload in `PROXY_ONLY` (the
 evidence's environments are `NO_NETWORK`, so the agent-shaped workload's
 network attempts are refused for want of any network — M5d.5 runs it with
@@ -432,7 +725,7 @@ the evidence host's own posture is reported, `posture-reported-matches-host`).
 | Checkpoint | Delivers | Accepted when |
 |---|---|---|
 | **M5d.1** Authorised OCI workload lifecycle | §§3–5, 8–10, 13: protocol 8's `workload_run`; the broker's re-judgement, digest proof, fixed plan, bounds, wall clock and `reap`; the probe as init; schema 9; `Authority::workload_run` (no public route) with every gate; fail-closed environment destruction; the start-up identity and ptrace-posture checks | its real-container evidence, mutants and every earlier evidence green locally and in hosted CI |
-| **M5d.2** Public sandboxed `process.exec` | the DWKP route (§2), the shared idempotency namespace, results naming environment and level; `workspace_exec_hygiene` enforced in the environment | hostile-client and eval coverage; the shipped packs' sandbox rules exercised |
+| **M5d.2** Public sandboxed `process.exec` | the DWKP route (§2), the shared idempotency namespace, results naming environment and level; `workspace_exec_hygiene` enforced in the environment; as built also private protocol 9's start and collection (§3), schema 10 (§4), OD-9, the production environment (§2a) and the trusted launcher (§5a) | hostile-client and eval coverage; the shipped packs' sandbox rules exercised; §§2a and 5a decided by the owner |
 | **M5d.3** Secrets B/C in the sandbox | §7 | residue evidence as M4e's: the value only in the target, redacted on return |
 | **M5d.4** Workspace ownership and disk quota | §§6, 10 (OD-3, OD-6) | the authority's tools and the workload both work on the workspace; a full disk refused, measured |
 | **M5d.5** The agent-shaped escape suite and multi-identity evidence | a long-lived agent-shaped workload in `PROXY_ONLY` with declared origins; the hosted three-identity job | ADR-0050 §21's uid-boundary condition shown with real users |
@@ -450,7 +743,40 @@ the evidence host's own posture is reported, `posture-reported-matches-host`).
 | OD-6 | Disk quota | **an operator-provided bounded filesystem, measured by the probe**; refuse when unbounded |
 | OD-7 | `local` | **not in M5d**; with M6, by its own ADR |
 | OD-8 | Default budgets | per workload ≤ 600 s and 128 KiB per stream; per run 100 workloads and 3 600 s |
-| OD-9 | What a concrete `process.exec:<path>` grant means for a run whose environment is a sandbox | **resolved against the image manifest** (path → the pinned digest) when the run is admitted with an execution environment configured, instead of the host's resolver; until then only `process.exec:*` covers a workload and policy narrows it |
+| OD-9 | What a concrete `process.exec:<path>` grant means for a run whose environment is a sandbox | **resolved against the image manifest** (path → the pinned digest) when the run is admitted with an execution environment configured, instead of the host's resolver; until then only `process.exec:*` covers a workload and policy narrows it — **built in M5d.2** (§2) |
+| OD-10 | How a production authority gets an environment (M5d.2) | **the operator's file at start, the authority preparing a run's environment on its first permitted launch** (§2a); no runtime-facing lifecycle operation; preparation's bounded hold on the worker accepted as stated, or made a start/collection pair before M5d.6 — **approved by the owner, 2026-10-19, with conditions (below)** |
+| OD-11 | How `workspace_exec_hygiene` is kept in an environment (M5d.2) | **the pinned probe as a trusted launcher**, the per-tool arguments first, undoing invocations and unevidenced tools refused (§5a); the residuals it does not reach stated, never claimed — **approved by the owner, 2026-10-19, with conditions (below)** |
+
+**Owner decisions, 2026-10-19 (M5d.2).** OD-10 and OD-11 are approved for
+M5d.2's implementation, on these conditions, each met as stated; the ADR
+stays Proposed until M5d.6, and OD-1 to OD-9 await the owner with it.
+
+- **OD-10.** Approved: operator-controlled production attachment and
+  preparation, with the authority choosing where a launch runs, operator-
+  pinned manifests, the measured assurance and no host fallback. *Conditions
+  and how they are met:* the bounded preparation delay is documented — at
+  most the 120 s environment deadline per exchange, a launch that needs an
+  environment holding the worker for at most one destruction and one
+  preparation (§2a); its timeout and failure behaviour is verified — a
+  refused preparation leaves nothing, an expired deadline records `UNKNOWN`,
+  refuses the launch `ENVIRONMENT_UNAVAILABLE`, runs nothing on the host, and
+  the uncertain environment is destroyed before another is prepared (§2a,
+  unit evidence); the production boundary is preserved — no DWKP lifecycle
+  operation, the operator's file read once through the trusted reader, TX053
+  and TX035, no host fallback, `CONTAINER_ISOLATION` the minimum. The review
+  found and fixed one unbounded availability issue: idle environments of
+  ended runs accumulated without bound; they are now reclaimed and at most 16
+  are live (§2a).
+- **OD-11.** Approved: the digest-pinned probe as the trusted hygiene
+  launcher. *Conditions and how they are met:* the Git, Python and pytest
+  protections proved with the real tools are kept (§5a, the `hygiene-*` and
+  `shipped-*` cases); `npm` and Cargo stay fail-closed until real-tool
+  evidence exists — directly, and (fixed in the review) through `cargo-*`,
+  `rustup`, `corepack`, a runner or `uv`; and hygiene is **not** claimed to
+  prevent arbitrary workspace code execution — a repository's configuration
+  and hooks, `conftest.py`, `build.rs`, a lifecycle script or a script named
+  as an argument still run, and **kernel-enforced OCI containment (§5, ADR-0047
+  §5) remains the security boundary**.
 
 ## Consequences
 
@@ -464,7 +790,11 @@ plan, the record's judgement and the ledger are reused, not duplicated.
 digests and an extra `exec` for `reap` (measured in the evidence). One
 workload at a time per environment. A lost answer destroys the environment,
 and with it `/tmp`'s contents. No `local` before M6. Workspace ownership and
-disk quota are not solved by M5d.1.
+disk quota are not solved by M5d.1. M5d.2's preparation holds the
+authority's worker for its duration — at most 120 s per exchange (§2a) — an
+ended run's environment idles until the next preparation, at most 16 are
+live, and `npm`-family tools and `cargo`, directly or through a wrapper, stay
+refused under the obligation until evidenced (§5a).
 
 ## Alternatives considered
 

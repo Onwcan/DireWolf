@@ -1361,7 +1361,7 @@
   {
    "name": "tool invoke at a version this build does not know",
    "family": "dwkp",
-   "input": "{\"v\": 1, \"id\": \"msg_01M24BB8G0E87TVJX9GX248ADD\", \"type\": \"request\", \"ts\": \"2026-09-12T09:14:22.481Z\", \"session_id\": \"ses_01M24BB8G2E87V1ZPZXQ7DSCVW\", \"run_id\": \"run_01M24BB8G3E0A851TRWE3M8FZF\", \"epoch\": 7, \"schema\": \"direwolf.tool.invoke\", \"schema_version\": 5, \"idempotency_key\": \"inv-7f3a\", \"payload\": {\"fs_delete\": {\"path\": \"/workspace/a\"}}}",
+   "input": "{\"v\": 1, \"id\": \"msg_01M24BB8G0E87TVJX9GX248ADD\", \"type\": \"request\", \"ts\": \"2026-09-12T09:14:22.481Z\", \"session_id\": \"ses_01M24BB8G2E87V1ZPZXQ7DSCVW\", \"run_id\": \"run_01M24BB8G3E0A851TRWE3M8FZF\", \"epoch\": 7, \"schema\": \"direwolf.tool.invoke\", \"schema_version\": 6, \"idempotency_key\": \"inv-7f3a\", \"payload\": {\"fs_delete\": {\"path\": \"/workspace/a\"}}}",
    "code": "PROTOCOL_VERSION_UNSUPPORTED",
    "violation": "OUT_OF_RANGE",
    "path": "/schema_version"
@@ -1805,6 +1805,70 @@
    "code": "PROTOCOL_SCHEMA_VIOLATION",
    "violation": "UNKNOWN_VARIANT",
    "path": "/payload/reason"
+  },
+  {
+   "name": "v5 process.exec naming where it runs",
+   "family": "dwkp",
+   "input": "{\"v\": 1, \"id\": \"msg_01M24BB8G0E87TVJX9GX248ADD\", \"type\": \"request\", \"ts\": \"2026-09-12T09:14:22.481Z\", \"session_id\": \"ses_01M24BB8G2E87V1ZPZXQ7DSCVW\", \"run_id\": \"run_01M24BB8G3E0A851TRWE3M8FZF\", \"epoch\": 7, \"schema\": \"direwolf.tool.invoke\", \"schema_version\": 5, \"idempotency_key\": \"inv-7f3a\", \"payload\": {\"process_exec\": {\"executable\": \"/usr/bin/git\", \"args\": [\"status\"], \"environment\": \"host\"}}}",
+   "code": "PROTOCOL_SCHEMA_VIOLATION",
+   "violation": "UNKNOWN_FIELD",
+   "path": "/payload/process_exec/environment"
+  },
+  {
+   "name": "v5 process.exec naming an image",
+   "family": "dwkp",
+   "input": "{\"v\": 1, \"id\": \"msg_01M24BB8G0E87TVJX9GX248ADD\", \"type\": \"request\", \"ts\": \"2026-09-12T09:14:22.481Z\", \"session_id\": \"ses_01M24BB8G2E87V1ZPZXQ7DSCVW\", \"run_id\": \"run_01M24BB8G3E0A851TRWE3M8FZF\", \"epoch\": 7, \"schema\": \"direwolf.tool.invoke\", \"schema_version\": 5, \"idempotency_key\": \"inv-7f3a\", \"payload\": {\"process_exec\": {\"executable\": \"/usr/bin/git\", \"args\": [\"status\"], \"image\": \"sha256:0000000000000000000000000000000000000000000000000000000000000000\"}}}",
+   "code": "PROTOCOL_SCHEMA_VIOLATION",
+   "violation": "UNKNOWN_FIELD",
+   "path": "/payload/process_exec/image"
+  },
+  {
+   "name": "v5 process.exec naming a user",
+   "family": "dwkp",
+   "input": "{\"v\": 1, \"id\": \"msg_01M24BB8G0E87TVJX9GX248ADD\", \"type\": \"request\", \"ts\": \"2026-09-12T09:14:22.481Z\", \"session_id\": \"ses_01M24BB8G2E87V1ZPZXQ7DSCVW\", \"run_id\": \"run_01M24BB8G3E0A851TRWE3M8FZF\", \"epoch\": 7, \"schema\": \"direwolf.tool.invoke\", \"schema_version\": 5, \"idempotency_key\": \"inv-7f3a\", \"payload\": {\"process_exec\": {\"executable\": \"/usr/bin/git\", \"args\": [\"status\"], \"user\": \"0:0\"}}}",
+   "code": "PROTOCOL_SCHEMA_VIOLATION",
+   "violation": "UNKNOWN_FIELD",
+   "path": "/payload/process_exec/user"
+  },
+  {
+   "name": "v5 process.exec adding a variable",
+   "family": "dwkp",
+   "input": "{\"v\": 1, \"id\": \"msg_01M24BB8G0E87TVJX9GX248ADD\", \"type\": \"request\", \"ts\": \"2026-09-12T09:14:22.481Z\", \"session_id\": \"ses_01M24BB8G2E87V1ZPZXQ7DSCVW\", \"run_id\": \"run_01M24BB8G3E0A851TRWE3M8FZF\", \"epoch\": 7, \"schema\": \"direwolf.tool.invoke\", \"schema_version\": 5, \"idempotency_key\": \"inv-7f3a\", \"payload\": {\"process_exec\": {\"executable\": \"/usr/bin/git\", \"args\": [\"status\"], \"env\": {\"GIT_CONFIG_NOSYSTEM\": \"0\"}}}}",
+   "code": "PROTOCOL_SCHEMA_VIOLATION",
+   "violation": "UNKNOWN_FIELD",
+   "path": "/payload/process_exec/env"
+  },
+  {
+   "name": "v5 process.exec choosing its launch",
+   "family": "dwkp",
+   "input": "{\"v\": 1, \"id\": \"msg_01M24BB8G0E87TVJX9GX248ADD\", \"type\": \"request\", \"ts\": \"2026-09-12T09:14:22.481Z\", \"session_id\": \"ses_01M24BB8G2E87V1ZPZXQ7DSCVW\", \"run_id\": \"run_01M24BB8G3E0A851TRWE3M8FZF\", \"epoch\": 7, \"schema\": \"direwolf.tool.invoke\", \"schema_version\": 5, \"idempotency_key\": \"inv-7f3a\", \"payload\": {\"process_exec\": {\"executable\": \"/usr/bin/git\", \"args\": [\"status\"], \"launch\": \"DIRECT\"}}}",
+   "code": "PROTOCOL_SCHEMA_VIOLATION",
+   "violation": "UNKNOWN_FIELD",
+   "path": "/payload/process_exec/launch"
+  },
+  {
+   "name": "v5 process.exec with no wall clock",
+   "family": "dwkp",
+   "input": "{\"v\": 1, \"id\": \"msg_01M24BB8G0E87TVJX9GX248ADD\", \"type\": \"request\", \"ts\": \"2026-09-12T09:14:22.481Z\", \"session_id\": \"ses_01M24BB8G2E87V1ZPZXQ7DSCVW\", \"run_id\": \"run_01M24BB8G3E0A851TRWE3M8FZF\", \"epoch\": 7, \"schema\": \"direwolf.tool.invoke\", \"schema_version\": 5, \"idempotency_key\": \"inv-7f3a\", \"payload\": {\"process_exec\": {\"executable\": \"/usr/bin/git\", \"args\": [\"status\"], \"timeout_seconds\": 0}}}",
+   "code": "PROTOCOL_SCHEMA_VIOLATION",
+   "violation": "OUT_OF_RANGE",
+   "path": "/payload/process_exec/timeout_seconds"
+  },
+  {
+   "name": "v5 process.exec past the wall clock's bound",
+   "family": "dwkp",
+   "input": "{\"v\": 1, \"id\": \"msg_01M24BB8G0E87TVJX9GX248ADD\", \"type\": \"request\", \"ts\": \"2026-09-12T09:14:22.481Z\", \"session_id\": \"ses_01M24BB8G2E87V1ZPZXQ7DSCVW\", \"run_id\": \"run_01M24BB8G3E0A851TRWE3M8FZF\", \"epoch\": 7, \"schema\": \"direwolf.tool.invoke\", \"schema_version\": 5, \"idempotency_key\": \"inv-7f3a\", \"payload\": {\"process_exec\": {\"executable\": \"/usr/bin/git\", \"args\": [\"status\"], \"timeout_seconds\": 601}}}",
+   "code": "PROTOCOL_SCHEMA_VIOLATION",
+   "violation": "OUT_OF_RANGE",
+   "path": "/payload/process_exec/timeout_seconds"
+  },
+  {
+   "name": "v5 process.exec past the stream bound",
+   "family": "dwkp",
+   "input": "{\"v\": 1, \"id\": \"msg_01M24BB8G0E87TVJX9GX248ADD\", \"type\": \"request\", \"ts\": \"2026-09-12T09:14:22.481Z\", \"session_id\": \"ses_01M24BB8G2E87V1ZPZXQ7DSCVW\", \"run_id\": \"run_01M24BB8G3E0A851TRWE3M8FZF\", \"epoch\": 7, \"schema\": \"direwolf.tool.invoke\", \"schema_version\": 5, \"idempotency_key\": \"inv-7f3a\", \"payload\": {\"process_exec\": {\"executable\": \"/usr/bin/git\", \"args\": [\"status\"], \"max_stream_bytes\": 131073}}}",
+   "code": "PROTOCOL_SCHEMA_VIOLATION",
+   "violation": "OUT_OF_RANGE",
+   "path": "/payload/process_exec/max_stream_bytes"
   }
  ]
 }

@@ -29,6 +29,8 @@
 //! [ADR-0047]: ../../../../docs/adr/0047-m5a-oci-execution-environment-and-measured-assurance.md
 //! [ADR-0048]: ../../../../docs/adr/0048-m5b-proxy-only-topology-and-connect-proxy.md
 
+pub mod operator;
+
 use core::fmt;
 
 use dwk_proto::brokerp::BrokerRefusal;
@@ -230,9 +232,10 @@ pub const fn refusal_class(refusal: BrokerRefusal) -> &'static str {
 /// budgets, and nothing else: no destination, no resolver, no exception. The
 /// destinations are the run's grants.
 ///
-/// Only the evidence harness constructs one ([`crate::state::Authority::attach_sandbox`]);
-/// `dwkd-authority serve` has no option that does, so no production
-/// authority prepares an environment before M5d.
+/// Built by the evidence harness, or -- from M5d.2 -- read from the
+/// operator's file by `dwkd-authority serve --sandbox-config` ([`operator`])
+/// and attached once at start ([`crate::state::Authority::attach_sandbox`]).
+/// No DWKP operation reaches either.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SandboxConfig {
     runtime: String,
@@ -558,6 +561,13 @@ impl SandboxConfig {
             .iter()
             .find(|(known, _)| known.as_str() == path)
             .map(|(known, sha256)| (known, sha256))
+    }
+
+    /// Every executable the manifest names, with its pinned SHA-256, in
+    /// the operator's order.
+    #[must_use]
+    pub fn executables(&self) -> &[(ImagePath, ContentDigest)] {
+        &self.executables
     }
 
     /// Each run's workload budget.

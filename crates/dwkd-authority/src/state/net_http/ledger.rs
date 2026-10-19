@@ -130,7 +130,7 @@ const fn within(budget: NetBudget, spent: Spent, charges: Charges, new_origin: b
         && (!new_origin || spent.origins < budget.origins)
 }
 
-/// Whether an idempotency key is bound, in any of the three ledgers.
+/// Whether an idempotency key is bound, in any of the four ledgers.
 fn key_bound(work: &Work<'_>, ctx: &Ctx<'_>, key: &str) -> Result<bool, AuthorityError> {
     let asked = ctx.asked;
     let found: Option<i64> = work.db(work
@@ -140,7 +140,8 @@ fn key_bound(work: &Work<'_>, ctx: &Ctx<'_>, key: &str) -> Result<bool, Authorit
              AND idempotency_key = ?3 UNION ALL SELECT 1 FROM tool_idempotency WHERE \
              subject = ?1 AND session_id = ?2 AND idempotency_key = ?3 UNION ALL SELECT 1 \
              FROM process_idempotency WHERE subject = ?1 AND session_id = ?2 \
-             AND idempotency_key = ?3 LIMIT 1",
+             AND idempotency_key = ?3 UNION ALL SELECT 1 FROM workload_idempotency WHERE \
+             subject = ?1 AND session_id = ?2 AND idempotency_key = ?3 LIMIT 1",
             rusqlite::params![
                 asked.caller.subject().storage_key(),
                 asked.session.as_str(),

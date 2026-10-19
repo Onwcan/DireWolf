@@ -51,7 +51,7 @@ use rusqlite::Connection;
 pub(super) const APPLICATION_ID: i64 = 0x4457_4B44;
 
 /// The schema version this build creates and understands.
-pub(super) const CURRENT_VERSION: i64 = 9;
+pub(super) const CURRENT_VERSION: i64 = 10;
 
 /// Schema version 1, the first. Static text: nothing in it is assembled from a
 /// value, and every value the authority stores is bound as a parameter.
@@ -1259,6 +1259,81 @@ CREATE TRIGGER workload_no_delete BEFORE DELETE ON workload
 BEGIN SELECT RAISE(ABORT, 'a workload record is never deleted'); END;
 ";
 
+/// Schema version 10 (M5d.2, ADR-0052 §§2, 4): the public route's two
+/// statements.
+///
+/// * `workload_idempotency` binds a public `process.exec`'s key to the
+///   workload it began, **in the one namespace every tool shares**: a key
+///   bound by a file operation, a host process, a request or a workload is
+///   bound for all of them, in the database's own words (the triggers below
+///   and their counterparts on the three earlier ledgers).
+/// * `run_image` is what a run's grants were resolved against when it was
+///   admitted with an execution environment configured (OD-9): the image, by
+///   content digest, and the digest of the operator's manifest. A concrete
+///   `process.exec:<path>` grant of such a run names the manifest's
+///   executable in that image, and a workload of the run is admitted only in
+///   an environment of that image.
+///
+/// No column can hold an argument, a byte of output or a secret value.
+pub(super) const SCHEMA_V10: &str = r"
+CREATE TABLE workload_idempotency (
+    subject          TEXT    NOT NULL,
+    session_id       TEXT    NOT NULL,
+    idempotency_key  TEXT    NOT NULL,
+    request_digest   TEXT    NOT NULL CHECK (length(request_digest) = 64
+                                             AND request_digest NOT GLOB '*[^0-9a-f]*'),
+    invocation_id    TEXT    NOT NULL UNIQUE REFERENCES workload(invocation_id)
+                                             ON DELETE RESTRICT,
+    recorded_ms      INTEGER NOT NULL,
+    PRIMARY KEY (subject, session_id, idempotency_key)
+) STRICT;
+CREATE TRIGGER workload_idempotency_no_update BEFORE UPDATE ON workload_idempotency
+BEGIN SELECT RAISE(ABORT, 'an idempotency record is immutable'); END;
+CREATE TRIGGER workload_idempotency_no_delete BEFORE DELETE ON workload_idempotency
+BEGIN SELECT RAISE(ABORT, 'an idempotency record is never deleted'); END;
+CREATE TRIGGER workload_idempotency_one_namespace BEFORE INSERT ON workload_idempotency
+WHEN EXISTS (SELECT 1 FROM tool_idempotency WHERE subject = NEW.subject
+             AND session_id = NEW.session_id AND idempotency_key = NEW.idempotency_key)
+     OR EXISTS (SELECT 1 FROM process_idempotency WHERE subject = NEW.subject
+                AND session_id = NEW.session_id AND idempotency_key = NEW.idempotency_key)
+     OR EXISTS (SELECT 1 FROM net_idempotency WHERE subject = NEW.subject
+                AND session_id = NEW.session_id AND idempotency_key = NEW.idempotency_key)
+BEGIN SELECT RAISE(ABORT, 'an idempotency key names one invocation'); END;
+CREATE TRIGGER tool_idempotency_not_a_workload BEFORE INSERT ON tool_idempotency
+WHEN EXISTS (SELECT 1 FROM workload_idempotency WHERE subject = NEW.subject
+             AND session_id = NEW.session_id AND idempotency_key = NEW.idempotency_key)
+BEGIN SELECT RAISE(ABORT, 'an idempotency key names one invocation'); END;
+CREATE TRIGGER process_idempotency_not_a_workload BEFORE INSERT ON process_idempotency
+WHEN EXISTS (SELECT 1 FROM workload_idempotency WHERE subject = NEW.subject
+             AND session_id = NEW.session_id AND idempotency_key = NEW.idempotency_key)
+BEGIN SELECT RAISE(ABORT, 'an idempotency key names one invocation'); END;
+CREATE TRIGGER net_idempotency_not_a_workload BEFORE INSERT ON net_idempotency
+WHEN EXISTS (SELECT 1 FROM workload_idempotency WHERE subject = NEW.subject
+             AND session_id = NEW.session_id AND idempotency_key = NEW.idempotency_key)
+BEGIN SELECT RAISE(ABORT, 'an idempotency key names one invocation'); END;
+
+CREATE TABLE run_image (
+    run_id           TEXT    PRIMARY KEY REFERENCES run(run_id) ON DELETE RESTRICT,
+    image            TEXT    NOT NULL CHECK (length(image) = 71 AND substr(image, 1, 7) = 'sha256:'
+                                             AND substr(image, 8) NOT GLOB '*[^0-9a-f]*'),
+    manifest_sha256  TEXT    NOT NULL CHECK (length(manifest_sha256) = 64
+                                             AND manifest_sha256 NOT GLOB '*[^0-9a-f]*'),
+    recorded_ms      INTEGER NOT NULL
+) STRICT;
+CREATE TRIGGER run_image_no_update BEFORE UPDATE ON run_image
+BEGIN SELECT RAISE(ABORT, 'a run''s image binding is fixed'); END;
+CREATE TRIGGER run_image_no_delete BEFORE DELETE ON run_image
+BEGIN SELECT RAISE(ABORT, 'a run''s image binding is never deleted'); END;
+CREATE TRIGGER workload_in_its_runs_image BEFORE INSERT ON workload
+WHEN EXISTS (SELECT 1 FROM run_image WHERE run_id = NEW.run_id)
+     AND NOT EXISTS (SELECT 1 FROM run_image JOIN environment
+                     ON environment.run_id = run_image.run_id
+                     AND environment.image = run_image.image
+                     WHERE run_image.run_id = NEW.run_id
+                     AND environment.environment_id = NEW.environment_id)
+BEGIN SELECT RAISE(ABORT, 'a workload runs only in the image its run was admitted against'); END;
+";
+
 /// One step from a version to the next.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct Migration {
@@ -1305,6 +1380,10 @@ pub(super) const MIGRATIONS: &[Migration] = &[
     Migration {
         to: 9,
         sql: SCHEMA_V9,
+    },
+    Migration {
+        to: 10,
+        sql: SCHEMA_V10,
     },
 ];
 
@@ -1460,8 +1539,8 @@ pub(super) fn foreign_key_check(conn: &Connection) -> rusqlite::Result<Result<()
 mod tests {
     use super::{
         APPLICATION_ID, CURRENT_VERSION, MIGRATIONS, Migration, SCHEMA_V1, SCHEMA_V2, SCHEMA_V3,
-        SCHEMA_V4, SCHEMA_V5, SCHEMA_V6, SCHEMA_V7, SCHEMA_V8, SCHEMA_V9, Shape, ShapeError,
-        decide, migrate, verify_exact,
+        SCHEMA_V4, SCHEMA_V5, SCHEMA_V6, SCHEMA_V7, SCHEMA_V8, SCHEMA_V9, SCHEMA_V10, Shape,
+        ShapeError, decide, migrate, verify_exact,
     };
     use rusqlite::Connection;
 
@@ -1529,6 +1608,7 @@ mod tests {
         assert!(conn.execute_batch(SCHEMA_V7).is_ok());
         assert!(conn.execute_batch(SCHEMA_V8).is_ok());
         assert!(conn.execute_batch(SCHEMA_V9).is_ok());
+        assert!(conn.execute_batch(SCHEMA_V10).is_ok());
         assert!(
             conn.execute_batch("DROP TRIGGER run_never_resurrects")
                 .is_ok()
@@ -1553,6 +1633,7 @@ mod tests {
         assert!(conn.execute_batch(SCHEMA_V7).is_ok());
         assert!(conn.execute_batch(SCHEMA_V8).is_ok());
         assert!(conn.execute_batch(SCHEMA_V9).is_ok());
+        assert!(conn.execute_batch(SCHEMA_V10).is_ok());
         assert!(
             conn.execute_batch("CREATE TABLE backdoor (x INTEGER)")
                 .is_ok()
@@ -2536,6 +2617,110 @@ mod tests {
             )
             .is_ok()
         );
+    }
+
+    #[test]
+    fn a_version_nine_store_migrates_to_ten_one_namespace_and_one_image() {
+        // M5d.2 (ADR-0052 §§2, 4): v10 joins a workload's key to the shared
+        // namespace and binds a run to its image. A v9 store's rows survive;
+        // the new tables start empty, and a run with no binding is unchanged.
+        let conn = store_at(9);
+        assert!(environment(&conn, ENV, "run_a", "PREPARING").is_ok());
+        assert!(
+            conn.execute(
+                "UPDATE environment SET state = 'READY', container = ?1, \
+                 effective = 'CONTAINER_ISOLATION'",
+                ["c".repeat(64)],
+            )
+            .is_ok()
+        );
+        assert!(workload(&conn, (0, "run_a", ENV), "k0").is_ok());
+        {
+            let Ok(tx) = conn.unchecked_transaction() else {
+                unreachable!("a transaction")
+            };
+            assert_eq!(migrate(&tx, 9, MIGRATIONS).ok(), Some(CURRENT_VERSION));
+            assert!(tx.commit().is_ok());
+        }
+        const { assert!(CURRENT_VERSION >= 10) };
+        assert_eq!(verify_exact(&conn).ok(), Some(Ok(())));
+        let count = |sql: &str| conn.query_row(sql, [], |row| row.get::<_, i64>(0)).ok();
+        assert_eq!(count("SELECT count(*) FROM workload"), Some(1));
+        assert_eq!(count("SELECT count(*) FROM workload_idempotency"), Some(0));
+        assert_eq!(count("SELECT count(*) FROM run_image"), Some(0));
+        // One namespace: a workload's key is bound for every tool, and every
+        // tool's for a workload.
+        let bind = |table: &str, key: &str, n: u8| {
+            let sql = format!(
+                "INSERT INTO {table}_idempotency (subject, session_id, idempotency_key, \
+                 request_digest, invocation_id, recorded_ms) VALUES ('uid:1000', 'ses_x', \
+                 ?1, ?2, ?3, 0)"
+            );
+            conn.execute(&sql, rusqlite::params![key, "ab".repeat(32), inv(n)])
+        };
+        assert!(bind("workload", "w1", 0).is_ok());
+        for table in ["tool", "process", "net"] {
+            assert!(
+                bind(table, "w1", 9).is_err(),
+                "a workload's key is free for {table}"
+            );
+        }
+        for (n, table) in [(1, "tool"), (2, "process"), (3, "net")] {
+            let key = format!("{table}-key");
+            assert!(bind(table, &key, n).is_ok(), "{table}");
+            assert!(
+                bind("workload", &key, 0).is_err(),
+                "a {table} key is free for a workload"
+            );
+        }
+        // Immutable, never deleted.
+        for bad in [
+            "UPDATE workload_idempotency SET request_digest = 'x'",
+            "DELETE FROM workload_idempotency",
+        ] {
+            assert!(conn.execute(bad, []).is_err(), "{bad}");
+        }
+        // A run bound to one image runs no workload in an environment of
+        // another; one bound to its environment's image does.
+        let image = |digit: char| format!("sha256:{}", digit.to_string().repeat(64));
+        let bound = |run: &str, digit: char| {
+            conn.execute(
+                "INSERT INTO run_image (run_id, image, manifest_sha256, recorded_ms) \
+                 VALUES (?1, ?2, ?3, 0)",
+                rusqlite::params![run, image(digit), "ab".repeat(32)],
+            )
+        };
+        let completed = |n: u8| {
+            conn.execute(
+                "UPDATE workload SET state = 'FAILED', failure = 'X', ended_ms = 9 \
+                 WHERE invocation_id = ?1",
+                [inv(n)],
+            )
+        };
+        assert!(completed(0).is_ok());
+        assert!(bound("run_a", '9').is_ok());
+        assert!(
+            workload(&conn, (4, "run_a", ENV), "k4").is_err(),
+            "an environment of another image"
+        );
+        for bad in [
+            "UPDATE run_image SET image = 'sha256:0'",
+            "DELETE FROM run_image",
+        ] {
+            assert!(conn.execute(bad, []).is_err(), "{bad}");
+        }
+        // Another run, bound to its own environment's image: it runs.
+        let own = "env_01M24BB8G3E0A851TRWE3M8FZH";
+        assert!(environment(&conn, own, "run_c", "PREPARING").is_ok());
+        assert!(
+            conn.execute(
+                "UPDATE environment SET state = 'READY', container = ?1,                  effective = 'CONTAINER_ISOLATION' WHERE environment_id = ?2",
+                rusqlite::params!["d".repeat(64), own],
+            )
+            .is_ok()
+        );
+        assert!(bound("run_c", 'a').is_ok());
+        assert!(workload(&conn, (5, "run_c", own), "k5").is_ok());
     }
 
     #[test]

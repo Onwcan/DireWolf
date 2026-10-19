@@ -175,20 +175,21 @@ fn an_outcome_carries_exactly_one_answer() {
     let mut both = BrokerOutcome::new(channel(), invocation(), OutcomeResult::done(done));
     both.refused = Some(BrokerRefusal::ReadFailed);
     assert!(encode_frame(&both).is_err());
-    let none = r#"{"channel":"0123456789abcdef0123456789abcdef","invocation_id":"inv_01M24BB8G3E0A851TRWE3M8FZF","kind":"broker.outcome","protocol":8}"#;
+    let none = r#"{"channel":"0123456789abcdef0123456789abcdef","invocation_id":"inv_01M24BB8G3E0A851TRWE3M8FZF","kind":"broker.outcome","protocol":9}"#;
     assert!(BrokerOutcome::decode_frame_body(none.as_bytes()).is_err());
     // A done names exactly one operation.
-    let two = r#"{"channel":"0123456789abcdef0123456789abcdef","done":{"fs_move":{},"fs_delete":{"debris":false}},"invocation_id":"inv_01M24BB8G3E0A851TRWE3M8FZF","kind":"broker.outcome","protocol":8}"#;
+    let two = r#"{"channel":"0123456789abcdef0123456789abcdef","done":{"fs_move":{},"fs_delete":{"debris":false}},"invocation_id":"inv_01M24BB8G3E0A851TRWE3M8FZF","kind":"broker.outcome","protocol":9}"#;
     assert!(BrokerOutcome::decode_frame_body(two.as_bytes()).is_err());
 }
 
 #[test]
 fn unknown_members_old_versions_and_second_spellings_are_refused() {
     for text in [
-        r#"{"channel":"0123456789abcdef0123456789abcdef","kind":"broker.hello","protocol":8,"extra":1}"#,
-        r#"{"channel":"0123456789ABCDEF0123456789ABCDEF","kind":"broker.hello","protocol":8}"#,
-        // Versions 1 to 7 are not half-understood (ADR-0052 made it 8), and
-        // a later one is not guessed at.
+        r#"{"channel":"0123456789abcdef0123456789abcdef","kind":"broker.hello","protocol":9,"extra":1}"#,
+        r#"{"channel":"0123456789ABCDEF0123456789ABCDEF","kind":"broker.hello","protocol":9}"#,
+        // Versions 1 to 8 are not half-understood (M5d.2's start and
+        // collection made it 9, ADR-0052 §8), and a later one is not guessed
+        // at.
         r#"{"channel":"0123456789abcdef0123456789abcdef","kind":"broker.hello","protocol":1}"#,
         r#"{"channel":"0123456789abcdef0123456789abcdef","kind":"broker.hello","protocol":2}"#,
         r#"{"channel":"0123456789abcdef0123456789abcdef","kind":"broker.hello","protocol":3}"#,
@@ -196,8 +197,9 @@ fn unknown_members_old_versions_and_second_spellings_are_refused() {
         r#"{"channel":"0123456789abcdef0123456789abcdef","kind":"broker.hello","protocol":5}"#,
         r#"{"channel":"0123456789abcdef0123456789abcdef","kind":"broker.hello","protocol":6}"#,
         r#"{"channel":"0123456789abcdef0123456789abcdef","kind":"broker.hello","protocol":7}"#,
-        r#"{"channel":"0123456789abcdef0123456789abcdef","kind":"broker.hello","protocol":9}"#,
-        r#"{"channel":"0123456789abcdef0123456789abcdef","kind":"broker.hello","kind":"broker.hello","protocol":8}"#,
+        r#"{"channel":"0123456789abcdef0123456789abcdef","kind":"broker.hello","protocol":8}"#,
+        r#"{"channel":"0123456789abcdef0123456789abcdef","kind":"broker.hello","protocol":10}"#,
+        r#"{"channel":"0123456789abcdef0123456789abcdef","kind":"broker.hello","kind":"broker.hello","protocol":9}"#,
     ] {
         assert!(
             BrokerHello::decode_frame_body(text.as_bytes()).is_err(),
@@ -206,10 +208,10 @@ fn unknown_members_old_versions_and_second_spellings_are_refused() {
     }
     // The current version is.
     let current =
-        r#"{"channel":"0123456789abcdef0123456789abcdef","kind":"broker.hello","protocol":8}"#;
+        r#"{"channel":"0123456789abcdef0123456789abcdef","kind":"broker.hello","protocol":9}"#;
     assert!(BrokerHello::decode_frame_body(current.as_bytes()).is_ok());
     // An unknown kind is not an authorisation.
-    let unknown = r#"{"kind":"broker.fs_chmod","protocol":8}"#;
+    let unknown = r#"{"kind":"broker.fs_chmod","protocol":9}"#;
     assert!(Authorisation::decode_frame_body(unknown.as_bytes()).is_err());
     for (text, ok) in [
         ("0", true),
@@ -678,7 +680,7 @@ fn a_secret_result_names_its_own_operation_and_says_nothing_of_the_value() {
         r#"{"secret_egress":{"length":8}}"#,
     ] {
         let text = format!(
-            r#"{{"channel":"0123456789abcdef0123456789abcdef","done":{done},"invocation_id":"inv_01M24BB8G3E0A851TRWE3M8FZF","kind":"broker.outcome","protocol":8}}"#
+            r#"{{"channel":"0123456789abcdef0123456789abcdef","done":{done},"invocation_id":"inv_01M24BB8G3E0A851TRWE3M8FZF","kind":"broker.outcome","protocol":9}}"#
         );
         assert!(
             BrokerOutcome::decode_frame_body(text.as_bytes()).is_err(),
@@ -1008,15 +1010,16 @@ fn workload(args: &[&str]) -> super::workload::WorkloadSpec {
         args: super::ProcessArgs::new(args).unwrap_or_else(|| unreachable!()),
         stream_limit: super::StreamLimit::new(131_072).unwrap_or_else(|| unreachable!()),
         wall_clock: super::workload::WorkloadSeconds::new(600).unwrap_or_else(|| unreachable!()),
+        launch: super::workload::WorkloadLaunch::Direct,
     }
 }
 
-fn workload_run(
+fn workload_start(
     spec: super::EnvironmentSpec,
     args: &[&str],
-) -> super::workload::WorkloadRunAuthorisation {
+) -> super::workload::WorkloadStartAuthorisation {
     use super::sandbox::ContainerRef;
-    super::workload::WorkloadRunAuthorisation::new(
+    super::workload::WorkloadStartAuthorisation::new(
         common(),
         spec,
         ContainerRef::new("e".repeat(64)).unwrap_or_else(|| unreachable!()),
@@ -1026,15 +1029,15 @@ fn workload_run(
 }
 
 #[test]
-fn a_workload_run_round_trips_with_two_descriptors_and_the_longest_deadline() {
+fn a_workload_start_round_trips_with_two_descriptors_and_an_environment_deadline() {
     for spec in [environment_spec(), proxy_spec()] {
-        let run = workload_run(spec.clone(), &["--user", "0", "--privileged", "$(id)"]);
-        let authorisation = Authorisation::WorkloadRun(run.clone());
+        let run = workload_start(spec.clone(), &["--user", "0", "--privileged", "$(id)"]);
+        let authorisation = Authorisation::WorkloadStart(run.clone());
         let bytes = body(&authorisation.encode_frame().unwrap_or_default());
         let decoded = Authorisation::decode_frame_body(&bytes);
         assert_eq!(
             decoded.as_ref().map(Authorisation::kind),
-            Ok(PrivateKind::WorkloadRun)
+            Ok(PrivateKind::WorkloadStart)
         );
         assert_eq!(decoded, Ok(authorisation));
         // The environment and the workload come back exactly, and a workload
@@ -1066,15 +1069,117 @@ fn a_workload_run_round_trips_with_two_descriptors_and_the_longest_deadline() {
                 "{smuggled}"
             );
         }
+        // How it is launched is one of two closed names, always stated: no
+        // other launcher, and no launch left to a default (ADR-0052 §5a).
+        assert!(text.contains(r#""launch":"DIRECT""#), "{text}");
+        let hygiene = text.replace(r#""launch":"DIRECT""#, r#""launch":"HYGIENE""#);
+        assert!(Authorisation::decode_frame_body(hygiene.as_bytes()).is_ok());
+        for bad in [
+            text.replace(r#""launch":"DIRECT""#, r#""launch":"SHELL""#),
+            text.replace(r#""launch":"DIRECT""#, r#""launch":"direct""#),
+            text.replace(r#""launch":"DIRECT","#, ""),
+        ] {
+            assert!(
+                Authorisation::decode_frame_body(bad.as_bytes()).is_err(),
+                "{bad}"
+            );
+        }
     }
-    assert_eq!(PrivateKind::WorkloadRun.descriptors(), Some(2));
+    assert_eq!(PrivateKind::WorkloadStart.descriptors(), Some(2));
+    // The start judges and proves and answers before the workload runs: no
+    // exchange holds the broker's one connection for a wall clock (ADR-0052
+    // §8). The supervisor's own bound is the wall clock and the margin.
     assert_eq!(
-        PrivateKind::WorkloadRun.deadline_seconds(),
-        u64::from(super::workload::WORKLOAD_MAX_SECONDS) + super::ENVIRONMENT_DEADLINE_SECONDS
+        PrivateKind::WorkloadStart.deadline_seconds(),
+        PrivateKind::EnvironmentPrepare.deadline_seconds()
     );
     assert!(
-        PrivateKind::WorkloadRun.deadline_seconds()
-            > PrivateKind::EnvironmentPrepare.deadline_seconds()
+        PrivateKind::WorkloadStart.deadline_seconds()
+            < u64::from(super::workload::WORKLOAD_MAX_SECONDS)
+    );
+    assert_eq!(
+        super::workload::WORKLOAD_SUPERVISION_SECONDS,
+        u64::from(super::workload::WORKLOAD_MAX_SECONDS) + super::ENVIRONMENT_DEADLINE_SECONDS
+    );
+}
+
+#[test]
+fn a_workload_collection_carries_nothing_but_its_name_and_answers_consistently() {
+    use super::BrokerGeneration;
+    use super::workload::{
+        WorkloadCollectAuthorisation, WorkloadCollectDone, WorkloadProgress, WorkloadStartDone,
+        check_collect,
+    };
+    let generation = BrokerGeneration::new("0123456789abcdef0123456789abcdef".to_owned())
+        .unwrap_or_else(|| unreachable!());
+    let collect = Authorisation::WorkloadCollect(WorkloadCollectAuthorisation::new(
+        common(),
+        generation.clone(),
+    ));
+    let bytes = body(&collect.encode_frame().unwrap_or_default());
+    assert_eq!(Authorisation::decode_frame_body(&bytes), Ok(collect));
+    assert_eq!(PrivateKind::WorkloadCollect.descriptors(), Some(0));
+    assert_eq!(
+        PrivateKind::WorkloadCollect.deadline_seconds(),
+        super::EXCHANGE_DEADLINE_SECONDS
+    );
+    // No descriptor, no workload, no environment rides in a collection.
+    let text = String::from_utf8(bytes).unwrap_or_default();
+    let bad = text.replace(r#""descriptors":0"#, r#""descriptors":2"#);
+    assert!(Authorisation::decode_frame_body(bad.as_bytes()).is_err());
+    for smuggled in [
+        r#""args":["x"],"#,
+        r#""container":"e","#,
+        r#""wall_clock":1,"#,
+    ] {
+        let bad = text.replacen('{', &format!("{{{smuggled}"), 1);
+        assert!(
+            Authorisation::decode_frame_body(bad.as_bytes()).is_err(),
+            "{smuggled}"
+        );
+    }
+    // A start answers with its generation; a collection says RUNNING with
+    // nothing, or ENDED with the result -- never one without the other.
+    let started = BrokerOutcome::new(
+        channel(),
+        invocation(),
+        OutcomeResult::done(BrokerDone::workload_start(WorkloadStartDone { generation })),
+    );
+    let decoded =
+        BrokerOutcome::decode_frame_body(&body(&encode_frame(&started).unwrap_or_default()))
+            .map(|o| o.result());
+    if let Ok(OutcomeResult::Done(answer)) = decoded {
+        assert_eq!(answer.kind(), Some(PrivateKind::WorkloadStart));
+    } else {
+        unreachable!("a start's answer decodes: {decoded:?}");
+    }
+    let running = WorkloadCollectDone {
+        progress: WorkloadProgress::Running,
+        result: None,
+        never_ran: None,
+    };
+    assert_eq!(check_collect(&running), Ok(()));
+    assert!(
+        check_collect(&WorkloadCollectDone {
+            progress: WorkloadProgress::Ended,
+            result: None,
+            never_ran: None,
+        })
+        .is_err()
+    );
+    // A run that never began says so in the collection's own answer.
+    let never = WorkloadCollectDone {
+        progress: WorkloadProgress::Ended,
+        result: None,
+        never_ran: Some(super::BrokerRefusal::DigestMismatch),
+    };
+    assert_eq!(check_collect(&never), Ok(()));
+    assert!(
+        check_collect(&WorkloadCollectDone {
+            progress: WorkloadProgress::Running,
+            ..never
+        })
+        .is_err()
     );
 }
 
@@ -1087,12 +1192,12 @@ fn a_workload_names_its_relay_exactly_for_proxy_only_and_its_bounds_hold() {
     let mut stray_relay = environment_spec();
     stray_relay.relay_sha256 = proxy_spec().relay_sha256;
     for spec in [no_relay, stray_relay] {
-        let authorisation = Authorisation::WorkloadRun(workload_run(spec, &[]));
+        let authorisation = Authorisation::WorkloadStart(workload_start(spec, &[]));
         assert!(authorisation.encode_frame().is_err());
     }
     // A wall clock past ten minutes, an empty one, a stream past its bound.
     let text = String::from_utf8(body(
-        &Authorisation::WorkloadRun(workload_run(environment_spec(), &["a"]))
+        &Authorisation::WorkloadStart(workload_start(environment_spec(), &["a"]))
             .encode_frame()
             .unwrap_or_default(),
     ))
@@ -1156,7 +1261,10 @@ fn an_image_path_has_one_plain_spelling() {
 #[test]
 fn a_workload_result_is_consistent_and_its_largest_fits_one_frame() {
     use super::sandbox::{Milliseconds, Verdict};
-    use super::workload::{ProcessCount, WorkloadEnding, WorkloadRunDone, check_done};
+    use super::workload::{
+        ProcessCount, WorkloadCollectDone, WorkloadEnding, WorkloadProgress, WorkloadRunDone,
+        check_collect, check_done,
+    };
     use crate::wire::scalar::{ByteCount, ExitCode, SignalNumber, StreamContent};
     let stream = |n: usize| super::ProcessStreamSnapshot {
         content: StreamContent::from_bytes(&vec![0xffu8; n]).unwrap_or_else(|| unreachable!()),
@@ -1175,10 +1283,31 @@ fn a_workload_result_is_consistent_and_its_largest_fits_one_frame() {
         remaining_processes: ProcessCount::new(0).unwrap_or_else(|| unreachable!()),
     };
     assert_eq!(check_done(&done), Ok(()));
+    let collected = WorkloadCollectDone {
+        progress: WorkloadProgress::Ended,
+        result: Some(done.clone()),
+        never_ran: None,
+    };
+    assert_eq!(check_collect(&collected), Ok(()));
+    // A RUNNING collection never carries a result; an ending is a result or
+    // a refusal, never both.
+    for (progress, never_ran) in [
+        (WorkloadProgress::Running, None),
+        (WorkloadProgress::Ended, Some(BrokerRefusal::DigestMismatch)),
+    ] {
+        assert!(
+            check_collect(&WorkloadCollectDone {
+                progress,
+                result: Some(done.clone()),
+                never_ran,
+            })
+            .is_err()
+        );
+    }
     let outcome = BrokerOutcome::new(
         channel(),
         invocation(),
-        OutcomeResult::done(BrokerDone::workload_run(done.clone())),
+        OutcomeResult::done(BrokerDone::workload_collect(collected.clone())),
     );
     let frame = encode_frame(&outcome).unwrap_or_default();
     assert!(frame.len() > HEADER_LEN + 4 * 131_072);
@@ -1187,10 +1316,10 @@ fn a_workload_result_is_consistent_and_its_largest_fits_one_frame() {
     let decoded = BrokerOutcome::decode_frame_body(&bytes).map(|o| o.result());
     assert_eq!(
         decoded,
-        Ok(OutcomeResult::done(BrokerDone::workload_run(done.clone())))
+        Ok(OutcomeResult::done(BrokerDone::workload_collect(collected)))
     );
     if let Ok(OutcomeResult::Done(answer)) = decoded {
-        assert_eq!(answer.kind(), Some(PrivateKind::WorkloadRun));
+        assert_eq!(answer.kind(), Some(PrivateKind::WorkloadCollect));
     }
     // An exit code exactly for EXITED, a signal exactly for KILLED, and a
     // clean residue leaves nothing.
@@ -1223,6 +1352,8 @@ fn a_workload_result_is_consistent_and_its_largest_fits_one_frame() {
         BrokerRefusal::EnvironmentNotClean,
         BrokerRefusal::DigestMismatch,
         BrokerRefusal::ForeignEnvironment,
+        BrokerRefusal::WorkloadTableFull,
+        BrokerRefusal::WorkloadInUse,
     ] {
         let outcome = BrokerOutcome::new(channel(), invocation(), OutcomeResult::Refused(refusal));
         assert!(encode_frame(&outcome).is_ok());

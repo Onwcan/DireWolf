@@ -435,9 +435,11 @@ pub(super) const fn failure_reason(failure: BrokerFailure) -> FsFailureReason {
             | BrokerRefusal::HttpTimeout
             | BrokerRefusal::HttpRequestInvalid
             | BrokerRefusal::HttpWorkerFailed
-            // The workload refusal (M5d) answers a workload's run, which no
-            // filesystem or process tool sends.
-            | BrokerRefusal::EnvironmentNotClean => FsFailureReason::BrokerExecutionError,
+            // The workload refusals (M5d) answer a workload's start, which
+            // no filesystem or process tool sends.
+            | BrokerRefusal::EnvironmentNotClean
+            | BrokerRefusal::WorkloadTableFull
+            | BrokerRefusal::WorkloadInUse => FsFailureReason::BrokerExecutionError,
         },
         BrokerFailure::Indeterminate(_) => FsFailureReason::BrokerExecutionError,
     }
@@ -545,7 +547,8 @@ fn key_bound(
              AND idempotency_key = ?3 UNION ALL SELECT invocation_id FROM process_idempotency \
              WHERE subject = ?1 AND session_id = ?2 AND idempotency_key = ?3 UNION ALL \
              SELECT invocation_id FROM net_idempotency WHERE subject = ?1 AND session_id = ?2 \
-             AND idempotency_key = ?3 LIMIT 1",
+             AND idempotency_key = ?3 UNION ALL SELECT invocation_id FROM workload_idempotency \
+             WHERE subject = ?1 AND session_id = ?2 AND idempotency_key = ?3 LIMIT 1",
             rusqlite::params![
                 asked.caller.subject().storage_key(),
                 asked.session.as_str(),

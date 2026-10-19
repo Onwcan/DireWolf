@@ -69,7 +69,7 @@ An `ALLOW` may carry requirements the kernel then enforces:
 | `audit_level(full)` | Record full canonical arguments, not just the hash |
 | `single_use_only` | The resulting approval, if any, cannot be reused |
 | `force_quarantined_read` | Result is delivered to a freshly-minted reader run with no side-effect capabilities; the requester gets a reference only |
-| `workspace_exec_hygiene` | Neutralise interpreter auto-loaded config for this invocation (see [SANDBOX.md](SANDBOX.md) §7) |
+| `workspace_exec_hygiene` | Neutralise interpreter auto-loaded config for this invocation (see [SANDBOX.md](SANDBOX.md) §4a). Unenforceable on the host (M4d). In an execution environment (M5d.2, [ADR-0052](adr/0052-m5d-sandboxed-process-exec.md) §5a, Proposed) kept by the pinned probe as a trusted launcher, with the tool's own arguments first; an invocation that undoes it, and `npm`-family tools and `cargo` until evidenced (directly or through a wrapper), are `OBLIGATION_UNENFORCEABLE`. It never neutralises the workspace's own code; OCI containment is the boundary |
 
 Obligations let policy say "yes, but under these conditions" without inventing new effects.
 
@@ -187,7 +187,8 @@ unless.config    = "security.allow_host_execution"
 # policy says -- and a host launch ALSO needs a per-invocation approval, which
 # no build has before M6. `workspace_exec_hygiene` cannot be enforced on the
 # host and denies (OBLIGATION_UNENFORCEABLE); `max_output_bytes` is the combined
-# stdout+stderr bound.
+# stdout+stderr bound. In a sandbox (M5d.2) the obligation is kept by the
+# trusted launcher, and `max_output_bytes` bounds each stream at half.
 
 # ---------------------------------------------------------------- taint
 

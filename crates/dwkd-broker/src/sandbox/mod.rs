@@ -1,6 +1,7 @@
 //! The sandbox supervisor (M5a, [ADR-0047]): execution environments —
 //! prepared, measured, destroyed and listed — and, since M5d ([ADR-0052]),
-//! one authorised workload at a time run inside one.
+//! authorised workloads run inside them, one at a time in each: started,
+//! supervised on their own threads, and collected (M5d.2, `supervisor`).
 //!
 //! | operation | what the broker does | what it never does |
 //! |---|---|---|
@@ -8,7 +9,8 @@
 //! | `environment_measure` | the same measurement, of a container the authority recorded, after proving it carries this environment's labels | measure or touch a container labelled otherwise |
 //! | `environment_destroy` | remove the one container labelled as this environment of this store | touch anything labelled otherwise, or guess between two |
 //! | `environment_list` | report every container labelled as this store's | report or touch another store's, or an unlabelled one |
-//! | `workload_run` | re-judge the recorded container from the runtime's record; prove the executable's bytes in the image; run exactly the plan's command line as uid 10001 in `/workspace`, bounded; then end every other process of the environment | run anything in a container that is not the clean, running, recorded one; run as anyone else; take a flag, a variable or a shell string from the authorisation; leave a process of the workload behind unreported |
+//! | `workload_start` | re-judge the recorded container from the runtime's record; prove the executable's bytes in the image; answer; then, supervised, run exactly the plan's command line as uid 10001 in `/workspace`, bounded, and end every other process of the environment | run anything in a container that is not the clean, running, recorded one; run anything it did not answer for; run as anyone else; take a flag, a variable or a shell string from the authorisation; leave a process of the workload behind unreported |
+//! | `workload_collect` | answer `RUNNING`, or the ending it kept | say how a workload of another generation, or one it does not hold, ended |
 //!
 //! The broker judges no assurance level. It reports every invariant with its
 //! verdict; the authority takes the level from them, and never higher than
@@ -35,22 +37,25 @@ mod inspect;
 mod oci;
 mod plan;
 mod relay_plan;
+mod supervisor;
 mod workload_plan;
 
 use std::os::fd::OwnedFd;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
+use dwk_proto::brokerp::EnvironmentSpec;
 use dwk_proto::brokerp::sandbox::{
     ContainerRef, InvariantCheck, InvariantChecks, Milliseconds, NetworkTopology, SandboxInvariant,
     Verdict,
 };
 use dwk_proto::brokerp::workload::{
-    ProcessCount, WorkloadEnding, WorkloadRunAuthorisation, WorkloadRunDone,
+    ProcessCount, WORKLOAD_SUPERVISION_SECONDS, WorkloadCollectAuthorisation, WorkloadCollectDone,
+    WorkloadEnding, WorkloadProgress, WorkloadRunDone, WorkloadSpec, WorkloadStartAuthorisation,
 };
 use dwk_proto::brokerp::{
-    BrokerDone, BrokerRefusal, DestroyState, EnvironmentDestroyAuthorisation,
+    BrokerDone, BrokerGeneration, BrokerRefusal, DestroyState, EnvironmentDestroyAuthorisation,
     EnvironmentDestroyDone, EnvironmentListAuthorisation, EnvironmentListDone,
     EnvironmentMeasureAuthorisation, EnvironmentMeasureDone, EnvironmentMeasurement,
     EnvironmentPrepareAuthorisation, EnvironmentPrepareDone, Indeterminate, OutcomeResult,
@@ -79,16 +84,23 @@ pub(crate) struct SandboxFiles {
     pub(crate) client_config: PathBuf,
 }
 
-/// The sandbox supervisor: what it needs to drive a runtime, and nothing it
-/// could decide with.
+/// What driving a runtime needs, shared with every workload's thread.
 #[derive(Debug)]
-pub(crate) struct Sandbox {
+struct Parts {
     helper: PathBuf,
     authority_uid: u32,
     files: SandboxFiles,
     profile: String,
-    evidence_topology: bool,
     proxies: Arc<Proxies>,
+}
+
+/// The sandbox supervisor: what it needs to drive a runtime, the workloads
+/// it supervises, and nothing it could decide with.
+#[derive(Debug)]
+pub(crate) struct Sandbox {
+    parts: Arc<Parts>,
+    evidence_topology: bool,
+    workloads: supervisor::Workloads,
 }
 
 /// The margin kept at the end of an exchange's deadline for the answer.
@@ -147,6 +159,110 @@ fn ran_done(ran: &Ran) -> Option<WorkloadRunDone> {
     Some(done)
 }
 
+/// A workload's judgement as a start answers it: a refusal, or -- when the
+/// steps that read could not say what they found -- indeterminate.
+fn judgement(failure: EnvFailure) -> OutcomeResult {
+    match failure {
+        EnvFailure::Refused(why) => OutcomeResult::Refused(why),
+        EnvFailure::Unconfirmed => OutcomeResult::Indeterminate(Indeterminate::WorkloadUnconfirmed),
+    }
+}
+
+/// A run's ending as every collection answers it.
+fn ending(ran: Result<Ran, EnvFailure>) -> OutcomeResult {
+    match ran {
+        Ok(ran) => match ran_done(&ran) {
+            Some(done) => OutcomeResult::done(BrokerDone::workload_collect(WorkloadCollectDone {
+                progress: WorkloadProgress::Ended,
+                result: Some(done),
+                never_ran: None,
+            })),
+            // It ran and its answer cannot be stated: nothing proves how it
+            // ended.
+            None => OutcomeResult::Indeterminate(Indeterminate::WorkloadUnconfirmed),
+        },
+        // The client never ran: nothing was executed. Said in the
+        // collection's own answer, so no refusal of a collection is ever
+        // read as one.
+        Err(EnvFailure::Refused(why)) => {
+            OutcomeResult::done(BrokerDone::workload_collect(WorkloadCollectDone {
+                progress: WorkloadProgress::Ended,
+                result: None,
+                never_ran: Some(why),
+            }))
+        }
+        Err(EnvFailure::Unconfirmed) => {
+            OutcomeResult::Indeterminate(Indeterminate::WorkloadUnconfirmed)
+        }
+    }
+}
+
+/// Re-prove the runtime and run `step` over the `oci` environment.
+fn with_oci<T>(
+    parts: &Parts,
+    descriptors: (OwnedFd, OwnedFd),
+    runtime: &RuntimeSpec,
+    until: Instant,
+    step: impl FnOnce(&oci::Oci<'_>) -> T,
+) -> Result<T, BrokerRefusal> {
+    let seccomp = parts
+        .files
+        .seccomp
+        .to_str()
+        .ok_or(BrokerRefusal::Unsupported)?;
+    let held = oci::Runtime::new(
+        &parts.helper,
+        descriptors,
+        runtime,
+        (&parts.files.client_config, parts.authority_uid),
+        until.checked_sub(ANSWER_MARGIN).unwrap_or(until),
+    )?;
+    Ok(step(&oci::Oci::new(
+        held,
+        (seccomp, &parts.profile),
+        runtime.socket.as_str(),
+        &parts.proxies,
+    )))
+}
+
+/// What a workload's thread needs of its start.
+struct Workload {
+    handle: EnvHandle,
+    spec: EnvironmentSpec,
+    program: WorkloadSpec,
+    runtime: RuntimeSpec,
+}
+
+/// A workload's thread (ADR-0052 §§5, 8): re-prove the runtime, re-judge
+/// the environment and prove the executable; report it through `gate`; and
+/// only on the exchange's word, run it, bounded by `until`. `None` when it
+/// never ran.
+fn supervise(
+    parts: &Parts,
+    descriptors: (OwnedFd, OwnedFd),
+    work: &Workload,
+    gate: supervisor::Gate,
+    until: Instant,
+) -> Option<OutcomeResult> {
+    let mut gate = Some(gate);
+    let ran = with_oci(parts, descriptors, &work.runtime, until, |env| {
+        let judged = env
+            .ready_workload(&work.handle, &work.spec, &work.program)
+            .map_err(judgement);
+        let go = gate.take().is_some_and(|gate| gate.judged(judged));
+        go.then(|| env.exec_workload(&work.handle, &work.program, until))
+    });
+    match ran {
+        Ok(ran) => ran.map(ending),
+        Err(refusal) => {
+            if let Some(gate) = gate {
+                let _ = gate.judged(Err(OutcomeResult::Refused(refusal)));
+            }
+            None
+        }
+    }
+}
+
 fn measurement(measured: &Measured) -> Option<EnvironmentMeasurement> {
     let checks = measured.checks.as_ref()?;
     let checks = InvariantChecks::new(
@@ -174,16 +290,19 @@ impl Sandbox {
         helper: PathBuf,
         authority_uid: u32,
         files: SandboxFiles,
-        evidence_topology: bool,
+        (evidence_topology, generation): (bool, BrokerGeneration),
         proxies: Arc<Proxies>,
     ) -> Self {
         Self {
-            helper,
-            authority_uid,
-            files,
-            profile: dwk_sandbox_profile::seccomp_profile_json(),
+            parts: Arc::new(Parts {
+                helper,
+                authority_uid,
+                files,
+                profile: dwk_sandbox_profile::seccomp_profile_json(),
+                proxies,
+            }),
             evidence_topology,
-            proxies,
+            workloads: supervisor::Workloads::new(generation),
         }
     }
 
@@ -203,25 +322,8 @@ impl Sandbox {
         until: Instant,
         step: impl FnOnce(&oci::Oci<'_>) -> OutcomeResult,
     ) -> OutcomeResult {
-        let Some(seccomp) = self.files.seccomp.to_str() else {
-            return OutcomeResult::Refused(BrokerRefusal::Unsupported);
-        };
-        let held = oci::Runtime::new(
-            &self.helper,
-            descriptors,
-            runtime,
-            (&self.files.client_config, self.authority_uid),
-            until.checked_sub(ANSWER_MARGIN).unwrap_or(until),
-        );
-        match held {
-            Ok(held) => step(&oci::Oci::new(
-                held,
-                (seccomp, &self.profile),
-                runtime.socket.as_str(),
-                &self.proxies,
-            )),
-            Err(why) => OutcomeResult::Refused(why),
-        }
+        with_oci(&self.parts, descriptors, runtime, until, step)
+            .unwrap_or_else(OutcomeResult::Refused)
     }
 
     /// `broker.environment_prepare`.
@@ -295,7 +397,7 @@ impl Sandbox {
                     EnvironmentMeasureDone {
                         state: measured.state,
                         measurement: measurement(&measured),
-                        egress: self.proxies.counters(spec.environment_id.as_str()),
+                        egress: self.parts.proxies.counters(spec.environment_id.as_str()),
                     },
                 ))),
                 Err(why) => failure(why),
@@ -319,7 +421,10 @@ impl Sandbox {
             );
             // Whatever the runtime managed, the environment's proxy is
             // closed: a destruction never leaves its egress open.
-            let egress = self.proxies.close(authorisation.environment_id.as_str());
+            let egress = self
+                .parts
+                .proxies
+                .close(authorisation.environment_id.as_str());
             match destroyed {
                 Ok(destroyed) => {
                     let (state, container): (DestroyState, Option<ContainerRef>) = match destroyed {
@@ -347,13 +452,14 @@ impl Sandbox {
         })
     }
 
-    /// `broker.workload_run` (M5d, ADR-0052 §5): one workload, in the
-    /// recorded container of a `READY` environment. The authority decided
-    /// it; this re-judges the environment and proves the executable before
-    /// anything runs, and ends whatever the workload left.
-    pub(crate) fn workload_run(
+    /// `broker.workload_start` (M5d.2, ADR-0052 §§5, 8): one workload, in
+    /// the recorded container of a `READY` environment. The authority
+    /// decided it; this re-judges the environment and proves the executable
+    /// before the answer, and the supervisor's thread then runs it and ends
+    /// whatever it left. Nothing runs that this did not answer for.
+    pub(crate) fn workload_start(
         &self,
-        authorisation: &WorkloadRunAuthorisation,
+        authorisation: &WorkloadStartAuthorisation,
         descriptors: (OwnedFd, OwnedFd),
         until: Instant,
     ) -> OutcomeResult {
@@ -361,25 +467,31 @@ impl Sandbox {
         if let Err(why) = self.topology(spec.network) {
             return OutcomeResult::Refused(why);
         }
-        let handle = EnvHandle {
-            environment: spec.environment_id.clone(),
-            container: authorisation.container.clone(),
+        let environment = spec.environment_id.clone();
+        let work = Workload {
+            handle: EnvHandle {
+                environment: spec.environment_id.clone(),
+                container: authorisation.container.clone(),
+            },
+            program: authorisation.workload(),
+            runtime: authorisation.runtime(),
+            spec,
         };
-        let workload = authorisation.workload();
-        self.with_oci(descriptors, &authorisation.runtime(), until, |env| {
-            match env.run_workload(&handle, &spec, &workload, until) {
-                Ok(ran) => match ran_done(&ran) {
-                    Some(done) => OutcomeResult::Done(Box::new(BrokerDone::workload_run(done))),
-                    // It ran and its answer cannot be stated: nothing proves
-                    // how it ended.
-                    None => OutcomeResult::Indeterminate(Indeterminate::WorkloadUnconfirmed),
-                },
-                Err(EnvFailure::Refused(why)) => OutcomeResult::Refused(why),
-                Err(EnvFailure::Unconfirmed) => {
-                    OutcomeResult::Indeterminate(Indeterminate::WorkloadUnconfirmed)
-                }
-            }
-        })
+        let parts = Arc::clone(&self.parts);
+        // The workload's own bound, from now: its longest wall clock and the
+        // steps before and after it. Its thread is gone by then.
+        let supervised = Instant::now() + Duration::from_secs(WORKLOAD_SUPERVISION_SECONDS);
+        self.workloads.start(
+            &authorisation.invocation_id,
+            &environment,
+            until.checked_sub(ANSWER_MARGIN).unwrap_or(until),
+            move |gate| supervise(&parts, descriptors, &work, gate, supervised),
+        )
+    }
+
+    /// `broker.workload_collect` (M5d.2): `RUNNING`, or the ending kept.
+    pub(crate) fn workload_collect(&self, collect: &WorkloadCollectAuthorisation) -> OutcomeResult {
+        self.workloads.collect(collect)
     }
 
     /// `broker.environment_list`.

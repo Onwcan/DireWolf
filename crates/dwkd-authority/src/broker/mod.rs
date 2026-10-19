@@ -221,10 +221,12 @@ pub enum Operation {
         /// it. Present exactly when `hop.credential` is.
         secret: Option<crate::secret::handoff::SecretPipe>,
     },
-    /// Run one workload in a `READY` environment (M5d, ADR-0052 §5): the
-    /// environment as the authority recorded it, its container, the runtime
-    /// client, and the workload it decided.
-    WorkloadRun {
+    /// Start one workload in a `READY` environment (M5d, ADR-0052 §§5, 8):
+    /// the environment as the authority recorded it, its container, the
+    /// runtime client, and the workload it decided. The broker answers once
+    /// it has re-judged the environment and proved the executable, and
+    /// supervises the run.
+    WorkloadStart {
         /// What the environment should be.
         spec: EnvironmentSpec,
         /// The container recorded for it.
@@ -233,6 +235,15 @@ pub enum Operation {
         runtime: RuntimeHandoff,
         /// The workload.
         workload: dwk_proto::brokerp::workload::WorkloadSpec,
+    },
+    /// Collect a started workload (M5d.2): its invocation is the order's,
+    /// the generation its start's. No descriptor.
+    WorkloadCollect {
+        /// The broker generation that started it.
+        generation: dwk_proto::brokerp::BrokerGeneration,
+        /// The per-stream bound it was started with: an ending is checked
+        /// against it.
+        stream_limit: u32,
     },
 }
 
@@ -284,7 +295,8 @@ impl Operation {
             Self::EnvironmentList { .. } => "environment.list",
             Self::HttpResolve { .. } => "http.resolve",
             Self::HttpExchange { .. } => "http.exchange",
-            Self::WorkloadRun { .. } => "workload.run",
+            Self::WorkloadStart { .. } => "workload.start",
+            Self::WorkloadCollect { .. } => "workload.collect",
         }
     }
 
@@ -299,7 +311,8 @@ impl Operation {
             Self::EnvironmentList { .. } => PrivateKind::EnvironmentList,
             Self::HttpResolve { .. } => PrivateKind::HttpResolve,
             Self::HttpExchange { .. } => PrivateKind::HttpExchange,
-            Self::WorkloadRun { .. } => PrivateKind::WorkloadRun,
+            Self::WorkloadStart { .. } => PrivateKind::WorkloadStart,
+            Self::WorkloadCollect { .. } => PrivateKind::WorkloadCollect,
             _ => return None,
         };
         Some(Duration::from_secs(kind.deadline_seconds()))
@@ -367,7 +380,8 @@ impl BrokerOrder {
             | Operation::EnvironmentList { .. }
             | Operation::HttpResolve { .. }
             | Operation::HttpExchange { .. }
-            | Operation::WorkloadRun { .. } => return None,
+            | Operation::WorkloadStart { .. }
+            | Operation::WorkloadCollect { .. } => return None,
         })
     }
 
@@ -529,14 +543,27 @@ pub enum BrokerDelivery {
     EnvironmentDestroyed(EnvironmentDestroyDone),
     /// A listing.
     EnvironmentListed(EnvironmentListDone),
-    /// A workload ran (M5d): how it ended, its output, what was left. The
-    /// link checked it against what was sent.
-    WorkloadRan(Box<dwk_proto::brokerp::workload::WorkloadRunDone>),
+    /// A workload's start (M5d.2): the generation that supervises it.
+    WorkloadStarted(dwk_proto::brokerp::BrokerGeneration),
+    /// A workload's collection: where it is, checked against what it was
+    /// started with.
+    WorkloadCollected(Collected),
     /// A `net.http` resolution, as the broker's guard judged it (M5c).
     HttpResolved(dwk_proto::brokerp::http::HttpResolveDone),
     /// A `net.http` exchange that sent its request (M5c): within every bound
     /// the hop was authorised with.
     HttpExchanged(dwk_proto::brokerp::http::HttpExchangeDone),
+}
+
+/// Where a started workload is, as its collection says (M5d.2).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Collected {
+    /// It has not ended.
+    Running,
+    /// It ran and ended: how, its output, and what was left.
+    Ended(Box<dwk_proto::brokerp::workload::WorkloadRunDone>),
+    /// Its run never began after its start was answered: nothing ran.
+    NeverRan(dwk_proto::brokerp::BrokerRefusal),
 }
 
 /// Why no connection could be used.

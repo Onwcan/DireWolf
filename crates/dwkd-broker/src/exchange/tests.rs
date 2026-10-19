@@ -47,8 +47,9 @@ fn no_proxies() -> std::sync::Arc<crate::egress::proxy::Proxies> {
 /// sandbox supervisor that can start nothing, and an HTTPS client no
 /// filesystem authorisation reaches. Leaked: a test process is short.
 fn effects() -> Effects<'static> {
+    let processes: &'static crate::process::Processes = Box::leak(Box::new(no_processes()));
     Effects {
-        processes: Box::leak(Box::new(no_processes())),
+        processes,
         sandbox: Box::leak(Box::new(crate::sandbox::Sandbox::new(
             PathBuf::from("/nonexistent/dwkd-broker"),
             0,
@@ -56,7 +57,7 @@ fn effects() -> Effects<'static> {
                 seccomp: PathBuf::from("/nonexistent/seccomp.json"),
                 client_config: PathBuf::from("/nonexistent/client"),
             },
-            false,
+            (false, processes.generation().clone()),
             no_proxies(),
         ))),
         http: Box::leak(Box::new(crate::http::Client::in_process(

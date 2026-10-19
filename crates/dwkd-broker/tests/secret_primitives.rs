@@ -1,7 +1,7 @@
 //! The broker's secret primitives against the released broker binary (M4e,
 //! ADR-0046 §§11–16, 22): this harness plays the authority — the kernel
 //! reports its uid as the one the broker was told to read from — and speaks
-//! the private protocol exactly as the authority's link does (version 8).
+//! the private protocol exactly as the authority's link does (version 9).
 //!
 //! What is measured, on real processes:
 //!
@@ -783,7 +783,7 @@ mod linux {
 
         // Messages the language does not have: closed, unanswered.
         for (case, edit) in [
-            ("old-private-version", ("\"protocol\":8", "\"protocol\":7")),
+            ("old-private-version", ("\"protocol\":9", "\"protocol\":8")),
             (
                 "unknown-kind",
                 ("broker.http_credential_exchange", "broker.secret_egress"),

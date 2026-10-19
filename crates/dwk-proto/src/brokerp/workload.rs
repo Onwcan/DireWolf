@@ -13,14 +13,25 @@
 //! The answer says how the program ended, its bounded output, and the
 //! **residue**: whether the environment's init then proved every other
 //! process of the environment gone.
+//!
+//! **Started, then collected** (M5d.2, ADR-0052 §8). The broker serves one
+//! connection at a time, so no exchange may hold it for a workload's wall
+//! clock: `broker.workload_start` re-judges the environment and proves the
+//! executable, hands the run to a supervisor and answers at once with the
+//! broker's generation; `broker.workload_collect`, a short exchange with no
+//! descriptor, answers `RUNNING` or the ending. A broker of another
+//! generation -- one that restarted -- supervises nothing of an earlier
+//! one: its collection is indeterminate, and the authority ends the
+//! workload `UNKNOWN` and destroys its environment.
 
 use crate::brokerp::sandbox::{
     ContainerRef, EnvironmentProfile, ImageId, Milliseconds, NetworkTopology, StoreInstance,
     Verdict,
 };
 use crate::brokerp::{
-    ChannelNonce, Common, DescriptorCount, EnvironmentSpec, KernelNumber, PrivateKind, ProcessArgs,
-    ProcessStreamSnapshot, ProtocolVersion, RuntimeSpec, StreamLimit,
+    BrokerGeneration, BrokerRefusal, ChannelNonce, Common, DescriptorCount, EnvironmentSpec,
+    KernelNumber, PrivateKind, ProcessArgs, ProcessStreamSnapshot, ProtocolVersion, RuntimeSpec,
+    StreamLimit,
 };
 use crate::error::{ProtocolError, Violation};
 use crate::json::{Number, Value};
@@ -37,11 +48,17 @@ use crate::wire::{Cx, WireType, expect_integer, expect_string};
 /// §2's `timeout`).
 pub const WORKLOAD_MAX_SECONDS: u32 = 600;
 
-/// How long one `broker.workload_run` exchange may take on the private
-/// channel, both sides: the longest wall clock, and the environment
-/// operations' own bound for the steps before and after it (the record's
-/// judgement, the digests, `reap`).
-pub const WORKLOAD_DEADLINE_SECONDS: u64 = 600 + super::ENVIRONMENT_DEADLINE_SECONDS;
+/// How long a started workload may take before its collection is due, at
+/// the most: the longest wall clock, and the environment operations' own
+/// bound for the steps before and after it (the record's judgement, the
+/// digests, `reap`). The broker's supervisor ends it by then; the authority
+/// stops waiting for it then.
+pub const WORKLOAD_SUPERVISION_SECONDS: u64 = 600 + super::ENVIRONMENT_DEADLINE_SECONDS;
+
+/// The most workloads one broker supervises at once, started and not yet
+/// collected. The authority runs one per environment; a start beyond this
+/// is refused before anything runs (`WORKLOAD_TABLE_FULL`).
+pub const MAX_SUPERVISED_WORKLOADS: usize = 16;
 
 const _: () = assert!(WORKLOAD_MAX_SECONDS == 600);
 
@@ -122,6 +139,20 @@ wire_enum! {
     }
 }
 
+wire_enum! {
+    /// How a workload is started in its environment (M5d.2, ADR-0052 §5a).
+    /// The authority chooses it from the obligations it decided; the broker
+    /// spells the one command line for each, and neither carries a variable.
+    WorkloadLaunch {
+        /// The runtime's `exec` runs the executable itself.
+        Direct = "DIRECT",
+        /// The runtime's `exec` runs the trusted probe as the launcher, which
+        /// sets `workspace_exec_hygiene`'s fixed variables and executes the
+        /// executable with exactly its arguments.
+        Hygiene = "HYGIENE",
+    }
+}
+
 /// A workload, as the authority decided it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkloadSpec {
@@ -135,17 +166,20 @@ pub struct WorkloadSpec {
     pub stream_limit: StreamLimit,
     /// The wall clock.
     pub wall_clock: WorkloadSeconds,
+    /// How it is started.
+    pub launch: WorkloadLaunch,
 }
 
 wire_struct! {
-    /// Run one workload in an environment the authority recorded `READY`
-    /// (ADR-0052 §5): re-judge the environment from the runtime's record,
-    /// prove the executable's bytes in the image, run exactly this, bound
-    /// it, then have the environment's init end every other process in it.
-    /// The environment's fields are a measurement's: the broker re-judges
-    /// the record against them before anything runs.
-    WorkloadRunAuthorisation: reject {
-        /// Always `broker.workload_run`.
+    /// Start one workload in an environment the authority recorded `READY`
+    /// (ADR-0052 §§5, 8): re-judge the environment from the runtime's
+    /// record and prove the executable's bytes in the image before the
+    /// answer; then -- supervised, after it -- run exactly this, bound it,
+    /// and have the environment's init end every other process in it. The
+    /// environment's fields are a measurement's: the broker re-judges the
+    /// record against them before anything runs.
+    WorkloadStartAuthorisation: reject {
+        /// Always `broker.workload_start`.
         required kind: PrivateKind,
         /// The protocol version.
         required protocol: ProtocolVersion,
@@ -201,8 +235,79 @@ wire_struct! {
         required stream_limit: StreamLimit,
         /// The wall clock.
         required wall_clock: WorkloadSeconds,
+        /// How it is started: directly, or by the trusted launcher.
+        required launch: WorkloadLaunch,
         /// Two: the runtime executable, then the working directory.
         required descriptors: DescriptorCount,
+    }
+}
+
+wire_struct! {
+    /// A workload's start: the environment re-judged, the executable proved,
+    /// and the run handed to the supervisor of this broker generation.
+    WorkloadStartDone: reject {
+        /// The generation that supervises it: a collection names it.
+        required generation: BrokerGeneration,
+    }
+}
+
+wire_enum! {
+    /// Where a started workload is, as its supervisor says.
+    WorkloadProgress {
+        /// It has not ended, or its residue is not yet proved.
+        Running = "RUNNING",
+        /// It ended and `reap` has run: the result says how -- or it never
+        /// began, and the refusal says why.
+        Ended = "ENDED",
+    }
+}
+
+wire_struct! {
+    /// Collect one workload this broker generation started. No descriptor:
+    /// it is named by its invocation and its generation.
+    WorkloadCollectAuthorisation: reject {
+        /// Always `broker.workload_collect`.
+        required kind: PrivateKind,
+        /// The protocol version.
+        required protocol: ProtocolVersion,
+        /// The channel from this connection's hello.
+        required channel: ChannelNonce,
+        /// The workload's invocation: the one its start named.
+        required invocation_id: InvocationId,
+        /// The generation that started it.
+        required generation: BrokerGeneration,
+        /// None.
+        required descriptors: DescriptorCount,
+    }
+}
+
+wire_struct! {
+    /// What a collection found. A refusal **of the collection** says
+    /// nothing about the workload; a workload whose run never began -- the
+    /// runtime's client could not be started after the start was answered
+    /// -- is `ENDED` with the refusal here, in the answer's own body.
+    WorkloadCollectDone: reject {
+        /// Whether it has ended.
+        required progress: WorkloadProgress,
+        /// For `ENDED`: how it ran and ended.
+        optional result: WorkloadRunDone,
+        /// For `ENDED` without a result: why it never began. Nothing ran.
+        optional never_ran: BrokerRefusal,
+    }
+}
+
+impl WorkloadCollectAuthorisation {
+    /// A collection of the workload `common` names, started by `generation`.
+    #[must_use]
+    pub fn new(common: Common, generation: BrokerGeneration) -> Self {
+        Self {
+            kind: PrivateKind::WorkloadCollect,
+            protocol: ProtocolVersion(super::PROTOCOL),
+            channel: common.channel,
+            invocation_id: common.invocation_id,
+            generation,
+            descriptors: DescriptorCount(0),
+        }
     }
 }
 
@@ -232,8 +337,8 @@ wire_struct! {
     }
 }
 
-impl WorkloadRunAuthorisation {
-    /// A run of `workload` in `container`, which should be `environment`.
+impl WorkloadStartAuthorisation {
+    /// A start of `workload` in `container`, which should be `environment`.
     #[must_use]
     pub fn new(
         common: Common,
@@ -243,7 +348,7 @@ impl WorkloadRunAuthorisation {
         workload: WorkloadSpec,
     ) -> Self {
         Self {
-            kind: PrivateKind::WorkloadRun,
+            kind: PrivateKind::WorkloadStart,
             protocol: ProtocolVersion(super::PROTOCOL),
             channel: common.channel,
             invocation_id: common.invocation_id,
@@ -271,6 +376,7 @@ impl WorkloadRunAuthorisation {
             args: workload.args,
             stream_limit: workload.stream_limit,
             wall_clock: workload.wall_clock,
+            launch: workload.launch,
             descriptors: DescriptorCount(2),
         }
     }
@@ -315,6 +421,7 @@ impl WorkloadRunAuthorisation {
             args: self.args.clone(),
             stream_limit: self.stream_limit,
             wall_clock: self.wall_clock,
+            launch: self.launch,
         }
     }
 }
@@ -328,7 +435,7 @@ fn inconsistent(path: &str, why: &str) -> ProtocolError {
 /// # Errors
 ///
 /// The first inconsistency.
-pub(super) fn check_run(run: &WorkloadRunAuthorisation) -> Result<(), ProtocolError> {
+pub(super) fn check_start(run: &WorkloadStartAuthorisation) -> Result<(), ProtocolError> {
     if super::process_argv_bytes(&run.args) > crate::limits::MAX_PROCESS_ARGV_BYTES {
         return Err(ProtocolError::schema(
             Violation::TooLong,
@@ -370,4 +477,24 @@ pub fn check_done(done: &WorkloadRunDone) -> Result<(), ProtocolError> {
         ));
     }
     Ok(())
+}
+
+/// A collection's own consistency: a result exactly for `ENDED`, and that
+/// result consistent.
+///
+/// # Errors
+///
+/// The first inconsistency.
+pub fn check_collect(done: &WorkloadCollectDone) -> Result<(), ProtocolError> {
+    match (done.progress, &done.result, done.never_ran) {
+        (WorkloadProgress::Ended, Some(result), None) => check_done(result),
+        (WorkloadProgress::Ended, None, Some(_)) | (WorkloadProgress::Running, None, None) => {
+            Ok(())
+        }
+        _ => Err(inconsistent(
+            "/result",
+            "an ENDED workload has a result or the refusal it never began under, never both; \
+             a RUNNING one has neither",
+        )),
+    }
 }

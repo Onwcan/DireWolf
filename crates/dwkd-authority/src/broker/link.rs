@@ -96,7 +96,8 @@ enum Sent {
         /// count echoes of one.
         credential: bool,
     },
-    WorkloadRun {
+    WorkloadStart,
+    WorkloadCollect {
         stream_limit: u32,
     },
 }
@@ -199,7 +200,19 @@ fn authorise(common: Common, operation: Operation) -> Result<Prepared, BrokerFai
         | Operation::EnvironmentMeasure { .. }
         | Operation::EnvironmentDestroy { .. }
         | Operation::EnvironmentList { .. }
-        | Operation::WorkloadRun { .. } => environment(common, operation),
+        | Operation::WorkloadStart { .. } => environment(common, operation),
+        // A workload's collection (M5d.2) carries nothing: it is named by the
+        // invocation and the generation.
+        Operation::WorkloadCollect {
+            generation,
+            stream_limit,
+        } => Ok((
+            Authorisation::WorkloadCollect(
+                dwk_proto::brokerp::workload::WorkloadCollectAuthorisation::new(common, generation),
+            ),
+            Vec::new(),
+            Sent::WorkloadCollect { stream_limit },
+        )),
         // `net.http` (M5c): a resolution carries nothing; an exchange carries
         // the credential's pipe, and only it, when the hop has one.
         Operation::HttpResolve { host } => Ok((
@@ -586,24 +599,23 @@ fn environment(common: Common, operation: Operation) -> Result<Prepared, BrokerF
                 Sent::EnvironmentList,
             )
         }
-        // A workload (M5d, ADR-0052 §3): the same two descriptors, typed
-        // fields, and no field that is a flag, a user or a variable.
-        Operation::WorkloadRun {
+        // A workload's start (M5d, ADR-0052 §3): the same two descriptors,
+        // typed fields, and no field that is a flag, a user or a variable.
+        Operation::WorkloadStart {
             spec,
             container,
             runtime,
             workload,
         } => {
             let (runtime, fds) = runtime_of(runtime)?;
-            let stream_limit = workload.stream_limit.get();
             (
-                Authorisation::WorkloadRun(
-                    dwk_proto::brokerp::workload::WorkloadRunAuthorisation::new(
+                Authorisation::WorkloadStart(
+                    dwk_proto::brokerp::workload::WorkloadStartAuthorisation::new(
                         common, spec, container, runtime, workload,
                     ),
                 ),
                 fds,
-                Sent::WorkloadRun { stream_limit },
+                Sent::WorkloadStart,
             )
         }
         _ => return Err(BrokerFailure::Protocol("not an environment operation")),
@@ -723,25 +735,37 @@ fn deliver(sent: &Sent, done: BrokerDone) -> Result<BrokerDelivery, BrokerFailur
         | Sent::EnvironmentDestroy { .. }
         | Sent::EnvironmentList => environment_delivery(sent, done)?,
         Sent::HttpResolve | Sent::HttpExchange { .. } => http_delivery(sent, done)?,
-        Sent::WorkloadRun { stream_limit } => {
-            workload_delivery(done.workload_run.ok_or(wrong)?, *stream_limit)?
+        Sent::WorkloadStart => {
+            BrokerDelivery::WorkloadStarted(done.workload_start.ok_or(wrong)?.generation)
+        }
+        Sent::WorkloadCollect { stream_limit } => {
+            workload_delivery(done.workload_collect.ok_or(wrong)?, *stream_limit)?
         }
     })
 }
 
-/// A workload's answer (M5d, ADR-0052 §3), if it agrees with itself and
-/// with the bound it was sent with: an exit code exactly for an exit, a
-/// signal exactly for a kill, a clean residue only with nothing remaining,
-/// and each stream within its bound with its counts consistent.
+/// A workload's collection (M5d.2, ADR-0052 §3), if it agrees with itself:
+/// `RUNNING` with nothing, or `ENDED` with an ending that agrees with itself
+/// and with the bound it was started with -- an exit code exactly for an
+/// exit, a signal exactly for a kill, a clean residue only with nothing
+/// remaining, and each stream within its bound with its counts consistent.
 fn workload_delivery(
-    done: dwk_proto::brokerp::workload::WorkloadRunDone,
+    collected: dwk_proto::brokerp::workload::WorkloadCollectDone,
     stream_limit: u32,
 ) -> Result<BrokerDelivery, BrokerFailure> {
-    dwk_proto::brokerp::workload::check_done(&done)
+    use super::Collected;
+    dwk_proto::brokerp::workload::check_collect(&collected)
         .map_err(|_| BrokerFailure::Protocol("a workload's answer contradicts itself"))?;
-    stream(&done.stdout, stream_limit)?;
-    stream(&done.stderr, stream_limit)?;
-    Ok(BrokerDelivery::WorkloadRan(Box::new(done)))
+    let at = match (collected.result, collected.never_ran) {
+        (Some(done), None) => {
+            stream(&done.stdout, stream_limit)?;
+            stream(&done.stderr, stream_limit)?;
+            Collected::Ended(Box::new(done))
+        }
+        (None, Some(refusal)) => Collected::NeverRan(refusal),
+        _ => Collected::Running,
+    };
+    Ok(BrokerDelivery::WorkloadCollected(at))
 }
 
 /// A `net.http` operation's answer (M5c), if it is this operation's and

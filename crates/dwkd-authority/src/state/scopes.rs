@@ -67,6 +67,18 @@
 //! path so long that `<path>@<digest>` exceeds 384 characters) cannot be
 //! stored and read back exactly, so it is not granted: it covers nothing.
 //!
+//! # Executables in an image (M5d.2, ADR-0052 OD-9)
+//!
+//! An authority with an execution environment configured runs no process on
+//! the host: its `process.exec` runs in the environment. So a NEW concrete
+//! declaration of a run admitted there means the executable the operator's
+//! **image manifest** names at that path, with the SHA-256 the manifest
+//! pins ([`resolve_executables_in_image`]) — never the host's file at the
+//! same path, which nothing would run. A path the manifest does not name
+//! covers nothing (`EXECUTABLE_NOT_IN_IMAGE`), nor does a declaration
+//! pinning another digest. The run is bound to the image and the manifest
+//! (`run_image`), and a stored grant is re-read as every stored grant is.
+//!
 //! [ADR-0043]: ../../../../../docs/adr/0043-m4b-private-broker-channel-and-brokered-fs-read.md
 
 use std::collections::BTreeMap;
@@ -80,6 +92,7 @@ use crate::resource::{CanonicalPath, ExecutableIdentity, FileIdentity};
 
 use super::config::RootBinding;
 use super::tool;
+use super::workload::{self, ManifestMiss};
 
 /// What a verb's scope path must be for the verb to be resolved at all: the
 /// filesystem verbs M4c gives a canonical meaning, and whether a vacant name
@@ -196,6 +209,8 @@ pub(super) enum Unresolved {
     DigestMismatch,
     /// The identity is too long to be stored and read back exactly.
     IdentityTooLong,
+    /// The image manifest names no executable at the path (OD-9).
+    NotInImage,
 }
 
 impl Unresolved {
@@ -210,6 +225,7 @@ impl Unresolved {
             Self::Executable(error) => super::process::exec_refusal(*error).as_str(),
             Self::DigestMismatch => "EXECUTABLE_DIGEST_MISMATCH",
             Self::IdentityTooLong => "EXECUTABLE_PATH_INVALID",
+            Self::NotInImage => "EXECUTABLE_NOT_IN_IMAGE",
         }
     }
 }
@@ -232,7 +248,16 @@ pub(super) struct Resolutions {
 /// The executable resolver's answers, by declared spelling: the identity and
 /// the object it names, or why there is none.
 pub(super) type Executables =
-    BTreeMap<String, Result<(ExecutableIdentity, FileIdentity), Unresolved>>;
+    BTreeMap<String, Result<(ExecutableIdentity, ExecutableSource), Unresolved>>;
+
+/// Where an executable's identity came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ExecutableSource {
+    /// The resolver found and hashed this host object.
+    Host(FileIdentity),
+    /// The image manifest names it (OD-9): no host object.
+    Image,
+}
 
 impl Resolutions {
     /// Nothing to resolve.
@@ -293,7 +318,7 @@ impl Resolutions {
     pub(super) fn executable(
         &self,
         declared: &DeclaredPath,
-    ) -> Result<(&ExecutableIdentity, FileIdentity), Unresolved> {
+    ) -> Result<(&ExecutableIdentity, ExecutableSource), Unresolved> {
         match self.executables.get(declared.as_str()) {
             Some(Ok((identity, object))) => Ok((identity, *object)),
             Some(Err(why)) => Err(why.clone()),
@@ -406,10 +431,38 @@ pub(super) fn resolve_executables(declared: &[DeclaredPath], trusted_owner: u32)
         .collect()
 }
 
+/// Resolve every declared executable against the image manifest `config`
+/// pins (OD-9): the run is admitted with an execution environment
+/// configured, so a concrete declaration names the image's executable at
+/// that path. Nothing on the host is opened.
+pub(super) fn resolve_executables_in_image(
+    declared: &[DeclaredPath],
+    config: &crate::sandbox::SandboxConfig,
+) -> Executables {
+    declared
+        .iter()
+        .map(|text| {
+            let (path, pin) = pinned(text.as_str());
+            let answer = workload::manifest_identity(config, path, pin)
+                .map_err(|miss| match miss {
+                    ManifestMiss::NotInImage => Unresolved::NotInImage,
+                    ManifestMiss::DigestMismatch => Unresolved::DigestMismatch,
+                })
+                .and_then(|identity| {
+                    if identity.to_string().chars().count() > DeclaredPath::MAX_CHARS {
+                        return Err(Unresolved::IdentityTooLong);
+                    }
+                    Ok((identity, ExecutableSource::Image))
+                });
+            (text.as_str().to_owned(), answer)
+        })
+        .collect()
+}
+
 fn resolve_one(
     declared: &str,
     trusted_owner: u32,
-) -> Result<(ExecutableIdentity, FileIdentity), Unresolved> {
+) -> Result<(ExecutableIdentity, ExecutableSource), Unresolved> {
     let (path, pin) = pinned(declared);
     let resolved = exec::resolve(path, trusted_owner).map_err(Unresolved::Executable)?;
     let identity = resolved.identity().clone();
@@ -421,7 +474,7 @@ fn resolve_one(
     if identity.to_string().chars().count() > DeclaredPath::MAX_CHARS {
         return Err(Unresolved::IdentityTooLong);
     }
-    Ok((identity, resolved.object()))
+    Ok((identity, ExecutableSource::Host(resolved.object())))
 }
 
 /// A NEW declaration in authority-comparable form, or which identity is

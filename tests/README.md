@@ -200,6 +200,21 @@ no container may be left behind. `make sandbox-workload-mutations` weakens each
 guard in turn and requires a unit suite or the evidence to fail; it is slow, runs
 locally, and is not part of the hosted workflow.
 
+**M5d.2** adds to both. The broker's: a workload started and collected, a second
+in its environment refused, the broker serving others while it runs, another
+generation's collection indeterminate — and the trusted launcher with the
+**real** `git`, Python and pytest, in a second evidence image built `FROM
+scratch` from the host's binaries and the locked environment's packages (no
+image is pulled). The authority's reach the public route with a **real DWKP
+client**, through the server seam (`serve_authority`) and through the released
+`dwkd-authority serve --sandbox-config`: the authority preparing the run's
+environment, the result's identity, responsiveness during a long workload,
+keys across tools and connections, a broker killed mid-launch, OD-9, the budget,
+unpinned bytes, the shipped `balanced` and `power` packs, and crash window W9.
+`crates/dwkd-authority/src/state/workload_route_tests.rs` covers the route's
+decisions against a **fake broker** (labelled so): ordering, refusals and
+parking, not containment.
+
 **Brokered `fs.read` tests (M4b)** are real-process evidence for the private
 channel ([ADR-0043](../docs/adr/0043-m4b-private-broker-channel-and-brokered-fs-read.md)):
 `crates/dwkd-authority/tests/broker_fs_read.rs` drives the released authority and

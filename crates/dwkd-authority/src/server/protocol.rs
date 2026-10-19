@@ -99,7 +99,9 @@ pub(crate) fn classify(message: &DwkpMessage) -> Kind {
         | DwkpBody::ToolInvokeV3(_)
         | DwkpBody::CanonicalPreviewV3(_)
         | DwkpBody::ToolInvokeV4(_)
-        | DwkpBody::CanonicalPreviewV4(_) => Kind::AuthorityRequest { v },
+        | DwkpBody::CanonicalPreviewV4(_)
+        | DwkpBody::ToolInvokeV5(_)
+        | DwkpBody::CanonicalPreviewV5(_) => Kind::AuthorityRequest { v },
         DwkpBody::HandshakeAccepted(_)
         | DwkpBody::LeaseGrant(_)
         | DwkpBody::RunGrant(_)
@@ -125,6 +127,11 @@ pub(crate) fn classify(message: &DwkpMessage) -> Kind {
         | DwkpBody::ToolPreviewedV4(_)
         | DwkpBody::ToolRefusedV4(_)
         | DwkpBody::ToolFailedV4(_)
+        | DwkpBody::ToolResultV5(_)
+        | DwkpBody::ToolDeniedV5(_)
+        | DwkpBody::ToolPreviewedV5(_)
+        | DwkpBody::ToolRefusedV5(_)
+        | DwkpBody::ToolFailedV5(_)
         | DwkpBody::Ack(_)
         | DwkpBody::ProtocolError(_) => Kind::NotARequest,
     }

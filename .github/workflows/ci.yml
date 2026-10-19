@@ -408,6 +408,9 @@ jobs:
           docker version --format 'client {{.Client.Version}} server {{.Server.Version}} api {{.Server.APIVersion}} {{.Server.Os}}/{{.Server.Arch}}'
           docker info --format '{{.OperatingSystem}} kernel {{.KernelVersion}} cgroup v{{.CgroupVersion}} runtime {{.DefaultRuntime}} {{.SecurityOptions}}'
           cat /proc/sys/kernel/yama/ptrace_scope || echo "no Yama"
+          # M5d.2's tools image (ADR-0052 §5a) is built from these, offline.
+          git --version
+          readlink -f /usr/bin/python3
       - run: make sandbox-workload-evidence
 
   # D11 hardening (ADR-0053): the exchange worker's syscall filter, the

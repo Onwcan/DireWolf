@@ -169,14 +169,14 @@ pub fn run_grant(admission: &Admission) -> Result<RunGrant, WireGap> {
     })
 }
 
-fn rule(id: &str, at: &SourceLocation) -> Result<(RuleId, RuleSource), WireGap> {
+pub(crate) fn rule(id: &str, at: &SourceLocation) -> Result<(RuleId, RuleSource), WireGap> {
     Ok((
         RuleId::new(id).ok_or(WireGap::Unrepresentable("rule id"))?,
         RuleSource::new(at.to_string()).ok_or(WireGap::Unrepresentable("rule source"))?,
     ))
 }
 
-const fn gate(satisfied: bool) -> GateResult {
+pub(crate) const fn gate(satisfied: bool) -> GateResult {
     if satisfied {
         GateResult::Satisfied
     } else {
@@ -891,5 +891,24 @@ pub(crate) fn v4_from_v3(body: DwkpBody) -> Result<DwkpBody, WireGap> {
         DwkpBody::ToolRefusedV3(p) => DwkpBody::ToolRefusedV4(widen(&p)?),
         DwkpBody::ToolFailedV3(p) => DwkpBody::ToolFailedV4(widen(&p)?),
         _ => return Err(WireGap::Unrepresentable("not a version-3 tool answer")),
+    })
+}
+
+/// A version-4 tool's answer in version 5's shapes (M5d.2): the answer to
+/// any tool but a sandboxed `process.exec`, asked at version 5. Version 5's
+/// members, plans, refusals and failures are version 4's, widened.
+///
+/// # Errors
+///
+/// [`WireGap::Unrepresentable`] for an answer that is not a version-4 tool
+/// response, or does not widen -- a bug.
+pub(crate) fn v5_from_v4(body: DwkpBody) -> Result<DwkpBody, WireGap> {
+    Ok(match body {
+        DwkpBody::ToolResultV4(p) => DwkpBody::ToolResultV5(widen(&p)?),
+        DwkpBody::ToolDeniedV4(p) => DwkpBody::ToolDeniedV5(widen(&p)?),
+        DwkpBody::ToolPreviewedV4(p) => DwkpBody::ToolPreviewedV5(widen(&p)?),
+        DwkpBody::ToolRefusedV4(p) => DwkpBody::ToolRefusedV5(widen(&p)?),
+        DwkpBody::ToolFailedV4(p) => DwkpBody::ToolFailedV5(widen(&p)?),
+        _ => return Err(WireGap::Unrepresentable("not a version-4 tool answer")),
     })
 }

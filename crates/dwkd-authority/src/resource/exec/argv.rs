@@ -603,7 +603,7 @@ fn is_interpreter(name: &str) -> bool {
         })
 }
 
-fn is_runner(name: &str) -> bool {
+pub(super) fn is_runner(name: &str) -> bool {
     RUNNERS.contains(&name)
 }
 

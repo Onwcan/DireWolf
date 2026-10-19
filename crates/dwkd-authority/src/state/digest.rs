@@ -70,6 +70,10 @@ pub(crate) const NET_REQUEST: &str = "direwolf.dwkp.net_http.request.v1";
 /// its idempotency key is bound to.
 pub(crate) const WORKLOAD_REQUEST: &str = "direwolf.workload.request.v1";
 
+/// An image manifest's digest (M5d.2, OD-9): what a run's grants were
+/// resolved against -- every executable's path and pinned SHA-256, in order.
+pub(crate) const IMAGE_MANIFEST: &str = "direwolf.sandbox.image_manifest.v1";
+
 /// Every domain, for the test that they are pairwise distinct.
 #[cfg(test)]
 const ALL_DOMAINS: [&str; 13] = [

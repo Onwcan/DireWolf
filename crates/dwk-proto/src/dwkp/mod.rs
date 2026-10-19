@@ -24,6 +24,7 @@ pub mod messages;
 pub mod netops;
 pub mod procops;
 pub mod registry;
+pub mod sandboxops;
 
 use crate::envelope::{Header, MessageType, decode_header, read_preamble};
 use crate::error::{ErrorCode, ProtocolError, Violation};
@@ -45,6 +46,9 @@ use netops::{
 };
 use procops::{
     CanonicalPreviewResultV3, ToolCallV3, ToolDenialV3, ToolFailureV3, ToolRefusalV3, ToolResultV3,
+};
+use sandboxops::{
+    CanonicalPreviewResultV5, ToolCallV5, ToolDenialV5, ToolFailureV5, ToolRefusalV5, ToolResultV5,
 };
 
 /// A decoded DWKP message body.
@@ -130,6 +134,20 @@ pub enum DwkpBody {
     ToolRefusedV4(ToolRefusalV4),
     /// `direwolf.tool.failed` version 4.
     ToolFailedV4(ToolFailureV4),
+    /// `direwolf.tool.invoke` version 5 (ADR-0052).
+    ToolInvokeV5(ToolCallV5),
+    /// `direwolf.tool.preview` version 5.
+    CanonicalPreviewV5(ToolCallV5),
+    /// `direwolf.tool.result` version 5.
+    ToolResultV5(ToolResultV5),
+    /// `direwolf.tool.denied` version 5.
+    ToolDeniedV5(ToolDenialV5),
+    /// `direwolf.tool.previewed` version 5.
+    ToolPreviewedV5(CanonicalPreviewResultV5),
+    /// `direwolf.tool.refused` version 5.
+    ToolRefusedV5(ToolRefusalV5),
+    /// `direwolf.tool.failed` version 5.
+    ToolFailedV5(ToolFailureV5),
     /// `direwolf.ack`
     Ack(Ack),
     /// `direwolf.protocol.error`
@@ -192,6 +210,13 @@ impl DwkpBody {
             Self::ToolPreviewedV4(_) => (MessageType::Response, "direwolf.tool.previewed", 4),
             Self::ToolRefusedV4(_) => (MessageType::Response, "direwolf.tool.refused", 4),
             Self::ToolFailedV4(_) => (MessageType::Response, "direwolf.tool.failed", 4),
+            Self::ToolInvokeV5(_) => (MessageType::Request, "direwolf.tool.invoke", 5),
+            Self::CanonicalPreviewV5(_) => (MessageType::Request, "direwolf.tool.preview", 5),
+            Self::ToolResultV5(_) => (MessageType::Response, "direwolf.tool.result", 5),
+            Self::ToolDeniedV5(_) => (MessageType::Response, "direwolf.tool.denied", 5),
+            Self::ToolPreviewedV5(_) => (MessageType::Response, "direwolf.tool.previewed", 5),
+            Self::ToolRefusedV5(_) => (MessageType::Response, "direwolf.tool.refused", 5),
+            Self::ToolFailedV5(_) => (MessageType::Response, "direwolf.tool.failed", 5),
             Self::Ack(_) => (MessageType::Response, "direwolf.ack", 1),
             Self::ProtocolError(_) => (MessageType::Response, "direwolf.protocol.error", 1),
         }
@@ -231,6 +256,15 @@ impl DwkpBody {
             ("direwolf.tool.previewed", 4) => Self::ToolPreviewedV4(WireType::decode(payload, cx)?),
             ("direwolf.tool.refused", 4) => Self::ToolRefusedV4(WireType::decode(payload, cx)?),
             ("direwolf.tool.failed", 4) => Self::ToolFailedV4(WireType::decode(payload, cx)?),
+            ("direwolf.tool.invoke", 5) => Self::ToolInvokeV5(WireType::decode(payload, cx)?),
+            ("direwolf.tool.preview", 5) => {
+                Self::CanonicalPreviewV5(WireType::decode(payload, cx)?)
+            }
+            ("direwolf.tool.result", 5) => Self::ToolResultV5(WireType::decode(payload, cx)?),
+            ("direwolf.tool.denied", 5) => Self::ToolDeniedV5(WireType::decode(payload, cx)?),
+            ("direwolf.tool.previewed", 5) => Self::ToolPreviewedV5(WireType::decode(payload, cx)?),
+            ("direwolf.tool.refused", 5) => Self::ToolRefusedV5(WireType::decode(payload, cx)?),
+            ("direwolf.tool.failed", 5) => Self::ToolFailedV5(WireType::decode(payload, cx)?),
             (schema, _) => Self::decode_single_version(schema, payload, cx)?,
         })
     }
@@ -316,6 +350,12 @@ impl DwkpBody {
             Self::ToolPreviewedV4(p) => p.encode(),
             Self::ToolRefusedV4(p) => p.encode(),
             Self::ToolFailedV4(p) => p.encode(),
+            Self::ToolInvokeV5(p) | Self::CanonicalPreviewV5(p) => p.encode(),
+            Self::ToolResultV5(p) => p.encode(),
+            Self::ToolDeniedV5(p) => p.encode(),
+            Self::ToolPreviewedV5(p) => p.encode(),
+            Self::ToolRefusedV5(p) => p.encode(),
+            Self::ToolFailedV5(p) => p.encode(),
             Self::Ack(p) => p.encode(),
             Self::ProtocolError(p) => p.encode(),
         }

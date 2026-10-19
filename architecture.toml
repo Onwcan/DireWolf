@@ -1429,12 +1429,11 @@ paths = [
 exempt_paths = []
 suffixes = [".rs", ".py"]
 patterns = [
-    '^(?!\s*(//|#)).*\b(attach_sandbox|environment_prepare|environment_measure|environment_destroy|environment_reconcile)\b',
-    '^(?!\s*(//|#)).*\bSandboxConfig\b',
+    '^(?!\s*(//|#)).*\b(environment_prepare|environment_measure|environment_destroy|environment_reconcile)\b',
     '^(?!\s*(//|#)).*\b(broker\.environment_[a-z]+|EnvironmentPrepare|EnvironmentDestroy)\b',
     '^(?!\s*(//|#)).*\b(attach_net_evidence|net_exceptions)\b',
     # M5d.1 (ADR-0052 §2): the workload API is in-process too.
-    '^(?!\s*(//|#)).*\b(workload_run|workload_record|WorkloadRequest|broker\.workload_run)\b',
+    '^(?!\s*(//|#)).*\b(workload_run|workload_record|WorkloadRequest|broker\.workload_(run|start|collect))\b',
 ]
 reason = """
 M5a's execution environments are an in-process authority API with no DWKP
@@ -1455,8 +1454,77 @@ until M5d.2 gives sandboxed `process.exec` its own reviewed public route; a
 reference from the server, `serve`, the CLI or the runtime before then would
 be that route arriving without its review.
 
+M5d.2 (ADR-0052 §2a) gives it that route -- `process.exec` at tool version
+5, inside the state layer -- and gives production its environment: the
+operator's file, attached once at start in the one place TX053 names. The
+lifecycle (prepare, measure, destroy, reconcile) and the workload API stay
+in-process: the authority prepares a run's environment itself, from inside
+its own decision, and nothing the server, `serve`, the CLI or the runtime
+names reaches them.
+
 Hygiene, not containment: the DWKP registry has no operation that names an
 environment, which the protocol corpus checks.
+"""
+
+[[text_rules]]
+id = "TX053-the-operator-sandbox-is-attached-in-one-place"
+paths = [
+    "crates/dwkd-authority/src/server",
+    "crates/dwkd-authority/src/main.rs",
+    "crates/direwolf-cli/src",
+    "runtime/src",
+]
+# `serve --sandbox-config`'s one reviewed entry point (ADR-0052 §2a): the
+# operator's file, read through the trusted reader, attached before the
+# socket is bound.
+exempt_paths = ["crates/dwkd-authority/src/server/sandbox.rs"]
+suffixes = [".rs", ".py"]
+patterns = [
+    '^(?!\s*(//|#)).*\battach_sandbox\b',
+    '^(?!\s*(//|#)).*\bSandboxConfig\b',
+    '^(?!\s*(//|#)).*\bsandbox\s*::\s*operator\b',
+]
+reason = """
+An execution environment is the operator's: the runtime client and its
+socket, the image and the probe by digest, the topology and the manifest
+(ADR-0052 §2a). A production authority gets one only from the operator's
+file, read once at start through the trusted reader and attached in exactly
+one place -- `server/sandbox.rs`. Anywhere else in the server, in `serve`,
+the CLI or the runtime, constructing or attaching one would be a second way
+to choose where code runs, which no request may have (OD-1).
+
+Hygiene, not containment.
+"""
+
+[[text_rules]]
+id = "TX054-the-server-seam-is-named-only-by-the-server"
+paths = [
+    "crates/dwkd-authority/src",
+    "crates/dwkd-broker/src",
+    "crates/direwolf-cli/src",
+    "crates/dwk-proto/src",
+]
+# The seam's definition, and the worker it hands the closure to.
+exempt_paths = [
+    "crates/dwkd-authority/src/server/mod.rs",
+    "crates/dwkd-authority/src/server/worker.rs",
+]
+suffixes = [".rs"]
+patterns = [
+    '^(?!\s*//).*\b(serve_authority|Served)\b',
+    '^(?!\s*//).*\.operate\s*\(',
+]
+reason = """
+`serve_authority` serves DWKP for an authority its caller built, and
+`Served::operate` runs that caller's closure on the authority's worker
+(M5d.2, ADR-0052 §17): the evidence's door to the public route, so a test can
+bind a session or reconcile as the operator would while a real client
+speaks DWKP. It is an in-process API with no wire form. Named anywhere else
+in the product -- `serve`, the broker, the CLI, the protocol crate -- it
+would be a second way into the authority beside the socket and its peer
+credentials.
+
+Hygiene, not containment: no DWKP operation reaches it.
 """
 
 [[text_rules]]
@@ -1478,6 +1546,10 @@ patterns = [
     # M5d.1 (ADR-0052 §3): a workload is typed facts -- no user to run as, no
     # variable, no entrypoint, no shell string, no terminal, no privilege.
     '^(?!\s*//).*\b(exec_user|run_as|run_as_user|exec_env|extra_env|env_vars|environment_variables|entrypoint|shell_command|workdir_override|tty|interactive|detach|privileged)\b',
+    # M5d.2 (ADR-0052 §5a): how a workload is launched is one closed word
+    # (`DIRECT`, `HYGIENE`); no launcher, launcher argument or variable of
+    # the obligation's crosses the wire -- they are the probe's constants.
+    '^(?!\s*//).*\b(launcher|launcher_path|launcher_args|launch_args|launch_env|hygiene_env|hygiene_vars|hygiene_variables)\b',
 ]
 reason = """
 An environment is described on the private wire by typed facts -- its id, run,
@@ -2065,6 +2137,11 @@ patterns = [
     # A shell, or a command string for one.
     '^(?!\s*//).*"(/usr)?(/bin/)?(sh|bash|dash|zsh|ksh|busybox)"',
     '^(?!\s*//).*"-c"',
+    # M5d.2 (ADR-0052 §5a): the one launcher is the pinned probe, named by
+    # the profile's constants -- never `env`, and never a variable spelled
+    # as a word of the command line.
+    '^(?!\s*//).*"(/usr)?/bin/env"',
+    '^(?!\s*//).*"[A-Za-z_][A-Za-z0-9_]*=[^"]*"',
 ]
 reason = """
 `workload_plan.rs` is the one place the broker spells a workload's command
@@ -2075,6 +2152,13 @@ The user is the profile's, never root; nothing is added to the environment;
 no terminal, no standard input, no detaching; and no word of the caller's is
 placed before the container's name, where the client still reads options.
 A weakening word here is a stronger workload in the product.
+
+M5d.2 (ADR-0052 §5a): a workload carrying `workspace_exec_hygiene` is started
+through the trusted launcher -- the pinned probe's `launch hygiene`, spelled
+from the profile's constants after the container's name -- which sets the
+obligation's fixed variables itself. No other launcher (`env`) and no
+`NAME=value` word is ever spelled here: the variables are the probe's, not
+the command line's.
 
 Hygiene, not containment: before every run the broker re-judges the
 environment from the runtime's record and proves the executable's bytes, and

@@ -505,7 +505,7 @@ pub(super) fn admit(
     message: &DwkpMessage,
     active: &ActiveAuthority,
     resolved: Option<&Resolutions>,
-    last: bool,
+    (last, image): (bool, Option<&super::workload::ImageBinding>),
 ) -> Result<Pass, AuthorityError> {
     let DwkpBody::AdmitRun(request) = &message.body else {
         return Err(AuthorityError::NotAnAuthorityRequest);
@@ -617,6 +617,11 @@ pub(super) fn admit(
         {
             super::secrets::bind(work, admission.run_id.as_str(), handle, revision)?;
         }
+    }
+    // Admitted with an execution environment configured: bound to the image
+    // its executables were resolved against (OD-9).
+    if let Some(image) = image {
+        super::workload::bind_run_image(work, &admission.run_id, image)?;
     }
     Ok(Pass::Answered(Reply::Done(admission)))
 }
@@ -1232,11 +1237,16 @@ fn executable_fields(terms: &FsTerms) -> Fields {
         }
         let mut entry = vec![("declared", Field::Text(declared.as_str().to_owned()))];
         match answer {
-            Ok((identity, object)) => {
+            Ok((identity, scopes::ExecutableSource::Host(object))) => {
                 entry.push(("outcome", Field::Text("RESOLVED".to_owned())));
                 entry.push(("identity", Field::Text(identity.to_string())));
                 entry.push(("device", Field::Text(object.device().to_string())));
                 entry.push(("inode", Field::Text(object.inode().to_string())));
+            }
+            Ok((identity, scopes::ExecutableSource::Image)) => {
+                entry.push(("outcome", Field::Text("RESOLVED".to_owned())));
+                entry.push(("identity", Field::Text(identity.to_string())));
+                entry.push(("source", Field::Text("IMAGE_MANIFEST".to_owned())));
             }
             Err(why) => entry.push(("outcome", Field::Text(why.class().to_owned()))),
         }

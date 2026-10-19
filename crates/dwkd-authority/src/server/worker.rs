@@ -19,6 +19,19 @@
 //! most one request in flight, so there is no unbounded writer storm and no
 //! unbounded queue.
 //!
+//! # A running sandboxed launch is parked (M5d.2, ADR-0052 §8)
+//!
+//! A sandboxed `process.exec` may run for ten minutes. Its start is decided,
+//! recorded and handed to the broker like any request; then, rather than
+//! wait, the worker **parks** it ([`Dispatched::Parked`]) and serves the next
+//! job, collecting each parked launch when it is due — a short broker
+//! exchange — and answering its connection once its outcome is durable. The
+//! connection that asked waits for that answer, as for any other; every
+//! other connection is served meanwhile. At most [`MAX_PARKED`] are held, as
+//! many as the broker supervises; a start beyond that is answered by the
+//! broker's refusal before anything runs. A parked launch the server drops — it stopped — is
+//! `UNKNOWN` at the authority's next start, and its environment destroyed.
+//!
 //! # What the worker does not do
 //!
 //! It interprets nothing: a decoded request goes to [`Authority::dispatch`]
@@ -53,8 +66,8 @@ use std::time::{Duration, Instant};
 use dwk_proto::dwkp::{DwkpBody, DwkpMessage};
 
 use crate::state::{
-    AuthenticatedSubject, Authority, AuthorityError, CallerContext, PoisonReason, TransportClass,
-    TransportEvent,
+    AuthenticatedSubject, Authority, AuthorityError, CallerContext, Dispatched, MAX_PARKED, Parked,
+    PoisonReason, TransportClass, TransportEvent,
 };
 
 /// Most jobs the worker's queue holds before a sender waits.
@@ -69,6 +82,9 @@ pub(crate) const AUDIT_PER_WINDOW: u32 = 32;
 /// How often an idle worker checks whether a suppression count is due.
 const TICK: Duration = Duration::from_secs(1);
 
+/// A parked launch, and the connection waiting for its answer.
+type Waiting = (Box<Parked>, SyncSender<Result<DwkpBody, Failure>>);
+
 /// One unit of work.
 enum Job {
     Connect {
@@ -81,6 +97,10 @@ enum Job {
         reply: SyncSender<Result<DwkpBody, Failure>>,
     },
     Audit(TransportEvent),
+    /// In-process work on the authority, between requests: the evidence
+    /// harness's own operations ([`super::Served::operate`]). No peer sends
+    /// one.
+    Operate(Box<dyn FnOnce(&mut Authority) + Send>),
 }
 
 /// Why the authority gave no answer.
@@ -111,6 +131,12 @@ impl Shutdown {
         self.reason.lock().ok().and_then(|slot| slot.clone())
     }
 
+    /// Ask the server to stop, with no store poisoned: the evidence
+    /// harness's own stop ([`super::Served::stop`]).
+    pub(crate) fn request_stop(&self) {
+        self.stopping.store(true, Ordering::SeqCst);
+    }
+
     fn stop(&self, reason: PoisonReason) {
         if let Ok(mut slot) = self.reason.lock()
             && slot.is_none()
@@ -133,6 +159,7 @@ impl fmt::Debug for Job {
             Self::Connect { .. } => "Connect",
             Self::Dispatch { .. } => "Dispatch",
             Self::Audit(_) => "Audit",
+            Self::Operate(_) => "Operate",
         })
     }
 }
@@ -161,6 +188,21 @@ impl WorkerHandle {
             })
             .map_err(|_| Failure::Stopped)?;
         answer.recv().unwrap_or(Err(Failure::Stopped))
+    }
+
+    /// Run `work` on the authority between requests, and return what it
+    /// returned. `None` once the worker has stopped.
+    pub(crate) fn operate<R: Send + 'static>(
+        &self,
+        work: impl FnOnce(&mut Authority) -> R + Send + 'static,
+    ) -> Option<R> {
+        let (reply, answer) = sync_channel(1);
+        self.jobs
+            .send(Job::Operate(Box::new(move |authority| {
+                let _ = reply.send(work(authority));
+            })))
+            .ok()?;
+        answer.recv().ok()
     }
 
     /// Record a transport event, subject to the rate limit. Does not wait for
@@ -292,8 +334,15 @@ struct Worker {
 
 impl Worker {
     fn run(&mut self, queue: &Receiver<Job>) {
+        let mut parked: Vec<Waiting> = Vec::new();
         loop {
-            match queue.recv_timeout(TICK) {
+            // Wake for the next parked launch that is due, or the tick.
+            let wait = parked
+                .iter()
+                .map(|(launch, _)| launch.due().saturating_duration_since(Instant::now()))
+                .min()
+                .map_or(TICK, |due| due.min(TICK));
+            match queue.recv_timeout(wait) {
                 Ok(Job::Connect { subject, reply }) => {
                     let _ = reply.send(self.authority.connect(subject));
                 }
@@ -301,11 +350,24 @@ impl Worker {
                     caller,
                     message,
                     reply,
-                }) => {
-                    let answer = self.authority.dispatch(&caller, &message);
-                    let answer = answer.map_err(|error| self.failure(&error));
-                    let _ = reply.send(answer);
-                }
+                }) => match self.authority.dispatch_parkable(&caller, &message) {
+                    Ok(Dispatched::Answer(body)) => {
+                        let _ = reply.send(Ok(body));
+                    }
+                    Ok(Dispatched::Parked(launch)) if parked.len() < MAX_PARKED => {
+                        parked.push((launch, reply));
+                    }
+                    // Past the bound -- which the broker's own table makes
+                    // unreachable -- the launch is waited for here, as
+                    // `Authority::dispatch` would.
+                    Ok(Dispatched::Parked(launch)) => {
+                        let answer = self.wait(launch).map_err(|error| self.failure(&error));
+                        let _ = reply.send(answer);
+                    }
+                    Err(error) => {
+                        let _ = reply.send(Err(self.failure(&error)));
+                    }
+                },
                 Ok(Job::Audit(event)) => {
                     let admission = self.limiter.admit(&event, Instant::now());
                     if let Some(summary) = admission.summary {
@@ -315,9 +377,11 @@ impl Worker {
                         self.record(&event);
                     }
                 }
+                Ok(Job::Operate(work)) => work(&mut self.authority),
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => return,
             }
+            self.collect(&mut parked);
             // A window that ended is counted whether the worker is idle or
             // busy with other classes.
             for summary in self.limiter.due(Instant::now()) {
@@ -326,6 +390,41 @@ impl Worker {
             if self.shutdown.stopping() {
                 return;
             }
+        }
+    }
+
+    /// Collect every parked launch that is due; answer each that ended.
+    fn collect(&mut self, parked: &mut Vec<Waiting>) {
+        let now = Instant::now();
+        let mut index = 0;
+        while index < parked.len() {
+            let Some((launch, _)) = parked.get_mut(index) else {
+                break;
+            };
+            if launch.due() > now {
+                index += 1;
+                continue;
+            }
+            let answer = match self.authority.resume(launch) {
+                Ok(None) => {
+                    index += 1;
+                    continue;
+                }
+                Ok(Some(body)) => Ok(body),
+                Err(error) => Err(self.failure(&error)),
+            };
+            let (_, reply) = parked.swap_remove(index);
+            let _ = reply.send(answer);
+        }
+    }
+
+    /// Wait for one launch, collecting it until it ends.
+    fn wait(&mut self, mut launch: Box<Parked>) -> Result<DwkpBody, AuthorityError> {
+        loop {
+            if let Some(body) = self.authority.resume(&mut launch)? {
+                return Ok(body);
+            }
+            std::thread::sleep(launch.due().saturating_duration_since(Instant::now()));
         }
     }
 

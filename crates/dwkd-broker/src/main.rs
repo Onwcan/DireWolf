@@ -99,12 +99,16 @@
 //! roots with a test authority, loudly, and only beside
 //! `--allow-evidence-egress`'s fixture resolver; production has none.
 //!
-//! [ADR-0052] (M5d, in progress) runs one workload at a time in a `READY`
-//! environment (`sandbox`, `workload_run`): the recorded container re-judged
-//! from the runtime's record, the executable's bytes proved in the image,
-//! exactly one command line run as the environment's user in `/workspace`
-//! within its bounds, and then every other process of the environment ended
-//! by its init, the trusted probe. And before it serves, the broker refuses
+//! [ADR-0052] (M5d, in progress) runs one workload at a time in each `READY`
+//! environment (`sandbox`, `workload_start`): the recorded container
+//! re-judged from the runtime's record and the executable's bytes proved in
+//! the image before the start is answered; then, on the supervisor's own
+//! thread, exactly one command line run as the environment's user in
+//! `/workspace` within its bounds, and every other process of the
+//! environment ended by its init, the trusted probe. A short
+//! `workload_collect` reports it running or how it ended (M5d.2): no
+//! exchange holds the broker's one connection for a workload's wall clock.
+//! And before it serves, the broker refuses
 //! an identity an environment has (its own uid or the authority's being the
 //! workload's or the relay's), and a deployment where a process of its uid
 //! could trace a process it starts before that process hardens itself
@@ -280,7 +284,10 @@ fn serve(config: &config::ServeConfig) -> ExitCode {
         processes.helper().to_path_buf(),
         config.authority_uid,
         files,
-        config.evidence_topology_permitted,
+        (
+            config.evidence_topology_permitted,
+            processes.generation().clone(),
+        ),
         proxies,
     );
     listener::serve(
@@ -579,9 +586,9 @@ fn help() -> String {
          per authorised hop to the pinned addresses, re-judged, with TLS\n\
          verification always on; no redirect followed, nothing re-resolved,\n\
          pooled or proxied; a credential composed into its one request. M5d\n\
-         (in progress) - one authorised workload at a time in a READY\n\
-         oci-strict environment, as uid 10001, bounded, every process it left\n\
-         then ended; no daemon with an environment's uid; no traceable start-up\n\
+         (in progress) - one authorised workload at a time in each READY\n\
+         oci-strict environment, started then collected, as uid 10001,\n\
+         bounded, every process it left then ended; no daemon with an environment's uid; no traceable start-up\n\
          window. Linux only.\n",
         env!("CARGO_PKG_VERSION")
     )

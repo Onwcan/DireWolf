@@ -86,6 +86,36 @@ pub const PROBE_REAP: &str = "reap";
 /// The longest `reap` waits for the environment to hold nothing but init, in
 /// milliseconds.
 pub const REAP_MILLIS: u64 = 5_000;
+/// The probe's argument for launching one workload (M5d.2, ADR-0052
+/// §5a): the trusted in-image launcher. `launch <profile> <path> <args...>`
+/// sets the named profile's variables over the environment's own and
+/// executes `<path>` with exactly `<args...>`, replacing itself: the workload
+/// is the process the runtime's `exec` started, and nothing else.
+pub const PROBE_LAUNCH: &str = "launch";
+/// The one launch profile: `workspace_exec_hygiene` (SANDBOX.md §4a).
+pub const LAUNCH_HYGIENE: &str = "hygiene";
+/// `workspace_exec_hygiene`'s variables, set by the launcher over the
+/// environment's own for every launch of [`LAUNCH_HYGIENE`] (SANDBOX.md §4a;
+/// ADR-0052 §5a). Each neutralises one tool's configuration from outside the
+/// invocation: git's global and system files and any injected through the
+/// environment, Python's user site and the implicit script or working
+/// directory on `sys.path`, Cargo's network, npm's lifecycle scripts. None of
+/// them reaches a repository's own `.git/config` or hooks, a `conftest.py`,
+/// a `build.rs` or a script the invocation names: those are workspace
+/// content, and the environment contains them.
+pub const HYGIENE_ENVIRONMENT: &[(&str, &str)] = &[
+    ("GIT_CONFIG_GLOBAL", "/dev/null"),
+    ("GIT_CONFIG_NOSYSTEM", "1"),
+    ("GIT_CONFIG_COUNT", "0"),
+    ("PYTHONNOUSERSITE", "1"),
+    ("PYTHONSAFEPATH", "1"),
+    ("CARGO_NET_OFFLINE", "1"),
+    ("npm_config_ignore_scripts", "true"),
+];
+/// The launcher's exit status when it executes nothing: a refused profile,
+/// a relative path, or an `exec` the kernel refused. The runtime's client
+/// uses it too, so it is never believed as the program's own (ADR-0052 §5).
+pub const LAUNCH_FAILED: u8 = 127;
 /// The probe's argument for a measurement.
 pub const PROBE_MEASURE: &str = "measure";
 /// The probe's argument for the child its ptrace canary attaches to.

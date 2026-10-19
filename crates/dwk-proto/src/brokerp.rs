@@ -120,7 +120,7 @@ use sandbox::{
 /// in a `READY` environment. The daemons ship together, so 8 is the only
 /// version either accepts: an older peer is refused by its hello, never
 /// half-understood.
-pub const PROTOCOL: u16 = 8;
+pub const PROTOCOL: u16 = 9;
 
 /// The largest authorisation body the broker reads: one DWKP frame, because an
 /// `fs.write` carries its content and an `fs.patch` its edits. Read from the
@@ -348,7 +348,7 @@ pub const PROCESS_BASE_ENVIRONMENT: &[(&str, &str)] = &[
 
 wire_int! {
     /// The private protocol's version.
-    ProtocolVersion(u16), min = 8, max = 8
+    ProtocolVersion(u16), min = 9, max = 9
 }
 
 const _: () = assert!(ProtocolVersion::MIN == PROTOCOL && ProtocolVersion::MAX == PROTOCOL);
@@ -581,9 +581,12 @@ wire_enum! {
         /// Perform one `net.http` hop that carries a credential: the
         /// credential's pipe is the one descriptor (ADR-0050 §8).
         HttpCredentialExchange = "broker.http_credential_exchange",
-        /// Run one workload in a `READY` environment and end every other
-        /// process it left there (ADR-0052 §5).
-        WorkloadRun = "broker.workload_run",
+        /// Start one workload in a `READY` environment, supervised: it is
+        /// run, bounded, and every other process it left there ended
+        /// (ADR-0052 §§5, 8).
+        WorkloadStart = "broker.workload_start",
+        /// Collect a started workload: still running, or how it ended.
+        WorkloadCollect = "broker.workload_collect",
         /// The broker's outcome for an authorisation.
         Outcome = "broker.outcome",
     }
@@ -605,7 +608,8 @@ impl PrivateKind {
     /// | `process_start` | the executable, open for reading; the working directory, open for reading |
     /// | `process_status`, `process_kill` | none: the process is the broker's own child, named by its handle |
     /// | `secret_process_start` | the executable; the working directory; the secret pipe |
-    /// | `environment_*`, `workload_run` | the container runtime's executable; the working directory it runs in |
+    /// | `environment_*`, `workload_start` | the container runtime's executable; the working directory it runs in |
+    /// | `workload_collect` | none: the workload is the broker's own, named by its invocation and generation |
     /// | `http_resolve`, `http_exchange` | none: a name to resolve, a hop to perform |
     /// | `http_credential_exchange` | the credential: a pipe's read end, at end of file after the value |
     ///
@@ -613,9 +617,11 @@ impl PrivateKind {
     #[must_use]
     pub const fn descriptors(self) -> Option<u8> {
         match self {
-            Self::ProcessStatus | Self::ProcessKill | Self::HttpResolve | Self::HttpExchange => {
-                Some(0)
-            }
+            Self::ProcessStatus
+            | Self::ProcessKill
+            | Self::HttpResolve
+            | Self::HttpExchange
+            | Self::WorkloadCollect => Some(0),
             Self::FsRead
             | Self::FsStat
             | Self::FsList
@@ -631,7 +637,7 @@ impl PrivateKind {
             | Self::EnvironmentMeasure
             | Self::EnvironmentDestroy
             | Self::EnvironmentList
-            | Self::WorkloadRun => Some(2),
+            | Self::WorkloadStart => Some(2),
             Self::SecretProcessStart => Some(3),
             Self::Hello | Self::Outcome => None,
         }
@@ -645,13 +651,17 @@ impl PrivateKind {
     #[must_use]
     pub const fn deadline_seconds(self) -> u64 {
         match self {
-            Self::EnvironmentPrepare | Self::EnvironmentMeasure => ENVIRONMENT_DEADLINE_SECONDS,
+            // A workload's start judges and proves, and answers before the
+            // workload runs: an environment operation's bound. A collection
+            // only reads, within the ordinary bound.
+            Self::EnvironmentPrepare | Self::EnvironmentMeasure | Self::WorkloadStart => {
+                ENVIRONMENT_DEADLINE_SECONDS
+            }
             Self::EnvironmentDestroy | Self::EnvironmentList => ENVIRONMENT_QUERY_DEADLINE_SECONDS,
             Self::HttpResolve => http::RESOLVE_EXCHANGE_DEADLINE_SECONDS,
             Self::HttpExchange | Self::HttpCredentialExchange => {
                 http::HTTP_EXCHANGE_DEADLINE_SECONDS
             }
-            Self::WorkloadRun => workload::WORKLOAD_DEADLINE_SECONDS,
             _ => EXCHANGE_DEADLINE_SECONDS,
         }
     }
@@ -796,6 +806,13 @@ wire_enum! {
         /// invariant the record shows does not pass, or its trusted probe is
         /// not the pinned one. Nothing was run (ADR-0052 §5).
         EnvironmentNotClean = "ENVIRONMENT_NOT_CLEAN",
+        /// The broker supervises as many workloads as it may, started and
+        /// not yet collected. Nothing was started (ADR-0052 §8).
+        WorkloadTableFull = "WORKLOAD_TABLE_FULL",
+        /// The broker already holds a workload of this invocation, or one of
+        /// this environment that has not ended: one workload at a time per
+        /// environment (OD-5). Nothing was started.
+        WorkloadInUse = "WORKLOAD_IN_USE",
     }
 }
 
@@ -1836,14 +1853,16 @@ wire_struct! {
         optional http_resolve: http::HttpResolveDone,
         /// A `net.http` exchange, with or without a credential.
         optional http_exchange: http::HttpExchangeDone,
-        /// A workload's run.
-        optional workload_run: workload::WorkloadRunDone,
+        /// A workload's start.
+        optional workload_start: workload::WorkloadStartDone,
+        /// A workload's collection.
+        optional workload_collect: workload::WorkloadCollectDone,
     }
     exactly_one(
         fs_read, fs_stat, fs_list, fs_search, fs_write, fs_patch, fs_move, fs_delete, fs_reclaim,
         process_start, process_status, process_kill, secret_process_start,
         environment_prepare, environment_measure, environment_destroy, environment_list,
-        http_resolve, http_exchange, workload_run
+        http_resolve, http_exchange, workload_start, workload_collect
     )
 }
 
@@ -2053,8 +2072,10 @@ pub enum Authorisation {
     /// `broker.http_exchange` or `broker.http_credential_exchange`: the
     /// message's own `kind` says which.
     HttpExchange(http::HttpExchangeAuthorisation),
-    /// `broker.workload_run`.
-    WorkloadRun(workload::WorkloadRunAuthorisation),
+    /// `broker.workload_start`.
+    WorkloadStart(workload::WorkloadStartAuthorisation),
+    /// `broker.workload_collect`.
+    WorkloadCollect(workload::WorkloadCollectAuthorisation),
 }
 
 impl Authorisation {
@@ -2136,8 +2157,11 @@ impl Authorisation {
             PrivateKind::HttpExchange | PrivateKind::HttpCredentialExchange => {
                 Self::HttpExchange(http::HttpExchangeAuthorisation::decode(value, cx)?)
             }
-            PrivateKind::WorkloadRun => {
-                Self::WorkloadRun(workload::WorkloadRunAuthorisation::decode(value, cx)?)
+            PrivateKind::WorkloadStart => {
+                Self::WorkloadStart(workload::WorkloadStartAuthorisation::decode(value, cx)?)
+            }
+            PrivateKind::WorkloadCollect => {
+                Self::WorkloadCollect(workload::WorkloadCollectAuthorisation::decode(value, cx)?)
             }
             PrivateKind::Hello | PrivateKind::Outcome => {
                 return Err(ProtocolError::schema(
@@ -2174,7 +2198,8 @@ impl Authorisation {
             Self::EnvironmentList(_) => PrivateKind::EnvironmentList,
             Self::HttpResolve(_) => PrivateKind::HttpResolve,
             Self::HttpExchange(a) => a.kind,
-            Self::WorkloadRun(_) => PrivateKind::WorkloadRun,
+            Self::WorkloadStart(_) => PrivateKind::WorkloadStart,
+            Self::WorkloadCollect(_) => PrivateKind::WorkloadCollect,
         }
     }
 
@@ -2201,7 +2226,8 @@ impl Authorisation {
             Self::EnvironmentList(a) => &a.channel,
             Self::HttpResolve(a) => &a.channel,
             Self::HttpExchange(a) => &a.channel,
-            Self::WorkloadRun(a) => &a.channel,
+            Self::WorkloadStart(a) => &a.channel,
+            Self::WorkloadCollect(a) => &a.channel,
         }
     }
 
@@ -2228,7 +2254,8 @@ impl Authorisation {
             Self::EnvironmentList(a) => &a.invocation_id,
             Self::HttpResolve(a) => &a.invocation_id,
             Self::HttpExchange(a) => &a.invocation_id,
-            Self::WorkloadRun(a) => &a.invocation_id,
+            Self::WorkloadStart(a) => &a.invocation_id,
+            Self::WorkloadCollect(a) => &a.invocation_id,
         }
     }
 
@@ -2255,7 +2282,8 @@ impl Authorisation {
             Self::EnvironmentList(a) => a.descriptors.get(),
             Self::HttpResolve(a) => a.descriptors.get(),
             Self::HttpExchange(a) => a.descriptors.get(),
-            Self::WorkloadRun(a) => a.descriptors.get(),
+            Self::WorkloadStart(a) => a.descriptors.get(),
+            Self::WorkloadCollect(a) => a.descriptors.get(),
         }
     }
 
@@ -2341,7 +2369,7 @@ impl Authorisation {
                 }
             }
             Self::HttpExchange(exchange) => http::check_exchange(exchange)?,
-            Self::WorkloadRun(run) => workload::check_run(run)?,
+            Self::WorkloadStart(run) => workload::check_start(run)?,
             _ => {}
         }
         Ok(())
@@ -2374,7 +2402,8 @@ impl Authorisation {
             Self::EnvironmentList(a) => encode_frame(a),
             Self::HttpResolve(a) => encode_frame(a),
             Self::HttpExchange(a) => encode_frame(a),
-            Self::WorkloadRun(a) => encode_frame(a),
+            Self::WorkloadStart(a) => encode_frame(a),
+            Self::WorkloadCollect(a) => encode_frame(a),
         }
     }
 }
@@ -3159,15 +3188,25 @@ impl BrokerDone {
             environment_list: None,
             http_resolve: None,
             http_exchange: None,
-            workload_run: None,
+            workload_start: None,
+            workload_collect: None,
         }
     }
 
-    /// A workload's run (M5d, ADR-0052).
+    /// A workload's start (M5d.2, ADR-0052 §8).
     #[must_use]
-    pub fn workload_run(done: workload::WorkloadRunDone) -> Self {
+    pub fn workload_start(done: workload::WorkloadStartDone) -> Self {
         Self {
-            workload_run: Some(done),
+            workload_start: Some(done),
+            ..Self::empty()
+        }
+    }
+
+    /// A workload's collection (M5d.2, ADR-0052 §8).
+    #[must_use]
+    pub fn workload_collect(done: workload::WorkloadCollectDone) -> Self {
+        Self {
+            workload_collect: Some(done),
             ..Self::empty()
         }
     }
@@ -3377,8 +3416,10 @@ impl BrokerDone {
             // Either exchange kind: the authority checks it against what it
             // sent.
             PrivateKind::HttpExchange
-        } else if self.workload_run.is_some() {
-            PrivateKind::WorkloadRun
+        } else if self.workload_start.is_some() {
+            PrivateKind::WorkloadStart
+        } else if self.workload_collect.is_some() {
+            PrivateKind::WorkloadCollect
         } else {
             return None;
         })
