@@ -169,18 +169,24 @@ fn a_network_call_belongs_to_version_four_only() {
     // Version 4 still carries the eleven earlier tools.
     let exec = r#"{"process_exec":{"executable":"/usr/bin/git","args":["status"]}}"#;
     assert!(dwkp::decode_body(request(4, KEY, exec).as_bytes()).is_ok());
-    // Version 5 (M5d.2) carries it on, in version 4's shape; a version this
-    // build does not know names the range it does.
+    // Versions 5 (M5d.2) and 6 (M5d.3) carry it on, in version 4's shape; a
+    // version this build does not know names the range it does.
     assert!(matches!(
         dwkp::decode_body(request(5, KEY, call).as_bytes())
             .unwrap()
             .body,
         DwkpBody::ToolInvokeV5(_)
     ));
-    let v6 = request(6, KEY, call);
-    let err = dwkp::decode_body(v6.as_bytes()).unwrap_err();
+    assert!(matches!(
+        dwkp::decode_body(request(6, KEY, call).as_bytes())
+            .unwrap()
+            .body,
+        DwkpBody::ToolInvokeV6(_)
+    ));
+    let v7 = request(7, KEY, call);
+    let err = dwkp::decode_body(v7.as_bytes()).unwrap_err();
     assert_eq!(err.code, ErrorCode::VersionUnsupported);
-    assert_eq!(err.supported.map(|r| (r.min, r.max)), Some((1, 5)));
+    assert_eq!(err.supported.map(|r| (r.min, r.max)), Some((1, 6)));
 }
 
 #[test]

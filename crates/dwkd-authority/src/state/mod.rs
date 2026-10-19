@@ -1760,7 +1760,7 @@ impl Authority {
         }
     }
 
-    /// The typed tool messages of versions 3 to 5; anything else is not an
+    /// The typed tool messages of versions 3 to 6; anything else is not an
     /// authority request.
     fn dispatch_typed(
         &mut self,
@@ -1774,6 +1774,8 @@ impl Authority {
             DwkpBody::CanonicalPreviewV4(call) => self.dispatch_v4(caller, message, call, false),
             DwkpBody::ToolInvokeV5(call) => self.dispatch_v5(caller, message, call, true),
             DwkpBody::CanonicalPreviewV5(call) => self.dispatch_v5(caller, message, call, false),
+            DwkpBody::ToolInvokeV6(call) => self.dispatch_v6(caller, message, call, true),
+            DwkpBody::CanonicalPreviewV6(call) => self.dispatch_v6(caller, message, call, false),
             _ => Err(AuthorityError::NotAnAuthorityRequest),
         }
     }

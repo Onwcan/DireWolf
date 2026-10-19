@@ -117,10 +117,12 @@ use sandbox::{
 /// grant on a preparation, every container's role in a listing, and the
 /// proxy's counters on a measurement and a destruction; version 7 (ADR-0050)
 /// `net.http`'s resolution and exchange; version 8 (ADR-0052) a workload run
-/// in a `READY` environment. The daemons ship together, so 8 is the only
-/// version either accepts: an older peer is refused by its hello, never
+/// in a `READY` environment; version 9 (ADR-0052, M5d.2) its start and its
+/// collection; version 10 (M5d.3) a workload that receives one secret
+/// (`broker.workload_secret_start`). The daemons ship together, so 10 is the
+/// only version either accepts: an older peer is refused by its hello, never
 /// half-understood.
-pub const PROTOCOL: u16 = 9;
+pub const PROTOCOL: u16 = 10;
 
 /// The largest authorisation body the broker reads: one DWKP frame, because an
 /// `fs.write` carries its content and an `fs.patch` its edits. Read from the
@@ -348,7 +350,7 @@ pub const PROCESS_BASE_ENVIRONMENT: &[(&str, &str)] = &[
 
 wire_int! {
     /// The private protocol's version.
-    ProtocolVersion(u16), min = 9, max = 9
+    ProtocolVersion(u16), min = 10, max = 10
 }
 
 const _: () = assert!(ProtocolVersion::MIN == PROTOCOL && ProtocolVersion::MAX == PROTOCOL);
@@ -585,6 +587,11 @@ wire_enum! {
         /// run, bounded, and every other process it left there ended
         /// (ADR-0052 §§5, 8).
         WorkloadStart = "broker.workload_start",
+        /// Start one workload that receives one secret (M5d.3, ADR-0052 §7):
+        /// a workload's start, plus the secret's pipe as the last descriptor,
+        /// which the broker reads once and forwards, framed, to the trusted
+        /// launcher in the environment.
+        WorkloadSecretStart = "broker.workload_secret_start",
         /// Collect a started workload: still running, or how it ended.
         WorkloadCollect = "broker.workload_collect",
         /// The broker's outcome for an authorisation.
@@ -609,6 +616,7 @@ impl PrivateKind {
     /// | `process_status`, `process_kill` | none: the process is the broker's own child, named by its handle |
     /// | `secret_process_start` | the executable; the working directory; the secret pipe |
     /// | `environment_*`, `workload_start` | the container runtime's executable; the working directory it runs in |
+    /// | `workload_secret_start` | the container runtime's executable; the working directory; the secret pipe |
     /// | `workload_collect` | none: the workload is the broker's own, named by its invocation and generation |
     /// | `http_resolve`, `http_exchange` | none: a name to resolve, a hop to perform |
     /// | `http_credential_exchange` | the credential: a pipe's read end, at end of file after the value |
@@ -638,7 +646,7 @@ impl PrivateKind {
             | Self::EnvironmentDestroy
             | Self::EnvironmentList
             | Self::WorkloadStart => Some(2),
-            Self::SecretProcessStart => Some(3),
+            Self::SecretProcessStart | Self::WorkloadSecretStart => Some(3),
             Self::Hello | Self::Outcome => None,
         }
     }
@@ -654,9 +662,10 @@ impl PrivateKind {
             // A workload's start judges and proves, and answers before the
             // workload runs: an environment operation's bound. A collection
             // only reads, within the ordinary bound.
-            Self::EnvironmentPrepare | Self::EnvironmentMeasure | Self::WorkloadStart => {
-                ENVIRONMENT_DEADLINE_SECONDS
-            }
+            Self::EnvironmentPrepare
+            | Self::EnvironmentMeasure
+            | Self::WorkloadStart
+            | Self::WorkloadSecretStart => ENVIRONMENT_DEADLINE_SECONDS,
             Self::EnvironmentDestroy | Self::EnvironmentList => ENVIRONMENT_QUERY_DEADLINE_SECONDS,
             Self::HttpResolve => http::RESOLVE_EXCHANGE_DEADLINE_SECONDS,
             Self::HttpExchange | Self::HttpCredentialExchange => {
@@ -1855,6 +1864,8 @@ wire_struct! {
         optional http_exchange: http::HttpExchangeDone,
         /// A workload's start.
         optional workload_start: workload::WorkloadStartDone,
+        /// A secret-bearing workload's start (M5d.3): the same answer.
+        optional workload_secret_start: workload::WorkloadStartDone,
         /// A workload's collection.
         optional workload_collect: workload::WorkloadCollectDone,
     }
@@ -1862,7 +1873,7 @@ wire_struct! {
         fs_read, fs_stat, fs_list, fs_search, fs_write, fs_patch, fs_move, fs_delete, fs_reclaim,
         process_start, process_status, process_kill, secret_process_start,
         environment_prepare, environment_measure, environment_destroy, environment_list,
-        http_resolve, http_exchange, workload_start, workload_collect
+        http_resolve, http_exchange, workload_start, workload_secret_start, workload_collect
     )
 }
 
@@ -2074,6 +2085,8 @@ pub enum Authorisation {
     HttpExchange(http::HttpExchangeAuthorisation),
     /// `broker.workload_start`.
     WorkloadStart(workload::WorkloadStartAuthorisation),
+    /// `broker.workload_secret_start` (M5d.3).
+    WorkloadSecretStart(workload::WorkloadSecretStartAuthorisation),
     /// `broker.workload_collect`.
     WorkloadCollect(workload::WorkloadCollectAuthorisation),
 }
@@ -2160,6 +2173,9 @@ impl Authorisation {
             PrivateKind::WorkloadStart => {
                 Self::WorkloadStart(workload::WorkloadStartAuthorisation::decode(value, cx)?)
             }
+            PrivateKind::WorkloadSecretStart => Self::WorkloadSecretStart(
+                workload::WorkloadSecretStartAuthorisation::decode(value, cx)?,
+            ),
             PrivateKind::WorkloadCollect => {
                 Self::WorkloadCollect(workload::WorkloadCollectAuthorisation::decode(value, cx)?)
             }
@@ -2199,6 +2215,7 @@ impl Authorisation {
             Self::HttpResolve(_) => PrivateKind::HttpResolve,
             Self::HttpExchange(a) => a.kind,
             Self::WorkloadStart(_) => PrivateKind::WorkloadStart,
+            Self::WorkloadSecretStart(_) => PrivateKind::WorkloadSecretStart,
             Self::WorkloadCollect(_) => PrivateKind::WorkloadCollect,
         }
     }
@@ -2227,6 +2244,7 @@ impl Authorisation {
             Self::HttpResolve(a) => &a.channel,
             Self::HttpExchange(a) => &a.channel,
             Self::WorkloadStart(a) => &a.channel,
+            Self::WorkloadSecretStart(a) => &a.channel,
             Self::WorkloadCollect(a) => &a.channel,
         }
     }
@@ -2255,6 +2273,7 @@ impl Authorisation {
             Self::HttpResolve(a) => &a.invocation_id,
             Self::HttpExchange(a) => &a.invocation_id,
             Self::WorkloadStart(a) => &a.invocation_id,
+            Self::WorkloadSecretStart(a) => &a.invocation_id,
             Self::WorkloadCollect(a) => &a.invocation_id,
         }
     }
@@ -2283,6 +2302,7 @@ impl Authorisation {
             Self::HttpResolve(a) => a.descriptors.get(),
             Self::HttpExchange(a) => a.descriptors.get(),
             Self::WorkloadStart(a) => a.descriptors.get(),
+            Self::WorkloadSecretStart(a) => a.descriptors.get(),
             Self::WorkloadCollect(a) => a.descriptors.get(),
         }
     }
@@ -2370,6 +2390,7 @@ impl Authorisation {
             }
             Self::HttpExchange(exchange) => http::check_exchange(exchange)?,
             Self::WorkloadStart(run) => workload::check_start(run)?,
+            Self::WorkloadSecretStart(run) => workload::check_secret_start(run)?,
             _ => {}
         }
         Ok(())
@@ -2403,6 +2424,7 @@ impl Authorisation {
             Self::HttpResolve(a) => encode_frame(a),
             Self::HttpExchange(a) => encode_frame(a),
             Self::WorkloadStart(a) => encode_frame(a),
+            Self::WorkloadSecretStart(a) => encode_frame(a),
             Self::WorkloadCollect(a) => encode_frame(a),
         }
     }
@@ -3189,7 +3211,17 @@ impl BrokerDone {
             http_resolve: None,
             http_exchange: None,
             workload_start: None,
+            workload_secret_start: None,
             workload_collect: None,
+        }
+    }
+
+    /// A secret-bearing workload's start (M5d.3, ADR-0052 §7).
+    #[must_use]
+    pub fn workload_secret_start(done: workload::WorkloadStartDone) -> Self {
+        Self {
+            workload_secret_start: Some(done),
+            ..Self::empty()
         }
     }
 
@@ -3418,6 +3450,8 @@ impl BrokerDone {
             PrivateKind::HttpExchange
         } else if self.workload_start.is_some() {
             PrivateKind::WorkloadStart
+        } else if self.workload_secret_start.is_some() {
+            PrivateKind::WorkloadSecretStart
         } else if self.workload_collect.is_some() {
             PrivateKind::WorkloadCollect
         } else {

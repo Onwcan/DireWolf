@@ -97,6 +97,7 @@ enum Sent {
         credential: bool,
     },
     WorkloadStart,
+    WorkloadSecretStart,
     WorkloadCollect {
         stream_limit: u32,
     },
@@ -200,7 +201,8 @@ fn authorise(common: Common, operation: Operation) -> Result<Prepared, BrokerFai
         | Operation::EnvironmentMeasure { .. }
         | Operation::EnvironmentDestroy { .. }
         | Operation::EnvironmentList { .. }
-        | Operation::WorkloadStart { .. } => environment(common, operation),
+        | Operation::WorkloadStart { .. }
+        | Operation::WorkloadSecretStart { .. } => environment(common, operation),
         // A workload's collection (M5d.2) carries nothing: it is named by the
         // invocation and the generation.
         Operation::WorkloadCollect {
@@ -618,8 +620,42 @@ fn environment(common: Common, operation: Operation) -> Result<Prepared, BrokerF
                 Sent::WorkloadStart,
             )
         }
+        operation @ Operation::WorkloadSecretStart { .. } => {
+            return secret_start(common, operation);
+        }
         _ => return Err(BrokerFailure::Protocol("not an environment operation")),
     })
+}
+
+/// A secret-bearing start (M5d.3): the same two descriptors a start carries,
+/// then the value's pipe -- the one send that consumes it.
+fn secret_start(common: Common, operation: Operation) -> Result<Prepared, BrokerFailure> {
+    let Operation::WorkloadSecretStart {
+        spec,
+        container,
+        runtime,
+        workload,
+        secret,
+        pipe,
+    } = operation
+    else {
+        return Err(BrokerFailure::Protocol("not a secret-bearing start"));
+    };
+    let (runtime, mut fds) = runtime_of(runtime)?;
+    fds.push(pipe.into_transfer_descriptor());
+    Ok((
+        Authorisation::WorkloadSecretStart(
+            dwk_proto::brokerp::workload::WorkloadSecretStartAuthorisation::new(
+                common,
+                spec,
+                (container, runtime),
+                workload,
+                secret,
+            ),
+        ),
+        fds,
+        Sent::WorkloadSecretStart,
+    ))
 }
 
 /// A retained stream, if it is within the bound and its counts agree.
@@ -735,12 +771,27 @@ fn deliver(sent: &Sent, done: BrokerDone) -> Result<BrokerDelivery, BrokerFailur
         | Sent::EnvironmentDestroy { .. }
         | Sent::EnvironmentList => environment_delivery(sent, done)?,
         Sent::HttpResolve | Sent::HttpExchange { .. } => http_delivery(sent, done)?,
+        Sent::WorkloadStart | Sent::WorkloadSecretStart | Sent::WorkloadCollect { .. } => {
+            workload_answer(sent, done)?
+        }
+    })
+}
+
+/// A workload's start -- with or without a secret, each answered under its
+/// own operation -- or its collection.
+fn workload_answer(sent: &Sent, done: BrokerDone) -> Result<BrokerDelivery, BrokerFailure> {
+    let wrong = BrokerFailure::Protocol("the outcome answers another operation");
+    Ok(match sent {
         Sent::WorkloadStart => {
             BrokerDelivery::WorkloadStarted(done.workload_start.ok_or(wrong)?.generation)
+        }
+        Sent::WorkloadSecretStart => {
+            BrokerDelivery::WorkloadStarted(done.workload_secret_start.ok_or(wrong)?.generation)
         }
         Sent::WorkloadCollect { stream_limit } => {
             workload_delivery(done.workload_collect.ok_or(wrong)?, *stream_limit)?
         }
+        _ => return Err(wrong),
     })
 }
 

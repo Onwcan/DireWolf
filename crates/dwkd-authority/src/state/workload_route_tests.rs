@@ -43,6 +43,8 @@ use dwk_proto::wire::scalar::{
     StreamContent,
 };
 
+use sha2::Digest as _;
+
 use super::{Dispatched, Parked};
 use crate::broker::{
     BrokerDelivery, BrokerError, BrokerFailure, BrokerOrder, Collected, EffectBroker, Operation,
@@ -173,10 +175,26 @@ fn ran(ending: WorkloadEnding, stdout: &[u8], residue: Verdict) -> Box<WorkloadR
         residue,
         ended_processes: ProcessCount::new(2).unwrap(),
         remaining_processes: ProcessCount::new(u32::from(residue == Verdict::Fail)).unwrap(),
+        redactions: None,
     })
 }
 
 type Answer = Result<BrokerDelivery, BrokerError>;
+
+/// What a secret-bearing start handed the fake (M5d.3): the secret as
+/// the launcher would be told it, the digest and length of what its pipe
+/// held, and what was durable when it arrived.
+#[derive(Debug, Clone)]
+struct SecretAsked {
+    invocation: InvocationId,
+    secret: dwk_proto::brokerp::workload::WorkloadSecret,
+    digest: [u8; 32],
+    len: usize,
+    /// `secret_injection` rows open (`INTENT`) when the order arrived.
+    intents: i64,
+    /// Workload rows `LAUNCHING` when it arrived.
+    launching: i64,
+}
 
 /// What the fake was asked, beside the operation's name.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -204,6 +222,8 @@ struct Fake {
     asked: Mutex<Vec<Asked>>,
     store: Mutex<Option<PathBuf>>,
     containers: AtomicU64,
+    /// Every secret-bearing start, in order (M5d.3).
+    secrets: Mutex<Vec<SecretAsked>>,
 }
 
 impl Fake {
@@ -218,6 +238,28 @@ impl Fake {
                 )
                 .unwrap()
         })
+    }
+
+    fn intents(&self) -> i64 {
+        self.store.lock().unwrap().as_ref().map_or(0, |db| {
+            rusqlite::Connection::open(db)
+                .unwrap()
+                .query_row(
+                    "SELECT count(*) FROM secret_injection WHERE state = 'INTENT'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap()
+        })
+    }
+
+    /// Whether `invocation` was started with a secret.
+    fn secret_bearing(&self, invocation: &InvocationId) -> bool {
+        self.secrets
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|s| s.invocation == *invocation)
     }
 
     fn record(
@@ -370,18 +412,48 @@ impl EffectBroker for Fake {
                     .pop_front()
                     .unwrap_or_else(|| Ok(BrokerDelivery::WorkloadStarted(generation('a'))))
             }
+            // A secret-bearing start (M5d.3): the pipe read once, its
+            // digest kept, never its bytes.
+            Operation::WorkloadSecretStart {
+                workload,
+                secret,
+                pipe,
+                ..
+            } => {
+                use std::io::Read as _;
+                let mut bytes = zeroize::Zeroizing::new(Vec::new());
+                std::io::PipeReader::from(pipe.into_transfer_descriptor())
+                    .read_to_end(&mut bytes)
+                    .unwrap();
+                let asked = SecretAsked {
+                    invocation: invocation.clone(),
+                    secret,
+                    digest: sha2::Sha256::digest(&*bytes).into(),
+                    len: bytes.len(),
+                    intents: self.intents(),
+                    launching: self.launching(),
+                };
+                self.secrets.lock().unwrap().push(asked);
+                self.record("workload.secret_start", invocation, (Some(workload), None));
+                self.starts
+                    .lock()
+                    .unwrap()
+                    .pop_front()
+                    .unwrap_or_else(|| Ok(BrokerDelivery::WorkloadStarted(generation('a'))))
+            }
             Operation::WorkloadCollect { generation, .. } => {
+                let secret_bearing = self.secret_bearing(&invocation);
                 self.record("workload.collect", invocation, (None, Some(generation)));
                 self.collects
                     .lock()
                     .unwrap()
                     .pop_front()
                     .unwrap_or_else(|| {
-                        Ok(BrokerDelivery::WorkloadCollected(Collected::Ended(ran(
-                            WorkloadEnding::Exited,
-                            b"hello",
-                            Verdict::Pass,
-                        ))))
+                        let mut done = ran(WorkloadEnding::Exited, b"hello", Verdict::Pass);
+                        if secret_bearing {
+                            done.redactions = dwk_proto::brokerp::workload::RedactionCount::new(0);
+                        }
+                        Ok(BrokerDelivery::WorkloadCollected(Collected::Ended(done)))
                     })
             }
             // A file operation's, for the shared key namespace's tests.
@@ -1653,3 +1725,7 @@ fn the_broker_is_asked_only_what_the_authority_decided() {
     assert_eq!(spec.executable.as_str(), FIXTURE);
     evidence("hostile-arguments-are-data", "exact");
 }
+
+// A sandboxed launch's credential (M5d.3): this fake, and real keyring values.
+#[path = "workload_secret_tests.rs"]
+mod secret;

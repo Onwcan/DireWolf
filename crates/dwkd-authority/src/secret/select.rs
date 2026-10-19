@@ -5,7 +5,7 @@
 //! | operation | candidate modes, most restrictive first | host (M4e) |
 //! |---|---|---|
 //! | egress to an origin | (A) `egress` | the one-shot render primitive; the connection is M5's |
-//! | spawn of a consumer | (C) `fd_at_spawn`, then (B) `env_at_spawn` | unavailable: SECRETS.md §3 puts B and C in a **sandboxed** child, and there is no sandbox before M5 |
+//! | spawn of a consumer | (C) `fd_at_spawn`, then (B) `env_at_spawn` | unavailable on the host: SECRETS.md §3 puts B and C in a **sandboxed** child -- since M5d.3 a workload in an execution environment ([`InjectionEnvironment::Sandbox`]) |
 //!
 //! Mode D (`plaintext_to_model`) is not a candidate for anything: the metadata
 //! parser refuses it, and it is unreachable until M6's approvals.
@@ -19,9 +19,14 @@ use super::metadata::{InjectionMode, SecretMetadata};
 /// Where an injected secret would run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InjectionEnvironment {
-    /// On the host, with the broker's privileges. The only environment this
-    /// build has.
+    /// On the host, with the broker's privileges: never in a build a user
+    /// runs.
     Host,
+    /// In an execution environment the authority prepared and measured at
+    /// `CONTAINER_ISOLATION` or above (M5d.3, ADR-0052 §7): the broker hands
+    /// the value to the environment's trusted launcher, which delivers it to
+    /// the consumer the image manifest pins.
+    Sandbox,
 }
 
 /// The operation a secret would be consumed by.
@@ -119,7 +124,7 @@ pub fn select(
                 InjectionEnvironment::Host if !host_spawn_permitted() => {
                     return Err(SecretError::InjectionModeUnavailable);
                 }
-                InjectionEnvironment::Host => {}
+                InjectionEnvironment::Host | InjectionEnvironment::Sandbox => {}
             }
             // (C) before (B): a descriptor is not in `environ`.
             [InjectionMode::FdAtSpawn, InjectionMode::EnvAtSpawn]
@@ -257,5 +262,28 @@ revoked = true
                 Err(SecretError::Revoked)
             );
         });
+        // In an execution environment (M5d.3): the same rules, no test
+        // permission -- and still by identity, never by spelling.
+        let sandboxed = |c| Consumption::Spawn {
+            consumer: c,
+            environment: InjectionEnvironment::Sandbox,
+        };
+        assert_eq!(
+            select(get("both"), &consumers, &sandboxed(&git)),
+            Ok(InjectionMode::FdAtSpawn),
+            "C before B"
+        );
+        assert_eq!(
+            select(get("fd-only"), &consumers, &sandboxed(&git_b)),
+            Err(SecretError::ConsumerNotAllowed)
+        );
+        assert_eq!(
+            select(get("egress-only"), &consumers, &sandboxed(&git)),
+            Err(SecretError::InjectionModeUnavailable)
+        );
+        assert_eq!(
+            select(get("env-only"), &consumers, &sandboxed(&git)),
+            Err(SecretError::Revoked)
+        );
     }
 }

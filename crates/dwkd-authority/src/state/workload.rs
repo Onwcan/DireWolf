@@ -30,6 +30,15 @@
 //! broker's `workload_run`, in the environment the run's record names. A run
 //! without a `READY` environment is refused, never redirected to M4d's host
 //! path (whose floor is unchanged: no production host launch before M6).
+//!
+//! # A workload's credential (M5d.3, ADR-0052 §7)
+//!
+//! A public launch that names a credential handle is decided twice, by both
+//! gates each: `process.exec` on the image executable, and `secret.use:<handle>`
+//! in the `SANDBOX` environment ([`SpawnGate`]). Either denial denies the
+//! launch. Its use's intent (`super::secret_use::spawn`) is recorded in the
+//! workload's own intent transaction and linked to it (`workload_secret`), so
+//! they are durable, ended and reconciled together.
 
 use dwk_proto::brokerp::sandbox::{AssuranceLevel, ContainerRef, ImageId, Verdict};
 use dwk_proto::brokerp::workload::{
@@ -49,6 +58,7 @@ use crate::resource::ExecutableIdentity;
 use crate::resource::exec::argv::{self, ArgvClass};
 use crate::resource::exec::hygiene::{self, Hygiene};
 use crate::sandbox::{SandboxConfig, WorkloadBudget};
+use crate::secret::metadata::InjectionMode;
 
 use super::Work;
 use super::audit::{AuditEvent, Field, Fields};
@@ -60,6 +70,7 @@ use super::lease::to_sql;
 use super::policy_state::ActiveAuthority;
 use super::query::{self, DecisionRecord, TaintCause};
 use super::resolution::{self, ResolutionRefused};
+use super::secret_use::spawn::{self, SpawnAsked, SpawnAuthorised, SpawnPrepared};
 
 /// Where a workload is in its lifecycle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -127,6 +138,9 @@ pub(super) struct Checked {
     pub(super) stream_limit: StreamLimit,
     pub(super) wall_clock: WorkloadSeconds,
     pub(super) key: String,
+    /// The credential handle a public launch named (M5d.3): part of what its
+    /// key is bound to. The in-process API names none.
+    pub(super) credential: Option<String>,
 }
 
 /// The longest idempotency key, in bytes.
@@ -275,6 +289,7 @@ pub(super) fn check(
         stream_limit,
         wall_clock,
         key: key.clone(),
+        credential: None,
     })
 }
 
@@ -291,16 +306,65 @@ pub(super) fn argv_digest(args: &[String]) -> Sha256Hash {
 }
 
 /// What a key is bound to: the run, the executable, the arguments, the
-/// bounds.
+/// bounds -- and the credential handle, when one is named (a request naming
+/// none digests as it did before M5d.3).
 fn request_digest(run: &RunId, checked: &Checked) -> Sha256Hash {
-    DomainHash::new(digest::WORKLOAD_REQUEST)
+    let hash = DomainHash::new(digest::WORKLOAD_REQUEST)
         .text(run.as_str())
         .text(checked.executable.as_str())
         .text(checked.sha256.as_str())
         .bytes(argv_digest(&checked.args).as_bytes())
         .int(u64::from(checked.stream_limit.get()))
-        .int(u64::from(checked.wall_clock.get()))
-        .finish()
+        .int(u64::from(checked.wall_clock.get()));
+    match &checked.credential {
+        Some(handle) => hash.text("credential").text(handle).finish(),
+        None => hash.finish(),
+    }
+}
+
+/// A launch's spawn injection, decided (M5d.3): `secret.use:<handle>` through
+/// both gates for a `SANDBOX` action, keeping only `audit_level`, and the mode
+/// the kernel chose from the operator's metadata.
+#[derive(Debug, Clone)]
+pub(super) struct SpawnGate {
+    pub(super) handle: String,
+    pub(super) mode: InjectionMode,
+    pub(super) record: DecisionRecord,
+    pub(super) obligations_enforced: bool,
+}
+
+impl SpawnGate {
+    /// Both gates, and every obligation kept.
+    pub(super) fn permits(&self) -> bool {
+        self.record.capability_satisfied()
+            && self.record.policy_satisfied()
+            && self.obligations_enforced
+    }
+
+    /// Why it was decided as it was, in the process tools' order.
+    pub(super) fn reason(&self) -> &'static str {
+        decision_reason(&self.record, self.obligations_enforced, self.permits())
+    }
+}
+
+/// Why `record` was decided as it was, in the process tools' order: an
+/// unevaluable input, policy, the capability, the obligations, an approval.
+fn decision_reason(record: &DecisionRecord, enforced: bool, permits: bool) -> &'static str {
+    let policy = record.policy();
+    if permits {
+        return "ALLOWED_BY_RULE";
+    }
+    if policy.unevaluable().is_some() {
+        return "UNRESOLVED_POLICY_INPUT";
+    }
+    match policy.effect() {
+        Effect::Deny if policy.rule_id().is_default() => "DEFAULT_DENY",
+        Effect::Deny => "DENIED_BY_RULE",
+        _ if !record.capability_satisfied() => "NO_CAPABILITY",
+        Effect::Allow if !enforced => "OBLIGATION_UNENFORCEABLE",
+        // REQUIRE_APPROVAL: no approval exists before M6.
+        _ => "APPROVAL_REQUIRED",
+    }
 }
 
 /// A workload's plan: the canonical action, both gates' records, and the
@@ -317,6 +381,8 @@ pub(super) struct WorkloadPlan {
     pub(super) launch: WorkloadLaunch,
     /// The arguments the kept obligation puts before the invocation's own.
     pub(super) prefix: &'static [&'static str],
+    /// The spawn injection, when the launch names a credential (M5d.3).
+    pub(super) injection: Option<SpawnGate>,
 }
 
 impl WorkloadPlan {
@@ -332,32 +398,28 @@ impl WorkloadPlan {
 }
 
 impl WorkloadPlan {
-    /// Both gates, and every obligation enforced.
-    pub(super) fn permits(&self) -> bool {
+    /// The launch's own action: both gates, and every obligation enforced.
+    pub(super) fn workload_permits(&self) -> bool {
         self.record.capability_satisfied()
             && self.record.policy_satisfied()
             && self.obligations_enforced
     }
 
-    /// Why it was decided as it was, in the process tools' order: an
-    /// unevaluable input, policy, the capability, the obligations, an
-    /// approval.
+    /// The whole plan: the launch's action and, when it names a credential,
+    /// its spawn injection. The only condition under which anything runs.
+    pub(super) fn permits(&self) -> bool {
+        self.workload_permits() && self.injection.as_ref().is_none_or(SpawnGate::permits)
+    }
+
+    /// Why the launch's own action was decided as it was, in the process
+    /// tools' order: an unevaluable input, policy, the capability, the
+    /// obligations, an approval.
     pub(super) fn reason(&self) -> &'static str {
-        let policy = self.record.policy();
-        if self.permits() {
-            return "ALLOWED_BY_RULE";
-        }
-        if policy.unevaluable().is_some() {
-            return "UNRESOLVED_POLICY_INPUT";
-        }
-        match policy.effect() {
-            Effect::Deny if policy.rule_id().is_default() => "DEFAULT_DENY",
-            Effect::Deny => "DENIED_BY_RULE",
-            _ if !self.record.capability_satisfied() => "NO_CAPABILITY",
-            Effect::Allow if !self.obligations_enforced => "OBLIGATION_UNENFORCEABLE",
-            // REQUIRE_APPROVAL: no approval exists before M6.
-            _ => "APPROVAL_REQUIRED",
-        }
+        decision_reason(
+            &self.record,
+            self.obligations_enforced,
+            self.workload_permits(),
+        )
     }
 }
 
@@ -441,12 +503,14 @@ fn obligations(record: &DecisionRecord, checked: &Checked) -> Kept {
     kept
 }
 
-/// Both gates for a **sandbox** action. Pure: reads what the caller loaded.
+/// Both gates for a **sandbox** action -- and, for a launch that names a
+/// credential, both gates again for `secret.use:<handle>` in the `SANDBOX`
+/// environment. Pure: reads what the caller loaded.
 fn decide_plan(
     checked: &Checked,
     admission: &super::admission::Admission,
-    context: &crate::policy::PolicyContext,
-    active: &ActiveAuthority,
+    (context, active): (&crate::policy::PolicyContext, &ActiveAuthority),
+    secret: Option<&SpawnPrepared>,
 ) -> Result<WorkloadPlan, AuthorityError> {
     let capability = required_capability(checked)?;
     let refs: Vec<&str> = checked.args.iter().map(String::as_str).collect();
@@ -458,6 +522,23 @@ fn decide_plan(
         });
     let record = query::decide(&action, admission, context, active);
     let kept = obligations(&record, checked);
+    let injection = secret
+        .map(|prepared| -> Result<SpawnGate, AuthorityError> {
+            let required = super::secret_use::required(&prepared.handle)?;
+            let record = query::decide(
+                &CanonicalAction::new(required, Environment::Sandbox),
+                admission,
+                context,
+                active,
+            );
+            Ok(SpawnGate {
+                handle: prepared.handle.as_str().to_owned(),
+                mode: prepared.mode,
+                obligations_enforced: super::secret_use::obligations_enforced(&record),
+                record,
+            })
+        })
+        .transpose()?;
     Ok(WorkloadPlan {
         action,
         record,
@@ -466,6 +547,7 @@ fn decide_plan(
         stream_limit: kept.stream_limit,
         launch: kept.launch,
         prefix: kept.prefix,
+        injection,
     })
 }
 
@@ -538,6 +620,36 @@ fn plan_fields(active: &ActiveAuthority, checked: &Checked, plan: &WorkloadPlan)
         .int("wall_clock_s", u64::from(checked.wall_clock.get()))
         .text("reason", plan.reason());
     fields.extend(class);
+    // The spawn injection's own decision (M5d.3): the handle, the mode, both
+    // gates. Never the value, its length, or the variable.
+    if let Some(gate) = &plan.injection {
+        let policy = gate.record.policy();
+        fields.extend(
+            Fields::new()
+                .text("credential_handle", gate.handle.as_str())
+                .text("injection_mode", gate.mode.as_str())
+                .text(
+                    "injection_required_capability",
+                    gate.record.required().to_canonical_string(),
+                )
+                .flag(
+                    "injection_capability_satisfied",
+                    gate.record.capability_satisfied(),
+                )
+                .maybe_text(
+                    "injection_covering_cap_id",
+                    gate.record.covering_grant().map(|c| c.as_str().to_owned()),
+                )
+                .text("injection_policy_effect", policy.effect().as_str())
+                .flag("injection_policy_satisfied", gate.record.policy_satisfied())
+                .text("injection_rule_id", policy.rule_id().as_str())
+                .text("injection_reason", gate.reason())
+                .text(
+                    "injection_effect",
+                    if gate.permits() { "ALLOW" } else { "DENY" },
+                ),
+        );
+    }
     fields.text("effect", if plan.permits() { "ALLOW" } else { "DENY" })
 }
 
@@ -663,6 +775,8 @@ pub(super) struct Intent {
     pub(super) stream_limit: u32,
     /// The plan both gates allowed: what the answer states.
     pub(super) plan: WorkloadPlan,
+    /// Its credential's use, when it names one (M5d.3): durable with it.
+    pub(super) secret: Option<SpawnAuthorised>,
 }
 
 const fn resolution_class(refused: &ResolutionRefused) -> &'static str {
@@ -783,6 +897,8 @@ pub(super) enum Binding<'a> {
         subject: &'a str,
         /// The session.
         session: &'a SessionId,
+        /// The tool messages' version it was asked at: 5, or 6 (M5d.3).
+        version: u16,
     },
 }
 
@@ -893,13 +1009,13 @@ pub(super) enum Missing {
 fn decide(
     work: &Work<'_>,
     run: &RunId,
-    checked: &Checked,
+    (checked, secret): (&Checked, Option<&SpawnPrepared>),
     (budget, active, image): (WorkloadBudget, &ActiveAuthority, &ImageBinding),
     (binding, busy_matters): (RootBinding, bool),
 ) -> Result<Result<Decided, &'static str>, AuthorityError> {
     let admission = super::admission::load(work, run.as_str())?;
     let context = query::policy_context(work, run.as_str(), active)?;
-    let plan = decide_plan(checked, &admission, &context, active)?;
+    let plan = decide_plan(checked, &admission, (&context, active), secret)?;
     let found = ready_environment(work, run)?;
     if !plan.permits() {
         return Ok(Ok(Decided {
@@ -966,10 +1082,14 @@ fn environments(work: &Work<'_>, run: &RunId) -> Result<i64, AuthorityError> {
 fn caller_fields(binding_key: &Binding<'_>) -> Fields {
     match binding_key {
         Binding::Run => Fields::new(),
-        Binding::Session { subject, session } => Fields::new()
+        Binding::Session {
+            subject,
+            session,
+            version,
+        } => Fields::new()
             .text("subject", *subject)
             .text("session_id", session.as_str())
-            .int("protocol_version", 5),
+            .int("protocol_version", u64::from(*version)),
     }
 }
 
@@ -989,7 +1109,7 @@ pub(super) enum Previewed {
 pub(super) fn preview(
     work: &mut Work<'_>,
     run: &RunId,
-    checked: &Checked,
+    (checked, secret): (&Checked, Option<&SpawnPrepared>),
     (budget, active, image): (WorkloadBudget, &ActiveAuthority, &ImageBinding),
     binding_key: &Binding<'_>,
 ) -> Result<Previewed, AuthorityError> {
@@ -1004,7 +1124,7 @@ pub(super) fn preview(
     let decided = match decide(
         work,
         run,
-        checked,
+        (checked, secret),
         (budget, active, image),
         (binding.clone(), false),
     )? {
@@ -1017,7 +1137,7 @@ pub(super) fn preview(
             Decided {
                 binding,
                 environment: None,
-                plan: decide_plan(checked, &admission, &context, active)?,
+                plan: decide_plan(checked, &admission, (&context, active), secret)?,
             }
         }
         Err(reason) => {
@@ -1042,11 +1162,12 @@ pub(super) fn preview(
     Ok(Previewed::Decided(Box::new(decided)))
 }
 
-/// Step 2: decide the workload and record its intent.
+/// Step 2: decide the workload -- and its credential's use, when it names
+/// one -- and record its intent.
 pub(super) fn begin(
     work: &mut Work<'_>,
     run: &RunId,
-    checked: &Checked,
+    (checked, secret): (&Checked, Option<(&SpawnAsked<'_>, &SpawnPrepared)>),
     (budget, active, image): (WorkloadBudget, &ActiveAuthority, &ImageBinding),
     (binding_key, missing): (&Binding<'_>, Missing),
 ) -> Result<Begun, AuthorityError> {
@@ -1075,7 +1196,13 @@ pub(super) fn begin(
             .ok_or(AuthorityError::Invariant("a bound key names no workload"))?;
         return Ok(Begun::Replayed(Box::new(found)));
     }
-    let decided = match decide(work, run, checked, (budget, active, image), (binding, true))? {
+    let decided = match decide(
+        work,
+        run,
+        (checked, secret.map(|(_, prepared)| prepared)),
+        (budget, active, image),
+        (binding, true),
+    )? {
         Ok(decided) => decided,
         // Permitted, and nothing to run in: the public route prepares the
         // run's environment -- within its bound -- and asks again.
@@ -1101,6 +1228,10 @@ pub(super) fn begin(
     fields.extend(caller_fields(binding_key));
     fields.extend(plan_fields(active, checked, &plan));
     if !plan.permits() {
+        // A denied use is the secret side's to record too, as an egress one is.
+        if let (Some((asked, _)), Some(gate)) = (secret, &plan.injection) {
+            spawn::refused_by_gates(work, asked, active, (&gate.record, gate.mode))?;
+        }
         work.audit(AuditEvent::WorkloadDenied, fields)?;
         return Ok(Begun::Denied(Box::new(Decided {
             binding,
@@ -1127,13 +1258,37 @@ pub(super) fn begin(
             .text("container", environment.container.as_str()),
     );
     work.audit(AuditEvent::WorkloadIntentRecorded, fields)?;
+    let secret = secret_intent(work, secret, (active, &plan), &invocation)?;
     Ok(Begun::Intent(Box::new(Intent {
         invocation,
         stream_limit: plan.stream_limit,
         environment,
         binding,
         plan,
+        secret,
     })))
+}
+
+/// A workload's credential's intent (M5d.3), in the workload's own
+/// transaction, linked to it.
+fn secret_intent(
+    work: &mut Work<'_>,
+    secret: Option<(&SpawnAsked<'_>, &SpawnPrepared)>,
+    (active, plan): (&ActiveAuthority, &WorkloadPlan),
+    invocation: &InvocationId,
+) -> Result<Option<SpawnAuthorised>, AuthorityError> {
+    match (secret, &plan.injection) {
+        (Some((asked, prepared)), Some(gate)) => Ok(Some(spawn::record_intent(
+            work,
+            (asked, prepared.clone()),
+            (active, &gate.record),
+            invocation,
+        )?)),
+        (None, None) => Ok(None),
+        _ => Err(AuthorityError::Invariant(
+            "a credential was prepared without its decision, or decided without preparing",
+        )),
+    }
 }
 
 /// The intent's rows: the workload, `LAUNCHING`, and -- for the public
@@ -1169,7 +1324,10 @@ fn record_intent(
     ))?;
     // The public route's key, in the namespace every tool shares: bound with
     // the intent, in the same transaction, so a crash leaves both or neither.
-    if let Binding::Session { subject, session } = binding_key {
+    if let Binding::Session {
+        subject, session, ..
+    } = binding_key
+    {
         work.db(work.tx.execute(
             "INSERT INTO workload_idempotency (subject, session_id, idempotency_key, \
              request_digest, invocation_id, recorded_ms) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
@@ -1343,6 +1501,12 @@ fn done_fields(fields: Fields, done: &WorkloadRunDone) -> Fields {
             u64::from(done.remaining_processes.get()),
         )
         .int("elapsed_ms", u64::from(done.elapsed_ms.get()))
+        // A credential-bearing workload's: how many whole occurrences of its
+        // value the broker replaced as it drained the output. A count only.
+        .maybe_int(
+            "broker_redactions",
+            done.redactions.map(|count| u64::from(count.get())),
+        )
 }
 
 /// A `LAUNCHING` workload a previous incarnation left (W8–W10): `UNKNOWN`,
@@ -1549,6 +1713,7 @@ mod tests {
                 residue,
                 ended_processes: none,
                 remaining_processes: none,
+                redactions: None,
             }))
         };
         assert_eq!(destroy_reason(&completed(Verdict::Pass)), None);

@@ -35,13 +35,35 @@ fn user() -> String {
 /// a `HYGIENE` launch.
 #[must_use]
 pub(crate) fn run(container: &ContainerRef, workload: &WorkloadSpec) -> Vec<String> {
-    let mut argv = words(&["container", "exec", "--user"]);
+    let launcher = if workload.launch == WorkloadLaunch::Hygiene {
+        words(&[PROBE_PATH, PROBE_LAUNCH, LAUNCH_HYGIENE])
+    } else {
+        Vec::new()
+    };
+    run_with(container, workload, None, launcher)
+}
+
+/// The one shape of a workload's command line: `container exec`, then -- for
+/// a secret-bearing workload only -- `attach`, the word that attaches the
+/// client's standard input, which only `workload_secret_plan` spells
+/// (M5d.3); then the profile's user, the workspace, the recorded container;
+/// then `launcher`'s words, if the workload is launched, and the executable
+/// with exactly its arguments. Nothing a caller says is placed before the
+/// container's name.
+#[must_use]
+pub(super) fn run_with(
+    container: &ContainerRef,
+    workload: &WorkloadSpec,
+    attach: Option<&'static str>,
+    launcher: Vec<String>,
+) -> Vec<String> {
+    let mut argv = words(&["container", "exec"]);
+    argv.extend(attach.map(str::to_owned));
+    argv.extend(words(&["--user"]));
     argv.push(user());
     argv.extend(words(&["--workdir", WORKSPACE_TARGET]));
     argv.push(container.as_str().to_owned());
-    if workload.launch == WorkloadLaunch::Hygiene {
-        argv.extend(words(&[PROBE_PATH, PROBE_LAUNCH, LAUNCH_HYGIENE]));
-    }
+    argv.extend(launcher);
     argv.push(workload.executable.as_str().to_owned());
     argv.extend(workload.args.iter().map(|arg| arg.as_str().to_owned()));
     argv

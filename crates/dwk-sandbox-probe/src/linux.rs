@@ -34,7 +34,9 @@ pub(crate) fn main() -> ExitCode {
         Some(profile::PROBE_HOLD) if args.len() == 2 => hold(),
         Some(profile::PROBE_REAP) if args.len() == 2 => reap(),
         Some(profile::PROBE_TARGET) if args.len() == 2 => target(),
-        Some(profile::PROBE_LAUNCH) if args.len() >= 4 => launch(args.get(2..).unwrap_or_default()),
+        Some(profile::PROBE_LAUNCH) if args.len() >= 4 => {
+            crate::launch::run(args.get(2..).unwrap_or_default())
+        }
         Some(profile::PROBE_MEASURE) if args.len() == 4 => {
             let environment = args.get(2).and_then(|s| EnvironmentId::parse(s));
             // The topology is named so that a measurement is of a stated
@@ -59,35 +61,9 @@ pub(crate) fn main() -> ExitCode {
 fn usage() -> ExitCode {
     eprintln!(
         "usage: dwk-sandbox-probe hold | measure <environment-id> <topology> | reap | \
-         ptrace-target | launch hygiene <path> [args...]"
+         ptrace-target | launch <profile> [NAME] <path> [args...]"
     );
     ExitCode::from(2)
-}
-
-/// The trusted launcher (M5d.2, ADR-0052 §5a): `launch hygiene <path>
-/// <args...>`. Sets `workspace_exec_hygiene`'s variables over the
-/// environment's own -- which it inherits and does not read -- and executes
-/// `<path>` with exactly `<args...>` and `argv[0]` the path, replacing this
-/// process. It decides nothing: the broker proved its bytes and the
-/// target's, and the authority chose the profile and the arguments. On any
-/// failure it executes nothing and exits [`profile::LAUNCH_FAILED`].
-fn launch(args: &[String]) -> ExitCode {
-    use std::os::unix::process::CommandExt as _;
-    let failed = ExitCode::from(profile::LAUNCH_FAILED);
-    let [name, path, rest @ ..] = args else {
-        return failed;
-    };
-    if name != profile::LAUNCH_HYGIENE || !path.starts_with('/') {
-        return failed;
-    }
-    let mut command = std::process::Command::new(path);
-    command.arg0(path).args(rest);
-    for (variable, value) in profile::HYGIENE_ENVIRONMENT {
-        command.env(variable, value);
-    }
-    // `exec` returns only if the kernel refused it.
-    let _refused = command.exec();
-    failed
 }
 
 /// The environment's first process: hold it open and, as the init of its

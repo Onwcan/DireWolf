@@ -51,7 +51,7 @@ use rusqlite::Connection;
 pub(super) const APPLICATION_ID: i64 = 0x4457_4B44;
 
 /// The schema version this build creates and understands.
-pub(super) const CURRENT_VERSION: i64 = 10;
+pub(super) const CURRENT_VERSION: i64 = 11;
 
 /// Schema version 1, the first. Static text: nothing in it is assembled from a
 /// value, and every value the authority stores is bound as a parameter.
@@ -1334,6 +1334,36 @@ WHEN EXISTS (SELECT 1 FROM run_image WHERE run_id = NEW.run_id)
 BEGIN SELECT RAISE(ABORT, 'a workload runs only in the image its run was admitted against'); END;
 ";
 
+/// Schema version 11 (M5d.3, ADR-0052 §7): a workload's secret.
+///
+/// `workload_secret` links a sandboxed workload to the one spawn injection
+/// it consumes -- a `secret_injection` row of mode `fd_at_spawn` or
+/// `env_at_spawn`, recorded in the workload's own intent transaction -- so a
+/// restart that finds the workload `LAUNCHING` finds its use open too, and
+/// ends both `UNKNOWN`. A link is made once, at both intents, and never
+/// changed or removed. No column can hold a value, a prefix of one, its
+/// length or anything derived from it.
+pub(super) const SCHEMA_V11: &str = r"
+CREATE TABLE workload_secret (
+    workload_invocation_id   TEXT    PRIMARY KEY REFERENCES workload(invocation_id)
+                                                 ON DELETE RESTRICT,
+    injection_invocation_id  TEXT    NOT NULL UNIQUE REFERENCES secret_injection(invocation_id)
+                                                 ON DELETE RESTRICT,
+    recorded_ms              INTEGER NOT NULL
+) STRICT;
+CREATE TRIGGER workload_secret_no_update BEFORE UPDATE ON workload_secret
+BEGIN SELECT RAISE(ABORT, 'a workload''s secret is fixed'); END;
+CREATE TRIGGER workload_secret_no_delete BEFORE DELETE ON workload_secret
+BEGIN SELECT RAISE(ABORT, 'a workload''s secret is never unlinked'); END;
+CREATE TRIGGER workload_secret_at_both_intents BEFORE INSERT ON workload_secret
+WHEN NOT EXISTS (SELECT 1 FROM workload WHERE invocation_id = NEW.workload_invocation_id
+                 AND state = 'LAUNCHING')
+     OR NOT EXISTS (SELECT 1 FROM secret_injection
+                    WHERE invocation_id = NEW.injection_invocation_id
+                    AND state = 'INTENT' AND mode IN ('fd_at_spawn', 'env_at_spawn'))
+BEGIN SELECT RAISE(ABORT, 'a workload''s secret is a spawn use, linked at both intents'); END;
+";
+
 /// One step from a version to the next.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct Migration {
@@ -1384,6 +1414,10 @@ pub(super) const MIGRATIONS: &[Migration] = &[
     Migration {
         to: 10,
         sql: SCHEMA_V10,
+    },
+    Migration {
+        to: 11,
+        sql: SCHEMA_V11,
     },
 ];
 
@@ -1539,8 +1573,8 @@ pub(super) fn foreign_key_check(conn: &Connection) -> rusqlite::Result<Result<()
 mod tests {
     use super::{
         APPLICATION_ID, CURRENT_VERSION, MIGRATIONS, Migration, SCHEMA_V1, SCHEMA_V2, SCHEMA_V3,
-        SCHEMA_V4, SCHEMA_V5, SCHEMA_V6, SCHEMA_V7, SCHEMA_V8, SCHEMA_V9, SCHEMA_V10, Shape,
-        ShapeError, decide, migrate, verify_exact,
+        SCHEMA_V4, SCHEMA_V5, SCHEMA_V6, SCHEMA_V7, SCHEMA_V8, SCHEMA_V9, SCHEMA_V10, SCHEMA_V11,
+        Shape, ShapeError, decide, migrate, verify_exact,
     };
     use rusqlite::Connection;
 
@@ -1609,6 +1643,7 @@ mod tests {
         assert!(conn.execute_batch(SCHEMA_V8).is_ok());
         assert!(conn.execute_batch(SCHEMA_V9).is_ok());
         assert!(conn.execute_batch(SCHEMA_V10).is_ok());
+        assert!(conn.execute_batch(SCHEMA_V11).is_ok());
         assert!(
             conn.execute_batch("DROP TRIGGER run_never_resurrects")
                 .is_ok()
@@ -1634,6 +1669,7 @@ mod tests {
         assert!(conn.execute_batch(SCHEMA_V8).is_ok());
         assert!(conn.execute_batch(SCHEMA_V9).is_ok());
         assert!(conn.execute_batch(SCHEMA_V10).is_ok());
+        assert!(conn.execute_batch(SCHEMA_V11).is_ok());
         assert!(
             conn.execute_batch("CREATE TABLE backdoor (x INTEGER)")
                 .is_ok()
@@ -2617,6 +2653,93 @@ mod tests {
             )
             .is_ok()
         );
+    }
+
+    #[test]
+    fn a_version_ten_store_migrates_to_eleven_and_links_a_workload_to_one_spawn_use() {
+        // M5d.3 (ADR-0052 §7): v11 links a sandboxed workload to the spawn
+        // injection it consumes. A v10 store's rows survive; the link table
+        // starts empty.
+        let conn = store_at(10);
+        assert!(environment(&conn, ENV, "run_a", "PREPARING").is_ok());
+        assert!(
+            conn.execute(
+                "UPDATE environment SET state = 'READY', container = ?1,                  effective = 'CONTAINER_ISOLATION'",
+                ["c".repeat(64)],
+            )
+            .is_ok()
+        );
+        assert!(workload(&conn, (0, "run_a", ENV), "k0").is_ok());
+        {
+            let Ok(tx) = conn.unchecked_transaction() else {
+                unreachable!("a transaction")
+            };
+            assert_eq!(migrate(&tx, 10, MIGRATIONS).ok(), Some(CURRENT_VERSION));
+            assert!(tx.commit().is_ok());
+        }
+        assert_eq!(verify_exact(&conn).ok(), Some(Ok(())));
+        let count = |sql: &str| conn.query_row(sql, [], |row| row.get::<_, i64>(0)).ok();
+        assert_eq!(count("SELECT count(*) FROM workload"), Some(1));
+        assert_eq!(count("SELECT count(*) FROM workload_secret"), Some(0));
+        assert!(
+            conn.execute(
+                "INSERT INTO secret_revision (handle, revision, state, backend, metadata, \
+                 metadata_sha256, recorded_ms) VALUES ('deploy-key', 1, 'CONFIGURED', \
+                 'keychain', '{}', ?1, 0)",
+                ["ab".repeat(32)],
+            )
+            .is_ok()
+        );
+        let injection = |n: u8, mode: &str, key: &str| {
+            conn.execute(
+                "INSERT INTO secret_injection (invocation_id, run_id, subject, session_id, \
+                 idempotency_key, handle, revision, mode, consumer, incarnation, state, \
+                 failure, intent_ms, ended_ms) VALUES (?1, 'run_a', 'uid:1000', 'ses_x', ?2, \
+                 'deploy-key', 1, ?3, '/usr/bin/git@ab', 1, 'INTENT', NULL, 0, NULL)",
+                rusqlite::params![inv(n), key, mode],
+            )
+        };
+        let link = |workload: u8, injection: u8| {
+            conn.execute(
+                "INSERT INTO workload_secret (workload_invocation_id, injection_invocation_id, \
+                 recorded_ms) VALUES (?1, ?2, 0)",
+                [inv(workload), inv(injection)],
+            )
+        };
+        assert!(injection(1, "fd_at_spawn", "a:secret").is_ok());
+        assert!(injection(2, "egress", "b:1").is_ok());
+        assert!(injection(3, "env_at_spawn", "c:secret").is_ok());
+        // Only a spawn use, and only one per workload and per use.
+        assert!(link(0, 2).is_err(), "an egress use is no workload's");
+        assert!(link(0, 1).is_ok());
+        assert!(link(0, 3).is_err(), "a second secret for one workload");
+        // One launch at a time per environment: the first ends, then another.
+        assert!(
+            conn.execute(
+                "UPDATE workload SET state = 'FAILED', failure = 'X', ended_ms = 9                  WHERE invocation_id = ?1",
+                [inv(0)],
+            )
+            .is_ok()
+        );
+        assert!(workload(&conn, (4, "run_a", ENV), "k4").is_ok());
+        assert!(link(4, 1).is_err(), "one use for two workloads");
+        // Only at both intents: an ended use or workload links nothing.
+        assert!(
+            conn.execute(
+                "UPDATE secret_injection SET state = 'UNKNOWN', ended_ms = 9 \
+                 WHERE invocation_id = ?1",
+                [inv(3)],
+            )
+            .is_ok()
+        );
+        assert!(link(4, 3).is_err(), "an ended use");
+        // Fixed, never removed.
+        for bad in [
+            "UPDATE workload_secret SET recorded_ms = 1",
+            "DELETE FROM workload_secret",
+        ] {
+            assert!(conn.execute(bad, []).is_err(), "{bad}");
+        }
     }
 
     #[test]

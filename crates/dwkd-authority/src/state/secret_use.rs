@@ -30,6 +30,9 @@
 //! incarnation left open is ended `UNKNOWN` at start ([`reconcile_open`]) and
 //! never injected again: the hop is never performed again either, and there
 //! is no standalone retry loop for a secret.
+//!
+//! Modes C and B -- a secret at a sandboxed workload's spawn (M5d.3) -- are
+//! [`spawn`]'s: the same steps, the same table, the same counter.
 
 use dwk_proto::brokerp::http::HttpCredential;
 use dwk_proto::brokerp::{SecretHeaderName, SecretHeaderPrefix, SecretOrigin};
@@ -374,16 +377,21 @@ pub(super) fn record_outcome(
         fields = fields.text("failure", reason);
     }
     if ending == Ending::Injected {
-        let uses: i64 = work.db(work.tx.query_row(
-            "INSERT INTO secret_use (handle, uses, last_used_ms) VALUES (?1, 1, ?2) \
-             ON CONFLICT (handle) DO UPDATE SET uses = uses + 1, last_used_ms = ?2 \
-             RETURNING uses",
-            rusqlite::params![prepared.handle.as_str(), to_sql(work.now)?],
-            |row| row.get(0),
-        ))?;
+        let uses = count_use(work, &prepared.handle)?;
         fields = fields.int("uses", u64::try_from(uses).unwrap_or(0));
     }
     work.audit(event, fields)
+}
+
+/// Count one confirmed injection of `handle`, and return its uses.
+fn count_use(work: &Work<'_>, handle: &SecretHandle) -> Result<i64, AuthorityError> {
+    work.db(work.tx.query_row(
+        "INSERT INTO secret_use (handle, uses, last_used_ms) VALUES (?1, 1, ?2) \
+         ON CONFLICT (handle) DO UPDATE SET uses = uses + 1, last_used_ms = ?2 \
+         RETURNING uses",
+        rusqlite::params![handle.as_str(), to_sql(work.now)?],
+        |row| row.get(0),
+    ))
 }
 
 /// End every secret use a previous incarnation left open: `UNKNOWN`, never
@@ -425,6 +433,8 @@ pub(super) fn reconcile_open(work: &mut Work<'_>) -> Result<u64, AuthorityError>
     }
     Ok(u64::try_from(open.len()).unwrap_or(u64::MAX))
 }
+
+pub(super) mod spawn;
 
 // A real kernel keyring and a real store: Linux only, like the backends.
 #[cfg(all(test, target_os = "linux"))]

@@ -215,6 +215,29 @@ unpinned bytes, the shipped `balanced` and `power` packs, and crash window W9.
 decisions against a **fake broker** (labelled so): ordering, refusals and
 parking, not containment.
 
+**Sandbox secret tests (M5d.3)** are the evidence behind
+`make sandbox-secret-evidence` (ADR-0052 §7). Every credential is **synthetic**,
+generated at run time; assertions compare fingerprints, lengths and booleans,
+never values. `crates/dwkd-authority/src/state/workload_secret_tests.rs` (a
+child of the route tests) runs the authority's mode B/C pipeline with **real
+kernel-keyring values** against the route tests' fake broker, which reads the
+one-shot pipe it is handed: read once after both intents, C before B, both
+gates, every refusal and denial reading nothing, revisions, failures, thirteen
+crash windows, no host fallback -- each case printing a `SECRET-EVIDENCE` line,
+all required. `crates/dwkd-broker/tests/sandbox_secret.rs` drives the released
+broker on a real runtime: the value on descriptor 3 and in `GH_TOKEN` through
+the pinned probe as the launcher, the descendants' inheritance (a residual,
+measured), absence from argv, the runtime's records, events and logs,
+redaction across reads, malformed handoffs and frames, and a broker stopped
+after the read. `crates/dwkd-authority/tests/sandbox_secret.rs` reaches the
+route with a **real DWKP client** through the seam and the released `serve
+--sandbox-config --secrets-file`: delivery, redaction, refusals, the shipped
+packs denying, crash windows, replays. Both real suites are `#[ignore]`d unless
+the task selects them by name, print `SANDBOX-EVIDENCE` lines that are all
+required, and leave no container behind; no runtime or no keyring is NOT
+EXERCISED, which fails. `make sandbox-secret-mutations` weakens each guard in
+turn, slow and local.
+
 **Brokered `fs.read` tests (M4b)** are real-process evidence for the private
 channel ([ADR-0043](../docs/adr/0043-m4b-private-broker-channel-and-brokered-fs-read.md)):
 `crates/dwkd-authority/tests/broker_fs_read.rs` drives the released authority and

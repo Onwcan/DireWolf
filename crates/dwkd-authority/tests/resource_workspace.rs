@@ -537,7 +537,7 @@ mod linux {
         {
             let conn = raw(&h.state());
             conn.execute_batch(
-                "DROP TABLE workload_idempotency; DROP TABLE run_image; \
+                "DROP TABLE workload_secret; DROP TABLE workload_idempotency; DROP TABLE run_image; \
                  DROP TABLE workload; \
                  DROP TABLE net_idempotency; DROP TABLE net_hop; DROP TABLE net_request; \
                  DROP TABLE environment; DROP TABLE secret_use; \
@@ -585,7 +585,7 @@ mod linux {
         {
             let conn = raw(&h.state());
             conn.execute_batch(
-                "DROP TABLE workload_idempotency; DROP TABLE run_image; DROP TABLE workload; DROP TABLE net_idempotency; DROP TABLE net_hop; DROP TABLE net_request;                  DROP TABLE environment; DROP TABLE secret_use; DROP TABLE secret_injection; DROP TABLE secret_run_binding;                  DROP TABLE secret_revision; DROP TABLE process_idempotency; DROP TABLE tool_process;                  DROP TABLE process_invocation; DROP TABLE tool_staging;                  DROP TABLE tool_idempotency; DROP TABLE tool_invocation;                  PRAGMA user_version = 2;",
+                "DROP TABLE workload_secret; DROP TABLE workload_idempotency; DROP TABLE run_image; DROP TABLE workload; DROP TABLE net_idempotency; DROP TABLE net_hop; DROP TABLE net_request;                  DROP TABLE environment; DROP TABLE secret_use; DROP TABLE secret_injection; DROP TABLE secret_run_binding;                  DROP TABLE secret_revision; DROP TABLE process_idempotency; DROP TABLE tool_process;                  DROP TABLE process_invocation; DROP TABLE tool_staging;                  DROP TABLE tool_idempotency; DROP TABLE tool_invocation;                  PRAGMA user_version = 2;",
             )
             .unwrap();
         }

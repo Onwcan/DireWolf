@@ -30,6 +30,8 @@ enum AssuranceLevel { None, ProcessIsolation, ContainerIsolation, VmIsolation }
 
 **As built in M5d.2** (ADR-0052 §§2, 2a, 3, 5a; Proposed). `spawn` and `collect` are separate: the broker answers a start once the workload runs and keeps its ending until it is collected, at most 16 supervised and one per environment. The public `process.exec` (tool messages version 5) reaches the run's `READY` environment when the operator started the authority with `serve --sandbox-config`, and the authority prepares that environment itself on the run's first permitted launch — first destroying at most one environment that can never run again (an ended run's, or one of uncertain end), with at most 16 live — within the 120 s environment deadline; nothing a request says chooses or reaches the environment, and nothing falls back to the host.
 
+**As built in M5d.3** (ADR-0052 §7; Proposed). A launch may consume **one credential** (tool messages version 6, `credential_handle`): mode C on descriptor 3 or mode B in the operator's variable, chosen by the kernel, delivered by the pinned probe as a trusted launcher from a frame on the runtime client's standard input -- the one command line that attaches it -- after the broker judged the environment and proved the executable. The ordinary launch is unchanged and keeps standard input `/dev/null`. The credential is inherited by the program's descendants, all of them the environment's; no shipped pack allows `secret.use`.
+
 ### Implementations
 
 | Implementation | Assurance | Status |

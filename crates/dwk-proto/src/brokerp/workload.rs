@@ -31,7 +31,7 @@ use crate::brokerp::sandbox::{
 use crate::brokerp::{
     BrokerGeneration, BrokerRefusal, ChannelNonce, Common, DescriptorCount, EnvironmentSpec,
     KernelNumber, PrivateKind, ProcessArgs, ProcessStreamSnapshot, ProtocolVersion, RuntimeSpec,
-    StreamLimit,
+    SecretDelivery, SecretEnvName, SecretHandle, StreamLimit,
 };
 use crate::error::{ProtocolError, Violation};
 use crate::json::{Number, Value};
@@ -118,6 +118,13 @@ const _: () = assert!(WorkloadSeconds::MAX == WORKLOAD_MAX_SECONDS);
 wire_int! {
     /// A count of processes an environment's init ended or found.
     ProcessCount(u32), min = 0, max = 4096
+}
+
+wire_int! {
+    /// How many whole occurrences of a secret-bearing workload's value the
+    /// broker replaced in its two streams while it drained them (M5d.3): a
+    /// count, never a position or a byte of it.
+    RedactionCount(u32), min = 0, max = 4_294_967_295
 }
 
 wire_enum! {
@@ -334,6 +341,205 @@ wire_struct! {
         required ended_processes: ProcessCount,
         /// How many remained after it.
         required remaining_processes: ProcessCount,
+        /// For a secret-bearing workload (M5d.3) only: how many whole
+        /// occurrences of its value the broker replaced in its output.
+        optional redactions: RedactionCount,
+    }
+}
+
+/// The secret a workload receives (M5d.3, ADR-0052 §7): the handle its
+/// output is redacted under, how the launcher delivers it, and -- for mode B
+/// -- the variable. The value is never here: it is the start's last
+/// descriptor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkloadSecret {
+    /// The handle: the name `[redacted:<handle>]` reports.
+    pub handle: SecretHandle,
+    /// Mode B or mode C.
+    pub delivery: SecretDelivery,
+    /// For mode B: the variable. `None` for mode C.
+    pub env_name: Option<SecretEnvName>,
+}
+
+wire_struct! {
+    /// Start one workload that receives one secret (M5d.3, ADR-0052 §7):
+    /// everything a `broker.workload_start` names, then the secret. The
+    /// broker re-judges the environment and proves the executable **before**
+    /// it reads the value -- a refusal reads nothing -- then reads it once
+    /// from the last descriptor, and its trusted launcher in the environment
+    /// receives it over the runtime's standard input, framed, and delivers it
+    /// as the target's descriptor 3 (mode C) or one variable (mode B).
+    WorkloadSecretStartAuthorisation: reject {
+        /// Always `broker.workload_secret_start`.
+        required kind: PrivateKind,
+        /// The protocol version.
+        required protocol: ProtocolVersion,
+        /// The channel from this connection's hello.
+        required channel: ChannelNonce,
+        /// The authority's id for the invocation.
+        required invocation_id: InvocationId,
+        /// The environment.
+        required environment_id: EnvironmentId,
+        /// The run it is for.
+        required run_id: RunId,
+        /// The authority store it belongs to.
+        required store: StoreInstance,
+        /// The profile.
+        required profile: EnvironmentProfile,
+        /// The network topology.
+        required network: NetworkTopology,
+        /// The image, by content digest.
+        required image: ImageId,
+        /// The SHA-256 of the probe the image must carry: it is the launcher,
+        /// and it is run as `reap`.
+        required probe_sha256: ContentDigest,
+        /// The workspace directory.
+        required workspace_path: HostPath,
+        /// Its device.
+        required workspace_device: KernelNumber,
+        /// Its inode.
+        required workspace_inode: KernelNumber,
+        /// The container the authority recorded.
+        required container: ContainerRef,
+        /// The container runtime's control socket.
+        required runtime_socket: HostPath,
+        /// `argv[0]` for the runtime.
+        required runtime_argv0: HostPath,
+        /// The runtime executable's device.
+        required runtime_device: KernelNumber,
+        /// The runtime executable's inode.
+        required runtime_inode: KernelNumber,
+        /// Its SHA-256.
+        required runtime_sha256: ContentDigest,
+        /// The working directory's device.
+        required cwd_device: KernelNumber,
+        /// The working directory's inode.
+        required cwd_inode: KernelNumber,
+        /// `PROXY_ONLY` only: the relay's SHA-256, judged again.
+        optional relay_sha256: ContentDigest,
+        /// The executable's path inside the image.
+        required executable: ImagePath,
+        /// The SHA-256 its bytes must have.
+        required executable_sha256: ContentDigest,
+        /// The arguments after `argv[0]`.
+        required args: ProcessArgs,
+        /// How many bytes of each output stream come back.
+        required stream_limit: StreamLimit,
+        /// The wall clock.
+        required wall_clock: WorkloadSeconds,
+        /// Whether the launcher also sets `workspace_exec_hygiene`'s
+        /// variables (`HYGIENE`) or not (`DIRECT`). A secret-bearing workload
+        /// is always started by the launcher.
+        required launch: WorkloadLaunch,
+        /// The handle whose value the last descriptor holds.
+        required handle: SecretHandle,
+        /// Mode B or mode C.
+        required delivery: SecretDelivery,
+        /// For mode B: the variable. Absent for mode C.
+        optional env_name: SecretEnvName,
+        /// Three: the runtime executable, the working directory, the secret
+        /// pipe.
+        required descriptors: DescriptorCount,
+    }
+}
+
+impl WorkloadSecretStartAuthorisation {
+    /// A start of `workload` in `container`, which should be `environment`,
+    /// that delivers `secret`.
+    #[must_use]
+    pub fn new(
+        common: Common,
+        environment: EnvironmentSpec,
+        (container, runtime): (ContainerRef, RuntimeSpec),
+        workload: WorkloadSpec,
+        secret: WorkloadSecret,
+    ) -> Self {
+        let start =
+            WorkloadStartAuthorisation::new(common, environment, container, runtime, workload);
+        Self {
+            kind: PrivateKind::WorkloadSecretStart,
+            protocol: start.protocol,
+            channel: start.channel,
+            invocation_id: start.invocation_id,
+            environment_id: start.environment_id,
+            run_id: start.run_id,
+            store: start.store,
+            profile: start.profile,
+            network: start.network,
+            image: start.image,
+            probe_sha256: start.probe_sha256,
+            workspace_path: start.workspace_path,
+            workspace_device: start.workspace_device,
+            workspace_inode: start.workspace_inode,
+            container: start.container,
+            runtime_socket: start.runtime_socket,
+            runtime_argv0: start.runtime_argv0,
+            runtime_device: start.runtime_device,
+            runtime_inode: start.runtime_inode,
+            runtime_sha256: start.runtime_sha256,
+            cwd_device: start.cwd_device,
+            cwd_inode: start.cwd_inode,
+            relay_sha256: start.relay_sha256,
+            executable: start.executable,
+            executable_sha256: start.executable_sha256,
+            args: start.args,
+            stream_limit: start.stream_limit,
+            wall_clock: start.wall_clock,
+            launch: start.launch,
+            handle: secret.handle,
+            delivery: secret.delivery,
+            env_name: secret.env_name,
+            descriptors: DescriptorCount(3),
+        }
+    }
+
+    /// The workload's start, without its secret: the environment, the
+    /// runtime and the workload it names, exactly as a
+    /// `broker.workload_start` would.
+    #[must_use]
+    pub fn start(&self) -> WorkloadStartAuthorisation {
+        WorkloadStartAuthorisation {
+            kind: PrivateKind::WorkloadStart,
+            protocol: self.protocol,
+            channel: self.channel.clone(),
+            invocation_id: self.invocation_id.clone(),
+            environment_id: self.environment_id.clone(),
+            run_id: self.run_id.clone(),
+            store: self.store.clone(),
+            profile: self.profile,
+            network: self.network,
+            image: self.image.clone(),
+            probe_sha256: self.probe_sha256.clone(),
+            workspace_path: self.workspace_path.clone(),
+            workspace_device: self.workspace_device.clone(),
+            workspace_inode: self.workspace_inode.clone(),
+            container: self.container.clone(),
+            runtime_socket: self.runtime_socket.clone(),
+            runtime_argv0: self.runtime_argv0.clone(),
+            runtime_device: self.runtime_device.clone(),
+            runtime_inode: self.runtime_inode.clone(),
+            runtime_sha256: self.runtime_sha256.clone(),
+            cwd_device: self.cwd_device.clone(),
+            cwd_inode: self.cwd_inode.clone(),
+            relay_sha256: self.relay_sha256.clone(),
+            executable: self.executable.clone(),
+            executable_sha256: self.executable_sha256.clone(),
+            args: self.args.clone(),
+            stream_limit: self.stream_limit,
+            wall_clock: self.wall_clock,
+            launch: self.launch,
+            descriptors: DescriptorCount(2),
+        }
+    }
+
+    /// The secret it delivers.
+    #[must_use]
+    pub fn secret(&self) -> WorkloadSecret {
+        WorkloadSecret {
+            handle: self.handle.clone(),
+            delivery: self.delivery,
+            env_name: self.env_name.clone(),
+        }
     }
 }
 
@@ -451,6 +657,57 @@ pub(super) fn check_start(run: &WorkloadStartAuthorisation) -> Result<(), Protoc
         ));
     }
     Ok(())
+}
+
+/// A secret-bearing start's own consistency: a start's, and a variable
+/// exactly for mode B.
+///
+/// # Errors
+///
+/// The first inconsistency.
+pub(super) fn check_secret_start(
+    run: &WorkloadSecretStartAuthorisation,
+) -> Result<(), ProtocolError> {
+    check_start(&run.start())?;
+    let consistent = match run.delivery {
+        SecretDelivery::EnvAtSpawn => run.env_name.is_some(),
+        SecretDelivery::FdAtSpawn => run.env_name.is_none(),
+    };
+    if !consistent {
+        return Err(inconsistent(
+            "/delivery",
+            "an environment delivery names its variable and a descriptor delivery none",
+        ));
+    }
+    if run
+        .env_name
+        .as_ref()
+        .is_some_and(|name| !sandbox_secret_name_allowed(name.as_str()))
+    {
+        return Err(inconsistent(
+            "/env_name",
+            "a sandboxed secret's variable is one the environment sets",
+        ));
+    }
+    Ok(())
+}
+
+/// The variables an execution environment sets for itself -- its egress
+/// proxy's -- which a sandboxed mode B secret may never carry (M5d.3,
+/// ADR-0052 §7). Together with the process-control names every secret
+/// variable is refused ([`super::valid_secret_env_name`]: `GIT_*`,
+/// `PYTHON*`, `CARGO_*`, `NPM_CONFIG_*`, a lowercase name), a value never
+/// shadows the environment's configuration or `workspace_exec_hygiene`'s.
+/// The environment's own lists are `dwk-sandbox-profile`'s, which the
+/// authority does not link; a broker test holds this one to them.
+pub const SANDBOX_RESERVED_SECRET_VARIABLES: &[&str] =
+    &["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY"];
+
+/// Whether `name` may carry a sandboxed mode B secret: a secret variable's
+/// shape, no process-control name, and none the environment sets.
+#[must_use]
+pub fn sandbox_secret_name_allowed(name: &str) -> bool {
+    super::valid_secret_env_name(name) && !SANDBOX_RESERVED_SECRET_VARIABLES.contains(&name)
 }
 
 /// The result's own consistency: an exit code exactly for `EXITED`, a signal

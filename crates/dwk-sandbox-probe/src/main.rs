@@ -21,10 +21,13 @@
 //! | `measure <environment-id> <topology>` | print one report and exit |
 //! | `reap` | after a workload (M5d, ADR-0052 §5): end every other process of the environment, print `reaped <found> <remaining>` |
 //! | `launch hygiene <path> <args...>` | the trusted launcher (M5d.2, ADR-0052 §5a): set `workspace_exec_hygiene`'s variables over the environment's own and execute `<path>` with exactly `<args...>`, replacing itself |
+//! | `launch secret-fd[-hygiene] <path> <args...>`, `launch secret-env[-hygiene] <NAME> <path> <args...>` | the same launcher with a secret (M5d.3, ADR-0052 §7): one framed value read from standard input, then the target executed with it on descriptor 3 (mode C) or as `NAME=value` (mode B), and standard input `/dev/null` |
 //! | `ptrace-target` | the child the ptrace canary attaches to |
 //!
 //! [ADR-0047]: ../../../docs/adr/0047-m5a-oci-execution-environment-and-measured-assurance.md
 
+#[cfg(target_os = "linux")]
+mod launch;
 #[cfg(target_os = "linux")]
 mod linux;
 

@@ -39,6 +39,7 @@ mod plan;
 mod relay_plan;
 mod supervisor;
 mod workload_plan;
+mod workload_secret_plan;
 
 use std::os::fd::OwnedFd;
 use std::path::PathBuf;
@@ -51,20 +52,21 @@ use dwk_proto::brokerp::sandbox::{
     Verdict,
 };
 use dwk_proto::brokerp::workload::{
-    ProcessCount, WORKLOAD_SUPERVISION_SECONDS, WorkloadCollectAuthorisation, WorkloadCollectDone,
-    WorkloadEnding, WorkloadProgress, WorkloadRunDone, WorkloadSpec, WorkloadStartAuthorisation,
+    ProcessCount, RedactionCount, WORKLOAD_SUPERVISION_SECONDS, WorkloadCollectAuthorisation,
+    WorkloadCollectDone, WorkloadEnding, WorkloadProgress, WorkloadRunDone, WorkloadSecret,
+    WorkloadSecretStartAuthorisation, WorkloadSpec, WorkloadStartAuthorisation,
 };
 use dwk_proto::brokerp::{
     BrokerDone, BrokerGeneration, BrokerRefusal, DestroyState, EnvironmentDestroyAuthorisation,
     EnvironmentDestroyDone, EnvironmentListAuthorisation, EnvironmentListDone,
     EnvironmentMeasureAuthorisation, EnvironmentMeasureDone, EnvironmentMeasurement,
     EnvironmentPrepareAuthorisation, EnvironmentPrepareDone, Indeterminate, OutcomeResult,
-    OwnedEnvironments, ProcessStreamSnapshot, RuntimeSpec,
+    OwnedEnvironments, ProcessStreamSnapshot, RuntimeSpec, SecretDelivery,
 };
 use dwk_proto::wire::scalar::{ByteCount, ExitCode, SignalNumber, StreamContent};
 
 use environment::{
-    Destroyed, EnvFailure, EnvHandle, ExecOutcome, ExecutionEnvironment, Measured, Ran,
+    Destroyed, EnvFailure, EnvHandle, ExecOutcome, ExecutionEnvironment, Measured, Ran, SecretRun,
 };
 
 use crate::egress::proxy::Proxies;
@@ -154,6 +156,10 @@ fn ran_done(ran: &Ran) -> Option<WorkloadRunDone> {
         residue: ran.residue,
         ended_processes: ProcessCount::new(ran.ended)?,
         remaining_processes: ProcessCount::new(ran.remaining)?,
+        redactions: match ran.redactions {
+            Some(count) => Some(RedactionCount::new(count)?),
+            None => None,
+        },
     };
     dwk_proto::brokerp::workload::check_done(&done).ok()?;
     Some(done)
@@ -231,12 +237,45 @@ struct Workload {
     spec: EnvironmentSpec,
     program: WorkloadSpec,
     runtime: RuntimeSpec,
+    /// A secret-bearing workload's secret (M5d.3), and the descriptor that
+    /// holds its value -- read only after the judgement.
+    secret: Option<(WorkloadSecret, OwnedFd)>,
+}
+
+/// Read a secret-bearing workload's value -- once, bounded, from a pipe the
+/// authority filled and closed -- and refuse what its delivery cannot carry
+/// (M5d.3, ADR-0046 §11, ADR-0052 §7). Called only once the environment is
+/// judged and the executable proved, so a refused workload never reads it.
+/// A variable the environment sets never reaches here: the shared decoder
+/// refuses the authorisation (`workload::sandbox_secret_name_allowed`), and
+/// the launcher refuses the name again inside the environment.
+fn secret_run(
+    secret: Option<&(WorkloadSecret, OwnedFd)>,
+) -> Result<Option<SecretRun>, BrokerRefusal> {
+    let Some((secret, fd)) = secret else {
+        return Ok(None);
+    };
+    let value = crate::secret::read_value(fd)?;
+    crate::crash::point("workload_secret_after_read");
+    if secret.delivery == SecretDelivery::EnvAtSpawn && value.contains(&0) {
+        return Err(BrokerRefusal::SecretUnsafeBytes);
+    }
+    let needle =
+        crate::secret::Needle::new(value, &secret.handle).ok_or(BrokerRefusal::SecretEmpty)?;
+    Ok(Some(SecretRun {
+        secret: secret.clone(),
+        launch: crate::process::launch::SecretLaunch {
+            delivery: crate::process::launch::Delivery::Stdin,
+            needle,
+        },
+    }))
 }
 
 /// A workload's thread (ADR-0052 §§5, 8): re-prove the runtime, re-judge
-/// the environment and prove the executable; report it through `gate`; and
-/// only on the exchange's word, run it, bounded by `until`. `None` when it
-/// never ran.
+/// the environment and prove the executable; for a secret-bearing workload
+/// (M5d.3), only then read its value; report it through `gate`; and only on
+/// the exchange's word, run it, bounded by `until`. `None` when it never
+/// ran.
 fn supervise(
     parts: &Parts,
     descriptors: (OwnedFd, OwnedFd),
@@ -248,9 +287,14 @@ fn supervise(
     let ran = with_oci(parts, descriptors, &work.runtime, until, |env| {
         let judged = env
             .ready_workload(&work.handle, &work.spec, &work.program)
-            .map_err(judgement);
+            .map_err(judgement)
+            .and_then(|()| secret_run(work.secret.as_ref()).map_err(OutcomeResult::Refused));
+        let (judged, secret) = match judged {
+            Ok(secret) => (Ok(()), secret),
+            Err(refused) => (Err(refused), None),
+        };
         let go = gate.take().is_some_and(|gate| gate.judged(judged));
-        go.then(|| env.exec_workload(&work.handle, &work.program, until))
+        go.then(|| env.exec_workload(&work.handle, &work.program, until, secret))
     });
     match ran {
         Ok(ran) => ran.map(ending),
@@ -463,6 +507,45 @@ impl Sandbox {
         descriptors: (OwnedFd, OwnedFd),
         until: Instant,
     ) -> OutcomeResult {
+        self.start_workload(authorisation, descriptors, None, until)
+    }
+
+    /// `broker.workload_secret_start` (M5d.3, ADR-0052 §7): a workload's
+    /// start that delivers one secret. Everything `workload_start` proves;
+    /// then -- on the supervisor's thread, before the answer -- the value is
+    /// read once from the last descriptor; the runtime's client receives it
+    /// framed on its standard input and the trusted launcher delivers it.
+    /// The output is redacted of it as it is drained.
+    pub(crate) fn workload_secret_start(
+        &self,
+        authorisation: &WorkloadSecretStartAuthorisation,
+        descriptors: (OwnedFd, OwnedFd),
+        secret: OwnedFd,
+        until: Instant,
+    ) -> OutcomeResult {
+        let answer = self.start_workload(
+            &authorisation.start(),
+            descriptors,
+            Some((authorisation.secret(), secret)),
+            until,
+        );
+        // The same answer, under the operation that asked it.
+        match answer {
+            OutcomeResult::Done(done) => match done.workload_start {
+                Some(started) => OutcomeResult::done(BrokerDone::workload_secret_start(started)),
+                None => OutcomeResult::Done(done),
+            },
+            other => other,
+        }
+    }
+
+    fn start_workload(
+        &self,
+        authorisation: &WorkloadStartAuthorisation,
+        descriptors: (OwnedFd, OwnedFd),
+        secret: Option<(WorkloadSecret, OwnedFd)>,
+        until: Instant,
+    ) -> OutcomeResult {
         let spec = authorisation.environment();
         if let Err(why) = self.topology(spec.network) {
             return OutcomeResult::Refused(why);
@@ -476,6 +559,7 @@ impl Sandbox {
             program: authorisation.workload(),
             runtime: authorisation.runtime(),
             spec,
+            secret,
         };
         let parts = Arc::clone(&self.parts);
         // The workload's own bound, from now: its longest wall clock and the

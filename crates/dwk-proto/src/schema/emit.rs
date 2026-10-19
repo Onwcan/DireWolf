@@ -28,6 +28,7 @@ use crate::dwkp::registry::{self, OPERATIONS};
 use crate::dwkp::sandboxops::{
     CanonicalPreviewResultV5, ToolCallV5, ToolDenialV5, ToolFailureV5, ToolRefusalV5, ToolResultV5,
 };
+use crate::dwkp::secretops::{CanonicalPreviewResultV6, ToolCallV6, ToolDenialV6, ToolResultV6};
 use crate::envelope::{EnvelopeRules, MessageType, Presence, field_schema};
 use crate::events::{self, LeaseAcquired};
 use crate::json::{Object, Value};
@@ -114,6 +115,10 @@ pub fn payload_schema(name: &str, defs: &mut Defs) -> Option<Value> {
         "CanonicalPreviewResultV5" => CanonicalPreviewResultV5::schema(defs),
         "ToolRefusalV5" => ToolRefusalV5::schema(defs),
         "ToolFailureV5" => ToolFailureV5::schema(defs),
+        "ToolCallV6" => ToolCallV6::schema(defs),
+        "ToolResultV6" => ToolResultV6::schema(defs),
+        "ToolDenialV6" => ToolDenialV6::schema(defs),
+        "CanonicalPreviewResultV6" => CanonicalPreviewResultV6::schema(defs),
         "Ack" => Ack::schema(defs),
         "ProtocolErrorPayload" => ProtocolErrorPayload::schema(defs),
         "ClientError" => dwcp::ClientError::schema(defs),

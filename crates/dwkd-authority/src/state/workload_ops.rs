@@ -18,6 +18,14 @@
 //! ([`super::workload`]); every decision is the authority's — both gates for
 //! a sandbox action, the environment's measured level, the manifest, the
 //! budget — and the broker only re-judges what it is about to touch.
+//!
+//! **A workload's credential** (M5d.3, ADR-0052 §7) is read from its backend
+//! here, with no transaction open, only once both intents are durable and
+//! the runtime client and the workspace are in hand -- the last step before
+//! the broker's start -- and leaves the authority only as a one-shot pipe:
+//! never a field, an argument, a variable of the runtime's client or a file.
+//! A credential that cannot be read or carried fails the workload before
+//! anything is sent: provably nothing ran.
 
 use std::time::{Duration, Instant};
 
@@ -31,12 +39,16 @@ use crate::broker::{
     BrokerDelivery, BrokerError, BrokerFailure, BrokerOrder, Collected, Operation,
 };
 use crate::sandbox;
+use crate::secret::SecretError;
+use crate::secret::handoff::{self, SecretPipe};
+use crate::secret::metadata::InjectionMode;
 
 use super::Authority;
 use super::crash::CrashPoint;
 use super::environment::DestroyBegun;
 use super::environment_ops::{Attached, EnvironmentReply, runtime, specification};
 use super::error::AuthorityError;
+use super::secret_use::spawn::{self, SpawnAuthorised};
 use super::workload::{self, Begun, Ending, WorkloadRecord, WorkloadRequest};
 
 /// How often the in-process API collects a running workload.
@@ -172,10 +184,52 @@ fn ending_of_run(done: Box<WorkloadRunDone>) -> Ending {
 /// executable's -- the workload's in the image, or the runtime client's --
 /// never ambiguous with an environment's.
 const fn refusal_class(refusal: dwk_proto::brokerp::BrokerRefusal) -> &'static str {
+    use dwk_proto::brokerp::BrokerRefusal as R;
     match refusal {
-        dwk_proto::brokerp::BrokerRefusal::DigestMismatch => "EXECUTABLE_DIGEST_MISMATCH",
+        R::DigestMismatch => "EXECUTABLE_DIGEST_MISMATCH",
+        // A credential the broker would not carry (M5d.3): nothing ran.
+        R::SecretDescriptor | R::SecretEmpty | R::SecretTooLarge | R::SecretUnsafeBytes => {
+            "CREDENTIAL_FAILED"
+        }
         refusal => sandbox::refusal_class(refusal),
     }
+}
+
+/// Read `authorised`'s value and hand it over as a one-shot pipe, with no
+/// transaction open (ADR-0046 §17 steps 10–12): `Ok(Err(reason))` when it
+/// cannot be read or carried -- the authority's copy zeroed either way. A
+/// crash hook at a [`CrashPoint::SECRET`] point poisons the store.
+fn hand_over(
+    shared: &super::Shared,
+    authorised: &mut SpawnAuthorised,
+) -> Result<Result<SecretPipe, &'static str>, AuthorityError> {
+    let prepared = &authorised.prepared;
+    let material = match crate::secret::backend::read(
+        &prepared.metadata.storage,
+        shared.secrets.config().age.as_ref(),
+        shared.authority_uid,
+    ) {
+        Ok(material) => material,
+        Err(error) => return Ok(Err(error.code())),
+    };
+    authorised.resolved = true;
+    shared.crash(CrashPoint::SecretAfterBackend)?;
+    // The return path learns it before it can go anywhere.
+    shared.secrets.register(&prepared.handle, &material);
+    shared.crash(CrashPoint::SecretAfterRegister)?;
+    // Mode B's value becomes a C string in the program's environment: a NUL
+    // would end it early. Refused, never sanitised.
+    if prepared.mode == InjectionMode::EnvAtSpawn && !handoff::variable_safe(&material) {
+        drop(material);
+        return Ok(Err(SecretError::MaterialInvalid.code()));
+    }
+    // The one-shot pipe; the authority's copy is zeroed.
+    let pipe = match handoff::one_shot(material) {
+        Ok(pipe) => pipe,
+        Err(error) => return Ok(Err(error.code())),
+    };
+    shared.crash(CrashPoint::SecretAfterHandoff)?;
+    Ok(Ok(pipe))
 }
 
 /// How a start's failure is recorded: a failure only when nothing can have
@@ -243,7 +297,7 @@ fn ending_of_collection(result: Result<BrokerDelivery, BrokerError>) -> Option<E
 pub(super) fn start(
     attached: &Attached,
     run: &RunId,
-    intent: workload::Intent,
+    mut intent: workload::Intent,
     workload: WorkloadSpec,
 ) -> Result<Launched, AuthorityError> {
     let order = runtime(&attached.shared, &attached.config).and_then(|handoff| {
@@ -262,16 +316,47 @@ pub(super) fn start(
         }
         Ok(order) => order,
     };
-    let since = Instant::now();
-    let result = attached.broker.perform(BrokerOrder::new(
-        intent.invocation.clone(),
-        Operation::WorkloadStart {
+    // A credential (M5d.3): read now, and only now, as a one-shot pipe.
+    let secret = match intent.secret.as_mut() {
+        None => None,
+        Some(authorised) => match hand_over(&attached.shared, authorised)? {
+            Ok(pipe) => Some((authorised.prepared.secret.clone(), pipe)),
+            Err(reason) => {
+                authorised.failure = Some(reason);
+                return Ok(Launched::Ended(
+                    Box::new(intent),
+                    Ending::Failed {
+                        reason: "CREDENTIAL_FAILED",
+                    },
+                ));
+            }
+        },
+    };
+    let container = intent.environment.container.clone();
+    let operation = match secret {
+        None => Operation::WorkloadStart {
             spec,
-            container: intent.environment.container.clone(),
+            container,
             runtime: handoff,
             workload,
         },
-    ));
+        Some((secret, pipe)) => Operation::WorkloadSecretStart {
+            spec,
+            container,
+            runtime: handoff,
+            workload,
+            secret,
+            pipe,
+        },
+    };
+    let since = Instant::now();
+    let result = attached
+        .broker
+        .perform(BrokerOrder::new(intent.invocation.clone(), operation));
+    if intent.secret.is_some() {
+        // The broker answered: it may have read the value (R8).
+        attached.shared.crash(CrashPoint::SecretAfterBroker)?;
+    }
     let ending = match result {
         Ok(BrokerDelivery::WorkloadStarted(generation)) => {
             attached.shared.crash(CrashPoint::WorkloadAfterStart)?;
@@ -314,6 +399,20 @@ pub(super) fn collect(
             reason: "WORKLOAD_OVERDUE",
             done: None,
         }),
+        // A redaction count exactly for a workload that was handed a
+        // credential (M5d.3): anything else is a broker that does not keep
+        // the protocol, and nothing proves what it ran.
+        Some(
+            Ending::Completed(done)
+            | Ending::Unknown {
+                done: Some(done), ..
+            },
+        ) if done.redactions.is_some() != started.intent.secret.is_some() => {
+            Some(Ending::Unknown {
+                reason: "BROKER_PROTOCOL_ERROR",
+                done: None,
+            })
+        }
         ending => ending,
     };
     if ending.is_some() {
@@ -359,7 +458,7 @@ impl Authority {
             workload::begin(
                 work,
                 run,
-                &checked,
+                (&checked, None),
                 (budget, active, &image),
                 (&workload::Binding::Run, workload::Missing::Refuse),
             )
@@ -425,9 +524,26 @@ impl Authority {
                 r.stdout_cut || r.stderr_cut,
             )
         });
-        let recorded =
-            self.transact(|work| workload::record_outcome(work, run, intent, &ending, sizes))?;
+        if intent.secret.is_some() {
+            shared.crash(CrashPoint::SecretBeforeOutcome)?;
+        }
+        // The workload's outcome and its credential's, in one transaction.
+        let recorded = self.transact(|work| {
+            let recorded = workload::record_outcome(work, run, intent, &ending, sizes)?;
+            if let Some(authorised) = &intent.secret {
+                spawn::record_outcome(
+                    work,
+                    authorised,
+                    run,
+                    spawn::ending_of(authorised, &ending),
+                )?;
+            }
+            Ok(recorded)
+        })?;
         shared.crash(CrashPoint::WorkloadAfterOutcome)?;
+        if intent.secret.is_some() {
+            shared.crash(CrashPoint::SecretAfterOutcome)?;
+        }
         let environment_destroyed = match recorded.destroy {
             Some(DestroyBegun::Pending { record, invocation }) => {
                 matches!(

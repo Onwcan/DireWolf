@@ -165,6 +165,23 @@ Stronger than (B): not visible in `environ`, and it disappears when the environm
 > the sandbox's job (M5). M4e implements the pipe form only, on descriptor 3,
 > with the same pre-M5 status as mode (B) (ADR-0046 §13).
 
+
+**In an execution environment (M5d.3, [ADR-0052](adr/0052-m5d-sandboxed-process-exec.md) §7, Proposed).**
+Modes B and C reach a **sandboxed** process -- the only place they reach in
+a build a user runs. A version-6 `process.exec` names a handle
+(`credential_handle`); the kernel checks the metadata, binds the consumer to
+the executable the image manifest pins at a path the metadata names, chooses
+C before B, and decides `secret.use:<handle>` for a `SANDBOX` action beside the
+launch, by both gates. The value is read only after both intents are durable,
+handed to the broker as a one-shot pipe, read by the broker only after it
+re-judged the environment, and delivered framed over the runtime client's
+standard input to the pinned probe, which puts it on descriptor 3 or in the
+operator's variable and executes the program. It is never an argument, a
+runtime option, a file or a protocol field. The program's descendants
+inherit it; output is redacted of it on return, which protects against an
+honest echo, not a malicious consumer. No shipped policy pack permits it:
+an operator writes a `secret.use` rule for the `sandbox` environment.
+
 ### (D) `plaintext_to_model` — forbidden by default
 
 **Unreachable until M6**: the metadata parser refuses it (ADR-0046 §14). Requires `security.allow_secret_to_model = true` **and** a per-use approval **and** an audit record at `sensitivity=critical`. It exists only because there are legitimate cases (a user pasting a token and asking the agent to explain it) where refusing would be paternalistic rather than protective. It is off, it is loud, and it is never the default for any secret.
@@ -218,7 +235,7 @@ Every resolution records: handle, agent, run, tool, injection mode, destination 
 | Secret in a core dump | `RLIMIT_CORE=0` and non-dumpable daemons (M4e; the hosted evidence crashes both hardened daemons and a dumpable control, and requires a core from the control only); `MADV_DONTDUMP` not implemented |
 | Secret paged to swap | **Not defended in M4e**: `mlock` is not implemented; `memory_swap == memory` in sandboxes (M5) |
 | Secret in shell history / process args | **Never passed as a command-line argument.** `argv` is world-readable on Linux. Modes B and C exist precisely to avoid argv. |
-| Secret inherited by an unexpected grandchild | Mode C over mode B; environment scrubbed to an allowlist at spawn. Mode C's descriptor is still inherited by a grandchild that does not close it (measured); containment is M5's |
+| Secret inherited by an unexpected grandchild | Mode C over mode B; environment scrubbed to an allowlist at spawn. Mode C's descriptor is still inherited by a grandchild that does not close it (measured); since M5d.3 every such process is the execution environment's -- uid 10001, ended by `reap` -- and the inheritance is measured there too, a residual, not a restriction to one process |
 | Malicious skill or plugin reading credentials | Runs out-of-process with its own capability set; secrets are per-invocation, not ambient |
 | Backup/export endpoint leak | No such endpoint exists at any privilege level |
 | Compromised kernel | **Total loss.** Accepted residual risk R8 in [THREAT_MODEL.md](THREAT_MODEL.md); mitigated only by keeping the TCB small and its dependencies pinned and reviewed. |

@@ -912,3 +912,41 @@ pub(crate) fn v5_from_v4(body: DwkpBody) -> Result<DwkpBody, WireGap> {
         _ => return Err(WireGap::Unrepresentable("not a version-4 tool answer")),
     })
 }
+
+/// A version-5 tool's answer in version 6's shapes (M5d.3): the answer to
+/// any call asked at version 6 that names no credential. Version 6's plans
+/// are version 5's, widened; its refusals and failures are version 5's own.
+///
+/// # Errors
+///
+/// [`WireGap::Unrepresentable`] for an answer that is not a version-5 tool
+/// response, or does not widen -- a bug.
+pub(crate) fn v6_from_v5(body: DwkpBody) -> Result<DwkpBody, WireGap> {
+    Ok(match body {
+        DwkpBody::ToolResultV5(p) => DwkpBody::ToolResultV6(widen(&p)?),
+        DwkpBody::ToolDeniedV5(p) => DwkpBody::ToolDeniedV6(widen(&p)?),
+        DwkpBody::ToolPreviewedV5(p) => DwkpBody::ToolPreviewedV6(widen(&p)?),
+        DwkpBody::ToolRefusedV5(p) => DwkpBody::ToolRefusedV6(p),
+        DwkpBody::ToolFailedV5(p) => DwkpBody::ToolFailedV6(p),
+        _ => return Err(WireGap::Unrepresentable("not a version-5 tool answer")),
+    })
+}
+
+/// A version-6 answer in version 5's shapes (M5d.3): a sandboxed launch
+/// asked at version 5, which cannot name a credential, so its plan holds no
+/// spawn injection and narrows exactly. One that does not narrow is a bug.
+///
+/// # Errors
+///
+/// [`WireGap::Unrepresentable`] for an answer that is not a version-6 tool
+/// response, or names a spawn injection.
+pub(crate) fn v5_from_v6(body: DwkpBody) -> Result<DwkpBody, WireGap> {
+    Ok(match body {
+        DwkpBody::ToolResultV6(p) => DwkpBody::ToolResultV5(widen(&p)?),
+        DwkpBody::ToolDeniedV6(p) => DwkpBody::ToolDeniedV5(widen(&p)?),
+        DwkpBody::ToolPreviewedV6(p) => DwkpBody::ToolPreviewedV5(widen(&p)?),
+        DwkpBody::ToolRefusedV6(p) => DwkpBody::ToolRefusedV5(p),
+        DwkpBody::ToolFailedV6(p) => DwkpBody::ToolFailedV5(p),
+        _ => return Err(WireGap::Unrepresentable("not a version-6 tool answer")),
+    })
+}

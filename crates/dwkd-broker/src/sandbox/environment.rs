@@ -101,6 +101,21 @@ pub(crate) struct Ran {
     pub(crate) ended: u32,
     /// How many remained.
     pub(crate) remaining: u32,
+    /// For a secret-bearing workload (M5d.3): how many whole occurrences of
+    /// its value were replaced in its output.
+    pub(crate) redactions: Option<u32>,
+}
+
+/// A workload's secret, read and ready (M5d.3, ADR-0052 §7): what the
+/// launcher is told -- the handle, mode B or C, the variable -- and the value,
+/// which the runtime's client receives framed on its standard input and
+/// which redacts the output.
+#[derive(Debug)]
+pub(crate) struct SecretRun {
+    /// The handle, the delivery and the variable.
+    pub(crate) secret: dwk_proto::brokerp::workload::WorkloadSecret,
+    /// The value, delivered on the client's standard input.
+    pub(crate) launch: crate::process::launch::SecretLaunch,
 }
 
 /// Why an environment operation has no result.
@@ -175,6 +190,7 @@ pub(crate) trait ExecutionEnvironment {
         handle: &EnvHandle,
         workload: &WorkloadSpec,
         until: std::time::Instant,
+        secret: Option<SecretRun>,
     ) -> Result<Ran, EnvFailure>;
 
     /// Remove exactly the environment `environment` of `run` in `store` —

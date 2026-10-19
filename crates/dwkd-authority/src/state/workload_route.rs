@@ -1,5 +1,6 @@
 //! The public `process.exec` in an execution environment (M5d.2, ADR-0052
-//! §2): tool messages at version 5.
+//! §2): tool messages at version 5 -- and at version 6 (M5d.3, ADR-0052 §7),
+//! which may name one credential the launched executable consumes.
 //!
 //! **The kernel decides where it runs** (OD-1). An authority with an
 //! execution environment attached runs `process.exec` in the run's `READY`
@@ -47,6 +48,18 @@
 //! `OBLIGATION_UNENFORCEABLE` (`resource::exec::hygiene`). It neutralises
 //! configuration from outside the invocation, never the workspace's own
 //! code: the environment contains that.
+//!
+//! # A credential (version 6)
+//!
+//! A launch that names a credential handle runs only in an execution
+//! environment: without one it is refused (`CREDENTIAL_UNAVAILABLE`) and
+//! nothing runs on the host instead. Its metadata, consumer and mode are
+//! checked before either gate (`super::secret_use::spawn`) -- a refusal reads
+//! nothing -- and the plan then holds two actions, the launch and its spawn
+//! injection, each decided by both gates for a `SANDBOX` action; either
+//! denial denies it. Both intents are durable before the value is read, and
+//! the value reaches the broker only as a one-shot pipe
+//! (`super::workload_ops`).
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -54,13 +67,17 @@ use std::time::{Duration, Instant};
 use dwk_proto::brokerp::sandbox::{AssuranceLevel, ImageId, Verdict};
 use dwk_proto::brokerp::workload::WorkloadEnding;
 use dwk_proto::dwkp::netops::CoreToolV4;
+use dwk_proto::dwkp::netops::CredentialHandle;
 use dwk_proto::dwkp::procops::{ProcessActionDecision, ProcessExecCall, ProcessStreamSnapshot};
 use dwk_proto::dwkp::sandboxops::{
-    CanonicalPreviewResultV5, ExecLaunch, ExecMilliseconds, ExecSeconds, ExecStreamLimit,
-    ExecutionAssurance, ImageDigest, ImageExecutableRef, MAX_EXEC_STREAM_BYTES, PlannedActionV5,
-    PlannedActionsV5, PlannedWorkloadAction, ProcessExecCallV5, ReapedCount, ResidueVerdict,
-    SandboxEnding, SandboxedExecResult, ToolCallV5, ToolDenialV5, ToolFailureReasonV5,
-    ToolFailureV5, ToolOutputV5, ToolPlanV5, ToolRefusalReasonV5, ToolRefusalV5, ToolResultV5,
+    ExecLaunch, ExecMilliseconds, ExecSeconds, ExecStreamLimit, ExecutionAssurance, ImageDigest,
+    ImageExecutableRef, MAX_EXEC_STREAM_BYTES, PlannedWorkloadAction, ProcessExecCallV5,
+    ReapedCount, ResidueVerdict, SandboxEnding, SandboxedExecResult, ToolCallV5,
+    ToolFailureReasonV5, ToolFailureV5, ToolOutputV5, ToolRefusalReasonV5, ToolRefusalV5,
+};
+use dwk_proto::dwkp::secretops::{
+    CanonicalPreviewResultV6, PlannedActionV6, PlannedActionsV6, PlannedSpawnInjectionAction,
+    ProcessExecCallV6, SpawnInjection, ToolCallV6, ToolDenialV6, ToolPlanV6, ToolResultV6,
 };
 use dwk_proto::dwkp::{DwkpBody, DwkpMessage};
 use dwk_proto::wire::id::{EnvironmentId, RunId, SessionId};
@@ -72,6 +89,7 @@ use dwk_proto::wire::scalar::{
 use rusqlite::OptionalExtension as _;
 
 use crate::resource::exec::argv::ArgvClass;
+use crate::secret::metadata::InjectionMode;
 
 use super::Authority;
 use super::Work;
@@ -82,11 +100,12 @@ use super::error::AuthorityError;
 use super::identity::CallerContext;
 use super::lease;
 use super::policy_state::ActiveAuthority;
+use super::secret_use::spawn::{self, SpawnAsked};
 use super::tool;
 use super::wire::{self, WireGap};
 use super::workload::{
     self, Begun, Binding, Checked, Decided, ImageBinding, Missing, Previewed, ReadyEnvironment,
-    WorkloadPlan, WorkloadRequest,
+    SpawnGate, WorkloadPlan, WorkloadRequest,
 };
 use super::workload_ops::{self, Launched, Started, WorkloadOutcome, WorkloadReply};
 
@@ -134,10 +153,12 @@ impl Parked {
 /// What a sandboxed launch's answer states besides its ending.
 #[derive(Debug, Clone)]
 struct Answer {
-    plan: ToolPlanV5,
+    plan: ToolPlanV6,
     environment: EnvironmentId,
     assurance: ExecutionAssurance,
     executable: ImageExecutableRef,
+    /// The tool messages' version it was asked at: 5 or 6.
+    version: u16,
 }
 
 /// Who asks, about what.
@@ -148,6 +169,8 @@ struct Asked<'a> {
     epoch: Epoch,
     key: Option<&'a IdempotencyKey>,
     operation: ToolOperation,
+    /// The tool messages' version: 5, or 6 (M5d.3).
+    version: u16,
 }
 
 /// What step 1 and 2 decided.
@@ -182,6 +205,7 @@ fn refusal(reason: &str) -> Result<ToolRefusalReasonV5, AuthorityError> {
         "ASSURANCE_INSUFFICIENT" => R::AssuranceInsufficient,
         "ENVIRONMENT_BUSY" => R::EnvironmentBusy,
         "IMAGE_CHANGED" => R::ImageChanged,
+        "CREDENTIAL_UNAVAILABLE" => R::CredentialUnavailable,
         "BUDGET_EXHAUSTED" | "ENVIRONMENT_BUDGET_EXHAUSTED" | "LIVE_ENVIRONMENTS_EXHAUSTED" => {
             R::BudgetExhausted
         }
@@ -213,6 +237,9 @@ fn failure(reason: &str) -> ToolFailureReasonV5 {
         | "RUNTIME_CWD_UNAVAILABLE" => F::RuntimeUnavailable,
         "BROKER_UNAVAILABLE" => F::BrokerUnavailable,
         "BROKER_PROTOCOL_ERROR" => F::BrokerProtocolError,
+        // A credential that could not be read, or carried, before anything
+        // ran (M5d.3).
+        "CREDENTIAL_FAILED" => F::CredentialFailed,
         _ => F::BrokerExecutionError,
     }
 }
@@ -230,7 +257,7 @@ const fn assurance(level: AssuranceLevel) -> ExecutionAssurance {
 /// manifest and the bounds ([`workload::check`]). The wall clock and the
 /// stream bound are the authority's, narrowed only if the call narrows them.
 fn checked(
-    call: &ProcessExecCallV5,
+    call: &ProcessExecCallV6,
     key: &str,
     config: &crate::sandbox::SandboxConfig,
 ) -> Result<Checked, &'static str> {
@@ -253,7 +280,34 @@ fn checked(
             .min(config.workload_max_seconds()),
         key: key.to_owned(),
     };
-    workload::check(&request, config)
+    let mut checked = workload::check(&request, config)?;
+    checked.credential = call
+        .credential_handle
+        .as_ref()
+        .map(|handle| handle.as_str().to_owned());
+    Ok(checked)
+}
+
+/// A version-5 launch as version 6 spells it: no credential.
+fn v6_call(call: &ProcessExecCallV5) -> ProcessExecCallV6 {
+    ProcessExecCallV6 {
+        executable: call.executable.clone(),
+        args: call.args.clone(),
+        cwd: call.cwd.clone(),
+        timeout_seconds: call.timeout_seconds,
+        max_stream_bytes: call.max_stream_bytes,
+        credential_handle: None,
+    }
+}
+
+/// A version-6 answer in the version the call was asked at: version 5's,
+/// for a call that could name no credential, is the same answer narrowed.
+fn in_version(body: DwkpBody, version: u16) -> Result<DwkpBody, WireGap> {
+    if version == 6 {
+        Ok(body)
+    } else {
+        wire::v5_from_v6(body)
+    }
 }
 
 /// Whether a key is bound in any of the four ledgers.
@@ -289,7 +343,7 @@ fn refused(
         Fields::new()
             .text("operation", asked.operation.as_str())
             .text("tool", "process.exec")
-            .int("protocol_version", 5)
+            .int("protocol_version", u64::from(asked.version))
             .text("environment", "SANDBOX")
             .text("subject", asked.caller.subject().storage_key())
             .text("session_id", asked.session.as_str())
@@ -303,7 +357,7 @@ fn refused(
 fn route(
     work: &mut Work<'_>,
     asked: &Asked<'_>,
-    call: &ProcessExecCallV5,
+    call: &ProcessExecCallV6,
     (attached, active, image): (&Attached, &ActiveAuthority, &ImageBinding),
     prepared: bool,
 ) -> Result<Route, AuthorityError> {
@@ -334,15 +388,29 @@ fn route(
             return Ok(Route::Refused(refusal(reason)?));
         }
     };
+    // The credential (M5d.3): its metadata, consumer and mode before either
+    // gate. A refusal reads nothing and runs nothing.
+    let consumer = checked.identity.clone();
+    let secret = match credential(work, asked, call, (attached, &consumer))? {
+        Ok(secret) => secret,
+        Err(refused) => return Ok(refused),
+    };
     let budget = attached.config.workload_budget();
     let subject = asked.caller.subject().storage_key();
     let binding = Binding::Session {
         subject: &subject,
         session: asked.session,
+        version: asked.version,
     };
     if asked.key.is_none() {
         return Ok(
-            match workload::preview(work, asked.run, &checked, (budget, active, image), &binding)? {
+            match workload::preview(
+                work,
+                asked.run,
+                (&checked, secret.as_ref().map(|(_, prepared)| prepared)),
+                (budget, active, image),
+                &binding,
+            )? {
                 Previewed::Refused(reason) => Route::Refused(refusal(reason)?),
                 Previewed::Decided(decided) => Route::Previewed(decided, Box::new(checked)),
             },
@@ -357,7 +425,10 @@ fn route(
         match workload::begin(
             work,
             asked.run,
-            &checked,
+            (
+                &checked,
+                secret.as_ref().map(|(asked, prepared)| (asked, prepared)),
+            ),
             (budget, active, image),
             (&binding, missing),
         )? {
@@ -371,6 +442,47 @@ fn route(
     )
 }
 
+/// A launch's credential, if it names one (M5d.3): prepared -- its metadata,
+/// consumer and mode -- before either gate, or refused
+/// (`CREDENTIAL_UNAVAILABLE`), audited, with nothing read.
+fn credential<'a>(
+    work: &mut Work<'_>,
+    asked: &Asked<'a>,
+    call: &'a ProcessExecCallV6,
+    (attached, consumer): (&Attached, &'a crate::resource::ExecutableIdentity),
+) -> Result<Result<Option<(SpawnAsked<'a>, spawn::SpawnPrepared)>, Route>, AuthorityError> {
+    let Some(handle) = &call.credential_handle else {
+        return Ok(Ok(None));
+    };
+    let spawn_asked = SpawnAsked {
+        caller: asked.caller,
+        session: asked.session,
+        run: asked.run,
+        epoch: asked.epoch,
+        handle: handle.as_str(),
+        consumer,
+    };
+    let after_metadata = || attached.shared.crash(CrashPoint::SecretAfterMetadata);
+    let prepared = spawn::prepare(
+        work,
+        &spawn_asked,
+        (&attached.shared.secrets, &attached.config),
+        &after_metadata,
+    )?;
+    if let Ok(prepared) = prepared {
+        return Ok(Ok(Some((spawn_asked, prepared))));
+    }
+    workload::refuse(
+        work,
+        asked.run,
+        call.executable.as_str(),
+        "CREDENTIAL_UNAVAILABLE",
+    )?;
+    Ok(Err(Route::Refused(
+        ToolRefusalReasonV5::CredentialUnavailable,
+    )))
+}
+
 /// The executable a sandboxed launch is decided on: the image's.
 fn executable(checked: &Checked, image: &ImageId) -> Result<ImageExecutableRef, WireGap> {
     Ok(ImageExecutableRef {
@@ -382,29 +494,63 @@ fn executable(checked: &Checked, image: &ImageId) -> Result<ImageExecutableRef, 
     })
 }
 
-/// A sandboxed launch's plan on the version-5 wire: its one action, both
-/// gates, the environment chosen, its level, and the bounds. Never the
-/// arguments: those are in the audit record.
+const fn effect_of(permits: bool) -> DecisionEffect {
+    if permits {
+        DecisionEffect::Allow
+    } else {
+        DecisionEffect::Deny
+    }
+}
+
+fn reason_of(reason: &str) -> Result<ProcessDecisionReason, WireGap> {
+    ProcessDecisionReason::ALL
+        .iter()
+        .copied()
+        .find(|r| r.as_str() == reason)
+        .ok_or(WireGap::Unrepresentable("a decision reason"))
+}
+
+/// A launch's spawn injection on the version-6 wire (M5d.3): the handle, the
+/// mode the kernel chose, both gates. Never the value, its length or the
+/// variable.
+fn spawn_action(gate: &SpawnGate) -> Result<PlannedSpawnInjectionAction, WireGap> {
+    let policy = gate.record.policy();
+    let (rule_id, rule_source) = wire::rule(policy.rule_id().as_str(), policy.rule_source())?;
+    Ok(PlannedSpawnInjectionAction {
+        handle: CredentialHandle::new(gate.handle.as_str())
+            .ok_or(WireGap::Unrepresentable("a credential handle"))?,
+        mode: match gate.mode {
+            InjectionMode::FdAtSpawn => SpawnInjection::FdAtSpawn,
+            InjectionMode::EnvAtSpawn => SpawnInjection::EnvAtSpawn,
+            InjectionMode::Egress => return Err(WireGap::Unrepresentable("egress at a spawn")),
+        },
+        decision: ProcessActionDecision {
+            effect: effect_of(gate.permits()),
+            reason: reason_of(gate.reason())?,
+            capability_result: wire::gate(gate.record.capability_satisfied()),
+            policy_result: wire::gate(gate.record.policy_satisfied()),
+            rule_id,
+            rule_source,
+        },
+    })
+}
+
+/// A sandboxed launch's plan on the version-6 wire: the launch's action --
+/// both gates, the environment chosen, its level, and the bounds -- and, for
+/// a launch that names a credential, its spawn injection. Never the
+/// arguments: those are in the audit record. A version-5 call's plan is this
+/// one narrowed: it never has an injection.
 fn plan(
     environment: Option<&ReadyEnvironment>,
     decided: &WorkloadPlan,
     checked: &Checked,
     image: &ImageId,
-) -> Result<ToolPlanV5, WireGap> {
+) -> Result<ToolPlanV6, WireGap> {
     let executed = decided.executed(checked);
     let policy = decided.record.policy();
     let (rule_id, rule_source) = wire::rule(policy.rule_id().as_str(), policy.rule_source())?;
-    let reason = decided.reason();
-    let reason = ProcessDecisionReason::ALL
-        .iter()
-        .copied()
-        .find(|r| r.as_str() == reason)
-        .ok_or(WireGap::Unrepresentable("a decision reason"))?;
-    let effect = if decided.permits() {
-        DecisionEffect::Allow
-    } else {
-        DecisionEffect::Deny
-    };
+    let reason = reason_of(decided.reason())?;
+    let effect = effect_of(decided.workload_permits());
     let action = PlannedWorkloadAction {
         role: ActionRole::Target,
         verb: ProcessVerb::ProcessExec,
@@ -438,18 +584,29 @@ fn plan(
             rule_source,
         },
     };
-    Ok(ToolPlanV5 {
-        tool: CoreToolV4::ProcessExec,
-        environment: ActionEnvironment::Sandbox,
-        effect,
-        actions: PlannedActionsV5::new(vec![PlannedActionV5 {
+    let mut actions = vec![PlannedActionV6 {
+        fs: None,
+        process: None,
+        workload: Some(action),
+        net: None,
+        injection: None,
+        spawn_injection: None,
+    }];
+    if let Some(gate) = &decided.injection {
+        actions.push(PlannedActionV6 {
             fs: None,
             process: None,
-            workload: Some(action),
+            workload: None,
             net: None,
             injection: None,
-        }])
-        .ok_or(WireGap::Unrepresentable("a plan"))?,
+            spawn_injection: Some(spawn_action(gate)?),
+        });
+    }
+    Ok(ToolPlanV6 {
+        tool: CoreToolV4::ProcessExec,
+        environment: ActionEnvironment::Sandbox,
+        effect: effect_of(decided.permits()),
+        actions: PlannedActionsV6::new(actions).ok_or(WireGap::Unrepresentable("a plan"))?,
     })
 }
 
@@ -506,10 +663,14 @@ fn result(answer: &Answer, done: &WorkloadOutcome) -> Result<SandboxedExecResult
     })
 }
 
-/// A settled launch's answer.
+/// A settled launch's answer, in the version it was asked at.
 fn answered(answer: &Answer, reply: &WorkloadReply) -> Result<DwkpBody, WireGap> {
+    in_version(answered_v6(answer, reply)?, answer.version)
+}
+
+fn answered_v6(answer: &Answer, reply: &WorkloadReply) -> Result<DwkpBody, WireGap> {
     Ok(match reply {
-        WorkloadReply::Completed(done) => DwkpBody::ToolResultV5(ToolResultV5 {
+        WorkloadReply::Completed(done) => DwkpBody::ToolResultV6(ToolResultV6 {
             invocation_id: done.invocation.clone(),
             plan: answer.plan.clone(),
             output: ToolOutputV5 {
@@ -532,7 +693,7 @@ fn answered(answer: &Answer, reply: &WorkloadReply) -> Result<DwkpBody, WireGap>
             invocation,
             reason,
             environment_destroyed,
-        } => DwkpBody::ToolFailedV5(ToolFailureV5 {
+        } => DwkpBody::ToolFailedV6(ToolFailureV5 {
             invocation_id: invocation.clone(),
             reason: failure(reason),
             environment_id: Some(answer.environment.clone()),
@@ -542,7 +703,7 @@ fn answered(answer: &Answer, reply: &WorkloadReply) -> Result<DwkpBody, WireGap>
             invocation,
             environment_destroyed,
             ..
-        } => DwkpBody::ToolFailedV5(ToolFailureV5 {
+        } => DwkpBody::ToolFailedV6(ToolFailureV5 {
             invocation_id: invocation.clone(),
             reason: ToolFailureReasonV5::OutcomeUnknown,
             environment_id: Some(answer.environment.clone()),
@@ -571,11 +732,15 @@ impl Authority {
         caller: &CallerContext,
         message: &DwkpMessage,
     ) -> Result<Dispatched, AuthorityError> {
-        if let DwkpBody::ToolInvokeV5(call) = &message.body
-            && let Some(exec) = &call.process_exec
+        let sandboxed = match &message.body {
+            DwkpBody::ToolInvokeV5(call) => call.process_exec.as_ref().map(|e| (v6_call(e), 5)),
+            DwkpBody::ToolInvokeV6(call) => call.process_exec.clone().map(|e| (e, 6)),
+            _ => None,
+        };
+        if let Some((exec, version)) = sandboxed
             && self.attached().is_some()
         {
-            return self.sandboxed(caller, message, exec, true);
+            return self.sandboxed(caller, message, &exec, true, version);
         }
         self.dispatch_answer(caller, message)
             .map(Dispatched::Answer)
@@ -629,7 +794,7 @@ impl Authority {
         if let Some(exec) = &call.process_exec
             && self.attached().is_some()
         {
-            return match self.sandboxed(caller, message, exec, invoke)? {
+            return match self.sandboxed(caller, message, &v6_call(exec), invoke, 5)? {
                 Dispatched::Answer(body) => Ok(body),
                 Dispatched::Parked(parked) => self.finish(parked),
             };
@@ -657,6 +822,90 @@ impl Authority {
         wire::v5_from_v4(body).map_err(unrepresentable)
     }
 
+    /// `tool.invoke` or `canonical.preview` at version 6 (M5d.3): version 5,
+    /// and a `process.exec` that may name a credential. A credential reaches
+    /// a process only in an execution environment: without one it is
+    /// refused, and nothing runs on the host instead.
+    pub(super) fn dispatch_v6(
+        &mut self,
+        caller: &CallerContext,
+        message: &DwkpMessage,
+        call: &ToolCallV6,
+        invoke: bool,
+    ) -> Result<DwkpBody, AuthorityError> {
+        if let Some(exec) = &call.process_exec {
+            if self.attached().is_some() {
+                return match self.sandboxed(caller, message, exec, invoke, 6)? {
+                    Dispatched::Answer(body) => Ok(body),
+                    Dispatched::Parked(parked) => self.finish(parked),
+                };
+            }
+            if exec.credential_handle.is_some() {
+                return self.credential_without_environment(caller, message, invoke);
+            }
+        }
+        let recoded = ToolCallV5 {
+            fs_read: call.fs_read.clone(),
+            fs_list: call.fs_list.clone(),
+            fs_search: call.fs_search.clone(),
+            fs_stat: call.fs_stat.clone(),
+            fs_write: call.fs_write.clone(),
+            fs_patch: call.fs_patch.clone(),
+            fs_move: call.fs_move.clone(),
+            fs_delete: call.fs_delete.clone(),
+            // No credential: version 5's launch, exactly.
+            process_exec: call.process_exec.as_ref().map(|exec| ProcessExecCallV5 {
+                executable: exec.executable.clone(),
+                args: exec.args.clone(),
+                cwd: exec.cwd.clone(),
+                timeout_seconds: exec.timeout_seconds,
+                max_stream_bytes: exec.max_stream_bytes,
+            }),
+            process_status: call.process_status.clone(),
+            process_kill: call.process_kill.clone(),
+            net_http: call.net_http.clone(),
+        };
+        let body = self.dispatch_v5(caller, message, &recoded, invoke)?;
+        wire::v6_from_v5(body).map_err(unrepresentable)
+    }
+
+    /// A version-6 launch naming a credential with no execution environment
+    /// attached: refused and audited. Nothing is read, recorded or run -- on
+    /// the host or anywhere.
+    fn credential_without_environment(
+        &mut self,
+        caller: &CallerContext,
+        message: &DwkpMessage,
+        invoke: bool,
+    ) -> Result<DwkpBody, AuthorityError> {
+        let header = &message.header;
+        let missing = || AuthorityError::Invariant("a decoded request lacks an envelope field");
+        let session = header.session_id.as_ref().ok_or_else(missing)?;
+        let run = header.run_id.as_ref().ok_or_else(missing)?;
+        let operation = if invoke {
+            ToolOperation::ToolInvoke
+        } else {
+            ToolOperation::CanonicalPreview
+        };
+        let reason = ToolRefusalReasonV5::CredentialUnavailable;
+        self.transact(|work| {
+            work.audit(
+                AuditEvent::ToolRefused,
+                Fields::new()
+                    .text("operation", operation.as_str())
+                    .text("tool", "process.exec")
+                    .int("protocol_version", 6)
+                    .text("environment", "HOST")
+                    .text("subject", caller.subject().storage_key())
+                    .text("session_id", session.as_str())
+                    .text("run_id", run.as_str())
+                    .text("reason", reason.as_str())
+                    .text("detail", "NO_EXECUTION_ENVIRONMENT"),
+            )
+        })?;
+        Ok(DwkpBody::ToolRefusedV6(ToolRefusalV5 { operation, reason }))
+    }
+
     /// Steps 1 and 2 -- and, when a permitted launch's run has none, the
     /// authority's own preparation of its environment (step 2a: recorded,
     /// measured and judged by the environment's lifecycle), then steps 1 and
@@ -664,7 +913,7 @@ impl Authority {
     fn routed(
         &mut self,
         asked: &Asked<'_>,
-        call: &ProcessExecCallV5,
+        call: &ProcessExecCallV6,
         context: (&Attached, &ActiveAuthority, &ImageBinding),
     ) -> Result<Route, AuthorityError> {
         let routed = self.transact(|work| route(work, asked, call, context, false))?;
@@ -732,8 +981,9 @@ impl Authority {
         &mut self,
         caller: &CallerContext,
         message: &DwkpMessage,
-        call: &ProcessExecCallV5,
+        call: &ProcessExecCallV6,
         invoke: bool,
+        version: u16,
     ) -> Result<Dispatched, AuthorityError> {
         let header = &message.header;
         let missing = || AuthorityError::Invariant("a decoded request lacks an envelope field");
@@ -759,7 +1009,11 @@ impl Authority {
             } else {
                 ToolOperation::CanonicalPreview
             },
+            version,
         };
+        if call.credential_handle.is_some() {
+            shared.crash(CrashPoint::SecretBeforeMetadata)?;
+        }
         let routed = self.routed(&asked, call, (&attached, active, &image))?;
         let plan_of = |decided: &Decided, checked: &Checked| {
             plan(
@@ -770,24 +1024,27 @@ impl Authority {
             )
             .map_err(unrepresentable)
         };
+        let answer_of = |body: DwkpBody| {
+            in_version(body, version)
+                .map(Dispatched::Answer)
+                .map_err(unrepresentable)
+        };
         let (intent, checked) = match routed {
             Route::Refused(reason) => {
-                return Ok(Dispatched::Answer(DwkpBody::ToolRefusedV5(ToolRefusalV5 {
+                return answer_of(DwkpBody::ToolRefusedV6(ToolRefusalV5 {
                     operation: asked.operation,
                     reason,
-                })));
+                }));
             }
             Route::Denied(decided, checked) => {
-                return Ok(Dispatched::Answer(DwkpBody::ToolDeniedV5(ToolDenialV5 {
+                return answer_of(DwkpBody::ToolDeniedV6(ToolDenialV6 {
                     plan: plan_of(&decided, &checked)?,
-                })));
+                }));
             }
             Route::Previewed(decided, checked) => {
-                return Ok(Dispatched::Answer(DwkpBody::ToolPreviewedV5(
-                    CanonicalPreviewResultV5 {
-                        plan: plan_of(&decided, &checked)?,
-                    },
-                )));
+                return answer_of(DwkpBody::ToolPreviewedV6(CanonicalPreviewResultV6 {
+                    plan: plan_of(&decided, &checked)?,
+                }));
             }
             Route::Intent(intent, checked) => (intent, checked),
             Route::NeedsEnvironment => {
@@ -797,6 +1054,9 @@ impl Authority {
             }
         };
         shared.crash(CrashPoint::WorkloadAfterIntent)?;
+        if intent.secret.is_some() {
+            shared.crash(CrashPoint::SecretAfterIntent)?;
+        }
         let answer = Answer {
             plan: plan(
                 Some(&intent.environment),
@@ -808,6 +1068,7 @@ impl Authority {
             environment: intent.environment.environment.clone(),
             assurance: assurance(intent.environment.level),
             executable: executable(&checked, attached.config.image()).map_err(unrepresentable)?,
+            version,
         };
         let spec = workload::spec(&checked, &intent)?;
         match workload_ops::start(&attached, asked.run, *intent, spec)? {

@@ -136,6 +136,11 @@ const V4: VersionRange = VersionRange { min: 4, max: 4 };
 /// the kernel decides. Beside versions 1 to 4, never instead of them.
 const V5: VersionRange = VersionRange { min: 5, max: 5 };
 
+/// The tool messages' sixth version (M5d.3, ADR-0052 §7): a sandboxed
+/// `process.exec` that consumes one credential. Beside versions 1 to 5, never
+/// instead of them.
+const V6: VersionRange = VersionRange { min: 6, max: 6 };
+
 const REQUEST_NO_SESSION: EnvelopeRules = EnvelopeRules {
     correlation_id: Presence::Optional,
     causation_id: Presence::Optional,
@@ -604,6 +609,62 @@ pub const MESSAGES: &[MessageSpec] = &[
         summary: "An authorised version-5 invocation produced no result, or its outcome is unknown.",
     },
     MessageSpec {
+        schema: "direwolf.tool.invoke",
+        message_type: MessageType::Request,
+        versions: V6,
+        rules: REQUEST_RUN_KEYED,
+        payload: "ToolCallV6",
+        summary: "Perform one typed tool call for a run, under an idempotency key; a sandboxed process.exec may name one credential handle.",
+    },
+    MessageSpec {
+        schema: "direwolf.tool.preview",
+        message_type: MessageType::Request,
+        versions: V6,
+        rules: REQUEST_RUN,
+        payload: "ToolCallV6",
+        summary: "Ask what a tool call's plan would be -- for a credential, whether and how it would be delivered -- without performing anything.",
+    },
+    MessageSpec {
+        schema: "direwolf.tool.result",
+        message_type: MessageType::Response,
+        versions: V6,
+        rules: RESPONSE,
+        payload: "ToolResultV6",
+        summary: "A version-6 invocation whose whole plan was allowed, performed, and recorded.",
+    },
+    MessageSpec {
+        schema: "direwolf.tool.denied",
+        message_type: MessageType::Response,
+        versions: V6,
+        rules: RESPONSE,
+        payload: "ToolDenialV6",
+        summary: "An action of a version-6 plan was refused; nothing was performed and no credential read.",
+    },
+    MessageSpec {
+        schema: "direwolf.tool.previewed",
+        message_type: MessageType::Response,
+        versions: V6,
+        rules: RESPONSE,
+        payload: "CanonicalPreviewResultV6",
+        summary: "The canonical plan and decisions a version-6 tool call would receive.",
+    },
+    MessageSpec {
+        schema: "direwolf.tool.refused",
+        message_type: MessageType::Response,
+        versions: V6,
+        rules: RESPONSE,
+        payload: "ToolRefusalV5",
+        summary: "A version-6 tool operation refused before any effect was authorised.",
+    },
+    MessageSpec {
+        schema: "direwolf.tool.failed",
+        message_type: MessageType::Response,
+        versions: V6,
+        rules: RESPONSE,
+        payload: "ToolFailureV5",
+        summary: "An authorised version-6 invocation produced no result, or its outcome is unknown.",
+    },
+    MessageSpec {
         schema: "direwolf.ack",
         message_type: MessageType::Response,
         versions: V1,
@@ -763,12 +824,12 @@ pub const OPERATIONS: &[OperationSpec] = &[
         ],
         initiator: "runtime",
         receiver: "dwkd-authority",
-        semantics_owner: "M4b (fs.read, version 1); M4c (the eight filesystem tools, version 2); M4d (the three process tools, version 3); M5c (net.http, version 4); M5d.2 (process.exec in an execution environment, version 5); M5, M10 (further tools)",
+        semantics_owner: "M4b (fs.read, version 1); M4c (the eight filesystem tools, version 2); M4d (the three process tools, version 3); M5c (net.http, version 4); M5d.2 (process.exec in an execution environment, version 5); M5d.3 (a sandboxed process.exec's credential, version 6); M5, M10 (further tools)",
         effect_bearing: true,
         authority_bearing: true,
-        carries: "Envelope session_id, run_id and epoch. Version 1: one typed fs_read{path, max_bytes}; responses ToolResult{invocation_id, action, decision, fs_read}, ToolDenial, ToolRefusal or ToolFailure -- unchanged since M4b. Version 2: exactly one of eight typed members (fs_read, fs_list, fs_search, fs_stat, fs_write, fs_patch, fs_move, fs_delete) and a mandatory envelope idempotency_key; responses ToolResultV2{invocation_id, plan, output}, ToolDenialV2{plan}, ToolRefusalV2 or ToolFailureV2, each in the version of the request. Version 3: exactly one of eleven typed members -- the eight filesystem calls and process_exec{executable, args[], cwd?}, process_status{process_id}, process_kill{process_id} -- under the same mandatory key; responses ToolResultV3{invocation_id, plan, output}, ToolDenialV3{plan}, ToolRefusalV3 or ToolFailureV3. Version 4: exactly one of twelve typed members -- version 3's eleven and net_http{method, url, headers[]?, body?, credential?, follow_redirects, max_response_bytes?} -- under the same mandatory key; responses ToolResultV4{invocation_id, plan, output}, ToolDenialV4{plan}, ToolRefusalV4 or ToolFailureV4. Version 5: version 4's twelve members, process_exec gaining two optional narrowings, timeout_seconds (1 to 600) and max_stream_bytes (1 to 131072), under the same mandatory key; responses ToolResultV5{invocation_id, plan, output} -- a sandboxed launch's output is process_exec_sandboxed{environment_id, assurance, executable{image, path, sha256}, ending, exit_code?, signal?, stdout, stderr, elapsed_ms, residue, ended_processes, environment_destroyed} -- ToolDenialV5{plan}, ToolRefusalV5 or ToolFailureV5{invocation_id, reason, environment_id?, environment_destroyed?}. No capability, cap_id, environment, image, container, user, shell, mount, environment variable, privilege, taint, existence claim or retry class -- for a process call no argv[0], environment variable, executable digest, argv classification or numeric process id, and for a network call no address, resolver, proxy, timeout, TLS option, trust material, cookie, credential value or header, injection mode or credential origin: each would be the runtime asserting something the authority decides.",
+        carries: "Envelope session_id, run_id and epoch. Version 1: one typed fs_read{path, max_bytes}; responses ToolResult{invocation_id, action, decision, fs_read}, ToolDenial, ToolRefusal or ToolFailure -- unchanged since M4b. Version 2: exactly one of eight typed members (fs_read, fs_list, fs_search, fs_stat, fs_write, fs_patch, fs_move, fs_delete) and a mandatory envelope idempotency_key; responses ToolResultV2{invocation_id, plan, output}, ToolDenialV2{plan}, ToolRefusalV2 or ToolFailureV2, each in the version of the request. Version 3: exactly one of eleven typed members -- the eight filesystem calls and process_exec{executable, args[], cwd?}, process_status{process_id}, process_kill{process_id} -- under the same mandatory key; responses ToolResultV3{invocation_id, plan, output}, ToolDenialV3{plan}, ToolRefusalV3 or ToolFailureV3. Version 4: exactly one of twelve typed members -- version 3's eleven and net_http{method, url, headers[]?, body?, credential?, follow_redirects, max_response_bytes?} -- under the same mandatory key; responses ToolResultV4{invocation_id, plan, output}, ToolDenialV4{plan}, ToolRefusalV4 or ToolFailureV4. Version 5: version 4's twelve members, process_exec gaining two optional narrowings, timeout_seconds (1 to 600) and max_stream_bytes (1 to 131072), under the same mandatory key; responses ToolResultV5{invocation_id, plan, output} -- a sandboxed launch's output is process_exec_sandboxed{environment_id, assurance, executable{image, path, sha256}, ending, exit_code?, signal?, stdout, stderr, elapsed_ms, residue, ended_processes, environment_destroyed} -- ToolDenialV5{plan}, ToolRefusalV5 or ToolFailureV5{invocation_id, reason, environment_id?, environment_destroyed?}. Version 6: version 5's twelve members, process_exec gaining one optional credential_handle -- a handle, never a value, a mode, a variable or a descriptor -- under the same mandatory key; responses ToolResultV6{invocation_id, plan, output} with version 5's output, ToolDenialV6{plan}, ToolRefusalV5 or ToolFailureV5, a plan that consumes a credential stating spawn_injection{handle, mode, decision} beside its workload action. No capability, cap_id, environment, image, container, user, shell, mount, environment variable, privilege, taint, existence claim or retry class -- for a process call no argv[0], environment variable, executable digest, argv classification or numeric process id, and for a network call no address, resolver, proxy, timeout, TLS option, trust material, cookie, credential value or header, injection mode or credential origin, and for a credential at spawn no value, mode, variable, descriptor or length: each would be the runtime asserting something the authority decides.",
         consumer: "dwkd-authority: fence, run and key; the canonical resolver for every target, existing or vacant, beneath the run's pinned root (ADR-0042, ADR-0044); the canonical plan and both gates for every action of it; the durable intent and the bound key; only then the descriptors the operation needs -- the file opened for reading, the directory opened for listing, the parent directories whose names change -- and one channel-bound authorisation to dwkd-broker over the private channel; then the durable outcome -- completed, failed, or UNKNOWN when an effect is not proved -- and, for a read-family result, the run's taint (ADR-0043, ADR-0044).",
-        second_path: "This IS the path from cognition to effect, and there is no other. A call names one tool from a closed inventory with typed arguments the authority canonicalises itself: a tool this build lacks is an undeclared member and fails to decode, so nothing dispatches on a string or an argument map. The authority resolves every path beneath the run's pinned workspace root so that the filesystem, not the spelling, supplies its meaning -- a vacant target as a checked parent directory and one validated name -- and derives the complete plan itself: the capability verbs each tool needs (a creating write needs fs.write and fs.create; a move fs.delete on its source and fs.create on its destination; a patch fs.read and fs.write), each with its canonical path and byte bound, environment HOST. Every action must be covered by a held grant and allowed by policy, with every obligation enforceable, or nothing happens. The intent and the idempotency key are recorded durably before any descriptor that could perform the effect exists. The broker receives exactly the operation's descriptors and at most one validated leaf name, re-proves every identity, checks the name immediately before and after changing it atomically (exchange or no-replace rename of a new file, never in place), undoes a change that reached an object it did not prove -- Linux has no compare-and-swap of a name against an inode, so the permission model keeps untrusted writers out of a write-enabled workspace -- and reports an outcome or an undo it cannot prove as indeterminate; the authority records that as UNKNOWN and never performs the invocation again. Every staging directory the broker may make is recorded with the intent and settled afterwards, removed only when it provably holds the broker's own uncommitted data. A key names one invocation for ever: a reuse is refused before anything is resolved. Because resolution precedes the gates, a refusal can say whether a workspace path exists or is vacant even where policy would deny the action; it never says what a file holds. A process call names its executable by an absolute host path, which the authority's executable resolver turns into an identity -- a bounded chain of symlinks followed to one regular native file, that file opened, required to be changeable only by root or the authority, and hashed -- decided as process.exec on that identity, with argv[0] its canonical path and every argument passed as exactly its bytes, no shell anywhere; the broker re-proves the descriptor the authority opened and executes that descriptor (execveat), never a path. process.status and process.kill name only a process this run launched, by the opaque handle its launch returned, and are decided as process.inspect and process.signal on the identity it was launched as. A host launch also needs the operator's host-execution opt-in and a per-invocation approval (SANDBOX.md section 4); approvals arrive at M6, so until then every launch is decided, audited and denied, with no invocation recorded and no broker contact (ADR-0045). The broker is not addressable from cognition, never opens a path, and never decides (ADR-0043, ADR-0044, ADR-0045). From version 5, an authority with an execution environment configured runs process.exec in the run's READY environment measured at CONTAINER_ISOLATION or above, and nowhere else: the executable is the one the operator's image manifest names at that path, its identity the image's content digest and the manifest's SHA-256 (a concrete process.exec grant of such a run is resolved against the manifest, OD-9), decided as process.exec with environment SANDBOX by both gates; an environment that is missing, not READY, below that level, busy, or of another image refuses -- never a retry on the host. The intent and the key are durable before the broker hears of it; the broker re-judges the environment from the runtime's record and proves the executable's bytes in the image before it answers a start, runs exactly one fixed command line as the environment's user in the workspace, and the environment's init then ends every other process of it; a short collection reports the ending. A start or a collection nothing can confirm is UNKNOWN, never run again, and costs the environment (ADR-0052).",
+        second_path: "This IS the path from cognition to effect, and there is no other. A call names one tool from a closed inventory with typed arguments the authority canonicalises itself: a tool this build lacks is an undeclared member and fails to decode, so nothing dispatches on a string or an argument map. The authority resolves every path beneath the run's pinned workspace root so that the filesystem, not the spelling, supplies its meaning -- a vacant target as a checked parent directory and one validated name -- and derives the complete plan itself: the capability verbs each tool needs (a creating write needs fs.write and fs.create; a move fs.delete on its source and fs.create on its destination; a patch fs.read and fs.write), each with its canonical path and byte bound, environment HOST. Every action must be covered by a held grant and allowed by policy, with every obligation enforceable, or nothing happens. The intent and the idempotency key are recorded durably before any descriptor that could perform the effect exists. The broker receives exactly the operation's descriptors and at most one validated leaf name, re-proves every identity, checks the name immediately before and after changing it atomically (exchange or no-replace rename of a new file, never in place), undoes a change that reached an object it did not prove -- Linux has no compare-and-swap of a name against an inode, so the permission model keeps untrusted writers out of a write-enabled workspace -- and reports an outcome or an undo it cannot prove as indeterminate; the authority records that as UNKNOWN and never performs the invocation again. Every staging directory the broker may make is recorded with the intent and settled afterwards, removed only when it provably holds the broker's own uncommitted data. A key names one invocation for ever: a reuse is refused before anything is resolved. Because resolution precedes the gates, a refusal can say whether a workspace path exists or is vacant even where policy would deny the action; it never says what a file holds. A process call names its executable by an absolute host path, which the authority's executable resolver turns into an identity -- a bounded chain of symlinks followed to one regular native file, that file opened, required to be changeable only by root or the authority, and hashed -- decided as process.exec on that identity, with argv[0] its canonical path and every argument passed as exactly its bytes, no shell anywhere; the broker re-proves the descriptor the authority opened and executes that descriptor (execveat), never a path. process.status and process.kill name only a process this run launched, by the opaque handle its launch returned, and are decided as process.inspect and process.signal on the identity it was launched as. A host launch also needs the operator's host-execution opt-in and a per-invocation approval (SANDBOX.md section 4); approvals arrive at M6, so until then every launch is decided, audited and denied, with no invocation recorded and no broker contact (ADR-0045). The broker is not addressable from cognition, never opens a path, and never decides (ADR-0043, ADR-0044, ADR-0045). From version 5, an authority with an execution environment configured runs process.exec in the run's READY environment measured at CONTAINER_ISOLATION or above, and nowhere else: the executable is the one the operator's image manifest names at that path, its identity the image's content digest and the manifest's SHA-256 (a concrete process.exec grant of such a run is resolved against the manifest, OD-9), decided as process.exec with environment SANDBOX by both gates; an environment that is missing, not READY, below that level, busy, or of another image refuses -- never a retry on the host. The intent and the key are durable before the broker hears of it; the broker re-judges the environment from the runtime's record and proves the executable's bytes in the image before it answers a start, runs exactly one fixed command line as the environment's user in the workspace, and the environment's init then ends every other process of it; a short collection reports the ending. A start or a collection nothing can confirm is UNKNOWN, never run again, and costs the environment (ADR-0052). From version 6, a sandboxed process.exec may name one credential handle, and runs only if process.exec on the image executable and secret.use:<handle> are each allowed by both gates for a SANDBOX action, every obligation of each kept: the operator's metadata must name the executable as the credential's consumer (the manifest pins its bytes), and the kernel chooses the mode -- descriptor 3 before the operator's variable -- never the call. The value is read from its backend only after the intent is durable, handed to the broker as a one-shot pipe, read by the broker only once it has re-judged the environment and proved the executable, and delivered framed over the runtime client's standard input to the trusted in-image launcher, which puts it on descriptor 3 or in the variable and executes the program: never an argument, a runtime environment option, a file, a container configuration or a protocol field. A process the program starts inherits it; the output is redacted of it, which keeps it from cognition only against a program that does not transform it (ADR-0046, ADR-0052).",
     },
     OperationSpec {
         name: "ToolCancel",
@@ -808,10 +869,10 @@ pub const OPERATIONS: &[OperationSpec] = &[
         responses: &["direwolf.tool.previewed", "direwolf.tool.refused", ERR],
         initiator: "runtime, CLI",
         receiver: "dwkd-authority",
-        semantics_owner: "M4b (version 1); M4c (version 2); M4d (version 3); M5c (version 4); M5d.2 (version 5)",
+        semantics_owner: "M4b (version 1); M4c (version 2); M4d (version 3); M5c (version 4); M5d.2 (version 5); M5d.3 (version 6)",
         effect_bearing: false,
         authority_bearing: false,
-        carries: "Envelope session_id, run_id and epoch; the same typed call ToolInvoke carries in the same version, and never an idempotency_key. Response CanonicalPreviewResult{action, decision} or ToolRefusal (version 1), CanonicalPreviewResultV2{plan} or ToolRefusalV2 (version 2), CanonicalPreviewResultV3{plan} or ToolRefusalV3 (version 3), CanonicalPreviewResultV4{plan} or ToolRefusalV4 (version 4), CanonicalPreviewResultV5{plan} or ToolRefusalV5 (version 5).",
+        carries: "Envelope session_id, run_id and epoch; the same typed call ToolInvoke carries in the same version, and never an idempotency_key. Response CanonicalPreviewResult{action, decision} or ToolRefusal (version 1), CanonicalPreviewResultV2{plan} or ToolRefusalV2 (version 2), CanonicalPreviewResultV3{plan} or ToolRefusalV3 (version 3), CanonicalPreviewResultV4{plan} or ToolRefusalV4 (version 4), CanonicalPreviewResultV5{plan} or ToolRefusalV5 (version 5), CanonicalPreviewResultV6{plan} or ToolRefusalV5 (version 6).",
         consumer: "direwolf policy simulate; the approval [w]hy branch (M6); a runtime asking what it lacks.",
         second_path: "It resolves every target, builds the complete plan and runs every gate of every action through the same code ToolInvoke uses, so the untrusted side never duplicates canonicalisation, and it performs nothing: it opens nothing for an effect, contacts no broker, mints no invocation id or process id, binds no key, records no intent, issues no authorisation, launches and signals nothing and reserves nothing. A process preview resolves and hashes the executable now; the identity it names is not frozen, and an invocation resolves and hashes it again. Its resolution is the same lookup ToolInvoke performs first, and a differential test holds each invocation to the plan its preview named. A network preview resolves nothing and contacts no broker: it decides without a destination address, so a rule that needs one is unevaluable and the preview says so. Its answer authorises nothing: it is information, stale the moment it is sent, and a later ToolInvoke fences, canonicalises and decides again from scratch.",
     },
@@ -1117,13 +1178,15 @@ mod tests {
         assert_eq!(v4, Some("ToolCallV4"));
         let v5 = message(MessageType::Request, "direwolf.tool.invoke", 5).map(|m| m.payload);
         assert_eq!(v5, Some("ToolCallV5"));
-        assert!(message(MessageType::Request, "direwolf.tool.invoke", 6).is_none());
+        let v6 = message(MessageType::Request, "direwolf.tool.invoke", 6).map(|m| m.payload);
+        assert_eq!(v6, Some("ToolCallV6"));
+        assert!(message(MessageType::Request, "direwolf.tool.invoke", 7).is_none());
         assert_eq!(
             versions(MessageType::Request, "direwolf.tool.invoke").map(|r| (r.min, r.max)),
-            Some((1, 5))
+            Some((1, 6))
         );
-        // Versions 3 to 5 carry the key version 2's does.
-        for version in [3, 4, 5] {
+        // Versions 3 to 6 carry the key version 2's does.
+        for version in [3, 4, 5, 6] {
             let rules =
                 message(MessageType::Request, "direwolf.tool.invoke", version).map(|m| m.rules);
             assert_eq!(

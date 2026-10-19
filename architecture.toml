@@ -695,6 +695,10 @@ exempt_paths = [
     "crates/dwkd-authority/src/resource/exec/tests.rs",
     "crates/dwkd-authority/src/secret/handoff.rs",
     "crates/dwkd-authority/src/state/secret_use/tests.rs",
+    # M5d.3: the route tests' fake broker reads the pipe a secret-bearing
+    # start hands it, as the secret-use tests' fake does a hop's -- to prove
+    # what the authority handed over, never as a path to a descriptor.
+    "crates/dwkd-authority/src/state/workload_route_tests.rs",
 ]
 suffixes = [".rs"]
 patterns = [
@@ -2163,6 +2167,70 @@ the command line's.
 Hygiene, not containment: before every run the broker re-judges the
 environment from the runtime's record and proves the executable's bytes, and
 the evidence shows the workload's uid, capabilities and arguments from inside.
+"""
+
+# ===========================================================================
+# M5d.3: a workload's credential (ADR-0052 §7). The value reaches the
+# environment's trusted launcher over the runtime client's standard input and
+# nowhere else; only one command line ever attaches that input.
+# ===========================================================================
+
+[[text_rules]]
+id = "TX055-only-the-secret-plan-attaches-standard-input"
+paths = ["crates/dwkd-broker/src"]
+# The secret plan spells the word once; its own tests, and the ordinary
+# plan's, name it to assert where it stands and where it never does.
+exempt_paths = [
+    "crates/dwkd-broker/src/sandbox/workload_secret_plan.rs",
+    "crates/dwkd-broker/src/sandbox/workload_secret_plan_tests.rs",
+    "crates/dwkd-broker/src/sandbox/workload_plan_tests.rs",
+]
+suffixes = [".rs"]
+patterns = [
+    '^(?!\s*//).*"--interactive\b',
+    # The short spelling, alone or combined with others (`-i`, `-it`).
+    '^(?!\s*//).*"-[A-Za-z]*i[A-Za-z]*"',
+]
+reason = """
+A secret-bearing workload's value reaches the environment's trusted launcher
+-- the digest-pinned probe's `launch secret-fd|secret-env` -- framed on the
+runtime client's standard input, which the client forwards only when told to
+(ADR-0052 §7). `workload_secret_plan.rs` is the one place that tells it, for
+that one command line; every other workload, environment step and probe run
+is planned with standard input `/dev/null` (TX050). A second spelling would
+be a command line that could carry bytes into an environment no secret's
+decision stood in front of -- or an ordinary workload reading what was meant
+for a launcher. The value itself is never a word, an option or a variable of
+the client: it is the bytes of a pipe only the launch helper holds.
+
+Hygiene, not containment: the broker reads the value only after it judged the
+environment and proved the executable, and the evidence shows it absent from
+the runtime's records, events and logs, and the launcher refusing every other
+frame.
+"""
+
+[[text_rules]]
+id = "TX056-the-secret-plan-spells-no-other-weakening"
+paths = ["crates/dwkd-broker/src/sandbox/workload_secret_plan.rs"]
+exempt_paths = []
+suffixes = [".rs"]
+patterns = [
+    # TX050's words, but the one this plan exists to spell.
+    '^(?!\s*//).*"--(privileged|cap-add|device|device-cgroup-rule|group-add|env|env-file|tty|detach|detach-keys|security-opt|volume|mount)\b',
+    '^(?!\s*//).*"-[etdvuw]+"',
+    '^(?!\s*//).*"(0|root)(:(0|root))?"',
+    '^(?!\s*//).*"(/usr)?(/bin/)?(sh|bash|dash|zsh|ksh|busybox)"',
+    '^(?!\s*//).*"-c"',
+    '^(?!\s*//).*"(/usr)?/bin/env"',
+    '^(?!\s*//).*"[A-Za-z_][A-Za-z0-9_]*=[^"]*"',
+]
+reason = """
+The secret-bearing plan is the ordinary one (`workload_plan::run_with`) with
+standard input attached and the launcher's secret profile: the profile's user,
+the workspace, the recorded container, the probe, and the executable with
+exactly its arguments. It adds no privilege, no variable -- mode B's variable
+is the launcher's, set from the frame, never `NAME=value` on the command line
+-- no terminal, no detaching, no shell, no launcher but the probe.
 """
 
 # ===========================================================================

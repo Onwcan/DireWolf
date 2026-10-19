@@ -3557,13 +3557,21 @@ WORKLOAD_MUTATIONS = (
     (
         "the capability gate is not consulted",
         "crates/dwkd-authority/src/state/workload.rs",
-        "        self.record.capability_satisfied()\n            && self.record.policy_satisfied()",
+        "    pub(super) fn workload_permits(&self) -> bool {\n"
+        "        self.record.capability_satisfied()\n"
+        "            && self.record.policy_satisfied()",
+        "    pub(super) fn workload_permits(&self) -> bool {\n"
         "        self.record.policy_satisfied()",
     ),
     (
         "policy is not consulted",
         "crates/dwkd-authority/src/state/workload.rs",
-        "            && self.record.policy_satisfied()\n            && self.obligations_enforced",
+        "    pub(super) fn workload_permits(&self) -> bool {\n"
+        "        self.record.capability_satisfied()\n"
+        "            && self.record.policy_satisfied()\n"
+        "            && self.obligations_enforced",
+        "    pub(super) fn workload_permits(&self) -> bool {\n"
+        "        self.record.capability_satisfied()\n"
         "            && self.obligations_enforced",
     ),
     (
@@ -3699,9 +3707,9 @@ WORKLOAD_MUTATIONS = (
         "a running sandboxed launch holds the authority's worker",
         "crates/dwkd-authority/src/state/workload_route.rs",
         "            && self.attached().is_some()\n        {\n"
-        "            return self.sandboxed(caller, message, exec, true);",
+        "            return self.sandboxed(caller, message, &exec, true, version);",
         "            && self.attached().is_some()\n            && false\n        {\n"
-        "            return self.sandboxed(caller, message, exec, true);",
+        "            return self.sandboxed(caller, message, &exec, true, version);",
     ),
     # The broker's supervisor (§3): bounded, one per environment, one
     # generation.
@@ -3728,14 +3736,14 @@ WORKLOAD_MUTATIONS = (
     (
         "the broker ignores the hygiene launch",
         "crates/dwkd-broker/src/sandbox/workload_plan.rs",
-        "    if workload.launch == WorkloadLaunch::Hygiene {",
-        "    if false && workload.launch == WorkloadLaunch::Hygiene {",
+        "    let launcher = if workload.launch == WorkloadLaunch::Hygiene {",
+        "    let launcher = if false && workload.launch == WorkloadLaunch::Hygiene {",
     ),
     (
         "the launcher sets none of the obligation's variables",
-        "crates/dwk-sandbox-probe/src/linux.rs",
-        "    for (variable, value) in profile::HYGIENE_ENVIRONMENT {",
-        "    for (variable, value) in profile::HYGIENE_ENVIRONMENT.iter().take(0) {",
+        "crates/dwk-sandbox-probe/src/launch.rs",
+        "        for (variable, value) in profile::HYGIENE_ENVIRONMENT {",
+        "        for (variable, value) in profile::HYGIENE_ENVIRONMENT.iter().take(0) {",
     ),
     (
         "an invocation that undoes the obligation keeps it",
@@ -3863,6 +3871,478 @@ def task_sandbox_workload_mutations() -> None:
     print(
         f"{GREEN}sandbox workload mutation review: {len(killed)} of "
         f"{len(WORKLOAD_MUTATIONS)} killed{OFF}"
+    )
+
+
+# M5d.3 (ADR-0052 §7): a sandboxed `process.exec` that consumes a credential.
+SECRET_SANDBOX_BROKER_TESTS = (
+    "linux::a_descriptor_secret_reaches_the_program_on_descriptor_three_and_nowhere_else",
+    "linux::an_environment_secret_reaches_the_program_as_its_variable_and_nowhere_else",
+    "linux::the_output_is_redacted_of_the_value_even_split_across_reads",
+    "linux::every_malformed_handoff_is_refused_and_the_value_is_read_only_after_the_judgement",
+    "linux::the_launcher_runs_nothing_for_a_frame_or_a_name_it_does_not_accept",
+    "linux::a_broker_that_stops_after_reading_the_value_runs_nothing",
+)
+SECRET_SANDBOX_AUTHORITY_TESTS = (
+    "linux::the_public_route_delivers_a_credential_to_the_sandboxed_launch_and_never_to_the_runtime",
+    "linux::a_crash_in_a_credential_bearing_launch_leaves_it_unknown_and_its_environment_gone",
+    "linux::the_shipped_packs_never_let_a_launch_use_a_credential",
+    "linux::production_serve_delivers_a_credential_from_the_operators_files_and_survives_its_death",
+)
+
+# Every (suite, case) M5d.3's evidence must report, exercised.
+#   authority-workload-secret  the REAL authority and REAL kernel-keyring values
+#                              against a FAKE broker that reads the one-shot pipe
+#                              it is handed (labelled so: not delivery) -- read
+#                              once after both intents, C before B, both gates,
+#                              every refusal and denial reading nothing, the
+#                              revision checks, failures before anything ran,
+#                              every crash window, no host fallback;
+#   sandbox-secret             the released broker handing a synthetic value to
+#                              a workload in a REAL environment it prepared, over
+#                              its runtime client's standard input, through the
+#                              pinned probe as the launcher: fd 3 and the
+#                              operator's variable, the residual inheritance
+#                              measured, absence from the runtime's records,
+#                              events and logs, redaction across reads, every
+#                              malformed handoff and frame refused;
+#   sandbox-authority-secret   the REAL authority, the released broker, a REAL
+#                              runtime and a REAL DWKP client -- the server seam
+#                              and the released `serve --sandbox-config
+#                              --secrets-file` -- delivery, redaction, refusals,
+#                              crash windows, the shipped packs, replays.
+SECRET_SANDBOX_UNIT_CASES = tuple(
+    ("authority-workload-secret", case)
+    for case in (
+        "read-once-after-both-intents",
+        "kernel-chooses-c-before-b",
+        "intent-linked-recorded-counted",
+        "no-plaintext-in-kernel-db-or-audit",
+        "replay-never-hands-over-again",
+        "ordinary-launch-unchanged",
+        "preview-reads-nothing",
+        "v5-cannot-name-a-credential",
+        "refused-not-configured",
+        "refused-consumer-not-allowed",
+        "refused-another-executable",
+        "refused-egress-only",
+        "refused-reserved-variable",
+        "not-granted-denied",
+        "stored-grant-replaced",
+        "stored-grant-revoked",
+        "no-refusal-reaches-the-broker",
+        "default-deny",
+        "host-rule-is-no-sandbox-rule",
+        "approval-required",
+        "obligation-unenforceable",
+        "failed-backend-missing",
+        "failed-nul-in-a-variable",
+        "broker-refusal-failed",
+        "unknown-start-unknown-use",
+        "missing-redaction-count-unknown",
+        "crash-1",
+        "crash-2",
+        "crash-q",
+        "crash-3",
+        "crash-4",
+        "crash-5",
+        "crash-6",
+        "crash-8",
+        "crash-t",
+        "crash-r",
+        "crash-0",
+        "crash-s",
+        "crash-9",
+        "no-host-fallback",
+    )
+)
+SECRET_SANDBOX_CASES = (
+    *(
+        ("sandbox-secret", case)
+        for case in (
+            "fd-at-spawn-delivers-exactly-the-value",
+            "fd-at-spawn-one-shot",
+            "fd-at-spawn-stdin-is-dev-null",
+            "fd-at-spawn-only-descriptor-three",
+            "fd-at-spawn-residue-clean",
+            "fd-at-spawn-inherited-by-a-descendant",
+            "fd-at-spawn-with-hygiene",
+            "fd-at-spawn-not-in-inspect-logs-events-argv",
+            "broker-log-names-the-mode-only",
+            "env-at-spawn-delivers-exactly-the-value",
+            "env-at-spawn-only-its-variable-added",
+            "env-at-spawn-no-extra-descriptor",
+            "env-at-spawn-inherited-by-a-descendant",
+            "env-at-spawn-with-hygiene",
+            "env-at-spawn-not-in-inspect-logs-events-argv",
+            "redacted-across-reads-fd",
+            "redacted-across-reads-env",
+            "refused-not-a-pipe",
+            "refused-a-write-end",
+            "refused-a-stalled-pipe",
+            "refused-empty",
+            "refused-past-32-kib",
+            "refused-nul-in-a-variable",
+            "refused-not-three-descriptors",
+            "value-unread-when-the-judgement-refuses",
+            "collected-only-under-its-generation",
+            "an-ordinary-workload-is-unchanged",
+            "launcher-accepts-one-exact-frame",
+            "launcher-refuses-every-other-frame",
+            "launcher-refuses-reserved-names-and-bad-words",
+            "crash-after-read-nothing-ran",
+        )
+    ),
+    *(
+        ("sandbox-authority-secret", case)
+        for case in (
+            "public-plan-states-both-actions",
+            "public-fd-at-spawn-delivered",
+            "public-env-at-spawn-delivered",
+            "public-echo-redacted",
+            "public-no-plaintext-durable-or-logged",
+            "public-never-on-the-host",
+            "public-replay-refused",
+            "public-preview-reads-nothing",
+            "public-ungranted-handle-denied",
+            "public-unconfigured-handle-refused",
+            "public-ordinary-launch-unchanged",
+            "public-hostile-credential-frames-refused",
+            "crash-r6-after-handoff",
+            "crash-r8-broker-running-it",
+            "shipped-safe-denies-a-launch-credential",
+            "shipped-balanced-denies-a-launch-credential",
+            "shipped-power-denies-a-launch-credential",
+            "production-serve-delivers-from-the-operators-files",
+            "production-crash-mid-workload-unknown-destroyed",
+            "production-replay-after-restart-refused",
+            "production-no-plaintext-durable",
+        )
+    ),
+)
+
+
+def task_sandbox_secret_evidence() -> None:
+    """M5d.3's evidence (ADR-0052 §7): secret modes B and C inside the sandbox.
+
+    First the authority's pipeline against a fake broker with real kernel-
+    keyring values (every case required: no keyring is NOT EXERCISED, which
+    fails); then, on a real OCI runtime, the released broker delivering a
+    synthetic credential through the trusted launcher, and the real
+    authority reached by a real DWKP client through the seam and the
+    released `serve`. Every suite must run every test; no container the
+    evidence made may remain, and none that was there may be gone. Linux only.
+    """
+    unit = run_captured(
+        "cargo",
+        "test",
+        "--locked",
+        "-p",
+        "dwkd-authority",
+        "--lib",
+        "--",
+        "state::workload_route::tests::secret::",
+        "--nocapture",
+        "--test-threads=1",
+    )
+    require_tests_ran(unit)
+    require_secret_evidence(unit, SECRET_SANDBOX_UNIT_CASES)
+    client, socket, variables, before, images = _workload_setup()
+    os.environ.update(variables)
+    outputs: list[str] = []
+    try:
+        run("cargo", "build", "--locked", "-p", "dwkd-broker")
+        for package, test, names in (
+            ("dwkd-broker", "sandbox_secret", SECRET_SANDBOX_BROKER_TESTS),
+            ("dwkd-authority", "sandbox_secret", SECRET_SANDBOX_AUTHORITY_TESTS),
+        ):
+            output = run_captured(
+                "cargo",
+                "test",
+                "--locked",
+                "-p",
+                package,
+                "--test",
+                test,
+                "--",
+                "--ignored",
+                "--exact",
+                "--nocapture",
+                "--test-threads=1",
+                *names,
+            )
+            summaries = [line for line in output.splitlines() if line.startswith("test result: ")]
+            expected = f"test result: ok. {len(names)} passed; 0 failed; 0 ignored"
+            if len(summaries) != 1 or not summaries[0].startswith(expected):
+                raise TaskError(
+                    f"the {package} {test} suite did not run all of its tests: expected "
+                    f"`{expected}`, got {summaries or 'no summary'}"
+                )
+            outputs.append(output)
+    finally:
+        after = set(
+            _docker(client, socket, "container", "ls", "--all", "--no-trunc", "--quiet").split()
+        )
+        for image in set(images.values()):
+            _docker(client, socket, "image", "rm", "--force", image, check=False)
+    left = sorted(after - before)
+    removed = sorted(before - after)
+    if left:
+        raise TaskError(f"the evidence left {len(left)} container(s) behind: {left}")
+    if removed:
+        raise TaskError(
+            f"{len(removed)} container(s) that predate the evidence are gone: {removed}"
+        )
+    print(f"{GREEN}cleanup: no evidence container remains; {len(before)} pre-existing kept{OFF}")
+    require_sandbox_evidence("\n".join(outputs), SECRET_SANDBOX_CASES)
+    uvrun("dwcheck", "closure", "--report")
+
+
+# M5d.3's mutation review: each line weakens one guard of a workload's
+# credential, one at a time. Each mutant must compile and must fail the
+# guards' unit suites or `sandbox-secret-evidence`; the file is then
+# restored, and its SHA-256 proves it byte-identical.
+SECRET_SANDBOX_MUTATIONS = (
+    # Where the value travels (§2).
+    (
+        "an ordinary workload attaches standard input",
+        "crates/dwkd-broker/src/sandbox/workload_plan.rs",
+        "    run_with(container, workload, None, launcher)",
+        '    run_with(container, workload, Some("--interactive"), launcher)',
+    ),
+    (
+        "the secret plan attaches nothing",
+        "crates/dwkd-broker/src/sandbox/workload_secret_plan.rs",
+        "    super::workload_plan::run_with(container, workload, Some(ATTACH_STDIN), launcher)",
+        "    super::workload_plan::run_with(container, workload, None, launcher)",
+    ),
+    (
+        "the launch helper sends the value unframed",
+        "crates/dwkd-broker/src/process/launch.rs",
+        "secret_pipe(s.needle.value(), s.delivery == Delivery::Stdin)",
+        "secret_pipe(s.needle.value(), false)",
+    ),
+    (
+        "the authority's link sends no secret descriptor",
+        "crates/dwkd-authority/src/broker/link.rs",
+        "    fds.push(pipe.into_transfer_descriptor());",
+        "    drop(pipe);",
+    ),
+    # The broker's read (§3).
+    (
+        "the broker reads the value before it judges",
+        "crates/dwkd-broker/src/sandbox/mod.rs",
+        "        let judged = env\n"
+        "            .ready_workload(&work.handle, &work.spec, &work.program)\n"
+        "            .map_err(judgement)\n"
+        "            .and_then(|()| secret_run(work.secret.as_ref())"
+        ".map_err(OutcomeResult::Refused));",
+        "        let early = secret_run(work.secret.as_ref()).map_err(OutcomeResult::Refused);\n"
+        "        let judged = env\n"
+        "            .ready_workload(&work.handle, &work.spec, &work.program)\n"
+        "            .map_err(judgement)\n"
+        "            .and(early);",
+    ),
+    (
+        "a NUL reaches a variable",
+        "crates/dwkd-broker/src/sandbox/mod.rs",
+        "    if secret.delivery == SecretDelivery::EnvAtSpawn && value.contains(&0) {",
+        "    if false && secret.delivery == SecretDelivery::EnvAtSpawn && value.contains(&0) {",
+    ),
+    (
+        "a secret-bearing start is answered as an ordinary one",
+        "crates/dwkd-broker/src/sandbox/mod.rs",
+        "                Some(started) => "
+        "OutcomeResult::done(BrokerDone::workload_secret_start(started)),",
+        "                Some(started) => "
+        "OutcomeResult::done(BrokerDone::workload_start(started)),",
+    ),
+    # The return path (§7).
+    (
+        "the drain does not redact",
+        "crates/dwkd-broker/src/process/run.rs",
+        "                redactor.feed(bytes, &mut |out| keep(&mut kept, &mut cut, limit, out));",
+        "                let _ = redactor;\n"
+        "                keep(&mut kept, &mut cut, limit, bytes);",
+    ),
+    (
+        "the redaction count is not reported",
+        "crates/dwkd-broker/src/sandbox/oci.rs",
+        "            redactions: secret_bearing"
+        ".then(|| u32::try_from(done.redactions).unwrap_or(u32::MAX)),",
+        "            redactions: secret_bearing.then_some(0),",
+    ),
+    # The launcher (§4).
+    (
+        "the launcher accepts a frame with bytes after it",
+        "crates/dwk-sandbox-probe/src/launch.rs",
+        "Some(filled) == length.checked_add(prefix)",
+        "Some(filled) >= length.checked_add(prefix)",
+    ),
+    (
+        "the launcher lets a proxy variable carry a secret",
+        "crates/dwk-sandbox-probe/src/launch.rs",
+        "    valid_secret_env_name(name) && !profile::sandbox_secret_name_reserved(name)",
+        "    valid_secret_env_name(name)",
+    ),
+    (
+        "the launcher leaves standard input attached",
+        "crates/dwk-sandbox-probe/src/launch.rs",
+        "        if delivered.is_none() || quiet_stdin().is_none() {",
+        "        if delivered.is_none() {",
+    ),
+    # The authority's decision (§5).
+    (
+        "permission to run the executable is permission to use the secret",
+        "crates/dwkd-authority/src/state/workload.rs",
+        "        self.workload_permits() && self.injection.as_ref().is_none_or(SpawnGate::permits)",
+        "        self.workload_permits()",
+    ),
+    (
+        "the plan states the injection allowed whatever both gates said",
+        "crates/dwkd-authority/src/state/workload_route.rs",
+        "            effect: effect_of(gate.permits()),",
+        "            effect: effect_of(true),",
+    ),
+    (
+        "mode B before mode C",
+        "crates/dwkd-authority/src/secret/select.rs",
+        "            [InjectionMode::FdAtSpawn, InjectionMode::EnvAtSpawn]",
+        "            [InjectionMode::EnvAtSpawn, InjectionMode::FdAtSpawn]",
+    ),
+    (
+        "any executable is a spawn consumer",
+        "crates/dwkd-authority/src/secret/select.rs",
+        "            if !consumers.iter().any(|allowed| allowed == *consumer) {",
+        "            if false && !consumers.iter().any(|allowed| allowed == *consumer) {",
+    ),
+    (
+        "a variable the environment sets reaches the broker",
+        "crates/dwkd-authority/src/state/secret_use/spawn.rs",
+        "                .filter(|name| sandbox_secret_name_allowed(name))",
+        "                .filter(|_| true)",
+    ),
+    (
+        "a variable's NUL is handed over",
+        "crates/dwkd-authority/src/secret/handoff.rs",
+        "    !material.expose().contains(&0)",
+        "    !material.expose().is_empty()",
+    ),
+    (
+        "a credential is sent with no execution environment",
+        "crates/dwkd-authority/src/state/workload_route.rs",
+        "            if exec.credential_handle.is_some() {\n"
+        "                return self.credential_without_environment(caller, message, invoke);\n"
+        "            }",
+        "            if exec.credential_handle.is_some() && false {\n"
+        "                return self.credential_without_environment(caller, message, invoke);\n"
+        "            }",
+    ),
+    # Durable state (§6).
+    (
+        "a credential-bearing launch records no use",
+        "crates/dwkd-authority/src/state/workload.rs",
+        "        (Some((asked, prepared)), Some(gate)) => Ok(Some(spawn::record_intent(\n"
+        "            work,\n"
+        "            (asked, prepared.clone()),\n"
+        "            (active, &gate.record),\n"
+        "            invocation,\n"
+        "        )?)),",
+        "        (Some(_), Some(_)) => Ok(None),",
+    ),
+    (
+        "an unknown ending counts a delivery",
+        "crates/dwkd-authority/src/state/secret_use/spawn.rs",
+        "        Workload::Unknown { .. } => Ending::Unknown,",
+        "        Workload::Unknown { .. } => Ending::Injected,",
+    ),
+    (
+        "a missing redaction count is believed",
+        "crates/dwkd-authority/src/state/workload_ops.rs",
+        "        ) if done.redactions.is_some() != started.intent.secret.is_some() => {",
+        "        ) if false && done.redactions.is_some() != started.intent.secret.is_some() => {",
+    ),
+)
+
+
+def _secret_guard_suites() -> None:
+    """The suites that prove M5d.3's guards without a runtime: the shared
+    contract, the broker's plans and drains, and the authority's selection,
+    decision, ledger and route against a fake broker with keyring values."""
+    run("cargo", "test", "--locked", "-p", "dwk-proto", "--lib")
+    run("cargo", "test", "--locked", "-p", "dwkd-broker", "--bin", "dwkd-broker")
+    run(
+        "cargo",
+        "test",
+        "--locked",
+        "-p",
+        "dwkd-authority",
+        "--lib",
+        "--",
+        "state::",
+        "secret::",
+    )
+
+
+def task_sandbox_secret_mutations() -> None:
+    """Weaken each M5d.3 guard in turn; a unit suite or the evidence must
+    catch every one.
+
+    Slow: a mutant no unit suite catches runs the whole
+    sandbox-secret-evidence. Every file is restored byte-identically whatever
+    happens, and checked. Never run it beside another build.
+    """
+    killed: list[str] = []
+    for what, rel, old, new in SECRET_SANDBOX_MUTATIONS:
+        path = ROOT / rel
+        original = path.read_bytes()
+        digest = hashlib.sha256(original).hexdigest()
+        text = original.decode("utf-8")
+        if text.count(old) != 1:
+            raise TaskError(f"mutation `{what}`: its target is not in {rel} exactly once")
+        print(f"{BOLD}mutant: {what}{OFF}")
+        outcome = "survived"
+        try:
+            path.write_bytes(text.replace(old, new).encode("utf-8"))
+            try:
+                run(
+                    "cargo",
+                    "test",
+                    "--locked",
+                    "--no-run",
+                    "-p",
+                    "dwk-proto",
+                    "-p",
+                    "dwk-sandbox-probe",
+                    "-p",
+                    "dwkd-broker",
+                    "-p",
+                    "dwkd-authority",
+                )
+            except TaskError:
+                outcome = "did not compile"
+            else:
+                try:
+                    _secret_guard_suites()
+                except TaskError as exc:
+                    outcome = f"killed by a unit suite: {str(exc)[:160]}"
+                else:
+                    try:
+                        task_sandbox_secret_evidence()
+                    except TaskError as exc:
+                        outcome = f"killed by the evidence: {str(exc)[:160]}"
+        finally:
+            path.write_bytes(original)
+        if hashlib.sha256(path.read_bytes()).hexdigest() != digest:
+            raise TaskError(f"{rel} was not restored byte-identically")
+        print(f"{DIM}restored {rel} (sha256 {digest[:16]}...){OFF}")
+        if not outcome.startswith("killed"):
+            raise TaskError(f"mutant `{what}` {outcome}: nothing guards it")
+        killed.append(what)
+        print(f"{GREEN}mutant {outcome[:60]}: {what}{OFF}")
+    print(
+        f"{GREEN}sandbox secret mutation review: {len(killed)} of "
+        f"{len(SECRET_SANDBOX_MUTATIONS)} killed{OFF}"
     )
 
 
@@ -5334,6 +5814,8 @@ TASKS = {
     "net-http-evidence": task_net_http_evidence,
     "net-http-mutations": task_net_http_mutations,
     "sandbox-workload-mutations": task_sandbox_workload_mutations,
+    "sandbox-secret-evidence": task_sandbox_secret_evidence,
+    "sandbox-secret-mutations": task_sandbox_secret_mutations,
     "d11-hardening-evidence": task_d11_hardening_evidence,
     "d11-hardening-mutations": task_d11_hardening_mutations,
     "d11-posture": task_d11_posture,

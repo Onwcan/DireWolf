@@ -92,8 +92,41 @@ pub const REAP_MILLIS: u64 = 5_000;
 /// executes `<path>` with exactly `<args...>`, replacing itself: the workload
 /// is the process the runtime's `exec` started, and nothing else.
 pub const PROBE_LAUNCH: &str = "launch";
-/// The one launch profile: `workspace_exec_hygiene` (SANDBOX.md §4a).
+/// The launch profile of `workspace_exec_hygiene` (SANDBOX.md §4a).
 pub const LAUNCH_HYGIENE: &str = "hygiene";
+/// The launch profile of a secret delivered on descriptor 3 (mode C, M5d.3,
+/// ADR-0052 §7): `launch secret-fd <path> <args...>`. The launcher reads one
+/// framed value from its standard input ([`SECRET_FRAME_PREFIX_BYTES`]), puts
+/// it in a fresh pipe whose read end is the target's descriptor 3, and
+/// executes the target with standard input `/dev/null`.
+pub const LAUNCH_SECRET_FD: &str = "secret-fd";
+/// [`LAUNCH_SECRET_FD`] with [`HYGIENE_ENVIRONMENT`] set as well.
+pub const LAUNCH_SECRET_FD_HYGIENE: &str = "secret-fd-hygiene";
+/// The launch profile of a secret delivered as one variable (mode B, M5d.3):
+/// `launch secret-env <NAME> <path> <args...>`. The launcher reads one framed
+/// value from its standard input and executes the target with `NAME=value`
+/// added to the environment's own variables, and standard input `/dev/null`.
+pub const LAUNCH_SECRET_ENV: &str = "secret-env";
+/// [`LAUNCH_SECRET_ENV`] with [`HYGIENE_ENVIRONMENT`] set as well.
+pub const LAUNCH_SECRET_ENV_HYGIENE: &str = "secret-env-hygiene";
+/// Whether `name` is a variable the environment or the launcher already sets
+/// -- one of [`HYGIENE_ENVIRONMENT`] or [`PROXY_VARIABLES`] -- and so may not
+/// carry a secret (M5d.3): a mode B value never shadows the environment's
+/// own configuration or the obligation's. The authority, the broker and the
+/// launcher each refuse such a name, beside the process-control names every
+/// secret variable is refused (`dwk_proto::brokerp::valid_secret_env_name`).
+#[must_use]
+pub fn sandbox_secret_name_reserved(name: &str) -> bool {
+    HYGIENE_ENVIRONMENT
+        .iter()
+        .chain(PROXY_VARIABLES)
+        .any(|(variable, _)| *variable == name)
+}
+/// The frame of a secret on the launcher's standard input (M5d.3): the
+/// value's length as a big-endian `u32` in this many bytes, then exactly the
+/// value, then end of file. Any other shape -- a length of zero or past the
+/// shared bound, fewer bytes, a byte more -- executes nothing.
+pub const SECRET_FRAME_PREFIX_BYTES: usize = 4;
 /// `workspace_exec_hygiene`'s variables, set by the launcher over the
 /// environment's own for every launch of [`LAUNCH_HYGIENE`] (SANDBOX.md §4a;
 /// ADR-0052 §5a). Each neutralises one tool's configuration from outside the

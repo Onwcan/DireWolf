@@ -335,6 +335,16 @@ fn execute(
         Authorisation::WorkloadCollect(collect) => {
             return effects.sandbox.workload_collect(collect);
         }
+        // A secret-bearing workload's start (M5d.3): the runtime's client,
+        // its working directory, and the secret's pipe last.
+        Authorisation::WorkloadSecretStart(start) => {
+            return match (fds.next(), fds.next(), fds.next(), fds.next()) {
+                (Some(runtime), Some(cwd), Some(secret), None) => effects
+                    .sandbox
+                    .workload_secret_start(start, (runtime, cwd), secret, until),
+                _ => OutcomeResult::Refused(BrokerRefusal::DescriptorCount),
+            };
+        }
         Authorisation::HttpExchange(exchange) => {
             return match (fds.next(), fds.next()) {
                 (secret, None) => effects.http.exchange(exchange, secret, until),

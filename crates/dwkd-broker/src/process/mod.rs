@@ -260,13 +260,16 @@ impl Processes {
         }
         let needle =
             crate::secret::Needle::new(value, &start.handle).ok_or(BrokerRefusal::SecretEmpty)?;
-        Ok(launch::SecretLaunch {
-            env_name: start
-                .env_name
-                .as_ref()
-                .map(|name| name.as_str().as_bytes().to_vec()),
-            needle,
-        })
+        let delivery = match (start.delivery, start.env_name.as_ref()) {
+            (SecretDelivery::EnvAtSpawn, Some(name)) => {
+                launch::Delivery::Env(name.as_str().as_bytes().to_vec())
+            }
+            (SecretDelivery::FdAtSpawn, None) => launch::Delivery::Fd,
+            // The decoder already refused a variable that is not exactly
+            // mode B's.
+            _ => return Err(BrokerRefusal::Unsupported),
+        };
+        Ok(launch::SecretLaunch { delivery, needle })
     }
 
     /// Re-prove, launch, confirm, supervise: the answer to a launch, or the

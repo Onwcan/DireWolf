@@ -54,6 +54,13 @@ pub(crate) fn header_safe(material: &SecretMaterial) -> bool {
         .any(|b| matches!(b, b'\r' | b'\n' | 0))
 }
 
+/// Whether `material` can be carried as an environment variable's value
+/// (mode B, M5d.3): no NUL, which would end the C string the program reads
+/// early. Refused, never sanitised.
+pub(crate) fn variable_safe(material: &SecretMaterial) -> bool {
+    !material.expose().contains(&0)
+}
+
 /// Put `material` in a fresh pipe and zero the authority's copy.
 ///
 /// # Errors

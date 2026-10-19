@@ -1,6 +1,6 @@
 # ADR-0052: M5d — production sandboxed `process.exec`: the authority decides a workload, the broker runs exactly that plan in a measured `oci-strict` environment, as the environment's own identity, and nothing of it outlives its invocation
 
-**Status:** Proposed (M5d.1 and M5d.2 built; M5d.2's refinements §§2a and 5a — OD-10 and OD-11 — approved by the owner on 2026-10-19 with conditions, §19; this ADR's acceptance remains M5d.6's) · **Date:** 2026-10-13 · **Revised:** 2026-10-19 · **Would amend (on acceptance):** [ADR-0018](0018-authority-broker-split.md) (the broker runs workloads, never as its own uid), [ADR-0039](0039-durable-authority-state.md) (schema version 9: the workload ledger, §4), [ADR-0043](0043-m4b-private-broker-channel-and-brokered-fs-read.md) (private protocol version 8, §3), [ADR-0045](0045-m4d-process-execution-broker.md) (a process can run in an environment; the host floor is unchanged), [ADR-0047](0047-m5a-oci-execution-environment-and-measured-assurance.md) (the probe becomes the environment's init: it reaps orphans and, asked, ends every other process; `run_probe` gains a sibling, `run_workload`), [ADR-0050](0050-m5c-kernel-performed-net-http-ssrf-redirects-and-credential-egress.md) (§21's ptrace-posture prerequisite becomes a check the broker makes at start) · **Refines:** [ADR-0008](0008-sandbox-default.md) and [ADR-0024](0024-sandbox-network-topology.md) (as realised by [ADR-0048](0048-m5b-proxy-only-topology-and-connect-proxy.md)), [ADR-0046](0046-m4e-secret-handles-backends-injection-and-redaction.md) §13 (modes B/C reach a sandboxed target, M5d.3), [ADR-0051](0051-external-agent-interoperability.md) (Proposed; its M5d prerequisites), [SANDBOX.md](../SANDBOX.md) §§1–4, [POLICY.md](../POLICY.md) (`when.environment = "sandbox"`)
+**Status:** Proposed (M5d.1, M5d.2 and M5d.3 built; M5d.2's refinements §§2a and 5a — OD-10 and OD-11 — approved by the owner on 2026-10-19 with conditions, §19; this ADR's acceptance remains M5d.6's) · **Date:** 2026-10-13 · **Revised:** 2026-10-19 · **Would amend (on acceptance):** [ADR-0018](0018-authority-broker-split.md) (the broker runs workloads, never as its own uid), [ADR-0039](0039-durable-authority-state.md) (schema version 9: the workload ledger, §4), [ADR-0043](0043-m4b-private-broker-channel-and-brokered-fs-read.md) (private protocol version 8, §3), [ADR-0045](0045-m4d-process-execution-broker.md) (a process can run in an environment; the host floor is unchanged), [ADR-0047](0047-m5a-oci-execution-environment-and-measured-assurance.md) (the probe becomes the environment's init: it reaps orphans and, asked, ends every other process; `run_probe` gains a sibling, `run_workload`), [ADR-0050](0050-m5c-kernel-performed-net-http-ssrf-redirects-and-credential-egress.md) (§21's ptrace-posture prerequisite becomes a check the broker makes at start) · **Refines:** [ADR-0008](0008-sandbox-default.md) and [ADR-0024](0024-sandbox-network-topology.md) (as realised by [ADR-0048](0048-m5b-proxy-only-topology-and-connect-proxy.md)), [ADR-0046](0046-m4e-secret-handles-backends-injection-and-redaction.md) §13 (modes B/C reach a sandboxed target, M5d.3), [ADR-0051](0051-external-agent-interoperability.md) (Proposed; its M5d prerequisites), [SANDBOX.md](../SANDBOX.md) §§1–4, [POLICY.md](../POLICY.md) (`when.environment = "sandbox"`)
 
 > **A workload runs only where the authority decided it may, as the
 > environment's own user, and is gone when its invocation is.** The authority
@@ -155,6 +155,19 @@ executable (`od9-host-resolved-grant-covers-no-image-executable`); a concrete
 grant covers its one executable and nothing else
 (`od9-concrete-grant-covers-nothing-else`).
 
+**As built in M5d.3: tool messages version 6** (§7). Version 5's twelve
+members, `process_exec` gaining one optional `credential_handle` -- a
+handle, never a value, a mode, a variable, a descriptor or a length -- under
+the same mandatory key. A plan that consumes a credential states a second
+action, `spawn_injection{handle, mode, decision}`, beside its workload
+action; the plan is `ALLOW` only if both are. Results, refusals and failures
+are version 5's payloads: `CREDENTIAL_UNAVAILABLE` when the credential cannot
+be used here (not configured, revoked, replaced, not allowed for this
+executable, no spawn mode, a variable the environment sets, or **no
+execution environment attached** -- then nothing runs on the host instead),
+`CREDENTIAL_FAILED` when it could not be read or carried before anything
+ran. A version-5 call cannot name a credential. Versions 1–5 are unchanged.
+
 ### 2a. A production environment (M5d.2; OD-10, approved by the owner 2026-10-19)
 
 ADR-0047 gave the environment lifecycle no production caller "until M5d".
@@ -272,6 +285,18 @@ workload the broker does not hold, or for another generation's, is
 `indeterminate` (`WORKLOAD_UNCONFIRMED`): a restarted broker cannot say what
 its predecessor's workload did.
 
+**As built in M5d.3: version 10.** `broker.workload_secret_start` is
+`broker.workload_start` with the secret's one-shot pipe as the **third**
+descriptor and three typed fields: the handle, the delivery (`FD_AT_SPAWN` or
+`ENV_AT_SPAWN`) and mode B's variable -- present exactly for B, and never a
+process-control name or one the environment sets (the shared decoder refuses
+it). No field carries the value, its length or a runtime flag. It is answered
+as a start, under its own operation; it is collected as any workload, and its
+ending carries `redactions` -- how many whole occurrences of the value the
+broker replaced in both streams, a count only -- exactly for a
+secret-bearing workload (the authority treats a count on any other, or none on
+one, as a broker not keeping the protocol: `UNKNOWN`).
+
 ### 4. Authority state: schema version 9
 
 Append-only by trigger, migrated transactionally from 8 with data:
@@ -293,6 +318,15 @@ process and `net.http` ledgers refusing a key another holds — and `run_image`
 — a run's image and manifest digest, fixed at admission (no update, no
 delete), with a trigger refusing a workload intent in a run whose environment
 is of another image.
+
+**As built in M5d.3: schema version 11**, migrated transactionally from 10:
+`workload_secret` links a workload to the one spawn use it consumes -- a
+`secret_injection` row of mode `fd_at_spawn` or `env_at_spawn`, its consumer
+the executable's (path, SHA-256) in the image -- made once, at both intents,
+in the workload's own intent transaction, and never updated or deleted. A
+restart that finds the workload `LAUNCHING` finds its use `INTENT`, and ends
+both `UNKNOWN`. No column holds a value, a prefix, a length or a digest of
+one.
 
 ### 5. OCI workload execution
 
@@ -473,6 +507,89 @@ process; a target that must keep it from its own children must close
 descriptor 3 before it starts them (stated in the operator documentation
 with M5d.3). Mode B's variable is inherited the same way, by construction.
 
+**As built (M5d.3; OD-4's recommendation, refined).** The path, end to end:
+
+1. **The authority decides, then records.** A version-6 `process_exec` naming
+   a handle is decided in one transaction: the fence, the run, the key; the
+   manifest's executable; then, before either gate and reading nothing, the
+   handle's metadata, the run's admitted revision (`REPLACED`, `REVOKED`), the
+   **consumer** and the **mode**; then both gates for the workload (a
+   `SANDBOX` action) **and** both gates for `secret.use:<handle>` in the
+   `SANDBOX` environment, keeping only `audit_level`. Permission to run the
+   executable is never permission to use the secret, and no shipped pack has
+   a `secret.use` rule (SAFE denies it; BALANCED and POWER default-deny it):
+   the evidence uses a dedicated operator test policy. Approvals stay closed
+   until M6 (a `REQUIRE_APPROVAL` rule denies). Both intents -- the workload's
+   and the use's, linked -- are durable before anything is read.
+2. **The consumer is the image's executable.** The operator's metadata names
+   consumer paths; in an environment each is the executable the image
+   manifest pins at that path, by its SHA-256, never the host file there --
+   the identity rule of ADR-0046 §15 applied to the image, as OD-2 and OD-9
+   apply it to grants. A run is bound to its manifest (`run_image`), and the
+   broker proves the bytes before every launch, so a replaced binary is not
+   the consumer. An egress-only secret names no consumer and reaches no
+   process. *This refinement is the owner's to confirm with OD-4.*
+3. **The kernel chooses the mode:** C (descriptor 3) before B (the operator's
+   variable), never the request. Mode B's variable is refused if it is a
+   process-control name or one the environment or `workspace_exec_hygiene`
+   sets (`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY`, and every
+   `GIT_*`, `PYTHON*`, `CARGO_*` name): the shared contract refuses it, and the
+   launcher refuses it again.
+4. **The value is read last, once.** With no transaction open, after the
+   runtime client is resolved and hashed and the workspace re-pinned: the
+   backend read (zeroizing), the redaction index learns it, a mode B value
+   holding a NUL is refused, and it leaves the authority as a one-shot pipe,
+   the authority's copy zeroed (ADR-0046 §11). A value that cannot be read or
+   carried fails the launch `CREDENTIAL_FAILED`; provably nothing ran.
+5. **The broker reads it only after the judgement.** On the supervisor's
+   thread, after it re-judged the environment from the runtime's record and
+   proved the executable, it reads the pipe once (a FIFO, read-only, at end
+   of file, 1 byte to 32 KiB) -- a refused workload never reads it (measured:
+   the pipe is still full after a digest refusal).
+6. **Over the client's standard input, to the trusted launcher.** The launch
+   helper gives the runtime client the value **framed** -- a 4-byte
+   big-endian length, the value, end of file -- as its standard input, and
+   nothing else changes: the same `container exec` as an ordinary workload's
+   (`workload_plan::run_with`) with the one word that attaches standard
+   input, and the probe's `launch secret-fd|secret-env[-hygiene] [NAME]`
+   before the executable. *Measured on Docker Engine 29.8.2:* without that
+   word the client forwards nothing (the process reads `/dev/null`); with it
+   the client forwards the bytes and they appear in no `inspect`, exec
+   inspect, log or event record, while the command line does appear in the
+   runtime's events -- which is why the value is never a word of it. The
+   word is spelled in `workload_secret_plan.rs` alone (TX055); every other
+   workload, environment step and probe run still has standard input
+   `/dev/null` (TX050), and the ordinary plan is unchanged.
+7. **The launcher delivers and executes.** The pinned probe reads exactly
+   one frame -- nothing, a short prefix, a length of zero or past 32 KiB, a
+   byte short or a byte more executes nothing (exit 127) -- puts the value on
+   descriptor 3 (mode C, a pipe holding it then end of file) or adds
+   `NAME=value` to the environment's own variables (mode B), sets
+   `workspace_exec_hygiene`'s variables for a `-hygiene` profile, replaces
+   its standard input with `/dev/null`, wipes its copy, refuses to run with
+   any other descriptor open, and executes the absolute path. npm, Cargo,
+   `rustup` and `corepack` stay fail-closed under the obligation (§5a).
+8. **The return path.** The broker's drains replace every whole occurrence
+   -- one split across reads included -- with `[redacted:<handle>]` as the
+   bytes arrive, keep no part of one, and report the count; the authority
+   then redacts with its exact index and known shapes before anything is
+   recorded or answered, and the run is `LOCAL_UNVERIFIED`.
+9. **The ending.** A completed workload's use is `INJECTED` and counted once;
+   a provably-unrun one `FAILED` with the typed reason; an uncertain one
+   `UNKNOWN`, its environment destroyed, the use not counted -- in the
+   workload's own outcome transaction. A key names one invocation for ever:
+   nothing is read, handed over or run again after any crash (§9).
+
+*Residuals, recorded and not hidden* (§14): descriptor 3 and the variable are
+inherited by every descendant the target starts; the runtime's client and
+daemon carry the value in memory on its way; a program that transforms the
+value (encodes, splits across separate writes beyond a whole occurrence,
+reverses) passes redaction; a malicious consumer can copy it into the
+workspace or to an origin the run may reach. Return-path redaction keeps an
+honest program's echo from cognition; it is **not** protection against a
+malicious consumer, which the environment's containment and the operator's
+choice of consumer bound.
+
 ### 8. Lifecycle
 
 `LAUNCHING` (the intent, durable before the broker hears anything) →
@@ -612,6 +729,16 @@ environment's mount namespace already names none of them.
   verdict says when it could not prove that.
 - **Disk** (until OD-6) and **workspace ownership** (until OD-3) as stated.
 - **Mode C grandchildren** (§7).
+- **M5d.3, as built (§7).** A credential's descendants: descriptor 3 and mode
+  B's variable are inherited by every process the target starts (measured,
+  `fd-at-spawn-inherited-by-a-descendant`, `env-at-spawn-inherited-by-a-descendant`);
+  confined by the environment and ended by `reap`, not restricted to one
+  process. The runtime's client and daemon hold the framed value in memory
+  while forwarding it (the client is pinned and hashed; neither writes it to
+  a record, an event or a log -- measured). Redaction matches whole
+  occurrences of the exact value and known shapes; a consumer that transforms
+  or exfiltrates it (the workspace, an allowed origin) is not stopped by it.
+  The launcher is the pinned probe, trusted by digest like `reap`.
 
 ### 15. Architecture rules
 
@@ -631,6 +758,15 @@ obligation's variables on the wire; TX050 extended to any launcher but the
 probe's own words (`env`) and to a `NAME=value` word in the plan;
 **TX054** (new) — `serve_authority` and `Served::operate`, the evidence's door
 to the public route (§17), are named by the server module alone.
+
+**M5d.3:** **TX055** (new) -- the word that attaches the runtime client's
+standard input (`--interactive`, or `-i` alone or combined) is spelled in
+`workload_secret_plan.rs` alone, across the broker; **TX056** (new) -- that
+plan spells nothing else TX050 bans. TX014's exemption gains the route tests'
+fake broker, which reads the pipe a secret-bearing start hands it (as the
+secret-use tests' fake does a hop's); TX026 is unchanged (the variable's NUL
+check is the handoff's, beside the header check). Each with a violation
+fixture and its findings pinned.
 
 ### 16. Dependencies and the TCB
 
@@ -711,6 +847,36 @@ worker, the supervisor's per-environment, table and generation bounds, the
 launcher ignored or setting nothing, the hygiene refusals (wrappers included)
 and prefix, and the operator file's strictness.
 
+**As built (M5d.3).** `make sandbox-secret-evidence` first runs the
+authority's mode B/C pipeline against a fake broker with **real kernel-keyring
+values** (labelled so: delivery is the real suites'), every case required --
+the value read once, after both intents; C before B; both gates; every
+refusal and denial reading nothing; the stored revision replaced or revoked;
+failures before anything ran; thirteen crash windows; no host fallback --
+then six broker and four authority real-container tests, each required to
+run, which must report every case of `SECRET_SANDBOX_CASES`: the released
+broker delivering a **synthetic** value on descriptor 3 and as `GH_TOKEN`
+(fingerprints compared, never values), the descendants' inheritance, the
+hygiene launcher composed with each mode, the value absent from argv, the
+runtime's records, events and logs, redaction of an echo split across reads,
+every malformed handoff refused and the pipe unread after a refused
+judgement, the launcher refusing every other frame and every reserved name,
+a broker stopped after the read running nothing; and the real authority over
+a **real DWKP client** -- the server seam and the released `serve
+--sandbox-config --secrets-file` -- delivering, redacting, refusing, denying
+under every shipped pack, ending `UNKNOWN` and destroying the environment
+after a crash, and never running a key twice. The hosted job is
+`sandbox-secret`, required by `ci`. `make sandbox-secret-mutations` weakens
+22 guards one at a time -- the plan attaching standard input (both ways), the
+frame, the third descriptor, the broker reading before it judges, a NUL in a
+variable, the start's answer, the drains' redaction and its count, the
+launcher's frame, names and standard input, both gates, the plan's injection
+decision, C before B, the consumer, a reserved variable, the variable's NUL,
+no host fallback, the linked use, an unknown ending and a missing count --
+and kills all 22, twelve by the unit suites and ten by the real-container
+evidence; M5d.2's campaign, its targets moved to the code M5d.3 reshaped,
+still kills 52 of 52. Every file is restored and its SHA-256 checked.
+
 **Not evidenced by M5d.1, and not claimed:** a workload in `PROXY_ONLY` (the
 evidence's environments are `NO_NETWORK`, so the agent-shaped workload's
 network attempts are refused for want of any network — M5d.5 runs it with
@@ -726,7 +892,7 @@ the evidence host's own posture is reported, `posture-reported-matches-host`).
 |---|---|---|
 | **M5d.1** Authorised OCI workload lifecycle | §§3–5, 8–10, 13: protocol 8's `workload_run`; the broker's re-judgement, digest proof, fixed plan, bounds, wall clock and `reap`; the probe as init; schema 9; `Authority::workload_run` (no public route) with every gate; fail-closed environment destruction; the start-up identity and ptrace-posture checks | its real-container evidence, mutants and every earlier evidence green locally and in hosted CI |
 | **M5d.2** Public sandboxed `process.exec` | the DWKP route (§2), the shared idempotency namespace, results naming environment and level; `workspace_exec_hygiene` enforced in the environment; as built also private protocol 9's start and collection (§3), schema 10 (§4), OD-9, the production environment (§2a) and the trusted launcher (§5a) | hostile-client and eval coverage; the shipped packs' sandbox rules exercised; §§2a and 5a decided by the owner |
-| **M5d.3** Secrets B/C in the sandbox | §7 | residue evidence as M4e's: the value only in the target, redacted on return |
+| **M5d.3** Secrets B/C in the sandbox | §7; as built also tool messages version 6 (§2), private protocol 10 (§3), schema 11 (§4), TX055–TX056 (§15) | residue evidence as M4e's: the value only in the target, redacted on return — **built** |
 | **M5d.4** Workspace ownership and disk quota | §§6, 10 (OD-3, OD-6) | the authority's tools and the workload both work on the workspace; a full disk refused, measured |
 | **M5d.5** The agent-shaped escape suite and multi-identity evidence | a long-lived agent-shaped workload in `PROXY_ONLY` with declared origins; the hosted three-identity job | ADR-0050 §21's uid-boundary condition shown with real users |
 | **M5d.6** Closeout | run release destroys the environment; the gated eval `m5d-sandbox-exec`; this ADR accepted | every checkpoint's evidence in hosted CI |
@@ -738,7 +904,7 @@ the evidence host's own posture is reported, `posture-reported-matches-host`).
 | OD-1 | Who chooses where `process.exec` runs | **the kernel**: a `READY` environment means sandbox, nothing means M4d's host floor; no runtime field, no fallback |
 | OD-2 | A sandboxed executable's identity | **the operator's image manifest** (path → SHA-256) beside the image digest, proved from outside before every run; workspace scripts run only as arguments of a manifest executable |
 | OD-3 | Workspace ownership | **(a) a workspace group** for V1; (c) copy-in/copy-out later where stronger isolation is wanted |
-| OD-4 | Modes B/C delivery | **the trusted launcher over the exec's stdin** |
+| OD-4 | Modes B/C delivery | **the trusted launcher over the exec's stdin** — **built in M5d.3** (§7), with the consumer resolved against the image manifest (§7 item 2), for the owner to confirm |
 | OD-5 | Concurrency and long-lived workloads | **one workload at a time per environment**; long-lived workloads with handles decided at M5d.5 |
 | OD-6 | Disk quota | **an operator-provided bounded filesystem, measured by the probe**; refuse when unbounded |
 | OD-7 | `local` | **not in M5d**; with M6, by its own ADR |
@@ -794,7 +960,10 @@ disk quota are not solved by M5d.1. M5d.2's preparation holds the
 authority's worker for its duration — at most 120 s per exchange (§2a) — an
 ended run's environment idles until the next preparation, at most 16 are
 live, and `npm`-family tools and `cargo`, directly or through a wrapper, stay
-refused under the obligation until evidenced (§5a).
+refused under the obligation until evidenced (§5a). M5d.3's credential
+reaches the program's whole process tree, not one process, and its return
+path redacts what an honest program echoes, not what a malicious one
+transforms (§7).
 
 ## Alternatives considered
 

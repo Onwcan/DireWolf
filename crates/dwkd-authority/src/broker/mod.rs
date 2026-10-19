@@ -236,6 +236,24 @@ pub enum Operation {
         /// The workload.
         workload: dwk_proto::brokerp::workload::WorkloadSpec,
     },
+    /// Start one workload that consumes a credential (M5d.3, ADR-0052 §7):
+    /// everything [`Operation::WorkloadStart`] carries, what the launcher is
+    /// told -- the handle, mode C or B, B's variable -- and the value's
+    /// one-shot pipe as the third descriptor. Never the value as a field.
+    WorkloadSecretStart {
+        /// What the environment should be.
+        spec: EnvironmentSpec,
+        /// The container recorded for it.
+        container: ContainerRef,
+        /// The runtime client and where it runs.
+        runtime: RuntimeHandoff,
+        /// The workload.
+        workload: dwk_proto::brokerp::workload::WorkloadSpec,
+        /// The handle, the delivery and the variable.
+        secret: dwk_proto::brokerp::workload::WorkloadSecret,
+        /// The value: a pipe's read end, at end of file after it.
+        pipe: crate::secret::handoff::SecretPipe,
+    },
     /// Collect a started workload (M5d.2): its invocation is the order's,
     /// the generation its start's. No descriptor.
     WorkloadCollect {
@@ -296,6 +314,7 @@ impl Operation {
             Self::HttpResolve { .. } => "http.resolve",
             Self::HttpExchange { .. } => "http.exchange",
             Self::WorkloadStart { .. } => "workload.start",
+            Self::WorkloadSecretStart { .. } => "workload.secret_start",
             Self::WorkloadCollect { .. } => "workload.collect",
         }
     }
@@ -312,6 +331,7 @@ impl Operation {
             Self::HttpResolve { .. } => PrivateKind::HttpResolve,
             Self::HttpExchange { .. } => PrivateKind::HttpExchange,
             Self::WorkloadStart { .. } => PrivateKind::WorkloadStart,
+            Self::WorkloadSecretStart { .. } => PrivateKind::WorkloadSecretStart,
             Self::WorkloadCollect { .. } => PrivateKind::WorkloadCollect,
             _ => return None,
         };
@@ -381,6 +401,7 @@ impl BrokerOrder {
             | Operation::HttpResolve { .. }
             | Operation::HttpExchange { .. }
             | Operation::WorkloadStart { .. }
+            | Operation::WorkloadSecretStart { .. }
             | Operation::WorkloadCollect { .. } => return None,
         })
     }

@@ -25,7 +25,8 @@ use dwk_proto::brokerp::BrokerRefusal;
 use rustix::process::{Pid, PidfdFlags, Signal, WaitId, WaitIdOptions};
 
 use super::fdcheck;
-use super::launch::{self, Program};
+use super::launch::{self, Program, SecretLaunch};
+use crate::secret::Redactor;
 
 /// How often the wait looks for an exit and at the deadline.
 const TICK: Duration = Duration::from_millis(5);
@@ -71,6 +72,9 @@ pub(crate) struct Completed {
     pub(crate) stderr: Vec<u8>,
     /// Every stderr byte read, kept or not.
     pub(crate) stderr_observed: u64,
+    /// For a run that delivered a secret (M5d.3): how many whole occurrences
+    /// of its value the drains replaced, in both streams.
+    pub(crate) redactions: usize,
 }
 
 /// Why a run has no answer.
@@ -88,14 +92,37 @@ struct Drained {
     kept: Vec<u8>,
     cut: bool,
     observed: u64,
+    redactions: usize,
 }
 
-fn drain(reader: impl std::io::Read, stdout: bool, limit: usize, sent: &mpsc::Sender<Drained>) {
+/// Keep `bytes` within `limit`; anything past it is counted as cut.
+fn keep(kept: &mut Vec<u8>, cut: &mut bool, limit: usize, bytes: &[u8]) {
+    let room = limit.saturating_sub(kept.len());
+    if bytes.len() > room {
+        *cut = true;
+    }
+    kept.extend_from_slice(bytes.get(..room.min(bytes.len())).unwrap_or_default());
+}
+
+/// Drain one stream to `limit`. With a `redactor` (M5d.3: a run that
+/// delivered a secret), every whole occurrence of the value is replaced as
+/// the bytes arrive, an occurrence split across reads included, and no part
+/// of one is ever retained: the matcher holds the value's own prefix, never a
+/// copy, and once the bound is reached the rest is counted, not scanned. The
+/// raw chunks are zeroed.
+fn drain(
+    reader: impl std::io::Read,
+    stdout: bool,
+    limit: usize,
+    sent: &mpsc::Sender<Drained>,
+    redactor: Option<Redactor>,
+) {
     let mut reader = reader;
+    let mut redactor = redactor;
     let mut kept = Vec::new();
     let mut cut = false;
     let mut observed = 0u64;
-    let mut chunk = vec![0u8; 64 * 1024];
+    let mut chunk = zeroize::Zeroizing::new(vec![0u8; 64 * 1024]);
     loop {
         let read = match reader.read(&mut chunk) {
             Ok(0) | Err(_) => break,
@@ -103,17 +130,37 @@ fn drain(reader: impl std::io::Read, stdout: bool, limit: usize, sent: &mpsc::Se
         };
         observed = observed.saturating_add(u64::try_from(read).unwrap_or(u64::MAX));
         let bytes = chunk.get(..read).unwrap_or_default();
-        let room = limit.saturating_sub(kept.len());
-        if bytes.len() > room {
-            cut = true;
+        match redactor.as_mut() {
+            // Retention full: the rest is counted, not scanned or kept.
+            Some(_) if kept.len() >= limit => {
+                if !bytes.is_empty() {
+                    cut = true;
+                }
+            }
+            Some(redactor) => {
+                redactor.feed(bytes, &mut |out| keep(&mut kept, &mut cut, limit, out));
+            }
+            None => keep(&mut kept, &mut cut, limit, bytes),
         }
-        kept.extend_from_slice(bytes.get(..room.min(bytes.len())).unwrap_or_default());
+    }
+    let mut redactions = 0;
+    if let Some(mut redactor) = redactor {
+        if kept.len() >= limit {
+            // Whatever the matcher still holds is past the bound.
+            let mut held = false;
+            redactor.finish(&mut |out| held |= !out.is_empty());
+            cut |= held;
+        } else {
+            redactor.finish(&mut |out| keep(&mut kept, &mut cut, limit, out));
+        }
+        redactions = redactor.occurrences();
     }
     let _ = sent.send(Drained {
         stdout,
         kept,
         cut,
         observed,
+        redactions,
     });
 }
 
@@ -133,7 +180,9 @@ fn kill_group(pidfd: &OwnedFd, pid: Pid) {
 }
 
 /// Launch `program` from `executable` in `cwd` and wait for it, within
-/// `bounds`. The caller has re-proved both descriptors.
+/// `bounds`. The caller has re-proved both descriptors. With a `secret`
+/// (M5d.3), the helper delivers it as the launch says and both streams are
+/// redacted of it while drained.
 ///
 /// # Errors
 ///
@@ -142,16 +191,17 @@ fn kill_group(pidfd: &OwnedFd, pid: Pid) {
 pub(crate) fn run(
     helper: &Path,
     program: &Program,
-    executable: OwnedFd,
-    cwd: OwnedFd,
+    (executable, cwd): (OwnedFd, OwnedFd),
     bounds: &Bounds,
+    secret: Option<SecretLaunch>,
 ) -> Result<Completed, Failure> {
     // Nothing this process holds may reach the program.
     match fdcheck::inheritable() {
         Ok(found) if found.is_empty() => {}
         _ => return Err(Failure::Refused(BrokerRefusal::InheritedDescriptor)),
     }
-    let launched = match launch::launch(helper, program, executable, cwd, None) {
+    let needle = secret.as_ref().map(|s| std::sync::Arc::clone(&s.needle));
+    let launched = match launch::launch(helper, program, executable, cwd, secret) {
         Ok(launched) => launched,
         Err(launch::Failure::Refused(refusal)) => return Err(Failure::Refused(refusal)),
         Err(launch::Failure::Unconfirmed) => return Err(Failure::Unconfirmed),
@@ -172,13 +222,17 @@ pub(crate) fn run(
     let (sent, received) = mpsc::channel();
     let (out_sent, err_sent) = (sent.clone(), sent);
     let (out_limit, err_limit) = (bounds.stdout, bounds.stderr);
+    let out_redactor = needle
+        .as_ref()
+        .map(|n| Redactor::new(std::sync::Arc::clone(n)));
+    let err_redactor = needle.map(Redactor::new);
     let drains = (
         thread::Builder::new()
             .name("run-stdout".to_owned())
-            .spawn(move || drain(stdout, true, out_limit, &out_sent)),
+            .spawn(move || drain(stdout, true, out_limit, &out_sent, out_redactor)),
         thread::Builder::new()
             .name("run-stderr".to_owned())
-            .spawn(move || drain(stderr, false, err_limit, &err_sent)),
+            .spawn(move || drain(stderr, false, err_limit, &err_sent, err_redactor)),
     );
     if drains.0.is_err() || drains.1.is_err() {
         kill_group(&pidfd, pid);
@@ -228,6 +282,7 @@ pub(crate) fn run(
     };
     Ok(Completed {
         ended,
+        redactions: out.redactions.saturating_add(err.redactions),
         stdout: out.kept,
         stdout_cut: out.cut,
         stdout_observed: out.observed,

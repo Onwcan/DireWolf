@@ -175,20 +175,20 @@ fn an_outcome_carries_exactly_one_answer() {
     let mut both = BrokerOutcome::new(channel(), invocation(), OutcomeResult::done(done));
     both.refused = Some(BrokerRefusal::ReadFailed);
     assert!(encode_frame(&both).is_err());
-    let none = r#"{"channel":"0123456789abcdef0123456789abcdef","invocation_id":"inv_01M24BB8G3E0A851TRWE3M8FZF","kind":"broker.outcome","protocol":9}"#;
+    let none = r#"{"channel":"0123456789abcdef0123456789abcdef","invocation_id":"inv_01M24BB8G3E0A851TRWE3M8FZF","kind":"broker.outcome","protocol":10}"#;
     assert!(BrokerOutcome::decode_frame_body(none.as_bytes()).is_err());
     // A done names exactly one operation.
-    let two = r#"{"channel":"0123456789abcdef0123456789abcdef","done":{"fs_move":{},"fs_delete":{"debris":false}},"invocation_id":"inv_01M24BB8G3E0A851TRWE3M8FZF","kind":"broker.outcome","protocol":9}"#;
+    let two = r#"{"channel":"0123456789abcdef0123456789abcdef","done":{"fs_move":{},"fs_delete":{"debris":false}},"invocation_id":"inv_01M24BB8G3E0A851TRWE3M8FZF","kind":"broker.outcome","protocol":10}"#;
     assert!(BrokerOutcome::decode_frame_body(two.as_bytes()).is_err());
 }
 
 #[test]
 fn unknown_members_old_versions_and_second_spellings_are_refused() {
     for text in [
-        r#"{"channel":"0123456789abcdef0123456789abcdef","kind":"broker.hello","protocol":9,"extra":1}"#,
-        r#"{"channel":"0123456789ABCDEF0123456789ABCDEF","kind":"broker.hello","protocol":9}"#,
-        // Versions 1 to 8 are not half-understood (M5d.2's start and
-        // collection made it 9, ADR-0052 §8), and a later one is not guessed
+        r#"{"channel":"0123456789abcdef0123456789abcdef","kind":"broker.hello","protocol":10,"extra":1}"#,
+        r#"{"channel":"0123456789ABCDEF0123456789ABCDEF","kind":"broker.hello","protocol":10}"#,
+        // Versions 1 to 9 are not half-understood (M5d.3's secret-bearing
+        // workload made it 10, ADR-0052 §7), and a later one is not guessed
         // at.
         r#"{"channel":"0123456789abcdef0123456789abcdef","kind":"broker.hello","protocol":1}"#,
         r#"{"channel":"0123456789abcdef0123456789abcdef","kind":"broker.hello","protocol":2}"#,
@@ -198,8 +198,9 @@ fn unknown_members_old_versions_and_second_spellings_are_refused() {
         r#"{"channel":"0123456789abcdef0123456789abcdef","kind":"broker.hello","protocol":6}"#,
         r#"{"channel":"0123456789abcdef0123456789abcdef","kind":"broker.hello","protocol":7}"#,
         r#"{"channel":"0123456789abcdef0123456789abcdef","kind":"broker.hello","protocol":8}"#,
-        r#"{"channel":"0123456789abcdef0123456789abcdef","kind":"broker.hello","protocol":10}"#,
-        r#"{"channel":"0123456789abcdef0123456789abcdef","kind":"broker.hello","kind":"broker.hello","protocol":9}"#,
+        r#"{"channel":"0123456789abcdef0123456789abcdef","kind":"broker.hello","protocol":9}"#,
+        r#"{"channel":"0123456789abcdef0123456789abcdef","kind":"broker.hello","protocol":11}"#,
+        r#"{"channel":"0123456789abcdef0123456789abcdef","kind":"broker.hello","kind":"broker.hello","protocol":10}"#,
     ] {
         assert!(
             BrokerHello::decode_frame_body(text.as_bytes()).is_err(),
@@ -208,10 +209,10 @@ fn unknown_members_old_versions_and_second_spellings_are_refused() {
     }
     // The current version is.
     let current =
-        r#"{"channel":"0123456789abcdef0123456789abcdef","kind":"broker.hello","protocol":9}"#;
+        r#"{"channel":"0123456789abcdef0123456789abcdef","kind":"broker.hello","protocol":10}"#;
     assert!(BrokerHello::decode_frame_body(current.as_bytes()).is_ok());
     // An unknown kind is not an authorisation.
-    let unknown = r#"{"kind":"broker.fs_chmod","protocol":9}"#;
+    let unknown = r#"{"kind":"broker.fs_chmod","protocol":10}"#;
     assert!(Authorisation::decode_frame_body(unknown.as_bytes()).is_err());
     for (text, ok) in [
         ("0", true),
@@ -680,7 +681,7 @@ fn a_secret_result_names_its_own_operation_and_says_nothing_of_the_value() {
         r#"{"secret_egress":{"length":8}}"#,
     ] {
         let text = format!(
-            r#"{{"channel":"0123456789abcdef0123456789abcdef","done":{done},"invocation_id":"inv_01M24BB8G3E0A851TRWE3M8FZF","kind":"broker.outcome","protocol":9}}"#
+            r#"{{"channel":"0123456789abcdef0123456789abcdef","done":{done},"invocation_id":"inv_01M24BB8G3E0A851TRWE3M8FZF","kind":"broker.outcome","protocol":10}}"#
         );
         assert!(
             BrokerOutcome::decode_frame_body(text.as_bytes()).is_err(),
@@ -1103,6 +1104,133 @@ fn a_workload_start_round_trips_with_two_descriptors_and_an_environment_deadline
     );
 }
 
+fn workload_secret_start(
+    delivery: super::SecretDelivery,
+    env_name: Option<&str>,
+) -> super::workload::WorkloadSecretStartAuthorisation {
+    use super::sandbox::ContainerRef;
+    super::workload::WorkloadSecretStartAuthorisation::new(
+        common(),
+        environment_spec(),
+        (
+            ContainerRef::new("e".repeat(64)).unwrap_or_else(|| unreachable!()),
+            runtime_spec(),
+        ),
+        workload(&["deploy", "--verbose"]),
+        super::workload::WorkloadSecret {
+            handle: super::SecretHandle::new("deploy-key").unwrap_or_else(|| unreachable!()),
+            delivery,
+            env_name: env_name
+                .map(|n| super::SecretEnvName::new(n).unwrap_or_else(|| unreachable!("{n}"))),
+        },
+    )
+}
+
+#[test]
+fn a_secret_workload_start_carries_three_descriptors_and_never_a_value() {
+    use super::SecretDelivery;
+    for (delivery, env_name) in [
+        (SecretDelivery::FdAtSpawn, None),
+        (SecretDelivery::EnvAtSpawn, Some("DEPLOY_TOKEN")),
+    ] {
+        let run = workload_secret_start(delivery, env_name);
+        let authorisation = Authorisation::WorkloadSecretStart(run.clone());
+        let bytes = body(&authorisation.encode_frame().unwrap_or_default());
+        let decoded = Authorisation::decode_frame_body(&bytes);
+        assert_eq!(
+            decoded.as_ref().map(Authorisation::kind),
+            Ok(PrivateKind::WorkloadSecretStart)
+        );
+        assert_eq!(decoded, Ok(authorisation));
+        // Without its secret it is exactly a workload's start.
+        let mut expected = environment_spec();
+        expected.egress = None;
+        assert_eq!(run.start().environment(), expected);
+        assert_eq!(run.start().workload(), workload(&["deploy", "--verbose"]));
+        assert_eq!(run.start().runtime(), runtime_spec());
+        assert_eq!(run.secret().delivery, delivery);
+        // No field can carry the value, its length, a second delivery, a
+        // path for the launcher or a runtime flag.
+        let text = String::from_utf8(bytes).unwrap_or_default();
+        for smuggled in [
+            r#""value":"hunter2","#,
+            r#""secret":"hunter2","#,
+            r#""length":7,"#,
+            r#""stdin":"hunter2","#,
+            r#""interactive":true,"#,
+            r#""launcher":"/bin/sh","#,
+            r#""env":{"TOKEN":"x"},"#,
+            r#""docker_args":["--interactive"],"#,
+        ] {
+            let bad = text.replacen('{', &format!("{{{smuggled}"), 1);
+            assert!(
+                Authorisation::decode_frame_body(bad.as_bytes()).is_err(),
+                "{smuggled}"
+            );
+        }
+    }
+    // A variable exactly for mode B, none for mode C, and never a
+    // process-control name.
+    let fd = workload_secret_start(SecretDelivery::FdAtSpawn, None);
+    let mut with_name = fd.clone();
+    with_name.env_name = super::SecretEnvName::new("DEPLOY_TOKEN");
+    assert!(
+        Authorisation::WorkloadSecretStart(with_name)
+            .encode_frame()
+            .is_err()
+    );
+    let mut env = workload_secret_start(SecretDelivery::EnvAtSpawn, Some("DEPLOY_TOKEN"));
+    env.env_name = None;
+    assert!(
+        Authorisation::WorkloadSecretStart(env)
+            .encode_frame()
+            .is_err()
+    );
+    assert!(super::SecretEnvName::new("LD_PRELOAD").is_none());
+    assert!(super::SecretEnvName::new("PATH").is_none());
+    // A variable the environment sets is refused when the start is built and
+    // when it is read, whatever the delivery's own rule allows.
+    for reserved in super::workload::SANDBOX_RESERVED_SECRET_VARIABLES {
+        let mut proxy = workload_secret_start(SecretDelivery::EnvAtSpawn, Some("DEPLOY_TOKEN"));
+        proxy.env_name = super::SecretEnvName::new(*reserved);
+        assert!(
+            proxy.env_name.is_some(),
+            "{reserved} is a secret variable's shape"
+        );
+        let refused = Authorisation::WorkloadSecretStart(proxy.clone());
+        assert!(refused.encode_frame().is_err(), "{reserved}");
+        let good = Authorisation::WorkloadSecretStart(workload_secret_start(
+            SecretDelivery::EnvAtSpawn,
+            Some("DEPLOY_TOKEN"),
+        ));
+        let text = String::from_utf8(body(&good.encode_frame().unwrap_or_default()))
+            .unwrap_or_default()
+            .replace("DEPLOY_TOKEN", reserved);
+        assert!(
+            Authorisation::decode_frame_body(text.as_bytes()).is_err(),
+            "{reserved}"
+        );
+        assert!(!super::workload::sandbox_secret_name_allowed(reserved));
+    }
+    for shadowing in [
+        "GIT_CONFIG_GLOBAL",
+        "PYTHONSAFEPATH",
+        "CARGO_NET_OFFLINE",
+        "http_proxy",
+    ] {
+        assert!(
+            !super::workload::sandbox_secret_name_allowed(shadowing),
+            "{shadowing}"
+        );
+    }
+    assert!(super::workload::sandbox_secret_name_allowed("GH_TOKEN"));
+    assert_eq!(PrivateKind::WorkloadSecretStart.descriptors(), Some(3));
+    assert_eq!(
+        PrivateKind::WorkloadSecretStart.deadline_seconds(),
+        PrivateKind::WorkloadStart.deadline_seconds()
+    );
+}
+
 #[test]
 fn a_workload_collection_carries_nothing_but_its_name_and_answers_consistently() {
     use super::BrokerGeneration;
@@ -1262,8 +1390,8 @@ fn an_image_path_has_one_plain_spelling() {
 fn a_workload_result_is_consistent_and_its_largest_fits_one_frame() {
     use super::sandbox::{Milliseconds, Verdict};
     use super::workload::{
-        ProcessCount, WorkloadCollectDone, WorkloadEnding, WorkloadProgress, WorkloadRunDone,
-        check_collect, check_done,
+        ProcessCount, RedactionCount, WorkloadCollectDone, WorkloadEnding, WorkloadProgress,
+        WorkloadRunDone, check_collect, check_done,
     };
     use crate::wire::scalar::{ByteCount, ExitCode, SignalNumber, StreamContent};
     let stream = |n: usize| super::ProcessStreamSnapshot {
@@ -1281,6 +1409,8 @@ fn a_workload_result_is_consistent_and_its_largest_fits_one_frame() {
         residue: Verdict::Pass,
         ended_processes: ProcessCount::new(4096).unwrap_or_else(|| unreachable!()),
         remaining_processes: ProcessCount::new(0).unwrap_or_else(|| unreachable!()),
+        // A secret-bearing workload's (M5d.3): a count, at its largest.
+        redactions: RedactionCount::new(u32::MAX),
     };
     assert_eq!(check_done(&done), Ok(()));
     let collected = WorkloadCollectDone {
@@ -1347,13 +1477,19 @@ fn a_workload_result_is_consistent_and_its_largest_fits_one_frame() {
     killed.signal = SignalNumber::new(9);
     killed.residue = Verdict::Fail;
     killed.remaining_processes = ProcessCount::new(2).unwrap_or_else(|| unreachable!());
+    killed.redactions = None;
     assert_eq!(check_done(&killed), Ok(()));
+}
+
+#[test]
+fn a_workload_refusal_and_an_unknown_ending_are_answers() {
     for refusal in [
         BrokerRefusal::EnvironmentNotClean,
         BrokerRefusal::DigestMismatch,
         BrokerRefusal::ForeignEnvironment,
         BrokerRefusal::WorkloadTableFull,
         BrokerRefusal::WorkloadInUse,
+        BrokerRefusal::SecretUnsafeBytes,
     ] {
         let outcome = BrokerOutcome::new(channel(), invocation(), OutcomeResult::Refused(refusal));
         assert!(encode_frame(&outcome).is_ok());

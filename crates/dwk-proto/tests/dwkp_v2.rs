@@ -77,12 +77,12 @@ fn version_one_is_kept_exactly_and_version_two_beside_it() {
             .body,
         DwkpBody::ToolInvokeV3(_)
     ));
-    // A version this build does not know names the range it does (M5d.2
-    // defines version 5).
-    let v6 = request("direwolf.tool.invoke", 6, KEY, READ);
-    let err = dwkp::decode_body(v6.as_bytes()).unwrap_err();
+    // A version this build does not know names the range it does (M5d.3
+    // defines version 6).
+    let v7 = request("direwolf.tool.invoke", 7, KEY, READ);
+    let err = dwkp::decode_body(v7.as_bytes()).unwrap_err();
     assert_eq!(err.code, ErrorCode::VersionUnsupported);
-    assert_eq!(err.supported.map(|r| (r.min, r.max)), Some((1, 5)));
+    assert_eq!(err.supported.map(|r| (r.min, r.max)), Some((1, 6)));
 }
 
 #[test]

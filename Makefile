@@ -19,7 +19,8 @@ DW := $(PY) scripts/dw.py
         authority-transport-evidence authority-write-probe broker-fs-read-evidence \
         filesystem-operations-evidence process-broker-evidence secret-broker-evidence \
         sandbox-foundation-evidence sandbox-egress-evidence sandbox-workload-evidence \
-        net-http-evidence net-http-mutations sandbox-workload-mutations d11-hardening-evidence d11-hardening-mutations d11-posture fuzz-smoke fuzz security docs \
+        net-http-evidence net-http-mutations sandbox-workload-mutations sandbox-secret-evidence \
+        sandbox-secret-mutations d11-hardening-evidence d11-hardening-mutations d11-posture fuzz-smoke fuzz security docs \
         preflight tools hooks clean
 
 help:            ## List available commands
@@ -105,6 +106,12 @@ sandbox-workload-evidence: ## M5d.1-M5d.2 workloads in real OCI environments: id
 
 sandbox-workload-mutations: ## M5d.1-M5d.2 mutation review: each workload guard weakened in turn must fail a unit suite or sandbox-workload-evidence (slow)
 	@$(DW) sandbox-workload-mutations
+
+sandbox-secret-evidence: ## M5d.3 secret modes B/C in a real OCI environment: a synthetic credential through the trusted launcher on fd 3 or the operator's variable, absent from argv, records, events and logs, redacted on return; the authority's pipeline, crash windows and the shipped packs, over real DWKP and serve --secrets-file
+	@$(DW) sandbox-secret-evidence
+
+sandbox-secret-mutations: ## M5d.3 mutation review: each credential guard weakened in turn must fail a unit suite or sandbox-secret-evidence (slow)
+	@$(DW) sandbox-secret-mutations
 
 d11-hardening-evidence: ## D11 hardening: the worker's syscall filter, vouching from the kernel, start-up window, swap posture; real workers, observers, cgroups; root-only cases need DW_D11_PRIVILEGED=1
 	@$(DW) d11-hardening-evidence

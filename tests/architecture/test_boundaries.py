@@ -565,11 +565,16 @@ def test_no_shell_no_pre_exec_no_raw_exec_no_inherited_environment(
     texts = " ".join(m for _, _, m in findings)
     for needle in ("/bin/sh", "pre_exec", "libc", "/proc/self/fd/", "envs"):
         assert needle in texts, needle
-    # D11 hardening's TX051 fixture names `libc` outside the filter module too.
+    # D11 hardening's TX051 fixture names `libc` outside the filter module too,
+    # and M5d.3's TX056 fixture a shell beside the secret plan's one word.
     second_filter = "crates/dwkd-broker/src/http/second_filter.rs"
-    assert _paths(rule) == {"crates/dwkd-broker/src/dispatch.rs", shell, second_filter}, sorted(
-        _paths(rule)
-    )
+    stdin_plan = "crates/dwkd-broker/src/sandbox/workload_secret_plan.rs"
+    assert _paths(rule) == {
+        "crates/dwkd-broker/src/dispatch.rs",
+        shell,
+        second_filter,
+        stdin_plan,
+    }, sorted(_paths(rule))
 
 
 def test_only_the_launch_helper_executes(violation_rules: list[str]) -> None:
@@ -797,6 +802,27 @@ def test_the_m5d_boundaries_each_catch_their_violation(violation_rules: list[str
     }
     # M5d.2: the private start's name is the broker link's alone, too.
     assert route == {3, 4, 7}, sorted(route)
+
+
+def test_the_secret_plan_alone_attaches_standard_input(violation_rules: list[str]) -> None:
+    """M5d.3 (ADR-0052 §7): the word that attaches the runtime client's
+    standard input is the secret plan's alone, long or short, alone or
+    combined; and the secret plan spells nothing else the ordinary one may
+    not -- each rule firing on exactly its fixture, on every banned line."""
+    rule = "TX055-only-the-secret-plan-attaches-standard-input"
+    assert rule in violation_rules
+    stdin = "crates/dwkd-broker/src/sandbox/environment_stdin.rs"
+    # TX050's own fixture attaches a terminal and stdin (`-it`): caught here too.
+    ordinary = "crates/dwkd-broker/src/sandbox/workload_plan.rs"
+    assert _paths(rule) == {stdin, ordinary}
+    assert {line for path, line, _ in _findings(rule) if path == stdin} == {6, 7, 8}
+    assert {line for path, line, _ in _findings(rule) if path == ordinary} == {12}
+    rule = "TX056-the-secret-plan-spells-no-other-weakening"
+    assert rule in violation_rules
+    assert _paths(rule) == {"crates/dwkd-broker/src/sandbox/workload_secret_plan.rs"}
+    # Root, a variable option and its word, its short spelling, a shell --
+    # never the one word the plan exists to spell (line 6).
+    assert {line for _, line, _ in _findings(rule)} == {8, 9, 10, 11, 13}
 
 
 def test_the_server_seam_is_named_only_by_the_server(violation_rules: list[str]) -> None:

@@ -54,15 +54,15 @@ use dwk_proto::wire::id::{EnvironmentId, RunId};
 use rustix::fs::Stat;
 
 use crate::egress::proxy::Proxies;
-use crate::process::launch::Program;
+use crate::process::launch::{Program, SecretLaunch};
 use crate::process::run::{self, Bounds, Completed, Ended};
 use crate::process::verify::{self, Authorised};
 
 use super::environment::{
     Destroyed, EnvFailure, EnvHandle, ExecOutcome, ExecutionEnvironment, Listed, Measured,
-    Prepared, Ran,
+    Prepared, Ran, SecretRun,
 };
-use super::{Checks, digest, inspect, plan, relay_plan, workload_plan};
+use super::{Checks, digest, inspect, plan, relay_plan, workload_plan, workload_secret_plan};
 
 /// The longest one runtime step may take.
 const STEP: Duration = Duration::from_secs(60);
@@ -173,7 +173,7 @@ impl<'a> Runtime<'a> {
     ) -> Result<Completed, run::Failure> {
         let name = step_name(&words);
         let deadline = self.until.min(Instant::now() + step);
-        let result = self.launch(words, (stdout, STDERR), deadline);
+        let result = self.launch(words, (stdout, STDERR), deadline, None);
         if let Ok(done) = &result
             && done.ended != Ended::Exited(0)
         {
@@ -190,8 +190,9 @@ impl<'a> Runtime<'a> {
         words: Vec<String>,
         limit: usize,
         deadline: Instant,
+        secret: Option<SecretLaunch>,
     ) -> Result<Completed, run::Failure> {
-        self.launch(words, (limit, limit), self.until.min(deadline))
+        self.launch(words, (limit, limit), self.until.min(deadline), secret)
     }
 
     /// Launch the client once with `words` after its fixed global options.
@@ -200,6 +201,7 @@ impl<'a> Runtime<'a> {
         words: Vec<String>,
         (stdout, stderr): (usize, usize),
         deadline: Instant,
+        secret: Option<SecretLaunch>,
     ) -> Result<Completed, run::Failure> {
         let refused = |why| run::Failure::Refused(why);
         let now =
@@ -228,13 +230,13 @@ impl<'a> Runtime<'a> {
         run::run(
             self.helper,
             &program,
-            executable,
-            cwd,
+            (executable, cwd),
             &Bounds {
                 stdout,
                 stderr,
                 deadline,
             },
+            secret,
         )
     }
 }
@@ -1039,6 +1041,7 @@ impl ExecutionEnvironment for Oci<'_> {
         handle: &EnvHandle,
         workload: &WorkloadSpec,
         until: Instant,
+        secret: Option<SecretRun>,
     ) -> Result<Ran, EnvFailure> {
         let wall_clock = Duration::from_secs(u64::from(workload.wall_clock.get()));
         let reserve = until.checked_sub(WORKLOAD_RESERVE).unwrap_or(until);
@@ -1046,15 +1049,25 @@ impl ExecutionEnvironment for Oci<'_> {
         let deadline = (since + wall_clock).min(reserve);
         let limit = usize::try_from(workload.stream_limit.get()).unwrap_or(usize::MAX);
         crate::event(&format!(
-            "workload_started args={} wall_clock_s={}",
+            "workload_started args={} wall_clock_s={} secret={}",
             workload.args.len(),
-            workload.wall_clock.get()
+            workload.wall_clock.get(),
+            secret
+                .as_ref()
+                .map_or("none", |s| s.secret.delivery.as_str())
         ));
-        let ran = self.runtime.call_workload(
-            workload_plan::run(&handle.container, workload),
-            limit,
-            deadline,
-        );
+        // A secret-bearing workload's plan is the one that attaches the
+        // client's standard input, which carries the framed value to the
+        // launcher; every other workload's has none (ADR-0052 §§5, 7).
+        let secret_bearing = secret.is_some();
+        let (words, launch) = match secret {
+            None => (workload_plan::run(&handle.container, workload), None),
+            Some(run) => (
+                workload_secret_plan::run(&handle.container, workload, &run.secret),
+                Some(run.launch),
+            ),
+        };
+        let ran = self.runtime.call_workload(words, limit, deadline, launch);
         let elapsed = Milliseconds::of(since.elapsed());
         crate::crash::point("workload_ended");
         let done = match ran {
@@ -1093,6 +1106,7 @@ impl ExecutionEnvironment for Oci<'_> {
             residue,
             ended,
             remaining,
+            redactions: secret_bearing.then(|| u32::try_from(done.redactions).unwrap_or(u32::MAX)),
         })
     }
 

@@ -988,7 +988,68 @@ def _payload_v5(rng: random.Random, schema: str) -> object:
     raise AssertionError(f"no version-5 generator for {schema}")
 
 
+def _tool_call_v6(rng: random.Random) -> dwkp.ToolCallV6:
+    """Version 6 (M5d.3): version 5's twelve members, `process_exec` with at
+    most one credential handle."""
+    v5 = _tool_call_v5(rng)
+    members = {name: getattr(v5, name) for name in v5.__slots__ if getattr(v5, name) is not None}
+    if "process_exec" in members:
+        exec_ = members["process_exec"]
+        members["process_exec"] = dwkp.ProcessExecCallV6(
+            executable=exec_.executable,
+            args=exec_.args,
+            cwd=exec_.cwd,
+            timeout_seconds=exec_.timeout_seconds,
+            max_stream_bytes=exec_.max_stream_bytes,
+            credential_handle=rng.choice([None, _kebab(rng, 63)]),
+        )
+    return dwkp.ToolCallV6(**members)
+
+
+def _tool_plan_v6(rng: random.Random) -> dwkp.ToolPlanV6:
+    v5 = _tool_plan_v5(rng)
+    actions = [
+        dwkp.PlannedActionV6(
+            fs=a.fs, process=a.process, workload=a.workload, net=a.net, injection=a.injection
+        )
+        for a in v5.actions
+    ]
+    # A launch's injection rides beside its workload action, within the bound.
+    if any(a.workload for a in v5.actions) and len(actions) < 4 and rng.random() < 0.6:
+        actions.append(
+            dwkp.PlannedActionV6(
+                spawn_injection=dwkp.PlannedSpawnInjectionAction(
+                    handle=_kebab(rng, 63),
+                    mode=rng.choice(["FD_AT_SPAWN", "ENV_AT_SPAWN"]),
+                    decision=_process_action(rng).decision,
+                )
+            )
+        )
+    return dwkp.ToolPlanV6(
+        tool=v5.tool, environment=v5.environment, effect=v5.effect, actions=actions
+    )
+
+
+def _payload_v6(rng: random.Random, schema: str) -> object:
+    if schema in ("direwolf.tool.invoke", "direwolf.tool.preview"):
+        return _tool_call_v6(rng)
+    if schema == "direwolf.tool.result":
+        return dwkp.ToolResultV6(
+            invocation_id=_id(rng, "inv"), plan=_tool_plan_v6(rng), output=_tool_output_v5(rng)
+        )
+    if schema == "direwolf.tool.denied":
+        return dwkp.ToolDenialV6(plan=_tool_plan_v6(rng))
+    if schema == "direwolf.tool.previewed":
+        return dwkp.CanonicalPreviewResultV6(plan=_tool_plan_v6(rng))
+    if schema in ("direwolf.tool.refused", "direwolf.tool.failed"):
+        # Version 5's payloads, unchanged.
+        return _payload_v5(rng, schema)
+    raise AssertionError(f"no version-6 generator for {schema}")
+
+
 def _payload(rng: random.Random, schema: str, version: int = 1) -> object:
+    if version == 6 and schema.startswith("direwolf.tool."):
+        return _payload_v6(rng, schema)
     if version == 5 and schema.startswith("direwolf.tool."):
         return _payload_v5(rng, schema)
     if version == 4 and schema.startswith("direwolf.tool."):

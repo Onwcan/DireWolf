@@ -17,7 +17,10 @@
 //!    that supervises it); `no_new_privs`;
 //! 5. a secret: mode B reads the value from its pipe and appends
 //!    `NAME=value` to `envp`; mode C moves the pipe to descriptor 3, the one
-//!    descriptor a target may inherit;
+//!    descriptor a target may inherit; and (M5d.3) a secret-bearing
+//!    workload's runtime client gets the pipe -- the value framed -- as its
+//!    standard input, which it forwards to the trusted launcher in the
+//!    environment;
 //! 6. no other descriptor numbered 3 or higher may survive the exec, or
 //!    refuse;
 //! 7. write `X`, then `execveat(executable, "", argv, envp, AT_EMPTY_PATH)`.
@@ -47,8 +50,9 @@ use rustix::net::{RecvAncillaryBuffer, RecvAncillaryMessage, RecvFlags, ReturnFl
 use rustix::process::{Resource, Rlimit};
 use zeroize::Zeroizing;
 
-/// The launch message's magic and version (2: M4e's secret delivery).
-const MAGIC: &[u8; 5] = b"DWXH2";
+/// The launch message's magic and version (2: M4e's secret delivery; 3:
+/// M5d.3's standard-input delivery).
+const MAGIC: &[u8; 5] = b"DWXH3";
 
 /// The largest launch message: arguments (64 KiB, the authority's bound),
 /// `argv[0]` (4 KiB), the environment and framing.
@@ -78,6 +82,10 @@ pub(super) enum SpecSecret {
     Env(Vec<u8>),
     /// Mode C: the pipe, as descriptor [`SECRET_TARGET_FD`].
     Fd,
+    /// The pipe as the target's standard input (M5d.3): the container
+    /// runtime's client, which forwards it to the environment's launcher.
+    /// The helper never reads it.
+    Stdin,
 }
 
 fn put_strings(out: &mut Vec<u8>, strings: &[Vec<u8>]) {
@@ -96,8 +104,8 @@ fn put_strings(out: &mut Vec<u8>, strings: &[Vec<u8>]) {
     }
 }
 
-/// The launch message: its length, then `DWXH2`, a flag byte, `argv`, `envp`,
-/// and the secret: `0`, `1` and the variable's name, or `2`.
+/// The launch message: its length, then `DWXH3`, a flag byte, `argv`, `envp`,
+/// and the secret: `0`, `1` and the variable's name, `2`, or `3`.
 pub(super) fn encode(spec: &Spec) -> Vec<u8> {
     let mut body = Vec::new();
     body.extend_from_slice(MAGIC);
@@ -111,6 +119,7 @@ pub(super) fn encode(spec: &Spec) -> Vec<u8> {
             put_strings(&mut body, std::slice::from_ref(name));
         }
         Some(SpecSecret::Fd) => body.push(2),
+        Some(SpecSecret::Stdin) => body.push(3),
     }
     let mut out = u32::try_from(body.len())
         .unwrap_or(u32::MAX)
@@ -170,6 +179,7 @@ pub(super) fn decode(mut body: &[u8]) -> Option<Spec> {
             Some(SpecSecret::Env(name))
         }
         2 => Some(SpecSecret::Fd),
+        3 => Some(SpecSecret::Stdin),
         _ => return None,
     };
     (body.is_empty() && !argv.is_empty() && flags <= 1).then_some(Spec {
@@ -378,6 +388,14 @@ fn deliver(
             drop(pipe);
             Ok((vec![number], Some(target)))
         }
+        (Some(SpecSecret::Stdin), Some(pipe)) => {
+            // Standard input, replacing `/dev/null`: the one descriptor below
+            // 3 the launch changes. Nothing numbered 3 or above is kept.
+            nix::unistd::dup2_stdin(&pipe)
+                .map_err(|errno| (stage::SECRET, errno_of(&errno.into())))?;
+            drop(pipe);
+            Ok((Vec::new(), None))
+        }
         _ => Err((stage::RECEIVE, 0)),
     }
 }
@@ -540,6 +558,7 @@ mod tests {
         for secret in [
             Some(super::SpecSecret::Env(b"DEPLOY_TOKEN".to_vec())),
             Some(super::SpecSecret::Fd),
+            Some(super::SpecSecret::Stdin),
         ] {
             let with = Spec {
                 secret,

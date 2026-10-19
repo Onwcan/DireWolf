@@ -78,22 +78,44 @@ impl Program {
     }
 }
 
-/// A secret a launch delivers (M4e): the variable for mode B, none for mode
-/// C, and the value, which also redacts the launch's output.
-#[derive(Debug)]
-pub(super) struct SecretLaunch {
-    /// Mode B's variable name; `None` for mode C.
-    pub(super) env_name: Option<Vec<u8>>,
-    /// The value.
-    pub(super) needle: std::sync::Arc<crate::secret::Needle>,
+/// How a launch's secret reaches its target.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Delivery {
+    /// Mode B (M4e): the variable's name; the helper adds `NAME=value`.
+    Env(Vec<u8>),
+    /// Mode C (M4e): the pipe as the target's descriptor 3.
+    Fd,
+    /// The pipe, holding the value **framed**
+    /// ([`dwk_sandbox_profile::SECRET_FRAME_PREFIX_BYTES`]), as the target's
+    /// standard input (M5d.3): the container runtime's client forwards it to
+    /// the environment's trusted launcher, which delivers it as mode B or C.
+    Stdin,
 }
 
-/// A fresh pipe holding `value` and nothing else, its writer closed: the
-/// helper's copy of the secret. The value fits the pipe's buffer (64 KiB on
-/// Linux; the value is at most 32 KiB), so the write never waits.
-fn secret_pipe(value: &[u8]) -> io::Result<OwnedFd> {
+// The frame's prefix is the length as a `u32`, big-endian.
+const _: () = assert!(dwk_sandbox_profile::SECRET_FRAME_PREFIX_BYTES == 4);
+
+/// A secret a launch delivers: how, and the value, which also redacts the
+/// launch's output.
+#[derive(Debug)]
+pub(crate) struct SecretLaunch {
+    /// How it reaches the target.
+    pub(crate) delivery: Delivery,
+    /// The value.
+    pub(crate) needle: std::sync::Arc<crate::secret::Needle>,
+}
+
+/// A fresh pipe holding `value` -- after its length, big-endian, for a
+/// `framed` delivery -- and nothing else, its writer closed: the helper's
+/// copy of the secret. Both fit the pipe's buffer (64 KiB on Linux; the value
+/// is at most 32 KiB), so the writes never wait.
+fn secret_pipe(value: &[u8], framed: bool) -> io::Result<OwnedFd> {
     let _fork = super::fork_guard();
     let (reader, mut writer) = io::pipe()?;
+    if framed {
+        let length = u32::try_from(value.len()).map_err(io::Error::other)?;
+        writer.write_all(&length.to_be_bytes())?;
+    }
     writer.write_all(value)?;
     drop(writer);
     Ok(OwnedFd::from(reader))
@@ -130,7 +152,9 @@ pub(super) fn launch(
     // The helper's copy of the value is made before the helper exists, so a
     // failure here launches nothing.
     let secret_fd = match &secret {
-        Some(s) => Some(secret_pipe(s.needle.value()).map_err(setup)?),
+        Some(s) => {
+            Some(secret_pipe(s.needle.value(), s.delivery == Delivery::Stdin).map_err(setup)?)
+        }
         None => None,
     };
     let (stdout_r, stdout_w) = io::pipe().map_err(setup)?;
@@ -158,9 +182,10 @@ pub(super) fn launch(
         argv: program.argv.clone(),
         envp: program.envp.clone(),
         crash_before_exec: crate::crash::armed("process_helper_before_exec"),
-        secret: secret.map(|s| match s.env_name {
-            Some(name) => helper::SpecSecret::Env(name),
-            None => helper::SpecSecret::Fd,
+        secret: secret.map(|s| match s.delivery {
+            Delivery::Env(name) => helper::SpecSecret::Env(name),
+            Delivery::Fd => helper::SpecSecret::Fd,
+            Delivery::Stdin => helper::SpecSecret::Stdin,
         }),
     };
     let payload = helper::encode(&spec);
