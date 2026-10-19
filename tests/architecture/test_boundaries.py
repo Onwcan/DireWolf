@@ -822,6 +822,64 @@ def test_the_operator_sandbox_is_attached_in_one_place(violation_rules: list[str
     ]
 
 
+SERVER = REPO_ROOT / "crates" / "dwkd-authority" / "src" / "server"
+
+
+def _unix_only_server_items(mod_rs: str) -> tuple[set[str], set[str]]:
+    """The items `server/mod.rs` defines only under a Unix or Linux `cfg`,
+    and the submodules it declares on every target."""
+    gated: set[str] = set()
+    everywhere: set[str] = set()
+    pending = False
+    for line in mod_rs.splitlines():
+        text = line.strip()
+        if text.startswith("#[cfg(") and ("unix" in text or "linux" in text) and "not(" not in text:
+            pending = True
+            continue
+        if text.startswith(("//", "#[")) or not text:
+            continue
+        item = re.match(
+            r"(?:pub(?:\([a-z]+\))?\s+)?(?:mod|fn|struct|enum|const|static|type)\s+(\w+)", text
+        )
+        if item:
+            name = item.group(1)
+            if pending:
+                gated.add(name)
+            elif text.startswith(("mod ", "pub mod ", "pub(crate) mod ")) and text.endswith(";"):
+                everywhere.add(name)
+        pending = False
+    return gated, everywhere
+
+
+def _names_from_super(source: str) -> set[str]:
+    """What a submodule takes from `super`: `super::x` paths and the names in
+    `use super::{...}`."""
+    code = "\n".join(line for line in source.splitlines() if not line.strip().startswith("//"))
+    names = set(re.findall(r"\bsuper::(\w+)", code))
+    for group in re.findall(r"\buse\s+super::\{([^}]*)\}", code):
+        names.update(n.strip().split(" ")[0] for n in group.split(",") if n.strip())
+    return names
+
+
+def test_a_server_module_built_everywhere_names_nothing_unix_only() -> None:
+    """M5d.2's hosted Windows failure: `server/sandbox.rs` was declared on
+    every target but imported `log`, which the server defines only for Unix
+    (E0432 on windows-latest). The DWKP server is Unix-only and refuses
+    elsewhere; a submodule declared without a platform gate must name none of
+    the Unix-only items beside it, or it breaks the reduced-assurance Windows
+    build. Hygiene for a Linux host that cannot build Windows; hosted Windows
+    CI is the evidence."""
+    gated, everywhere = _unix_only_server_items((SERVER / "mod.rs").read_text(encoding="utf-8"))
+    assert {"log", "start", "socket", "worker"} <= gated, sorted(gated)
+    assert "sandbox" in gated, "server/sandbox.rs attaches only within the Unix start-up"
+    for module in sorted(everywhere):
+        path = SERVER / f"{module}.rs"
+        if not path.exists():
+            path = SERVER / module / "mod.rs"
+        named = _names_from_super(path.read_text(encoding="utf-8")) & gated
+        assert not named, f"server/{module} is built on every target but names {sorted(named)}"
+
+
 def test_the_d11_hardening_boundary_catches_its_violation(violation_rules: list[str]) -> None:
     """D11 hardening (ADR-0053 §15): the exchange worker's syscall filter is
     one module -- a second program, raw `libc` or a seccomp constant

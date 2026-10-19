@@ -65,7 +65,9 @@ mod config;
 // The one reader of a peer's credentials (TX043), which the broker link
 // asks too.
 pub(crate) mod peer;
-// The one place the operator's execution environment is attached (TX035).
+// The one place the operator's execution environment is attached (TX035):
+// part of the Unix server's start-up, as `log` and `start` are.
+#[cfg(unix)]
 mod sandbox;
 
 #[cfg(unix)]
