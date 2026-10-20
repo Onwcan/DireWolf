@@ -388,8 +388,12 @@ M4E:DONE"
         let mut chunk = vec![b'.'; 128 * 1024];
         chunk[65_536 - 17..65_536 - 17 + value.len()].copy_from_slice(&value);
         std::fs::write(root.join("chunk.bin"), &chunk).unwrap();
+        // Each value meets its shape whatever `fresh` draws: the fixed `9`
+        // gives the OpenAI-style token the digit its rule wants (without it,
+        // 1 run in 209 drew none), and the fixed tail gives the keyword value
+        // ten distinct bytes of three classes.
         let github = [b"gh".as_slice(), b"p_", &fresh("gh", 36)].concat();
-        let openai = [b"s".as_slice(), b"k-proj-", &fresh("oa", 40)].concat();
+        let openai = [b"s".as_slice(), b"k-proj-", &fresh("oa", 40), b"9"].concat();
         let slack = [b"xo".as_slice(), b"xb-", &fresh("sl", 24)].concat();
         let aws = [
             b"AK".as_slice(),
@@ -418,7 +422,7 @@ M4E:DONE"
         ]
         .concat();
         let password = fresh("pw", 14);
-        let keyword = fresh("kw", 24);
+        let keyword = [fresh("kw", 24).as_slice(), b"Kw23456789"].concat();
         let shapes = [
             b"github ".as_slice(),
             &github,
