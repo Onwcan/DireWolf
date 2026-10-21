@@ -86,7 +86,7 @@
 //! |---|---|
 //! | `workload-make <name>` | make `<name>.file` and `<name>.dir` with the widest modes, and print their modes and groups and the process's umask |
 //! | `workload-modify <path> <text>`, `workload-read <path>` | append to a file in place; print a file's bytes |
-//! | `workload-fill <name> <max-mib> [sleep\|forks]` | write a MiB at a time until the kernel refuses; print what was written, the errno and what is left; then sleep, or start children until the pids limit refuses one |
+//! | `workload-fill <name> <max-mib> [sleep\|forks]` | write a MiB at a time until the kernel refuses, then -- refused for room -- a block at a time, closing the file between rounds, until not one more block fits; print what was written, the first errno, the rounds, whether it is exhausted and what is left; then sleep, or start children until the pids limit refuses one |
 //! | `workload-mounts` | each writable place's size and room, and whether `/` can be written |
 //! | `workload-move-out <name>` | rename a workspace file to `/tmp`, link it from `/tmp` and `/var/tmp`; print each errno |
 //! | `workload-remove <path>` | remove a file, freeing its room |
@@ -1218,16 +1218,24 @@ mod workload {
     }
 
     /// `workload-fill <name> <max-mib> [sleep|forks]`: write `/workspace/<name>`
-    /// a MiB at a time until the kernel refuses or `max-mib` is written, and
-    /// say how much and with what errno; then what is left. With `sleep` it
-    /// then sleeps for ever -- the wall clock ends it -- and with `forks` it
-    /// starts children until the pids limit refuses one, and sleeps.
+    /// a MiB at a time until the kernel refuses or `max-mib` is written.
+    /// Refused for room, it goes on until not one more block fits: a block at
+    /// a time, the file synced and closed between rounds, at most 64 rounds.
+    /// The first `ENOSPC` is not a full filesystem: ext4 holds blocks
+    /// preallocated for a file being written, counted as used, and gives
+    /// them back when the file is closed -- room a writer that stopped there
+    /// leaves for the next one. Say how much, the first errno, the rounds,
+    /// whether the last fitted nothing (`exhausted=1`), and what is left.
+    /// With `sleep` it then sleeps for ever -- the wall clock ends it -- and
+    /// with `forks` it starts children until the pids limit refuses one, and
+    /// sleeps.
     fn fill(name: &str, max_mib: &str, after: &str) -> ExitCode {
         let limit: u64 = max_mib.parse().unwrap_or(0);
+        let path = format!("/workspace/{name}");
         let chunk = vec![0x5a_u8; 1 << 20];
         let mut written = 0u64;
         let mut refused = 0;
-        match std::fs::File::create(format!("/workspace/{name}")) {
+        match std::fs::File::create(&path) {
             Err(error) => refused = errno_of(&error),
             Ok(mut file) => {
                 for _ in 0..limit {
@@ -1248,9 +1256,22 @@ mod workload {
                 }
             }
         }
+        let no_room = matches!(
+            nix::errno::Errno::from_raw(refused),
+            nix::errno::Errno::ENOSPC | nix::errno::Errno::EDQUOT
+        );
+        let (rounds, more, exhausted) = if no_room {
+            to_the_last_block(&path)
+        } else {
+            (0, 0, false)
+        };
+        written += more;
         let (size, available) = room("/workspace").unwrap_or((0, 0));
-        let mut line =
-            format!("written={written}\nerrno={refused}\nsize={size}\navailable={available}\n");
+        let mut line = format!(
+            "written={written}\nerrno={refused}\nrounds={rounds}\nexhausted={}\n\
+             size={size}\navailable={available}\n",
+            u8::from(exhausted)
+        );
         if after == "forks" {
             let mut started = 0u32;
             while Command::new("/proc/self/exe")
@@ -1274,6 +1295,35 @@ mod workload {
             return sleep("600");
         }
         ExitCode::SUCCESS
+    }
+
+    /// Append to `path` one filesystem block at a time until the kernel
+    /// refuses, sync and close it, and again -- until a round fits nothing,
+    /// at most 64 rounds. Returns the rounds, the bytes written, and whether
+    /// the last round fitted nothing.
+    fn to_the_last_block(path: &str) -> (u32, u64, bool) {
+        let unit = nix::sys::statvfs::statvfs("/workspace")
+            .map_or(4096, |s| s.fragment_size())
+            .clamp(512, 1 << 16);
+        let block = vec![0x5a_u8; usize::try_from(unit).unwrap_or(4096)];
+        let mut written = 0u64;
+        for round in 1..=64 {
+            let Ok(mut file) = std::fs::OpenOptions::new().append(true).open(path) else {
+                return (round, written, false);
+            };
+            let mut fitted = 0u64;
+            while let Ok(n @ 1..) = file.write(&block) {
+                fitted += u64::try_from(n).unwrap_or(0);
+            }
+            let _ = file.sync_all();
+            // Closed here: what ext4 held preallocated for the file is free.
+            drop(file);
+            written += fitted;
+            if fitted == 0 {
+                return (round, written, true);
+            }
+        }
+        (64, written, false)
     }
 
     /// `workload-mounts`: every writable place's size and what is left, and

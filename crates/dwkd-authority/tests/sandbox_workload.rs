@@ -1985,6 +1985,9 @@ reason = "NO_MATCHING_RULE"
             "fs.delete:/workspace",
         ];
         const ENOSPC: &str = "28";
+        /// The brokered write a full workspace must refuse, and then -- room
+        /// made -- accept.
+        const FULL_WRITE_BYTES: usize = 65_536;
 
         fn evidence(case: &str, outcome: &str) {
             println!(
@@ -2946,7 +2949,12 @@ reason = "NO_MATCHING_RULE"
             lab.reap_later(report.container.as_ref().unwrap().as_str());
             evidence("bounded-ext4-accepted", "ready");
             let second_before = available(&p.second);
-            // The workload writes until the filesystem says no.
+            // The workload writes until the filesystem says no -- and on,
+            // until not one more block fits. Its first `ENOSPC` is not a full
+            // filesystem: ext4 counts the blocks it holds preallocated for a
+            // file being written as used, and frees them when the file is
+            // closed (hosted run 39585235773 found room for the broker's
+            // write after a workload that stopped there).
             let max = (p.quota >> 20) * 2;
             let text = ran(
                 &mut lab,
@@ -2955,15 +2963,37 @@ reason = "NO_MATCHING_RULE"
                 "f-1",
             );
             assert_eq!(field(&text, "errno"), ENOSPC, "{text}");
+            assert_eq!(
+                field(&text, "exhausted"),
+                "1",
+                "a block still fitted: {text}"
+            );
             let filled: u64 = field(&text, "written").parse().unwrap();
             assert!(filled > 0 && filled <= p.quota, "{text}");
-            evidence("workload-fills-to-enospc", "ENOSPC");
-            // The broker's change fails with nothing changed and nothing
-            // left behind.
+            assert_eq!(
+                std::fs::metadata(p.ext4.join("big")).unwrap().len(),
+                filled,
+                "{text}"
+            );
+            // The precondition, measured by the kernel from the host once the
+            // workload ended and its file was closed: an unprivileged writer
+            // -- the broker is one -- has less room than the change needs, so
+            // the kernel cannot let the change complete.
+            let left = available(&p.ext4);
+            assert!(
+                left < u64::try_from(FULL_WRITE_BYTES).unwrap(),
+                "{left} bytes still available after the fill: {text}"
+            );
+            evidence(
+                "workload-fills-to-enospc",
+                &format!("ENOSPC-exhausted-{left}-bytes-available"),
+            );
+            // The broker's change fails for want of room, with nothing
+            // changed and nothing left behind.
             let reply = tool(
                 &mut lab,
                 &l,
-                &write("/workspace/late.txt", &[0x42; 65_536]),
+                &write("/workspace/late.txt", &[0x42; FULL_WRITE_BYTES]),
                 "w-1",
             );
             assert_eq!(failed(&reply), FsFailureReason::BrokerExecutionError);
@@ -2978,6 +3008,16 @@ reason = "NO_MATCHING_RULE"
                 )
                 .unwrap();
             assert_eq!(audited, 1);
+            // The audit names the cause: no room, not any broker failure.
+            let refusals: Vec<String> =
+                super::super::state_support::audit_records(&lab.dir.state(), "tool.failed")
+                    .iter()
+                    .filter_map(|r| {
+                        super::super::state_support::text(r, "broker_refusal").map(str::to_owned)
+                    })
+                    .collect();
+            assert_eq!(refusals, ["NO_SPACE"]);
+            assert_eq!(std::fs::metadata(p.ext4.join("big")).unwrap().len(), filled);
             evidence("full-workspace-write-fails-unchanged", "NO_SPACE");
             // Another workspace is its own filesystem: untouched, and usable.
             assert_eq!(available(&p.second), second_before, "no space was borrowed");
@@ -3000,13 +3040,15 @@ reason = "NO_MATCHING_RULE"
                 "f-2",
             );
             assert!(!text.contains("error="), "{text}");
+            // The very write that was refused, now made in full.
+            let late = [0x43; FULL_WRITE_BYTES];
             written(&tool(
                 &mut lab,
                 &l,
-                &write("/workspace/late.txt", b"now"),
+                &write("/workspace/late.txt", &late),
                 "w-3",
             ));
-            assert_eq!(std::fs::read(p.ext4.join("late.txt")).unwrap(), b"now");
+            assert_eq!(std::fs::read(p.ext4.join("late.txt")).unwrap(), late);
             evidence("space-recovered-after-removal", "written");
             // A new incarnation on the same files: the store and its audit
             // chain are whole.

@@ -176,8 +176,13 @@ nix = { version = "=0.31.3", default-features = false }
 rustls = { version = "=0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
 # Mozilla's root store, compiled in (D1): fixed and reproducible, never the
 # host's trust store or `SSL_CERT_FILE` (TX046). CDLA-Permissive-2.0, the one
-# licence exception in deny.toml.
-webpki-roots = { version = "=1.0.9", default-features = false }
+# licence exception in deny.toml. 1.0.10 (M5d.4's repair), from the 1.0.9
+# ADR-0050 reviewed: the fix for RUSTSEC-2026-0381, a data-only change to the
+# compiled-in roots with the same dependency requirement. The verifier beside it,
+# `rustls-webpki` (through `rustls`, not named here), is locked at 0.103.16 for
+# RUSTSEC-2026-0382 (distrusted emSign intermediates' keys), within the range
+# `rustls` 0.23.46 already accepts.
+webpki-roots = { version = "=1.0.10", default-features = false }
 # HTTP/1.1 framing (D2): a sans-I/O protocol library over `httparse` -- every
 # buffer is the broker's, so the buffer a credential header is written into is
 # `Zeroizing` and nothing else ever holds it in plaintext (ADR-0050 §9). No

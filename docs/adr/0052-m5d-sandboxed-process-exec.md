@@ -1088,10 +1088,16 @@ the workload reads, modes `0660`/`2770` and group 10001 throughout —
 the filesystem, an unbounded host directory and a subdirectory of a bounded
 filesystem each refused and left exactly as found; a grown filesystem and a
 filesystem mounted over the root each destroying the environment before the
-workload; a real `ENOSPC` on the `ext4` image — the broker's write failing
-with nothing changed and no staging left, another workspace's free space
-unchanged and writable, room made and the write made, a new incarnation's
-store whole; and the released `serve` with a quota. Without the privileged
+workload; a real `ENOSPC` on the `ext4` image — the workload writing until
+not one more block fits, its file closed between rounds (a first `ENOSPC`
+is not a full filesystem: ext4 counts blocks preallocated for an open file
+as used and frees them on close, which is how hosted run 39585235773 found
+room for the write this case expected refused), the room left measured from
+the host as less than the brokered write needs, then that write failing
+`NO_SPACE` with nothing changed and no staging left, another workspace's
+free space unchanged and writable, room made and the same write made in
+full, a new incarnation's store whole; and the released `serve` with a
+quota. Without the privileged
 half those cases are NOT EXERCISED and the task fails after reporting the
 rest. No container, mount, loop device or directory the evidence made may
 remain. `make sandbox-workspace-mutations` weakens 26 guards one at a time —
