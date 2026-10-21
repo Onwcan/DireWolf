@@ -1372,11 +1372,26 @@ fn destroy_reason(ending: &Ending) -> Option<&'static str> {
 }
 
 /// Whether a refusal says the environment is not what was recorded: it is
-/// then destroyed, as a drifted measurement is.
+/// then destroyed, as a drifted measurement is. Since M5d.4 that includes a
+/// workspace no longer the one it was measured with -- replaced, or no
+/// longer the contract's on the authority's side -- and one the broker,
+/// reading it again before the workload, found changed (`NOT_CLEAN`).
 const fn environment_drifted(reason: &str) -> bool {
     matches!(
         reason.as_bytes(),
-        b"ENVIRONMENT_NOT_CLEAN" | b"ENVIRONMENT_NOT_FOUND" | b"FOREIGN_ENVIRONMENT"
+        b"ENVIRONMENT_NOT_CLEAN"
+            | b"ENVIRONMENT_NOT_FOUND"
+            | b"FOREIGN_ENVIRONMENT"
+            | b"WORKSPACE_CHANGED"
+            | b"WORKSPACE_OWNER"
+            | b"WORKSPACE_GROUP"
+            | b"WORKSPACE_MODE"
+            | b"WORKSPACE_GROUP_MEMBERSHIP"
+            | b"WORKSPACE_UNBOUNDED"
+            | b"WORKSPACE_QUOTA_MISMATCH"
+            | b"WORKSPACE_FILESYSTEM_SHARED"
+            | b"WORKSPACE_UNOBSERVABLE"
+            | b"WORKSPACE_UNVERIFIED"
     )
 }
 
@@ -1559,7 +1574,7 @@ mod tests {
         Ending, WorkloadRequest, WorkloadState, check, destroy_reason, readiness,
         workload_may_run_at,
     };
-    use crate::sandbox::{SandboxConfig, WorkloadBudget};
+    use crate::sandbox::{SandboxConfig, WorkloadBudget, WorkspaceSetting};
     use dwk_proto::brokerp::sandbox::{AssuranceLevel, Milliseconds, NetworkTopology, Verdict};
     use dwk_proto::brokerp::workload::{ProcessCount, WorkloadEnding, WorkloadRunDone};
 
@@ -1570,6 +1585,7 @@ mod tests {
             &format!("sha256:{}", "a".repeat(64)),
             &"b".repeat(64),
             NetworkTopology::NoNetwork,
+            WorkspaceSetting::UnverifiedEvidence,
         ) else {
             unreachable!("a valid configuration")
         };
@@ -1735,6 +1751,20 @@ mod tests {
             "ENVIRONMENT_NOT_CLEAN",
             "ENVIRONMENT_NOT_FOUND",
             "FOREIGN_ENVIRONMENT",
+            // M5d.4: a workspace that changed under a READY environment --
+            // replaced, or no longer the contract's on the authority's side,
+            // or not one this broker builds -- takes the environment down
+            // before anything more runs in it.
+            "WORKSPACE_CHANGED",
+            "WORKSPACE_OWNER",
+            "WORKSPACE_GROUP",
+            "WORKSPACE_MODE",
+            "WORKSPACE_GROUP_MEMBERSHIP",
+            "WORKSPACE_UNBOUNDED",
+            "WORKSPACE_QUOTA_MISMATCH",
+            "WORKSPACE_FILESYSTEM_SHARED",
+            "WORKSPACE_UNOBSERVABLE",
+            "WORKSPACE_UNVERIFIED",
         ] {
             assert_eq!(
                 destroy_reason(&Ending::Failed { reason }),
@@ -1742,7 +1772,12 @@ mod tests {
                 "{reason}"
             );
         }
-        for reason in ["DIGEST_MISMATCH", "BROKER_UNAVAILABLE"] {
+        for reason in [
+            "DIGEST_MISMATCH",
+            "BROKER_UNAVAILABLE",
+            "WORKSPACE_PATH",
+            "BUDGET_EXHAUSTED",
+        ] {
             assert_eq!(destroy_reason(&Ending::Failed { reason }), None, "{reason}");
         }
     }

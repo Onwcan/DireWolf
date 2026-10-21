@@ -747,6 +747,10 @@ paths = ["crates/dwkd-broker/src"]
 exempt_paths = [
     "crates/dwkd-broker/src/listener.rs",
     "crates/dwkd-broker/src/exchange/tests.rs",
+    # M5d.4 (ADR-0052 §10): the exchange's workspace evidence, a child of its
+    # test module under `cfg(test)`, fills a tmpfs of its own to the kernel's
+    # ENOSPC -- and opens nothing a workspace names.
+    "crates/dwkd-broker/src/exchange/workspace_tests.rs",
     "crates/dwkd-broker/src/exchange/mutate.rs",
     "crates/dwkd-broker/src/exchange/staging.rs",
     "crates/dwkd-broker/src/process/fdcheck.rs",
@@ -1001,6 +1005,11 @@ exempt_paths = [
     # D11 hardening's tests (ADR-0053 §18), under `cfg(test)`: real workers,
     # stand-ins, observers and cgroups -- exempt as `http/tests.rs` is.
     "crates/dwkd-broker/src/http/hardening_tests.rs",
+    # M5d.4 (ADR-0052 §10): the exchange's full-filesystem evidence, under
+    # `cfg(test)`, starts `unshare` and `mount` for a tmpfs of its own in a
+    # user and mount namespace of its own; it launches nothing a hop or an
+    # authorisation names.
+    "crates/dwkd-broker/src/exchange/workspace_tests.rs",
 ]
 suffixes = [".rs"]
 patterns = [
@@ -2231,6 +2240,98 @@ the workspace, the recorded container, the probe, and the executable with
 exactly its arguments. It adds no privilege, no variable -- mode B's variable
 is the launcher's, set from the frame, never `NAME=value` on the command line
 -- no terminal, no detaching, no shell, no launcher but the probe.
+"""
+
+# ===========================================================================
+# M5d.4: workspace ownership and the measured disk quota (ADR-0052 §§6, 10).
+# The operator provisions; the daemons measure and refuse, and never repair.
+# ===========================================================================
+
+[[text_rules]]
+id = "TX057-the-workspace-contract-repairs-nothing"
+paths = [
+    "crates/dwkd-authority/src/state",
+    "crates/dwkd-authority/src/resource/fs",
+    "crates/dwkd-authority/src/sandbox.rs",
+    "crates/dwkd-authority/src/sandbox",
+]
+# The process tests make their own scratch executables runnable.
+exempt_paths = ["crates/dwkd-authority/src/state/process/tests.rs"]
+suffixes = [".rs"]
+patterns = [
+    '^(?!\s*//).*\b(set_permissions|fchmod|fchmodat|chmod|fchown|fchownat|chown|lchown|umount2?|mount_setattr|move_mount|fsmount|setxattr|fsetxattr|lsetxattr|fallocate|mkfs)\b',
+    '^(?!\s*//).*\bmount(::|\()',
+]
+reason = """
+The workspace contract (ADR-0052 §§6, 10; OD-3(a), OD-6) is the operator's to
+provision and the daemons' to measure: the root's owner, its group 10001 and
+mode 2770, the filesystem that is its own and its capacity against the quota.
+The authority's state layer, its resolver and its sandbox configuration hold
+the root by its descriptor and judge it -- refusing with the reason, the
+environment destroyed if it was live -- and change nothing about it: no mode,
+owner, extended attribute, mount, allocation or format. A daemon that repaired
+a workspace would turn a provisioning mistake, or an attacker's change, into
+a workspace that looks provisioned; a refusal keeps the operator deciding.
+
+Hygiene, not containment: the evidence shows each refusal leaving the root
+exactly as it found it (`a_root_not_as_the_contract_says_is_refused_and_never_repaired`).
+"""
+
+[[text_rules]]
+id = "TX058-the-workspace-modes-are-spelled-once"
+paths = [
+    "crates/dwk-proto/src",
+    "crates/dwk-sandbox-profile/src",
+    "crates/dwk-sandbox-probe/src",
+    "crates/dwkd-authority/src",
+    "crates/dwkd-broker/src",
+]
+exempt_paths = ["crates/dwk-proto/src/brokerp/sandbox.rs"]
+suffixes = [".rs"]
+patterns = [
+    # The root's mode and the workload's umask, as literals.
+    '^(?!\s*//).*\b0o2770\b',
+    '^(?!\s*//).*\b0o0?007\b',
+]
+reason = """
+The workspace root's mode (`WORKSPACE_ROOT_MODE`, `2770`) and the umask every
+launch sets (`WORKLOAD_UMASK`, `0007`) are the contract both daemons and the
+probe hold a workspace to; they are spelled once, in the wire contract both
+link (`dwk-proto/src/brokerp/sandbox.rs`, whose tests pin their values), and
+named everywhere else. A second literal is a second contract that can drift
+from the first -- the authority judging one mode, the broker or the probe
+another -- and the difference would be a workspace one side accepts and the
+other was never told about.
+"""
+
+[[text_rules]]
+id = "TX059-the-unverified-workspace-is-acknowledged-in-one-place"
+paths = ["crates/dwkd-broker/src", "crates/dwkd-authority/src"]
+exempt_paths = [
+    # The broker's command line, and its usage text's test.
+    "crates/dwkd-broker/src/config.rs",
+    "crates/dwkd-broker/src/main.rs",
+    # The operator's file.
+    "crates/dwkd-authority/src/sandbox/operator.rs",
+]
+suffixes = [".rs"]
+patterns = [
+    '^(?!\s*//).*"--allow-unverified-workspace"',
+    '^(?!\s*//).*"unverified_evidence"',
+]
+reason = """
+The unverified-evidence workspace -- a directory whose group and bound
+nothing proves -- exists for the evidence harness alone (ADR-0052 §§6, 10).
+Each daemon learns of it from one place its operator controls: the broker
+from its own command line (`--allow-unverified-workspace`, parsed in
+`config.rs`), the authority from the operator's file (`[workspace]
+unverified_evidence`, parsed in `sandbox/operator.rs`); both log `REDUCED
+ASSURANCE`. A second spelling would be a second way in -- a request, a
+variable, a default -- to the one contract that does not prove the workspace.
+
+Hygiene, not containment: the broker refuses an unbounded specification
+unless its operator acknowledged it (`WORKSPACE_UNVERIFIED`), and the
+evidence shows it.
 """
 
 # ===========================================================================

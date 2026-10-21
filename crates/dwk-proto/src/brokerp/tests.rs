@@ -175,21 +175,21 @@ fn an_outcome_carries_exactly_one_answer() {
     let mut both = BrokerOutcome::new(channel(), invocation(), OutcomeResult::done(done));
     both.refused = Some(BrokerRefusal::ReadFailed);
     assert!(encode_frame(&both).is_err());
-    let none = r#"{"channel":"0123456789abcdef0123456789abcdef","invocation_id":"inv_01M24BB8G3E0A851TRWE3M8FZF","kind":"broker.outcome","protocol":10}"#;
+    let none = r#"{"channel":"0123456789abcdef0123456789abcdef","invocation_id":"inv_01M24BB8G3E0A851TRWE3M8FZF","kind":"broker.outcome","protocol":11}"#;
     assert!(BrokerOutcome::decode_frame_body(none.as_bytes()).is_err());
     // A done names exactly one operation.
-    let two = r#"{"channel":"0123456789abcdef0123456789abcdef","done":{"fs_move":{},"fs_delete":{"debris":false}},"invocation_id":"inv_01M24BB8G3E0A851TRWE3M8FZF","kind":"broker.outcome","protocol":10}"#;
+    let two = r#"{"channel":"0123456789abcdef0123456789abcdef","done":{"fs_move":{},"fs_delete":{"debris":false}},"invocation_id":"inv_01M24BB8G3E0A851TRWE3M8FZF","kind":"broker.outcome","protocol":11}"#;
     assert!(BrokerOutcome::decode_frame_body(two.as_bytes()).is_err());
 }
 
 #[test]
 fn unknown_members_old_versions_and_second_spellings_are_refused() {
     for text in [
-        r#"{"channel":"0123456789abcdef0123456789abcdef","kind":"broker.hello","protocol":10,"extra":1}"#,
-        r#"{"channel":"0123456789ABCDEF0123456789ABCDEF","kind":"broker.hello","protocol":10}"#,
-        // Versions 1 to 9 are not half-understood (M5d.3's secret-bearing
-        // workload made it 10, ADR-0052 §7), and a later one is not guessed
-        // at.
+        r#"{"channel":"0123456789abcdef0123456789abcdef","kind":"broker.hello","protocol":11,"extra":1}"#,
+        r#"{"channel":"0123456789ABCDEF0123456789ABCDEF","kind":"broker.hello","protocol":11}"#,
+        // Versions 1 to 10 are not half-understood (M5d.4's workspace
+        // contract made it 11, ADR-0052 §§6, 10), and a later one is not
+        // guessed at.
         r#"{"channel":"0123456789abcdef0123456789abcdef","kind":"broker.hello","protocol":1}"#,
         r#"{"channel":"0123456789abcdef0123456789abcdef","kind":"broker.hello","protocol":2}"#,
         r#"{"channel":"0123456789abcdef0123456789abcdef","kind":"broker.hello","protocol":3}"#,
@@ -199,8 +199,9 @@ fn unknown_members_old_versions_and_second_spellings_are_refused() {
         r#"{"channel":"0123456789abcdef0123456789abcdef","kind":"broker.hello","protocol":7}"#,
         r#"{"channel":"0123456789abcdef0123456789abcdef","kind":"broker.hello","protocol":8}"#,
         r#"{"channel":"0123456789abcdef0123456789abcdef","kind":"broker.hello","protocol":9}"#,
-        r#"{"channel":"0123456789abcdef0123456789abcdef","kind":"broker.hello","protocol":11}"#,
-        r#"{"channel":"0123456789abcdef0123456789abcdef","kind":"broker.hello","kind":"broker.hello","protocol":10}"#,
+        r#"{"channel":"0123456789abcdef0123456789abcdef","kind":"broker.hello","protocol":10}"#,
+        r#"{"channel":"0123456789abcdef0123456789abcdef","kind":"broker.hello","protocol":12}"#,
+        r#"{"channel":"0123456789abcdef0123456789abcdef","kind":"broker.hello","kind":"broker.hello","protocol":11}"#,
     ] {
         assert!(
             BrokerHello::decode_frame_body(text.as_bytes()).is_err(),
@@ -209,10 +210,10 @@ fn unknown_members_old_versions_and_second_spellings_are_refused() {
     }
     // The current version is.
     let current =
-        r#"{"channel":"0123456789abcdef0123456789abcdef","kind":"broker.hello","protocol":10}"#;
+        r#"{"channel":"0123456789abcdef0123456789abcdef","kind":"broker.hello","protocol":11}"#;
     assert!(BrokerHello::decode_frame_body(current.as_bytes()).is_ok());
     // An unknown kind is not an authorisation.
-    let unknown = r#"{"kind":"broker.fs_chmod","protocol":10}"#;
+    let unknown = r#"{"kind":"broker.fs_chmod","protocol":11}"#;
     assert!(Authorisation::decode_frame_body(unknown.as_bytes()).is_err());
     for (text, ok) in [
         ("0", true),
@@ -681,7 +682,7 @@ fn a_secret_result_names_its_own_operation_and_says_nothing_of_the_value() {
         r#"{"secret_egress":{"length":8}}"#,
     ] {
         let text = format!(
-            r#"{{"channel":"0123456789abcdef0123456789abcdef","done":{done},"invocation_id":"inv_01M24BB8G3E0A851TRWE3M8FZF","kind":"broker.outcome","protocol":10}}"#
+            r#"{{"channel":"0123456789abcdef0123456789abcdef","done":{done},"invocation_id":"inv_01M24BB8G3E0A851TRWE3M8FZF","kind":"broker.outcome","protocol":11}}"#
         );
         assert!(
             BrokerOutcome::decode_frame_body(text.as_bytes()).is_err(),
@@ -721,6 +722,12 @@ fn environment_spec() -> super::EnvironmentSpec {
         workspace_path: crate::wire::scalar::HostPath::new("/srv/ws")
             .unwrap_or_else(|| unreachable!()),
         workspace: (2049, 131),
+        workspace_bound: Some(super::sandbox::WorkspaceBound {
+            quota_bytes: super::sandbox::WorkspaceQuota::new(64 << 20)
+                .unwrap_or_else(|| unreachable!()),
+            capacity_bytes: super::KernelNumber::from_u64(64 << 20),
+            owner: super::KernelNumber::from_u64(1000),
+        }),
         relay_sha256: None,
         egress: None,
     }

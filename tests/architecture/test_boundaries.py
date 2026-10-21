@@ -825,6 +825,28 @@ def test_the_secret_plan_alone_attaches_standard_input(violation_rules: list[str
     assert {line for _, line, _ in _findings(rule)} == {8, 9, 10, 11, 13}
 
 
+def test_the_m5d4_boundaries_each_catch_their_violation(violation_rules: list[str]) -> None:
+    """M5d.4 (ADR-0052 §§6, 10): the authority's workspace code repairs
+    nothing, the contract's modes are spelled once, and the unverified
+    workspace is acknowledged in one place per daemon -- each rule firing on
+    exactly its fixture, on every banned line, and never on a comment."""
+    rule = "TX057-the-workspace-contract-repairs-nothing"
+    assert rule in violation_rules
+    assert _paths(rule) == {"crates/dwkd-authority/src/state/workspace_repair.rs"}
+    # A mode, an owner and a mount -- not the comment naming chmod (line 6).
+    assert {line for _, line, _ in _findings(rule)} == {3, 4, 5}
+    rule = "TX058-the-workspace-modes-are-spelled-once"
+    assert rule in violation_rules
+    assert _paths(rule) == {"crates/dwkd-broker/src/sandbox/workspace_mode.rs"}
+    assert {line for _, line, _ in _findings(rule)} == {2, 4, 5}
+    rule = "TX059-the-unverified-workspace-is-acknowledged-in-one-place"
+    assert rule in violation_rules
+    assert {(path, line) for path, line, _ in _findings(rule)} == {
+        ("crates/dwkd-broker/src/sandbox/waiver.rs", 3),
+        ("crates/dwkd-authority/src/server/waiver.rs", 3),
+    }
+
+
 def test_the_server_seam_is_named_only_by_the_server(violation_rules: list[str]) -> None:
     """M5d.2 (ADR-0052 §17): `serve_authority` and `Served::operate` -- the
     evidence's door -- are named by the server module alone; the CLI fixture
@@ -1069,6 +1091,9 @@ def test_the_required_boundary_rules_are_all_declared() -> None:
         "TX048-one-address-guard",
         "TX051-the-exchange-workers-syscall-filter-is-one-module",
         "TX052-the-filter-module-only-names-constants-and-attempts",
+        "TX057-the-workspace-contract-repairs-nothing",
+        "TX058-the-workspace-modes-are-spelled-once",
+        "TX059-the-unverified-workspace-is-acknowledged-in-one-place",
         "DEP001-no-agent-framework-dependency",
         "DEP002-runtime-has-no-transport-dependency",
         "RS001-authority-depends-on-nothing-in-tree",

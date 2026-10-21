@@ -72,6 +72,30 @@ pub(crate) fn sandbox_identity_clash(own_uid: u32, authority_uid: u32) -> Option
     None
 }
 
+/// Whether `status` -- a `/proc/<pid>/status` -- names `gid` as the
+/// process's effective group or one of its supplementary groups; `None`
+/// when neither line can be read.
+fn status_names_group(status: &str, gid: u32) -> Option<bool> {
+    let field = |key: &str| {
+        status
+            .lines()
+            .find_map(|line| line.strip_prefix(key))
+            .map(str::split_whitespace)
+    };
+    let effective = field("Gid:")?.nth(1)?.parse::<u32>().ok()?;
+    let mut groups = field("Groups:")?;
+    Some(effective == gid || groups.any(|g| g.parse::<u32>() == Ok(gid)))
+}
+
+/// Whether this process is a member of `gid` -- its effective group or a
+/// supplementary one -- as the kernel says now (M5d.4: the workspace group,
+/// without which the broker could change no name in a workspace). `None`
+/// when that cannot be read.
+#[must_use]
+pub(crate) fn member_of(gid: u32) -> Option<bool> {
+    status_names_group(&std::fs::read_to_string("/proc/self/status").ok()?, gid)
+}
+
 /// The facts the startup window depends on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Posture {
@@ -299,7 +323,43 @@ pub(crate) fn read(binary: &Path) -> Posture {
 
 #[cfg(test)]
 mod tests {
-    use super::{Posture, execute_only, sandbox_identity_clash, scope_of, suid_dumpable_of};
+    use super::{
+        Posture, execute_only, sandbox_identity_clash, scope_of, status_names_group,
+        suid_dumpable_of,
+    };
+
+    #[test]
+    fn membership_is_the_effective_group_or_a_supplementary_one_and_nothing_else() {
+        let status = |gid: &str, groups: &str| {
+            format!(
+                "Name:\tdwkd-broker\nUid:\t1001\t1001\t1001\t1001\nGid:\t{gid}\nGroups:\t{groups}\n"
+            )
+        };
+        assert_eq!(
+            status_names_group(&status("1001\t1001\t1001\t1001", "27 10001 "), 10_001),
+            Some(true)
+        );
+        assert_eq!(
+            status_names_group(&status("1001\t10001\t1001\t1001", ""), 10_001),
+            Some(true),
+            "the effective group"
+        );
+        // The real or saved group alone grants no access a check makes.
+        assert_eq!(
+            status_names_group(&status("10001\t1001\t10001\t10001", "27"), 10_001),
+            Some(false)
+        );
+        assert_eq!(
+            status_names_group(&status("1001\t1001\t1001\t1001", "100010 1000"), 10_001),
+            Some(false),
+            "a prefix is not the group"
+        );
+        assert_eq!(status_names_group("Name:\tx\n", 10_001), None);
+        assert_eq!(
+            status_names_group("Gid:\tx\ty\nGroups:\t10001\n", 10_001),
+            None
+        );
+    }
 
     #[test]
     fn no_daemon_may_have_an_environment_identity() {

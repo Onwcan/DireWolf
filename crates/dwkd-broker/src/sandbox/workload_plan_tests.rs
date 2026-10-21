@@ -51,6 +51,13 @@ fn a_workload_runs_as_the_environment_user_in_the_workspace_with_exactly_its_arg
     .map(|w| (*w).to_owned())
     .collect();
     expected.push("c".repeat(64));
+    // M5d.4: even a direct launch is the trusted launcher's, which sets the
+    // workspace's umask and nothing else.
+    expected.extend(
+        ["/usr/libexec/direwolf/sandbox-probe", "launch", "direct"]
+            .iter()
+            .map(|w| (*w).to_owned()),
+    );
     expected.push("/usr/libexec/direwolf/sandbox-fixture".to_owned());
     expected.extend(hostile.iter().map(|a| (*a).to_owned()));
     assert_eq!(argv, expected);
@@ -99,7 +106,9 @@ fn a_hygiene_launch_runs_the_trusted_probe_as_the_launcher_and_adds_no_option() 
         argv.get(name + 1..name + 4).unwrap(),
         ["/usr/libexec/direwolf/sandbox-probe", "launch", "hygiene"]
     );
-    assert_eq!(argv.get(name + 4..), direct.get(name + 1..));
+    // The launch's profile is the only word that differs (M5d.4).
+    assert_eq!(direct.get(name + 3).unwrap(), "direct");
+    assert_eq!(argv.get(name + 4..), direct.get(name + 4..));
     assert!(
         !argv
             .get(..name)

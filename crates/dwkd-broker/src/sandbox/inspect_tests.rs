@@ -44,6 +44,7 @@ fn spec_with(network: NetworkTopology) -> EnvironmentSpec {
         probe_sha256: ContentDigest::new("b".repeat(64)).unwrap(),
         workspace_path: HostPath::new("/srv/ws".to_owned()).unwrap(),
         workspace: (1, 2),
+        workspace_bound: None,
         relay_sha256: None,
         egress: None,
     }

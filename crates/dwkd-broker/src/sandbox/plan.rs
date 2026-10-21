@@ -19,10 +19,17 @@ use dwk_proto::wire::id::{EnvironmentId, RunId};
 use dwk_sandbox_profile::{
     LABEL_ENVIRONMENT, LABEL_OWNER, LABEL_OWNER_VALUE, LABEL_PROFILE, LABEL_ROLE, LABEL_RUN,
     LABEL_SCHEMA, LABEL_SCHEMA_VALUE, LABEL_STORE, MEMORY_BYTES, MEMORY_SWAP_BYTES, NANO_CPUS,
-    OOM_SCORE_ADJ, PIDS_LIMIT, PROBE_HOLD, PROBE_MEASURE, PROBE_PATH, PROXY_VARIABLES, RELAY_PATH,
-    RLIMIT_CORE, RLIMIT_FSIZE, RLIMIT_NOFILE, RLIMIT_NPROC, SANDBOX_GID, SANDBOX_UID, TMPFS,
-    WORKSPACE_TARGET,
+    OOM_SCORE_ADJ, PIDS_LIMIT, PROBE_HOLD, PROBE_MEASURE, PROBE_PATH, PROBE_WORKSPACE,
+    PROXY_VARIABLES, RELAY_PATH, RLIMIT_CORE, RLIMIT_FSIZE, RLIMIT_NOFILE, RLIMIT_NPROC,
+    SANDBOX_GID, SANDBOX_UID, TMPFS, WORKSPACE_TARGET,
 };
+
+// The workspace contract the authority checks on its side (`dwk_proto`) is
+// this profile's identity, or nothing agrees (M5d.4).
+const _: () = assert!(
+    dwk_proto::brokerp::sandbox::WORKSPACE_GROUP == SANDBOX_GID
+        && dwk_proto::brokerp::sandbox::WORKLOAD_UID == SANDBOX_UID
+);
 
 /// The container name an environment is created under: unique per runtime,
 /// so a second creation of the same environment — a retry after a crash —
@@ -260,6 +267,18 @@ pub(crate) fn measure(container: &ContainerRef, spec: &EnvironmentSpec) -> Vec<S
     argv.push(PROBE_MEASURE.to_owned());
     argv.push(spec.environment_id.as_str().to_owned());
     argv.push(spec.network.as_str().to_owned());
+    argv
+}
+
+/// Read the mounted workspace inside the container before a workload
+/// (M5d.4): the probe's `workspace`, which writes nothing, as the container's
+/// own configured user -- as the measurement is.
+#[must_use]
+pub(crate) fn workspace(container: &ContainerRef) -> Vec<String> {
+    let mut argv = words(&["container", "exec"]);
+    argv.push(container.as_str().to_owned());
+    argv.push(PROBE_PATH.to_owned());
+    argv.push(PROBE_WORKSPACE.to_owned());
     argv
 }
 

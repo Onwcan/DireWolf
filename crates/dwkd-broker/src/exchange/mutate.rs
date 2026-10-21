@@ -93,8 +93,8 @@ use zeroize::Zeroizing;
 
 use super::checks::{self, Kind, identity, named};
 use super::staging::{
-    self, HELD, NEW, RECORD, Record, Staging, Stop, TAKEN, at, binds, denied_or, sync_dir, vacant,
-    write_all,
+    self, HELD, NEW, RECORD, Record, Staging, Stop, TAKEN, at, binds, denied_or, room_or_io,
+    sync_dir, vacant, write_all,
 };
 use crate::crash;
 
@@ -155,10 +155,11 @@ fn write_new(
         OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
         Mode::RUSR | Mode::WUSR,
     )
-    .map_err(|_| BrokerRefusal::IoError)?;
+    .map_err(room_or_io)?;
     staging::changed("create new", &[&staging.dir]);
     let prepared = (|| {
-        write_all(&file, content).map_err(|_| BrokerRefusal::IoError)?;
+        // A full workspace says so here, before any name changed (M5d.4).
+        write_all(&file, content).map_err(room_or_io)?;
         rustix::fs::fchmod(&file, Mode::from_raw_mode(attributes.mode))
             .map_err(|_| BrokerRefusal::IoError)?;
         let st = rustix::fs::fstat(&file).map_err(|_| BrokerRefusal::IoError)?;
@@ -168,17 +169,22 @@ fn write_new(
             rustix::fs::fchown(&file, None, Some(Gid::from_raw(group)))
                 .map_err(|_| BrokerRefusal::AttributesNotPreserved)?;
         }
-        staging::sync_file(&file, NEW).map_err(|_| BrokerRefusal::IoError)?;
+        staging::sync_file(&file, NEW).map_err(room_or_io)?;
         let st = rustix::fs::fstat(&file).map_err(|_| BrokerRefusal::IoError)?;
         if st.st_mode & 0o7777 != attributes.mode
             || attributes.group.is_some_and(|group| st.st_gid != group)
         {
             return Err(BrokerRefusal::AttributesNotPreserved);
         }
-        staging::synced(&staging.dir).map_err(|_| BrokerRefusal::IoError)?;
+        staging::synced(&staging.dir).map_err(room_or_io)?;
         Ok(identity(&st))
     })();
     if prepared.is_err() {
+        // The new file and its entry are made durable before its removal
+        // is, as every change before the next (ADR-0044 §10) -- a write that
+        // failed half-way (a full filesystem, M5d.4) included.
+        let _ = staging::sync_file(&file, NEW);
+        let _ = staging::synced(&staging.dir);
         staging.unlink(NEW);
     }
     prepared
@@ -838,8 +844,8 @@ fn remove_taken(
 ) -> Result<BrokerDone, Stop> {
     sync_dir(parent)?;
     sync_dir(&staging.dir)?;
-    if staging.mark_taken().is_err() {
-        return put_back(staging, parent, leaf, taken, BrokerRefusal::IoError);
+    if let Err(errno) = staging.mark_taken() {
+        return put_back(staging, parent, leaf, taken, room_or_io(errno));
     }
     let flags = if directory {
         AtFlags::REMOVEDIR

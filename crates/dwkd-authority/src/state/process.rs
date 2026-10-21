@@ -416,7 +416,12 @@ pub(super) const fn failure_reason(failure: BrokerFailure) -> ToolFailureReasonV
             // no filesystem or process tool sends.
             | BrokerRefusal::EnvironmentNotClean
             | BrokerRefusal::WorkloadTableFull
-            | BrokerRefusal::WorkloadInUse => ToolFailureReasonV3::BrokerExecutionError,
+            | BrokerRefusal::WorkloadInUse
+            // The workspace contract's refusals (M5d.4) answer a name change
+            // or an environment operation, which no process tool sends.
+            | BrokerRefusal::WorkspaceGroupContract
+            | BrokerRefusal::NoSpace
+            | BrokerRefusal::WorkspaceUnverified => ToolFailureReasonV3::BrokerExecutionError,
         },
         BrokerFailure::Indeterminate(_) => ToolFailureReasonV3::BrokerExecutionError,
     }

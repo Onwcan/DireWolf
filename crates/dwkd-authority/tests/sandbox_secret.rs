@@ -68,7 +68,7 @@ mod linux {
     use dwk_proto::wire::scalar::{DecisionEffect, Epoch, ProcessDecisionReason};
     use dwkd_authority::broker::{EffectBroker, UnixBroker};
     use dwkd_authority::capability::PrivacyClass;
-    use dwkd_authority::sandbox::{SandboxConfig, WorkloadBudget};
+    use dwkd_authority::sandbox::{SandboxConfig, WorkloadBudget, WorkspaceSetting};
     use dwkd_authority::server::{PeerPolicy, Served, serve_authority};
     use dwkd_authority::state::{
         Authority, CallerContext, CrashHook, CrashPoint, HookAction, ManualClock, Mode, PolicySet,
@@ -397,6 +397,7 @@ reason = "NO_MATCHING_RULE"
                 &var("DW_SANDBOX_WORKLOAD_IMAGE"),
                 &probe,
                 NetworkTopology::NoNetwork,
+                WorkspaceSetting::UnverifiedEvidence,
             )
             .unwrap()
             .with_workloads(&manifest, WorkloadBudget::default())
@@ -411,7 +412,11 @@ reason = "NO_MATCHING_RULE"
             let broker = Broker::start(
                 &broker_socket,
                 own_uid(),
-                &["--allow-shared-authority-uid", "--allow-evidence-topology"],
+                &[
+                    "--allow-shared-authority-uid",
+                    "--allow-evidence-topology",
+                    "--allow-unverified-workspace",
+                ],
             );
             let workspace = dir.path().join("workspace");
             std::fs::create_dir_all(&workspace).unwrap();
@@ -1057,7 +1062,8 @@ reason = "NO_MATCHING_RULE"
             &format!(
                 "schema_version = 1\nruntime = \"{runtime}\"\nsocket = \"{socket}\"\n\
                  image = \"{image}\"\nprobe_sha256 = \"{probe}\"\nnetwork = \"NO_NETWORK\"\n\
-                 [executables]\n\"{FIXTURE}\" = \"{fixture}\"\n",
+                 [executables]\n\"{FIXTURE}\" = \"{fixture}\"\n\
+                 [workspace]\nunverified_evidence = true\n",
                 runtime = var("DW_SANDBOX_RUNTIME"),
                 socket = var("DW_SANDBOX_SOCKET"),
                 image = var("DW_SANDBOX_WORKLOAD_IMAGE"),

@@ -59,7 +59,7 @@ mod linux {
 
     use dwk_proto::brokerp::sandbox::{
         ContainerRef, EnvironmentProfile, ImageId, NetworkTopology, SandboxInvariant as I,
-        StoreInstance, Verdict, required_invariants,
+        StoreInstance, Verdict, WorkspaceContract, required_invariants,
     };
     use dwk_proto::brokerp::{
         Authorisation, BrokerDone, BrokerHello, BrokerOutcome, BrokerRefusal, Common,
@@ -266,7 +266,8 @@ mod linux {
                 .arg(socket)
                 .arg("--authority-uid")
                 .arg(own_uid().to_string())
-                .arg("--allow-shared-authority-uid");
+                .arg("--allow-shared-authority-uid")
+                .arg("--allow-unverified-workspace");
             if evidence_topology {
                 command.arg("--allow-evidence-topology");
             }
@@ -406,6 +407,10 @@ mod linux {
             probe_sha256: ContentDigest::new(probe.to_owned()).unwrap(),
             workspace_path: HostPath::new(workspace.display().to_string()).unwrap(),
             workspace: identity(workspace),
+            // The evidence's own scratch directory: no group, no bound
+            // proved (M5d.4), which this broker admits only because it
+            // was started with --allow-unverified-workspace.
+            workspace_bound: None,
             relay_sha256: None,
             egress: None,
         }
@@ -571,7 +576,10 @@ mod linux {
     /// `NO_NETWORK`, which has no proxy to hash or reach (M5b, ADR-0048):
     /// those two are reported, and not required.
     fn not_passing(measurement: &EnvironmentMeasurement) -> Vec<(I, Verdict)> {
-        let required = required_invariants(NetworkTopology::NoNetwork);
+        let required = required_invariants(
+            NetworkTopology::NoNetwork,
+            WorkspaceContract::UnverifiedEvidence,
+        );
         measurement
             .checks
             .iter()

@@ -40,7 +40,7 @@ use rustix::io::Errno;
 
 use super::{
     BirthTime, FileIdentity, PathError, Probe, ResolveError, ResourceKind, RootError,
-    RootFingerprint, Walked,
+    RootFingerprint, RootMeasure, Walked,
 };
 use crate::resource::PathComponent;
 
@@ -107,6 +107,22 @@ pub(in crate::resource) fn open_root(
     let id = identity(&st);
     let fingerprint = RootFingerprint::new(id.device(), id.inode(), birth_time(&fd));
     Ok((fd, id, fingerprint))
+}
+
+/// What a pinned root's own descriptor says it is (M5d.4): `fstat` for its
+/// owner, group and mode, `fstatvfs` for its filesystem's size. Both work on
+/// the `O_PATH` descriptor the root is held by; neither opens anything.
+pub(in crate::resource) fn measure_root(root: &OwnedFd) -> Result<RootMeasure, RootError> {
+    let st = sys::fstat(root).map_err(root_io)?;
+    let filesystem = sys::fstatvfs(root).map_err(root_io)?;
+    Ok(RootMeasure {
+        uid: st.st_uid,
+        gid: st.st_gid,
+        mode: st.st_mode & 0o7777,
+        block_size: filesystem.f_frsize,
+        blocks: filesystem.f_blocks,
+        blocks_available: filesystem.f_bavail,
+    })
 }
 
 /// The directory's birth time, where the filesystem reports one.

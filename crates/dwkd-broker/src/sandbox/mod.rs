@@ -102,6 +102,9 @@ struct Parts {
 pub(crate) struct Sandbox {
     parts: Arc<Parts>,
     evidence_topology: bool,
+    /// The operator's acknowledgement that the evidence harness's scratch
+    /// workspace may be mounted unverified (M5d.4).
+    unverified_workspace: bool,
     workloads: supervisor::Workloads,
 }
 
@@ -328,13 +331,14 @@ fn measurement(measured: &Measured) -> Option<EnvironmentMeasurement> {
 impl Sandbox {
     /// The supervisor. `helper` is this binary (the launch helper),
     /// `evidence_topology` the operator's acknowledgement that the evidence
-    /// harness's `NO_NETWORK` topology may be built, and `proxies` the
-    /// broker's `PROXY_ONLY` listeners.
+    /// harness's `NO_NETWORK` topology may be built, `unverified_workspace`
+    /// that its scratch workspace may be mounted unverified (M5d.4), and
+    /// `proxies` the broker's `PROXY_ONLY` listeners.
     pub(crate) fn new(
         helper: PathBuf,
         authority_uid: u32,
         files: SandboxFiles,
-        (evidence_topology, generation): (bool, BrokerGeneration),
+        (evidence_topology, unverified_workspace, generation): (bool, bool, BrokerGeneration),
         proxies: Arc<Proxies>,
     ) -> Self {
         Self {
@@ -346,16 +350,27 @@ impl Sandbox {
                 proxies,
             }),
             evidence_topology,
+            unverified_workspace,
             workloads: supervisor::Workloads::new(generation),
         }
     }
 
-    fn topology(&self, network: NetworkTopology) -> Result<(), BrokerRefusal> {
-        match network {
-            NetworkTopology::ProxyOnly => Ok(()),
-            NetworkTopology::NoNetwork if self.evidence_topology => Ok(()),
-            NetworkTopology::NoNetwork => Err(BrokerRefusal::TopologyUnavailable),
+    /// Whether this broker builds `spec`'s environment: its topology -- the
+    /// evidence harness's `NO_NETWORK` only when the operator acknowledged
+    /// it -- and its workspace. A workspace without the authority's bound is
+    /// the evidence harness's unverified one (M5d.4), admitted only when the
+    /// operator acknowledged that too: every production environment carries
+    /// its bound, and is judged against it.
+    fn admissible(&self, spec: &EnvironmentSpec) -> Result<(), BrokerRefusal> {
+        match spec.network {
+            NetworkTopology::ProxyOnly => {}
+            NetworkTopology::NoNetwork if self.evidence_topology => {}
+            NetworkTopology::NoNetwork => return Err(BrokerRefusal::TopologyUnavailable),
         }
+        if spec.workspace_bound.is_none() && !self.unverified_workspace {
+            return Err(BrokerRefusal::WorkspaceUnverified);
+        }
+        Ok(())
     }
 
     /// Re-prove the runtime and run `step` over the `oci` environment.
@@ -378,7 +393,7 @@ impl Sandbox {
         until: Instant,
     ) -> OutcomeResult {
         let spec = authorisation.environment();
-        if let Err(why) = self.topology(spec.network) {
+        if let Err(why) = self.admissible(&spec) {
             return OutcomeResult::Refused(why);
         }
         // The probe's own question must stay unanswerable: a grant that
@@ -425,7 +440,7 @@ impl Sandbox {
         until: Instant,
     ) -> OutcomeResult {
         let spec = authorisation.environment();
-        if let Err(why) = self.topology(spec.network) {
+        if let Err(why) = self.admissible(&spec) {
             return OutcomeResult::Refused(why);
         }
         let handle = EnvHandle {
@@ -547,7 +562,7 @@ impl Sandbox {
         until: Instant,
     ) -> OutcomeResult {
         let spec = authorisation.environment();
-        if let Err(why) = self.topology(spec.network) {
+        if let Err(why) = self.admissible(&spec) {
             return OutcomeResult::Refused(why);
         }
         let environment = spec.environment_id.clone();
@@ -604,3 +619,7 @@ impl Sandbox {
         )
     }
 }
+
+#[cfg(test)]
+#[path = "admission_tests.rs"]
+mod admission_tests;

@@ -10,7 +10,7 @@
 //!
 //! [ADR-0042]: ../../../../../../docs/adr/0042-m4a-canonical-filesystem-resolution.md
 
-use super::{FileIdentity, Probe, ResolveError, RootError, RootFingerprint, Walked};
+use super::{FileIdentity, Probe, ResolveError, RootError, RootFingerprint, RootMeasure, Walked};
 use crate::resource::PathComponent;
 
 /// No descriptor exists on this platform.
@@ -21,6 +21,10 @@ pub(in crate::resource) fn open_root(
     _host: &str,
 ) -> Result<(Fd, FileIdentity, RootFingerprint), RootError> {
     Err(RootError::Unsupported)
+}
+
+pub(in crate::resource) fn measure_root(root: &Fd) -> Result<RootMeasure, RootError> {
+    match *root {}
 }
 
 pub(in crate::resource) fn walk(

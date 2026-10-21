@@ -3225,7 +3225,9 @@ WORKLOAD_CASES = (
             "unknown-ending-recorded",
             "unknown-ending-environment-destroyed",
             "unknown-ending-never-rerun",
+            "crash-w9-running-after-start",
             "crash-w9-unknown-environment-destroyed",
+            "crash-w9-never-run-again",
             # M5d.2: the public route over DWKP (the server seam).
             "public-exec-environment-prepared-by-the-authority",
             "public-exec-result-names-environment-assurance-identity",
@@ -3500,8 +3502,8 @@ WORKLOAD_MUTATIONS = (
     (
         "a drifted environment is worked in",
         "crates/dwkd-broker/src/sandbox/oci.rs",
-        "        if clean { Ok(()) } else { Err(not_clean) }",
-        "        if clean || true { Ok(()) } else { Err(not_clean) }",
+        "        if failed.is_empty() {\n            Ok(())",
+        "        if failed.is_empty() || true {\n            Ok(())",
     ),
     (
         "the output bound is not the workload's",
@@ -3736,8 +3738,8 @@ WORKLOAD_MUTATIONS = (
     (
         "the broker ignores the hygiene launch",
         "crates/dwkd-broker/src/sandbox/workload_plan.rs",
-        "    let launcher = if workload.launch == WorkloadLaunch::Hygiene {",
-        "    let launcher = if false && workload.launch == WorkloadLaunch::Hygiene {",
+        "    let profile = if workload.launch == WorkloadLaunch::Hygiene {",
+        "    let profile = if false && workload.launch == WorkloadLaunch::Hygiene {",
     ),
     (
         "the launcher sets none of the obligation's variables",
@@ -4107,8 +4109,8 @@ SECRET_SANDBOX_MUTATIONS = (
     (
         "an ordinary workload attaches standard input",
         "crates/dwkd-broker/src/sandbox/workload_plan.rs",
-        "    run_with(container, workload, None, launcher)",
-        '    run_with(container, workload, Some("--interactive"), launcher)',
+        "        None,\n        words(&[PROBE_PATH, PROBE_LAUNCH, profile]),",
+        '        Some("--interactive"),\n        words(&[PROBE_PATH, PROBE_LAUNCH, profile]),',
     ),
     (
         "the secret plan attaches nothing",
@@ -4343,6 +4345,722 @@ def task_sandbox_secret_mutations() -> None:
     print(
         f"{GREEN}sandbox secret mutation review: {len(killed)} of "
         f"{len(SECRET_SANDBOX_MUTATIONS)} killed{OFF}"
+    )
+
+
+# --- M5d.4: workspace ownership and the measured disk quota (ADR-0052 §§6, 10) ---
+
+WORKSPACE_EVIDENCE_PREFIX = "WORKSPACE-EVIDENCE "
+# The workspace group (OD-3(a)): the workload's own primary gid.
+WORKSPACE_GID = 10001
+# Each provisioned workspace's size, and the quota the evidence declares.
+WORKSPACE_QUOTA = 64 << 20
+
+# The in-process half, printed as WORKSPACE-EVIDENCE lines:
+#   broker-exchange  the broker's own unit suite: the workspace group's
+#                    convention refused unchanged, no room its own class, and a
+#                    REAL full tmpfs -- the test's own, in an unprivileged user
+#                    and mount namespace -- refusing a write, a creation and a
+#                    deletion with nothing changed;
+#   authority-route  the REAL authority and store against a FAKE broker
+#                    (labelled so: not containment) -- a workspace not the
+#                    contract's refused before the broker hears of it, the
+#                    contract said, no name change or reclamation while a
+#                    workload may run in the workspace, a replaced root taking
+#                    its environment down, drift answered as not clean.
+WORKSPACE_UNIT_CASES = (
+    *(
+        ("broker-exchange", case)
+        for case in (
+            "broker-group-convention-refused",
+            "broker-full-filesystem-write",
+            "broker-full-filesystem-create",
+            "broker-full-filesystem-delete",
+            "broker-full-filesystem-nothing-changed",
+        )
+    ),
+    *(
+        ("authority-route", case)
+        for case in (
+            "authority-unbounded-workspace-refused",
+            "authority-refused-before-the-broker",
+            "authority-unverified-workspace-said",
+            "authority-write-excluded-during-a-workload",
+            "authority-other-runs-write-excluded",
+            "authority-read-served-during-a-workload",
+            "authority-write-after-the-workload",
+            "authority-unknown-environment-excludes",
+            "authority-destroying-environment-excludes",
+            "authority-reclamation-waits-for-the-workload",
+            "authority-replaced-workspace-destroys",
+            "authority-workspace-drift-answered-not-clean",
+        )
+    ),
+)
+
+# The real-container half, selected by name. What any Linux host with a
+# runtime runs: the evidence's own scratch workspace, under the
+# unverified-evidence waiver where a case says so.
+WORKSPACE_BROKER_TESTS = (
+    "linux::workspace::a_broker_not_told_to_allow_it_refuses_an_unverified_workspace",
+    "linux::workspace::a_bound_the_probe_does_not_find_is_refused_and_its_container_removed",
+    # M5d.1's, again: nothing outside the workspace is reachable from it.
+    "linux::nothing_outside_the_workspace_is_reachable_from_a_workload",
+)
+WORKSPACE_AUTHORITY_TESTS = (
+    "linux::workspace::an_unprovisioned_workspace_is_refused_in_production_before_the_broker",
+    "linux::workspace::production_serve_refuses_a_workspace_it_cannot_bound",
+    "linux::workspace::what_a_workload_makes_takes_the_workspace_umask_and_stays_in_the_workspace",
+    "linux::workspace::a_brokered_change_waits_while_a_workload_may_write_the_workspace",
+)
+# What only an operator-provisioned host runs (`DW_WORKSPACE_PRIVILEGED=1`):
+# the group 10001 with this process in it, filesystems of their own made and
+# undone here, `sudo` to change them.
+WORKSPACE_PRIVILEGED_BROKER_TESTS = (
+    "linux::workspace::a_provisioned_workspace_is_accepted_and_judged_again_before_work",
+)
+WORKSPACE_PRIVILEGED_AUTHORITY_TESTS = (
+    "linux::workspace::a_bounded_workspace_is_shared_by_its_group_and_nobody_else",
+    "linux::workspace::a_root_not_as_the_contract_says_is_refused_and_never_repaired",
+    "linux::workspace::a_workspace_changed_under_a_ready_environment_takes_it_down_first",
+    "linux::workspace::a_full_workspace_fails_cleanly_and_borrows_from_no_other",
+    "linux::workspace::production_serve_runs_in_a_bounded_workspace",
+)
+
+# Every (suite, case) the real-container half must report, exercised.
+#   sandbox-workspace            the released broker judging the probe's facts
+#                                against the bound it was sent, this process
+#                                playing the authority;
+#   sandbox-authority-workspace  the REAL authority, the released broker, a
+#                                REAL runtime and (M5d.2's route) a REAL DWKP
+#                                client, the released `serve --sandbox-config`
+#                                included;
+#   sandbox-workload             M5d.1's reachability cases, run again.
+WORKSPACE_CASES = (
+    *(
+        ("sandbox-workspace", case)
+        for case in (
+            "broker-unverified-workspace-refused-without-the-flag",
+            "broker-unbounded-directory-refused",
+            "broker-forged-capacity-refused",
+            "broker-forged-identity-refused",
+            "broker-host-and-container-identity-agree",
+            "broker-runtime-probe-disagreement-refused",
+        )
+    ),
+    *(
+        ("sandbox-workload", case)
+        for case in (
+            "workload-root-read-only",
+            "workload-etc-read-only",
+            "workload-dot-dot-escape-refused",
+            "workload-tmp-writable",
+            "workload-workspace-writable-as-10001",
+            "workload-no-runtime-socket",
+            "workload-no-host-path",
+        )
+    ),
+    *(
+        ("sandbox-authority-workspace", case)
+        for case in (
+            "authority-unprovisioned-workspace-refused-before-the-broker",
+            "authority-unprovisioned-workspace-runs-nothing",
+            "production-serve-unprovisioned-workspace-refused",
+            "umask-0007-through-the-direct-launcher",
+            "workspace-tmp-var-tmp-distinct",
+            "exclusion-while-a-workload-runs",
+            "exclusion-lifted-when-the-workload-ended",
+        )
+    ),
+)
+WORKSPACE_PRIVILEGED_CASES = (
+    *(
+        ("sandbox-workspace", case)
+        for case in (
+            "broker-bounded-tmpfs-accepted",
+            "broker-bounded-ext4-accepted",
+            "broker-capacity-drift-refused-before-work",
+        )
+    ),
+    *(
+        ("sandbox-authority-workspace", case)
+        for case in (
+            "bounded-tmpfs-accepted",
+            "host-and-container-identity-agree",
+            "workload-makes-broker-reads",
+            "broker-makes-workload-modifies",
+            "broker-replaces-workload-reads",
+            "another-identity-cannot-write-or-read",
+            "wrong-gid-refused",
+            "missing-setgid-refused",
+            "group-only-mode-world-readable-refused",
+            "world-writable-root-refused",
+            "workload-owned-root-refused",
+            "foreign-owned-root-refused",
+            "quota-mismatch-refused",
+            "unbounded-host-directory-refused",
+            "subdirectory-of-a-bounded-filesystem-refused",
+            "capacity-drift-destroys-before-the-workload",
+            "mount-substitution-destroys-before-the-workload",
+            "bounded-ext4-accepted",
+            "workload-fills-to-enospc",
+            "full-workspace-write-fails-unchanged",
+            "other-workspace-unaffected",
+            "space-recovered-after-removal",
+            "durability-valid-after-a-full-workspace",
+            "production-serve-bounded-workspace",
+        )
+    ),
+)
+
+
+def workspace_privileged() -> bool:
+    """Whether this run may provision workspaces: filesystems of their own,
+    mounted and undone with passwordless sudo. Never inferred: only
+    `DW_WORKSPACE_PRIVILEGED=1` says so, and a developer's machine is never
+    changed without it."""
+    return os.environ.get("DW_WORKSPACE_PRIVILEGED", "").strip() == "1"
+
+
+def _workspace_base() -> Path:
+    """Where the provisioned workspaces are mounted: never inside the
+    workload evidence's own directory, which its setup removes."""
+    return Path(os.environ.get("DW_WORKSPACE_BASE", str(Path.home() / ".cache" / "dw-m5d4")))
+
+
+def _mounted_under(base: Path) -> list[str]:
+    """Every mount point under `base`, in the order they were mounted."""
+    prefix = f"{base}/"
+    points = []
+    for line in Path("/proc/self/mountinfo").read_text(encoding="utf-8").splitlines():
+        fields = line.split()
+        if len(fields) > 4 and fields[4].startswith(prefix):
+            points.append(fields[4])
+    return points
+
+
+def _provision_workspaces(base: Path) -> dict[str, str]:
+    """An operator's provisioning, for the evidence only (ADR-0052 §6):
+    two `tmpfs` workspaces and a loop-mounted `ext4` image, each exactly the
+    quota's size, `nosuid,nodev`, its root this user's, of the workspace
+    group, mode 2770; and a directory provisioned the same on the host's own
+    filesystem, bounded by nothing of its own. Nothing the developer owns is
+    touched: every path is under `base`, made here and undone after."""
+    groups = subprocess.run(["id", "-G"], capture_output=True, text=True, check=True).stdout
+    if str(WORKSPACE_GID) not in groups.split():
+        raise TaskError(
+            f"NOT EXERCISED: this process is not a member of the workspace group "
+            f"{WORKSPACE_GID}; the hosted job creates it, adds the runner to it and runs "
+            "`make` again under `sudo -u $USER`"
+        )
+    if subprocess.run(["sudo", "-n", "true"], capture_output=True, check=False).returncode != 0:
+        raise TaskError("NOT EXERCISED: DW_WORKSPACE_PRIVILEGED=1 but `sudo -n` cannot run")
+    mkfs = shutil.which("mkfs.ext4") or next(
+        (p for p in ("/usr/sbin/mkfs.ext4", "/sbin/mkfs.ext4") if Path(p).exists()), None
+    )
+    if mkfs is None:
+        raise TaskError("NOT EXERCISED: no mkfs.ext4 for the loop-mounted workspace")
+    if base.exists():
+        _unprovision_workspaces(base)
+    base.mkdir(mode=0o755, parents=True)
+    uid = os.getuid()
+    roots = {name: base / name for name in ("tmpfs", "second", "ext4", "unbounded")}
+    for name in ("tmpfs", "second"):
+        roots[name].mkdir()
+        run(
+            "sudo",
+            "-n",
+            "mount",
+            "-t",
+            "tmpfs",
+            "-o",
+            f"size={WORKSPACE_QUOTA},mode=2770,uid={uid},gid={WORKSPACE_GID},nosuid,nodev",
+            f"dw-workspace-{name}",
+            str(roots[name]),
+        )
+    image = base / "ext4.img"
+    with image.open("wb") as handle:
+        os.posix_fallocate(handle.fileno(), 0, WORKSPACE_QUOTA)
+    run(mkfs, "-q", "-F", "-E", f"root_owner={uid}:{WORKSPACE_GID}", str(image))
+    roots["ext4"].mkdir()
+    run("sudo", "-n", "mount", "-o", "loop,nosuid,nodev", str(image), str(roots["ext4"]))
+    run("sudo", "-n", "chown", f"{uid}:{WORKSPACE_GID}", str(roots["ext4"]))
+    run("sudo", "-n", "chmod", "2770", str(roots["ext4"]))
+    roots["unbounded"].mkdir()
+    os.chown(roots["unbounded"], -1, WORKSPACE_GID)
+    roots["unbounded"].chmod(0o2770)
+    for name, root in roots.items():
+        st = root.stat()
+        if (st.st_uid, st.st_gid, st.st_mode & 0o7777) != (uid, WORKSPACE_GID, 0o2770):
+            raise TaskError(f"the {name} workspace was not provisioned as the contract says")
+    print(f"{BOLD}workspace provisioning{OFF} (undone after)")
+    for name, root in roots.items():
+        stat = os.statvfs(root)
+        print(f"  {name:<10} {root}  {stat.f_blocks * stat.f_frsize} bytes")
+    return {
+        "DW_WORKSPACE_TMPFS": str(roots["tmpfs"]),
+        "DW_WORKSPACE_SECOND": str(roots["second"]),
+        "DW_WORKSPACE_EXT4": str(roots["ext4"]),
+        "DW_WORKSPACE_UNBOUNDED": str(roots["unbounded"]),
+        "DW_WORKSPACE_QUOTA": str(WORKSPACE_QUOTA),
+        "DW_WORKSPACE_PEER": os.environ.get("DW_WORKSPACE_PEER", "nobody"),
+    }
+
+
+def _unprovision_workspaces(base: Path) -> None:
+    """Undo `_provision_workspaces`, and prove it: no mount left under
+    `base` (an over-mount a failed case left included), no loop device on
+    the image, and `base` itself gone."""
+    for _ in range(8):
+        points = _mounted_under(base)
+        if not points:
+            break
+        for point in reversed(points):
+            subprocess.run(["sudo", "-n", "umount", point], capture_output=True, check=False)
+    left = _mounted_under(base)
+    if left:
+        raise TaskError(f"cleanup: still mounted under {base}: {left}")
+    image = base / "ext4.img"
+    if image.exists():
+        loops = subprocess.run(
+            ["sudo", "-n", "losetup", "--associated", str(image)],
+            capture_output=True,
+            text=True,
+            check=False,
+        ).stdout.strip()
+        if loops:
+            raise TaskError(f"cleanup: a loop device still holds {image}: {loops}")
+    shutil.rmtree(base)
+    if base.exists():
+        raise TaskError(f"cleanup: {base} remains")
+    print(f"{GREEN}cleanup: no workspace mount, loop device or directory remains{OFF}")
+
+
+def require_workspace_unit_evidence(output: str) -> None:
+    """Every in-process (suite, case) must have printed its
+    WORKSPACE-EVIDENCE line."""
+    reported: set[tuple[str, str]] = set()
+    for line in output.splitlines():
+        at = line.find(WORKSPACE_EVIDENCE_PREFIX)
+        if at < 0:
+            continue
+        try:
+            record = json.loads(line[at + len(WORKSPACE_EVIDENCE_PREFIX) :])
+        except json.JSONDecodeError as exc:
+            raise TaskError(f"unreadable evidence line: {line[:200]}") from exc
+        if not isinstance(record, dict) or not record.get("outcome"):
+            raise TaskError(f"malformed evidence line: {line[:200]}")
+        reported.add((str(record.get("suite")), str(record.get("case"))))
+    missing = [
+        f"{suite}/{case}" for suite, case in WORKSPACE_UNIT_CASES if (suite, case) not in reported
+    ]
+    if missing:
+        raise TaskError(
+            f"NOT EXERCISED: {len(missing)} in-process workspace case(s) did not report: "
+            + ", ".join(missing)
+        )
+    print(f"{GREEN}workspace in-process evidence: {len(WORKSPACE_UNIT_CASES)} cases reported{OFF}")
+
+
+def task_sandbox_workspace_evidence() -> None:
+    """M5d.4's evidence: `_sandbox_workspace_evidence`, its privileged half
+    required."""
+    _sandbox_workspace_evidence(require_privileged=True)
+
+
+def _sandbox_workspace_evidence(*, require_privileged: bool) -> None:
+    """M5d.4's evidence (ADR-0052 §§6, 10, 17; OD-3(a), OD-6): workspace
+    ownership and the measured disk quota.
+
+    In process: the broker's group convention, no-room class and a REAL full
+    tmpfs; the authority's contract and exclusions against a FAKE broker.
+    Then real containers: the released broker judging the probe's facts
+    against the bound it was sent, and the real authority over a real
+    runtime -- what any host runs on the evidence's own scratch workspace,
+    and, only where `DW_WORKSPACE_PRIVILEGED=1` (the hosted runner),
+    operator-provisioned filesystems of their own: interoperation through the
+    group, refusals that never repair, drift and mount substitution, a real
+    ENOSPC on a dedicated 64 MiB ext4 image with another workspace untouched,
+    and the released `serve --sandbox-config` with a quota.
+
+    Every case must report. Without the privileged half the task FAILS, NOT
+    EXERCISED, after reporting the rest: the unverified-workspace waiver is
+    never evidence of the production guarantee. No container, mount, loop
+    device or directory the evidence made may remain. Linux only.
+    """
+    unit = run_captured(
+        "cargo",
+        "test",
+        "--locked",
+        "-p",
+        "dwkd-broker",
+        "--bin",
+        "dwkd-broker",
+        "--",
+        "exchange::tests::workspace::",
+        "--nocapture",
+        "--test-threads=1",
+    )
+    unit += run_captured(
+        "cargo",
+        "test",
+        "--locked",
+        "-p",
+        "dwkd-authority",
+        "--lib",
+        "--",
+        "state::workload_route::tests::workspace::",
+        "--nocapture",
+        "--test-threads=1",
+    )
+    require_workspace_unit_evidence(unit)
+    privileged = workspace_privileged()
+    base = _workspace_base()
+    client, socket, variables, before, images = _workload_setup()
+    os.environ.update(variables)
+    suites = [
+        ("dwkd-broker", "sandbox_workload", WORKSPACE_BROKER_TESTS),
+        ("dwkd-authority", "sandbox_workload", WORKSPACE_AUTHORITY_TESTS),
+    ]
+    outputs: list[str] = []
+    try:
+        if privileged:
+            os.environ.update(_provision_workspaces(base))
+            suites += [
+                ("dwkd-broker", "sandbox_workload", WORKSPACE_PRIVILEGED_BROKER_TESTS),
+                ("dwkd-authority", "sandbox_workload", WORKSPACE_PRIVILEGED_AUTHORITY_TESTS),
+            ]
+        run("cargo", "build", "--locked", "-p", "dwkd-broker")
+        for package, test, names in suites:
+            output = run_captured(
+                "cargo",
+                "test",
+                "--locked",
+                "-p",
+                package,
+                "--test",
+                test,
+                "--",
+                "--ignored",
+                "--exact",
+                "--nocapture",
+                "--test-threads=1",
+                *names,
+            )
+            summaries = [line for line in output.splitlines() if line.startswith("test result: ")]
+            expected = f"test result: ok. {len(names)} passed; 0 failed; 0 ignored"
+            if len(summaries) != 1 or not summaries[0].startswith(expected):
+                raise TaskError(
+                    f"the {package} {test} workspace suite did not run all of its tests: "
+                    f"expected `{expected}`, got {summaries or 'no summary'}"
+                )
+            outputs.append(output)
+    finally:
+        if privileged or base.exists():
+            _unprovision_workspaces(base)
+        after = set(
+            _docker(client, socket, "container", "ls", "--all", "--no-trunc", "--quiet").split()
+        )
+        for image in set(images.values()):
+            _docker(client, socket, "image", "rm", "--force", image, check=False)
+    left = sorted(after - before)
+    removed = sorted(before - after)
+    if left:
+        raise TaskError(f"the evidence left {len(left)} container(s) behind: {left}")
+    if removed:
+        raise TaskError(
+            f"{len(removed)} container(s) that predate the evidence are gone: {removed}"
+        )
+    print(f"{GREEN}cleanup: no evidence container remains; {len(before)} pre-existing kept{OFF}")
+    require_sandbox_evidence("\n".join(outputs), WORKSPACE_CASES)
+    if not privileged and not require_privileged:
+        # A mutant's run: what could run here ran; the privileged half
+        # is NOT EXERCISED, and never counted as a kill.
+        print(
+            f"NOT EXERCISED (not counted): {len(WORKSPACE_PRIVILEGED_CASES)} privileged "
+            "workspace case(s)"
+        )
+        return
+    if not privileged:
+        raise TaskError(
+            f"NOT EXERCISED: {len(WORKSPACE_PRIVILEGED_CASES)} case(s) need an "
+            "operator-provisioned workspace -- the group 10001, filesystems of their own, "
+            "sudo -- which only DW_WORKSPACE_PRIVILEGED=1 provisions (the hosted "
+            "`sandbox-workspace` job). The unverified-workspace waiver is not evidence of "
+            "the production guarantee: "
+            + ", ".join(f"{suite}/{case}" for suite, case in WORKSPACE_PRIVILEGED_CASES)
+        )
+    require_sandbox_evidence("\n".join(outputs), WORKSPACE_PRIVILEGED_CASES)
+    uvrun("dwcheck", "closure", "--report")
+
+
+# The mutation review (ADR-0052 §17): each line weakens one guard of M5d.4's,
+# in the source, one at a time. Each mutant must compile and must fail the
+# guards' unit suites or the workspace evidence that can run here; the file is
+# then restored, and its SHA-256 proves it byte-identical. A mutant that
+# survives, or does not compile, fails the review.
+WORKSPACE_MUTATIONS = (
+    # The authority's contract (state/workspace.rs).
+    (
+        "a root the workload or a stranger owns is accepted",
+        "crates/dwkd-authority/src/state/workspace.rs",
+        "    if measured.uid == WORKLOAD_UID"
+        " || (measured.uid != 0 && measured.uid != context.authority_uid)\n",
+        "    if false\n        && (measured.uid == WORKLOAD_UID"
+        " || (measured.uid != 0 && measured.uid != context.authority_uid))\n",
+    ),
+    (
+        "a root of another group is accepted",
+        "crates/dwkd-authority/src/state/workspace.rs",
+        "    if measured.gid != WORKSPACE_GROUP {",
+        "    if false && measured.gid != WORKSPACE_GROUP {",
+    ),
+    (
+        "a root of another mode is accepted",
+        "crates/dwkd-authority/src/state/workspace.rs",
+        "    if measured.mode != WORKSPACE_ROOT_MODE {",
+        "    if measured.mode & WORKSPACE_ROOT_MODE != WORKSPACE_ROOT_MODE {",
+    ),
+    (
+        "an authority outside the group is accepted",
+        "crates/dwkd-authority/src/state/workspace.rs",
+        '        Some(false) => return Err("WORKSPACE_GROUP_MEMBERSHIP"),',
+        "        Some(false) => {}",
+    ),
+    (
+        "a filesystem larger than the quota is accepted",
+        "crates/dwkd-authority/src/state/workspace.rs",
+        "    if bytes > quota {",
+        "    if false && bytes > quota {",
+    ),
+    (
+        "a filesystem far below the quota is accepted",
+        "crates/dwkd-authority/src/state/workspace.rs",
+        "    if !capacity_within_quota(bytes, quota) {",
+        "    if bytes > quota && !capacity_within_quota(bytes, quota) {",
+    ),
+    (
+        "the authority's own files may share the workspace's filesystem",
+        "crates/dwkd-authority/src/state/workspace.rs",
+        '            Some(found) if found == device => return Err("WORKSPACE_FILESYSTEM_SHARED"),',
+        "            Some(found) if found == device && false => {\n"
+        '                return Err("WORKSPACE_FILESYSTEM_SHARED");\n'
+        "            }",
+    ),
+    (
+        "a bounded workspace is sent with no bound",
+        "crates/dwkd-authority/src/state/workspace.rs",
+        '    let measured = root.measure().map_err(|_| "WORKSPACE_UNOBSERVABLE")?;',
+        "    if quota.get() > 0 {\n        return Ok(None);\n    }\n"
+        '    let measured = root.measure().map_err(|_| "WORKSPACE_UNOBSERVABLE")?;',
+    ),
+    # The exclusion in time (ADR-0044 §3).
+    (
+        "a brokered change is made while a workload may run",
+        "crates/dwkd-authority/src/state/mod.rs",
+        "            if workspace::in_use(work, run.as_str())? {",
+        "            if false && workspace::in_use(work, run.as_str())? {",
+    ),
+    (
+        "a launching workload does not exclude",
+        "crates/dwkd-authority/src/state/workspace.rs",
+        "w.state = 'LAUNCHING'",
+        "w.state = 'NEVER'",
+    ),
+    (
+        "an environment whose end nothing proved does not exclude",
+        "crates/dwkd-authority/src/state/workspace.rs",
+        "e.state IN ('UNKNOWN', 'DESTROYING')",
+        "e.state IN ('NEVER')",
+    ),
+    (
+        "a reclamation is made while a workload may run",
+        "crates/dwkd-authority/src/state/mod.rs",
+        "            if self.transact(|work| workspace::in_use(work, item.run()))? {",
+        "            if false && self.transact(|work| workspace::in_use(work, item.run()))? {",
+    ),
+    # Drift before a workload, and how it is answered.
+    (
+        "a workspace grown under a ready environment keeps it",
+        "crates/dwkd-authority/src/state/workload.rs",
+        '            | b"WORKSPACE_UNBOUNDED"\n',
+        "",
+    ),
+    (
+        "a drifted workspace is answered as the broker's failure",
+        "crates/dwkd-authority/src/state/workload_route.rs",
+        '        | "WORKSPACE_UNBOUNDED"\n',
+        "",
+    ),
+    # The operator's file.
+    (
+        "a file that names no workspace contract gets the unverified one",
+        "crates/dwkd-authority/src/sandbox/operator.rs",
+        '        (None, Some(false) | None) => Err("[workspace] needs quota_bytes".to_owned()),',
+        "        (None, Some(false) | None) => Ok(WorkspaceSetting::UnverifiedEvidence),",
+    ),
+    # The broker's judgement of the probe's facts (sandbox/oci.rs).
+    (
+        "a workspace whose identity the probe contradicts passes",
+        "crates/dwkd-broker/src/sandbox/oci.rs",
+        "    let same = if facts.identity() == spec.workspace {",
+        "    let same = if true || facts.identity() == spec.workspace {",
+    ),
+    (
+        "a broker outside the group passes ownership",
+        "crates/dwkd-broker/src/sandbox/oci.rs",
+        "                (Verdict::Pass, Some(true)) => Verdict::Pass,",
+        "                (Verdict::Pass, _) => Verdict::Pass,",
+    ),
+    (
+        "the capacity the probe found is not judged",
+        "crates/dwkd-broker/src/sandbox/oci.rs",
+        "            workspace_capacity(facts, bound),",
+        "            Verdict::Pass,",
+    ),
+    (
+        "a bounded environment is judged without the workspace's invariants",
+        "crates/dwkd-broker/src/sandbox/oci.rs",
+        "        .iter()\n        .all(|invariant| checks.contains(&(*invariant, Verdict::Pass)))",
+        "        .iter()\n        .filter(|invariant| !invariant.workspace_contract())\n"
+        "        .all(|invariant| checks.contains(&(*invariant, Verdict::Pass)))",
+    ),
+    (
+        "an unverified workspace is served without the operator's flag",
+        "crates/dwkd-broker/src/sandbox/mod.rs",
+        "        if spec.workspace_bound.is_none() && !self.unverified_workspace {",
+        "        if false && spec.workspace_bound.is_none() && !self.unverified_workspace {",
+    ),
+    # The probe's reading of the mount.
+    (
+        "the probe says every mount is its filesystem's root",
+        "crates/dwk-sandbox-probe/src/linux.rs",
+        '        self.root == "/"',
+        "        !self.root.is_empty()",
+    ),
+    # The group's convention and a full filesystem (the broker's exchange).
+    (
+        "a workspace directory without the group's convention is changed",
+        "crates/dwkd-broker/src/exchange/staging.rs",
+        "    if parent.st_gid == WORKSPACE_GROUP && parent.st_mode & 0o2070 != 0o2070 {",
+        "    if false && parent.st_gid == WORKSPACE_GROUP && parent.st_mode & 0o2070 != 0o2070 {",
+    ),
+    (
+        "no room is reported as an input/output error",
+        "crates/dwkd-broker/src/exchange/staging.rs",
+        "        Errno::NOSPC | Errno::DQUOT => BrokerRefusal::NoSpace,\n"
+        "        _ => BrokerRefusal::IoError,",
+        "        Errno::NOSPC | Errno::DQUOT => BrokerRefusal::IoError,\n"
+        "        _ => BrokerRefusal::IoError,",
+    ),
+    (
+        "no room for a name change is reported as the caller's",
+        "crates/dwkd-broker/src/exchange/staging.rs",
+        "        // workspace, which is no one's fault but the writer's.\n"
+        "        Errno::NOSPC | Errno::DQUOT => BrokerRefusal::NoSpace,",
+        "        // workspace, which is no one's fault but the writer's.\n"
+        "        Errno::NOSPC | Errno::DQUOT => otherwise,",
+    ),
+    # Every launch through the launcher, with the workspace's umask (OD-12).
+    (
+        "the launcher leaves the runtime's umask",
+        "crates/dwk-sandbox-probe/src/launch.rs",
+        "    let _previous = nix::sys::stat::umask(Mode::from_bits_truncate(WORKLOAD_UMASK));",
+        "    let _previous = nix::sys::stat::umask(Mode::from_bits_truncate(0o022));",
+    ),
+    (
+        "a direct workload bypasses the launcher",
+        "crates/dwkd-broker/src/sandbox/workload_plan.rs",
+        "        None,\n        words(&[PROBE_PATH, PROBE_LAUNCH, profile]),",
+        "        None,\n        if profile == LAUNCH_DIRECT {\n            Vec::new()\n"
+        "        } else {\n            words(&[PROBE_PATH, PROBE_LAUNCH, profile])\n        },",
+    ),
+)
+
+
+def _workspace_guard_suites() -> None:
+    """The suites that prove M5d.4's guards without a runtime: the contract's
+    judgements and their wire forms, the probe's mount reading and launcher,
+    the broker's plan, judgement, admission and exchange (a real full tmpfs
+    included), and the authority's contract, exclusions, drift, route and
+    operator file (against a fake broker)."""
+    run("cargo", "test", "--locked", "-p", "dwk-proto", "--lib", "--", "sandbox::")
+    run("cargo", "test", "--locked", "-p", "dwk-sandbox-probe")
+    run("cargo", "test", "--locked", "-p", "dwkd-broker", "--bin", "dwkd-broker")
+    run(
+        "cargo",
+        "test",
+        "--locked",
+        "-p",
+        "dwkd-authority",
+        "--lib",
+        "--",
+        "state::",
+        "sandbox::",
+    )
+
+
+def task_sandbox_workspace_mutations() -> None:
+    """Weaken each M5d.4 guard in turn; a unit suite or the workspace
+    evidence must catch every one.
+
+    Slow: a mutant no unit suite catches runs the workspace evidence -- its
+    privileged half too where DW_WORKSPACE_PRIVILEGED=1 provisions it, and
+    otherwise the rest, whose NOT EXERCISED is never counted as a kill.
+    Every file is restored byte-identically whatever happens, and checked.
+    Never run it beside another build.
+    """
+    killed: list[str] = []
+    for what, rel, old, new in WORKSPACE_MUTATIONS:
+        path = ROOT / rel
+        original = path.read_bytes()
+        digest = hashlib.sha256(original).hexdigest()
+        text = original.decode("utf-8")
+        if text.count(old) != 1:
+            raise TaskError(f"mutation `{what}`: its target is not in {rel} exactly once")
+        print(f"{BOLD}mutant: {what}{OFF}")
+        outcome = "survived"
+        try:
+            path.write_bytes(text.replace(old, new).encode("utf-8"))
+            try:
+                run(
+                    "cargo",
+                    "test",
+                    "--locked",
+                    "--no-run",
+                    "-p",
+                    "dwk-proto",
+                    "-p",
+                    "dwk-sandbox-probe",
+                    "-p",
+                    "dwkd-broker",
+                    "-p",
+                    "dwkd-authority",
+                )
+            except TaskError:
+                outcome = "did not compile"
+            else:
+                try:
+                    _workspace_guard_suites()
+                except TaskError as exc:
+                    outcome = f"killed by a unit suite: {str(exc)[:160]}"
+                else:
+                    try:
+                        _sandbox_workspace_evidence(require_privileged=False)
+                    except TaskError as exc:
+                        outcome = f"killed by the evidence: {str(exc)[:160]}"
+        finally:
+            path.write_bytes(original)
+        if hashlib.sha256(path.read_bytes()).hexdigest() != digest:
+            raise TaskError(f"{rel} was not restored byte-identically")
+        print(f"{DIM}restored {rel} (sha256 {digest[:16]}...){OFF}")
+        if not outcome.startswith("killed"):
+            raise TaskError(f"mutant `{what}` {outcome}: nothing guards it")
+        killed.append(what)
+        print(f"{GREEN}mutant {outcome[:60]}: {what}{OFF}")
+    print(
+        f"{GREEN}sandbox workspace mutation review: {len(killed)} of "
+        f"{len(WORKSPACE_MUTATIONS)} killed{OFF}"
     )
 
 
@@ -5816,6 +6534,8 @@ TASKS = {
     "sandbox-workload-mutations": task_sandbox_workload_mutations,
     "sandbox-secret-evidence": task_sandbox_secret_evidence,
     "sandbox-secret-mutations": task_sandbox_secret_mutations,
+    "sandbox-workspace-evidence": task_sandbox_workspace_evidence,
+    "sandbox-workspace-mutations": task_sandbox_workspace_mutations,
     "d11-hardening-evidence": task_d11_hardening_evidence,
     "d11-hardening-mutations": task_d11_hardening_mutations,
     "d11-posture": task_d11_posture,

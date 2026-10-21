@@ -209,7 +209,14 @@ pub(super) fn begin_prepare(
         .text("network", config.topology().as_str())
         .text("image", config.image().as_str())
         .text("probe_sha256", config.probe_sha256().as_str())
-        .text("declared", level(kind.declared().0));
+        .text("declared", level(kind.declared().0))
+        // What the workspace was judged under (M5d.4): the operator's bound,
+        // or the evidence harness's unverified directory -- said, never
+        // implied.
+        .text("workspace_contract", config.workspace().contract().as_str());
+    if let crate::sandbox::WorkspaceSetting::Bounded(quota) = config.workspace() {
+        fields = fields.int("workspace_quota_bytes", quota.get());
+    }
     if let (Some(grant), Some(egress)) = (&egress, config.egress()) {
         // The grant, whole: what the environment may reach, and how much.
         fields = fields

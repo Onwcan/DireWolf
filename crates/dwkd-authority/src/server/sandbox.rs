@@ -36,6 +36,14 @@ pub(super) fn attach(
     })?;
     let config =
         crate::sandbox::operator::load(text, authority_uid).map_err(ServeError::Configuration)?;
+    if config.workspace() == crate::sandbox::WorkspaceSetting::UnverifiedEvidence {
+        log(
+            "REDUCED ASSURANCE: [workspace] unverified_evidence -- no run's workspace has its \
+             group or its bound proved, so a workload can fill the filesystem it is on; this is \
+             the evidence harness's scratch workspace, refused by every broker not started with \
+             --allow-unverified-workspace, and never a production one (ADR-0052 §§6, 10)",
+        );
+    }
     let report = authority
         .attach_sandbox(config)
         .map_err(|error| ServeError::Io(format!("attaching the execution environment: {error}")))?;

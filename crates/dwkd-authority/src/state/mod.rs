@@ -88,6 +88,7 @@ pub mod wire;
 mod workload;
 mod workload_ops;
 mod workload_route;
+mod workspace;
 
 use core::fmt;
 use std::path::Path;
@@ -1163,6 +1164,10 @@ impl Authority {
         // nothing could perform an effect: the resolver holds `O_PATH` handles.
         shared.crash(CrashPoint::ToolAfterIntent)?;
 
+        if let Some(reason) = self.excluded(run, &plan, &invocation)? {
+            return Ok(ToolReply::Failed { invocation, reason });
+        }
+
         // Only now: the descriptors the operation needs, each proved to be
         // the object checked, a vacant name re-proved vacant.
         let decided_call = call.clone();
@@ -1241,6 +1246,29 @@ impl Authority {
         })
     }
 
+    /// A name change while a workload may be running in the workspace
+    /// (M5d.4): a writer outside the trusted set, which the broker's checks
+    /// exclude rather than defend against (ADR-0044 §3). Nothing is handed
+    /// over; the invocation ends as a shared directory's change does, and
+    /// its failure is returned. `None` when nothing excludes it.
+    fn excluded(
+        &mut self,
+        run: &RunId,
+        plan: &ToolPlan,
+        invocation: &InvocationId,
+    ) -> Result<Option<FsFailureReason>, AuthorityError> {
+        if !plan::has_effect(plan.tool()) {
+            return Ok(None);
+        }
+        self.transact(|work| {
+            if workspace::in_use(work, run.as_str())? {
+                tool::record_exclusion(work, run, invocation).map(Some)
+            } else {
+                Ok(None)
+            }
+        })
+    }
+
     /// Settle staging records left `EXPECTED` — at most `limit`, of `run`
     /// only if given, oldest first, and only for invocations whose outcome is
     /// recorded (ADR-0044 §10). For each, the recorded parent directory is
@@ -1270,6 +1298,12 @@ impl Authority {
         };
         let pending = self.transact(|work| staging::pending(work, run, limit))?;
         for item in pending {
+            // A reclamation changes names too: while a workload may be
+            // running in the workspace (M5d.4), it waits, `EXPECTED`.
+            if self.transact(|work| workspace::in_use(work, item.run()))? {
+                sweep.pending = sweep.pending.saturating_add(1);
+                continue;
+            }
             let Some(directory) = staging::directory(&item) else {
                 sweep.pending = sweep.pending.saturating_add(1);
                 continue;

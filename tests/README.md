@@ -238,6 +238,33 @@ required, and leave no container behind; no runtime or no keyring is NOT
 EXERCISED, which fails. `make sandbox-secret-mutations` weakens each guard in
 turn, slow and local.
 
+**Sandbox workspace tests (M5d.4)** are the evidence behind
+`make sandbox-workspace-evidence` (ADR-0052 §§6, 10). In process, each case
+printing a `WORKSPACE-EVIDENCE` line, all required:
+`crates/dwkd-broker/src/exchange/workspace_tests.rs` (the group's convention,
+no room as its own class, and a **real** 256 KiB `tmpfs` filled to `ENOSPC` in
+the test's own unprivileged user and mount namespace, every change refused
+with nothing changed) and `crates/dwkd-authority/src/state/workspace_route_tests.rs`
+(the authority's contract and exclusions against the route tests' **fake
+broker**, labelled so). Then real containers, selected by name from the
+`linux::workspace` modules of `crates/dwkd-broker/tests/sandbox_workload.rs`
+and `crates/dwkd-authority/tests/sandbox_workload.rs`, printing
+`SANDBOX-EVIDENCE` lines: what any Linux host with a runtime runs (an
+unprovisioned workspace refused in production before the broker, the released
+`serve` refusing it, the umask through the launcher, `/tmp` and `/var/tmp`
+apart, the exclusion while a workload runs, the broker refusing an unverified
+or contradicted bound) and what only an operator-provisioned host runs:
+`DW_WORKSPACE_PRIVILEGED=1` has the task make, and undo after, two 64 MiB
+`tmpfs` roots, a loop-mounted 64 MiB `ext4` image and an unbounded root under
+one directory of its own, with passwordless `sudo` and this user in group
+10001 (the hosted `sandbox-workspace` job creates both) -- interoperation
+through the group, another identity refused, every unsafe root refused and
+left as it was, drift and mount substitution, a real `ENOSPC` with another
+workspace untouched, and the released `serve` with a quota. Without it those
+cases are NOT EXERCISED and the task fails after reporting the rest: the
+unverified workspace is never evidence of the production guarantee. No
+container, mount, loop device or directory the evidence made may remain.
+
 **Brokered `fs.read` tests (M4b)** are real-process evidence for the private
 channel ([ADR-0043](../docs/adr/0043-m4b-private-broker-channel-and-brokered-fs-read.md)):
 `crates/dwkd-authority/tests/broker_fs_read.rs` drives the released authority and

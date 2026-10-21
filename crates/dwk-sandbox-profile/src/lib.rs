@@ -92,6 +92,12 @@ pub const REAP_MILLIS: u64 = 5_000;
 /// executes `<path>` with exactly `<args...>`, replacing itself: the workload
 /// is the process the runtime's `exec` started, and nothing else.
 pub const PROBE_LAUNCH: &str = "launch";
+/// The launch profile of a workload with no obligation (M5d.4): it sets no
+/// variable, only the workspace's umask (`dwk_proto`'s `WORKLOAD_UMASK`,
+/// which every profile sets), so that what the workload makes is the
+/// workspace group's -- the runtime's `exec` gives every process `0022`,
+/// and has no option that changes it.
+pub const LAUNCH_DIRECT: &str = "direct";
 /// The launch profile of `workspace_exec_hygiene` (SANDBOX.md §4a).
 pub const LAUNCH_HYGIENE: &str = "hygiene";
 /// The launch profile of a secret delivered on descriptor 3 (mode C, M5d.3,
@@ -151,6 +157,11 @@ pub const HYGIENE_ENVIRONMENT: &[(&str, &str)] = &[
 pub const LAUNCH_FAILED: u8 = 127;
 /// The probe's argument for a measurement.
 pub const PROBE_MEASURE: &str = "measure";
+/// The probe's argument for reading the mounted workspace before a workload
+/// (M5d.4): its identity, its root's owner, group and mode, the mount it is
+/// and its filesystem's size, printed as one `sandbox.workspace_report`.
+/// It writes nothing, so a full workspace reads as it is.
+pub const PROBE_WORKSPACE: &str = "workspace";
 /// The probe's argument for the child its ptrace canary attaches to.
 pub const PROBE_TARGET: &str = "ptrace-target";
 /// The longest one measurement by the probe may take, in seconds: the broker

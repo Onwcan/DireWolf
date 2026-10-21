@@ -288,9 +288,14 @@ mod linux {
         }
 
         fn start_with(socket: &Path, crash: Option<&str>, extra: &[&str]) -> Self {
-            let mut flags = vec!["--allow-evidence-topology"];
+            let mut flags = vec!["--allow-evidence-topology", "--allow-unverified-workspace"];
             flags.extend_from_slice(extra);
-            let mut command = Self::command(socket, own_uid(), &flags);
+            Self::launch(socket, crash, &flags)
+        }
+
+        /// A broker given exactly `flags` besides its socket and authority.
+        fn launch(socket: &Path, crash: Option<&str>, flags: &[&str]) -> Self {
+            let mut command = Self::command(socket, own_uid(), flags);
             if let Some(point) = crash {
                 command.env("DWKD_BROKER_CRASH_AT", point);
             }
@@ -439,6 +444,10 @@ mod linux {
             probe_sha256: ContentDigest::new(ev.probe_sha256.clone()).unwrap(),
             workspace_path: HostPath::new(workspace.display().to_string()).unwrap(),
             workspace: identity(workspace),
+            // The evidence's own scratch directory: no group, no bound
+            // proved (M5d.4), which this broker admits only because it
+            // was started with --allow-unverified-workspace.
+            workspace_bound: None,
             relay_sha256: None,
             egress: None,
         }
@@ -1715,5 +1724,260 @@ mod linux {
         destroy(&socket, &ev, &s, &container);
         assert!(!ev.exists(container.as_str()));
         evidence("broker-restart-destroy-ends-it", "container-removed");
+    }
+
+    /// M5d.4 (ADR-0052 §§6, 10, 17; OD-3(a), OD-6): what the broker judges
+    /// of a workspace -- the probe's facts from inside against the bound the
+    /// authority sent -- with this test process playing the authority.
+    /// `make sandbox-workspace-evidence` runs these by name. The cases that
+    /// need an operator-provisioned workspace (the group `10001`, a
+    /// filesystem of its own, `sudo` to change it) run only where
+    /// `DW_WORKSPACE_PRIVILEGED=1` -- the hosted runner -- and otherwise
+    /// panic NOT EXERCISED, which fails the task.
+    mod workspace {
+        use dwk_proto::brokerp::EnvironmentPrepareDone;
+        use dwk_proto::brokerp::KernelNumber;
+        use dwk_proto::brokerp::sandbox::{
+            Capacity, SandboxInvariant as I, WorkspaceBound, WorkspaceQuota, capacity,
+        };
+
+        use super::*;
+
+        const WORKSPACE_SUITE: &str = "sandbox-workspace";
+
+        fn evidence(case: &str, outcome: &str) {
+            println!(
+                "SANDBOX-EVIDENCE {{\"suite\":\"{WORKSPACE_SUITE}\",\"case\":\"{case}\",\"outcome\":\"{outcome}\"}}"
+            );
+        }
+
+        /// Every container the runtime holds, by id.
+        fn containers(ev: &Evidence) -> Vec<String> {
+            let mut ids: Vec<String> = ev
+                .docker_ok(&["container", "ls", "--all", "--no-trunc", "--quiet"])
+                .lines()
+                .map(str::to_owned)
+                .collect();
+            ids.sort();
+            ids
+        }
+
+        fn prepare(socket: &Path, ev: &Evidence, s: &EnvironmentSpec) -> OutcomeResult {
+            let (runtime, exe, cwd) = runtime(ev);
+            let sent = s.clone();
+            exchange(
+                socket,
+                move |common| {
+                    Authorisation::EnvironmentPrepare(EnvironmentPrepareAuthorisation::new(
+                        common, sent, runtime,
+                    ))
+                },
+                (exe, cwd),
+            )
+        }
+
+        fn verdict(prepared: &EnvironmentPrepareDone, invariant: I) -> Verdict {
+            let found: Vec<Verdict> = prepared
+                .measurement
+                .as_ref()
+                .expect("a measurement")
+                .checks
+                .iter()
+                .filter(|c| c.invariant == invariant)
+                .map(|c| c.verdict)
+                .collect();
+            assert_eq!(found.len(), 1, "{invariant:?} reported once");
+            found[0]
+        }
+
+        /// What the authority would send for `root`: the quota, the
+        /// capacity its own `statvfs` counts, the owner its `stat` finds.
+        fn bound(root: &Path, quota: u64) -> WorkspaceBound {
+            let stat = rustix::fs::statvfs(root).unwrap();
+            let Capacity::Bytes(bytes) = capacity(stat.f_frsize, stat.f_blocks, stat.f_bavail)
+            else {
+                panic!("{} has no countable capacity", root.display())
+            };
+            WorkspaceBound {
+                quota_bytes: WorkspaceQuota::new(quota).unwrap(),
+                capacity_bytes: KernelNumber::from_u64(bytes),
+                owner: KernelNumber::from_u64(u64::from(std::fs::metadata(root).unwrap().uid())),
+            }
+        }
+
+        /// What the harness provisioned on the hosted runner: two roots of
+        /// the group `10001`, mode `2770`, each a filesystem of its own of
+        /// the quota's size -- a `tmpfs`, and a loop-mounted `ext4` image.
+        fn provisioned() -> (PathBuf, PathBuf, u64) {
+            assert!(
+                std::env::var("DW_WORKSPACE_PRIVILEGED").as_deref() == Ok("1"),
+                "NOT EXERCISED: this case needs an operator-provisioned workspace -- the \
+                 group 10001, filesystems of their own, sudo -- which `make \
+                 sandbox-workspace-evidence` provisions only where DW_WORKSPACE_PRIVILEGED=1 \
+                 (the hosted runner)"
+            );
+            (
+                PathBuf::from(var("DW_WORKSPACE_TMPFS")),
+                PathBuf::from(var("DW_WORKSPACE_EXT4")),
+                var("DW_WORKSPACE_QUOTA").parse().unwrap(),
+            )
+        }
+
+        #[test]
+        #[ignore = "needs a real OCI runtime: make sandbox-workspace-evidence"]
+        fn a_broker_not_told_to_allow_it_refuses_an_unverified_workspace() {
+            let ev = Evidence::load();
+            let _reaper = Reaper(ev.clone());
+            let dir = Scratch::new("unverified");
+            let socket = dir.socket();
+            let _broker = Broker::launch(&socket, None, &["--allow-evidence-topology"]);
+            let workspace = dir.workspace("ws");
+            let before = containers(&ev);
+            let s = spec(&environment(), &run(), &workspace, &ev);
+            assert!(s.workspace_bound.is_none());
+            assert_eq!(
+                refusal(prepare(&socket, &ev, &s)),
+                BrokerRefusal::WorkspaceUnverified
+            );
+            assert_eq!(containers(&ev), before, "no container was made");
+            evidence(
+                "broker-unverified-workspace-refused-without-the-flag",
+                "WORKSPACE_UNVERIFIED",
+            );
+        }
+
+        #[test]
+        #[ignore = "needs a real OCI runtime: make sandbox-workspace-evidence"]
+        fn a_bound_the_probe_does_not_find_is_refused_and_its_container_removed() {
+            let ev = Evidence::load();
+            let _reaper = Reaper(ev.clone());
+            let dir = Scratch::new("unbounded");
+            let socket = dir.socket();
+            let broker = Broker::start(&socket, None);
+            let workspace = dir.workspace("ws");
+            let before = containers(&ev);
+            // What an honest authority would send for an ordinary directory:
+            // its whole filesystem's capacity, its owner.
+            let honest = bound(&workspace, 64 << 20);
+            for (case, forged) in [
+                ("broker-unbounded-directory-refused", None),
+                ("broker-forged-capacity-refused", Some("capacity")),
+                ("broker-forged-identity-refused", Some("identity")),
+            ] {
+                let mut s = spec(&environment(), &run(), &workspace, &ev);
+                let mut b = honest.clone();
+                match forged {
+                    Some("capacity") => b.capacity_bytes = KernelNumber::from_u64(64 << 20),
+                    Some("identity") => s.workspace.1 += 1,
+                    _ => {}
+                }
+                s.workspace_bound = Some(b);
+                let prepared = done(prepare(&socket, &ev, &s)).environment_prepare.unwrap();
+                assert!(!prepared.retained, "{case}:\n{}", broker.stderr());
+                assert_eq!(
+                    verdict(&prepared, I::HostWorkspaceOwnership),
+                    Verdict::Fail,
+                    "{case}"
+                );
+                assert_eq!(
+                    verdict(&prepared, I::HostWorkspaceCapacity),
+                    Verdict::Fail,
+                    "{case}"
+                );
+                let identity = verdict(&prepared, I::HostWorkspaceIdentity);
+                if forged == Some("identity") {
+                    assert_eq!(identity, Verdict::Fail, "{case}");
+                } else {
+                    assert_eq!(identity, Verdict::Pass, "{case}");
+                }
+                assert_eq!(containers(&ev), before, "{case}: its container was removed");
+                evidence(case, "not-retained");
+            }
+            evidence("broker-host-and-container-identity-agree", "pass");
+            evidence("broker-runtime-probe-disagreement-refused", "not-retained");
+        }
+
+        #[test]
+        #[ignore = "needs a provisioned workspace: make sandbox-workspace-evidence"]
+        fn a_provisioned_workspace_is_accepted_and_judged_again_before_work() {
+            let (tmpfs, ext4, quota) = provisioned();
+            let ev = Evidence::load();
+            let _reaper = Reaper(ev.clone());
+            let dir = Scratch::new("provisioned");
+            let socket = dir.socket();
+            let broker = Broker::launch(&socket, None, &["--allow-evidence-topology"]);
+            let mut kept = Vec::new();
+            for (root, case) in [
+                (&tmpfs, "broker-bounded-tmpfs-accepted"),
+                (&ext4, "broker-bounded-ext4-accepted"),
+            ] {
+                let mut s = spec(&environment(), &run(), root, &ev);
+                s.workspace_bound = Some(bound(root, quota));
+                let prepared = done(prepare(&socket, &ev, &s)).environment_prepare.unwrap();
+                assert!(prepared.retained, "{case}:\n{}", broker.stderr());
+                for invariant in [
+                    I::HostWorkspaceIdentity,
+                    I::HostWorkspaceOwnership,
+                    I::HostWorkspaceCapacity,
+                    I::ContainerWorkspaceGroupInherited,
+                    I::ContainerWorkspaceWritable,
+                ] {
+                    assert_eq!(
+                        verdict(&prepared, invariant),
+                        Verdict::Pass,
+                        "{case} {invariant:?}"
+                    );
+                }
+                evidence(case, "retained");
+                kept.push((s, prepared.container.unwrap()));
+            }
+            // The tmpfs grown under its environment: the next workload is
+            // refused before anything runs.
+            let (s, container) = &kept[0];
+            let root = tmpfs.to_str().unwrap();
+            let grow = Command::new("sudo")
+                .args([
+                    "-n",
+                    "mount",
+                    "-o",
+                    &format!("remount,size={}", quota * 2),
+                    root,
+                ])
+                .status()
+                .unwrap();
+            assert!(grow.success());
+            let answer = try_start(
+                &socket,
+                &ev,
+                (s, container),
+                invocation(),
+                workload(
+                    (FIXTURE, &ev.fixture_sha256),
+                    &["mark", "/workspace/grown"],
+                    65_536,
+                    60,
+                ),
+            )
+            .expect("an answer to the start");
+            let shrink = Command::new("sudo")
+                .args(["-n", "mount", "-o", &format!("remount,size={quota}"), root])
+                .status()
+                .unwrap();
+            assert!(shrink.success());
+            assert_eq!(refusal(answer), BrokerRefusal::EnvironmentNotClean);
+            assert!(!tmpfs.join("grown").exists());
+            assert!(
+                broker.stderr().contains("HOST_WORKSPACE_CAPACITY"),
+                "{}",
+                broker.stderr()
+            );
+            evidence(
+                "broker-capacity-drift-refused-before-work",
+                "ENVIRONMENT_NOT_CLEAN",
+            );
+            for (s, container) in &kept {
+                destroy(&socket, &ev, s, container);
+            }
+        }
     }
 }

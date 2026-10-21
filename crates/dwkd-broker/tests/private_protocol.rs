@@ -1105,8 +1105,8 @@ mod linux {
                 Box::new(move |c| {
                     let a = authorisation(c, 1, id, 7);
                     let text = String::from_utf8(a[5..].to_vec()).unwrap();
-                    assert!(text.contains(r#""protocol":10"#));
-                    json(&text.replace(r#""protocol":10"#, r#""protocol":1"#))
+                    assert!(text.contains(r#""protocol":11"#));
+                    json(&text.replace(r#""protocol":11"#, r#""protocol":1"#))
                 }),
             ),
             (
@@ -1115,7 +1115,7 @@ mod linux {
                 Box::new(move |c| {
                     let a = authorisation(c, 1, id, 7);
                     let text = String::from_utf8(a[5..].to_vec()).unwrap();
-                    json(&text.replace(r#""protocol":10"#, r#""protocol":2"#))
+                    json(&text.replace(r#""protocol":11"#, r#""protocol":2"#))
                 }),
             ),
             (
@@ -1125,7 +1125,7 @@ mod linux {
                 Box::new(move |c| {
                     let a = authorisation(c, 1, id, 7);
                     let text = String::from_utf8(a[5..].to_vec()).unwrap();
-                    json(&text.replace(r#""protocol":10"#, r#""protocol":3"#))
+                    json(&text.replace(r#""protocol":11"#, r#""protocol":3"#))
                 }),
             ),
             (
@@ -1134,7 +1134,7 @@ mod linux {
                 Box::new(move |c| {
                     let a = authorisation(c, 1, id, 7);
                     let text = String::from_utf8(a[5..].to_vec()).unwrap();
-                    json(&text.replace(r#""protocol":10"#, r#""protocol":4"#))
+                    json(&text.replace(r#""protocol":11"#, r#""protocol":4"#))
                 }),
             ),
             (
@@ -1143,7 +1143,7 @@ mod linux {
                 Box::new(move |c| {
                     let a = authorisation(c, 1, id, 7);
                     let text = String::from_utf8(a[5..].to_vec()).unwrap();
-                    json(&text.replace(r#""protocol":10"#, r#""protocol":5"#))
+                    json(&text.replace(r#""protocol":11"#, r#""protocol":5"#))
                 }),
             ),
             (
@@ -1152,7 +1152,7 @@ mod linux {
                 Box::new(move |c| {
                     let a = authorisation(c, 1, id, 7);
                     let text = String::from_utf8(a[5..].to_vec()).unwrap();
-                    json(&text.replace(r#""protocol":10"#, r#""protocol":6"#))
+                    json(&text.replace(r#""protocol":11"#, r#""protocol":6"#))
                 }),
             ),
             (
@@ -1161,7 +1161,7 @@ mod linux {
                 Box::new(move |c| {
                     let a = authorisation(c, 1, id, 7);
                     let text = String::from_utf8(a[5..].to_vec()).unwrap();
-                    json(&text.replace(r#""protocol":10"#, r#""protocol":7"#))
+                    json(&text.replace(r#""protocol":11"#, r#""protocol":7"#))
                 }),
             ),
             (
@@ -1171,7 +1171,7 @@ mod linux {
                 Box::new(move |c| {
                     let a = authorisation(c, 1, id, 7);
                     let text = String::from_utf8(a[5..].to_vec()).unwrap();
-                    json(&text.replace(r#""protocol":10"#, r#""protocol":8"#))
+                    json(&text.replace(r#""protocol":11"#, r#""protocol":8"#))
                 }),
             ),
             (
@@ -1181,7 +1181,17 @@ mod linux {
                 Box::new(move |c| {
                     let a = authorisation(c, 1, id, 7);
                     let text = String::from_utf8(a[5..].to_vec()).unwrap();
-                    json(&text.replace(r#""protocol":10"#, r#""protocol":9"#))
+                    json(&text.replace(r#""protocol":11"#, r#""protocol":9"#))
+                }),
+            ),
+            (
+                // M5d.3's protocol, before M5d.4's workspace bound (ADR-0052
+                // §3).
+                "protocol-ten",
+                Box::new(move |c| {
+                    let a = authorisation(c, 1, id, 7);
+                    let text = String::from_utf8(a[5..].to_vec()).unwrap();
+                    json(&text.replace(r#""protocol":11"#, r#""protocol":10"#))
                 }),
             ),
             (

@@ -286,6 +286,7 @@ fn serve(config: &config::ServeConfig) -> ExitCode {
         files,
         (
             config.evidence_topology_permitted,
+            config.unverified_workspace == config::UnverifiedWorkspace::Permitted,
             processes.generation().clone(),
         ),
         proxies,
@@ -407,6 +408,14 @@ fn admit(
              swap ({}; --allow-swappable-workers)",
             swap.describe()
         ));
+    }
+    if config.unverified_workspace == config::UnverifiedWorkspace::Permitted {
+        reduced.push(
+            "an execution environment may mount the evidence harness's scratch workspace with \
+             neither its group nor its bound proved, so a workload there can fill the host's \
+             filesystem (--allow-unverified-workspace; never production)"
+                .to_owned(),
+        );
     }
     Ok(reduced)
 }
@@ -555,7 +564,8 @@ fn help() -> String {
          USAGE:\n    \
              {NAME} serve --socket <PATH> --authority-uid <UID> [--allow-shared-authority-uid] [--allow-dumpable]\n    \
                               [--allow-traceable-workers] [--allow-swappable-workers]\n    \
-                              [--allow-evidence-topology] [--allow-evidence-egress <FILE>]\n    \
+                              [--allow-evidence-topology] [--allow-unverified-workspace]\n    \
+                              [--allow-evidence-egress <FILE>]\n    \
                               [--allow-evidence-trust <PEM>]\n    \
              {NAME} [-V | --version] [-h | --help]\n\
          \n\
@@ -567,6 +577,7 @@ fn help() -> String {
              --allow-traceable-workers       serve where its uid could trace the processes it starts (development only)\n    \
              --allow-swappable-workers       perform credential hops where their memory could reach swap (development only)\n    \
              --allow-evidence-topology       permit NO_NETWORK execution environments (M5a evidence only)\n    \
+             --allow-unverified-workspace    mount a workspace with no proved group or quota (evidence only)\n    \
              --allow-evidence-egress <FILE>  resolve egress names from a fixture file (M5b, M5c evidence only)\n    \
              --allow-evidence-trust <PEM>    trust a test authority instead of Mozilla's roots; needs --allow-evidence-egress (M5c evidence only)\n\
          \n\
@@ -779,6 +790,7 @@ mod tests {
         assert!(h.contains("--authority-uid"));
         assert!(h.contains("M5a") && h.contains("oci-strict") && h.contains("NO_NETWORK only"));
         assert!(h.contains("--allow-evidence-topology"));
+        assert!(h.contains("--allow-unverified-workspace"));
     }
 
     /// The broker's defining property, asserted as a test so that a future

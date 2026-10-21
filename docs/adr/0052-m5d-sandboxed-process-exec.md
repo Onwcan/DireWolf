@@ -1,6 +1,6 @@
 # ADR-0052: M5d — production sandboxed `process.exec`: the authority decides a workload, the broker runs exactly that plan in a measured `oci-strict` environment, as the environment's own identity, and nothing of it outlives its invocation
 
-**Status:** Proposed (M5d.1, M5d.2 and M5d.3 built; M5d.2's refinements §§2a and 5a — OD-10 and OD-11 — approved by the owner on 2026-10-19 with conditions, §19; this ADR's acceptance remains M5d.6's) · **Date:** 2026-10-13 · **Revised:** 2026-10-19 · **Would amend (on acceptance):** [ADR-0018](0018-authority-broker-split.md) (the broker runs workloads, never as its own uid), [ADR-0039](0039-durable-authority-state.md) (schema version 9: the workload ledger, §4), [ADR-0043](0043-m4b-private-broker-channel-and-brokered-fs-read.md) (private protocol version 8, §3), [ADR-0045](0045-m4d-process-execution-broker.md) (a process can run in an environment; the host floor is unchanged), [ADR-0047](0047-m5a-oci-execution-environment-and-measured-assurance.md) (the probe becomes the environment's init: it reaps orphans and, asked, ends every other process; `run_probe` gains a sibling, `run_workload`), [ADR-0050](0050-m5c-kernel-performed-net-http-ssrf-redirects-and-credential-egress.md) (§21's ptrace-posture prerequisite becomes a check the broker makes at start) · **Refines:** [ADR-0008](0008-sandbox-default.md) and [ADR-0024](0024-sandbox-network-topology.md) (as realised by [ADR-0048](0048-m5b-proxy-only-topology-and-connect-proxy.md)), [ADR-0046](0046-m4e-secret-handles-backends-injection-and-redaction.md) §13 (modes B/C reach a sandboxed target, M5d.3), [ADR-0051](0051-external-agent-interoperability.md) (Proposed; its M5d prerequisites), [SANDBOX.md](../SANDBOX.md) §§1–4, [POLICY.md](../POLICY.md) (`when.environment = "sandbox"`)
+**Status:** Proposed (M5d.1, M5d.2 and M5d.3 built; M5d.2's refinements §§2a and 5a — OD-10 and OD-11 — approved by the owner on 2026-10-19 with conditions, §19; M5d.4 built locally and awaiting the owner's review of OD-3, OD-6 and OD-12 — the `DIRECT` launch through the trusted launcher — §§5a, 6, 10, 19; this ADR's acceptance remains M5d.6's) · **Date:** 2026-10-13 · **Revised:** 2026-10-20 · **Would amend (on acceptance):** [ADR-0018](0018-authority-broker-split.md) (the broker runs workloads, never as its own uid), [ADR-0039](0039-durable-authority-state.md) (schema version 9: the workload ledger, §4), [ADR-0043](0043-m4b-private-broker-channel-and-brokered-fs-read.md) (private protocol version 8, §3), [ADR-0045](0045-m4d-process-execution-broker.md) (a process can run in an environment; the host floor is unchanged), [ADR-0047](0047-m5a-oci-execution-environment-and-measured-assurance.md) (the probe becomes the environment's init: it reaps orphans and, asked, ends every other process; `run_probe` gains a sibling, `run_workload`), [ADR-0050](0050-m5c-kernel-performed-net-http-ssrf-redirects-and-credential-egress.md) (§21's ptrace-posture prerequisite becomes a check the broker makes at start) · **Refines:** [ADR-0008](0008-sandbox-default.md) and [ADR-0024](0024-sandbox-network-topology.md) (as realised by [ADR-0048](0048-m5b-proxy-only-topology-and-connect-proxy.md)), [ADR-0046](0046-m4e-secret-handles-backends-injection-and-redaction.md) §13 (modes B/C reach a sandboxed target, M5d.3), [ADR-0051](0051-external-agent-interoperability.md) (Proposed; its M5d prerequisites), [SANDBOX.md](../SANDBOX.md) §§1–4, [POLICY.md](../POLICY.md) (`when.environment = "sandbox"`)
 
 > **A workload runs only where the authority decided it may, as the
 > environment's own user, and is gone when its invocation is.** The authority
@@ -190,7 +190,11 @@ used unchanged, and no new way to reach them is public.
   runtime's or variable that attaches, prepares, measures, destroys or
   reconciles an environment (`public-no-lifecycle-operation`). TX053 confines
   the attachment to `server/sandbox.rs`; TX035 keeps every other public path
-  from naming the lifecycle.
+  from naming the lifecycle. **M5d.4:** the file's `[workspace]` table is
+  required and says what every run's workspace is (§§6, 10): `quota_bytes`
+  (16 MiB to 16 TiB) — production's — or `unverified_evidence = true`, never
+  both; the second is served only by a broker started with
+  `--allow-unverified-workspace`, and both daemons log `REDUCED ASSURANCE`.
 - **The authority prepares a run's environment when a permitted launch needs
   one** and the run has none live (§2's step 2a): recorded, measured from both
   vantages and judged by ADR-0047's lifecycle, W1–W7 included, then the launch
@@ -296,6 +300,29 @@ ending carries `redactions` -- how many whole occurrences of the value the
 broker replaced in both streams, a count only -- exactly for a
 secret-bearing workload (the authority treats a count on any other, or none on
 one, as a broker not keeping the protocol: `UNKNOWN`).
+
+**As built in M5d.4: version 11.** The environment's specification — on
+preparation, measurement and every workload start — gains an optional
+`workspace_bound`: the operator's quota, the capacity the authority's
+`fstatvfs` of its pinned root counts and the owner its `fstat` finds (§§6,
+10). Present, the workspace contract is **bounded** and its three host
+invariants are required; absent, the contract is the evidence harness's
+unverified workspace, which a broker serves only when its operator started it
+with `--allow-unverified-workspace` (`WORKSPACE_UNVERIFIED` otherwise, before
+anything is created). The probe's report goes to version 3 with the mounted
+workspace's facts, and a new closed probe command, `workspace`, reports them
+again — writing nothing — before every workload. New refusals:
+`WORKSPACE_GROUP_CONTRACT` (a brokered name change in a directory of the
+workspace group that is not set-group-id and group-writable; public
+`WRITE_DENIED`), `NO_SPACE` (`ENOSPC` or `EDQUOT` with nothing changed; public
+`BROKER_EXECUTION_ERROR`, the class every failed brokered change has, the
+audit naming `NO_SPACE`) and `WORKSPACE_UNVERIFIED`. **What a start's answer
+means** (made precise by M5d.4's W9 review): the environment was judged, the
+bytes proved and the workload admitted to the supervisor, whose thread then
+starts the runtime client — so the answer precedes the runtime's `exec`, by
+design ("nothing runs that a start did not answer for"). The workload's
+process can therefore appear after an authority that received the answer has
+already died; W9 is evidenced accordingly (§9).
 
 ### 4. Authority state: schema version 9
 
@@ -453,6 +480,30 @@ limits, `reap` — is what bounds them (SANDBOX.md §4a, consequence 1). The
 environment's `HOME` is `/`, read-only, so no user file there is workspace
 content either way.
 
+**M5d.4: every workload through the launcher — for the owner's review
+(OD-12).** The runtime's `exec` gives a process the umask `0022` and has no
+option to change it, so a file a workload made would be `0644` — readable,
+but not writable, by the workspace group that the broker and the authority
+share with it (§6). The broker therefore starts a `DIRECT` workload as
+`container exec --user 10001:10001 --workdir /workspace <container>
+/usr/libexec/direwolf/sandbox-probe launch direct <path> <args…>` too: the
+same digest-pinned probe, proved before every workload, with a new profile,
+`direct`, that sets **no variable** and only the umask; and every profile —
+`hygiene` and M5d.3's four included — now sets the umask `0007` immediately
+before its `exec`. What did not change: the executable and its exact
+arguments (`argv[0]` its path, no shell); uid and gid 10001; standard input
+`/dev/null` for every launch but M5d.3's secret ones, whose frame is read and
+replaced by `/dev/null` before the `exec`; no descriptor beyond 0–2 (3 for
+mode C) — the launcher refuses to `exec` with any other; no variable but the
+profile's; the digest of the target proved before the start as before. The
+launcher's failure is its reserved exit (`LAUNCH_FAILED`), never believed as
+the program's. Measured: a file and a directory the workload makes are `0660`
+and `0770` (`2770` under a set-group-id root), its umask `0007`
+(`umask-0007-through-the-direct-launcher`). The workload may change its own
+umask; the root's `2770` keeps every identity outside the group out whatever
+it does. **Flagged for the owner:** this widens the launcher from M5d.2's
+obligated launches to every launch; it is not presented as approved.
+
 ### 6. Workspace ownership
 
 As built through M5c the workspace is the operator's directory, bind-mounted
@@ -465,6 +516,63 @@ workspace owner — stronger, needs runtime support not yet universal; (c)
 copy-in/copy-out — the workload works on a copy, changes return through the
 brokered filesystem tools — strongest, costs a copy. Until M5d.4 the evidence
 uses its own scratch workspace and says so (as M5a's did).
+
+**As built (M5d.4): OD-3(a), for the owner's review.**
+
+- **The group is `10001`, the workload's own primary gid** (`WORKSPACE_GROUP`
+  = the profile's `SANDBOX_GID`, a compile-time assertion keeps them one).
+  The workload reaches the workspace through its primary group; nothing is
+  added to its command line (no `--group-add`) and the plan's identity is
+  unchanged. Measured on Docker Engine 29.8.2: `docker exec --user
+  10001:10001` gives gid 10001 and the supplementary groups `10001` only.
+- **The root:** owned by root or the authority's own uid — never 10001, which
+  could change its mode — of group 10001, mode **exactly `2770`**; the
+  authority and the broker are supplementary members of the group, and
+  nobody else is. Files the workload makes are `0660` and directories `2770`
+  (the launcher's umask `0007`, §5a; the set-group-id bit inherited); files
+  the broker makes are `0660` (`CREATED_FILE_MODE`) of the root's group.
+- **Measured from both vantages before anything uses it**, and again before
+  every workload: the authority holds its pinned root's descriptor against
+  the contract — owner, group, mode, its own membership of the group by
+  `/proc/self/status`, and none of its own state, socket or secret files on
+  that filesystem — and sends what it found (§3); the probe reports from
+  inside the mounted root's identity, owner, group and mode, the mount's own
+  root (`/`) and `nosuid,nodev`, and the broker judges the two:
+  `HOST_WORKSPACE_IDENTITY`, `HOST_WORKSPACE_OWNERSHIP` (the probe's facts and
+  the broker's own membership) and `CONTAINER_WORKSPACE_GROUP_INHERITED` (the
+  probe makes a directory and a file and finds them group 10001, the
+  directory set-group-id; a full filesystem falls back to the root's own
+  metadata). Required for the bounded contract; the evidence harness's
+  unverified contract requires none of them and says so (§10).
+- **Nothing is repaired.** No daemon changes a root's mode, owner or mount:
+  a root that is not the contract's is refused with the reason
+  (`WORKSPACE_OWNER`, `WORKSPACE_GROUP`, `WORKSPACE_MODE`,
+  `WORKSPACE_GROUP_MEMBERSHIP`, …), before the broker hears of it; found so
+  under a `READY` environment, before a workload, it is drifted and
+  destroyed (TX057).
+- **The broker keeps the group's convention.** A brokered name change in a
+  directory of group 10001 that is not set-group-id, or not the group's to
+  write — a workload cleared the bit — is refused unchanged
+  (`WORKSPACE_GROUP_CONTRACT`, public `WRITE_DENIED`), rather than leaving a
+  file the workload cannot reach.
+- **A brokered change waits while a workload may write the workspace**
+  (ADR-0044 §3). Under OD-3(a) the workload is in the group that may write
+  the workspace, and Linux has no compare-and-swap of a directory entry, so
+  the broker's checks exclude untrusted writers rather than defend against
+  them; the exclusion is now in time. `fs.write`, `fs.patch`, `fs.move`,
+  `fs.delete` and staging reclamation fail `SHARED_DIRECTORY` before anything
+  is sent — the audit naming `excluded_by: WORKLOAD_IN_WORKSPACE` — while any
+  run whose workspace root is the same directory (by device and inode) has a
+  workload `LAUNCHING`, or an environment `UNKNOWN` or `DESTROYING`; a
+  reclamation waits `EXPECTED`. Reads are unaffected: the resolver is built
+  against concurrent renames (ADR-0042 §4). **Why it cannot race:** the
+  intent of every workload is durable (`LAUNCHING`) before the broker hears
+  of it; a workload's terminal state is recorded only after `reap` proved
+  every process of its environment gone, or with the environment's
+  destruction; the authority serves one request at a time, so the exclusion's
+  read and the effect it guards are one step that no workload start can
+  enter; and the broker serves one connection at a time, so an effect sent by
+  an incarnation that then died completes before any later request is read.
 
 ### 7. Secret modes B and C to a sandboxed target (M5d.3)
 
@@ -623,6 +731,13 @@ thread runs no untrusted code (the runtime client is the pinned one, the
 workload runs in the environment as uid 10001), so the worker count and its
 conditions are unchanged.
 
+**M5d.4.** The start's answer says the workload was judged, proved and
+admitted; its supervising thread then starts the runtime client (§3). While
+a workload is `LAUNCHING` — and while an environment is `UNKNOWN` or
+`DESTROYING` — no brokered change of a name, and no reclamation, is made in
+its workspace or that of any run bound to the same directory (§6); its
+`COMPLETED`, `FAILED` or `UNKNOWN` ends that.
+
 ### 9. Crash windows
 
 | Window | Durable state | On restart | Semantics |
@@ -646,6 +761,20 @@ during a public launch answers `OUTCOME_UNKNOWN` with the environment's
 destruction durable, completed when a broker answers again
 (`public-exec-unknown-destroys-environment`).
 
+**W9's evidence, corrected in M5d.4.** The case counted the environment's
+processes at once after the authority stopped, and once failed with none
+counted. The cause is in the design, not the launcher: the start's answer
+precedes the runtime's `exec` (§3), so a count taken at once can run before
+the workload exists. The evidence now waits — bounded, 60 s — for the
+workload's own process: uid 10001 with the target's argument vector, which
+proves the launcher reached its `exec` and the target runs as the workload's
+identity while the authority is gone (`crash-w9-running-after-start`); then
+the restart ends it `UNKNOWN` and destroys the environment, and the same key
+is answered from its record (or the run's end), never run again, with no
+second workload record, environment or container (`crash-w9-never-run-again`).
+W8–W11 together passed six runs of six, and the whole workload evidence
+135 of 135 cases, after the change.
+
 ### 10. Resource quotas
 
 Per environment, unchanged from M5a and measured: 256 pids, 2 GiB memory with
@@ -660,6 +789,33 @@ provides each workspace on a size-bounded filesystem, the probe measures its
 capacity from inside (`statvfs`) against the declared quota, and an
 unbounded one refuses the environment. Until then `fsize` bounds one file,
 not the total (residual).
+
+**As built (M5d.4): OD-6, for the owner's review.** The operator's file
+declares the quota (`[workspace] quota_bytes`, 16 MiB to 16 TiB, §2a); each
+workspace root must be **the root of a filesystem of its own** of that size —
+a `tmpfs`, a loop-mounted image, a volume, a project-quota directory exposed
+as its own mount — `nosuid,nodev`. The authority's `fstatvfs` of its pinned
+root and the probe's `statvfs` of `/workspace` each count the capacity
+(`f_blocks × f_frsize`, overflow-checked); it must be at most the quota and
+no more than a quarter below it (`capacity_within_quota`), and the mount must
+be the filesystem's root (mountinfo's root field `/`): a host directory on a
+larger filesystem — measured: a plain directory reports the whole disk and a
+non-root mount root — is `WORKSPACE_UNBOUNDED` before anything is created,
+or `HOST_WORKSPACE_CAPACITY` failed from inside. The capacity is measured
+again before every workload; one that changed — a remount, another
+filesystem mounted over the root — drifts the environment, which is
+destroyed before the workload. **When the filesystem is full** the kernel
+says so: a brokered write, creation or deletion that meets `ENOSPC` or
+`EDQUOT` changes nothing and fails `NO_SPACE` (public
+`BROKER_EXECUTION_ERROR`), every change before it durable first; the
+workload sees its own `ENOSPC`; another workspace, a filesystem of its own,
+is untouched — nothing is borrowed. `/tmp` (512 MiB) and `/var/tmp` (128 MiB)
+stay the environment's own `tmpfs`, never the workspace, and `RLIMIT_FSIZE`
+(1 GiB) still bounds one file: it is not the quota. **The evidence
+harness's unverified contract** (`unverified_evidence = true`) bounds
+nothing and proves no group; both daemons log `REDUCED ASSURANCE`, the
+broker serves it only with `--allow-unverified-workspace` (TX059), and it is
+never evidence of this section's guarantee.
 
 ### 11. Network containment
 
@@ -727,7 +883,20 @@ environment's mount namespace already names none of them.
 - **The probe is trusted** to end what it can see; a process it cannot signal
   cannot exist in the environment (one uid, no capability), and the residue
   verdict says when it could not prove that.
-- **Disk** (until OD-6) and **workspace ownership** (until OD-3) as stated.
+- **Disk and workspace ownership (M5d.4, §§6, 10).** The guarantee is the
+  operator's provisioning, measured: a workspace that is not a filesystem of
+  its own of the quota's size, or not the group's as stated, is refused, never
+  repaired. What remains: every member of group 10001 — the workload, the
+  authority, the broker — can read and write everything in every workspace
+  the group owns, so any other host account given gid 10001 shares them; the
+  workload can fill its own workspace (its own run's denial of service, never
+  another's), change its own umask or the modes of files it owns, and clear
+  a directory's set-group-id bit — the root's `2770` keeps every identity
+  outside the group out regardless, and the broker refuses to change a name
+  in such a directory (`WORKSPACE_GROUP_CONTRACT`); the quota is a
+  filesystem's, so its granularity is the operator's (the capacity may lie a
+  quarter below the declaration); and the unverified contract proves none of
+  it, for evidence only.
 - **Mode C grandchildren** (§7).
 - **M5d.3, as built (§7).** A credential's descendants: descriptor 3 and mode
   B's variable are inherited by every process the target starts (measured,
@@ -767,6 +936,17 @@ fake broker, which reads the pipe a secret-bearing start hands it (as the
 secret-use tests' fake does a hop's); TX026 is unchanged (the variable's NUL
 check is the handoff's, beside the header check). Each with a violation
 fixture and its findings pinned.
+
+**M5d.4:** **TX057** (new) -- the authority's state layer, resolver and
+sandbox configuration change no mode, owner, extended attribute or mount and
+allocate or format nothing: the workspace is measured and refused, never
+repaired; **TX058** (new) -- the root's mode `2770` and the launcher's umask
+`0007` are spelled once, in `dwk-proto`'s sandbox contract, and named
+everywhere else; **TX059** (new) -- the unverified workspace is acknowledged
+in one place per daemon: the broker's command line, the operator's file.
+TX015 and TX021 exempt the broker's full-filesystem unit test, which reads
+and writes its own `tmpfs` and re-executes itself in its own user and mount
+namespace. Each with a violation fixture and its findings pinned.
 
 ### 16. Dependencies and the TCB
 
@@ -877,6 +1057,62 @@ and kills all 22, twelve by the unit suites and ten by the real-container
 evidence; M5d.2's campaign, its targets moved to the code M5d.3 reshaped,
 still kills 52 of 52. Every file is restored and its SHA-256 checked.
 
+**As built (M5d.4).** `make sandbox-workspace-evidence` first runs the
+in-process half, every case required: the broker's group convention and
+no-room class, and a **real** 256 KiB `tmpfs` filled to `ENOSPC` in the
+test's own unprivileged user and mount namespace — a write, a creation and a
+deletion each refused `NO_SPACE` with nothing changed; and the authority's
+contract and exclusions against the route tests' **fake broker** (labelled
+so) — a workspace not the contract's refused before the broker hears of it,
+the contract said in the audit, no name change and no reclamation while a
+workload may run, an environment of uncertain end excluding until it is
+gone, a replaced root destroying its environment, drift answered
+`ENVIRONMENT_NOT_CLEAN`. Then real containers, selected by name and each
+required to run: three broker and four authority tests that any host with a
+runtime runs — the broker refusing an unverified workspace it was not told to
+allow, and a bound the probe contradicts (an unbounded directory, a forged
+capacity, a forged identity) with its container removed; production refusing
+an unprovisioned workspace before the broker, the released `serve` refusing
+it too; the umask through the `direct` launcher; `/tmp` and `/var/tmp` apart
+from the workspace; the exclusion while a workload runs, said by the audit,
+and lifted when it ended — and one broker and five authority tests that only
+an operator-provisioned host runs (`DW_WORKSPACE_PRIVILEGED=1`: the hosted
+`sandbox-workspace` job creates the group 10001 and the harness mounts, and
+undoes, two 64 MiB `tmpfs` roots, a loop-mounted 64 MiB `ext4` image and an
+unbounded root): both filesystems accepted with every workspace invariant
+`PASS`; interoperation through the group — the workload makes and the broker
+reads, the broker makes and the workload changes, the broker replaces and
+the workload reads, modes `0660`/`2770` and group 10001 throughout —
+`nobody` refused both ways; a wrong group, a cleared set-group-id bit, modes
+`2775` and `2777`, a workload-owned and a foreign-owned root, a quota twice
+the filesystem, an unbounded host directory and a subdirectory of a bounded
+filesystem each refused and left exactly as found; a grown filesystem and a
+filesystem mounted over the root each destroying the environment before the
+workload; a real `ENOSPC` on the `ext4` image — the broker's write failing
+with nothing changed and no staging left, another workspace's free space
+unchanged and writable, room made and the write made, a new incarnation's
+store whole; and the released `serve` with a quota. Without the privileged
+half those cases are NOT EXERCISED and the task fails after reporting the
+rest. No container, mount, loop device or directory the evidence made may
+remain. `make sandbox-workspace-mutations` weakens 26 guards one at a time —
+the contract's owner, group, mode, membership, bound, tolerance and private
+filesystems, a bounded workspace sent with no bound, the exclusion and its
+two states, the reclamation's wait, drift and its public answer, the
+operator file's default, the broker's identity, membership, capacity and
+contract judgements and its waiver, the probe's mount root, the group
+convention, both no-room classes, the launcher's umask and the `direct`
+launch — and each must fail the guards' unit suites or the evidence that can
+run where it runs; the privileged half's NOT EXERCISED is never counted as a
+kill. Measured: 26 of 26 killed, 25 by the unit suites and one -- the
+launcher's umask -- by the real-container evidence; one
+kill credited to the broker's suite was a flake of an M4d resource-count test
+(`launches_leave_no_descriptor_or_thread_behind`) and was re-run against the
+authority's own suite, which kills it. M5d.2's campaign, its three targets
+moved to the code M5d.4 reshaped, still kills 52 of 52, M5d.3's 22 of 22,
+net.http's 10 of 10 and D11's 26 of 26. The wire contract's own ownership and capacity judgements are proved by
+`dwk-proto`'s unit tests, not by a mutant: the harness may not name that
+module (TX016).
+
 **Not evidenced by M5d.1, and not claimed:** a workload in `PROXY_ONLY` (the
 evidence's environments are `NO_NETWORK`, so the agent-shaped workload's
 network attempts are refused for want of any network — M5d.5 runs it with
@@ -893,7 +1129,7 @@ the evidence host's own posture is reported, `posture-reported-matches-host`).
 | **M5d.1** Authorised OCI workload lifecycle | §§3–5, 8–10, 13: protocol 8's `workload_run`; the broker's re-judgement, digest proof, fixed plan, bounds, wall clock and `reap`; the probe as init; schema 9; `Authority::workload_run` (no public route) with every gate; fail-closed environment destruction; the start-up identity and ptrace-posture checks | its real-container evidence, mutants and every earlier evidence green locally and in hosted CI |
 | **M5d.2** Public sandboxed `process.exec` | the DWKP route (§2), the shared idempotency namespace, results naming environment and level; `workspace_exec_hygiene` enforced in the environment; as built also private protocol 9's start and collection (§3), schema 10 (§4), OD-9, the production environment (§2a) and the trusted launcher (§5a) | hostile-client and eval coverage; the shipped packs' sandbox rules exercised; §§2a and 5a decided by the owner |
 | **M5d.3** Secrets B/C in the sandbox | §7; as built also tool messages version 6 (§2), private protocol 10 (§3), schema 11 (§4), TX055–TX056 (§15) | residue evidence as M4e's: the value only in the target, redacted on return — **built** |
-| **M5d.4** Workspace ownership and disk quota | §§6, 10 (OD-3, OD-6) | the authority's tools and the workload both work on the workspace; a full disk refused, measured |
+| **M5d.4** Workspace ownership and disk quota | §§6, 10 (OD-3, OD-6); as built also private protocol 11 (§3), probe report 3, every launch through the launcher (§5a, OD-12), the exclusion in time (§6), TX057–TX059 (§15) | the authority's tools and the workload both work on the workspace; a full disk refused, measured — **built locally; the owner's review of OD-3, OD-6 and OD-12 and hosted CI outstanding** |
 | **M5d.5** The agent-shaped escape suite and multi-identity evidence | a long-lived agent-shaped workload in `PROXY_ONLY` with declared origins; the hosted three-identity job | ADR-0050 §21's uid-boundary condition shown with real users |
 | **M5d.6** Closeout | run release destroys the environment; the gated eval `m5d-sandbox-exec`; this ADR accepted | every checkpoint's evidence in hosted CI |
 
@@ -903,15 +1139,16 @@ the evidence host's own posture is reported, `posture-reported-matches-host`).
 |---|---|---|
 | OD-1 | Who chooses where `process.exec` runs | **the kernel**: a `READY` environment means sandbox, nothing means M4d's host floor; no runtime field, no fallback |
 | OD-2 | A sandboxed executable's identity | **the operator's image manifest** (path → SHA-256) beside the image digest, proved from outside before every run; workspace scripts run only as arguments of a manifest executable |
-| OD-3 | Workspace ownership | **(a) a workspace group** for V1; (c) copy-in/copy-out later where stronger isolation is wanted |
+| OD-3 | Workspace ownership | **(a) a workspace group** for V1; (c) copy-in/copy-out later where stronger isolation is wanted — **built in M5d.4 as (a)** (§6): the group 10001, the workload's own gid; a root of root or the authority, mode `2770`; nothing repaired; brokered changes excluded while a workload may write — for the owner to confirm |
 | OD-4 | Modes B/C delivery | **the trusted launcher over the exec's stdin** — **built in M5d.3** (§7), with the consumer resolved against the image manifest (§7 item 2), for the owner to confirm |
 | OD-5 | Concurrency and long-lived workloads | **one workload at a time per environment**; long-lived workloads with handles decided at M5d.5 |
-| OD-6 | Disk quota | **an operator-provided bounded filesystem, measured by the probe**; refuse when unbounded |
+| OD-6 | Disk quota | **an operator-provided bounded filesystem, measured by the probe**; refuse when unbounded — **built in M5d.4** (§10): measured by the authority and the probe, the mount's own root, within a quarter below the declared quota, again before every workload; `ENOSPC` changes nothing — for the owner to confirm |
 | OD-7 | `local` | **not in M5d**; with M6, by its own ADR |
 | OD-8 | Default budgets | per workload ≤ 600 s and 128 KiB per stream; per run 100 workloads and 3 600 s |
 | OD-9 | What a concrete `process.exec:<path>` grant means for a run whose environment is a sandbox | **resolved against the image manifest** (path → the pinned digest) when the run is admitted with an execution environment configured, instead of the host's resolver; until then only `process.exec:*` covers a workload and policy narrows it — **built in M5d.2** (§2) |
 | OD-10 | How a production authority gets an environment (M5d.2) | **the operator's file at start, the authority preparing a run's environment on its first permitted launch** (§2a); no runtime-facing lifecycle operation; preparation's bounded hold on the worker accepted as stated, or made a start/collection pair before M5d.6 — **approved by the owner, 2026-10-19, with conditions (below)** |
 | OD-11 | How `workspace_exec_hygiene` is kept in an environment (M5d.2) | **the pinned probe as a trusted launcher**, the per-tool arguments first, undoing invocations and unevidenced tools refused (§5a); the residuals it does not reach stated, never claimed — **approved by the owner, 2026-10-19, with conditions (below)** |
+| OD-12 | How a workload gets the workspace's umask (M5d.4) | **every launch through the pinned probe**, `DIRECT` included as the variable-free profile `direct`, every profile setting the umask `0007` before its `exec` (§5a); the target, its arguments, its identity, its descriptors and its standard input unchanged — **built in M5d.4; flagged for the owner's review, not approved** |
 
 **Owner decisions, 2026-10-19 (M5d.2).** OD-10 and OD-11 are approved for
 M5d.2's implementation, on these conditions, each met as stated; the ADR
@@ -944,6 +1181,15 @@ stays Proposed until M5d.6, and OD-1 to OD-9 await the owner with it.
   as an argument still run, and **kernel-enforced OCI containment (§5, ADR-0047
   §5) remains the security boundary**.
 
+**M5d.4 (2026-10-20), awaiting the owner.** OD-3, OD-6 and OD-12 are built
+as recommended and are **not** approved; nothing here presents them as
+approved. The owner is asked to confirm: OD-3(a) with the workload's own gid
+as the workspace group and the exclusion of brokered changes in time (§6);
+OD-6 as an operator-provisioned filesystem of its own, measured from both
+vantages, with the quarter's tolerance (§10); and OD-12, every launch through
+the trusted launcher (§5a) — the one change to how a `DIRECT` workload is
+started since M5d.2.
+
 ## Consequences
 
 **Positive.** The first code DireWolf runs at an agent's request runs where
@@ -956,7 +1202,11 @@ plan, the record's judgement and the ledger are reused, not duplicated.
 digests and an extra `exec` for `reap` (measured in the evidence). One
 workload at a time per environment. A lost answer destroys the environment,
 and with it `/tmp`'s contents. No `local` before M6. Workspace ownership and
-disk quota are not solved by M5d.1. M5d.2's preparation holds the
+disk quota are not solved by M5d.1; M5d.4 solves them only for a workspace an
+operator provisions as a filesystem of its own, of the group 10001, and
+refuses every other — the operator now has a filesystem to make per
+workspace, and a brokered change waits while a workload runs in its
+workspace (`SHARED_DIRECTORY`). M5d.2's preparation holds the
 authority's worker for its duration — at most 120 s per exchange (§2a) — an
 ended run's environment idles until the next preparation, at most 16 are
 live, and `npm`-family tools and `cargo`, directly or through a wrapper, stay

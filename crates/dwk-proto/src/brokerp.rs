@@ -105,7 +105,7 @@ use crate::wire::{Cx, WireType, expect_integer, expect_string};
 use egress::{EgressCounters, EgressGrant};
 use sandbox::{
     ContainerRef, ContainerRole, EnvironmentProfile, ImageId, InvariantChecks, Milliseconds,
-    NetworkTopology, RuntimeVersion, StoreInstance,
+    NetworkTopology, RuntimeVersion, StoreInstance, WorkspaceBound,
 };
 
 /// The protocol version this build speaks. Version 2 (ADR-0044) added the M4c
@@ -119,10 +119,14 @@ use sandbox::{
 /// `net.http`'s resolution and exchange; version 8 (ADR-0052) a workload run
 /// in a `READY` environment; version 9 (ADR-0052, M5d.2) its start and its
 /// collection; version 10 (M5d.3) a workload that receives one secret
-/// (`broker.workload_secret_start`). The daemons ship together, so 10 is the
+/// (`broker.workload_secret_start`); version 11 (M5d.4) the workspace
+/// contract -- a bounded workspace's quota, capacity and owner on every
+/// environment operation and workload start, the probe's workspace facts,
+/// and the refusals of a full filesystem and of a directory outside the
+/// workspace group's convention. The daemons ship together, so 11 is the
 /// only version either accepts: an older peer is refused by its hello, never
 /// half-understood.
-pub const PROTOCOL: u16 = 10;
+pub const PROTOCOL: u16 = 11;
 
 /// The largest authorisation body the broker reads: one DWKP frame, because an
 /// `fs.write` carries its content and an `fs.patch` its edits. Read from the
@@ -350,7 +354,7 @@ pub const PROCESS_BASE_ENVIRONMENT: &[(&str, &str)] = &[
 
 wire_int! {
     /// The private protocol's version.
-    ProtocolVersion(u16), min = 10, max = 10
+    ProtocolVersion(u16), min = 11, max = 11
 }
 
 const _: () = assert!(ProtocolVersion::MIN == PROTOCOL && ProtocolVersion::MAX == PROTOCOL);
@@ -725,6 +729,19 @@ wire_enum! {
         /// a writer outside the trusted set could race the change, which the
         /// permission model must exclude (ADR-0044 §8).
         SharedDirectory = "SHARED_DIRECTORY",
+        /// The directory whose names would change belongs to the workspace
+        /// group but does not keep its convention (M5d.4, OD-3(a)): it is
+        /// not set-group-id, or the group may not write it -- so what the
+        /// broker made there would not be the group's. Nothing was changed.
+        WorkspaceGroupContract = "WORKSPACE_GROUP_CONTRACT",
+        /// The filesystem had no space -- or the writer no quota -- for the
+        /// change (`ENOSPC`, `EDQUOT`; M5d.4). Nothing was changed.
+        NoSpace = "NO_SPACE",
+        /// An environment named no bounded workspace, and this broker's
+        /// operator did not acknowledge the evidence harness's unverified
+        /// one (`--allow-unverified-workspace`; M5d.4): every production
+        /// environment has the authority's bound. Nothing was created or run.
+        WorkspaceUnverified = "WORKSPACE_UNVERIFIED",
         /// The object or the filesystem cannot be operated on as the contract
         /// requires: a setuid, setgid or sticky file; no atomic exchange.
         Unsupported = "UNSUPPORTED",
@@ -1414,6 +1431,11 @@ wire_struct! {
         required workspace_device: KernelNumber,
         /// Its inode.
         required workspace_inode: KernelNumber,
+        /// A bounded workspace (M5d.4): the operator's quota, and the
+        /// capacity and owner the authority found on its pinned root.
+        /// Absent: the evidence harness's unverified workspace, which only a
+        /// broker started with `--allow-unverified-workspace` accepts.
+        optional workspace_bound: WorkspaceBound,
         /// The container runtime's control socket.
         required runtime_socket: HostPath,
         /// `argv[0]` for the runtime: its canonical path.
@@ -1473,6 +1495,11 @@ wire_struct! {
         required workspace_device: KernelNumber,
         /// Its inode.
         required workspace_inode: KernelNumber,
+        /// A bounded workspace (M5d.4): the operator's quota, and the
+        /// capacity and owner the authority found on its pinned root.
+        /// Absent: the evidence harness's unverified workspace, which only a
+        /// broker started with `--allow-unverified-workspace` accepts.
+        optional workspace_bound: WorkspaceBound,
         /// The container the authority recorded.
         required container: ContainerRef,
         /// The container runtime's control socket.
@@ -2891,6 +2918,10 @@ pub struct EnvironmentSpec {
     pub workspace_path: HostPath,
     /// The workspace directory's `(device, inode)`.
     pub workspace: (u64, u64),
+    /// A bounded workspace's quota and the capacity and owner the
+    /// authority found (M5d.4); `None` for the evidence harness's
+    /// unverified one.
+    pub workspace_bound: Option<WorkspaceBound>,
     /// `PROXY_ONLY`: the relay's SHA-256.
     pub relay_sha256: Option<ContentDigest>,
     /// `PROXY_ONLY`, on a preparation: what the proxy may tunnel to.
@@ -2918,6 +2949,7 @@ impl EnvironmentPrepareAuthorisation {
             workspace_path: environment.workspace_path,
             workspace_device: KernelNumber::from_u64(environment.workspace.0),
             workspace_inode: KernelNumber::from_u64(environment.workspace.1),
+            workspace_bound: environment.workspace_bound,
             runtime_socket: runtime.socket,
             runtime_argv0: runtime.argv0,
             runtime_device: KernelNumber::from_u64(runtime.executable.0),
@@ -2944,6 +2976,7 @@ impl EnvironmentPrepareAuthorisation {
             probe_sha256: self.probe_sha256.clone(),
             workspace_path: self.workspace_path.clone(),
             workspace: (self.workspace_device.value(), self.workspace_inode.value()),
+            workspace_bound: self.workspace_bound.clone(),
             relay_sha256: self.relay_sha256.clone(),
             egress: self.egress.clone(),
         }
@@ -2988,6 +3021,7 @@ impl EnvironmentMeasureAuthorisation {
             workspace_path: environment.workspace_path,
             workspace_device: KernelNumber::from_u64(environment.workspace.0),
             workspace_inode: KernelNumber::from_u64(environment.workspace.1),
+            workspace_bound: environment.workspace_bound,
             container,
             runtime_socket: runtime.socket,
             runtime_argv0: runtime.argv0,
@@ -3015,6 +3049,7 @@ impl EnvironmentMeasureAuthorisation {
             probe_sha256: self.probe_sha256.clone(),
             workspace_path: self.workspace_path.clone(),
             workspace: (self.workspace_device.value(), self.workspace_inode.value()),
+            workspace_bound: self.workspace_bound.clone(),
             relay_sha256: self.relay_sha256.clone(),
             egress: None,
         }

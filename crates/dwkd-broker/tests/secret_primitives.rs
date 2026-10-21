@@ -783,7 +783,10 @@ mod linux {
 
         // Messages the language does not have: closed, unanswered.
         for (case, edit) in [
-            ("old-private-version", ("\"protocol\":10", "\"protocol\":9")),
+            (
+                "old-private-version",
+                ("\"protocol\":11", "\"protocol\":10"),
+            ),
             (
                 "unknown-kind",
                 ("broker.http_credential_exchange", "broker.secret_egress"),

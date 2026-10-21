@@ -221,7 +221,19 @@ fn refusal(reason: &str) -> Result<ToolRefusalReasonV5, AuthorityError> {
 fn failure(reason: &str) -> ToolFailureReasonV5 {
     use ToolFailureReasonV5 as F;
     match reason {
-        "ENVIRONMENT_NOT_CLEAN" => F::EnvironmentNotClean,
+        // The workspace found, before the workload, no longer as the
+        // contract says (M5d.4): the environment, as recorded, does not
+        // hold, and was destroyed.
+        "ENVIRONMENT_NOT_CLEAN"
+        | "WORKSPACE_OWNER"
+        | "WORKSPACE_GROUP"
+        | "WORKSPACE_MODE"
+        | "WORKSPACE_GROUP_MEMBERSHIP"
+        | "WORKSPACE_UNBOUNDED"
+        | "WORKSPACE_QUOTA_MISMATCH"
+        | "WORKSPACE_FILESYSTEM_SHARED"
+        | "WORKSPACE_UNOBSERVABLE"
+        | "WORKSPACE_UNVERIFIED" => F::EnvironmentNotClean,
         "ENVIRONMENT_NOT_FOUND" | "FOREIGN_ENVIRONMENT" | "ENVIRONMENT_AMBIGUOUS" => {
             F::EnvironmentUnavailable
         }

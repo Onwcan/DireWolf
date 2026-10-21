@@ -195,6 +195,13 @@ pub(super) struct Pending {
     binding: Option<RootBinding>,
 }
 
+impl Pending {
+    /// The run whose invocation left it.
+    pub(super) fn run(&self) -> &str {
+        &self.run
+    }
+}
+
 type PendingRow = (
     String,
     String,

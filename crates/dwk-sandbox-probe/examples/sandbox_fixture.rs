@@ -76,6 +76,21 @@
 //! | `workload-secret-env <NAME>` | whether `NAME` is set, its length and fingerprint, the variables' names, what standard input is, every descriptor it holds |
 //! | `workload-secret-fd-child`, `workload-secret-env-child <NAME>` | the same, from a child it starts -- what a descendant inherits |
 //! | `workload-echo-fd <n>`, `workload-echo-env <NAME> <n>` | write the value `n` times to standard output and once to standard error, each split across two writes |
+//!
+//! M5d.4's workspace evidence (ADR-0052 §§6, 10) runs it in a workspace --
+//! the evidence's own scratch directory, or the bounded filesystem of the
+//! workspace group a privileged run provisions -- to show what a workload
+//! makes there, what it can reach, and where the kernel stops it:
+//!
+//! | argv | what |
+//! |---|---|
+//! | `workload-make <name>` | make `<name>.file` and `<name>.dir` with the widest modes, and print their modes and groups and the process's umask |
+//! | `workload-modify <path> <text>`, `workload-read <path>` | append to a file in place; print a file's bytes |
+//! | `workload-fill <name> <max-mib> [sleep\|forks]` | write a MiB at a time until the kernel refuses; print what was written, the errno and what is left; then sleep, or start children until the pids limit refuses one |
+//! | `workload-mounts` | each writable place's size and room, and whether `/` can be written |
+//! | `workload-move-out <name>` | rename a workspace file to `/tmp`, link it from `/tmp` and `/var/tmp`; print each errno |
+//! | `workload-remove <path>` | remove a file, freeing its room |
+//! | `workload-procs` | every other process but init: its uid and its argument vector, one line each |
 
 // The probe crate's other dependencies, which the fixture does not use.
 #[cfg(not(target_os = "linux"))]
@@ -105,7 +120,6 @@ mod linux {
     use std::process::ExitCode;
     use std::time::Duration;
 
-    use dwk_proto::brokerp::KernelNumber;
     use dwk_proto::brokerp::sandbox::{
         InvariantCheck, InvariantChecks, ProbeReport, ProbeReportKind, ProbeReportVersion, Verdict,
         probe_invariants,
@@ -141,10 +155,9 @@ mod linux {
             .collect();
         let report = ProbeReport {
             kind: ProbeReportKind::Report,
-            version: ProbeReportVersion::new(2).unwrap_or_else(|| unreachable!("2 is in range")),
+            version: ProbeReportVersion::new(3).unwrap_or_else(|| unreachable!("3 is in range")),
             checks: InvariantChecks::new(checks).unwrap_or_else(|| unreachable!("bounded")),
-            workspace_device: Some(KernelNumber::from_u64(0)),
-            workspace_inode: Some(KernelNumber::from_u64(0)),
+            workspace: None,
         };
         report.to_bytes().unwrap_or_default()
     }
@@ -1118,6 +1131,219 @@ mod workload {
         sleep("600")
     }
 
+    // ---- M5d.4: the workspace's group, its bound, its mounts ----------------
+
+    /// Print `line`, and succeed.
+    fn said(line: &str) -> ExitCode {
+        let mut out = std::io::stdout().lock();
+        if out.write_all(line.as_bytes()).is_ok() {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::from(3)
+        }
+    }
+
+    /// The errno an error carries, as a number (-1: none).
+    fn errno_of(error: &std::io::Error) -> i32 {
+        error.raw_os_error().unwrap_or(-1)
+    }
+
+    /// `workload-make <name>`: a file and a directory made in `/workspace`
+    /// with the widest modes asked -- the umask decides -- and what they
+    /// came to: modes, groups, and the umask the process has.
+    fn make(name: &str) -> ExitCode {
+        use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
+        let file = format!("/workspace/{name}.file");
+        let dir = format!("/workspace/{name}.dir");
+        let made = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o666)
+            .open(&file)
+            .and_then(|_| std::fs::create_dir(&dir));
+        if let Err(error) = made {
+            return said(&format!("error={}\n", errno_of(&error)));
+        }
+        let umask = std::fs::read_to_string("/proc/self/status")
+            .ok()
+            .and_then(|s| {
+                s.lines()
+                    .find_map(|l| l.strip_prefix("Umask:").map(|v| v.trim().to_owned()))
+            })
+            .unwrap_or_default();
+        match (std::fs::metadata(&file), std::fs::metadata(&dir)) {
+            (Ok(f), Ok(d)) => said(&format!(
+                "file_mode={:o}\nfile_gid={}\ndir_mode={:o}\ndir_gid={}\numask={umask}\n",
+                f.mode() & 0o7777,
+                f.gid(),
+                d.mode() & 0o7777,
+                d.gid()
+            )),
+            _ => ExitCode::from(4),
+        }
+    }
+
+    /// `workload-modify <path> <text>`: append `text` to an existing file in
+    /// place -- no new file, no rename -- and say how it went.
+    fn modify(path: &str, text: &str) -> ExitCode {
+        let appended = std::fs::OpenOptions::new()
+            .append(true)
+            .open(path)
+            .and_then(|mut f| f.write_all(text.as_bytes()));
+        match appended {
+            Ok(()) => said(&format!("modified={}\n", text.len())),
+            Err(error) => said(&format!("error={}\n", errno_of(&error))),
+        }
+    }
+
+    /// `workload-read <path>`: the file's bytes, as hexadecimal.
+    fn read(path: &str) -> ExitCode {
+        match std::fs::read(path) {
+            Ok(bytes) => {
+                let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+                said(&format!("content={hex}\n"))
+            }
+            Err(error) => said(&format!("error={}\n", errno_of(&error))),
+        }
+    }
+
+    /// `statvfs` of `path`: `(size, available)` in bytes, `None` if it fails.
+    fn room(path: &str) -> Option<(u64, u64)> {
+        let stat = nix::sys::statvfs::statvfs(path).ok()?;
+        let unit = stat.fragment_size();
+        Some((
+            stat.blocks().checked_mul(unit)?,
+            stat.blocks_available().checked_mul(unit)?,
+        ))
+    }
+
+    /// `workload-fill <name> <max-mib> [sleep|forks]`: write `/workspace/<name>`
+    /// a MiB at a time until the kernel refuses or `max-mib` is written, and
+    /// say how much and with what errno; then what is left. With `sleep` it
+    /// then sleeps for ever -- the wall clock ends it -- and with `forks` it
+    /// starts children until the pids limit refuses one, and sleeps.
+    fn fill(name: &str, max_mib: &str, after: &str) -> ExitCode {
+        let limit: u64 = max_mib.parse().unwrap_or(0);
+        let chunk = vec![0x5a_u8; 1 << 20];
+        let mut written = 0u64;
+        let mut refused = 0;
+        match std::fs::File::create(format!("/workspace/{name}")) {
+            Err(error) => refused = errno_of(&error),
+            Ok(mut file) => {
+                for _ in 0..limit {
+                    // A partial write is counted: the kernel took those bytes.
+                    match file.write(&chunk) {
+                        Ok(0) => break,
+                        Ok(n) => written += u64::try_from(n).unwrap_or(0),
+                        Err(error) => {
+                            refused = errno_of(&error);
+                            break;
+                        }
+                    }
+                }
+                if let Err(error) = file.sync_all()
+                    && refused == 0
+                {
+                    refused = errno_of(&error);
+                }
+            }
+        }
+        let (size, available) = room("/workspace").unwrap_or((0, 0));
+        let mut line =
+            format!("written={written}\nerrno={refused}\nsize={size}\navailable={available}\n");
+        if after == "forks" {
+            let mut started = 0u32;
+            while Command::new("/proc/self/exe")
+                .args(["workload-sleep", "600"])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .is_ok()
+            {
+                started += 1;
+                if started > 1000 {
+                    break;
+                }
+            }
+            line.push_str(&format!("forked={started}\n"));
+        }
+        let _ = said(&line);
+        let _ = std::io::stdout().flush();
+        if after == "sleep" || after == "forks" {
+            return sleep("600");
+        }
+        ExitCode::SUCCESS
+    }
+
+    /// `workload-mounts`: every writable place's size and what is left, and
+    /// whether `/` can be written.
+    fn mounts() -> ExitCode {
+        let mut line = String::new();
+        for path in ["/workspace", "/tmp", "/var/tmp"] {
+            let (size, available) = room(path).unwrap_or((0, 0));
+            line.push_str(&format!("{path}={size}/{available}\n"));
+        }
+        let root =
+            std::fs::write("/.direwolf-fixture-root", b"x").map_or_else(|e| errno_of(&e), |()| 0);
+        line.push_str(&format!("root_write_errno={root}\n"));
+        said(&line)
+    }
+
+    /// `workload-move-out <name>`: try to take `/workspace/<name>` out of the
+    /// workspace -- renamed to `/tmp`, linked from `/tmp` and `/var/tmp` --
+    /// and print each errno (0: it worked).
+    fn move_out(name: &str) -> ExitCode {
+        let from = format!("/workspace/{name}");
+        let result = |r: std::io::Result<()>| r.map_or_else(|e| errno_of(&e), |()| 0);
+        let renamed = result(std::fs::rename(&from, format!("/tmp/{name}")));
+        let linked = result(std::fs::hard_link(&from, format!("/tmp/{name}.link")));
+        let var_linked = result(std::fs::hard_link(&from, format!("/var/tmp/{name}.link")));
+        said(&format!(
+            "rename_tmp={renamed}\nlink_tmp={linked}\nlink_var_tmp={var_linked}\n"
+        ))
+    }
+
+    /// `workload-procs`: every other process its pid namespace holds but
+    /// init, one line each -- its uid and its argument vector -- so that a
+    /// test can say which process it saw, not only how many.
+    fn procs() -> ExitCode {
+        use std::os::unix::fs::MetadataExt as _;
+        let me = std::process::id();
+        let mut lines = String::new();
+        if let Ok(entries) = std::fs::read_dir("/proc") {
+            for entry in entries.flatten() {
+                let Some(pid) = entry
+                    .file_name()
+                    .to_str()
+                    .and_then(|n| n.parse::<u32>().ok())
+                else {
+                    continue;
+                };
+                if pid == me || pid == 1 {
+                    continue;
+                }
+                let uid = std::fs::metadata(format!("/proc/{pid}")).map_or(u32::MAX, |m| m.uid());
+                let argv = std::fs::read(format!("/proc/{pid}/cmdline")).unwrap_or_default();
+                let words: Vec<String> = argv
+                    .split(|b| *b == 0)
+                    .filter(|w| !w.is_empty())
+                    .map(|w| String::from_utf8_lossy(w).into_owned())
+                    .collect();
+                lines.push_str(&format!("proc uid={uid} argv={}\n", words.join(" ")));
+            }
+        }
+        said(&lines)
+    }
+
+    /// `workload-remove <path>`: remove one file, freeing what it held.
+    fn remove(path: &str) -> ExitCode {
+        match std::fs::remove_file(path) {
+            Ok(()) => said("removed=1\n"),
+            Err(error) => said(&format!("error={}\n", errno_of(&error))),
+        }
+    }
+
     pub(super) fn main(args: &[String]) -> Option<ExitCode> {
         let arg = |n: usize| args.get(n).map_or("", String::as_str);
         Some(match arg(1) {
@@ -1146,6 +1372,14 @@ mod workload {
             "workload-secret-env-child" => child(&["workload-secret-env", arg(2)]),
             "workload-echo-fd" => echo_fd(arg(2)),
             "workload-echo-env" => echo_env(arg(2), arg(3)),
+            "workload-make" => make(arg(2)),
+            "workload-modify" => modify(arg(2), arg(3)),
+            "workload-read" => read(arg(2)),
+            "workload-fill" => fill(arg(2), arg(3), arg(4)),
+            "workload-mounts" => mounts(),
+            "workload-move-out" => move_out(arg(2)),
+            "workload-remove" => remove(arg(2)),
+            "workload-procs" => procs(),
             _ => return None,
         })
     }

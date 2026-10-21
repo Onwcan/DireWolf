@@ -51,7 +51,7 @@ use crate::broker::{
     Unreachable,
 };
 use crate::capability::PrivacyClass;
-use crate::sandbox::{SandboxConfig, WorkloadBudget};
+use crate::sandbox::{SandboxConfig, WorkloadBudget, WorkspaceSetting};
 use crate::scratch::Scratch;
 use crate::state::{
     AgentProfileSpec, AuthenticatedSubject, Authority, CallerContext, CrashHook, CrashPoint,
@@ -224,6 +224,10 @@ struct Fake {
     containers: AtomicU64,
     /// Every secret-bearing start, in order (M5d.3).
     secrets: Mutex<Vec<SecretAsked>>,
+    /// How the next writes end (M5d.4); then each is a clean creation.
+    writes: Mutex<VecDeque<Answer>>,
+    /// How the next reclamations end (M5d.4); then each finds nothing.
+    reclaims: Mutex<VecDeque<Answer>>,
 }
 
 impl Fake {
@@ -466,6 +470,31 @@ impl EffectBroker for Fake {
                     mode: 0o755,
                 }))
             }
+            // A name change and a reclamation (M5d.4), for the workspace's
+            // exclusion: the fake performs nothing.
+            Operation::Write { .. } => {
+                self.record("fs.write", invocation, (None, None));
+                self.writes
+                    .lock()
+                    .unwrap()
+                    .pop_front()
+                    .unwrap_or(Ok(BrokerDelivery::Write {
+                        created: true,
+                        debris: false,
+                    }))
+            }
+            Operation::Reclaim { .. } => {
+                self.record("fs.reclaim", invocation, (None, None));
+                self.reclaims
+                    .lock()
+                    .unwrap()
+                    .pop_front()
+                    .unwrap_or(Ok(BrokerDelivery::Reclaim {
+                        state: dwk_proto::brokerp::ReclaimState::Absent,
+                        holds: None,
+                        held: None,
+                    }))
+            }
             other => panic!("not a sandbox operation: {}", other.name()),
         }
     }
@@ -482,15 +511,15 @@ struct Fixture {
     config: StartupConfig,
 }
 
-fn startup(policy: PolicySet) -> StartupConfig {
+/// What every fixture's operator profile declares, unless a test asks for
+/// more.
+const DECLARED: &[&str] = &["process.exec:*", "fs.read:*", "fs.stat:*"];
+
+fn startup(policy: PolicySet, declared: &[&str]) -> StartupConfig {
     StartupConfig::new(
         policy,
         Mode::Balanced,
-        vec![
-            "process.exec:*".to_owned(),
-            "fs.read:*".to_owned(),
-            "fs.stat:*".to_owned(),
-        ],
+        declared.iter().map(|c| (*c).to_owned()).collect(),
     )
 }
 
@@ -521,6 +550,7 @@ fn sandbox(image: &str, manifest: &[(&str, &str)]) -> SandboxConfig {
         image,
         PROBE,
         NetworkTopology::NoNetwork,
+        WorkspaceSetting::UnverifiedEvidence,
     )
     .unwrap()
     .with_workloads(manifest, WorkloadBudget::default())
@@ -547,12 +577,17 @@ impl Fixture {
 
     /// A fixture whose authority stops at `hook`'s point.
     fn with(policy: PolicySet, hook: Option<CrashHook>) -> Self {
+        Self::with_declared(policy, hook, DECLARED)
+    }
+
+    /// A fixture whose operator profile, and ceiling, declare `declared`.
+    fn with_declared(policy: PolicySet, hook: Option<CrashHook>, declared: &[&str]) -> Self {
         let scratch = Scratch::new("workload-route");
         let root = scratch.path().join("ws");
         std::fs::create_dir_all(&root).unwrap();
         let fake = Arc::new(Fake::default());
         let clock = Arc::new(ManualClock::new(START_MS));
-        let config = startup(policy);
+        let config = startup(policy, declared);
         let mut fx = Self {
             scratch,
             authority: None,
@@ -572,11 +607,7 @@ impl Fixture {
             operator
                 .install_agent_profile(&AgentProfileSpec {
                     name: AgentProfileName::new("operator").unwrap(),
-                    declared: vec![
-                        "process.exec:*".to_owned(),
-                        "fs.read:*".to_owned(),
-                        "fs.stat:*".to_owned(),
-                    ],
+                    declared: declared.iter().map(|c| (*c).to_owned()).collect(),
                     baseline_skills: Vec::new(),
                     privacy_default: PrivacyClass::Any,
                 })
@@ -1729,3 +1760,7 @@ fn the_broker_is_asked_only_what_the_authority_decided() {
 // A sandboxed launch's credential (M5d.3): this fake, and real keyring values.
 #[path = "workload_secret_tests.rs"]
 mod secret;
+
+/// M5d.4: the workspace contract on the authority's side.
+#[path = "workspace_route_tests.rs"]
+mod workspace;

@@ -83,6 +83,7 @@
 
 use std::os::fd::OwnedFd;
 
+use dwk_proto::brokerp::sandbox::WORKSPACE_GROUP;
 use dwk_proto::brokerp::{
     BrokerDone, BrokerRefusal, FsReclaimAuthorisation, FsReclaimDone, Indeterminate, KernelNumber,
     OutcomeResult, ReclaimState, StagingHolds, StagingOperation,
@@ -123,7 +124,20 @@ impl From<BrokerRefusal> for Stop {
 pub(super) const fn denied_or(errno: Errno, otherwise: BrokerRefusal) -> BrokerRefusal {
     match errno {
         Errno::ACCESS | Errno::PERM | Errno::ROFS => BrokerRefusal::WriteDenied,
+        // No room -- or no quota -- for the change (M5d.4): a full
+        // workspace, which is no one's fault but the writer's.
+        Errno::NOSPC | Errno::DQUOT => BrokerRefusal::NoSpace,
         _ => otherwise,
+    }
+}
+
+/// The class of a failure to write what the broker makes in its own staging
+/// directory -- the new file, its record -- before any workspace name
+/// changes: no room for it (M5d.4), or another error.
+pub(super) const fn room_or_io(errno: Errno) -> BrokerRefusal {
+    match errno {
+        Errno::NOSPC | Errno::DQUOT => BrokerRefusal::NoSpace,
+        _ => BrokerRefusal::IoError,
     }
 }
 
@@ -225,12 +239,21 @@ pub(super) fn write_all(file: &OwnedFd, mut bytes: &[u8]) -> Result<(), Errno> {
 /// The directory whose names change must not be writable by every user: the
 /// permission model (ADR-0044 §8) keeps any writer outside the trusted set away
 /// from it, and a directory that says otherwise is refused, unchanged.
+///
+/// And a directory of the workspace group keeps the group's convention
+/// (M5d.4, OD-3(a)): set-group-id -- so what the broker makes there is the
+/// group's, and the workload can reach it -- and the group's to write. One
+/// that does not, a workload having cleared the bit or the group's write, is
+/// refused, unchanged (`WORKSPACE_GROUP_CONTRACT`), rather than given a
+/// file the workload could not reach.
 pub(super) fn exclusive(parent: &Stat) -> Result<(), BrokerRefusal> {
-    if parent.st_mode & 0o002 == 0 {
-        Ok(())
-    } else {
-        Err(BrokerRefusal::SharedDirectory)
+    if parent.st_mode & 0o002 != 0 {
+        return Err(BrokerRefusal::SharedDirectory);
     }
+    if parent.st_gid == WORKSPACE_GROUP && parent.st_mode & 0o2070 != 0o2070 {
+        return Err(BrokerRefusal::WorkspaceGroupContract);
+    }
+    Ok(())
 }
 
 /// A staging directory's name.
@@ -399,9 +422,9 @@ impl Staging {
             dir,
         };
         // Durable before anything is put in it: the mode, then the name.
-        if synced(&staging.dir).and_then(|()| synced(parent)).is_err() {
+        if let Err(errno) = synced(&staging.dir).and_then(|()| synced(parent)) {
             staging.remove(parent);
-            return Err(BrokerRefusal::IoError);
+            return Err(room_or_io(errno));
         }
         Ok(staging)
     }
@@ -417,14 +440,18 @@ impl Staging {
             OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
             Mode::RUSR | Mode::WUSR,
         )
-        .map_err(|_| BrokerRefusal::IoError)?;
+        .map_err(room_or_io)?;
         changed("create record", &[&self.dir]);
         let durable = write_all(&file, record.text().as_bytes())
             .and_then(|()| sync_file(&file, RECORD))
             .and_then(|()| synced(&self.dir));
-        if durable.is_err() {
+        if let Err(errno) = durable {
+            // It and its entry durable before its removal is (ADR-0044 §10),
+            // even when the write failed half-way (a full filesystem, M5d.4).
+            let _ = sync_file(&file, RECORD);
+            let _ = synced(&self.dir);
             self.unlink(RECORD);
-            return Err(BrokerRefusal::IoError);
+            return Err(room_or_io(errno));
         }
         Ok(())
     }

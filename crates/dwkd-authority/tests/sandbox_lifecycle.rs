@@ -64,7 +64,7 @@ mod linux {
     use dwk_proto::brokerp::sandbox::{AssuranceLevel, NetworkTopology};
     use dwk_proto::wire::id::{EnvironmentId, RunId};
     use dwkd_authority::broker::{EffectBroker, UnixBroker};
-    use dwkd_authority::sandbox::{EgressConfig, SandboxConfig};
+    use dwkd_authority::sandbox::{EgressConfig, SandboxConfig, WorkspaceSetting};
     use dwkd_authority::state::{
         Authority, AuthorityError, CrashHook, CrashPoint, EnvironmentReply, EnvironmentState,
         HookAction, ManualClock, ReconcileReport, Reply, StartOptions, StartupConfig, WorkspaceId,
@@ -266,11 +266,16 @@ mod linux {
                 image,
                 probe,
                 NetworkTopology::NoNetwork,
+                WorkspaceSetting::UnverifiedEvidence,
             )
             .unwrap();
             Self::with(
                 tag,
-                &["--allow-shared-authority-uid", "--allow-evidence-topology"],
+                &[
+                    "--allow-shared-authority-uid",
+                    "--allow-evidence-topology",
+                    "--allow-unverified-workspace",
+                ],
                 sandbox,
             )
         }
@@ -284,6 +289,7 @@ mod linux {
                 image,
                 probe,
                 EgressConfig::new(relay, 4, 1 << 20, 1 << 20).unwrap(),
+                WorkspaceSetting::UnverifiedEvidence,
             )
             .unwrap();
             Self::with(
@@ -292,6 +298,8 @@ mod linux {
                     "--allow-shared-authority-uid",
                     "--allow-evidence-egress",
                     fixture,
+                    // The evidence's own workspace (M5d.4): acknowledged.
+                    "--allow-unverified-workspace",
                 ],
                 sandbox,
             )

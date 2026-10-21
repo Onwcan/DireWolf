@@ -355,6 +355,25 @@ pub struct PinnedRoot {
     identity: FileIdentity,
 }
 
+/// A pinned root as `fstat` and `fstatvfs` of its descriptor found it
+/// (M5d.4). Facts, not a judgement: the state layer holds them against the
+/// workspace contract.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RootMeasure {
+    /// Its owner.
+    pub uid: u32,
+    /// Its group.
+    pub gid: u32,
+    /// `st_mode & 0o7777`.
+    pub mode: u32,
+    /// `f_frsize`.
+    pub block_size: u64,
+    /// `f_blocks`.
+    pub blocks: u64,
+    /// `f_bavail`.
+    pub blocks_available: u64,
+}
+
 impl fmt::Debug for PinnedRoot {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("PinnedRoot")
@@ -406,6 +425,19 @@ impl PinnedRoot {
     #[must_use]
     pub const fn identity(&self) -> FileIdentity {
         self.identity
+    }
+
+    /// What the pinned directory is, as its own descriptor says (M5d.4,
+    /// ADR-0052 §§6, 10): its owner, group and mode, and its filesystem's
+    /// size -- the workspace contract's host vantage, read from the object
+    /// pinned and never from a path.
+    ///
+    /// # Errors
+    ///
+    /// [`RootError::Io`] when the kernel will not say; [`RootError::Unsupported`]
+    /// off Linux.
+    pub fn measure(&self) -> Result<RootMeasure, RootError> {
+        imp::measure_root(&self.handle.0)
     }
 
     /// `${WORKSPACE}` in canonical form: `/workspace`, the anchor every path

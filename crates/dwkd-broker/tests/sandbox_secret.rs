@@ -285,7 +285,8 @@ mod linux {
                 .arg("--authority-uid")
                 .arg(own_uid().to_string())
                 .arg("--allow-shared-authority-uid")
-                .arg("--allow-evidence-topology");
+                .arg("--allow-evidence-topology")
+                .arg("--allow-unverified-workspace");
             if let Some(point) = crash {
                 command.env("DWKD_BROKER_CRASH_AT", point);
             }
@@ -414,6 +415,10 @@ mod linux {
             probe_sha256: ContentDigest::new(ev.probe_sha256.clone()).unwrap(),
             workspace_path: HostPath::new(workspace.display().to_string()).unwrap(),
             workspace: identity(workspace),
+            // The evidence's own scratch directory: no group, no bound
+            // proved (M5d.4), which this broker admits only because it
+            // was started with --allow-unverified-workspace.
+            workspace_bound: None,
             relay_sha256: None,
             egress: None,
         }
@@ -1136,7 +1141,12 @@ mod linux {
         let (runtime, exe, cwd) = runtime(&ev);
         let (s2, c2) = (s.clone(), container.clone());
         let plain = invocation_ordinary(&socket, (runtime, exe, cwd), (s2, c2), &ev);
-        assert_eq!(line(&text(&plain), "fd3"), "absent");
+        let out = text(&plain);
+        assert_eq!(line(&out, "fd3"), "absent");
+        // M5d.4: the `direct` launcher in front of it changes none of that --
+        // standard input `/dev/null`, exactly the three standard descriptors.
+        assert_eq!(line(&out, "stdin"), "/dev/null");
+        assert_eq!(line(&out, "fds"), "0,1,2");
         assert_eq!(plain.redactions, None);
         evidence("an-ordinary-workload-is-unchanged", "fd3 absent, no count");
         destroy(&socket, &ev, &s, &container);

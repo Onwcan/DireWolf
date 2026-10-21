@@ -44,9 +44,10 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use dwk_proto::brokerp::sandbox::{
-    AssuranceLevel, ContainerRef, ContainerRole, MAX_PROBE_REPORT_BYTES, Milliseconds,
-    NetworkTopology, ProbeReport, RuntimeVersion, SandboxInvariant, StoreInstance, Vantage,
-    Verdict,
+    AssuranceLevel, ContainerRef, ContainerRole, MAX_PROBE_REPORT_BYTES,
+    MAX_WORKSPACE_REPORT_BYTES, Milliseconds, NetworkTopology, ProbeReport, RuntimeVersion,
+    SandboxInvariant, StoreInstance, Vantage, Verdict, WORKSPACE_GROUP, WorkspaceContract,
+    WorkspaceFacts, WorkspaceReport, workspace_capacity, workspace_ownership,
 };
 use dwk_proto::brokerp::workload::{MAX_REAPED_PROCESSES, WorkloadSpec};
 use dwk_proto::brokerp::{BrokerRefusal, ContainerState, EnvironmentSpec, RuntimeSpec};
@@ -702,16 +703,11 @@ impl<'a> Oci<'a> {
             Verdict::Unobservable
         };
         checks.push((SandboxInvariant::HostProbeDigest, digest));
-        let workspace = report.as_ref().map_or(Verdict::Unobservable, |r| {
-            match (&r.workspace_device, &r.workspace_inode) {
-                (Some(dev), Some(ino)) if (dev.value(), ino.value()) == spec.workspace => {
-                    Verdict::Pass
-                }
-                (Some(_), Some(_)) => Verdict::Fail,
-                _ => Verdict::Unobservable,
-            }
-        });
-        checks.push((SandboxInvariant::HostWorkspaceIdentity, workspace));
+        checks.extend(workspace_checks(
+            report.as_ref().and_then(|r| r.workspace.as_ref()),
+            spec,
+            crate::posture::member_of(WORKSPACE_GROUP),
+        ));
         checks.push((SandboxInvariant::HostProxyRelay, self.peers(handle, spec)));
         checks.push((
             SandboxInvariant::HostRelayDigest,
@@ -733,10 +729,13 @@ impl Oci<'_> {
     /// recorded container, labelled as exactly this environment, running,
     /// and every required invariant the record can show passing — the
     /// probe's bytes among them, because `reap` runs it. The probe's own
-    /// `CONTAINER_*` facts and the workspace's identity from inside were
-    /// measured when the environment was prepared and at every measurement
-    /// since; what they govern is what the record shows has not changed.
-    /// Nothing is run inside.
+    /// `CONTAINER_*` facts were measured when the environment was prepared
+    /// and at every measurement since; what they govern is what the record
+    /// shows has not changed. **The workspace is read again** (M5d.4): the
+    /// proved probe's `workspace`, which writes nothing, says what is
+    /// mounted now -- its identity, its root's owner, group and mode, and its
+    /// filesystem's size -- so that a workspace whose bound or ownership
+    /// changed since the measurement runs nothing more.
     fn judged_for_work(
         &self,
         handle: &EnvHandle,
@@ -757,23 +756,62 @@ impl Oci<'_> {
             return Err(not_clean);
         }
         let mut checks = record.judge(spec, self.seccomp_profile, &self.socket);
-        checks.push((
-            SandboxInvariant::HostProbeDigest,
-            self.probe_digest(&handle.container, spec),
+        let probe = self.probe_digest(&handle.container, spec);
+        checks.push((SandboxInvariant::HostProbeDigest, probe));
+        // A probe that is not the pinned one is never run.
+        let workspace = if probe == Verdict::Pass {
+            self.workspace_now(&handle.container)
+        } else {
+            None
+        };
+        checks.extend(workspace_checks(
+            workspace.as_ref(),
+            spec,
+            crate::posture::member_of(WORKSPACE_GROUP),
         ));
         checks.push((SandboxInvariant::HostProxyRelay, self.peers(handle, spec)));
         checks.push((
             SandboxInvariant::HostRelayDigest,
             self.running_relay_digest(spec),
         ));
-        let clean = dwk_proto::brokerp::sandbox::required_invariants(spec.network)
-            .iter()
-            .filter(|invariant| {
-                invariant.vantage() == Vantage::Host
-                    && **invariant != SandboxInvariant::HostWorkspaceIdentity
-            })
-            .all(|invariant| checks.contains(&(*invariant, Verdict::Pass)));
-        if clean { Ok(()) } else { Err(not_clean) }
+        let failed: Vec<SandboxInvariant> =
+            dwk_proto::brokerp::sandbox::required_invariants(spec.network, contract(spec))
+                .into_iter()
+                .filter(|invariant| invariant.vantage() == Vantage::Host)
+                .filter(|invariant| !checks.contains(&(*invariant, Verdict::Pass)))
+                .collect();
+        if failed.is_empty() {
+            Ok(())
+        } else {
+            crate::event(&format!(
+                "workload_refused not_clean={}",
+                failed
+                    .iter()
+                    .map(|i| i.as_str())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ));
+            Err(not_clean)
+        }
+    }
+
+    /// What the mounted workspace is now, as the proved probe's `workspace`
+    /// reads it -- or `None` when it does not answer exactly one report.
+    fn workspace_now(&self, container: &ContainerRef) -> Option<WorkspaceFacts> {
+        let done = self
+            .runtime
+            .call_within(
+                plan::workspace(container),
+                MAX_WORKSPACE_REPORT_BYTES + 1,
+                PROBE_STEP,
+            )
+            .ok()?;
+        if done.stdout_cut || !succeeded(&done) {
+            return None;
+        }
+        WorkspaceReport::decode_bytes(&done.stdout)
+            .ok()
+            .map(|report| report.workspace)
     }
 
     /// The executable's bytes, copied out of the container's own root,
@@ -884,11 +922,64 @@ fn order(checks: &[(SandboxInvariant, Verdict)]) -> Checks {
         .collect()
 }
 
-/// Whether every required invariant passed.
-pub(crate) fn clean(checks: &Checks, topology: NetworkTopology) -> bool {
-    dwk_proto::brokerp::sandbox::required_invariants(topology)
+/// Whether every invariant `spec` requires passed.
+pub(crate) fn clean(checks: &Checks, spec: &EnvironmentSpec) -> bool {
+    dwk_proto::brokerp::sandbox::required_invariants(spec.network, contract(spec))
         .iter()
         .all(|invariant| checks.contains(&(*invariant, Verdict::Pass)))
+}
+
+/// The workspace contract `spec` names: bounded when the authority sent the
+/// bound, the evidence harness's unverified workspace otherwise -- which the
+/// supervisor admits only for its evidence topology (M5d.4).
+pub(crate) const fn contract(spec: &EnvironmentSpec) -> WorkspaceContract {
+    if spec.workspace_bound.is_some() {
+        WorkspaceContract::Bounded
+    } else {
+        WorkspaceContract::UnverifiedEvidence
+    }
+}
+
+/// The workspace's three host-judged invariants (M5d.4) from what the probe
+/// found mounted -- `None`: it said nothing believable -- against what the
+/// authority found on its side: the identity it pinned; the root's owner,
+/// group and mode, with this broker a member of the group (`member`, as the
+/// kernel says it now; `None`: it cannot say); and a filesystem of its own
+/// within the quota. An unverified workspace has no bound to be judged
+/// against: its ownership and capacity are reported `UNOBSERVABLE`, and
+/// nothing requires them.
+pub(crate) fn workspace_checks(
+    facts: Option<&WorkspaceFacts>,
+    spec: &EnvironmentSpec,
+    member: Option<bool>,
+) -> [(SandboxInvariant, Verdict); 3] {
+    let identity = SandboxInvariant::HostWorkspaceIdentity;
+    let ownership = SandboxInvariant::HostWorkspaceOwnership;
+    let capacity = SandboxInvariant::HostWorkspaceCapacity;
+    let Some(facts) = facts else {
+        return [
+            (identity, Verdict::Unobservable),
+            (ownership, Verdict::Unobservable),
+            (capacity, Verdict::Unobservable),
+        ];
+    };
+    let same = if facts.identity() == spec.workspace {
+        Verdict::Pass
+    } else {
+        Verdict::Fail
+    };
+    let (owned, bounded) = match &spec.workspace_bound {
+        Some(bound) => (
+            match (workspace_ownership(facts, bound), member) {
+                (Verdict::Pass, Some(true)) => Verdict::Pass,
+                (Verdict::Pass, None) => Verdict::Unobservable,
+                _ => Verdict::Fail,
+            },
+            workspace_capacity(facts, bound),
+        ),
+        None => (Verdict::Unobservable, Verdict::Unobservable),
+    };
+    [(identity, same), (ownership, owned), (capacity, bounded)]
 }
 
 impl ExecutionEnvironment for Oci<'_> {
@@ -962,7 +1053,7 @@ impl ExecutionEnvironment for Oci<'_> {
         let keep = measured
             .checks
             .as_ref()
-            .is_some_and(|checks| clean(checks, spec.network));
+            .is_some_and(|checks| clean(checks, spec));
         if !keep {
             // Never left running unless it measured clean: helpers,
             // environment and listener alike.
@@ -1283,3 +1374,7 @@ mod tests {
         assert_eq!(lines(b"a\n\nb\n"), Some(vec!["a", "b"]));
     }
 }
+
+#[cfg(test)]
+#[path = "oci_tests.rs"]
+mod workspace_tests;

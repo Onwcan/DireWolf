@@ -69,7 +69,7 @@ mod linux {
     use dwk_proto::wire::id::{EnvironmentId, RunId};
     use dwkd_authority::broker::{EffectBroker, UnixBroker};
     use dwkd_authority::capability::PrivacyClass;
-    use dwkd_authority::sandbox::{SandboxConfig, WorkloadBudget};
+    use dwkd_authority::sandbox::{SandboxConfig, WorkloadBudget, WorkspaceSetting};
     use dwkd_authority::server::{PeerPolicy, Served, serve_authority};
     use dwkd_authority::state::{
         Authority, AuthorityError, CrashHook, CrashPoint, EnvironmentReply, EnvironmentState,
@@ -225,6 +225,37 @@ reason = "NO_MATCHING_RULE"
                 .and_then(|n| n.trim().parse::<u32>().ok())
                 .map_or(u32::MAX, |n| n.saturating_sub(1))
         }
+
+        /// Every process the container holds besides init and the census
+        /// itself: `uid=<n> argv=<words>`, one line each.
+        fn procs(&self, container: &str) -> Vec<String> {
+            let out = self.ok(&["container", "exec", container, FIXTURE, "workload-procs"]);
+            out.lines()
+                .filter_map(|l| l.strip_prefix("proc "))
+                .map(str::to_owned)
+                .collect()
+        }
+
+        /// Wait, bounded, until the container holds `line` -- one process,
+        /// by its uid and argument vector -- and return every other process
+        /// it then held. A broker's start answer precedes the runtime's
+        /// `exec` (the supervisor sends `go` with it, ADR-0052 §3): a census
+        /// taken at once may run before the workload exists. Its argument
+        /// vector being the target's proves the launcher reached `exec`.
+        fn awaited(&self, container: &str, line: &str) -> Vec<String> {
+            let deadline = Instant::now() + Duration::from_secs(60);
+            loop {
+                let procs = self.procs(container);
+                if procs.iter().any(|p| p == line) {
+                    return procs;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "{line:?} never ran; the container held {procs:?}"
+                );
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        }
     }
 
     /// Everything a test had made, removed when it ends: every container
@@ -269,6 +300,39 @@ reason = "NO_MATCHING_RULE"
         next_session: u64,
         runtime: Runtime,
         reaper: Reaper,
+        broker_flags: Vec<&'static str>,
+    }
+
+    /// Where a Lab's workspace is and under what contract (M5d.4, ADR-0052
+    /// §6). The evidence's own unless a test says otherwise: a fresh
+    /// world-writable directory under the unverified-evidence waiver, which
+    /// its broker is started to allow.
+    struct Provision {
+        /// An operator-provisioned root, or `None`: a fresh scratch one.
+        root: Option<PathBuf>,
+        setting: WorkspaceSetting,
+        /// The filesystem verbs too: a `maintainer` profile and a ceiling
+        /// that write.
+        writes: bool,
+    }
+
+    impl Provision {
+        const fn evidence() -> Self {
+            Self {
+                root: None,
+                setting: WorkspaceSetting::UnverifiedEvidence,
+                writes: false,
+            }
+        }
+
+        /// The broker's flags: the waiver only under the waiver's contract.
+        fn broker_flags(&self) -> Vec<&'static str> {
+            let mut flags = vec!["--allow-shared-authority-uid", "--allow-evidence-topology"];
+            if self.setting == WorkspaceSetting::UnverifiedEvidence {
+                flags.push("--allow-unverified-workspace");
+            }
+            flags
+        }
     }
 
     fn stop_at(point: CrashPoint) -> CrashHook {
@@ -321,6 +385,10 @@ reason = "NO_MATCHING_RULE"
         }
 
         fn custom(tag: &str, custom: Custom) -> Self {
+            Self::provisioned(tag, custom, Provision::evidence())
+        }
+
+        fn provisioned(tag: &str, custom: Custom, provision: Provision) -> Self {
             let probe = var("DW_SANDBOX_PROBE_SHA256");
             let manifest: Vec<(&str, &str)> = custom
                 .manifest
@@ -333,6 +401,7 @@ reason = "NO_MATCHING_RULE"
                 &custom.image,
                 &probe,
                 NetworkTopology::NoNetwork,
+                provision.setting,
             )
             .unwrap()
             .with_workloads(&manifest, custom.budget)
@@ -344,19 +413,25 @@ reason = "NO_MATCHING_RULE"
             };
             let dir = TempDir::new(tag);
             let broker_socket = dir.path().join("broker").join("broker.sock");
-            let broker = Broker::start(
-                &broker_socket,
-                own_uid(),
-                &["--allow-shared-authority-uid", "--allow-evidence-topology"],
-            );
-            let workspace = dir.path().join("workspace");
-            std::fs::create_dir_all(&workspace).unwrap();
-            // The environment's user writes the evidence's workspace; the
-            // production ownership model is M5d.4's (ADR-0052 §6).
-            std::fs::set_permissions(&workspace, std::fs::Permissions::from_mode(0o777)).unwrap();
+            let broker_flags = provision.broker_flags();
+            let broker = Broker::start(&broker_socket, own_uid(), &broker_flags);
+            let workspace = provision.root.clone().unwrap_or_else(|| {
+                let workspace = dir.path().join("workspace");
+                std::fs::create_dir_all(&workspace).unwrap();
+                // The environment's user writes the evidence's workspace;
+                // the production ownership model is M5d.4's (ADR-0052 §6).
+                std::fs::set_permissions(&workspace, std::fs::Permissions::from_mode(0o777))
+                    .unwrap();
+                workspace
+            });
             let mut ceiling = super::state_support::ceiling();
             ceiling.push("process.exec:*".to_owned());
             ceiling.push("fs.stat:*".to_owned());
+            if provision.writes {
+                for verb in ["fs.list", "fs.write", "fs.create", "fs.delete"] {
+                    ceiling.push(format!("{verb}:*"));
+                }
+            }
             let config = StartupConfig::new(custom.policy, Mode::Balanced, ceiling);
             let mut lab = Self {
                 dir,
@@ -370,6 +445,7 @@ reason = "NO_MATCHING_RULE"
                 next_session: 1,
                 runtime,
                 reaper,
+                broker_flags,
             };
             lab.start(None);
             let authority = lab.authority();
@@ -383,6 +459,24 @@ reason = "NO_MATCHING_RULE"
                     PrivacyClass::Any,
                 ))
                 .unwrap();
+            if provision.writes {
+                operator
+                    .install_agent_profile(&profile(
+                        "maintainer",
+                        &[
+                            "process.exec:*",
+                            "fs.read:*",
+                            "fs.list:*",
+                            "fs.stat:*",
+                            "fs.write:*",
+                            "fs.create:*",
+                            "fs.delete:*",
+                        ],
+                        &[],
+                        PrivacyClass::Any,
+                    ))
+                    .unwrap();
+            }
             operator
                 .install_workspace(
                     &WorkspaceId::new("ws").unwrap(),
@@ -511,11 +605,7 @@ reason = "NO_MATCHING_RULE"
 
         fn restart_broker(&mut self) {
             self.broker.kill();
-            self.broker = Broker::start(
-                &self.broker_socket,
-                own_uid(),
-                &["--allow-shared-authority-uid", "--allow-evidence-topology"],
-            );
+            self.broker = Broker::start(&self.broker_socket, own_uid(), &self.broker_flags);
         }
     }
 
@@ -856,7 +946,15 @@ reason = "NO_MATCHING_RULE"
             lab.authority()
                 .workload_run(&run, &fixture(&["workload-sleep", "300"], "c-9")),
         );
+        // The answer came first; the workload follows it. It is the target
+        // itself -- the launcher reached its `exec` -- as the workload's
+        // identity, and nothing else runs.
+        let workload = format!("uid=10001 argv={FIXTURE} workload-sleep 300");
+        let procs = lab.runtime.awaited(&container, &workload);
+        assert_eq!(procs, [workload], "W9 is while it runs");
         assert_eq!(lab.runtime.others(&container), 1, "W9 is while it runs");
+        evidence("crash-w9-running-after-start", "target-as-workload");
+        let environments = rows(&lab, "SELECT count(*) FROM environment");
         lab.start(None);
         let state: String = super::state_support::raw(&lab.dir.state())
             .query_row(
@@ -872,6 +970,28 @@ reason = "NO_MATCHING_RULE"
             "crash-w9-unknown-environment-destroyed",
             "unknown-destroyed",
         );
+        // The same key again: its record, or the run's end -- never a second
+        // execution, environment or container.
+        let again = lab
+            .authority()
+            .workload_run(&run, &fixture(&["workload-sleep", "300"], "c-9"))
+            .unwrap();
+        match again {
+            WorkloadReply::Replayed(replayed) => {
+                assert_eq!(replayed.state, WorkloadState::Unknown);
+            }
+            WorkloadReply::Refused(reason) => assert_eq!(reason, "RUN_NOT_ACTIVE"),
+            other => panic!("W9's key ran again: {other:?}"),
+        }
+        assert_eq!(
+            rows(
+                &lab,
+                "SELECT count(*) FROM workload WHERE idempotency_key = 'c-9'"
+            ),
+            1
+        );
+        assert_eq!(rows(&lab, "SELECT count(*) FROM environment"), environments);
+        evidence("crash-w9-never-run-again", "no-second-execution");
 
         // W10: the broker ran it and answered; the outcome is not durable.
         lab.start(Some(stop_at(CrashPoint::WorkloadAfterBroker)));
@@ -1000,6 +1120,17 @@ reason = "NO_MATCHING_RULE"
             capabilities: &[&str],
             bind: impl FnOnce(dwk_proto::wire::id::SessionId),
         ) -> Self {
+            Self::admit_as(socket, n, "operator", capabilities, bind)
+        }
+
+        /// [`Peer::admit`], under the agent profile `profile`.
+        fn admit_as(
+            socket: &std::path::Path,
+            n: u64,
+            profile: &str,
+            capabilities: &[&str],
+            bind: impl FnOnce(dwk_proto::wire::id::SessionId),
+        ) -> Self {
             let session = session(n);
             bind(session.clone());
             let mut client = Client::connect(socket);
@@ -1016,7 +1147,7 @@ reason = "NO_MATCHING_RULE"
                 &session,
                 epoch,
                 &format!("admit-{n}-{message}"),
-                "operator",
+                profile,
                 &[],
                 capabilities,
                 message,
@@ -1703,7 +1834,8 @@ reason = "NO_MATCHING_RULE"
             format!(
                 "schema_version = 1\nruntime = \"{runtime}\"\nsocket = \"{socket}\"\n\
                  image = \"{image}\"\nprobe_sha256 = \"{probe}\"\nnetwork = \"NO_NETWORK\"\n\
-                 [executables]\n\"{FIXTURE}\" = \"{fixture}\"\n",
+                 [executables]\n\"{FIXTURE}\" = \"{fixture}\"\n\
+                 [workspace]\nunverified_evidence = true\n",
                 runtime = var("DW_SANDBOX_RUNTIME"),
                 socket = var("DW_SANDBOX_SOCKET"),
                 image = var("DW_SANDBOX_WORKLOAD_IMAGE"),
@@ -1817,5 +1949,1121 @@ reason = "NO_MATCHING_RULE"
             "production-replay-after-restart-refused",
             "IDEMPOTENCY_KEY_REUSED",
         );
+    }
+
+    /// M5d.4 (ADR-0052 §§6, 10, 17; OD-3(a), OD-6): the workspace contract
+    /// against the real authority, the released broker and a real runtime --
+    /// `make sandbox-workspace-evidence` runs these by name.
+    ///
+    /// The cases an ordinary machine can run use the evidence's own scratch
+    /// workspace, and say so. The others need what an operator provisions:
+    /// the group `10001` with this process and the broker in it, filesystems
+    /// of their own with a root of that group and mode `2770`, and `sudo` to
+    /// change them. Only the hosted runner has those, made by the harness
+    /// and undone after (`DW_WORKSPACE_PRIVILEGED=1`); anywhere else those
+    /// cases panic NOT EXERCISED, which fails the task.
+    mod workspace {
+        use std::os::unix::fs::MetadataExt as _;
+        use std::path::Path;
+
+        use dwk_proto::brokerp::sandbox::{SandboxInvariant, WorkspaceQuota};
+        use dwk_proto::wire::id::SessionId;
+        use dwk_proto::wire::scalar::{Epoch, FsFailureReason, IdempotencyKey};
+        use dwkd_authority::state::{CallerContext, EnvironmentReport, ToolReply, ToolRequest};
+
+        use super::*;
+
+        const WORKSPACE_SUITE: &str = "sandbox-authority-workspace";
+        /// What a writing run asks for.
+        const CAPABILITIES: &[&str] = &[
+            "process.exec:*",
+            "fs.read:/workspace",
+            "fs.list:/workspace",
+            "fs.stat:/workspace",
+            "fs.write:/workspace",
+            "fs.create:/workspace",
+            "fs.delete:/workspace",
+        ];
+        const ENOSPC: &str = "28";
+
+        fn evidence(case: &str, outcome: &str) {
+            println!(
+                "SANDBOX-EVIDENCE {{\"suite\":\"{WORKSPACE_SUITE}\",\"case\":\"{case}\",\"outcome\":\"{outcome}\"}}"
+            );
+        }
+
+        /// The evidence policy, with the workspace's reads and brokered
+        /// changes allowed: an operator test policy, not a shipped pack.
+        fn custom() -> Custom {
+            let mut custom = Custom::evidence(WorkloadBudget::default());
+            let marker = "[[rule]]\nid = \"never-on-the-host\"";
+            let text = workload_policy(&var("DW_SANDBOX_FIXTURE_SHA256"));
+            assert!(text.contains(marker));
+            let text = text.replace(
+                marker,
+                &format!(
+                    "[[rule]]\nid = \"observe-the-workspace\"\neffect = \"ALLOW\"\n\
+                     when.verb = [\"fs.read\", \"fs.list\"]\n\
+                     when.path_under = \"${{WORKSPACE}}\"\nwhen.max_bytes = 16777216\n\n\
+                     [[rule]]\nid = \"change-the-workspace\"\neffect = \"ALLOW\"\n\
+                     when.verb = [\"fs.write\", \"fs.create\", \"fs.delete\"]\n\
+                     when.path_under = \"${{WORKSPACE}}\"\n\n{marker}"
+                ),
+            );
+            custom.policy = policy("m5d", &text);
+            custom
+        }
+
+        fn bounded(quota: u64) -> WorkspaceSetting {
+            WorkspaceSetting::Bounded(WorkspaceQuota::new(quota).unwrap())
+        }
+
+        /// What the harness provisioned on the hosted runner.
+        struct Provisioned {
+            /// A `tmpfs` of the quota's size, its root this uid's, of group
+            /// `10001`, mode `2770`, `nosuid,nodev`.
+            tmpfs: PathBuf,
+            /// Another, for another workspace.
+            second: PathBuf,
+            /// A loop-mounted `ext4` image of the quota's size, the same.
+            ext4: PathBuf,
+            /// A directory on the runner's own filesystem, provisioned as a
+            /// root is but bounded by nothing of its own.
+            unbounded: PathBuf,
+            quota: u64,
+            /// An identity outside the group.
+            peer: String,
+        }
+
+        fn provisioned() -> Provisioned {
+            assert!(
+                std::env::var("DW_WORKSPACE_PRIVILEGED").as_deref() == Ok("1"),
+                "NOT EXERCISED: this case needs an operator-provisioned workspace -- the \
+                 group 10001, filesystems of their own, sudo -- which `make \
+                 sandbox-workspace-evidence` provisions only where DW_WORKSPACE_PRIVILEGED=1 \
+                 (the hosted runner)"
+            );
+            let root = |name: &str| {
+                let path = PathBuf::from(var(name));
+                emptied(&path);
+                path
+            };
+            Provisioned {
+                tmpfs: root("DW_WORKSPACE_TMPFS"),
+                second: root("DW_WORKSPACE_SECOND"),
+                ext4: root("DW_WORKSPACE_EXT4"),
+                unbounded: root("DW_WORKSPACE_UNBOUNDED"),
+                quota: var("DW_WORKSPACE_QUOTA").parse().unwrap(),
+                peer: var("DW_WORKSPACE_PEER"),
+            }
+        }
+
+        /// Remove what an earlier case left in a provisioned root: every
+        /// entry is the group's to remove. An `ext4` root's `lost+found` is
+        /// the filesystem's.
+        fn emptied(root: &Path) {
+            for entry in std::fs::read_dir(root).unwrap() {
+                let path = entry.unwrap().path();
+                if path.file_name() == Some("lost+found".as_ref()) {
+                    continue;
+                }
+                if path.is_dir() && !path.is_symlink() {
+                    std::fs::remove_dir_all(&path).unwrap();
+                } else {
+                    std::fs::remove_file(&path).unwrap();
+                }
+            }
+        }
+
+        fn sudo(args: &[&str]) -> Output {
+            super::super::state_support::output(Command::new("sudo").arg("-n").args(args)).unwrap()
+        }
+
+        fn sudo_ok(args: &[&str]) {
+            let out = sudo(args);
+            assert!(
+                out.status.success(),
+                "sudo {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+
+        /// Every container the runtime holds, by id.
+        fn containers(runtime: &Runtime) -> Vec<String> {
+            let mut ids: Vec<String> = runtime
+                .ok(&["container", "ls", "--all", "--no-trunc", "--quiet"])
+                .lines()
+                .map(str::to_owned)
+                .collect();
+            ids.sort();
+            ids
+        }
+
+        fn verdict(report: &EnvironmentReport, invariant: SandboxInvariant) -> Verdict {
+            report
+                .checks
+                .iter()
+                .find(|(i, _)| *i == invariant)
+                .map(|(_, v)| *v)
+                .unwrap_or_else(|| panic!("{invariant:?} was not reported"))
+        }
+
+        /// A writing run in workspace `workspace`, and what a tool call needs.
+        struct Live {
+            caller: CallerContext,
+            session: SessionId,
+            epoch: Epoch,
+            run: RunId,
+        }
+
+        fn live(lab: &mut Lab, workspace: &str) -> Live {
+            let n = lab.next_session;
+            lab.next_session += 1;
+            let authority = lab.authority();
+            authority
+                .operator()
+                .bind_session_workspace(&session(n), &WorkspaceId::new(workspace).unwrap())
+                .unwrap();
+            let caller = authority.connect(subject(1000));
+            let Reply::Done(epoch) = authority.acquire_lease(&caller, &session(n)).unwrap() else {
+                panic!("a lease")
+            };
+            let admitted = authority
+                .admit_run(
+                    &caller,
+                    &admit_msg(
+                        &session(n),
+                        epoch,
+                        &format!("k{n}"),
+                        "maintainer",
+                        &[],
+                        CAPABILITIES,
+                        n,
+                    ),
+                )
+                .unwrap();
+            let Reply::Done(admission) = admitted else {
+                panic!("admitted: {admitted:?}")
+            };
+            Live {
+                caller,
+                session: session(n),
+                epoch,
+                run: admission.run_id().clone(),
+            }
+        }
+
+        /// A second workspace, `ws2`, bound to `root`.
+        fn second_workspace(lab: &mut Lab, root: &Path) {
+            let mut operator = lab.authority().operator();
+            let id = WorkspaceId::new("ws2").unwrap();
+            operator
+                .install_workspace(&id, WorkspaceSensitivity::Private)
+                .unwrap();
+            operator
+                .install_workspace_root(&id, root.to_str().unwrap())
+                .unwrap();
+        }
+
+        /// A version-2 tool call in `l`'s run, in process.
+        fn tool(lab: &mut Lab, l: &Live, payload: &str, key: &str) -> ToolReply {
+            let text = format!(
+                r#"{{"v":1,"id":"{id}","type":"request","schema":"direwolf.tool.invoke","schema_version":2,"ts":"2026-10-20T10:00:00.000Z","session_id":"{session}","run_id":"{run}","epoch":{epoch},"idempotency_key":"{key}","payload":{payload}}}"#,
+                id = id("msg", 80_000 + next_message()),
+                session = l.session.as_str(),
+                run = l.run.as_str(),
+                epoch = l.epoch.get(),
+            );
+            let DwkpBody::ToolInvokeV2(call) = decode(&text).body else {
+                panic!("not a tool call: {text}")
+            };
+            let request = ToolRequest::v2(call, Some(IdempotencyKey::new(key).unwrap()));
+            lab.authority()
+                .tool_invoke(&l.caller, &l.session, &l.run, l.epoch, &request)
+                .expect("the authority answers")
+        }
+
+        fn hex(bytes: &[u8]) -> String {
+            bytes.iter().map(|b| format!("{b:02x}")).collect()
+        }
+
+        fn write(path: &str, content: &[u8]) -> String {
+            format!(
+                r#"{{"fs_write":{{"path":"{path}","content":"{}"}}}}"#,
+                hex(content)
+            )
+        }
+
+        fn read(path: &str) -> String {
+            format!(r#"{{"fs_read":{{"path":"{path}","max_bytes":65536}}}}"#)
+        }
+
+        fn written(reply: &ToolReply) {
+            assert!(
+                matches!(reply, ToolReply::Done { output, .. } if output.fs_write.is_some()),
+                "not written: {reply:?}"
+            );
+        }
+
+        fn read_back(reply: &ToolReply) -> Vec<u8> {
+            match reply {
+                ToolReply::Done { output, .. } => {
+                    output.fs_read.as_ref().unwrap().content.to_bytes()
+                }
+                other => panic!("not read: {other:?}"),
+            }
+        }
+
+        fn failed(reply: &ToolReply) -> FsFailureReason {
+            match reply {
+                ToolReply::Failed { reason, .. } => *reason,
+                other => panic!("not failed: {other:?}"),
+            }
+        }
+
+        /// A workload's standard output, which must have completed.
+        fn ran(lab: &mut Lab, run: &RunId, args: &[&str], key: &str) -> String {
+            let reply = lab
+                .authority()
+                .workload_run(run, &fixture(args, key))
+                .unwrap();
+            let WorkloadReply::Completed(outcome) = reply else {
+                panic!("not completed: {reply:?}")
+            };
+            String::from_utf8(outcome.stdout).unwrap()
+        }
+
+        fn field<'a>(text: &'a str, key: &str) -> &'a str {
+            text.lines()
+                .find_map(|l| l.strip_prefix(key)?.strip_prefix('='))
+                .unwrap_or_else(|| panic!("no {key} in:\n{text}"))
+        }
+
+        /// The broker's staging directories left in `root`.
+        fn debris(root: &Path) -> Vec<PathBuf> {
+            std::fs::read_dir(root)
+                .unwrap()
+                .filter_map(|e| e.ok().map(|e| e.path()))
+                .filter(|p| {
+                    p.file_name()
+                        .and_then(|n| n.to_str())
+                        .is_some_and(|n| n.starts_with(".dwkd-"))
+                })
+                .collect()
+        }
+
+        /// Make `path` a directory the broker will change -- ADR-0044 §3
+        /// refuses one every user may write, as the evidence's own is --
+        /// that the workload may still write: this uid's, `0775` with uid
+        /// 10001 named in its POSIX ACL, nobody else able to. The evidence's
+        /// own stand-in, needing no privilege, for the group an operator
+        /// provisions (§6); the unverified contract, said as such.
+        fn shared_with_the_workload(path: &Path) {
+            const UNDEFINED: u32 = u32::MAX;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            // ACL version 2: the owner rwx, uid 10001 rwx, the group r-x,
+            // the mask rwx, others r-x.
+            let mut blob = 2u32.to_le_bytes().to_vec();
+            for (tag, permissions, id) in [
+                (0x01_u16, 7_u16, UNDEFINED),
+                (0x02, 7, 10_001),
+                (0x04, 5, UNDEFINED),
+                (0x10, 7, UNDEFINED),
+                (0x20, 5, UNDEFINED),
+            ] {
+                blob.extend_from_slice(&tag.to_le_bytes());
+                blob.extend_from_slice(&permissions.to_le_bytes());
+                blob.extend_from_slice(&id.to_le_bytes());
+            }
+            rustix::fs::setxattr(
+                path,
+                "system.posix_acl_access",
+                &blob,
+                rustix::fs::XattrFlags::empty(),
+            )
+            .unwrap();
+            assert_eq!(std::fs::metadata(path).unwrap().mode() & 0o7777, 0o775);
+        }
+
+        /// One text column of every row `sql` selects, for a diagnosis.
+        fn states(state: &Path, sql: &str) -> Vec<String> {
+            let conn = super::super::state_support::raw(state);
+            let mut statement = conn.prepare(sql).unwrap();
+            statement
+                .query_map([], |row| row.get(0))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap()
+        }
+
+        fn available(root: &Path) -> u64 {
+            let stat = rustix::fs::statvfs(root).unwrap();
+            stat.f_bavail * stat.f_frsize
+        }
+
+        // ---- what any machine can run -----------------------------------
+
+        #[test]
+        #[ignore = "needs a real OCI runtime: make sandbox-workspace-evidence"]
+        fn an_unprovisioned_workspace_is_refused_in_production_before_the_broker() {
+            // Production's contract on the evidence's own directory: this
+            // uid's, its own group, mode 0777 -- what an operator who
+            // provisioned nothing has.
+            let mut lab = Lab::provisioned(
+                "m5d4-unprovisioned",
+                custom(),
+                Provision {
+                    root: None,
+                    setting: bounded(64 << 20),
+                    writes: false,
+                },
+            );
+            let before = containers(&lab.runtime);
+            let run = lab.operator_run();
+            let reply = lab.authority().environment_prepare(&run).unwrap();
+            let EnvironmentReply::Failed { reason, report, .. } = reply else {
+                panic!("not refused: {reply:?}")
+            };
+            assert_eq!(reason, "WORKSPACE_GROUP");
+            assert!(report.is_none(), "nothing was measured");
+            assert_eq!(containers(&lab.runtime), before, "no container was made");
+            let intents = super::super::state_support::audit_records(
+                &lab.dir.state(),
+                "environment.intent_recorded",
+            );
+            let last = intents.last().unwrap();
+            assert_eq!(
+                super::super::state_support::text(last, "workspace_contract"),
+                Some("BOUNDED")
+            );
+            assert_eq!(
+                super::super::state_support::int(last, "workspace_quota_bytes"),
+                Some(64 << 20)
+            );
+            evidence(
+                "authority-unprovisioned-workspace-refused-before-the-broker",
+                reason,
+            );
+            // Nothing can run where no environment could be prepared.
+            let reply = lab
+                .authority()
+                .workload_run(&run, &fixture(&["mark", "/workspace/never"], "u-1"))
+                .unwrap();
+            assert_eq!(reply, WorkloadReply::Refused("NO_ENVIRONMENT"));
+            assert!(!lab.workspace.join("never").exists());
+            evidence(
+                "authority-unprovisioned-workspace-runs-nothing",
+                "NO_ENVIRONMENT",
+            );
+        }
+
+        #[test]
+        #[ignore = "needs a real OCI runtime: make sandbox-workspace-evidence"]
+        fn production_serve_refuses_a_workspace_it_cannot_bound() {
+            // The released binary, from the operator's file, with a quota:
+            // no waiver, no seam.
+            let mut lab = Lab::provisioned(
+                "m5d4-serve-unbounded",
+                custom(),
+                Provision {
+                    root: None,
+                    setting: bounded(64 << 20),
+                    writes: false,
+                },
+            );
+            lab.authority()
+                .operator()
+                .bind_session_workspace(&session(1), &WorkspaceId::new("ws").unwrap())
+                .unwrap();
+            lab.authority = None;
+            let socket = lab.dir.path().join("ipc").join("kernel.sock");
+            let mut server = super::super::transport_support::Server::start(&serve_args(
+                &lab,
+                &socket,
+                "quota_bytes = 67108864",
+            ));
+            let stderr = server.stderr();
+            assert!(
+                stderr.contains("execution environment attached from"),
+                "{stderr}"
+            );
+            // The evidence's shared uids are said; a waived workspace is not.
+            assert!(!stderr.contains("unverified_evidence"), "{stderr}");
+            let before = containers(&lab.runtime);
+            let mut a = Peer::admit(&socket, 1, &["process.exec:*"], |_| {});
+            let body = a.exec("p-1", &call(FIXTURE, &["mark", "/workspace/never"]));
+            assert_eq!(refusal(&body), "ENVIRONMENT_UNAVAILABLE");
+            assert_eq!(containers(&lab.runtime), before, "no container was made");
+            assert!(!lab.workspace.join("never").exists());
+            let failure: String = super::super::state_support::raw(&lab.dir.state())
+                .query_row(
+                    "SELECT failure FROM environment WHERE state = 'REFUSED'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(failure, "WORKSPACE_GROUP");
+            evidence(
+                "production-serve-unprovisioned-workspace-refused",
+                "ENVIRONMENT_UNAVAILABLE",
+            );
+            server.kill();
+        }
+
+        /// `serve --sandbox-config` for `lab`, its `[workspace]` table
+        /// holding `workspace`.
+        fn serve_args(lab: &Lab, socket: &Path, workspace: &str) -> Vec<String> {
+            let config = lab.dir.path().join("sandbox.toml");
+            std::fs::write(
+                &config,
+                format!(
+                    "schema_version = 1\nruntime = \"{runtime}\"\nsocket = \"{runtime_socket}\"\n\
+                     image = \"{image}\"\nprobe_sha256 = \"{probe}\"\nnetwork = \"NO_NETWORK\"\n\
+                     [executables]\n\"{FIXTURE}\" = \"{fixture}\"\n\
+                     [workspace]\n{workspace}\n",
+                    runtime = var("DW_SANDBOX_RUNTIME"),
+                    runtime_socket = var("DW_SANDBOX_SOCKET"),
+                    image = var("DW_SANDBOX_WORKLOAD_IMAGE"),
+                    probe = var("DW_SANDBOX_PROBE_SHA256"),
+                    fixture = var("DW_SANDBOX_FIXTURE_SHA256"),
+                ),
+            )
+            .unwrap();
+            std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600)).unwrap();
+            let policy_file = lab.dir.path().join("m5d.toml");
+            std::fs::write(
+                &policy_file,
+                workload_policy(&var("DW_SANDBOX_FIXTURE_SHA256")),
+            )
+            .unwrap();
+            let mut args: Vec<String> = [
+                "serve",
+                "--state-dir",
+                lab.dir.state().to_str().unwrap(),
+                "--socket",
+                socket.to_str().unwrap(),
+                "--policy-file",
+                policy_file.to_str().unwrap(),
+                "--policy-profile",
+                "m5d",
+                "--mode",
+                "balanced",
+                "--allow-uid",
+                &own_uid().to_string(),
+                "--allow-authority-uid",
+                "--broker-socket",
+                lab.broker_socket.to_str().unwrap(),
+                "--broker-uid",
+                &own_uid().to_string(),
+                "--allow-shared-broker-uid",
+                "--sandbox-config",
+                config.to_str().unwrap(),
+            ]
+            .iter()
+            .map(|a| (*a).to_owned())
+            .collect();
+            let mut ceiling = super::super::state_support::ceiling();
+            ceiling.push("process.exec:*".to_owned());
+            for capability in ceiling {
+                args.push("--ceiling".to_owned());
+                args.push(capability);
+            }
+            args
+        }
+
+        #[test]
+        #[ignore = "needs a real OCI runtime: make sandbox-workspace-evidence"]
+        fn what_a_workload_makes_takes_the_workspace_umask_and_stays_in_the_workspace() {
+            // The evidence's own workspace (no group, no bound): what the
+            // launcher sets, not what the root's group gives.
+            let mut lab = Lab::new("m5d4-umask", WorkloadBudget::default());
+            let run = lab.operator_run();
+            let (_, container) = lab.ready(&run);
+            let text = ran(&mut lab, &run, &["workload-make", "made"], "m-1");
+            assert_eq!(field(&text, "umask"), "0007", "{text}");
+            assert_eq!(field(&text, "file_mode"), "660", "{text}");
+            assert_eq!(field(&text, "dir_mode"), "770", "{text}");
+            assert_eq!(field(&text, "file_gid"), "10001", "{text}");
+            let host = std::fs::metadata(lab.workspace.join("made.file")).unwrap();
+            assert_eq!(
+                (host.uid(), host.gid(), host.mode() & 0o7777),
+                (10_001, 10_001, 0o660)
+            );
+            evidence("umask-0007-through-the-direct-launcher", "file-660-dir-770");
+            // /tmp and /var/tmp are the environment's own, never the
+            // workspace: nothing leaves it by name, and / is read-only.
+            let text = ran(&mut lab, &run, &["workload-mounts"], "m-2");
+            let size = |path: &str| field(&text, path).split('/').next().unwrap().to_owned();
+            assert_ne!(size("/tmp"), size("/workspace"), "{text}");
+            assert_ne!(size("/var/tmp"), size("/workspace"), "{text}");
+            assert_eq!(field(&text, "root_write_errno"), "30", "EROFS: {text}");
+            let text = ran(&mut lab, &run, &["workload-move-out", "made.file"], "m-3");
+            for key in ["rename_tmp", "link_tmp", "link_var_tmp"] {
+                assert_eq!(field(&text, key), "18", "EXDEV {key}: {text}");
+            }
+            assert!(lab.workspace.join("made.file").exists());
+            evidence("workspace-tmp-var-tmp-distinct", "exdev-erofs");
+            let _ = container;
+        }
+
+        #[test]
+        #[ignore = "needs a real OCI runtime: make sandbox-workspace-evidence"]
+        fn a_brokered_change_waits_while_a_workload_may_write_the_workspace() {
+            let root = super::super::state_support::TempDir::new("m5d4-exclusion-ws");
+            shared_with_the_workload(root.path());
+            let mut lab = Lab::provisioned(
+                "m5d4-exclusion",
+                custom(),
+                Provision {
+                    root: Some(root.path().to_path_buf()),
+                    setting: WorkspaceSetting::UnverifiedEvidence,
+                    writes: true,
+                },
+            );
+            let workspace = lab.workspace.clone();
+            let runtime = lab.runtime.clone();
+            let state = lab.dir.state();
+            let served = lab.serve();
+            let mut a = Peer::admit_as(
+                served.path(),
+                1,
+                "maintainer",
+                CAPABILITIES,
+                binder(&served),
+            );
+            let body = a.exec("x-1", &call(FIXTURE, &["workload-identity"]));
+            let environment = sandboxed(&body).environment_id.clone();
+            let container: String = super::super::state_support::raw(&state)
+                .query_row(
+                    "SELECT container FROM environment WHERE environment_id = ?1",
+                    [environment.as_str()],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            lab.reap_later(&container);
+            a.send_exec("x-2", &call(FIXTURE, &["workload-sleep", "8"]));
+            runtime.awaited(
+                &container,
+                &format!("uid=10001 argv={FIXTURE} workload-sleep 8"),
+            );
+            // Another run, the same workspace: no name changes while the
+            // workload may write it.
+            let mut b = Peer::admit_as(
+                served.path(),
+                2,
+                "maintainer",
+                CAPABILITIES,
+                binder(&served),
+            );
+            let message = b.tool(
+                2,
+                "direwolf.tool.invoke",
+                Some("w-1"),
+                &write("/workspace/while", b"x"),
+            );
+            let body = b.client.call(&message).body;
+            let DwkpBody::ToolFailedV2(failure) = &body else {
+                panic!("not failed: {body:?}")
+            };
+            assert_eq!(failure.reason.as_str(), "SHARED_DIRECTORY");
+            assert!(!workspace.join("while").exists());
+            // The authority's exclusion, not the broker's refusal: said so,
+            // and the broker never asked.
+            let failed = super::super::state_support::audit_records(&state, "tool.failed");
+            let excluded: Vec<_> = failed
+                .iter()
+                .filter(|r| {
+                    super::super::state_support::text(r, "excluded_by")
+                        == Some("WORKLOAD_IN_WORKSPACE")
+                })
+                .collect();
+            assert_eq!(excluded.len(), 1, "{failed:?}");
+            assert!(debris(&workspace).is_empty());
+            evidence("exclusion-while-a-workload-runs", "SHARED_DIRECTORY");
+            // Ended, and proved quiet by `reap`: the change is made.
+            let answer = a.answer(Duration::from_secs(120));
+            assert!(matches!(answer, DwkpBody::ToolResultV5(_)), "{answer:?}");
+            let message = b.tool(
+                2,
+                "direwolf.tool.invoke",
+                Some("w-2"),
+                &write("/workspace/after", b"y"),
+            );
+            let body = b.client.call(&message).body;
+            assert!(
+                matches!(body, DwkpBody::ToolResultV2(_)),
+                "{body:?}; workloads {:?}, environments {:?}",
+                states(
+                    &state,
+                    "SELECT idempotency_key || ':' || state FROM workload"
+                ),
+                states(&state, "SELECT run_id || ':' || state FROM environment"),
+            );
+            assert_eq!(std::fs::read(workspace.join("after")).unwrap(), b"y");
+            evidence("exclusion-lifted-when-the-workload-ended", "written");
+            served.stop();
+        }
+
+        // ---- what an operator provisions --------------------------------
+
+        #[test]
+        #[ignore = "needs a provisioned workspace: make sandbox-workspace-evidence"]
+        fn a_bounded_workspace_is_shared_by_its_group_and_nobody_else() {
+            let p = provisioned();
+            let mut lab = Lab::provisioned(
+                "m5d4-shared",
+                custom(),
+                Provision {
+                    root: Some(p.tmpfs.clone()),
+                    setting: bounded(p.quota),
+                    writes: true,
+                },
+            );
+            let l = live(&mut lab, "ws");
+            let reply = lab.authority().environment_prepare(&l.run).unwrap();
+            let EnvironmentReply::Ready { report, .. } = reply else {
+                panic!("not ready: {reply:?}")
+            };
+            lab.reap_later(report.container.as_ref().unwrap().as_str());
+            for invariant in [
+                SandboxInvariant::HostWorkspaceIdentity,
+                SandboxInvariant::HostWorkspaceOwnership,
+                SandboxInvariant::HostWorkspaceCapacity,
+                SandboxInvariant::ContainerWorkspaceGroupInherited,
+            ] {
+                assert_eq!(verdict(&report, invariant), Verdict::Pass, "{invariant:?}");
+            }
+            evidence("bounded-tmpfs-accepted", "ready");
+            evidence("host-and-container-identity-agree", "pass");
+            // The workload makes; the broker reads.
+            let text = ran(&mut lab, &l.run, &["workload-make", "w"], "s-1");
+            assert_eq!(field(&text, "file_mode"), "660", "{text}");
+            assert_eq!(field(&text, "file_gid"), "10001", "{text}");
+            assert_eq!(field(&text, "dir_mode"), "2770", "{text}");
+            assert_eq!(field(&text, "dir_gid"), "10001", "{text}");
+            let text = ran(
+                &mut lab,
+                &l.run,
+                &["workload-modify", "/workspace/w.file", "from-the-workload"],
+                "s-2",
+            );
+            assert_eq!(field(&text, "modified"), "17", "{text}");
+            let reply = tool(&mut lab, &l, &read("/workspace/w.file"), "r-1");
+            assert_eq!(read_back(&reply), b"from-the-workload");
+            evidence("workload-makes-broker-reads", "read");
+            // The broker makes; the workload changes it in place.
+            written(&tool(
+                &mut lab,
+                &l,
+                &write("/workspace/b.txt", b"from-the-broker"),
+                "w-1",
+            ));
+            let made = std::fs::metadata(p.tmpfs.join("b.txt")).unwrap();
+            assert_eq!((made.gid(), made.mode() & 0o7777), (10_001, 0o660));
+            let text = ran(
+                &mut lab,
+                &l.run,
+                &["workload-modify", "/workspace/b.txt", "+changed"],
+                "s-3",
+            );
+            assert_eq!(field(&text, "modified"), "8", "{text}");
+            let reply = tool(&mut lab, &l, &read("/workspace/b.txt"), "r-2");
+            assert_eq!(read_back(&reply), b"from-the-broker+changed");
+            evidence("broker-makes-workload-modifies", "modified");
+            // The broker replaces what the workload made, keeping its mode
+            // and group, and the workload reads the replacement.
+            written(&tool(
+                &mut lab,
+                &l,
+                &write("/workspace/w.file", b"replaced"),
+                "w-2",
+            ));
+            let text = ran(
+                &mut lab,
+                &l.run,
+                &["workload-read", "/workspace/w.file"],
+                "s-4",
+            );
+            assert_eq!(field(&text, "content"), hex(b"replaced"), "{text}");
+            evidence("broker-replaces-workload-reads", "replaced");
+            // Nobody outside the group: not to write, not to read.
+            let denied = sudo(&[
+                "-u",
+                &p.peer,
+                "touch",
+                p.tmpfs.join("intruder").to_str().unwrap(),
+            ]);
+            assert!(!denied.status.success());
+            assert!(!p.tmpfs.join("intruder").exists());
+            let denied = sudo(&[
+                "-u",
+                &p.peer,
+                "cat",
+                p.tmpfs.join("b.txt").to_str().unwrap(),
+            ]);
+            assert!(!denied.status.success());
+            assert!(denied.stdout.is_empty());
+            evidence("another-identity-cannot-write-or-read", "denied");
+        }
+
+        #[test]
+        #[ignore = "needs a provisioned workspace: make sandbox-workspace-evidence"]
+        fn a_root_not_as_the_contract_says_is_refused_and_never_repaired() {
+            let p = provisioned();
+            let root = p.tmpfs.to_str().unwrap().to_owned();
+            let mut lab = Lab::provisioned(
+                "m5d4-unsafe",
+                custom(),
+                Provision {
+                    root: Some(p.tmpfs.clone()),
+                    setting: bounded(p.quota),
+                    writes: false,
+                },
+            );
+            let own_gid = std::fs::metadata("/proc/self").unwrap().gid().to_string();
+            let owner = std::fs::metadata(&p.tmpfs).unwrap().uid().to_string();
+            let restore = || {
+                sudo_ok(&["chown", &format!("{owner}:10001"), &root]);
+                sudo_ok(&["chmod", "2770", &root]);
+            };
+            let before = containers(&lab.runtime);
+            for (change, expected, case) in [
+                (
+                    vec!["chgrp", own_gid.as_str(), root.as_str()],
+                    "WORKSPACE_GROUP",
+                    "wrong-gid-refused",
+                ),
+                (
+                    vec!["chmod", "g-s", root.as_str()],
+                    "WORKSPACE_MODE",
+                    "missing-setgid-refused",
+                ),
+                (
+                    vec!["chmod", "2775", root.as_str()],
+                    "WORKSPACE_MODE",
+                    "group-only-mode-world-readable-refused",
+                ),
+                (
+                    vec!["chmod", "2777", root.as_str()],
+                    "WORKSPACE_MODE",
+                    "world-writable-root-refused",
+                ),
+                (
+                    vec!["chown", "10001", root.as_str()],
+                    "WORKSPACE_OWNER",
+                    "workload-owned-root-refused",
+                ),
+                (
+                    vec!["chown", "65534", root.as_str()],
+                    "WORKSPACE_OWNER",
+                    "foreign-owned-root-refused",
+                ),
+            ] {
+                sudo_ok(&change);
+                let mode = std::fs::metadata(&p.tmpfs).unwrap().mode() & 0o7777;
+                let run = lab.operator_run();
+                let reply = lab.authority().environment_prepare(&run).unwrap();
+                let EnvironmentReply::Failed { reason, .. } = reply else {
+                    panic!("{case}: not refused: {reply:?}")
+                };
+                assert_eq!(reason, expected, "{case}");
+                // Refused, not repaired: the root is as it was made.
+                assert_eq!(
+                    std::fs::metadata(&p.tmpfs).unwrap().mode() & 0o7777,
+                    mode,
+                    "{case}"
+                );
+                assert_eq!(containers(&lab.runtime), before, "{case}: no container");
+                evidence(case, expected);
+                restore();
+            }
+            // An authority bounded at twice the filesystem: refused too.
+            let mut lab = Lab::provisioned(
+                "m5d4-mismatch",
+                custom(),
+                Provision {
+                    root: Some(p.tmpfs.clone()),
+                    setting: bounded(p.quota * 2),
+                    writes: false,
+                },
+            );
+            let run = lab.operator_run();
+            let reply = lab.authority().environment_prepare(&run).unwrap();
+            let EnvironmentReply::Failed { reason, .. } = reply else {
+                panic!("not refused: {reply:?}")
+            };
+            assert_eq!(reason, "WORKSPACE_QUOTA_MISMATCH");
+            evidence("quota-mismatch-refused", reason);
+            // A root provisioned as the contract says, on the host's own
+            // filesystem: bounded by nothing of its own.
+            let mut lab = Lab::provisioned(
+                "m5d4-unbounded",
+                custom(),
+                Provision {
+                    root: Some(p.unbounded.clone()),
+                    setting: bounded(p.quota),
+                    writes: false,
+                },
+            );
+            let run = lab.operator_run();
+            let reply = lab.authority().environment_prepare(&run).unwrap();
+            let EnvironmentReply::Failed { reason, .. } = reply else {
+                panic!("not refused: {reply:?}")
+            };
+            assert_eq!(reason, "WORKSPACE_UNBOUNDED");
+            assert_eq!(containers(&lab.runtime), before);
+            evidence("unbounded-host-directory-refused", reason);
+            // A directory inside a bounded filesystem, provisioned as a root
+            // is: the authority's own count is the filesystem's and within
+            // the quota, but the mount is not the filesystem's root -- two
+            // such workspaces would share one bound. The probe's mount root
+            // refuses it, and the container is removed.
+            let inner = p.tmpfs.join("inner");
+            std::fs::create_dir(&inner).unwrap();
+            std::fs::set_permissions(&inner, std::fs::Permissions::from_mode(0o2770)).unwrap();
+            let mut lab = Lab::provisioned(
+                "m5d4-inner",
+                custom(),
+                Provision {
+                    root: Some(inner.clone()),
+                    setting: bounded(p.quota),
+                    writes: false,
+                },
+            );
+            let run = lab.operator_run();
+            let reply = lab.authority().environment_prepare(&run).unwrap();
+            let EnvironmentReply::Failed { reason, report, .. } = reply else {
+                panic!("not refused: {reply:?}")
+            };
+            assert_eq!(reason, "WORKSPACE_UNBOUNDED");
+            let report = report.expect("the broker measured it");
+            assert_eq!(
+                verdict(&report, SandboxInvariant::HostWorkspaceCapacity),
+                Verdict::Fail
+            );
+            assert_eq!(
+                containers(&lab.runtime),
+                before,
+                "its container was removed"
+            );
+            evidence("subdirectory-of-a-bounded-filesystem-refused", reason);
+        }
+
+        #[test]
+        #[ignore = "needs a provisioned workspace: make sandbox-workspace-evidence"]
+        fn a_workspace_changed_under_a_ready_environment_takes_it_down_first() {
+            let p = provisioned();
+            let root = p.tmpfs.to_str().unwrap().to_owned();
+            let mut lab = Lab::provisioned(
+                "m5d4-drift",
+                custom(),
+                Provision {
+                    root: Some(p.tmpfs.clone()),
+                    setting: bounded(p.quota),
+                    writes: false,
+                },
+            );
+            let size = format!("size={}", p.quota);
+            let twice = format!("size={}", p.quota * 2);
+            // The filesystem grown under a ready environment.
+            let run = lab.operator_run();
+            let (environment, container) = lab.ready(&run);
+            sudo_ok(&["mount", "-o", &format!("remount,{twice}"), &root]);
+            let reply = lab
+                .authority()
+                .workload_run(&run, &fixture(&["mark", "/workspace/grown"], "d-1"))
+                .unwrap();
+            sudo_ok(&["mount", "-o", &format!("remount,{size}"), &root]);
+            let WorkloadReply::Failed {
+                reason,
+                environment_destroyed,
+                ..
+            } = reply
+            else {
+                panic!("not refused: {reply:?}")
+            };
+            assert_eq!(reason, "WORKSPACE_UNBOUNDED");
+            assert!(environment_destroyed);
+            assert_eq!(lab.state_of(&environment), EnvironmentState::Destroyed);
+            assert!(!lab.runtime.exists(&container));
+            assert!(!p.tmpfs.join("grown").exists());
+            evidence("capacity-drift-destroys-before-the-workload", reason);
+            // Another filesystem mounted over the root: the path names
+            // another directory.
+            let run = lab.operator_run();
+            let (environment, container) = lab.ready(&run);
+            let uid = std::fs::metadata("/proc/self").unwrap().uid();
+            sudo_ok(&[
+                "mount",
+                "-t",
+                "tmpfs",
+                "-o",
+                &format!("{size},mode=2770,uid={uid},gid=10001,nosuid,nodev"),
+                "dw-substitute",
+                &root,
+            ]);
+            let reply = lab
+                .authority()
+                .workload_run(&run, &fixture(&["mark", "/workspace/substituted"], "d-2"))
+                .unwrap();
+            sudo_ok(&["umount", &root]);
+            let WorkloadReply::Failed {
+                reason,
+                environment_destroyed,
+                ..
+            } = reply
+            else {
+                panic!("not refused: {reply:?}")
+            };
+            assert_eq!(reason, "WORKSPACE_CHANGED");
+            assert!(environment_destroyed);
+            assert_eq!(lab.state_of(&environment), EnvironmentState::Destroyed);
+            assert!(!lab.runtime.exists(&container));
+            assert!(!p.tmpfs.join("substituted").exists());
+            evidence("mount-substitution-destroys-before-the-workload", reason);
+        }
+
+        #[test]
+        #[ignore = "needs a provisioned workspace: make sandbox-workspace-evidence"]
+        fn a_full_workspace_fails_cleanly_and_borrows_from_no_other() {
+            let p = provisioned();
+            let mut lab = Lab::provisioned(
+                "m5d4-full",
+                custom(),
+                Provision {
+                    root: Some(p.ext4.clone()),
+                    setting: bounded(p.quota),
+                    writes: true,
+                },
+            );
+            second_workspace(&mut lab, &p.second);
+            let l = live(&mut lab, "ws");
+            let other = live(&mut lab, "ws2");
+            let reply = lab.authority().environment_prepare(&l.run).unwrap();
+            let EnvironmentReply::Ready { report, .. } = reply else {
+                panic!("not ready: {reply:?}")
+            };
+            lab.reap_later(report.container.as_ref().unwrap().as_str());
+            evidence("bounded-ext4-accepted", "ready");
+            let second_before = available(&p.second);
+            // The workload writes until the filesystem says no.
+            let max = (p.quota >> 20) * 2;
+            let text = ran(
+                &mut lab,
+                &l.run,
+                &["workload-fill", "big", &max.to_string()],
+                "f-1",
+            );
+            assert_eq!(field(&text, "errno"), ENOSPC, "{text}");
+            let filled: u64 = field(&text, "written").parse().unwrap();
+            assert!(filled > 0 && filled <= p.quota, "{text}");
+            evidence("workload-fills-to-enospc", "ENOSPC");
+            // The broker's change fails with nothing changed and nothing
+            // left behind.
+            let reply = tool(
+                &mut lab,
+                &l,
+                &write("/workspace/late.txt", &[0x42; 65_536]),
+                "w-1",
+            );
+            assert_eq!(failed(&reply), FsFailureReason::BrokerExecutionError);
+            assert!(!p.ext4.join("late.txt").exists());
+            assert!(debris(&p.ext4).is_empty(), "{:?}", debris(&p.ext4));
+            let audited: i64 = super::super::state_support::raw(&lab.dir.state())
+                .query_row(
+                    "SELECT count(*) FROM tool_invocation \
+                     WHERE state = 'FAILED' AND failure = 'BROKER_EXECUTION_ERROR'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(audited, 1);
+            evidence("full-workspace-write-fails-unchanged", "NO_SPACE");
+            // Another workspace is its own filesystem: untouched, and usable.
+            assert_eq!(available(&p.second), second_before, "no space was borrowed");
+            written(&tool(
+                &mut lab,
+                &other,
+                &write("/workspace/elsewhere.txt", b"fine"),
+                "w-2",
+            ));
+            assert_eq!(
+                std::fs::read(p.second.join("elsewhere.txt")).unwrap(),
+                b"fine"
+            );
+            evidence("other-workspace-unaffected", "written");
+            // Room made, the change is made.
+            let text = ran(
+                &mut lab,
+                &l.run,
+                &["workload-remove", "/workspace/big"],
+                "f-2",
+            );
+            assert!(!text.contains("error="), "{text}");
+            written(&tool(
+                &mut lab,
+                &l,
+                &write("/workspace/late.txt", b"now"),
+                "w-3",
+            ));
+            assert_eq!(std::fs::read(p.ext4.join("late.txt")).unwrap(), b"now");
+            evidence("space-recovered-after-removal", "written");
+            // A new incarnation on the same files: the store and its audit
+            // chain are whole.
+            lab.start(None);
+            let ok: String = super::super::state_support::raw(&lab.dir.state())
+                .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(ok, "ok");
+            evidence("durability-valid-after-a-full-workspace", "integrity-ok");
+        }
+
+        #[test]
+        #[ignore = "needs a provisioned workspace: make sandbox-workspace-evidence"]
+        fn production_serve_runs_in_a_bounded_workspace() {
+            let p = provisioned();
+            let mut lab = Lab::provisioned(
+                "m5d4-serve-bounded",
+                custom(),
+                Provision {
+                    root: Some(p.tmpfs.clone()),
+                    setting: bounded(p.quota),
+                    writes: false,
+                },
+            );
+            lab.authority()
+                .operator()
+                .bind_session_workspace(&session(1), &WorkspaceId::new("ws").unwrap())
+                .unwrap();
+            lab.authority = None;
+            let socket = lab.dir.path().join("ipc").join("kernel.sock");
+            let mut server = super::super::transport_support::Server::start(&serve_args(
+                &lab,
+                &socket,
+                &format!("quota_bytes = {}", p.quota),
+            ));
+            assert!(
+                !server.stderr().contains("unverified_evidence"),
+                "{}",
+                server.stderr()
+            );
+            let mut a = Peer::admit(&socket, 1, &["process.exec:*"], |_| {});
+            let body = a.exec("p-1", &call(FIXTURE, &["workload-make", "served"]));
+            let out = sandboxed(&body);
+            let text = String::from_utf8(out.stdout.content.to_bytes()).unwrap();
+            assert_eq!(field(&text, "file_gid"), "10001", "{text}");
+            assert_eq!(field(&text, "dir_mode"), "2770", "{text}");
+            let container: String = super::super::state_support::raw(&lab.dir.state())
+                .query_row(
+                    "SELECT container FROM environment WHERE environment_id = ?1",
+                    [out.environment_id.as_str()],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            lab.reap_later(&container);
+            assert!(p.tmpfs.join("served.file").exists());
+            evidence("production-serve-bounded-workspace", "completed");
+            server.kill();
+        }
     }
 }

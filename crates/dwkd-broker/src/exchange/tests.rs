@@ -57,7 +57,7 @@ fn effects() -> Effects<'static> {
                 seccomp: PathBuf::from("/nonexistent/seccomp.json"),
                 client_config: PathBuf::from("/nonexistent/client"),
             },
-            (false, processes.generation().clone()),
+            (false, false, processes.generation().clone()),
             no_proxies(),
         ))),
         http: Box::leak(Box::new(crate::http::Client::in_process(
@@ -1935,3 +1935,7 @@ fn the_durability_checker_refuses_a_change_made_before_the_last_was_durable() {
         None
     );
 }
+
+/// M5d.4: the workspace group's convention and a full filesystem.
+#[path = "workspace_tests.rs"]
+mod workspace;

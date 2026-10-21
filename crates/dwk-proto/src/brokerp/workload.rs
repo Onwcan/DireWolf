@@ -26,7 +26,7 @@
 
 use crate::brokerp::sandbox::{
     ContainerRef, EnvironmentProfile, ImageId, Milliseconds, NetworkTopology, StoreInstance,
-    Verdict,
+    Verdict, WorkspaceBound,
 };
 use crate::brokerp::{
     BrokerGeneration, BrokerRefusal, ChannelNonce, Common, DescriptorCount, EnvironmentSpec,
@@ -151,11 +151,15 @@ wire_enum! {
     /// The authority chooses it from the obligations it decided; the broker
     /// spells the one command line for each, and neither carries a variable.
     WorkloadLaunch {
-        /// The runtime's `exec` runs the executable itself.
+        /// No obligation: the runtime's `exec` runs the trusted probe as the
+        /// launcher, which sets no variable -- only the workspace's umask
+        /// (M5d.4) -- and executes the executable with exactly its
+        /// arguments.
         Direct = "DIRECT",
         /// The runtime's `exec` runs the trusted probe as the launcher, which
-        /// sets `workspace_exec_hygiene`'s fixed variables and executes the
-        /// executable with exactly its arguments.
+        /// sets `workspace_exec_hygiene`'s fixed variables and the
+        /// workspace's umask and executes the executable with exactly its
+        /// arguments.
         Hygiene = "HYGIENE",
     }
 }
@@ -214,6 +218,11 @@ wire_struct! {
         required workspace_device: KernelNumber,
         /// Its inode.
         required workspace_inode: KernelNumber,
+        /// A bounded workspace (M5d.4): the operator's quota, and the
+        /// capacity and owner the authority found on its pinned root.
+        /// Absent: the evidence harness's unverified workspace, which only a
+        /// broker started with `--allow-unverified-workspace` accepts.
+        optional workspace_bound: WorkspaceBound,
         /// The container the authority recorded.
         required container: ContainerRef,
         /// The container runtime's control socket.
@@ -399,6 +408,11 @@ wire_struct! {
         required workspace_device: KernelNumber,
         /// Its inode.
         required workspace_inode: KernelNumber,
+        /// A bounded workspace (M5d.4): the operator's quota, and the
+        /// capacity and owner the authority found on its pinned root.
+        /// Absent: the evidence harness's unverified workspace, which only a
+        /// broker started with `--allow-unverified-workspace` accepts.
+        optional workspace_bound: WorkspaceBound,
         /// The container the authority recorded.
         required container: ContainerRef,
         /// The container runtime's control socket.
@@ -471,6 +485,7 @@ impl WorkloadSecretStartAuthorisation {
             workspace_path: start.workspace_path,
             workspace_device: start.workspace_device,
             workspace_inode: start.workspace_inode,
+            workspace_bound: start.workspace_bound,
             container: start.container,
             runtime_socket: start.runtime_socket,
             runtime_argv0: start.runtime_argv0,
@@ -513,6 +528,7 @@ impl WorkloadSecretStartAuthorisation {
             workspace_path: self.workspace_path.clone(),
             workspace_device: self.workspace_device.clone(),
             workspace_inode: self.workspace_inode.clone(),
+            workspace_bound: self.workspace_bound.clone(),
             container: self.container.clone(),
             runtime_socket: self.runtime_socket.clone(),
             runtime_argv0: self.runtime_argv0.clone(),
@@ -568,6 +584,7 @@ impl WorkloadStartAuthorisation {
             workspace_path: environment.workspace_path,
             workspace_device: KernelNumber::from_u64(environment.workspace.0),
             workspace_inode: KernelNumber::from_u64(environment.workspace.1),
+            workspace_bound: environment.workspace_bound,
             container,
             runtime_socket: runtime.socket,
             runtime_argv0: runtime.argv0,
@@ -601,6 +618,7 @@ impl WorkloadStartAuthorisation {
             probe_sha256: self.probe_sha256.clone(),
             workspace_path: self.workspace_path.clone(),
             workspace: (self.workspace_device.value(), self.workspace_inode.value()),
+            workspace_bound: self.workspace_bound.clone(),
             relay_sha256: self.relay_sha256.clone(),
             egress: None,
         }

@@ -10,8 +10,16 @@
 //! [`profile::LAUNCH_FAILED`], which the broker never believes as a
 //! program's own exit (ADR-0052 §5).
 //!
+//! **Every profile sets the workspace's umask** (M5d.4, OD-3(a)):
+//! [`WORKLOAD_UMASK`], so that what the target makes in the workspace is the
+//! workspace group's to read and write and nobody else's. The runtime's
+//! `exec` gives a process `0022` and has no option to change it; the target
+//! is untrusted and may change its own, which the root's mode makes harmless
+//! to every identity outside the group.
+//!
 //! | profile | sets | the target's descriptors |
 //! |---|---|---|
+//! | `direct` | nothing but the umask | 0 `/dev/null`, 1, 2 |
 //! | `hygiene` | `workspace_exec_hygiene`'s variables | 0 `/dev/null`, 1, 2 |
 //! | `secret-fd`, `secret-fd-hygiene` | (and the hygiene variables) | 0 `/dev/null`, 1, 2, and 3: a fresh pipe holding exactly the value |
 //! | `secret-env`, `secret-env-hygiene` | `NAME=value` (and the hygiene variables) | 0 `/dev/null`, 1, 2 |
@@ -43,8 +51,10 @@ use std::os::unix::ffi::OsStrExt as _;
 use std::os::unix::process::CommandExt as _;
 use std::process::{Command, ExitCode};
 
+use dwk_proto::brokerp::sandbox::WORKLOAD_UMASK;
 use dwk_proto::brokerp::{MAX_SECRET_BYTES, SECRET_TARGET_FD, valid_secret_env_name};
 use dwk_sandbox_profile as profile;
+use nix::sys::stat::Mode;
 
 /// How a profile delivers its secret, if it has one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -60,6 +70,7 @@ enum Delivery {
 /// The profile's delivery, and whether it sets the hygiene variables.
 fn profile_of(name: &str) -> Option<(Delivery, bool)> {
     Some(match name {
+        profile::LAUNCH_DIRECT => (Delivery::None, false),
         profile::LAUNCH_HYGIENE => (Delivery::None, true),
         profile::LAUNCH_SECRET_FD => (Delivery::Fd, false),
         profile::LAUNCH_SECRET_FD_HYGIENE => (Delivery::Fd, true),
@@ -239,6 +250,9 @@ pub(crate) fn run(args: &[String]) -> ExitCode {
     if !descriptors_closed(delivery) {
         return failed;
     }
+    // The workspace's umask, kept across the exec: what the target makes is
+    // the group's (M5d.4).
+    let _previous = nix::sys::stat::umask(Mode::from_bits_truncate(WORKLOAD_UMASK));
     // `exec` returns only if the kernel refused it.
     let _refused = command.exec();
     drop(reserved);
@@ -252,6 +266,10 @@ mod tests {
 
     #[test]
     fn every_profile_is_one_closed_word_and_nothing_else_launches() {
+        assert_eq!(
+            profile_of(profile::LAUNCH_DIRECT),
+            Some((Delivery::None, false))
+        );
         assert_eq!(
             profile_of(profile::LAUNCH_HYGIENE),
             Some((Delivery::None, true))

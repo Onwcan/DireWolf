@@ -17,7 +17,8 @@ use std::time::{Duration, Instant};
 use dwk_proto::brokerp::KernelNumber;
 use dwk_proto::brokerp::sandbox::{
     InvariantCheck, InvariantChecks, NetworkTopology, ProbeReport, ProbeReportKind,
-    ProbeReportVersion, SandboxInvariant as I, Verdict, probe_invariants,
+    ProbeReportVersion, SandboxInvariant as I, Verdict, WORKSPACE_GROUP, WorkspaceFacts,
+    WorkspaceReport, WorkspaceReportKind, WorkspaceReportVersion, probe_invariants,
 };
 use dwk_proto::wire::id::EnvironmentId;
 use dwk_sandbox_profile as profile;
@@ -34,6 +35,7 @@ pub(crate) fn main() -> ExitCode {
         Some(profile::PROBE_HOLD) if args.len() == 2 => hold(),
         Some(profile::PROBE_REAP) if args.len() == 2 => reap(),
         Some(profile::PROBE_TARGET) if args.len() == 2 => target(),
+        Some(profile::PROBE_WORKSPACE) if args.len() == 2 => workspace_report(),
         Some(profile::PROBE_LAUNCH) if args.len() >= 4 => {
             crate::launch::run(args.get(2..).unwrap_or_default())
         }
@@ -61,7 +63,7 @@ pub(crate) fn main() -> ExitCode {
 fn usage() -> ExitCode {
     eprintln!(
         "usage: dwk-sandbox-probe hold | measure <environment-id> <topology> | reap | \
-         ptrace-target | launch <profile> [NAME] <path> [args...]"
+         workspace | ptrace-target | launch <profile> [NAME] <path> [args...]"
     );
     ExitCode::from(2)
 }
@@ -186,8 +188,20 @@ fn measure(environment: &EnvironmentId) -> ExitCode {
         (I::ContainerNoRuntimeSocket, no_runtime_socket()),
         (I::ContainerProcRestricted, proc_restricted()),
     ];
-    let (workspace_writable, workspace) = workspace();
-    found.push((I::ContainerWorkspaceWritable, workspace_writable));
+    // What the workspace is, read before anything is made in it.
+    let workspace = workspace_facts();
+    found.push((
+        I::ContainerWorkspaceWritable,
+        if workspace.is_some() {
+            workspace_writable()
+        } else {
+            Verdict::Unobservable
+        },
+    ));
+    found.push((
+        I::ContainerWorkspaceGroupInherited,
+        group_inherited(workspace.as_ref()),
+    ));
     let (tmp_writable, tmp_fresh) = temporary(environment);
     found.push((I::ContainerTmpWritable, tmp_writable));
     found.push((I::ContainerTmpFresh, tmp_fresh));
@@ -207,7 +221,7 @@ fn measure(environment: &EnvironmentId) -> ExitCode {
                 .map_or(Verdict::Unobservable, |(_, v)| *v),
         })
         .collect();
-    let (Some(checks), Some(version)) = (InvariantChecks::new(checks), ProbeReportVersion::new(2))
+    let (Some(checks), Some(version)) = (InvariantChecks::new(checks), ProbeReportVersion::new(3))
     else {
         return ExitCode::from(3);
     };
@@ -215,20 +229,41 @@ fn measure(environment: &EnvironmentId) -> ExitCode {
         kind: ProbeReportKind::Report,
         version,
         checks,
-        workspace_device: workspace.map(|(dev, _)| KernelNumber::from_u64(dev)),
-        workspace_inode: workspace.map(|(_, ino)| KernelNumber::from_u64(ino)),
+        workspace,
     };
-    match report.to_bytes() {
-        Ok(bytes) => {
-            let mut out = std::io::stdout().lock();
-            if out.write_all(&bytes).and_then(|()| out.flush()).is_ok() {
-                ExitCode::SUCCESS
-            } else {
-                ExitCode::from(3)
-            }
-        }
-        Err(_) => ExitCode::from(3),
+    print_report(report.to_bytes().ok())
+}
+
+/// Print one report, or exit 3 having printed nothing.
+fn print_report(bytes: Option<Vec<u8>>) -> ExitCode {
+    let Some(bytes) = bytes else {
+        return ExitCode::from(3);
+    };
+    let mut out = std::io::stdout().lock();
+    if out.write_all(&bytes).and_then(|()| out.flush()).is_ok() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(3)
     }
+}
+
+/// `workspace` (M5d.4): the mounted workspace's facts, read and never
+/// written, before a workload. Exits 3 having printed nothing when any of
+/// them cannot be read.
+fn workspace_report() -> ExitCode {
+    let (Some(workspace), Some(version)) = (workspace_facts(), WorkspaceReportVersion::new(1))
+    else {
+        return ExitCode::from(3);
+    };
+    print_report(
+        WorkspaceReport {
+            kind: WorkspaceReportKind::Report,
+            version,
+            workspace,
+        }
+        .to_bytes()
+        .ok(),
+    )
 }
 
 fn pass_if(ok: bool) -> Verdict {
@@ -630,35 +665,167 @@ fn proc_restricted() -> Verdict {
     all(&[sysrq, kcore, read_only("/proc/sys"), read_only("/sys")])
 }
 
-/// Whether `/workspace` can be written, and its `(st_dev, st_ino)`.
-fn workspace() -> (Verdict, Option<(u64, u64)>) {
-    let identity = fs::metadata(profile::WORKSPACE_TARGET)
+/// The `/workspace` mount as `/proc/self/mountinfo` states it: its root
+/// within its filesystem, and its per-mount options. The last line naming
+/// it is the mount that is visible there.
+struct WorkspaceMount {
+    root: String,
+    options: Vec<String>,
+}
+
+impl WorkspaceMount {
+    /// Whether the mount is its filesystem's own root (M5d.4): a directory
+    /// inside a filesystem, mounted alone, shares that filesystem's bound
+    /// with whatever else is in it.
+    fn is_filesystem_root(&self) -> bool {
+        self.root == "/"
+    }
+
+    fn has(&self, option: &str) -> bool {
+        self.options.iter().any(|o| o == option)
+    }
+}
+
+fn workspace_mount() -> Option<WorkspaceMount> {
+    mount_at(
+        &fs::read_to_string("/proc/self/mountinfo").ok()?,
+        profile::WORKSPACE_TARGET,
+    )
+}
+
+/// The mount `mountinfo` names last at `target`: the one visible there.
+/// `None` when none is, or a line is not one.
+fn mount_at(mountinfo: &str, target: &str) -> Option<WorkspaceMount> {
+    let mut found = None;
+    for line in mountinfo.lines() {
+        // `id parent major:minor root mount-point options ...`
+        let mut fields = line.split(' ');
+        let (Some(root), Some(point), Some(options)) =
+            (fields.nth(3), fields.next(), fields.next())
+        else {
+            return None;
+        };
+        if unescape(point) == target {
+            found = Some(WorkspaceMount {
+                root: unescape(root),
+                options: options.split(',').map(str::to_owned).collect(),
+            });
+        }
+    }
+    found
+}
+
+/// What the mounted workspace is (M5d.4): its identity, its root's owner,
+/// group and mode, whether it is its filesystem's root and mounted `nosuid`
+/// and `nodev`, and the filesystem's size from `statvfs`. Read, never
+/// written. `None` when any part cannot be read: whole, or nothing.
+fn workspace_facts() -> Option<WorkspaceFacts> {
+    let meta = fs::metadata(profile::WORKSPACE_TARGET)
         .ok()
-        .filter(fs::Metadata::is_dir)
-        .map(|m| (m.dev(), m.ino()));
+        .filter(fs::Metadata::is_dir)?;
+    let stat = statvfs(profile::WORKSPACE_TARGET).ok()?;
+    let mount = workspace_mount()?;
+    let number = KernelNumber::from_u64;
+    Some(WorkspaceFacts {
+        device: number(meta.dev()),
+        inode: number(meta.ino()),
+        uid: number(u64::from(meta.uid())),
+        gid: number(u64::from(meta.gid())),
+        mode: number(u64::from(meta.mode() & 0o7777)),
+        filesystem_root: mount.is_filesystem_root(),
+        nosuid: mount.has("nosuid"),
+        nodev: mount.has("nodev"),
+        block_size: number(stat.fragment_size()),
+        blocks: number(stat.blocks()),
+        blocks_available: number(stat.blocks_available()),
+        files: number(stat.files()),
+    })
+}
+
+/// Whether `error` is the filesystem's want of room rather than a refusal:
+/// the kernel checks permission and a read-only mount before it allocates,
+/// so `ENOSPC` or `EDQUOT` says the write was permitted.
+fn out_of_room(error: &std::io::Error) -> bool {
+    matches!(
+        error.raw_os_error().map(Errno::from_raw),
+        Some(Errno::ENOSPC | Errno::EDQUOT)
+    )
+}
+
+/// Whether `/workspace` can be written. A full filesystem can: space, not
+/// permission, is what it lacks (M5d.4), and a full workspace is a
+/// workload's doing, not a sign that its environment drifted.
+fn workspace_writable() -> Verdict {
     let name = Path::new(profile::WORKSPACE_TARGET)
         .join(format!(".direwolf-probe-{}", std::process::id()));
-    let writable = match fs::OpenOptions::new()
+    match fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(&name)
     {
         Ok(mut file) => {
-            let wrote = file.write_all(b"probe").is_ok();
+            let wrote = match file.write_all(b"probe") {
+                Ok(()) => true,
+                Err(error) => out_of_room(&error),
+            };
             drop(file);
             let removed = fs::remove_file(&name).is_ok();
             pass_if(wrote && removed)
         }
+        Err(error) if out_of_room(&error) => Verdict::Pass,
+        Err(_) => Verdict::Fail,
+    }
+}
+
+/// `CONTAINER_WORKSPACE_GROUP_INHERITED` (M5d.4): attempted, a directory
+/// made in `/workspace` takes the workspace group and the set-group-id bit,
+/// and a file made there takes the group; each is removed again. A
+/// filesystem with no room for an attempt is judged by the kernel's rule
+/// from the root's own facts instead -- set-group-id and the group's --
+/// which a filesystem that ignores the bit would have failed at its first
+/// measurement with room.
+fn group_inherited(root: Option<&WorkspaceFacts>) -> Verdict {
+    let by_rule = match root {
+        Some(root) => pass_if(
+            root.gid.value() == u64::from(WORKSPACE_GROUP) && root.mode.value() & 0o2000 != 0,
+        ),
+        None => Verdict::Unobservable,
+    };
+    let pid = std::process::id();
+    let at = Path::new(profile::WORKSPACE_TARGET);
+    let directory = at.join(format!(".direwolf-probe-dir-{pid}"));
+    let made_directory = match fs::create_dir(&directory) {
+        Ok(()) => {
+            let inherited = fs::symlink_metadata(&directory)
+                .map(|m| m.is_dir() && m.gid() == WORKSPACE_GROUP && m.mode() & 0o2000 != 0);
+            let removed = fs::remove_dir(&directory).is_ok();
+            match inherited {
+                Ok(inherited) => pass_if(inherited && removed),
+                Err(_) => Verdict::Unobservable,
+            }
+        }
+        Err(error) if out_of_room(&error) => by_rule,
         Err(_) => Verdict::Fail,
     };
-    (
-        if identity.is_some() {
-            writable
-        } else {
-            Verdict::Unobservable
-        },
-        identity,
-    )
+    let file = at.join(format!(".direwolf-probe-file-{pid}"));
+    let made_file = match fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&file)
+    {
+        Ok(created) => {
+            drop(created);
+            let inherited = fs::symlink_metadata(&file).map(|m| m.gid() == WORKSPACE_GROUP);
+            let removed = fs::remove_file(&file).is_ok();
+            match inherited {
+                Ok(inherited) => pass_if(inherited && removed),
+                Err(_) => Verdict::Unobservable,
+            }
+        }
+        Err(error) if out_of_room(&error) => by_rule,
+        Err(_) => Verdict::Fail,
+    };
+    all(&[made_directory, made_file])
 }
 
 /// Whether `/tmp` and `/var/tmp` can be written, and whether they held
@@ -741,4 +908,54 @@ fn unshare_blocked() -> Verdict {
     ];
     let parts: Vec<Verdict> = flags.into_iter().map(|f| refused(unshare(f))).collect();
     all(&parts)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{WorkspaceMount, mount_at};
+
+    #[test]
+    fn the_workspace_mount_is_the_last_at_its_target_and_says_its_root() {
+        // A host directory bound alone: its root is a path inside its
+        // filesystem (measured on Docker Engine 29.8.2).
+        let bound = concat!(
+            "1 0 8:1 / / ro,relatime - ext4 /dev/sda1 rw\n",
+            "90 1 8:32 /home/onur/ws /workspace rw,nosuid,nodev - ext4 /dev/sdc rw\n",
+        );
+        let mount = mount_at(bound, "/workspace");
+        assert_eq!(
+            mount.as_ref().map(WorkspaceMount::is_filesystem_root),
+            Some(false)
+        );
+        assert_eq!(
+            mount
+                .as_ref()
+                .map(|m| (m.has("nosuid"), m.has("nodev"), m.has("ro"))),
+            Some((true, true, false))
+        );
+        // A filesystem of its own, at its root.
+        let own = "91 1 0:57 / /workspace rw,nosuid,nodev - tmpfs dw rw,size=65536k\n";
+        assert_eq!(
+            mount_at(own, "/workspace")
+                .as_ref()
+                .map(WorkspaceMount::is_filesystem_root),
+            Some(true)
+        );
+        // Mounted over: the last line is the visible mount.
+        let over = format!("{bound}92 90 0:58 / /workspace rw - tmpfs x rw\n");
+        let mount = mount_at(&over, "/workspace");
+        assert_eq!(
+            mount
+                .as_ref()
+                .map(|m| (m.is_filesystem_root(), m.has("nosuid"))),
+            Some((true, false))
+        );
+        // An escaped root, and no mount there at all.
+        let escaped = "93 1 0:59 /a\\040b /workspace rw - tmpfs x rw\n";
+        assert_eq!(
+            mount_at(escaped, "/workspace").map(|m| m.root),
+            Some("/a b".to_owned())
+        );
+        assert!(mount_at("1 0 8:1 / / ro - ext4 /dev/sda1 rw\n", "/workspace").is_none());
+    }
 }

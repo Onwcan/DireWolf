@@ -56,6 +56,14 @@ pub(crate) struct ServeConfig {
     /// broker builds `PROXY_ONLY` environments only (M5b). Stated at
     /// start-up; never implied.
     pub(crate) evidence_topology_permitted: bool,
+    /// The operator's acknowledgement that the evidence harness's own
+    /// scratch workspace may be mounted unverified (M5d.4, ADR-0052 §§6,
+    /// 10): an environment whose specification carries no bounded
+    /// workspace -- no proved group, no proved quota. Without it every
+    /// environment must carry the authority's bound. Evidence only, logged
+    /// `REDUCED ASSURANCE` at start-up, never implied, and absent from
+    /// every production configuration.
+    pub(crate) unverified_workspace: UnverifiedWorkspace,
     /// The egress evidence's fixture file (M5b, ADR-0048): when given, the
     /// proxy resolves names from it instead of the host's resolver, and may
     /// reach the loopback addresses it names. Evidence only — a fixture
@@ -82,6 +90,19 @@ pub(crate) enum TraceableWorkers {
     Permitted,
 }
 
+/// What the broker does with an environment whose workspace carries no
+/// bound (M5d.4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum UnverifiedWorkspace {
+    /// It refuses it (`WORKSPACE_UNVERIFIED`): the default, and the only
+    /// production answer.
+    Refused,
+    /// It builds it, having logged `REDUCED ASSURANCE` at start: the
+    /// evidence harness's acknowledgement, `--allow-unverified-workspace`.
+    /// Never implied.
+    Permitted,
+}
+
 /// What the broker does with a hop that carries a credential where its
 /// memory, or its exchange worker's, can be written to swap.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -92,6 +113,39 @@ pub(crate) enum SwappableWorkers {
     /// operator's development acknowledgement, `--allow-swappable-workers`.
     /// Never implied.
     Permitted,
+}
+
+impl TraceableWorkers {
+    /// `Permitted` exactly when the operator gave the acknowledgement.
+    const fn acknowledged(given: bool) -> Self {
+        if given {
+            Self::Permitted
+        } else {
+            Self::Refused
+        }
+    }
+}
+
+impl SwappableWorkers {
+    /// `Permitted` exactly when the operator gave the acknowledgement.
+    const fn acknowledged(given: bool) -> Self {
+        if given {
+            Self::Permitted
+        } else {
+            Self::Refused
+        }
+    }
+}
+
+impl UnverifiedWorkspace {
+    /// `Permitted` exactly when the operator gave the acknowledgement.
+    const fn acknowledged(given: bool) -> Self {
+        if given {
+            Self::Permitted
+        } else {
+            Self::Refused
+        }
+    }
 }
 
 /// A command line that does not describe a configuration.
@@ -171,6 +225,7 @@ pub(crate) fn parse(args: &[String]) -> Result<Command, UsageError> {
     let mut traceable = false;
     let mut swappable = false;
     let mut evidence_topology = false;
+    let mut unverified_workspace = false;
     // An acknowledgement is a flag with no value, given at most once.
     let acknowledge = |seen: &mut bool, flag: &str| {
         if std::mem::replace(seen, true) {
@@ -204,6 +259,7 @@ pub(crate) fn parse(args: &[String]) -> Result<Command, UsageError> {
             "--allow-traceable-workers" => acknowledge(&mut traceable, flag)?,
             "--allow-swappable-workers" => acknowledge(&mut swappable, flag)?,
             "--allow-evidence-topology" => acknowledge(&mut evidence_topology, flag)?,
+            "--allow-unverified-workspace" => acknowledge(&mut unverified_workspace, flag)?,
             "--allow-evidence-egress" => evidence_path(flag, value()?, &mut evidence_egress)?,
             "--allow-evidence-trust" => evidence_path(flag, value()?, &mut evidence_trust)?,
             other => {
@@ -235,17 +291,10 @@ pub(crate) fn parse(args: &[String]) -> Result<Command, UsageError> {
         authority_uid,
         shared_uid_permitted: shared,
         dumpable_permitted: dumpable,
-        traceable_workers: if traceable {
-            TraceableWorkers::Permitted
-        } else {
-            TraceableWorkers::Refused
-        },
-        swappable_workers: if swappable {
-            SwappableWorkers::Permitted
-        } else {
-            SwappableWorkers::Refused
-        },
+        traceable_workers: TraceableWorkers::acknowledged(traceable),
+        swappable_workers: SwappableWorkers::acknowledged(swappable),
         evidence_topology_permitted: evidence_topology,
+        unverified_workspace: UnverifiedWorkspace::acknowledged(unverified_workspace),
         evidence_egress,
         evidence_trust,
     }))
@@ -255,7 +304,9 @@ pub(crate) fn parse(args: &[String]) -> Result<Command, UsageError> {
 mod tests {
     use std::path::PathBuf;
 
-    use super::{Command, ServeConfig, SwappableWorkers, TraceableWorkers, parse};
+    use super::{
+        Command, ServeConfig, SwappableWorkers, TraceableWorkers, UnverifiedWorkspace, parse,
+    };
 
     /// A socket path that is absolute on this platform: `/b` is not, on
     /// Windows, and the parser is portable even though serving is not.
@@ -297,6 +348,7 @@ mod tests {
                 traceable_workers: TraceableWorkers::Refused,
                 swappable_workers: SwappableWorkers::Refused,
                 evidence_topology_permitted: false,
+                unverified_workspace: UnverifiedWorkspace::Refused,
                 evidence_egress: None,
                 evidence_trust: None,
             }))
@@ -430,6 +482,39 @@ mod tests {
             }))
         ));
         with.push("--allow-evidence-topology");
+        assert!(parse(&args(&with)).is_err());
+    }
+
+    #[test]
+    fn the_unverified_workspace_is_explicit_and_given_once() {
+        let base = ["serve", "--socket", "ABS", "--authority-uid", "7"];
+        assert!(matches!(
+            parse(&args(&base)),
+            Ok(Command::Serve(ServeConfig {
+                unverified_workspace: UnverifiedWorkspace::Refused,
+                ..
+            }))
+        ));
+        // The evidence topology does not imply it: each is its own word.
+        let mut topology = base.to_vec();
+        topology.push("--allow-evidence-topology");
+        assert!(matches!(
+            parse(&args(&topology)),
+            Ok(Command::Serve(ServeConfig {
+                unverified_workspace: UnverifiedWorkspace::Refused,
+                ..
+            }))
+        ));
+        let mut with = base.to_vec();
+        with.push("--allow-unverified-workspace");
+        assert!(matches!(
+            parse(&args(&with)),
+            Ok(Command::Serve(ServeConfig {
+                unverified_workspace: UnverifiedWorkspace::Permitted,
+                ..
+            }))
+        ));
+        with.push("--allow-unverified-workspace");
         assert!(parse(&args(&with)).is_err());
     }
 

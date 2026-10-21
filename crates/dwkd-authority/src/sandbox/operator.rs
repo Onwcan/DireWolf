@@ -31,17 +31,22 @@
 //!
 //! [executables]                     # the image's manifest: path -> SHA-256
 //! "/usr/bin/git" = "<64 hex>"
+//!
+//! [workspace]                       # required (M5d.4, ADR-0052 §§6, 10)
+//! quota_bytes = 5368709120          # each workspace's own filesystem: 16 MiB to 16 TiB
+//! # unverified_evidence = true      # instead: the evidence harness's scratch directory
 //! ```
 //!
 //! Strict: an unknown member, a missing required one, a value of another
 //! type or outside its grammar refuses the whole file, and the authority
 //! does not start. There is no field for a runtime flag, a mount, a
-//! capability, a device, a user or a weaker profile.
+//! capability, a device, a user, a group or a weaker profile; the workspace
+//! group and its root's mode are the contract's, not the operator's.
 
 use toml::de::{DeTable, DeValue};
 
-use super::{EgressConfig, SandboxConfig, WorkloadBudget};
-use dwk_proto::brokerp::sandbox::NetworkTopology;
+use super::{EgressConfig, SandboxConfig, WorkloadBudget, WorkspaceSetting};
+use dwk_proto::brokerp::sandbox::{NetworkTopology, WorkspaceQuota};
 
 /// The largest file read.
 pub const MAX_FILE_BYTES: u64 = 64 * 1024;
@@ -56,6 +61,7 @@ const TOP: &[&str] = &[
     "egress",
     "budget",
     "executables",
+    "workspace",
 ];
 const EGRESS: &[&str] = &[
     "relay_sha256",
@@ -64,6 +70,7 @@ const EGRESS: &[&str] = &[
     "max_download_bytes",
 ];
 const BUDGET: &[&str] = &["workloads", "seconds"];
+const WORKSPACE: &[&str] = &["quota_bytes", "unverified_evidence"];
 
 type Value<'t> = toml::Spanned<DeValue<'t>>;
 
@@ -115,6 +122,43 @@ fn integer(table: &DeTable<'_>, name: &str, path: &str) -> Result<Option<u64>, S
         .map_err(|_| format!("{path}{name} is out of range"))
 }
 
+fn boolean(table: &DeTable<'_>, name: &str, path: &str) -> Result<Option<bool>, String> {
+    let Some(value) = find(table, name) else {
+        return Ok(None);
+    };
+    match value.get_ref() {
+        DeValue::Boolean(flag) => Ok(Some(*flag)),
+        _ => Err(format!("{path}{name} must be true or false")),
+    }
+}
+
+/// `[workspace]` (M5d.4): every run's workspace -- the operator's bounded
+/// filesystem at `quota_bytes`, or, for the evidence harness only,
+/// `unverified_evidence = true`. Required: there is no default, and never
+/// both.
+fn workspace(document: &DeTable<'_>) -> Result<WorkspaceSetting, String> {
+    let Some(table) = table(document, "workspace")? else {
+        return Err(
+            "[workspace] is required: quota_bytes, the bound of each workspace's own filesystem"
+                .to_owned(),
+        );
+    };
+    reject_unknown(table, WORKSPACE, "workspace.")?;
+    match (
+        integer(table, "quota_bytes", "workspace.")?,
+        boolean(table, "unverified_evidence", "workspace.")?,
+    ) {
+        (Some(quota), None) => WorkspaceQuota::new(quota)
+            .map(WorkspaceSetting::Bounded)
+            .ok_or_else(|| "workspace.quota_bytes must be 16 MiB to 16 TiB".to_owned()),
+        (None, Some(true)) => Ok(WorkspaceSetting::UnverifiedEvidence),
+        (None, Some(false) | None) => Err("[workspace] needs quota_bytes".to_owned()),
+        (Some(_), Some(_)) => {
+            Err("[workspace] names quota_bytes or unverified_evidence, never both".to_owned())
+        }
+    }
+}
+
 fn table<'t>(document: &'t DeTable<'t>, name: &str) -> Result<Option<&'t DeTable<'t>>, String> {
     let Some(value) = find(document, name) else {
         return Ok(None);
@@ -152,6 +196,7 @@ pub fn parse(text: &str) -> Result<SandboxConfig, String> {
         _ => return Err("network must be PROXY_ONLY or NO_NETWORK".to_owned()),
     };
     let refused = |error: super::SandboxConfigError| error.to_string();
+    let workspace = workspace(document)?;
     let config = match (network, table(document, "egress")?) {
         (NetworkTopology::ProxyOnly, Some(egress)) => {
             reject_unknown(egress, EGRESS, "egress.")?;
@@ -168,13 +213,15 @@ pub fn parse(text: &str) -> Result<SandboxConfig, String> {
                 limit("max_download_bytes")?,
             )
             .map_err(refused)?;
-            SandboxConfig::proxy_only(runtime, socket, image, probe, egress).map_err(refused)?
+            SandboxConfig::proxy_only(runtime, socket, image, probe, egress, workspace)
+                .map_err(refused)?
         }
         (NetworkTopology::ProxyOnly, None) => {
             return Err("a PROXY_ONLY configuration needs its [egress] table".to_owned());
         }
         (NetworkTopology::NoNetwork, None) => {
-            SandboxConfig::new(runtime, socket, image, probe, network).map_err(refused)?
+            SandboxConfig::new(runtime, socket, image, probe, network, workspace)
+                .map_err(refused)?
         }
         (NetworkTopology::NoNetwork, Some(_)) => {
             return Err("a NO_NETWORK configuration has no [egress] table".to_owned());
@@ -227,7 +274,13 @@ mod tests {
 
     const HEX: &str = "abababababababababababababababababababababababababababababababab";
 
+    /// A document with `extra`, and a bounded workspace of 64 MiB.
     fn document(extra: &str) -> String {
+        bare(&format!("{extra}\n[workspace]\nquota_bytes = 67108864\n"))
+    }
+
+    /// A document with `extra` and nothing else.
+    fn bare(extra: &str) -> String {
         format!(
             "schema_version = 1\n\
              runtime = \"/usr/bin/docker\"\n\
@@ -236,6 +289,52 @@ mod tests {
              probe_sha256 = \"{HEX}\"\n\
              {extra}"
         )
+    }
+
+    #[test]
+    fn every_workspace_is_stated_bounded_or_the_evidence_harnesses_never_both() {
+        use super::WorkspaceSetting;
+        let config =
+            parse(&document("network = \"NO_NETWORK\"\n")).unwrap_or_else(|e| unreachable!("{e}"));
+        assert!(matches!(
+            config.workspace(),
+            WorkspaceSetting::Bounded(quota) if quota.get() == 64 << 20
+        ));
+        let evidence = parse(&bare(
+            "network = \"NO_NETWORK\"\n[workspace]\nunverified_evidence = true\n",
+        ))
+        .unwrap_or_else(|e| unreachable!("{e}"));
+        assert_eq!(evidence.workspace(), WorkspaceSetting::UnverifiedEvidence);
+        for bad in [
+            // No default: an operator who says nothing gets nothing.
+            bare("network = \"NO_NETWORK\"\n"),
+            bare("network = \"NO_NETWORK\"\n[workspace]\n"),
+            bare("network = \"NO_NETWORK\"\n[workspace]\nunverified_evidence = false\n"),
+            bare(
+                "network = \"NO_NETWORK\"\n[workspace]\nquota_bytes = 67108864\n\
+                 unverified_evidence = true\n",
+            ),
+            // Outside 16 MiB to 16 TiB, or not one plain decimal integer.
+            bare("network = \"NO_NETWORK\"\n[workspace]\nquota_bytes = 16777215\n"),
+            bare("network = \"NO_NETWORK\"\n[workspace]\nquota_bytes = 17592186044417\n"),
+            bare("network = \"NO_NETWORK\"\n[workspace]\nquota_bytes = 0x4000000\n"),
+            bare("network = \"NO_NETWORK\"\n[workspace]\nquota_bytes = \"64MiB\"\n"),
+            bare("network = \"NO_NETWORK\"\n[workspace]\nquota_bytes = -1\n"),
+            bare("network = \"NO_NETWORK\"\n[workspace]\nunverified_evidence = \"yes\"\n"),
+            // The group and the mode are the contract's, never the operator's.
+            bare("network = \"NO_NETWORK\"\n[workspace]\nquota_bytes = 67108864\ngroup = 1000\n"),
+            bare("network = \"NO_NETWORK\"\n[workspace]\nquota_bytes = 67108864\nmode = 511\n"),
+            bare("network = \"NO_NETWORK\"\nworkspace = 67108864\n"),
+        ] {
+            assert!(parse(&bad).is_err(), "{bad}");
+        }
+        // The bounds themselves are accepted.
+        for quota in [16u64 << 20, 16 << 40] {
+            let text = bare(&format!(
+                "network = \"NO_NETWORK\"\n[workspace]\nquota_bytes = {quota}\n"
+            ));
+            assert!(parse(&text).is_ok(), "{quota}");
+        }
     }
 
     #[test]

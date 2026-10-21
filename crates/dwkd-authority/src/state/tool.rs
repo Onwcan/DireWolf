@@ -389,7 +389,12 @@ pub(super) const fn failure_reason(failure: BrokerFailure) -> FsFailureReason {
             BrokerRefusal::TargetOccupied => FsFailureReason::TargetOccupied,
             BrokerRefusal::Conflict => FsFailureReason::Conflict,
             BrokerRefusal::DirectoryNotEmpty => FsFailureReason::DirectoryNotEmpty,
-            BrokerRefusal::WriteDenied => FsFailureReason::WriteDenied,
+            // M5d.4: a directory of the workspace group that does not keep
+            // the group's convention is not write-enabled as the contract
+            // says. Nothing was changed either way.
+            BrokerRefusal::WriteDenied | BrokerRefusal::WorkspaceGroupContract => {
+                FsFailureReason::WriteDenied
+            }
             BrokerRefusal::AttributesNotPreserved => FsFailureReason::AttributesNotPreserved,
             BrokerRefusal::SharedDirectory => FsFailureReason::SharedDirectory,
             // The process refusals (M4d) answer a process operation; for a
@@ -439,7 +444,14 @@ pub(super) const fn failure_reason(failure: BrokerFailure) -> FsFailureReason {
             // no filesystem or process tool sends.
             | BrokerRefusal::EnvironmentNotClean
             | BrokerRefusal::WorkloadTableFull
-            | BrokerRefusal::WorkloadInUse => FsFailureReason::BrokerExecutionError,
+            | BrokerRefusal::WorkloadInUse
+            // The workspace contract's environment refusal (M5d.4) answers
+            // an environment operation.
+            | BrokerRefusal::WorkspaceUnverified
+            // M5d.4: a full workspace. Nothing was changed; the audit record
+            // names it (`broker_refusal: NO_SPACE`): the tool messages have
+            // no word of their own for it before a new version of them.
+            | BrokerRefusal::NoSpace => FsFailureReason::BrokerExecutionError,
         },
         BrokerFailure::Indeterminate(_) => FsFailureReason::BrokerExecutionError,
     }
@@ -1122,6 +1134,34 @@ pub(super) fn record_handoff_failure(
             .text("failure", reason.as_str())
             .flag("effect_possible", false)
             .text("open_failure", detail.as_str()),
+    )?;
+    Ok(reason)
+}
+
+/// An invocation that would change names while a workload may be running in
+/// its workspace (M5d.4): the workload writes there as a member of the
+/// workspace group and its code is untrusted, which ADR-0044 §3 keeps away
+/// from a brokered change rather than defending against. It ends here,
+/// `FAILED` as a change in a shared directory does -- `SHARED_DIRECTORY`,
+/// whose meaning this is: a writer outside the trusted set could race it --
+/// with nothing sent to the broker, so nothing done. The audit says why.
+pub(super) fn record_exclusion(
+    work: &mut Work<'_>,
+    run: &RunId,
+    invocation: &InvocationId,
+) -> Result<FsFailureReason, AuthorityError> {
+    let reason = FsFailureReason::SharedDirectory;
+    end(work, invocation, &Ending::Failed(reason))?;
+    // Nothing was sent: no staging directory can exist.
+    staging::clear(work, invocation)?;
+    work.audit(
+        AuditEvent::ToolFailed,
+        Fields::new()
+            .text("run_id", run.as_str())
+            .text("invocation_id", invocation.as_str())
+            .text("failure", reason.as_str())
+            .flag("effect_possible", false)
+            .text("excluded_by", "WORKLOAD_IN_WORKSPACE"),
     )?;
     Ok(reason)
 }

@@ -139,7 +139,10 @@ fn report_of(
     environment: &EnvironmentId,
     container: Option<ContainerRef>,
     measurement: &EnvironmentMeasurement,
-    topology: dwk_proto::brokerp::sandbox::NetworkTopology,
+    judged: (
+        dwk_proto::brokerp::sandbox::NetworkTopology,
+        dwk_proto::brokerp::sandbox::WorkspaceContract,
+    ),
     egress: Option<EgressCounters>,
 ) -> EnvironmentReport {
     let checks: Vec<(SandboxInvariant, Verdict)> = measurement
@@ -150,7 +153,7 @@ fn report_of(
     EnvironmentReport {
         environment: environment.clone(),
         container,
-        judgement: sandbox::judge(EnvironmentKind::Oci, topology, &checks),
+        judgement: sandbox::judge(EnvironmentKind::Oci, judged, &checks),
         checks,
         runtime_version: measurement
             .runtime_version
@@ -198,6 +201,15 @@ pub(super) fn runtime(
 /// that directory's identity, which the probe proves from inside. A
 /// `PROXY_ONLY` one carries the relay's digest and, to be prepared, its
 /// grant (M5b); a measurement needs no grant.
+///
+/// **The workspace contract, the authority's side** (M5d.4): the root just
+/// pinned is held against what a production workspace must be -- its owner,
+/// group and mode, the authority's own membership of the group, its
+/// filesystem's capacity within the operator's quota, and nothing private
+/// on that filesystem -- and the bound found travels with the specification
+/// for the broker to hold the probe's view against. Every preparation,
+/// measurement and workload start passes through here, so a workspace that
+/// changed since is refused before anything more runs in it.
 pub(super) fn specification(
     shared: &Shared,
     config: &SandboxConfig,
@@ -208,6 +220,33 @@ pub(super) fn specification(
     let root = PinnedRoot::reopen(&binding.host_path, &binding.fingerprint)
         .map_err(|_| "WORKSPACE_CHANGED")?;
     let identity = root.identity();
+    let ages: Vec<std::path::PathBuf> = shared
+        .secrets
+        .config()
+        .secrets
+        .iter()
+        .filter_map(|secret| match &secret.storage {
+            crate::secret::metadata::Storage::Age(file) => Some(file.as_str().into()),
+            crate::secret::metadata::Storage::Keychain(_) => None,
+        })
+        .collect();
+    // The authority's own state must be looked at; the runtime's socket may
+    // be the broker's alone to reach (ADR-0047 §2), and is looked at where
+    // it can be.
+    let mut private: Vec<(&std::path::Path, bool)> = vec![
+        (shared.paths.dir.as_path(), true),
+        (std::path::Path::new(config.socket().as_str()), false),
+    ];
+    private.extend(ages.iter().map(|age| (age.as_path(), true)));
+    let workspace_bound = super::workspace::bound(
+        config,
+        &root,
+        &super::workspace::Context {
+            authority_uid: shared.authority_uid,
+            member: super::workspace::member_of(dwk_proto::brokerp::sandbox::WORKSPACE_GROUP),
+            private: &private,
+        },
+    )?;
     Ok(EnvironmentSpec {
         environment_id: environment.clone(),
         run_id: run.clone(),
@@ -218,6 +257,7 @@ pub(super) fn specification(
         probe_sha256: config.probe_sha256().clone(),
         workspace_path: HostPath::new(binding.host_path.clone()).ok_or("WORKSPACE_PATH")?,
         workspace: (identity.device(), identity.inode()),
+        workspace_bound,
         relay_sha256: config.egress().map(|e| e.relay_sha256().clone()),
         egress,
     })
@@ -440,7 +480,7 @@ impl Authority {
                                 &record.environment,
                                 Some(container),
                                 measurement,
-                                config.topology(),
+                                (config.topology(), config.workspace().contract()),
                                 done.egress.clone(),
                             );
                             match report.judgement.failure(EnvironmentKind::Oci) {
@@ -725,7 +765,7 @@ fn judge_preparation(
                     environment,
                     done.container.clone(),
                     m,
-                    config.topology(),
+                    (config.topology(), config.workspace().contract()),
                     None,
                 )
             });

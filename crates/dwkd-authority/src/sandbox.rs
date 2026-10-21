@@ -39,7 +39,8 @@ use dwk_proto::brokerp::egress::{
     EgressTunnelLimit, MAX_EGRESS_TARGETS,
 };
 use dwk_proto::brokerp::sandbox::{
-    AssuranceLevel, ImageId, NetworkTopology, SandboxInvariant, Verdict, required_invariants,
+    AssuranceLevel, ImageId, NetworkTopology, SandboxInvariant, Verdict, WorkspaceContract,
+    WorkspaceQuota, required_invariants,
 };
 use dwk_proto::brokerp::workload::{ImagePath, WORKLOAD_MAX_SECONDS};
 use dwk_proto::wire::scalar::{ContentDigest, HostPath};
@@ -156,6 +157,19 @@ impl Judgement {
         .any(failed)
         {
             "RESOURCE_LIMIT_FAILED"
+        } else if failed(SandboxInvariant::HostWorkspaceCapacity) {
+            // M5d.4: not the operator's bounded filesystem, or not as bounded
+            // as declared.
+            "WORKSPACE_UNBOUNDED"
+        } else if [
+            SandboxInvariant::HostWorkspaceIdentity,
+            SandboxInvariant::HostWorkspaceOwnership,
+            SandboxInvariant::ContainerWorkspaceGroupInherited,
+        ]
+        .into_iter()
+        .any(failed)
+        {
+            "WORKSPACE_CONTRACT_FAILED"
         } else if !self.failed.is_empty() {
             "ASSURANCE_FAILED"
         } else {
@@ -164,16 +178,18 @@ impl Judgement {
     }
 }
 
-/// Judge a measurement of an environment of `kind` with `topology`.
+/// Judge a measurement of an environment of `kind` with `topology` and
+/// `workspace` (M5d.4: a bounded workspace requires the workspace
+/// contract's invariants).
 #[must_use]
 pub fn judge(
     kind: EnvironmentKind,
-    topology: NetworkTopology,
+    (topology, workspace): (NetworkTopology, WorkspaceContract),
     checks: &[(SandboxInvariant, Verdict)],
 ) -> Judgement {
     let mut failed = Vec::new();
     let mut unobservable = Vec::new();
-    for invariant in required_invariants(topology) {
+    for invariant in required_invariants(topology, workspace) {
         let found: Vec<Verdict> = checks
             .iter()
             .filter(|(i, _)| *i == invariant)
@@ -219,7 +235,35 @@ pub const fn refusal_class(refusal: BrokerRefusal) -> &'static str {
             "RUNTIME_CLIENT_CHANGED"
         }
         BrokerRefusal::Unsupported => "WORKSPACE_PATH_UNSUPPORTED",
+        BrokerRefusal::WorkspaceUnverified => "WORKSPACE_UNVERIFIED",
         _ => "BROKER_EXECUTION_ERROR",
+    }
+}
+
+/// What the operator says every run's workspace is (M5d.4, ADR-0052 §§6,
+/// 10; OD-3(a), OD-6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkspaceSetting {
+    /// Production: each workspace an operator-provided filesystem of its
+    /// own, its root the authority's or root's, of the workspace group,
+    /// mode `2770`, and bounded at this quota. Measured from both vantages
+    /// -- the authority's pinned root and the probe inside -- and required
+    /// before anything runs.
+    Bounded(WorkspaceQuota),
+    /// The evidence harness's own scratch directory, whose group and bound
+    /// are proved by nothing: refused by every broker whose operator did not
+    /// start it with `--allow-unverified-workspace`. Never production's.
+    UnverifiedEvidence,
+}
+
+impl WorkspaceSetting {
+    /// The contract the environment is judged under.
+    #[must_use]
+    pub const fn contract(self) -> WorkspaceContract {
+        match self {
+            Self::Bounded(_) => WorkspaceContract::Bounded,
+            Self::UnverifiedEvidence => WorkspaceContract::UnverifiedEvidence,
+        }
     }
 }
 
@@ -249,6 +293,8 @@ pub struct SandboxConfig {
     executables: Vec<(ImagePath, ContentDigest)>,
     /// Each run's workload budget (M5d.1, ADR-0052 §10).
     workload_budget: WorkloadBudget,
+    /// What every run's workspace is (M5d.4).
+    workspace: WorkspaceSetting,
 }
 
 /// The most executables one image manifest names.
@@ -454,7 +500,8 @@ fn absolute(path: &str) -> bool {
 
 impl SandboxConfig {
     /// A `NO_NETWORK` configuration, checked. `PROXY_ONLY` is refused here:
-    /// it needs [`Self::proxy_only`].
+    /// it needs [`Self::proxy_only`]. What every run's `workspace` is has no
+    /// default (M5d.4): the operator states it.
     ///
     /// # Errors
     ///
@@ -465,11 +512,19 @@ impl SandboxConfig {
         image: &str,
         probe_sha256: &str,
         topology: NetworkTopology,
+        workspace: WorkspaceSetting,
     ) -> Result<Self, SandboxConfigError> {
         if topology != NetworkTopology::NoNetwork {
             return Err(SandboxConfigError::EgressUnconfigured);
         }
-        Self::checked(runtime, socket, image, probe_sha256, topology, None)
+        Self::checked(
+            runtime,
+            socket,
+            image,
+            probe_sha256,
+            (topology, None),
+            workspace,
+        )
     }
 
     /// A `PROXY_ONLY` configuration (M5b), checked.
@@ -483,14 +538,15 @@ impl SandboxConfig {
         image: &str,
         probe_sha256: &str,
         egress: EgressConfig,
+        workspace: WorkspaceSetting,
     ) -> Result<Self, SandboxConfigError> {
         Self::checked(
             runtime,
             socket,
             image,
             probe_sha256,
-            NetworkTopology::ProxyOnly,
-            Some(egress),
+            (NetworkTopology::ProxyOnly, Some(egress)),
+            workspace,
         )
     }
 
@@ -499,8 +555,8 @@ impl SandboxConfig {
         socket: &str,
         image: &str,
         probe_sha256: &str,
-        topology: NetworkTopology,
-        egress: Option<EgressConfig>,
+        (topology, egress): (NetworkTopology, Option<EgressConfig>),
+        workspace: WorkspaceSetting,
     ) -> Result<Self, SandboxConfigError> {
         if !absolute(runtime) {
             return Err(SandboxConfigError::RuntimePath);
@@ -520,7 +576,14 @@ impl SandboxConfig {
             egress,
             executables: Vec::new(),
             workload_budget: WorkloadBudget::default(),
+            workspace,
         })
+    }
+
+    /// What every run's workspace is (M5d.4).
+    #[must_use]
+    pub const fn workspace(&self) -> WorkspaceSetting {
+        self.workspace
     }
 
     /// The same configuration, with the image's manifest — the executables
@@ -623,10 +686,14 @@ impl SandboxConfig {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, reason = "test assertions")]
 mod tests {
-    use dwk_proto::brokerp::sandbox::{AssuranceLevel, NetworkTopology, SandboxInvariant, Verdict};
+    use dwk_proto::brokerp::sandbox::{
+        AssuranceLevel, NetworkTopology, SandboxInvariant, Verdict, WorkspaceContract,
+        WorkspaceQuota,
+    };
 
     use super::{
-        EgressConfig, EnvironmentKind, SandboxConfig, SandboxConfigError, egress_targets, judge,
+        EgressConfig, EnvironmentKind, SandboxConfig, SandboxConfigError, WorkspaceSetting,
+        egress_targets, judge,
     };
 
     fn all(verdict: Verdict) -> Vec<(SandboxInvariant, Verdict)> {
@@ -640,7 +707,7 @@ mod tests {
     fn every_pass_earns_the_declared_level_and_no_more() {
         let j = judge(
             EnvironmentKind::Oci,
-            NetworkTopology::NoNetwork,
+            (NetworkTopology::NoNetwork, WorkspaceContract::Bounded),
             &all(Verdict::Pass),
         );
         assert_eq!(j.measured.0, AssuranceLevel::ContainerIsolation);
@@ -669,18 +736,28 @@ mod tests {
                 }
             }
             assert!(
-                judge(EnvironmentKind::Oci, NetworkTopology::NoNetwork, &checks)
-                    .usable(EnvironmentKind::Oci)
+                judge(
+                    EnvironmentKind::Oci,
+                    (NetworkTopology::NoNetwork, WorkspaceContract::Bounded),
+                    &checks
+                )
+                .usable(EnvironmentKind::Oci)
             );
             assert!(
-                !judge(EnvironmentKind::Oci, NetworkTopology::ProxyOnly, &checks)
-                    .usable(EnvironmentKind::Oci)
+                !judge(
+                    EnvironmentKind::Oci,
+                    (NetworkTopology::ProxyOnly, WorkspaceContract::Bounded),
+                    &checks
+                )
+                .usable(EnvironmentKind::Oci)
             );
         }
     }
 
     fn one_topology_refuses_with_no_partial_credit(topology: NetworkTopology) {
-        for invariant in dwk_proto::brokerp::sandbox::required_invariants(topology) {
+        for invariant in
+            dwk_proto::brokerp::sandbox::required_invariants(topology, WorkspaceContract::Bounded)
+        {
             for verdict in [Verdict::Fail, Verdict::Unobservable] {
                 let mut checks = all(Verdict::Pass);
                 for check in &mut checks {
@@ -688,7 +765,11 @@ mod tests {
                         check.1 = verdict;
                     }
                 }
-                let j = judge(EnvironmentKind::Oci, topology, &checks);
+                let j = judge(
+                    EnvironmentKind::Oci,
+                    (topology, WorkspaceContract::Bounded),
+                    &checks,
+                );
                 assert_eq!(
                     j.measured.0,
                     AssuranceLevel::None,
@@ -702,13 +783,21 @@ mod tests {
                 .into_iter()
                 .filter(|(i, _)| *i != invariant)
                 .collect();
-            let j = judge(EnvironmentKind::Oci, topology, &missing);
+            let j = judge(
+                EnvironmentKind::Oci,
+                (topology, WorkspaceContract::Bounded),
+                &missing,
+            );
             assert_eq!(j.unobservable, [invariant]);
             assert!(!j.usable(EnvironmentKind::Oci));
             // Said twice, even both PASS, is not a measurement.
             let mut twice = all(Verdict::Pass);
             twice.push((invariant, Verdict::Pass));
-            let j = judge(EnvironmentKind::Oci, topology, &twice);
+            let j = judge(
+                EnvironmentKind::Oci,
+                (topology, WorkspaceContract::Bounded),
+                &twice,
+            );
             assert_eq!(j.unobservable, [invariant]);
         }
     }
@@ -725,8 +814,12 @@ mod tests {
                     }
                 }
             }
-            judge(EnvironmentKind::Oci, NetworkTopology::NoNetwork, &checks)
-                .failure(EnvironmentKind::Oci)
+            judge(
+                EnvironmentKind::Oci,
+                (NetworkTopology::NoNetwork, WorkspaceContract::Bounded),
+                &checks,
+            )
+            .failure(EnvironmentKind::Oci)
         };
         assert_eq!(
             with(&[
@@ -771,6 +864,7 @@ mod tests {
             &image,
             &digest,
             NetworkTopology::NoNetwork,
+            WorkspaceSetting::UnverifiedEvidence,
         );
         assert!(ok.is_ok());
         for (runtime, socket, image, digest, topology, want) in [
@@ -824,7 +918,14 @@ mod tests {
             ),
         ] {
             assert_eq!(
-                SandboxConfig::new(runtime, socket, image, digest, topology),
+                SandboxConfig::new(
+                    runtime,
+                    socket,
+                    image,
+                    digest,
+                    topology,
+                    WorkspaceSetting::UnverifiedEvidence
+                ),
                 Err(want)
             );
         }
@@ -836,8 +937,17 @@ mod tests {
         let image = format!("sha256:{}", "b".repeat(64));
         let relay = "c".repeat(64);
         let egress = EgressConfig::new(&relay, 8, 1 << 30, 1 << 30).unwrap();
-        let config =
-            SandboxConfig::proxy_only("/usr/bin/docker", "/s", &image, &digest, egress).unwrap();
+        let quota = WorkspaceQuota::new(5 << 30).unwrap();
+        let config = SandboxConfig::proxy_only(
+            "/usr/bin/docker",
+            "/s",
+            &image,
+            &digest,
+            egress,
+            WorkspaceSetting::Bounded(quota),
+        )
+        .unwrap();
+        assert_eq!(config.workspace().contract(), WorkspaceContract::Bounded);
         assert_eq!(config.topology(), NetworkTopology::ProxyOnly);
         assert_eq!(config.egress().unwrap().relay_sha256().as_str(), relay);
         for (relay, tunnels, up, down, want) in [

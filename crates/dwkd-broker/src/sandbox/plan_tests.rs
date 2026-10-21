@@ -29,6 +29,7 @@ pub(crate) fn spec(workspace: &str, network: NetworkTopology) -> EnvironmentSpec
         probe_sha256: ContentDigest::new("b".repeat(64)).unwrap(),
         workspace_path: HostPath::new(workspace.to_owned()).unwrap(),
         workspace: (1, 2),
+        workspace_bound: None,
         relay_sha256: None,
         egress: None,
     }
@@ -196,6 +197,18 @@ fn names_and_filters_are_exact() {
     assert_eq!(
         remove(&container),
         ["container", "rm", "--force", "--volumes", &"c".repeat(64)]
+    );
+    // M5d.4: the workspace read before a workload is the trusted probe's
+    // closed word, as the container's own user, and nothing else.
+    assert_eq!(
+        super::workspace(&container),
+        [
+            "container",
+            "exec",
+            &"c".repeat(64),
+            "/usr/libexec/direwolf/sandbox-probe",
+            "workspace"
+        ]
     );
 }
 
