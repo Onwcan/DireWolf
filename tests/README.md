@@ -265,6 +265,41 @@ cases are NOT EXERCISED and the task fails after reporting the rest: the
 unverified workspace is never evidence of the production guarantee. No
 container, mount, loop device or directory the evidence made may remain.
 
+**Sandbox agent tests (M5d.5)** are the evidence behind
+`make sandbox-agent-evidence` (ADR-0052 §§11, 13, 17;
+[the M5d.5 handoff](../docs/M5D5_IMPLEMENTATION_HANDOFF.md)):
+`crates/dwkd-authority/tests/sandbox_agent.rs`, every test `#[ignore]`d and
+selected by name, each case printing a `SANDBOX-EVIDENCE` line that names its
+**level** (DWKP end to end, measured OCI, hosted three-identity) and its
+**enforcement** (the CONNECT proxy and its decision, the network namespace and
+its errno, the workload's own TLS verification, the peer policies, the file
+modes, the kernel) -- a line without both fails the task. An agent-shaped
+workload (`sandbox-fixture`'s `workload-agent-net`: a plan, two workers and a
+daemonised helper) and its network tool (`tests/sandbox/agent_net.py`, run by
+the image's Python as a stock HTTPS client that verifies each origin against
+the run's test anchor in the workspace) go through a real DWKP client, the
+released `dwkd-authority serve --sandbox-config` and the released broker into
+a measured `PROXY_ONLY` environment built from the M5d.2 tools image with the
+pinned relay added; the destinations are local HTTPS origins
+(`tests/net_http/origin.py`, a PKI made per run) named by the broker's
+evidence-only resolver. One identity, any Linux host with a runtime: the
+granted origin reached, every other host, port, CONNECT form, server name,
+certificate, direct TCP/UDP/DNS path and rewritten proxy variable refused and
+attributed, the budgets, the wall clock, `reap`, a broker and an authority
+lost mid-agent, and no replay. Three identities, only where
+`DW_AGENT_PRIVILEGED=1` (the hosted `sandbox-agent` job creates `dwbroker` --
+the runtime socket's group and the workspace group -- and `dwruntime`, and
+the task provisions a bounded `tmpfs` workspace of group 10001):
+the authority as this user, the broker as `DW_BROKER_AS`, the DWKP runtime as
+`DW_PEER_AS` through `tests/authority/agent_runtime_client.py relay` (so the
+kernel reports that user to the authority), `DW_AGENT_OUTSIDER` as a
+stranger; every uid read from the kernel, the workload's and the relay's from
+the runtime's host, and every cross-identity boundary attempted. Locally that
+half is NOT EXERCISED and the task fails after reporting the rest. No
+container, workspace mount or broker socket directory may remain.
+`make sandbox-agent-mutations` weakens each identity, proxy, policy, cleanup
+and non-replay guard in turn, slow and local.
+
 **Brokered `fs.read` tests (M4b)** are real-process evidence for the private
 channel ([ADR-0043](../docs/adr/0043-m4b-private-broker-channel-and-brokered-fs-read.md)):
 `crates/dwkd-authority/tests/broker_fs_read.rs` drives the released authority and

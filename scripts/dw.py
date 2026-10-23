@@ -2446,13 +2446,16 @@ def _tools_image(
     context: Path,
     binaries: tuple[Path, Path],
     platform_: str,
+    relay: Path | None = None,
 ) -> tuple[str, dict[str, str]]:
     """M5d.2's tools image (ADR-0052 §5a): the probe and the fixture, the
     host's real `git` and Python with its standard library, pytest from the
     locked environment, every shared object they load, and a system git
     configuration carrying a marker -- built offline `FROM scratch` from
-    local bytes and named by content. Returns the image and the variables the
-    suites read (paths and digests). Without git or Python: NOT EXERCISED."""
+    local bytes and named by content. With `relay` (M5d.5), the pinned relay
+    too, at its path: the image a `PROXY_ONLY` environment needs. Returns
+    the image and the variables the suites read (paths and digests). Without
+    git or Python: NOT EXERCISED."""
     probe, fixture = binaries
     git = Path(TOOLS_GIT_PATH)
     python_link = Path("/usr/bin/python3")
@@ -2488,6 +2491,8 @@ def _tools_image(
     rootfs.mkdir(parents=True)
     _place(rootfs, probe, "/usr/libexec/direwolf/sandbox-probe", 0o755)
     _place(rootfs, fixture, SANDBOX_FIXTURE_PATH, 0o755)
+    if relay is not None:
+        _place(rootfs, relay, SANDBOX_RELAY_PATH, 0o755)
     _place(rootfs, git, TOOLS_GIT_PATH, 0o755)
     _place(rootfs, python, str(python), 0o755)
     shutil.copytree(
@@ -5064,6 +5069,531 @@ def task_sandbox_workspace_mutations() -> None:
     )
 
 
+# --- M5d.5: the agent-shaped workload and three identities (ADR-0052 §§11, 13, 17) ---
+
+# The one-identity suite: any Linux host with a runtime runs it.
+AGENT_TESTS = (
+    "linux::an_agent_runs_through_the_production_route_and_reaches_only_its_origin",
+    "linux::budgets_and_the_wall_clock_bound_an_agent",
+    "linux::an_agent_that_outlives_its_daemons_is_destroyed_and_never_run_again",
+)
+# The three-identity suite: only a disposable host that provisions three
+# users, the workspace group and a bounded workspace runs it
+# (`DW_AGENT_PRIVILEGED=1`, the hosted `sandbox-agent` job).
+AGENT_IDENTITY_TESTS = (
+    "linux::three_identities_run_an_agent_and_none_reaches_anothers_state",
+    "linux::three_identities_a_broker_refuses_a_sandbox_identity_at_start",
+)
+
+# Every (suite, case) the one-identity suite must report, exercised. The
+# handoff's matrix (docs/M5D5_IMPLEMENTATION_HANDOFF.md §5) is the prefix:
+# A01-A12, and `audit-*` for what the audit records.
+AGENT_CASES = tuple(
+    ("sandbox-agent", case)
+    for case in (
+        "a01-production-route-dwkp-to-measured-proxy-only-sandbox",
+        "a01-no-host-fallback",
+        "a02-agent-plan-workers-and-helper",
+        "a02-agent-processes-within-the-environment",
+        "a02-agent-identity-measured-from-the-host",
+        "a03-relay-identity-measured-from-the-host",
+        "a03-https-granted-origin-stock-client",
+        "a03-https-granted-origin-tls-verified",
+        "a04-agent-ungranted-origin-refused",
+        "a04-origin-host-not-granted",
+        "a04-origin-port-not-granted",
+        "a04-granted-name-blocked-by-the-address-guard",
+        "a05-connect-absolute-form-refused",
+        "a05-connect-address-literal-refused",
+        "a05-connect-host-not-canonical-refused",
+        "a05-connect-another-method-refused",
+        "a05-connect-smuggled-body-refused",
+        "a05-connect-host-header-disagrees-refused",
+        "a05-tls-sni-mismatch-closed",
+        "a05-tls-sni-missing-closed",
+        "a05-tls-certificate-for-another-name-refused-by-the-client",
+        "a05-tls-untrusted-issuer-refused-by-the-client",
+        "a06-agent-direct-tcp-no-route",
+        "a06-agent-direct-udp-no-route",
+        "a06-direct-tcp-public-no-route",
+        "a06-direct-udp-public-no-route",
+        "a06-direct-tcp-bridge-gateway-no-route",
+        "a06-host-loopback-origin-is-not-the-environments",
+        "a06-direct-dns-no-route",
+        "a06-no-resolver-answers",
+        "a06-raw-and-packet-sockets-refused",
+        "a07-proxy-variables-name-only-the-relay",
+        "a07-proxy-variable-redirected-to-another-host",
+        "a07-proxy-variable-redirected-to-another-port",
+        "a07-proxy-variables-removed",
+        "a08-tunnel-limit",
+        "a08-upload-budget",
+        "a08-download-budget",
+        "a08-wall-clock-ends-the-agent",
+        "a08-workload-budget-refused",
+        "a10-writes-outside-the-workspace-refused",
+        "a10-no-runtime-socket-or-daemon-state-in-the-environment",
+        "a11-descendants-reaped",
+        "a11-census-empty-after-the-invocation",
+        "a12-timeout-reaped-environment-kept-clean",
+        "a12-broker-lost-outcome-unknown-environment-destroyed",
+        "a12-authority-crash-unknown-environment-destroyed",
+        "a12-uncertain-agent-never-replayed",
+        "audit-environment-intent-names-the-grant",
+        "audit-egress-counted-by-disposition-not-per-attempt",
+    )
+)
+# Every (suite, case) the three-identity suite must report: I01-I08, A09,
+# and A03 again as three users.
+AGENT_IDENTITY_CASES = tuple(
+    ("sandbox-agent-identity", case)
+    for case in (
+        "i01-three-distinct-host-identities",
+        "i01-workload-runs-as-10001",
+        "i01-relay-runs-as-10002",
+        "i02-configured-runtime-admitted",
+        "i02-authority-own-uid-refused",
+        "i02-broker-uid-refused",
+        "i02-another-uid-refused",
+        "i03-runtime-cannot-use-the-broker-channel",
+        "i04-runtime-cannot-read-or-change-authority-state",
+        "i04-runtime-cannot-read-policy-operator-file-or-secret",
+        "i05-runtime-cannot-reach-the-oci-socket",
+        "i05-workload-cannot-reach-the-oci-socket",
+        "i06-broker-start-up-posture-production",
+        "i06-broker-refuses-a-workload-authority",
+        "i06-broker-refuses-a-relay-authority",
+        "i06-runtime-cannot-inspect-a-daemon",
+        "i06-workload-is-not-the-brokers-identity",
+        "i07-workspace-group-membership",
+        "i07-workspace-root-contract-measured",
+        "i07-runtime-excluded-from-the-workspace",
+        "i08-authority-crash-unknown-environment-destroyed",
+        "i08-broker-crash-unknown-environment-destroyed",
+        "i08-never-replayed",
+        "a03-https-granted-origin-three-identities",
+        "a09-agent-and-broker-share-the-bounded-workspace",
+    )
+)
+# What each line of agent evidence must say it is (the handoff's §5): never
+# a unit decision called hosted proof, never a logged denial called an audit.
+AGENT_EVIDENCE_LEVELS = frozenset(
+    ("dwkp-end-to-end", "measured-oci", "real-process-refusal", "hosted-three-identity")
+)
+
+
+def agent_privileged() -> bool:
+    """Whether this run may provision three users' worth of host: never
+    inferred, only `DW_AGENT_PRIVILEGED=1` (the hosted `sandbox-agent` job,
+    a disposable runner) says so."""
+    return os.environ.get("DW_AGENT_PRIVILEGED", "").strip() == "1"
+
+
+def _agent_workspace_base() -> Path:
+    """Where the provisioned workspaces are mounted: somewhere the broker's
+    own user can traverse, which the runner's home is not promised to be."""
+    # A name under the shared temporary directory, made 0755 by this user and
+    # removed after (`_provision_workspaces`): the broker's user must reach it.
+    default = f"/tmp/dw-m5d5-{os.getuid()}"  # noqa: S108 - see above
+    return Path(os.environ.get("DW_AGENT_WORKSPACE_BASE", default))
+
+
+def _agent_setup() -> tuple[Path, str, dict[str, str], set[str], list[str]]:
+    """M5d.5's setup, separate from the evidence: a trusted runtime client;
+    the probe, the fixture and the relay built statically and proved static
+    from their ELF headers, their digests pinned; the agent image -- M5d.2's
+    tools image (the host's Python and its standard library, `_ssl`'s shared
+    objects included) with the pinned relay added -- built offline `FROM
+    scratch` and named by content. No new dependency, nothing pulled.
+    Returns the client, the socket, the variables the suite reads, the
+    containers that predate the evidence, and the images to remove."""
+    if not sys.platform.startswith("linux"):
+        raise TaskError("NOT EXERCISED: the agent evidence needs Linux and an OCI runtime")
+    found = shutil.which("docker")
+    if found is None:
+        raise TaskError("NOT EXERCISED: no container runtime client (`docker`) on PATH")
+    socket = os.environ.get("DW_SANDBOX_SOCKET", "/var/run/docker.sock")
+    target_root = Path(os.environ.get("CARGO_TARGET_DIR", str(ROOT / "target")))
+    work = Path(os.environ.get("DW_AGENT_WORK", str(Path.home() / ".cache" / "dw-m5d5")))
+    shutil.rmtree(work, ignore_errors=True)
+    work.mkdir(mode=0o700, parents=True)
+    client, chosen = _trusted_client(Path(found), work / "client")
+    try:
+        server = json.loads(
+            _docker(client, socket, "version", "--format", "{{json .Server}}").strip()
+        )
+    except (TaskError, json.JSONDecodeError) as exc:
+        raise TaskError(f"NOT EXERCISED: the runtime at {socket} does not answer: {exc}") from exc
+    if server.get("Os") != "linux":
+        raise TaskError(f"NOT EXERCISED: the runtime is not a Linux one: {server.get('Os')}")
+    arch = {"amd64": "x86_64", "arm64": "aarch64"}.get(str(server.get("Arch")))
+    if arch is None:
+        raise TaskError(f"the runtime's architecture {server.get('Arch')!r} is not supported")
+    triple = f"{arch}-unknown-linux-gnu"
+    platform_ = f"linux/{server.get('Arch')}"
+    before = set(
+        _docker(client, socket, "container", "ls", "--all", "--no-trunc", "--quiet").split()
+    )
+    static = target_root / "sandbox-static"
+    env = dict(os.environ, RUSTFLAGS="-C target-feature=+crt-static")
+    command = [
+        "cargo",
+        "build",
+        "--locked",
+        "--release",
+        "-p",
+        "dwk-sandbox-probe",
+        "--bin",
+        "dwk-sandbox-probe",
+        "--example",
+        "sandbox_fixture",
+        "-p",
+        "dwk-sandbox-relay",
+        "--bin",
+        "dwk-sandbox-relay",
+        "--target",
+        triple,
+        "--target-dir",
+        str(static),
+    ]
+    print(f"{DIM}$ RUSTFLAGS='-C target-feature=+crt-static' {' '.join(command)}{OFF}", flush=True)
+    if subprocess.run(command, cwd=str(ROOT), env=env, check=False).returncode != 0:
+        raise TaskError("the static probe, relay and fixture did not build")
+    release = static / triple / "release"
+    probe = release / "dwk-sandbox-probe"
+    relay = release / "dwk-sandbox-relay"
+    fixture = release / "examples" / "sandbox_fixture"
+    linking = {
+        name: _static_elf(path)
+        for name, path in (("probe", probe), ("relay", relay), ("fixture", fixture))
+    }
+    image, tools = _tools_image(
+        client, socket, work / "images" / "agent", (probe, fixture), platform_, relay
+    )
+    digests = {
+        name: hashlib.sha256(path.read_bytes()).hexdigest()
+        for name, path in (("probe", probe), ("relay", relay), ("fixture", fixture))
+    }
+    print(f"{BOLD}agent evidence setup{OFF}")
+    print(
+        f"  runtime            {server.get('Version')} (api {server.get('ApiVersion')}), "
+        f"{platform_}"
+    )
+    print(f"  runtime client     {chosen}")
+    for name in ("probe", "relay", "fixture"):
+        print(f"  {name:<18} {linking[name]}, sha256 {digests[name]}")
+    print(f"  agent image        {image} (probe, relay, fixture, {tools['DW_SANDBOX_PYTHON']})")
+    variables = {
+        "DW_SANDBOX_RUNTIME": str(client),
+        "DW_SANDBOX_SOCKET": socket,
+        "DW_AGENT_IMAGE": image,
+        "DW_SANDBOX_PROBE_SHA256": digests["probe"],
+        "DW_EGRESS_RELAY_SHA256": digests["relay"],
+        "DW_SANDBOX_FIXTURE_SHA256": digests["fixture"],
+        "DW_SANDBOX_PYTHON": tools["DW_SANDBOX_PYTHON"],
+        "DW_SANDBOX_PYTHON_SHA256": tools["DW_SANDBOX_PYTHON_SHA256"],
+    }
+    return client, socket, variables, before, [image]
+
+
+def require_agent_evidence(output: str, cases: tuple[tuple[str, str], ...]) -> None:
+    """Every case reported, exercised (`require_sandbox_evidence`), and each
+    line saying what kind of evidence it is and what enforced it."""
+    for record in require_sandbox_evidence(output, cases):
+        if (str(record["suite"]), str(record.get("case"))) not in cases:
+            continue
+        if record.get("level") not in AGENT_EVIDENCE_LEVELS or not record.get("enforcement"):
+            raise TaskError(f"agent evidence without its level or enforcement: {record}")
+
+
+def _agent_suite(tests: tuple[str, ...]) -> str:
+    """Run `tests` of `sandbox_agent` by name, each required to pass."""
+    output = run_captured(
+        "cargo",
+        "test",
+        "--locked",
+        "-p",
+        "dwkd-authority",
+        "--test",
+        "sandbox_agent",
+        "--",
+        "--ignored",
+        "--exact",
+        "--nocapture",
+        "--test-threads=1",
+        *tests,
+    )
+    summaries = [line for line in output.splitlines() if line.startswith("test result: ")]
+    expected = f"test result: ok. {len(tests)} passed; 0 failed; 0 ignored"
+    if len(summaries) != 1 or not summaries[0].startswith(expected):
+        raise TaskError(
+            f"the sandbox_agent suite did not run all of its tests: expected `{expected}`, "
+            f"got {summaries or 'no summary'}"
+        )
+    return output
+
+
+def _socket_dirs_left() -> list[str]:
+    """The broker socket directories a separated broker made under /tmp and
+    a test did not remove (`dwa-*`, `dwr-*`): what C04 must find empty."""
+    tmp = Path("/tmp")  # noqa: S108 - where the suite names them, read-only here
+    return sorted(
+        str(p) for p in tmp.iterdir() if p.name.startswith(("dwa-", "dwr-")) and p.is_dir()
+    )
+
+
+def task_sandbox_agent_evidence() -> None:
+    """M5d.5's evidence: `_sandbox_agent_evidence`, its three-identity half required."""
+    _sandbox_agent_evidence(require_privileged=True)
+
+
+def _sandbox_agent_evidence(*, require_privileged: bool) -> None:
+    """M5d.5's evidence (ADR-0052 §§11, 13, 17; the M5d.5 handoff): an
+    agent-shaped workload -- a plan, two workers, a daemonised helper, the
+    image's Python as a stock HTTPS client verifying its origin -- run
+    through the released `dwkd-authority serve --sandbox-config`, the
+    released broker and a real runtime, in a measured `PROXY_ONLY`
+    environment reaching exactly its granted synthetic origins through the
+    real relay and CONNECT proxy; every other path refused and attributed;
+    budgets, the wall clock, `reap`, crash windows and non-replay. Then, only
+    where `DW_AGENT_PRIVILEGED=1` provisions it (the hosted runner): three
+    host identities -- the authority as this user, the broker as
+    `DW_BROKER_AS`, the runtime as `DW_PEER_AS` through a relay of its own --
+    a bounded workspace of the group 10001, and every cross-identity
+    boundary measured from the kernel.
+
+    Every case must report with its level and enforcement. Without the
+    three-identity half the task FAILS, NOT EXERCISED, after reporting the
+    rest. No container, mount or broker socket directory the evidence made
+    may remain, and every container that predates it must. Linux only.
+    """
+    privileged = agent_privileged()
+    if privileged:
+        # Fail early, before anything is built: the half that needs the
+        # host is what this run exists for.
+        for variable in ("DW_BROKER_AS", "DW_PEER_AS", "DW_AGENT_OUTSIDER"):
+            if not os.environ.get(variable):
+                raise TaskError(f"NOT EXERCISED: DW_AGENT_PRIVILEGED=1 but {variable} is unset")
+    client, socket, variables, before, images = _agent_setup()
+    os.environ.update(variables)
+    base = _agent_workspace_base()
+    sockets_before = set(_socket_dirs_left())
+    outputs: list[str] = []
+    try:
+        run("cargo", "build", "--locked", "-p", "dwkd-broker")
+        outputs.append(_agent_suite(AGENT_TESTS))
+        if privileged:
+            os.environ.update(_provision_workspaces(base))
+            outputs.append(_agent_suite(AGENT_IDENTITY_TESTS))
+    finally:
+        if privileged or base.exists():
+            _unprovision_workspaces(base)
+        after = set(
+            _docker(client, socket, "container", "ls", "--all", "--no-trunc", "--quiet").split()
+        )
+        for image in images:
+            _docker(client, socket, "image", "rm", "--force", image, check=False)
+    left = sorted(after - before)
+    removed = sorted(before - after)
+    if left:
+        raise TaskError(f"the evidence left {len(left)} container(s) behind: {left}")
+    if removed:
+        raise TaskError(
+            f"{len(removed)} container(s) that predate the evidence are gone: {removed}"
+        )
+    stray = sorted(set(_socket_dirs_left()) - sockets_before)
+    if stray:
+        raise TaskError(f"the evidence left broker socket directories behind: {stray}")
+    print(
+        f"{GREEN}cleanup: no evidence container, workspace mount or broker socket directory "
+        f"remains; {len(before)} pre-existing container(s) kept{OFF}"
+    )
+    require_agent_evidence("\n".join(outputs), AGENT_CASES)
+    if not privileged and not require_privileged:
+        # A mutant's run: what could run here ran; the three-identity half
+        # is NOT EXERCISED, and never counted as a kill.
+        print(
+            f"NOT EXERCISED (not counted): {len(AGENT_IDENTITY_CASES)} three-identity agent case(s)"
+        )
+        return
+    if not privileged:
+        raise TaskError(
+            f"NOT EXERCISED: {len(AGENT_IDENTITY_CASES)} case(s) need three host identities, "
+            "the workspace group 10001 and a bounded workspace -- which only "
+            "DW_AGENT_PRIVILEGED=1 provisions, on a disposable host (the hosted `sandbox-agent` "
+            "job). One uid playing three roles is not this evidence: "
+            + ", ".join(f"{suite}/{case}" for suite, case in AGENT_IDENTITY_CASES)
+        )
+    require_agent_evidence("\n".join(outputs), AGENT_IDENTITY_CASES)
+    uvrun("dwcheck", "closure", "--report")
+
+
+# The mutation review (ADR-0052 §17; the M5d.5 handoff's C03): each line
+# weakens one guard the agent evidence stands on -- identity, the proxy,
+# policy, the workload's ending and non-replay -- in the source, one at a
+# time. Each mutant must compile and must fail the guards' unit suites or the
+# one-identity agent evidence; the file is then restored, and its SHA-256
+# proves it byte-identical. A mutant that survives, or does not compile,
+# fails the review. The three-identity half is the hosted job's: its NOT
+# EXERCISED is never counted as a kill.
+AGENT_MUTATIONS = (
+    # Identity (ADR-0052 §13).
+    (
+        "the authority serves a peer it was not told to",
+        "crates/dwkd-authority/src/server/config.rs",
+        "        self.allowed.contains(&uid)",
+        "        true || self.allowed.contains(&uid)",
+    ),
+    (
+        "the broker reads a peer that is not the authority",
+        "crates/dwkd-broker/src/listener.rs",
+        "        if peer != authority_uid {",
+        "        if false && peer != authority_uid {",
+    ),
+    (
+        "a broker serves an authority with the relay's uid",
+        "crates/dwkd-broker/src/posture.rs",
+        '            RELAY_UID => "every relay\'s",',
+        '            RELAY_UID if false => "every relay\'s",',
+    ),
+    # The CONNECT proxy (ADR-0048).
+    (
+        "the proxy dials a destination the run was not granted",
+        "crates/dwkd-broker/src/egress/tunnel.rs",
+        "    if !context.grant.permits(&target.host, target.port) {",
+        "    if false && !context.grant.permits(&target.host, target.port) {",
+    ),
+    (
+        "the proxy carries a tunnel whose server name is not its CONNECT host",
+        "crates/dwkd-broker/src/egress/tunnel.rs",
+        "            Ok(Some(_)) => return EgressDisposition::SniMismatch,",
+        "            Ok(Some(_)) => break,",
+    ),
+    (
+        "the proxy holds four times the tunnels the operator allowed",
+        "crates/dwkd-broker/src/egress/tunnel.rs",
+        "    let Some(_held) = Held::take(&context.tunnels, most) else {",
+        "    let Some(_held) = Held::take(&context.tunnels, most.saturating_mul(4)) else {",
+    ),
+    # Policy and the grant (ADR-0052 §§2, 11).
+    (
+        "a run's plain-HTTP and TCP grants become proxy destinations",
+        "crates/dwkd-authority/src/sandbox.rs",
+        "        if verb.namespace() != Namespace::Network || verb.action() != Action::Https {",
+        "        if verb.namespace() != Namespace::Network {",
+    ),
+    (
+        "an agent's launch is judged as a host action",
+        "crates/dwkd-authority/src/state/workload.rs",
+        "CanonicalAction::new(capability, Environment::Sandbox)",
+        "CanonicalAction::new(capability, Environment::Host)",
+    ),
+    # The agent's ending (ADR-0052 §§5, 10).
+    (
+        "reap signals none of the agent's descendants",
+        "crates/dwk-sandbox-probe/src/linux.rs",
+        "let _ = nix::sys::signal::kill(Pid::from_raw(-1), nix::sys::signal::Signal::SIGKILL);",
+        "let _ = nix::sys::signal::kill(Pid::from_raw(-1), None);",
+    ),
+    (
+        "the agent's wall clock is four times its own",
+        "crates/dwkd-broker/src/sandbox/oci.rs",
+        "        let deadline = (since + wall_clock).min(reserve);",
+        "        let deadline = (since + 4 * wall_clock).min(reserve);",
+    ),
+    # Non-replay (ADR-0052 §9, W8-W10).
+    (
+        "a restart leaves an uncertain agent launching and its environment up",
+        "crates/dwkd-authority/src/state/workload.rs",
+        "         WHERE state = 'LAUNCHING' RETURNING invocation_id, run_id, environment_id\",",
+        "         WHERE state = 'NEVER' RETURNING invocation_id, run_id, environment_id\",",
+    ),
+)
+
+
+def _agent_guard_suites() -> None:
+    """The suites that prove the agent's guards without a runtime: the
+    authority's peer policy, sandbox configuration, grant and ledger; the
+    broker's start-up, plan, supervisor and CONNECT proxy, and its private
+    channel refusing a stranger; the probe's reap."""
+    run(
+        "cargo",
+        "test",
+        "--locked",
+        "-p",
+        "dwkd-authority",
+        "--lib",
+        "--",
+        "server::",
+        "sandbox::",
+        "state::",
+    )
+    run("cargo", "test", "--locked", "-p", "dwkd-broker", "--bin", "dwkd-broker")
+    run("cargo", "test", "--locked", "-p", "dwkd-broker", "--test", "private_protocol")
+    run("cargo", "test", "--locked", "-p", "dwk-sandbox-probe")
+
+
+def task_sandbox_agent_mutations() -> None:
+    """Weaken each M5d.5 agent guard in turn; a unit suite or the agent evidence must catch it.
+
+    Slow: a mutant no unit suite catches runs the one-identity agent
+    evidence. Every file is restored byte-identically whatever happens, and
+    checked. Never run it beside another build.
+    """
+    for what, rel, old, _new in AGENT_MUTATIONS:
+        if (ROOT / rel).read_text(encoding="utf-8").count(old) != 1:
+            raise TaskError(f"mutation `{what}`: its target is not in {rel} exactly once")
+    killed: list[str] = []
+    for what, rel, old, new in AGENT_MUTATIONS:
+        path = ROOT / rel
+        original = path.read_bytes()
+        digest = hashlib.sha256(original).hexdigest()
+        text = original.decode("utf-8")
+        print(f"{BOLD}mutant: {what}{OFF}")
+        outcome = "survived"
+        try:
+            path.write_bytes(text.replace(old, new).encode("utf-8"))
+            try:
+                run(
+                    "cargo",
+                    "test",
+                    "--locked",
+                    "--no-run",
+                    "-p",
+                    "dwk-sandbox-probe",
+                    "-p",
+                    "dwkd-broker",
+                    "-p",
+                    "dwkd-authority",
+                )
+            except TaskError:
+                outcome = "did not compile"
+            else:
+                try:
+                    _agent_guard_suites()
+                except TaskError as exc:
+                    outcome = f"killed by a unit suite: {str(exc)[:160]}"
+                else:
+                    try:
+                        _sandbox_agent_evidence(require_privileged=False)
+                    except TaskError as exc:
+                        outcome = f"killed by the evidence: {str(exc)[:160]}"
+        finally:
+            path.write_bytes(original)
+        if hashlib.sha256(path.read_bytes()).hexdigest() != digest:
+            raise TaskError(f"{rel} was not restored byte-identically")
+        print(f"{DIM}restored {rel} (sha256 {digest[:16]}...){OFF}")
+        if not outcome.startswith("killed"):
+            raise TaskError(f"mutant `{what}` {outcome}: nothing guards it")
+        killed.append(f"{what}: {outcome[:60]}")
+        print(f"{GREEN}mutant {outcome[:60]}: {what}{OFF}")
+    for line in killed:
+        print(f"  {line}")
+    print(
+        f"{GREEN}sandbox agent mutation review: {len(killed)} of {len(AGENT_MUTATIONS)} killed{OFF}"
+    )
+
+
 # --- D11 hardening (ADR-0053) ---------------------------------------------------
 
 D11_EVIDENCE_PREFIX = "D11-EVIDENCE "
@@ -6536,6 +7066,8 @@ TASKS = {
     "sandbox-secret-mutations": task_sandbox_secret_mutations,
     "sandbox-workspace-evidence": task_sandbox_workspace_evidence,
     "sandbox-workspace-mutations": task_sandbox_workspace_mutations,
+    "sandbox-agent-evidence": task_sandbox_agent_evidence,
+    "sandbox-agent-mutations": task_sandbox_agent_mutations,
     "d11-hardening-evidence": task_d11_hardening_evidence,
     "d11-hardening-mutations": task_d11_hardening_mutations,
     "d11-posture": task_d11_posture,

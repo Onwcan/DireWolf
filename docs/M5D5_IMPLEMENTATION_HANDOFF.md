@@ -3,7 +3,8 @@
 **Project:** [DireWolf](https://github.com/Onwcan/DireWolf)  
 **Baseline:** `1c8ccbefc1cdc157a4385a1b3f0f36765b7dae8a` (`main`, verified 2026-10-23)  
 **Verified hosted CI:** [run 39854518873](https://github.com/Onwcan/DireWolf/actions/runs/39854518873), **25/25 jobs successful**  
-**Status:** **Planning handoff only. M5d.5 NOT IMPLEMENTED. No M5d.5 evidence executed.**  
+**Status (as written):** Planning handoff only. M5d.5 NOT IMPLEMENTED. No M5d.5 evidence executed.  
+**Status (2026-10-23):** **Implemented on `0cc1fcc`; one-identity evidence passing locally; awaiting the owner's commit and hosted CI** -- see §11. The plan below is kept as it was written.  
 **Authority of this document:** Technical plan, not an Accepted ADR; it does not approve any open owner decision.
 
 ## 1. Milestone boundary and source of truth
@@ -150,3 +151,39 @@ For a documentation-only commit, use an accurate subject such as:
 `docs(m5d.5): record agent and identity evidence handoff`
 
 Do not use a `feat(m5d.5)` commit or mark the milestone complete solely because this document exists.
+
+## 11. Implementation status (2026-10-23, baseline `0cc1fcc`)
+
+**Built:** `crates/dwkd-authority/tests/sandbox_agent.rs` (five `#[ignore]`d tests, selected by name), the fixture's `workload-agent-net`, the agent's network tool `tests/sandbox/agent_net.py`, the runtime's relay and probes `tests/authority/agent_runtime_client.py`, `make sandbox-agent-evidence` and `make sandbox-agent-mutations` (`scripts/dw.py`), the required hosted job `sandbox-agent` in the aggregate `ci`, and `tests/architecture/test_ci_sandbox_agent.py` (the job's wiring and the task's accounting). No product code, protocol, schema or dependency changed. ADR-0052 stays **Proposed**; OD-5 is for the owner (built as: no handle).
+
+**State of each row of §5.** "Locally" is the developer's WSL2 host with Docker Desktop 29.9.2 and one uid; "hosted" is the `sandbox-agent` job, which alone has three users and a provisioned workspace. Nothing hosted has run yet.
+
+| Row | Exact mapping (cases printed by `sandbox_agent.rs`) | State |
+|---|---|---|
+| A01 | `a01-production-route-dwkp-to-measured-proxy-only-sandbox`, `a01-no-host-fallback` | PASS locally |
+| A02 | `a02-agent-plan-workers-and-helper`, `a02-agent-processes-within-the-environment`, `a02-agent-identity-measured-from-the-host` | PASS locally |
+| A03 | `a03-https-granted-origin-stock-client`, `a03-https-granted-origin-tls-verified`, `a03-relay-identity-measured-from-the-host`; hosted `a03-https-granted-origin-three-identities` | PASS locally; the hosted case NOT EXERCISED |
+| A04 | `a04-agent-ungranted-origin-refused`, `a04-origin-host-not-granted`, `a04-origin-port-not-granted`, `a04-granted-name-blocked-by-the-address-guard` | PASS locally |
+| A05 | six `a05-connect-*` parser refusals, `a05-tls-sni-mismatch-closed`, `a05-tls-sni-missing-closed` (the proxy); `a05-tls-certificate-for-another-name-refused-by-the-client`, `a05-tls-untrusted-issuer-refused-by-the-client` (the agent's own verification, attributed so) | PASS locally |
+| A06 | `a06-agent-direct-{tcp,udp}-no-route`, `a06-direct-{tcp-public,udp-public,tcp-bridge-gateway}-no-route`, `a06-host-loopback-origin-is-not-the-environments`, `a06-direct-dns-no-route`, `a06-no-resolver-answers`, `a06-raw-and-packet-sockets-refused` | PASS locally |
+| A07 | `a07-proxy-variables-name-only-the-relay`, `a07-proxy-variable-redirected-to-another-{host,port}`, `a07-proxy-variables-removed` | PASS locally |
+| A08 | `a08-tunnel-limit`, `a08-upload-budget`, `a08-download-budget`, `a08-wall-clock-ends-the-agent`, `a08-workload-budget-refused` | PASS locally |
+| A09 | `a09-agent-and-broker-share-the-bounded-workspace` (group 10001, `0660`, read back by the separated broker) | hosted only, NOT EXERCISED locally: the evidence waiver proves no group, and its brokered read of the agent's `0660` file is refused `OBJECT_UNREADABLE`, as it should be |
+| A10 | `a10-writes-outside-the-workspace-refused`, `a10-no-runtime-socket-or-daemon-state-in-the-environment` | PASS locally |
+| A11 | `a11-descendants-reaped`, `a11-census-empty-after-the-invocation` | PASS locally |
+| A12 | `a12-timeout-reaped-environment-kept-clean`, `a12-broker-lost-outcome-unknown-environment-destroyed`, `a12-authority-crash-unknown-environment-destroyed`, `a12-uncertain-agent-never-replayed` | PASS locally |
+| — | `audit-environment-intent-names-the-grant`, `audit-egress-counted-by-disposition-not-per-attempt` (counts at the destruction, never one event per attempt) | PASS locally |
+| I01 | `i01-three-distinct-host-identities`, `i01-workload-runs-as-10001`, `i01-relay-runs-as-10002` | hosted only |
+| I02 | `i02-configured-runtime-admitted`, `i02-authority-own-uid-refused`, `i02-broker-uid-refused`, `i02-another-uid-refused` | hosted only |
+| I03 | `i03-runtime-cannot-use-the-broker-channel` | hosted only |
+| I04 | `i04-runtime-cannot-read-or-change-authority-state`, `i04-runtime-cannot-read-policy-operator-file-or-secret` | hosted only |
+| I05 | `i05-runtime-cannot-reach-the-oci-socket`, `i05-workload-cannot-reach-the-oci-socket` | hosted only |
+| I06 | `i06-broker-start-up-posture-production`, `i06-broker-refuses-a-{workload,relay}-authority`, `i06-runtime-cannot-inspect-a-daemon`, `i06-workload-is-not-the-brokers-identity` | hosted only |
+| I07 | `i07-workspace-group-membership`, `i07-workspace-root-contract-measured`, `i07-runtime-excluded-from-the-workspace` | hosted only |
+| I08 | `i08-authority-crash-unknown-environment-destroyed`, `i08-broker-crash-unknown-environment-destroyed`, `i08-never-replayed` | hosted only |
+| C01 | `require_agent_evidence`: every case reported exercised, with its level and its enforcement; `tests/architecture/test_ci_sandbox_agent.py` holds the task's list equal to what the suite prints | PASS locally |
+| C02 | the `sandbox-agent` job: unconditional, three distinct ordinary users, in the aggregate's `needs` (every job required exactly once) | structure PASS locally; the job itself NOT EXERCISED until hosted |
+| C03 | `make sandbox-agent-mutations`, eleven guards: identity (the authority's peer policy, the broker's peer check, a relay-uid authority), the proxy (grant, server name, tunnel limit), policy (a non-HTTPS grant as a destination, a launch judged as the host's), cleanup (`reap`, the wall clock), non-replay (the restart's `UNKNOWN`) | **11 of 11 killed** locally (nine by the guards' suites, two by the agent evidence), every file restored and its SHA-256 checked |
+| C04 | the task: no evidence container, workspace mount or broker socket directory remains, every pre-existing container kept; the job removes the users it created | PASS locally (4 pre-existing containers kept); the users' removal hosted only |
+
+**What hosted CI must show before M5d.5 is complete:** the `sandbox-agent` job green on the owner's committed SHA with all 25 three-identity cases exercised, every earlier job still green, and the aggregate `ci` reporting every required job (26 with this one).

@@ -20,7 +20,8 @@ DW := $(PY) scripts/dw.py
         filesystem-operations-evidence process-broker-evidence secret-broker-evidence \
         sandbox-foundation-evidence sandbox-egress-evidence sandbox-workload-evidence \
         net-http-evidence net-http-mutations sandbox-workload-mutations sandbox-secret-evidence \
-        sandbox-secret-mutations sandbox-workspace-evidence sandbox-workspace-mutations d11-hardening-evidence d11-hardening-mutations d11-posture fuzz-smoke fuzz security docs \
+        sandbox-secret-mutations sandbox-workspace-evidence sandbox-workspace-mutations \
+        sandbox-agent-evidence sandbox-agent-mutations d11-hardening-evidence d11-hardening-mutations d11-posture fuzz-smoke fuzz security docs \
         preflight tools hooks clean
 
 help:            ## List available commands
@@ -118,6 +119,12 @@ sandbox-workspace-evidence: ## M5d.4 workspace ownership and measured quota: gro
 
 sandbox-workspace-mutations: ## M5d.4 mutation review: each workspace guard weakened in turn must fail a unit suite or sandbox-workspace-evidence (slow)
 	@$(DW) sandbox-workspace-mutations
+
+sandbox-agent-evidence: ## M5d.5 an agent-shaped workload in PROXY_ONLY over real DWKP and the released serve: granted HTTPS only, every other path refused and attributed, budgets, reap, crashes, no replay; three host identities need DW_AGENT_PRIVILEGED=1, DW_BROKER_AS, DW_PEER_AS, DW_AGENT_OUTSIDER (hosted)
+	@$(DW) sandbox-agent-evidence
+
+sandbox-agent-mutations: ## M5d.5 mutation review: each identity, proxy, policy, cleanup and non-replay guard weakened in turn must fail a unit suite or sandbox-agent-evidence (slow)
+	@$(DW) sandbox-agent-mutations
 
 d11-hardening-evidence: ## D11 hardening: the worker's syscall filter, vouching from the kernel, start-up window, swap posture; real workers, observers, cgroups; root-only cases need DW_D11_PRIVILEGED=1
 	@$(DW) d11-hardening-evidence

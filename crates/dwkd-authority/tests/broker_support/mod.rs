@@ -242,12 +242,36 @@ impl Broker {
     /// switching users, never the authority (TX010). `binary` must be a copy
     /// that user can execute.
     pub(crate) fn start_as(user: &str, binary: &Path, socket: &Path, authority_uid: u32) -> Self {
-        let mut command = Command::new("sudo");
-        command.args(["-n", "-u", user]).arg(binary);
-        match Self::spawn(command, Some(user.to_owned()), socket, authority_uid, &[]) {
+        Self::start_as_with(user, binary, socket, authority_uid, &[])
+    }
+
+    /// [`Broker::start_as`], with `extra` flags (M5d.5: the evidence-only
+    /// resolver a separated broker's CONNECT proxy reads).
+    pub(crate) fn start_as_with(
+        user: &str,
+        binary: &Path,
+        socket: &Path,
+        authority_uid: u32,
+        extra: &[&str],
+    ) -> Self {
+        match Self::try_start_as(user, binary, socket, authority_uid, extra) {
             Ok(broker) => broker,
             Err(text) => panic!("the broker did not start as {user}:\n{text}"),
         }
+    }
+
+    /// [`Broker::start_as_with`], or how it refused: the start-up checks of
+    /// a broker that is its own identity.
+    pub(crate) fn try_start_as(
+        user: &str,
+        binary: &Path,
+        socket: &Path,
+        authority_uid: u32,
+        extra: &[&str],
+    ) -> Result<Self, String> {
+        let mut command = Command::new("sudo");
+        command.args(["-n", "-u", user]).arg(binary);
+        Self::spawn(command, Some(user.to_owned()), socket, authority_uid, extra)
     }
 
     fn spawn(

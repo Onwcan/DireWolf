@@ -1,6 +1,6 @@
 # ADR-0052: M5d — production sandboxed `process.exec`: the authority decides a workload, the broker runs exactly that plan in a measured `oci-strict` environment, as the environment's own identity, and nothing of it outlives its invocation
 
-**Status:** Proposed (M5d.1, M5d.2 and M5d.3 built; M5d.2's refinements §§2a and 5a — OD-10 and OD-11 — approved by the owner on 2026-10-19 with conditions, §19; M5d.4 built locally and awaiting the owner's review of OD-3, OD-6 and OD-12 — the `DIRECT` launch through the trusted launcher — §§5a, 6, 10, 19; this ADR's acceptance remains M5d.6's) · **Date:** 2026-10-13 · **Revised:** 2026-10-20 · **Would amend (on acceptance):** [ADR-0018](0018-authority-broker-split.md) (the broker runs workloads, never as its own uid), [ADR-0039](0039-durable-authority-state.md) (schema version 9: the workload ledger, §4), [ADR-0043](0043-m4b-private-broker-channel-and-brokered-fs-read.md) (private protocol version 8, §3), [ADR-0045](0045-m4d-process-execution-broker.md) (a process can run in an environment; the host floor is unchanged), [ADR-0047](0047-m5a-oci-execution-environment-and-measured-assurance.md) (the probe becomes the environment's init: it reaps orphans and, asked, ends every other process; `run_probe` gains a sibling, `run_workload`), [ADR-0050](0050-m5c-kernel-performed-net-http-ssrf-redirects-and-credential-egress.md) (§21's ptrace-posture prerequisite becomes a check the broker makes at start) · **Refines:** [ADR-0008](0008-sandbox-default.md) and [ADR-0024](0024-sandbox-network-topology.md) (as realised by [ADR-0048](0048-m5b-proxy-only-topology-and-connect-proxy.md)), [ADR-0046](0046-m4e-secret-handles-backends-injection-and-redaction.md) §13 (modes B/C reach a sandboxed target, M5d.3), [ADR-0051](0051-external-agent-interoperability.md) (Proposed; its M5d prerequisites), [SANDBOX.md](../SANDBOX.md) §§1–4, [POLICY.md](../POLICY.md) (`when.environment = "sandbox"`)
+**Status:** Proposed (M5d.1, M5d.2 and M5d.3 built; M5d.2's refinements §§2a and 5a — OD-10 and OD-11 — approved by the owner on 2026-10-19 with conditions, §19; M5d.4 built, its hosted CI green at `1c8ccbe` (run 39854518873), OD-3, OD-6 and OD-12 — the `DIRECT` launch through the trusted launcher — still awaiting the owner's review, §§5a, 6, 10, 19; M5d.5 built, its one-identity evidence passing locally and its three-identity evidence hosted-only, awaiting the owner's commit and hosted CI, OD-5 for the owner, §§17, 19; this ADR's acceptance remains M5d.6's) · **Date:** 2026-10-13 · **Revised:** 2026-10-23 · **Would amend (on acceptance):** [ADR-0018](0018-authority-broker-split.md) (the broker runs workloads, never as its own uid), [ADR-0039](0039-durable-authority-state.md) (schema version 9: the workload ledger, §4), [ADR-0043](0043-m4b-private-broker-channel-and-brokered-fs-read.md) (private protocol version 8, §3), [ADR-0045](0045-m4d-process-execution-broker.md) (a process can run in an environment; the host floor is unchanged), [ADR-0047](0047-m5a-oci-execution-environment-and-measured-assurance.md) (the probe becomes the environment's init: it reaps orphans and, asked, ends every other process; `run_probe` gains a sibling, `run_workload`), [ADR-0050](0050-m5c-kernel-performed-net-http-ssrf-redirects-and-credential-egress.md) (§21's ptrace-posture prerequisite becomes a check the broker makes at start) · **Refines:** [ADR-0008](0008-sandbox-default.md) and [ADR-0024](0024-sandbox-network-topology.md) (as realised by [ADR-0048](0048-m5b-proxy-only-topology-and-connect-proxy.md)), [ADR-0046](0046-m4e-secret-handles-backends-injection-and-redaction.md) §13 (modes B/C reach a sandboxed target, M5d.3), [ADR-0051](0051-external-agent-interoperability.md) (Proposed; its M5d prerequisites), [SANDBOX.md](../SANDBOX.md) §§1–4, [POLICY.md](../POLICY.md) (`when.environment = "sandbox"`)
 
 > **A workload runs only where the authority decided it may, as the
 > environment's own user, and is gone when its invocation is.** The authority
@@ -1119,6 +1119,82 @@ net.http's 10 of 10 and D11's 26 of 26. The wire contract's own ownership and ca
 `dwk-proto`'s unit tests, not by a mutant: the harness may not name that
 module (TX016).
 
+**As built (M5d.5).** `make sandbox-agent-evidence` runs an **agent-shaped
+workload** the way a runtime runs one: a real DWKP client, the released
+`dwkd-authority serve --sandbox-config` (an operator file naming `PROXY_ONLY`,
+its relay by digest, four tunnels, 64 KiB up and 256 KiB down per
+environment), the released broker and a real runtime. The workload is the
+fixture's `workload-agent-net` -- a plan, two long-lived workers and a
+daemonised helper -- and its network tool (`tests/sandbox/agent_net.py`) run
+by the image's Python as a **stock HTTPS client that verifies its origin**
+against the run's test anchor, which the workspace carries as an agent's own
+trust would; the image is M5d.2's tools image with the pinned relay added (no
+new dependency). The destinations are local HTTPS origins under a PKI made
+for the run, named by the broker's evidence-only resolver -- fixtures, said
+so; the production resolver has no exception (M5b). Every case names its
+level and what enforced it, and a line without both fails the task. One
+identity, any Linux host with a runtime, three tests, 50 cases, measured
+locally on Docker Desktop 29.9.2 (WSL2): the route to a measured
+`CONTAINER_ISOLATION`, `PROXY_ONLY` environment and no host launch; the
+agent's processes all 10001:10001 inside and from the host, the relay's
+10002; the granted origin answering `200` with the bytes it served, through
+`urllib` honouring the proxy variable and through the tool's own CONNECT;
+another host, another port and a granted name the address guard blocks
+refused by the proxy (`TARGET_NOT_GRANTED`, `ADDRESS_BLOCKED`) with the
+origin never contacted; six malformed CONNECTs refused by its parser
+(`TARGET_NOT_CANONICAL`, `NOT_CONNECT`, `MALFORMED`); a mismatched and a
+missing server name closed before anything is dialled; a certificate for
+another name and one from an untrusted issuer refused by **the agent's own
+verification** -- the workload's guarantee, not DireWolf's, and attributed
+so; direct TCP to a public address and to the bridge gateway, UDP, DNS and
+the C resolver finding no route (`ENETUNREACH`), the host's loopback origin
+not the environment's (`ECONNREFUSED`), raw, packet and virtual sockets
+`EPERM`; the proxy variables exactly the relay's, and the workload rewriting
+them -- another host, another port, none -- finding no other path; writes
+outside the workspace `EROFS` and no runtime socket or daemon path in the
+environment; everything the agent left ended by `reap`, init alone after;
+the tunnel limit (four of six, then `TUNNEL_LIMIT`), the upload budget
+(65 536 of 65 536 bytes, spent staying spent), the download budget (under
+256 KiB of 1 MiB asked), the wall clock (`TIMED_OUT`, reaped, the environment
+kept clean) and the run's workload budget (`BUDGET_EXHAUSTED` before
+anything is recorded); a broker lost mid-agent (`OUTCOME_UNKNOWN`, the
+environment destroyed at the next start) and an authority lost mid-agent
+(`UNKNOWN`, destroyed), and the same keys never running again; the grant in
+the environment's intent record and the egress **counted by disposition**
+in its destruction record -- the audit's whole account of the network:
+counts at the end, never one event per refused attempt. **Three
+identities**, only where `DW_AGENT_PRIVILEGED=1` provisions them (the
+required hosted job `sandbox-agent`, a disposable runner; two tests, 25
+cases, NOT EXERCISED locally, which fails the task): the authority as the
+runner (A); the broker as `dwbroker` (B), in the runtime socket's group and
+the workspace group and nothing else; the DWKP runtime as `dwruntime` (C),
+its connection a relay of its own (`tests/authority/agent_runtime_client.py
+relay`) so the kernel reports C to the authority; `nobody` as a stranger; a
+64 MiB `tmpfs` workspace of group 10001, root `2770`, the authority's. Each
+uid and group is read from the kernel, the workload's and the relay's from
+the runtime's host; C admitted and A, B and the stranger refused by the peer
+policy, audited; C read nothing from the broker's private channel; the
+authority's store, audit, policy, operator file and a synthetic secret, the
+runtime's socket and the workspace closed to C; no other identity reads a
+daemon's `/proc` or signals it; the broker's start-up posture the production
+one, and a broker told its authority is 10001 or 10002 refusing to serve;
+the agent reaching its origin as C's run; what it wrote `0660` in group
+10001 and read back by the broker for C (A09); and an authority and a broker
+lost mid-agent, `UNKNOWN`, destroyed, never replayed. `make
+sandbox-agent-mutations` weakens eleven guards one at a time -- the
+authority's peer policy, the broker's peer check, a relay-uid authority, the
+proxy's grant, server name and tunnel limit, a grant that is not HTTPS, a
+launch judged as the host's, `reap`, the wall clock and the restart's
+`UNKNOWN` -- each to fail a unit suite or the one-identity evidence.
+Measured: 11 of 11 killed, nine by the guards' suites (the private channel's
+stranger test among them) and two by the agent evidence -- `reap`, by the
+agent's descendants left behind, and the wall clock, by the agent ended at
+four times its own bound -- every file restored and its SHA-256 checked; the
+three-identity half is never counted as a kill. The review tightened one
+case first: the wall clock's bound was 120 s for a 10 s agent, loose enough
+to let a fourfold clock through, and is now 10 to 35 s. No product code,
+protocol, schema or dependency changed.
+
 **Not evidenced by M5d.1, and not claimed:** a workload in `PROXY_ONLY` (the
 evidence's environments are `NO_NETWORK`, so the agent-shaped workload's
 network attempts are refused for want of any network — M5d.5 runs it with
@@ -1135,8 +1211,8 @@ the evidence host's own posture is reported, `posture-reported-matches-host`).
 | **M5d.1** Authorised OCI workload lifecycle | §§3–5, 8–10, 13: protocol 8's `workload_run`; the broker's re-judgement, digest proof, fixed plan, bounds, wall clock and `reap`; the probe as init; schema 9; `Authority::workload_run` (no public route) with every gate; fail-closed environment destruction; the start-up identity and ptrace-posture checks | its real-container evidence, mutants and every earlier evidence green locally and in hosted CI |
 | **M5d.2** Public sandboxed `process.exec` | the DWKP route (§2), the shared idempotency namespace, results naming environment and level; `workspace_exec_hygiene` enforced in the environment; as built also private protocol 9's start and collection (§3), schema 10 (§4), OD-9, the production environment (§2a) and the trusted launcher (§5a) | hostile-client and eval coverage; the shipped packs' sandbox rules exercised; §§2a and 5a decided by the owner |
 | **M5d.3** Secrets B/C in the sandbox | §7; as built also tool messages version 6 (§2), private protocol 10 (§3), schema 11 (§4), TX055–TX056 (§15) | residue evidence as M4e's: the value only in the target, redacted on return — **built** |
-| **M5d.4** Workspace ownership and disk quota | §§6, 10 (OD-3, OD-6); as built also private protocol 11 (§3), probe report 3, every launch through the launcher (§5a, OD-12), the exclusion in time (§6), TX057–TX059 (§15) | the authority's tools and the workload both work on the workspace; a full disk refused, measured — **built locally; the owner's review of OD-3, OD-6 and OD-12 and hosted CI outstanding** |
-| **M5d.5** The agent-shaped escape suite and multi-identity evidence | a long-lived agent-shaped workload in `PROXY_ONLY` with declared origins; the hosted three-identity job | ADR-0050 §21's uid-boundary condition shown with real users |
+| **M5d.4** Workspace ownership and disk quota | §§6, 10 (OD-3, OD-6); as built also private protocol 11 (§3), probe report 3, every launch through the launcher (§5a, OD-12), the exclusion in time (§6), TX057–TX059 (§15) | the authority's tools and the workload both work on the workspace; a full disk refused, measured — **built; hosted CI green at `1c8ccbe` (run 39854518873); the owner's review of OD-3, OD-6 and OD-12 outstanding** |
+| **M5d.5** The agent-shaped escape suite and multi-identity evidence | a long-lived agent-shaped workload in `PROXY_ONLY` with declared origins; the hosted three-identity job; as built (§17) `make sandbox-agent-evidence`, the required hosted job `sandbox-agent`, `make sandbox-agent-mutations` -- no protocol, schema, dependency or product-code change | ADR-0050 §21's uid-boundary condition shown with real users — **built; the one-identity half passing locally; the three-identity half hosted-only, awaiting the owner's commit and hosted CI; OD-5 for the owner** |
 | **M5d.6** Closeout | run release destroys the environment; the gated eval `m5d-sandbox-exec`; this ADR accepted | every checkpoint's evidence in hosted CI |
 
 ### 19. Owner decisions
@@ -1147,7 +1223,7 @@ the evidence host's own posture is reported, `posture-reported-matches-host`).
 | OD-2 | A sandboxed executable's identity | **the operator's image manifest** (path → SHA-256) beside the image digest, proved from outside before every run; workspace scripts run only as arguments of a manifest executable |
 | OD-3 | Workspace ownership | **(a) a workspace group** for V1; (c) copy-in/copy-out later where stronger isolation is wanted — **built in M5d.4 as (a)** (§6): the group 10001, the workload's own gid; a root of root or the authority, mode `2770`; nothing repaired; brokered changes excluded while a workload may write — for the owner to confirm |
 | OD-4 | Modes B/C delivery | **the trusted launcher over the exec's stdin** — **built in M5d.3** (§7), with the consumer resolved against the image manifest (§7 item 2), for the owner to confirm |
-| OD-5 | Concurrency and long-lived workloads | **one workload at a time per environment**; long-lived workloads with handles decided at M5d.5 |
+| OD-5 | Concurrency and long-lived workloads | **one workload at a time per environment**; long-lived workloads with handles decided at M5d.5 — **recommended and built in M5d.5 (§17): no handle.** A long-lived agent is one bounded invocation (start, then collection, M5d.2) whose children and daemons live within its wall clock (at most 600 s) and are ended by `reap` when it returns; nothing outlives the invocation, no public operation names a running workload, and `process.status`/`kill` stay the host's. A client-visible persistent handle, or a workload that outlives one invocation, would need its own decision and evidence — for the owner to confirm, not approved |
 | OD-6 | Disk quota | **an operator-provided bounded filesystem, measured by the probe**; refuse when unbounded — **built in M5d.4** (§10): measured by the authority and the probe, the mount's own root, within a quarter below the declared quota, again before every workload; `ENOSPC` changes nothing — for the owner to confirm |
 | OD-7 | `local` | **not in M5d**; with M6, by its own ADR |
 | OD-8 | Default budgets | per workload ≤ 600 s and 128 KiB per stream; per run 100 workloads and 3 600 s |
@@ -1195,6 +1271,16 @@ OD-6 as an operator-provisioned filesystem of its own, measured from both
 vantages, with the quarter's tolerance (§10); and OD-12, every launch through
 the trusted launcher (§5a) — the one change to how a `DIRECT` workload is
 started since M5d.2.
+
+**M5d.5 (2026-10-23), awaiting the owner.** M5d.4's hosted CI passed at
+`1c8ccbe` (run 39854518873); that verifies its evidence and approves none of
+OD-3, OD-6 and OD-12, which still await the owner. M5d.5 asks the owner to
+confirm OD-5 as built (§17): an agent is one bounded invocation with its
+children, never a handle. M5d.5 changed no product code, protocol, schema or
+dependency, so it needs no other decision; its evidence's own fixtures --
+the broker's evidence-only resolver, the run's test anchor in the agent's
+workspace, the unverified workspace of the one-identity half -- are labelled
+as fixtures, and none is a production setting.
 
 ## Consequences
 
