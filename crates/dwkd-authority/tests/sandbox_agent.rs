@@ -111,11 +111,11 @@ mod linux {
     use dwk_proto::dwkp::{self, DwkpBody, DwkpMessage};
     use dwk_proto::frame::FrameDecoder;
     use dwk_proto::json::{self, Number, ParseOptions, Value};
-    use dwk_proto::wire::id::{InvocationId, RunId, SessionId};
+    use dwk_proto::wire::id::{AnyId, InvocationId, RunId, SessionId};
     use dwk_proto::wire::scalar::{Epoch, ReadLimit};
     use dwkd_authority::capability::PrivacyClass;
     use dwkd_authority::state::{
-        ManualClock, Mode, StartupConfig, WorkspaceId, WorkspaceSensitivity,
+        DEFAULT_LEASE_TTL_MS, ManualClock, Mode, StartupConfig, WorkspaceId, WorkspaceSensitivity,
     };
     use sha2::{Digest as _, Sha256};
 
@@ -1245,11 +1245,7 @@ reason = "NO_MATCHING_RULE"
         /// next preparation (ADR-0052 §2a). The destruction's audit record.
         fn reclaim(&self, peer: &mut Peer, container: &str, next_session: u64) -> json::Object {
             let environment = self.environment_of(container);
-            let released = peer
-                .wire
-                .call(&release_run_msg(&peer.session, &peer.run, peer.epoch))
-                .body;
-            assert!(matches!(released, DwkpBody::Ack(_)), "{released:?}");
+            peer.release();
             let mut other = self.peer(next_session);
             let body = other.exec(
                 &format!("r-{}", next()),
@@ -1307,17 +1303,47 @@ reason = "NO_MATCHING_RULE"
     // ---- a runtime's run ---------------------------------------------------
 
     /// A runtime: one DWKP connection, its session's lease, and one run.
+    ///
+    /// The lease is the runtime's to keep (ADR-0011): every epoch-carrying
+    /// request is fenced -- `STALE_EPOCH` unless the lease is live -- and
+    /// only a `Heartbeat` moves its expiry; a tool call renews nothing. So
+    /// this runtime heartbeats at its own epoch before every epoch-carrying
+    /// request and accepts nothing but the `Ack` to that heartbeat. It never
+    /// acquires again: that would rotate the epoch and reap the run.
+    ///
+    /// The server answers a connection's requests one at a time, in order
+    /// (`server/connection.rs` reads the next frame only once it answered
+    /// the last), so a heartbeat queued behind an outstanding launch would
+    /// renew nothing until that launch was answered. Nothing is therefore
+    /// sent while a request is outstanding, and every answer must name the
+    /// request it answers (`causation_id`).
     struct Peer {
         wire: Wire,
         session: SessionId,
         epoch: Epoch,
         run: RunId,
+        /// When the lease was last renewed -- acquired or heartbeated -- as
+        /// the moment that request was sent: never later than the server's.
+        renewed: Instant,
+        /// The id of the request awaiting its answer, if one is.
+        outstanding: Option<String>,
+    }
+
+    /// A `Heartbeat` for `session` at `epoch`, with an id of its own.
+    fn heartbeat(session: &SessionId, epoch: Epoch) -> DwkpMessage {
+        decode(&format!(
+            r#"{{"v":1,"id":"{id}","type":"request","schema":"direwolf.heartbeat","schema_version":1,"ts":"2026-10-24T10:00:00.000Z","session_id":"{session}","epoch":{epoch},"payload":{{}}}}"#,
+            id = id("msg", 950_000 + next()),
+            session = session.as_str(),
+            epoch = epoch.get(),
+        ))
     }
 
     impl Peer {
         fn admit(mut wire: Wire, n: u64, capabilities: &[&str]) -> Self {
             let session = session(n);
             wire.handshake();
+            let asked = Instant::now();
             let granted = wire.call(&acquire_msg(&session));
             let DwkpBody::LeaseGrant(lease) = granted.body else {
                 panic!("a lease: {granted:?}")
@@ -1341,7 +1367,61 @@ reason = "NO_MATCHING_RULE"
                 session,
                 epoch,
                 run: grant.run_id,
+                renewed: asked,
+                outstanding: None,
             }
+        }
+
+        /// Send one request; `answer` reads its answer.
+        fn send(&mut self, message: &DwkpMessage) {
+            assert!(
+                self.outstanding.is_none(),
+                "a request is already outstanding: {:?}",
+                self.outstanding
+            );
+            self.outstanding = Some(message.header.id.as_str().to_owned());
+            self.wire.send(message);
+        }
+
+        /// The outstanding request's answer, within `wait`: the connection's
+        /// next message, which must name that request as its cause.
+        fn answer(&mut self, wait: Duration) -> DwkpBody {
+            let asked = self.outstanding.take().expect("no request is outstanding");
+            let answer = self.wire.recv(wait).message();
+            assert_eq!(
+                answer.header.causation_id.as_ref().map(AnyId::as_str),
+                Some(asked.as_str()),
+                "an answer to another request: {answer:?}"
+            );
+            answer.body
+        }
+
+        /// Renew the lease before an epoch-carrying request: a `Heartbeat`
+        /// at this lease's epoch, answered `Ack`. A lease that lapsed is
+        /// refused `STALE_EPOCH`, which fails the test saying how long it
+        /// went unrenewed -- it is never acquired again to get past the fence.
+        fn renew(&mut self) {
+            let unrenewed = self.renewed.elapsed();
+            let asked = Instant::now();
+            let message = heartbeat(&self.session, self.epoch);
+            self.send(&message);
+            match self.answer(PROMPT) {
+                DwkpBody::Ack(_) => self.renewed = asked,
+                other => panic!(
+                    "the lease was not renewed after {unrenewed:?} unrenewed (the server's TTL \
+                     is {:?}): {other:?}",
+                    Duration::from_millis(DEFAULT_LEASE_TTL_MS)
+                ),
+            }
+        }
+
+        /// End the run (`ReleaseRun`, fenced like any request): `Ack`.
+        fn release(&mut self) {
+            self.renew();
+            let message = release_run_msg(&self.session, &self.run, self.epoch);
+            self.send(&message);
+            let released = self.answer(PROMPT);
+            assert!(matches!(released, DwkpBody::Ack(_)), "{released:?}");
         }
 
         fn tool_message(&self, schema: &str, key: Option<&str>, payload: &str) -> DwkpMessage {
@@ -1356,6 +1436,7 @@ reason = "NO_MATCHING_RULE"
         }
 
         fn send_exec(&mut self, key: &str, executable: &str, args: &[&str], timeout: u32) {
+            self.renew();
             let message = self.tool_message(
                 "direwolf.tool.invoke",
                 Some(key),
@@ -1364,11 +1445,7 @@ reason = "NO_MATCHING_RULE"
                     call(executable, args, Some(timeout))
                 ),
             );
-            self.wire.send(&message);
-        }
-
-        fn answer(&mut self, wait: Duration) -> DwkpBody {
-            self.wire.recv(wait).message().body
+            self.send(&message);
         }
 
         fn exec(&mut self, key: &str, executable: &str, args: &[&str], timeout: u32) -> DwkpBody {
@@ -1378,13 +1455,15 @@ reason = "NO_MATCHING_RULE"
 
         /// A brokered `fs.read` of a workspace path: the bytes.
         fn read(&mut self, path: &str) -> Vec<u8> {
+            self.renew();
             let key = format!("read-{}", next());
             let message = self.tool_message(
                 "direwolf.tool.invoke",
                 Some(&key),
                 &format!(r#"{{"fs_read":{{"path":"{path}","max_bytes":65536}}}}"#),
             );
-            match self.wire.call(&message).body {
+            self.send(&message);
+            match self.answer(PROMPT) {
                 DwkpBody::ToolResultV5(result) => {
                     result.output.fs_read.as_ref().unwrap().content.to_bytes()
                 }
@@ -2367,6 +2446,9 @@ reason = "NO_MATCHING_RULE"
             assert!(Instant::now() < deadline, "three refusals audited");
             std::thread::sleep(Duration::from_millis(50));
         }
+        // The runtime keeps its lease while the other identities are probed,
+        // each probe a process started through `sudo`.
+        peer.renew();
 
         // I03: the broker's private channel reads nothing from the runtime.
         let forged = FsReadAuthorisation::new(
@@ -2403,6 +2485,7 @@ reason = "NO_MATCHING_RULE"
             HOSTED,
             "broker-peer-check",
         );
+        peer.renew();
 
         // I04: the authority's state, policy, operator file and a secret
         // fixture: closed to the runtime.
@@ -2450,6 +2533,7 @@ reason = "NO_MATCHING_RULE"
             HOSTED,
             "file-modes",
         );
+        peer.renew();
 
         // I05: the runtime's socket is the broker's alone.
         let docker = run_as(&runtime_user, &client, &["connect", &lab.pins.socket]);

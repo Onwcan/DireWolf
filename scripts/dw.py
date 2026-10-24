@@ -4615,7 +4615,8 @@ def _provision_workspaces(base: Path) -> dict[str, str]:
 def _unprovision_workspaces(base: Path) -> None:
     """Undo `_provision_workspaces`, and prove it: no mount left under
     `base` (an over-mount a failed case left included), no loop device on
-    the image, and `base` itself gone."""
+    the image, and `base` itself gone -- or never made, when the run failed
+    before it provisioned anything."""
     for _ in range(8):
         points = _mounted_under(base)
         if not points:
@@ -4635,7 +4636,8 @@ def _unprovision_workspaces(base: Path) -> None:
         ).stdout.strip()
         if loops:
             raise TaskError(f"cleanup: a loop device still holds {image}: {loops}")
-    shutil.rmtree(base)
+    if base.exists():
+        shutil.rmtree(base)
     if base.exists():
         raise TaskError(f"cleanup: {base} remains")
     print(f"{GREEN}cleanup: no workspace mount, loop device or directory remains{OFF}")
@@ -5342,6 +5344,50 @@ def _socket_dirs_left() -> list[str]:
     )
 
 
+def _agent_cleanup(
+    client: Path,
+    socket: str,
+    images: list[str],
+    base: Path,
+    before: set[str],
+    sockets_before: set[str],
+) -> list[str]:
+    """Undo and check what the agent evidence may have made, however far it
+    got: every problem found, as text, and nothing raised -- so a failure of
+    the evidence itself stays the failure reported. The checks are the
+    evidence's own (C04): no workspace mount, loop device or directory under
+    `base`, no container it made, every container that predates it, no
+    broker socket directory a separated broker left."""
+    problems: list[str] = []
+    # Provisioning may never have begun (the one-identity suite failed
+    # first) or may have stopped part of the way: undo what is there.
+    if base.exists() or _mounted_under(base):
+        try:
+            _unprovision_workspaces(base)
+        except (TaskError, OSError) as exc:
+            problems.append(str(exc))
+    try:
+        listed = _docker(client, socket, "container", "ls", "--all", "--no-trunc", "--quiet")
+    except TaskError as exc:
+        problems.append(f"the runtime did not list its containers: {exc}")
+    else:
+        after = set(listed.split())
+        left = sorted(after - before)
+        removed = sorted(before - after)
+        if left:
+            problems.append(f"the evidence left {len(left)} container(s) behind: {left}")
+        if removed:
+            problems.append(
+                f"{len(removed)} container(s) that predate the evidence are gone: {removed}"
+            )
+    for image in images:
+        _docker(client, socket, "image", "rm", "--force", image, check=False)
+    stray = sorted(set(_socket_dirs_left()) - sockets_before)
+    if stray:
+        problems.append(f"the evidence left broker socket directories behind: {stray}")
+    return problems
+
+
 def task_sandbox_agent_evidence() -> None:
     """M5d.5's evidence: `_sandbox_agent_evidence`, its three-identity half required."""
     _sandbox_agent_evidence(require_privileged=True)
@@ -5385,25 +5431,15 @@ def _sandbox_agent_evidence(*, require_privileged: bool) -> None:
         if privileged:
             os.environ.update(_provision_workspaces(base))
             outputs.append(_agent_suite(AGENT_IDENTITY_TESTS))
-    finally:
-        if privileged or base.exists():
-            _unprovision_workspaces(base)
-        after = set(
-            _docker(client, socket, "container", "ls", "--all", "--no-trunc", "--quiet").split()
-        )
-        for image in images:
-            _docker(client, socket, "image", "rm", "--force", image, check=False)
-    left = sorted(after - before)
-    removed = sorted(before - after)
-    if left:
-        raise TaskError(f"the evidence left {len(left)} container(s) behind: {left}")
-    if removed:
-        raise TaskError(
-            f"{len(removed)} container(s) that predate the evidence are gone: {removed}"
-        )
-    stray = sorted(set(_socket_dirs_left()) - sockets_before)
-    if stray:
-        raise TaskError(f"the evidence left broker socket directories behind: {stray}")
+    except BaseException:
+        # The evidence's own failure is the one this task reports; what
+        # cleaning up finds is said beside it, never instead of it.
+        for problem in _agent_cleanup(client, socket, images, base, before, sockets_before):
+            print(f"{RED}cleanup also failed: {problem}{OFF}", file=sys.stderr, flush=True)
+        raise
+    problems = _agent_cleanup(client, socket, images, base, before, sockets_before)
+    if problems:
+        raise TaskError("cleanup failed: " + "; ".join(problems))
     print(
         f"{GREEN}cleanup: no evidence container, workspace mount or broker socket directory "
         f"remains; {len(before)} pre-existing container(s) kept{OFF}"

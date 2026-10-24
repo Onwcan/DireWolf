@@ -17,7 +17,9 @@ task's accounting directly, through `scripts/dw.py`.
 from __future__ import annotations
 
 import re
+import subprocess
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -217,3 +219,102 @@ def test_without_the_identities_the_task_is_not_exercised_after_the_rest(
     monkeypatch.delenv("DW_BROKER_AS", raising=False)
     with pytest.raises(dw.TaskError, match="NOT EXERCISED: DW_AGENT_PRIVILEGED=1 but"):
         dw._sandbox_agent_evidence(require_privileged=True)
+
+
+# --- the task's cleanup (hosted run 40024819700) ------------------------------
+#
+# A failed suite must be the failure reported: cleanup that meets a workspace
+# the run never provisioned must not raise in its place, and what cleanup does
+# find -- a leaked or a lost container, a mount -- is reported beside the
+# suite's failure, or as the failure of a run whose suites passed.
+
+PRE_EXISTING = "pre-existing"
+IMAGE = "sha256:" + "a" * 64
+
+
+def _stub_runner(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    suite: Callable[[tuple[str, ...]], str],
+    listed: str,
+) -> list[str]:
+    """`_sandbox_agent_evidence` with no runtime, build or host: the runtime
+    lists `listed` after the evidence (`PRE_EXISTING` before it), the suites
+    do what `suite` does, and the workspace base is never made. Returns the
+    commands the task ran."""
+    ran: list[str] = []
+    monkeypatch.delenv("DW_AGENT_PRIVILEGED", raising=False)
+    monkeypatch.setattr(
+        dw,
+        "_agent_setup",
+        lambda: (tmp_path / "docker", "/run/docker.sock", {}, {PRE_EXISTING}, [IMAGE]),
+    )
+    monkeypatch.setattr(dw, "run", lambda *command: ran.append(" ".join(command)))
+    monkeypatch.setattr(dw, "_agent_suite", suite)
+    monkeypatch.setattr(dw, "_agent_workspace_base", lambda: tmp_path / "never-provisioned")
+    monkeypatch.setattr(dw, "_mounted_under", lambda _base: [])
+    monkeypatch.setattr(dw, "_socket_dirs_left", list)
+
+    def docker(_client: Path, _socket: str, *args: str, **_options: bool) -> str:
+        ran.append("docker " + " ".join(args))
+        return listed if args[:2] == ("container", "ls") else ""
+
+    monkeypatch.setattr(dw, "_docker", docker)
+    return ran
+
+
+def _failed_suite(tests: tuple[str, ...]) -> str:
+    raise dw.TaskError(f"the sandbox_agent suite did not run all of its {len(tests)} tests")
+
+
+def test_a_failed_suite_is_reported_even_when_nothing_was_provisioned(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    ran = _stub_runner(monkeypatch, tmp_path, _failed_suite, PRE_EXISTING)
+    with pytest.raises(dw.TaskError, match="did not run all of its 3 tests"):
+        dw._sandbox_agent_evidence(require_privileged=True)
+    assert f"docker image rm --force {IMAGE}" in ran, "the cleanup still ran"
+    assert not (tmp_path / "never-provisioned").exists()
+    assert "cleanup also failed" not in capsys.readouterr().err
+
+
+def test_what_cleanup_finds_is_reported_beside_the_suites_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _stub_runner(monkeypatch, tmp_path, _failed_suite, f"{PRE_EXISTING}\nleaked")
+    with pytest.raises(dw.TaskError, match="did not run all of its 3 tests"):
+        dw._sandbox_agent_evidence(require_privileged=True)
+    assert (
+        "cleanup also failed: the evidence left 1 container(s) behind: ['leaked']"
+        in capsys.readouterr().err
+    )
+
+
+def test_cleanup_fails_a_run_whose_suites_passed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    complete = "\n".join(_line(suite, case) for suite, case in dw.AGENT_CASES)
+    _stub_runner(monkeypatch, tmp_path, lambda _tests: complete, "")
+    with pytest.raises(
+        dw.TaskError, match=re.escape("cleanup failed: 1 container(s) that predate")
+    ):
+        dw._sandbox_agent_evidence(require_privileged=False)
+
+
+def test_unprovisioning_is_clean_when_nothing_was_provisioned_and_strict_when_it_was(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    base = tmp_path / "never-provisioned"
+    monkeypatch.setattr(dw, "_mounted_under", lambda _base: [])
+    dw._unprovision_workspaces(base)
+    assert not base.exists()
+    # A mount that will not come off is still a failure, never ignored.
+    monkeypatch.setattr(dw, "_mounted_under", lambda under: [str(under / "tmpfs")])
+    # Every `umount` "succeeds" and changes nothing.
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda *args, **_options: subprocess.CompletedProcess(args, 0, "", ""),
+    )
+    with pytest.raises(dw.TaskError, match="still mounted"):
+        dw._unprovision_workspaces(base)
