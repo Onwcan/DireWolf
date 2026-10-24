@@ -74,28 +74,21 @@ jobs:
       - run: make arch
       # `make arch` above anchors to HEAD, which proves the working tree matches
       # what was committed. The gate is here: the anchor is the merge base with
-      # the target branch, which is outside the pull request and which branch
-      # protection keeps that way. docs/adr/accepted.sha256 cannot substitute --
-      # a change that edits an accepted ADR can update that file in the same
-      # commit, which is precisely the case this step catches.
+      # the target branch on a pull request, the previous tip on a push -- both
+      # outside the change, and branch protection keeps them that way.
+      # docs/adr/accepted.sha256 cannot substitute -- a change that edits an
+      # accepted ADR can update that file in the same commit, which is
+      # precisely the case this step catches. A push that replaced the previous
+      # tip (a force-push) leaves that tip on no ref, so the full-depth checkout
+      # lacks it: `make adr-history` then fetches exactly that commit, verifies
+      # it, and fails rather than anchor anywhere weaker (scripts/dw.py).
       - name: Accepted ADRs must match the history that accepted them
         env:
           # Through the environment, not string interpolation: a branch name is
-          # attacker-controlled on a fork pull request.
-          BASE_REF: ${{ github.base_ref }}
-          BEFORE: ${{ github.event.before }}
-        run: |
-          set -euo pipefail
-          if [ -n "${BASE_REF:-}" ]; then
-            git fetch --no-tags --quiet origin "+refs/heads/${BASE_REF}:refs/remotes/origin/${BASE_REF}"
-            base="$(git merge-base "origin/${BASE_REF}" HEAD)"
-          elif [ -n "${BEFORE:-}" ] && [ "${BEFORE}" != "0000000000000000000000000000000000000000" ]; then
-            base="${BEFORE}"
-          else
-            base="HEAD"
-          fi
-          echo "anchoring accepted ADRs to ${base}"
-          uv run --frozen python -m dwcheck --adr-base "${base}" --require-adr-history adr
+          # attacker-controlled on a fork pull request. Validated before use.
+          DW_ADR_BASE_REF: ${{ github.base_ref }}
+          DW_ADR_BEFORE: ${{ github.event.before }}
+        run: make adr-history
       # The gate is not "a checker is configured" but "the checker rejects a
       # known violation". The proof runs here, against the deliberately-invalid
       # fixture tree, and fails the job if the checker ever accepts it.

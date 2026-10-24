@@ -240,6 +240,137 @@ def task_arch() -> None:
     uvrun("dwcheck", "--root", str(ROOT), "closure")
 
 
+# --- Accepted ADRs against the history that accepted them --------------------
+#
+# `dwcheck adr --adr-base <rev>` anchors every accepted ADR to the revision in
+# which it became Accepted, as reachable from <rev> (checks_adr.py). Which <rev>
+# is the gate: in a pull request the merge base with the target branch, on a
+# push the previous tip of the branch (`github.event.before`) -- both outside
+# the change being checked. Locally, and for a run with neither, HEAD.
+#
+# A push can replace the previous tip instead of building on it (a
+# force-push): the old tip is then reachable from no ref, and a full-depth
+# checkout -- which fetches refs -- does not contain it. On a hosted runner that
+# exact commit is requested from origin and verified before anything is
+# anchored to it; if origin does not serve it, the check fails. Nothing weaker
+# is put in its place: not HEAD, not a merge base, not the digest manifest.
+
+# A full commit identifier, as GitHub reports `github.event.before`.
+_FULL_COMMIT = re.compile(r"[0-9a-f]{40}")
+# What `github.event.before` is when the push created the branch: no commit.
+_NO_COMMIT = "0" * 40
+# A branch name as the workflow may pass it: no option, no revision syntax,
+# no shell metacharacter. `git check-ref-format` is asked as well.
+_BRANCH_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]*")
+
+GitRunner = Callable[..., subprocess.CompletedProcess[str]]
+
+
+def _git(*args: str) -> subprocess.CompletedProcess[str]:
+    """`git -C ROOT <args>`, captured; a non-zero exit is the caller's to judge.
+    Fixed argv, no shell: every caller-supplied word is validated first."""
+    return subprocess.run(
+        ["git", "-C", str(ROOT), *args], capture_output=True, text=True, check=False
+    )
+
+
+def _is_commit(git: GitRunner, revision: str) -> bool:
+    """Whether `revision` -- a full commit identifier -- names a commit object
+    this clone holds: it resolves, as a commit, to exactly itself."""
+    resolved = git("rev-parse", "--verify", "--quiet", f"{revision}^{{commit}}")
+    return resolved.returncode == 0 and resolved.stdout.strip() == revision
+
+
+def adr_history_anchor(base_ref: str, before: str, *, hosted: bool, git: GitRunner = _git) -> str:
+    """The revision accepted ADRs are anchored to.
+
+    `base_ref` is a pull request's target branch (`github.base_ref`), `before`
+    a push's previous tip (`github.event.before`), `hosted` whether this is a
+    GitHub-hosted run, the only place that may fetch. Raises TaskError -- and
+    runs nothing -- for any input that is not what it claims to be, and for a
+    previous tip that is not here and cannot be fetched and verified."""
+    if base_ref:
+        if (
+            not _BRANCH_NAME.fullmatch(base_ref)
+            or ".." in base_ref
+            or git("check-ref-format", f"refs/heads/{base_ref}").returncode != 0
+        ):
+            raise TaskError(
+                f"the pull request's base branch {base_ref!r} is not a branch name; "
+                "nothing is anchored to it"
+            )
+        if hosted:
+            fetched = git(
+                "fetch",
+                "--no-tags",
+                "--quiet",
+                "origin",
+                f"+refs/heads/{base_ref}:refs/remotes/origin/{base_ref}",
+            )
+            if fetched.returncode != 0:
+                raise TaskError(
+                    f"could not fetch the base branch {base_ref!r}: {fetched.stderr.strip()}"
+                )
+        merged = git("merge-base", f"refs/remotes/origin/{base_ref}", "HEAD")
+        base = merged.stdout.strip()
+        if merged.returncode != 0 or not _FULL_COMMIT.fullmatch(base):
+            raise TaskError(
+                f"no merge base between origin/{base_ref} and HEAD: {merged.stderr.strip()}"
+            )
+        return base
+    if before and before != _NO_COMMIT:
+        if not _FULL_COMMIT.fullmatch(before):
+            raise TaskError(
+                f"the previous push's tip {before!r} is not a full commit identifier; "
+                "nothing is anchored to it"
+            )
+        if _is_commit(git, before):
+            return before
+        if not hosted:
+            raise TaskError(
+                f"the previous push's tip {before} is not in this clone; fetch that commit "
+                "and run again (only a hosted run fetches it by itself)"
+            )
+        print(
+            f"the previous push's tip {before} is not in this checkout (a push replaced it); "
+            "requesting exactly that commit from origin",
+            flush=True,
+        )
+        fetched = git("fetch", "--no-tags", "--quiet", "origin", before)
+        if fetched.returncode != 0 or not _is_commit(git, before):
+            detail = fetched.stderr.strip() or "it did not resolve to itself afterwards"
+            raise TaskError(
+                f"cannot verify accepted ADRs against the history before this push: its "
+                f"previous tip {before} (github.event.before) is not in this checkout and "
+                f"origin did not serve it ({detail}). It is reachable from no branch -- the "
+                "push replaced it -- and nothing weaker is put in its place: not HEAD, not a "
+                "merge base, not docs/adr/accepted.sha256. In a clone that holds it, run "
+                f"`uv run --frozen python -m dwcheck --adr-base {before} --require-adr-history "
+                "adr`; a later push on top of this one is anchored to a tip that exists"
+            )
+        return before
+    return "HEAD"
+
+
+def task_adr_history() -> None:
+    """Accepted ADRs against the history that accepted them (CI: merge base or previous tip).
+
+    In CI the workflow passes the pull request's target branch as
+    DW_ADR_BASE_REF and the push's previous tip as DW_ADR_BEFORE; with neither
+    -- locally, a manual run, a push that created the branch -- the anchor is
+    HEAD, as `make arch` uses. A history that cannot be read fails
+    (`--require-adr-history`); it is never skipped.
+    """
+    base = adr_history_anchor(
+        os.environ.get("DW_ADR_BASE_REF", ""),
+        os.environ.get("DW_ADR_BEFORE", ""),
+        hosted=os.environ.get("GITHUB_ACTIONS", "") == "true",
+        git=_git,
+    )
+    print(f"anchoring accepted ADRs to {base}", flush=True)
+    uvrun("dwcheck", "--adr-base", base, "--require-adr-history", "adr")
+
+
 def task_schema() -> None:
     """Regenerate schemas/ from dwk-proto, then the Python bindings from schemas/."""
     # One direction only (ADR-0033): Rust types -> JSON Schema -> Python.
@@ -7077,6 +7208,7 @@ TASKS = {
     "typecheck": task_typecheck,
     "test": task_test,
     "arch": task_arch,
+    "adr-history": task_adr_history,
     "eval": task_eval,
     "eval-check": task_eval_check,
     "eval-one": task_eval_one,

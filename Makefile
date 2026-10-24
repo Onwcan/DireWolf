@@ -13,7 +13,7 @@ endif
 DW := $(PY) scripts/dw.py
 
 .DEFAULT_GOAL := help
-.PHONY: help dev check test lint fmt fmt-check typecheck arch schema schema-check \
+.PHONY: help dev check test lint fmt fmt-check typecheck arch adr-history schema schema-check \
         eval eval-check eval-one capability-evidence policy-benchmark \
         authority-state-evidence filesystem-canonicalization-evidence \
         authority-transport-evidence authority-write-probe broker-fs-read-evidence \
@@ -50,6 +50,9 @@ test:            ## cargo test and pytest
 
 arch:            ## Architecture boundary checks (hygiene, not containment)
 	@$(DW) arch
+
+adr-history:     ## Accepted ADRs against the history that accepted them (CI: DW_ADR_BASE_REF, DW_ADR_BEFORE)
+	@$(DW) adr-history
 
 schema:          ## Regenerate schemas/ from dwk-proto and Python bindings from schemas/
 	@$(DW) schema
