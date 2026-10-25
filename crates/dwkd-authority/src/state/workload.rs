@@ -964,8 +964,10 @@ pub(super) fn live_environments(work: &Work<'_>) -> Result<i64, AuthorityError> 
 /// The oldest environment that can never run a workload again, if one is
 /// live: `READY` in a run that is no longer `ACTIVE`, or `UNKNOWN` or
 /// `DESTROYING` in any run -- never one a workload is `LAUNCHING` in. Its
-/// destruction is its only end; until M5d.6 a run's release does not
-/// perform it, so the authority does before it prepares another.
+/// destruction is its only end. Since M5d.6 a run's release performs it at
+/// once; what remains for this are the environments of runs a lease's end
+/// reaped, and destructions a release or an outcome could not complete, so
+/// the authority ends one before it prepares another.
 pub(super) fn reclaimable(work: &Work<'_>) -> Result<Option<EnvironmentId>, AuthorityError> {
     let found: Option<String> = work.db(work
         .tx

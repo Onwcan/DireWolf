@@ -31,6 +31,12 @@
 //! An environment id is never prepared twice: a `PREPARING` row a previous
 //! incarnation left becomes `UNKNOWN` at start ([`reconcile_open`]), and
 //! only reconciliation — which removes by label, exactly — ends it.
+//!
+//! A run's release (M5d.6) begins its live environment's destruction in the
+//! release's own transaction ([`begin_release`]): a crash after it (W12,
+//! `CrashPoint::ReleaseAfterIntent`) is W6 for that environment, and a
+//! preparation whose run ended under it destroys what it made
+//! ([`end_with_its_run`]).
 
 use dwk_proto::brokerp::OwnedEnvironment;
 use dwk_proto::brokerp::egress::{EgressCounters, EgressGrant};
@@ -525,6 +531,64 @@ pub(super) fn begin_destroy(
             .text("from", record.state.as_str()),
     )?;
     Ok(DestroyBegun::Pending { record, invocation })
+}
+
+/// A run's release (M5d.6, ADR-0052 §8): the destruction of every live
+/// environment of `run` -- at most one, by the schema's
+/// `environment_one_live_per_run` -- begun in the release's own transaction,
+/// so the run's end and its environment's are durable together. Only
+/// records whose recorded run is `run` are named; one being destroyed
+/// already is tried again; a preparation still in flight is left to its
+/// outcome, which finds the run ended ([`end_with_its_run`]).
+pub(super) fn begin_release(
+    work: &mut Work<'_>,
+    run: &RunId,
+) -> Result<Vec<DestroyBegun>, AuthorityError> {
+    let mut statement = work.db(work.tx.prepare(
+        "SELECT environment_id FROM environment \
+         WHERE state IN ('PREPARING', 'READY', 'DESTROYING', 'UNKNOWN') AND run_id = ?1 \
+         ORDER BY environment_id",
+    ))?;
+    let rows = work.db(statement.query_map([run.as_str()], |row| row.get::<_, String>(0)))?;
+    let mut live = Vec::new();
+    for row in rows {
+        live.push(work.db(row)?);
+    }
+    drop(statement);
+    let mut begun = Vec::with_capacity(live.len());
+    for id in &live {
+        let environment = EnvironmentId::parse(id).ok_or(AuthorityError::Invariant(
+            "a stored environment id is malformed",
+        ))?;
+        begun.push(begin_destroy(work, &environment, "RELEASED")?);
+    }
+    Ok(begun)
+}
+
+/// A preparation's outcome in a run that ended while the broker prepared
+/// it (M5d.6) -- released through another handle onto the store: what it
+/// left live, `READY` or `UNKNOWN`, is to be destroyed in the outcome's own
+/// transaction, never left to idle. `None` while the run is active, and for
+/// an outcome that left nothing or is being destroyed already.
+pub(super) fn end_with_its_run(
+    work: &mut Work<'_>,
+    environment: &EnvironmentId,
+    run: &RunId,
+) -> Result<Option<DestroyBegun>, AuthorityError> {
+    let active: bool = work.db(work.tx.query_row(
+        "SELECT state = 'ACTIVE' FROM run WHERE run_id = ?1",
+        [run.as_str()],
+        |row| row.get(0),
+    ))?;
+    if active {
+        return Ok(None);
+    }
+    match record(work, environment)?.map(|r| r.state) {
+        Some(EnvironmentState::Ready | EnvironmentState::Unknown) => {
+            begin_destroy(work, environment, "RUN_ENDED").map(Some)
+        }
+        _ => Ok(None),
+    }
 }
 
 /// How a destruction ended.

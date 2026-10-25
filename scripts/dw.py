@@ -5761,6 +5761,410 @@ def task_sandbox_agent_mutations() -> None:
     )
 
 
+# --- M5d.6: a run's release ends its environment (ADR-0052 §8) -------------------
+
+# The in-process half: the REAL authority and store against the route tests'
+# FAKE broker -- labelled `fake-broker`: it proves the authority's state
+# machine (who may end an environment, what is durable before the broker is
+# told, which environment is named, what stays pending, what never reruns),
+# never that a container ended.
+RELEASE_UNIT_FILTER = "state::workload_route::tests::release::"
+RELEASE_UNIT_TESTS = 8
+RELEASE_UNIT_CASES = tuple(
+    ("authority-release", case)
+    for case in (
+        "release-destroys-the-runs-environment",
+        "release-intent-durable-before-the-broker",
+        "release-names-only-its-environment",
+        "release-audited-in-order",
+        "release-spares-another-runs-environment",
+        "release-repeated-no-second-effect",
+        "released-run-launch-refused-nothing-prepared",
+        "released-runs-key-never-runs-again",
+        "release-keeps-the-runs-ledger",
+        "release-without-an-environment-destroys-nothing",
+        "release-without-a-sandbox-unchanged",
+        "release-stale-epoch-refused-nothing-destroyed",
+        "release-other-holder-refused-nothing-destroyed",
+        "release-of-a-run-not-held-destroys-nothing",
+        "release-ends-an-in-flight-workloads-environment",
+        "release-in-flight-workload-settled-unknown",
+        "release-in-flight-workload-never-rerun",
+        "release-during-preparation-environment-destroyed",
+        "release-during-preparation-nothing-ran",
+        "release-broker-unreachable-destruction-pending",
+        "release-broker-unreachable-completed-at-restart",
+        "release-answer-lost-destruction-pending",
+        "release-answer-lost-completed-at-restart",
+        "release-pending-destruction-completed-by-the-next-preparation",
+        "release-completes-its-runs-pending-destruction",
+        # W12 (`u`), W6 (`k`) and W7 (`l`) through a release.
+        *(
+            f"release-crash-{letter}-{what}"
+            for letter in ("u", "k", "l")
+            for what in ("environment-destroyed-at-restart", "never-rerun")
+        ),
+    )
+)
+
+# The real-container half, selected by name: the workload harness -- the
+# released broker, a real runtime, the real authority over a real DWKP client
+# through the server seam, and the authority's own API for what one DWKP
+# connection never interleaves (a release while its own launch runs, a crash,
+# a lost broker) -- and the agent harness's PROXY_ONLY environment through the
+# released `serve --sandbox-config`.
+RELEASE_WORKLOAD_TESTS = (
+    "linux::release::a_release_over_dwkp_destroys_its_environment_and_nothing_else",
+    "linux::release::a_release_ends_an_in_flight_workload_and_every_process_it_left",
+    "linux::release::a_release_a_crash_or_a_lost_broker_interrupts_is_completed_at_the_next_start",
+)
+RELEASE_AGENT_TESTS = ("linux::a_released_run_takes_its_proxy_only_environment_and_relay_down",)
+RELEASE_CASES = tuple(
+    ("sandbox-release", case)
+    for case in (
+        # What a release ends: a sandboxed launch as M5d.2 made it.
+        "sandboxed-exec-in-a-measured-environment-never-the-host",
+        "sandboxed-exec-names-the-pinned-image-and-executable",
+        "sandboxed-exec-runs-as-the-environment-user",
+        # Over DWKP: the release ends exactly its run's environment.
+        "release-stale-epoch-refused-nothing-destroyed",
+        "release-other-holder-refused-nothing-destroyed",
+        "release-of-a-run-not-held-destroys-nothing",
+        "release-over-dwkp-destroys-the-environment",
+        "release-audited",
+        "release-spares-another-runs-environment",
+        "release-spares-foreign-containers",
+        "release-other-run-still-runs",
+        "release-repeated-over-dwkp-no-second-effect",
+        "released-run-launch-refused-over-dwkp",
+        "release-without-an-environment-over-dwkp",
+        # An in-flight agent-shaped workload and its descendants.
+        "release-in-flight-agent-and-descendants-running",
+        "release-ends-in-flight-workload-and-descendants",
+        "release-in-flight-workload-settled-unknown",
+        "release-in-flight-workload-never-rerun",
+        # Crashes and a lost broker, reconciled.
+        *(
+            f"release-crash-{letter}-{what}"
+            for letter in ("u", "k", "l")
+            for what in ("completed-at-restart", "never-rerun")
+        ),
+        "release-broker-lost-destruction-pending",
+        "release-broker-lost-completed-at-restart",
+        # PROXY_ONLY: the relay and setup go with it; the egress is kept.
+        "release-removes-the-proxy-only-environment-relay-and-setup",
+        "release-destruction-records-the-egress-by-disposition",
+        "release-spares-another-runs-proxy-only-environment",
+    )
+)
+# What each line must say it is: a fake broker's line is never a container's
+# end, and a real case is never a fake broker's.
+RELEASE_LEVELS = {
+    "authority-release": frozenset({"fake-broker"}),
+    "sandbox-release": frozenset({"dwkp-end-to-end", "real-oci"}),
+}
+
+
+def require_release_evidence(output: str, cases: tuple[tuple[str, str], ...]) -> None:
+    """Every case reported, exercised (`require_sandbox_evidence`), each line
+    of its suite's level and naming what enforced it."""
+    for record in require_sandbox_evidence(output, cases):
+        suite = str(record["suite"])
+        if (suite, str(record.get("case"))) not in cases:
+            continue
+        if record.get("level") not in RELEASE_LEVELS.get(suite, frozenset()):
+            raise TaskError(f"release evidence at the wrong level: {record}")
+        if not record.get("enforcement"):
+            raise TaskError(f"release evidence without its enforcement: {record}")
+
+
+def _release_unit_half() -> str:
+    """The in-process half: every release unit test run, none filtered away."""
+    output = run_captured(
+        "cargo",
+        "test",
+        "--locked",
+        "-p",
+        "dwkd-authority",
+        "--lib",
+        "--",
+        RELEASE_UNIT_FILTER,
+        "--nocapture",
+        "--test-threads=1",
+    )
+    summaries = [line for line in output.splitlines() if line.startswith("test result: ")]
+    expected = f"test result: ok. {RELEASE_UNIT_TESTS} passed; 0 failed; 0 ignored"
+    if len(summaries) != 1 or not summaries[0].startswith(expected):
+        raise TaskError(
+            f"the release unit tests did not all run: expected `{expected}`, "
+            f"got {summaries or 'no summary'}"
+        )
+    require_release_evidence(output, RELEASE_UNIT_CASES)
+    return output
+
+
+def _release_workload_half() -> str:
+    """The workload harness's release tests over a real runtime; no container
+    they made may remain and none that predates them may go."""
+    client, socket, variables, before, images = _workload_setup()
+    os.environ.update(variables)
+    try:
+        run("cargo", "build", "--locked", "-p", "dwkd-broker")
+        output = run_captured(
+            "cargo",
+            "test",
+            "--locked",
+            "-p",
+            "dwkd-authority",
+            "--test",
+            "sandbox_workload",
+            "--",
+            "--ignored",
+            "--exact",
+            "--nocapture",
+            "--test-threads=1",
+            *RELEASE_WORKLOAD_TESTS,
+        )
+        summaries = [line for line in output.splitlines() if line.startswith("test result: ")]
+        expected = f"test result: ok. {len(RELEASE_WORKLOAD_TESTS)} passed; 0 failed; 0 ignored"
+        if len(summaries) != 1 or not summaries[0].startswith(expected):
+            raise TaskError(
+                f"the sandbox_workload release suite did not run all of its tests: expected "
+                f"`{expected}`, got {summaries or 'no summary'}"
+            )
+    finally:
+        after = set(
+            _docker(client, socket, "container", "ls", "--all", "--no-trunc", "--quiet").split()
+        )
+        for image in set(images.values()):
+            _docker(client, socket, "image", "rm", "--force", image, check=False)
+    left = sorted(after - before)
+    removed = sorted(before - after)
+    if left:
+        raise TaskError(f"the evidence left {len(left)} container(s) behind: {left}")
+    if removed:
+        raise TaskError(
+            f"{len(removed)} container(s) that predate the evidence are gone: {removed}"
+        )
+    print(f"{GREEN}cleanup: no evidence container remains; {len(before)} pre-existing kept{OFF}")
+    return output
+
+
+def _release_agent_half() -> str:
+    """The agent harness's PROXY_ONLY release test through the released
+    `serve`; its cleanup is the agent evidence's own (C04)."""
+    client, socket, variables, before, images = _agent_setup()
+    os.environ.update(variables)
+    base = _agent_workspace_base()
+    sockets_before = set(_socket_dirs_left())
+    try:
+        output = _agent_suite(RELEASE_AGENT_TESTS)
+    except BaseException:
+        for problem in _agent_cleanup(client, socket, images, base, before, sockets_before):
+            print(f"{RED}cleanup also failed: {problem}{OFF}", file=sys.stderr, flush=True)
+        raise
+    problems = _agent_cleanup(client, socket, images, base, before, sockets_before)
+    if problems:
+        raise TaskError("cleanup failed: " + "; ".join(problems))
+    print(
+        f"{GREEN}cleanup: no evidence container or broker socket directory remains; "
+        f"{len(before)} pre-existing container(s) kept{OFF}"
+    )
+    return output
+
+
+def task_sandbox_release_evidence() -> None:
+    """M5d.6's evidence (ADR-0052 §8): a run's release ends its environment.
+
+    In process: the real authority against a FAKE broker (labelled so) --
+    who may end a run's environment, the destruction durable in the
+    release's transaction before the broker hears of it, exactly the run's
+    environment named, an unconfirmed destruction pending until reconciled,
+    a preparation the release overtook keeping nothing, crash windows W12,
+    W6 and W7, and nothing the run did run again. Then real containers: over
+    a real DWKP client, a release removing its environment when it is
+    answered and nothing else -- another run's, an unlabelled container of
+    the same image, another store's copy of its labels -- fenced and foreign
+    releases ending nothing; an in-flight agent-shaped workload and its
+    descendants ended with their environment and settled UNKNOWN, never
+    rerun; crashes and a lost broker completed at the next start; and a
+    PROXY_ONLY environment's relay and setup removed with it, its egress
+    recorded by disposition, another run's relay kept.
+
+    Every case must report with its level and what enforced it, none NOT
+    EXERCISED. No container or broker socket directory the evidence made may
+    remain, and every container that predates it must. Linux only.
+    """
+    outputs = [_release_unit_half(), _release_workload_half(), _release_agent_half()]
+    require_release_evidence("\n".join(outputs[1:]), RELEASE_CASES)
+    uvrun("dwcheck", "closure", "--report")
+
+
+# The mutation review (ADR-0052 §17): each line weakens one guard of the
+# release's teardown, in the source, one at a time. Each mutant must compile
+# and must fail the authority's state suites or `sandbox-release-evidence`;
+# the file is then restored, and its SHA-256 proves it byte-identical. A
+# mutant that survives, or does not compile, fails the review.
+RELEASE_MUTATIONS = (
+    (
+        "a release ends nothing of its run",
+        "crates/dwkd-authority/src/state/mod.rs",
+        "                Reply::Done(true) => environment::begin_release(work, run)?,",
+        "                Reply::Done(true) => Vec::new(),",
+    ),
+    (
+        "the environment's destruction is recorded only after the release committed",
+        "crates/dwkd-authority/src/state/mod.rs",
+        "                Reply::Done(true) => environment::begin_release(work, run)?,\n"
+        "                Reply::Done(false) | Reply::Refused(_) => Vec::new(),\n"
+        "            };\n"
+        "            let reply = match released {\n"
+        "                Reply::Done(_) => Reply::Done(()),\n"
+        "                Reply::Refused(reason) => Reply::Refused(reason),\n"
+        "            };\n"
+        "            Ok((reply, teardown))\n"
+        "        })?;\n"
+        "        if !teardown.is_empty() {\n"
+        "            self.shared.crash(CrashPoint::ReleaseAfterIntent)?;\n"
+        "        }\n",
+        '                Reply::Done(true) => vec![environment::DestroyBegun::Refused("LATER")],\n'
+        "                Reply::Done(false) | Reply::Refused(_) => Vec::new(),\n"
+        "            };\n"
+        "            let reply = match released {\n"
+        "                Reply::Done(_) => Reply::Done(()),\n"
+        "                Reply::Refused(reason) => Reply::Refused(reason),\n"
+        "            };\n"
+        "            Ok((reply, teardown))\n"
+        "        })?;\n"
+        "        if !teardown.is_empty() {\n"
+        "            self.shared.crash(CrashPoint::ReleaseAfterIntent)?;\n"
+        "        }\n"
+        "        let teardown = if teardown.is_empty() {\n"
+        "            teardown\n"
+        "        } else {\n"
+        "            self.transact(|work| environment::begin_release(work, run))?\n"
+        "        };\n",
+    ),
+    (
+        "a fenced release ends the run's environment",
+        "crates/dwkd-authority/src/state/mod.rs",
+        "                Reply::Done(false) | Reply::Refused(_) => Vec::new(),",
+        "                Reply::Done(false) => Vec::new(),\n"
+        "                Reply::Refused(_) => environment::begin_release(work, run)?,",
+    ),
+    (
+        "a release acknowledged without effect ends the named run's environment",
+        "crates/dwkd-authority/src/state/mod.rs",
+        "                Reply::Done(false) | Reply::Refused(_) => Vec::new(),",
+        "                Reply::Done(false) => environment::begin_release(work, run)?,\n"
+        "                Reply::Refused(_) => Vec::new(),",
+    ),
+    (
+        "a release ends every environment of its session",
+        "crates/dwkd-authority/src/state/environment.rs",
+        "AND run_id = ?1 \\",
+        "AND run_id IN (SELECT r.run_id FROM run r JOIN run m ON m.session_id = r.session_id "
+        "WHERE m.run_id = ?1) \\",
+    ),
+    (
+        "a release ends every live environment",
+        "crates/dwkd-authority/src/state/environment.rs",
+        "AND run_id = ?1 \\",
+        "AND (run_id = ?1 OR ?1 IS NOT NULL) \\",
+    ),
+    (
+        "a preparation keeps an environment its run's release overtook",
+        "crates/dwkd-authority/src/state/environment.rs",
+        "    if active {\n        return Ok(None);",
+        "    if true || active {\n        return Ok(None);",
+    ),
+    (
+        "an unconfirmed destruction is recorded as done",
+        "crates/dwkd-authority/src/state/environment_ops.rs",
+        "        Err(error) => pending(failure_of(&error)),",
+        "        Err(_) => (\n"
+        "            DestroyEnding::Gone { container: None, already: true, egress: None },\n"
+        "            0,\n"
+        "        ),",
+    ),
+    (
+        "a restart leaves a pending destruction pending",
+        "crates/dwkd-authority/src/state/environment_ops.rs",
+        "        for class in environment::classify(&records, &listed, current) {",
+        "        for class in environment::classify(&records, &listed, current)\n"
+        "            .into_iter()\n"
+        "            .filter(|c| !matches!(c, ReconcileClass::Pending(_)))\n"
+        "        {",
+    ),
+    # Weakening only the route's own run check is an equivalent mutant: the
+    # workload ledger refuses a run that is not active again, with the same
+    # answer. What a released run must never regain is its state.
+    (
+        "a release leaves its run active, and executable",
+        "crates/dwkd-authority/src/state/admission.rs",
+        "SET state = 'RELEASED', ended_ms = ?5 WHERE run_id = ?1 AND session_id = ?2",
+        "SET state = state, ended_ms = NULLIF(?5, ?5) WHERE run_id = ?1 AND session_id = ?2",
+    ),
+)
+
+
+def _release_guard_suites() -> None:
+    """The suites that prove the release's guards without a runtime: the
+    authority's state machine, its route and lifecycle tests included."""
+    run("cargo", "test", "--locked", "-p", "dwkd-authority", "--lib", "--", "state::")
+
+
+def task_sandbox_release_mutations() -> None:
+    """Weaken each M5d.6 release guard in turn; a unit suite or the release evidence must catch it.
+
+    Slow: a mutant no unit suite catches runs the whole release evidence.
+    Every file is restored byte-identically whatever happens, and checked.
+    Never run it beside another build.
+    """
+    for what, rel, old, _new in RELEASE_MUTATIONS:
+        if (ROOT / rel).read_text(encoding="utf-8").count(old) != 1:
+            raise TaskError(f"mutation `{what}`: its target is not in {rel} exactly once")
+    killed: list[str] = []
+    for what, rel, old, new in RELEASE_MUTATIONS:
+        path = ROOT / rel
+        original = path.read_bytes()
+        digest = hashlib.sha256(original).hexdigest()
+        text = original.decode("utf-8")
+        print(f"{BOLD}mutant: {what}{OFF}")
+        outcome = "survived"
+        try:
+            path.write_bytes(text.replace(old, new).encode("utf-8"))
+            try:
+                run("cargo", "test", "--locked", "--no-run", "-p", "dwkd-authority")
+            except TaskError:
+                outcome = "did not compile"
+            else:
+                try:
+                    _release_guard_suites()
+                except TaskError as exc:
+                    outcome = f"killed by a unit suite: {str(exc)[:160]}"
+                else:
+                    try:
+                        task_sandbox_release_evidence()
+                    except TaskError as exc:
+                        outcome = f"killed by the evidence: {str(exc)[:160]}"
+        finally:
+            path.write_bytes(original)
+        if hashlib.sha256(path.read_bytes()).hexdigest() != digest:
+            raise TaskError(f"{rel} was not restored byte-identically")
+        print(f"{DIM}restored {rel} (sha256 {digest[:16]}...){OFF}")
+        if not outcome.startswith("killed"):
+            raise TaskError(f"mutant `{what}` {outcome}: nothing guards it")
+        killed.append(f"{what}: {outcome[:60]}")
+        print(f"{GREEN}mutant {outcome[:60]}: {what}{OFF}")
+    for line in killed:
+        print(f"  {line}")
+    print(
+        f"{GREEN}sandbox release mutation review: {len(killed)} of {len(RELEASE_MUTATIONS)} "
+        f"killed{OFF}"
+    )
+
+
 # --- D11 hardening (ADR-0053) ---------------------------------------------------
 
 D11_EVIDENCE_PREFIX = "D11-EVIDENCE "
@@ -7236,6 +7640,8 @@ TASKS = {
     "sandbox-workspace-mutations": task_sandbox_workspace_mutations,
     "sandbox-agent-evidence": task_sandbox_agent_evidence,
     "sandbox-agent-mutations": task_sandbox_agent_mutations,
+    "sandbox-release-evidence": task_sandbox_release_evidence,
+    "sandbox-release-mutations": task_sandbox_release_mutations,
     "d11-hardening-evidence": task_d11_hardening_evidence,
     "d11-hardening-mutations": task_d11_hardening_mutations,
     "d11-posture": task_d11_posture,

@@ -135,7 +135,9 @@ jobs:
       # traversal, exec mediation and the secret boundary are no longer
       # pending, and a regression in any of them fails this gate. Since M5a
       # the gated `m5a-sandbox-foundation` suite runs the real OCI evidence
-      # (the runner's Docker Engine, real containers, both daemons) here too.
+      # (the runner's Docker Engine, real containers, both daemons) here too,
+      # and since M5d.6 the gated `m5d-sandbox-exec` suite runs the release
+      # evidence (`make sandbox-release-evidence`, one identity).
       # Strict (ADR-0041): an eval this job cannot exercise FAILS the gate
       # rather than being listed as not exercised -- and `scripts/dw.py` makes
       # the gate strict under GitHub Actions even without the line below.
@@ -531,6 +533,34 @@ jobs:
             exit 1
           fi
 
+  # M5d.6 (ADR-0052 §8): a run's release ends its environment. The real
+  # authority against a fake broker first (labelled so: its state machine,
+  # never a container's end), then the released broker, this runner's Docker
+  # Engine and the real authority over a real DWKP client: a release removing
+  # exactly its run's environment when it is answered -- another run's, an
+  # unlabelled container of the same image and another store's copy of its
+  # labels kept; fenced and foreign releases ending nothing; an in-flight
+  # agent-shaped workload and its descendants ended with it, never rerun;
+  # crashes at W12, W6 and W7 and a lost broker completed at the next start;
+  # a PROXY_ONLY environment's relay and setup removed with it through the
+  # released `serve`. One identity: nothing here changes the runner. Every
+  # case required; no runtime: NOT EXERCISED, which fails. The `ci` job
+  # requires it.
+  sandbox-release:
+    name: sandbox release (make sandbox-release-evidence)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v5.0.1
+      - uses: ./.github/actions/setup
+      - name: Show the OCI runtime and the agent's tools
+        run: |
+          docker version --format 'client {{.Client.Version}} server {{.Server.Version}} api {{.Server.APIVersion}} {{.Server.Os}}/{{.Server.Arch}}'
+          docker info --format '{{.OperatingSystem}} kernel {{.KernelVersion}} cgroup v{{.CgroupVersion}} runtime {{.DefaultRuntime}} {{.SecurityOptions}}'
+          readlink -f /usr/bin/python3
+          python3 -c 'import ssl; print(ssl.OPENSSL_VERSION)'
+          openssl version
+      - run: make sandbox-release-evidence
+
   # D11 hardening (ADR-0053): the exchange worker's syscall filter, the
   # broker's vouching for each worker from the kernel, the start-up window
   # and the swap posture -- on the runner's own kernel, with the host each
@@ -628,7 +658,7 @@ jobs:
   ci:
     name: CI
     runs-on: ubuntu-latest
-    needs: [format, lint, typecheck, architecture, schema, evals, test, authority-transport, filesystem-canonicalization, broker-fs-read, filesystem-operations, process-broker, secret-broker, sandbox-foundation, sandbox-egress, sandbox-workload, sandbox-secret, sandbox-workspace, sandbox-agent, d11-hardening, net-http, supply-chain, build]
+    needs: [format, lint, typecheck, architecture, schema, evals, test, authority-transport, filesystem-canonicalization, broker-fs-read, filesystem-operations, process-broker, secret-broker, sandbox-foundation, sandbox-egress, sandbox-workload, sandbox-secret, sandbox-workspace, sandbox-agent, sandbox-release, d11-hardening, net-http, supply-chain, build]
     if: always()
     steps:
       - name: Fail unless every required job succeeded

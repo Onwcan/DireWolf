@@ -39,7 +39,7 @@ MAX_REASON_CHARS: Final = 1000
 that reaches a result file."""
 
 AVAILABLE_MILESTONES: Final[frozenset[str]] = frozenset(
-    {"M1", "M2", "M2.5", "M3", "M4", "M5a", "M5b", "M5c"}
+    {"M1", "M2", "M2.5", "M3", "M4", "M5a", "M5b", "M5c", "M5d"}
 )
 """What this build has. An eval requiring anything else is pending.
 
@@ -63,6 +63,14 @@ M5 gate -- sandboxed workloads, net.http -- still waits for "M5".
 mode A's credential egress. It turns on exactly the suite that requires it,
 which must pass in CI's gate; M5c is complete, and the complete M5 gate --
 sandboxed workloads in production -- still waits for "M5".
+
+"M5d" is the fourth (ADR-0052, Proposed): production sandboxed
+`process.exec`, joined at M5d.6 once its gated suite, `m5d-sandbox-exec`, had
+a real runner. It turns on exactly the suite that requires it, which must
+pass in CI's gate. Joining here is the suite's switch, not the milestone's
+acceptance: that is the owner's, with ADR-0052. The complete M5 gate -- the
+sandbox escape suite and the registry scenarios -- is M5e's and still waits
+for "M5".
 """
 
 

@@ -364,10 +364,26 @@ impl Authority {
         let timing = Fields::new()
             .int("prepare_ms", u64::from(prepare_ms))
             .int("authority_ms", elapsed(since));
-        self.transact(|work| {
-            environment::record_prepared(work, &environment, run, &prepared, timing)
+        let ended = self.transact(|work| {
+            environment::record_prepared(work, &environment, run, &prepared, timing)?;
+            environment::end_with_its_run(work, &environment, run)
         })?;
         shared.crash(CrashPoint::EnvironmentAfterOutcome)?;
+        // The run ended while the broker prepared it (M5d.6): what it made is
+        // destroyed now, and is never this run's to use.
+        if let Some(DestroyBegun::Pending { record, invocation }) = ended {
+            return Ok(match self.perform_destroy(record, invocation)? {
+                EnvironmentReply::Destroyed { .. } => EnvironmentReply::Failed {
+                    environment,
+                    reason: "RUN_ENDED",
+                    report,
+                },
+                _ => EnvironmentReply::Unknown {
+                    environment,
+                    reason: "RUN_ENDED",
+                },
+            });
+        }
         Ok(match prepared {
             Prepared::Ready { .. } => match report {
                 Some(report) => EnvironmentReply::Ready { report, prepare_ms },

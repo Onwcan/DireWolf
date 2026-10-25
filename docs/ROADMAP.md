@@ -155,7 +155,7 @@ and serving on Linux only. **M5 is in progress: M5a, M5b and M5c are complete (s
 **Adversarial:** the full path-traversal set ([EVALS.md](EVALS.md) §3) including Unicode normalisation and TOCTOU swap races in a tight loop; secret-in-output detection; core-dump inspection for secret residue.
 **Deferred:** remote fs, Windows-native hardening beyond the fallback walker.
 
-### M5 · Sandbox — **IN PROGRESS** (M5a complete, hosted acceptance passed; M5b complete, hosted acceptance passed; M5c complete, ADR-0050 accepted, hosted acceptance passed; M5d in progress — M5d.2 and M5d.3 complete, M5d.4 hosted CI green with OD-3, OD-6 and OD-12 awaiting the owner, M5d.5 built and awaiting hosted CI, ADR-0052 Proposed; M5e not started)
+### M5 · Sandbox — **IN PROGRESS** (M5a complete, hosted acceptance passed; M5b complete, hosted acceptance passed; M5c complete, ADR-0050 accepted, hosted acceptance passed; M5d in progress — M5d.2 and M5d.3 complete, M5d.4 hosted CI green with OD-3, OD-6 and OD-12 awaiting the owner, M5d.5 hosted CI green with OD-5 awaiting the owner, M5d.6 built and awaiting hosted CI, ADR-0052 Proposed; M5e not started)
 
 M5 is two products in one (a sandbox *and* an egress proxy), so it is decomposed like M4
 ([ADR-0047](adr/0047-m5a-oci-execution-environment-and-measured-assurance.md)). The
@@ -302,7 +302,7 @@ documented and not yet verified**, whose fail-closed check at the broker's start
 before any workload runs.
 **Deferred:** package-manager routing (M5d/M5e); model egress (M7); approvals (M6).
 
-#### M5d · Production sandboxed `process.exec` — **IN PROGRESS** (M5d.1 to M5d.5 built; [ADR-0052](adr/0052-m5d-sandboxed-process-exec.md) Proposed)
+#### M5d · Production sandboxed `process.exec` — **IN PROGRESS** (M5d.1 to M5d.6 built; M5d.5's hosted CI green, M5d.6's pending; [ADR-0052](adr/0052-m5d-sandboxed-process-exec.md) Proposed)
 
 **Deps:** M5a, M5b. **Deliverables:** `process.exec` in an environment through the
 authority's gates; secret modes B/C wired to sandboxed processes; `workspace_exec_hygiene`
@@ -332,8 +332,8 @@ hosted CI):
 | **M5d.2** Public sandboxed `process.exec` | the DWKP route (tool messages version 5), the shared idempotency namespace, results naming environment and level; `workspace_exec_hygiene` in the environment; concrete `process.exec:<path>` grants resolved against the image manifest (OD-9); as built also private protocol 9's workload start and collection, schema 10, `serve --sandbox-config` with the authority preparing a run's environment (ADR-0052 §2a) and the probe as the hygiene launcher (§5a) | **COMPLETE** — `make sandbox-workload-evidence` (eleven broker and eleven authority real-container tests, a real DWKP client and the released `serve`), `make sandbox-workload-mutations` (52 mutants); OD-10 and OD-11 approved by the owner (2026-10-19, with conditions); hosted CI green at `3f56e04` (run 39229385310) |
 | **M5d.3** Secrets B/C in the sandbox | the trusted launcher over the `exec`'s standard input; mode C's descendants recorded as a residual; as built tool messages version 6 (`credential_handle`, the plan's `spawn_injection`), private protocol 10 (`broker.workload_secret_start`, three descriptors), schema 11 (`workload_secret`), the consumer resolved against the image manifest, TX055–TX056 | **BUILT, local gates** — `make sandbox-secret-evidence` (the authority's pipeline with real keyring values against a fake broker; six broker and four authority real-container tests, a real DWKP client and the released `serve --secrets-file`), `make sandbox-secret-mutations` (22 of 22 killed; M5d.2's 52 of 52 still); **COMPLETE** — hosted CI green at `4cfc9f8` (run 39410907163, 24 of 24 required jobs) |
 | **M5d.4** Workspace ownership and disk quota | OD-3(a): the group 10001, the workload's own gid, a root of mode `2770` owned by root or the authority, nothing repaired; OD-6: a filesystem of its own per workspace, measured by the authority and the probe against the declared quota before preparation and every workload; every launch through the trusted launcher with the umask `0007` (OD-12); brokered changes excluded while a workload may run; `ENOSPC` changing nothing; as built private protocol 11, probe report 3, TX057–TX059 | **BUILT, local gates** — `make sandbox-workspace-evidence` (in process: a real full `tmpfs`, the authority against a fake broker; real containers: the local cases, and the operator-provisioned cases on the hosted `sandbox-workspace` job only — NOT EXERCISED locally), `make sandbox-workspace-mutations` (26 of 26 killed; M5d.2's 52, M5d.3's 22, net.http's 10 and D11's 26 still all killed); OD-3, OD-6 and OD-12 awaiting the owner; hosted CI green at `1c8ccbe` (run [39854518873](https://github.com/Onwcan/DireWolf/actions/runs/39854518873), 25 of 25 required jobs) — the evidence verified, the three decisions still the owner's |
-| **M5d.5** Agent-shaped escape suite and multi-identity evidence | a long-lived agent-shaped workload in `PROXY_ONLY` with declared origins; the hosted three-identity job; as built `make sandbox-agent-evidence` (the released `serve --sandbox-config` over a real DWKP client, the released broker, a real runtime, the M5d.2 tools image with the relay added, local HTTPS origins under a per-run PKI), the required hosted job `sandbox-agent`, `make sandbox-agent-mutations`; no product code, protocol, schema or dependency changed | **BUILT, local gates** — the one-identity half passing locally (3 tests, 50 cases); `make sandbox-agent-mutations` 11 of 11 killed; the three-identity half (`DW_AGENT_PRIVILEGED=1`: three host users, the group 10001, a bounded workspace) NOT EXERCISED locally, hosted-only; OD-5 (no handle) for the owner; awaiting the owner's commit and hosted CI |
-| M5d.6 Closeout | run release destroys its environment; the gated eval; ADR-0052 accepted | not started |
+| **M5d.5** Agent-shaped escape suite and multi-identity evidence | a long-lived agent-shaped workload in `PROXY_ONLY` with declared origins; the hosted three-identity job; as built `make sandbox-agent-evidence` (the released `serve --sandbox-config` over a real DWKP client, the released broker, a real runtime, the M5d.2 tools image with the relay added, local HTTPS origins under a per-run PKI), the required hosted job `sandbox-agent`, `make sandbox-agent-mutations`; no product code, protocol, schema or dependency changed | **BUILT, local gates** — the one-identity half passing locally (3 tests, 50 cases); `make sandbox-agent-mutations` 11 of 11 killed; the three-identity half (`DW_AGENT_PRIVILEGED=1`: three host users, the group 10001, a bounded workspace) NOT EXERCISED locally, hosted-only; OD-5 (no handle) for the owner; awaiting the owner's commit and hosted CI. **Hosted CI green at `49bb8f8`** (run [40134163102](https://github.com/Onwcan/DireWolf/actions/runs/40134163102), 26 of 26 jobs; the `sandbox-agent` job ran the two three-identity tests, 25 cases) — the evidence verified, OD-5 still the owner's |
+| **M5d.6** Closeout | run release destroys its environment; the gated eval; ADR-0052 accepted | **BUILT, local gates** — a run's release records its live environment's destruction in the release's own transaction and has the broker remove it (ADR-0052 §8); `make sandbox-release-evidence` (the authority against a fake broker: 8 tests, 31 cases; real containers: 4 tests, 29 cases, over a real DWKP client and the released `serve`), the required hosted job `sandbox-release`, `make sandbox-release-mutations` (10 of 10 killed, each by the authority's state suites, every file restored and checked); the gated eval `m5d-sandbox-exec` passing locally, `M5d` available to the harness (`M5` not); awaiting the owner's commit and hosted CI; ADR-0052's acceptance awaits that run and the owner's decisions (§19) |
 
 **M5d.1 as built.** The ptrace-posture check carried from M5c is made: the broker reads
 Yama's `ptrace_scope` and its own binary's owner and mode at start and refuses to serve
@@ -387,6 +387,21 @@ the broker as `dwbroker`, the DWKP runtime as `dwruntime` through a relay of its
 as a stranger, a bounded workspace of the group 10001 — every uid from the kernel, and every
 cross-identity boundary attempted. Not M5d.5: a persistent workload handle (OD-5: none), run
 release destroying its environment (M5d.6), and package-manager registries (M5e).
+
+**M5d.6 as built.** A run's release now ends its environment. In the transaction that
+records the run `RELEASED`, its live environment is recorded `DESTROYING`; then the broker
+removes exactly the container recorded for it, by its labels — in `PROXY_ONLY` its relay and
+setup with it, the egress counted by disposition at the destruction. A workload still running
+there ends with it and is settled `UNKNOWN`, never rerun; a destruction the broker cannot
+confirm stays `DESTROYING` and is completed by the next preparation or at the next start; a
+preparation that another handle's release overtook destroys what it made. A fenced, foreign or
+repeated release ends nothing, and another run's environment and foreign containers are never
+touched. The public contract is unchanged: `ReleaseRun` still answers `Ack` (the release and
+its environment's destruction durable, not a confirmed removal) and refuses only
+`STALE_EPOCH`. A run a lease's end reaped is not released; its environment is still reclaimed
+before the next preparation (ADR-0052 §2a). The gated `m5d-sandbox-exec` eval runs the real
+evidence and requires every case at its level with its expected outcome. Not M5d.6: the
+complete M5 escape and registry gate (M5e), and ADR-0052's acceptance (the owner's).
 
 #### M5e · The M5 adversarial gate and closeout — **NOT STARTED**
 

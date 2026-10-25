@@ -1496,12 +1496,14 @@ reason = "NO_MATCHING_RULE"
         );
         evidence("public-no-lifecycle-operation", "UNKNOWN_OPERATION");
 
-        // A run that ended leaves its environment idle until the authority
-        // next prepares one; then it is destroyed first (ADR-0052 §2a).
-        let release = super::state_support::release_run_msg(&a.session, &a.run, a.epoch);
+        // A run a lease's end reaped leaves its environment idle until the
+        // authority next prepares one; then it is destroyed first (ADR-0052
+        // §2a). (Since M5d.6 a run's own release destroys it at once:
+        // `release::`, `make sandbox-release-evidence`.)
+        let release = super::state_support::release_lease_msg(&a.session, a.epoch);
         let released = a.client.call(&release).body;
         assert!(matches!(released, DwkpBody::Ack(_)), "{released:?}");
-        assert!(lab.runtime.exists(&container), "released, still idle");
+        assert!(lab.runtime.exists(&container), "reaped, still idle");
         let mut c = Peer::admit(served.path(), 3, &["process.exec:*"], binder(&served));
         let body = c.exec("c-1", &call(FIXTURE, &["workload-identity"]));
         assert_eq!(
@@ -3106,6 +3108,631 @@ reason = "NO_MATCHING_RULE"
             assert!(p.tmpfs.join("served.file").exists());
             evidence("production-serve-bounded-workspace", "completed");
             server.kill();
+        }
+    }
+
+    /// M5d.6 (ADR-0052 §8): a run's release ends its environment -- in a
+    /// **real** OCI runtime, through the released broker, the real authority
+    /// and, where a runtime would ask, a **real** DWKP client. Every line says
+    /// what it is and what enforced it: `dwkp-end-to-end` is a real DWKP
+    /// client on the authority's socket; `real-oci` is the authority's own
+    /// API -- the interleavings one DWKP connection never makes (a release
+    /// while its own launch is outstanding), a crash, a broker lost -- over
+    /// the same real broker and runtime. `make sandbox-release-evidence`
+    /// selects these by name.
+    mod release {
+        use dwk_proto::wire::id::SessionId;
+        use dwk_proto::wire::scalar::{Epoch, RefusalReason};
+        use dwkd_authority::state::{CallerContext, Dispatched};
+
+        use super::super::state_support::release_run_msg;
+        use super::*;
+
+        const RELEASE_SUITE: &str = "sandbox-release";
+        const E2E: &str = "dwkp-end-to-end";
+        const REAL: &str = "real-oci";
+        /// The agent-shaped workload's processes, as `workload-procs` names
+        /// them: the plan, two workers and the daemonised helper's child.
+        const AGENT: [&str; 4] = [
+            "uid=10001 argv=/usr/libexec/direwolf/sandbox-fixture workload-agent 300",
+            "uid=10001 argv=/usr/libexec/direwolf/sandbox-fixture workload-agent-worker 1",
+            "uid=10001 argv=/usr/libexec/direwolf/sandbox-fixture workload-agent-worker 2",
+            "uid=10001 argv=/usr/libexec/direwolf/sandbox-fixture workload-sleep 600",
+        ];
+
+        fn evidence(case: &str, outcome: &str, level: &str, enforcement: &str) {
+            println!(
+                "SANDBOX-EVIDENCE {{\"suite\":\"{RELEASE_SUITE}\",\"case\":\"{case}\",\"outcome\":\"{outcome}\",\"level\":\"{level}\",\"enforcement\":\"{enforcement}\"}}"
+            );
+        }
+
+        fn one(lab: &Lab, sql: &str, param: &str) -> String {
+            super::super::state_support::raw(&lab.dir.state())
+                .query_row(sql, [param], |row| row.get(0))
+                .unwrap()
+        }
+
+        fn container_of(lab: &Lab, environment: &EnvironmentId) -> String {
+            one(
+                lab,
+                "SELECT container FROM environment WHERE environment_id = ?1",
+                environment.as_str(),
+            )
+        }
+
+        fn ended(lab: &Lab, environment: &EnvironmentId) -> String {
+            one(
+                lab,
+                "SELECT state || ':' || COALESCE(failure, '') FROM environment \
+                 WHERE environment_id = ?1",
+                environment.as_str(),
+            )
+        }
+
+        fn run_state(lab: &Lab, run: &RunId) -> String {
+            one(lab, "SELECT state FROM run WHERE run_id = ?1", run.as_str())
+        }
+
+        fn intents(lab: &Lab) -> usize {
+            audit_records(&lab.dir.state(), "environment.destroy_intent").len()
+        }
+
+        fn audit_records(state: &std::path::Path, event: &str) -> Vec<dwk_proto::json::Object> {
+            super::super::state_support::audit_records(state, event)
+        }
+
+        /// Containers that are not the evidence's environments: the workload
+        /// image run unlabelled, and run labelled as another store's copy of
+        /// a released environment -- what a destruction by name, image or
+        /// partial label would take. Removed when the test ends.
+        struct Decoys {
+            runtime: Runtime,
+            ids: Vec<String>,
+        }
+
+        impl Decoys {
+            fn new(runtime: &Runtime, labels: &[Vec<(&str, &str)>]) -> Self {
+                let image = var("DW_SANDBOX_WORKLOAD_IMAGE");
+                let mut ids = Vec::new();
+                for set in labels {
+                    let mut args: Vec<String> =
+                        ["container", "run", "--detach", "--network", "none"]
+                            .iter()
+                            .map(|a| (*a).to_owned())
+                            .collect();
+                    for (key, value) in set {
+                        args.push("--label".to_owned());
+                        args.push(format!("{key}={value}"));
+                    }
+                    args.extend(
+                        [image.as_str(), FIXTURE, "workload-sleep", "600"]
+                            .iter()
+                            .map(|a| (*a).to_owned()),
+                    );
+                    let words: Vec<&str> = args.iter().map(String::as_str).collect();
+                    ids.push(runtime.ok(&words).trim().to_owned());
+                }
+                Self {
+                    runtime: runtime.clone(),
+                    ids,
+                }
+            }
+        }
+
+        impl Drop for Decoys {
+            fn drop(&mut self) {
+                for id in &self.ids {
+                    let _ = self.runtime.docker(&["container", "rm", "--force", id]);
+                }
+            }
+        }
+
+        /// A run admitted in-process, with everything a DWKP request of its
+        /// runtime would carry.
+        fn admitted(lab: &mut Lab) -> (CallerContext, SessionId, Epoch, RunId) {
+            let n = lab.next_session;
+            lab.next_session += 1;
+            let authority = lab.authority();
+            authority
+                .operator()
+                .bind_session_workspace(&session(n), &WorkspaceId::new("ws").unwrap())
+                .unwrap();
+            let caller = authority.connect(subject(1000));
+            let Reply::Done(epoch) = authority.acquire_lease(&caller, &session(n)).unwrap() else {
+                panic!("a lease")
+            };
+            let run = again(lab, &caller, &session(n), epoch);
+            (caller, session(n), epoch, run)
+        }
+
+        /// Another run in the same session, under the same lease.
+        fn again(
+            lab: &mut Lab,
+            caller: &CallerContext,
+            session: &SessionId,
+            epoch: Epoch,
+        ) -> RunId {
+            let n = next_message();
+            let admitted = lab
+                .authority()
+                .admit_run(
+                    caller,
+                    &admit_msg(
+                        session,
+                        epoch,
+                        &format!("release-{n}"),
+                        "operator",
+                        &[],
+                        &["process.exec:*"],
+                        n,
+                    ),
+                )
+                .unwrap();
+            let Reply::Done(admission) = admitted else {
+                panic!("admitted: {admitted:?}")
+            };
+            admission.run_id().clone()
+        }
+
+        /// A version-5 `process.exec` of `run`, as its runtime would send it.
+        fn exec_message(
+            (session, run, epoch): (&SessionId, &RunId, Epoch),
+            key: &str,
+            call: &str,
+        ) -> DwkpMessage {
+            decode(&format!(
+                r#"{{"v":1,"id":"{id}","type":"request","schema":"direwolf.tool.invoke","schema_version":5,"ts":"2026-10-25T10:00:00.000Z","session_id":"{session}","run_id":"{run}","epoch":{epoch},"idempotency_key":"{key}","payload":{{"process_exec":{call}}}}}"#,
+                id = id("msg", 95_000 + next_message()),
+                session = session.as_str(),
+                run = run.as_str(),
+                epoch = epoch.get(),
+            ))
+        }
+
+        fn stale(body: &DwkpBody) -> bool {
+            matches!(body, DwkpBody::AuthorityRefused(r) if r.reason == RefusalReason::StaleEpoch)
+        }
+
+        #[test]
+        #[ignore = "needs a real OCI runtime: make sandbox-release-evidence"]
+        fn a_release_over_dwkp_destroys_its_environment_and_nothing_else() {
+            let mut lab = Lab::new("m5d6-release", WorkloadBudget::default());
+            let served = lab.serve();
+            let mut a = Peer::admit(served.path(), 1, &["process.exec:*"], binder(&served));
+            let mut b = Peer::admit(served.path(), 2, &["process.exec:*"], binder(&served));
+            let mut idle = Peer::admit(served.path(), 3, &["process.exec:*"], binder(&served));
+            let body = a.exec("a-1", &call(FIXTURE, &["workload-identity"]));
+            let mine = sandboxed(&body).environment_id.clone();
+            // What a run's release ends is a sandboxed launch as M5d.2 made
+            // it: decided by the authority, in its measured environment,
+            // the pinned image's pinned executable, as the environment's user.
+            let out = sandboxed(&body);
+            assert_eq!(
+                out.assurance,
+                dwk_proto::dwkp::sandboxops::ExecutionAssurance::ContainerIsolation
+            );
+            evidence(
+                "sandboxed-exec-in-a-measured-environment-never-the-host",
+                "CONTAINER_ISOLATION",
+                E2E,
+                "authority-route-no-fallback",
+            );
+            assert_eq!(
+                out.executable.image.as_str(),
+                var("DW_SANDBOX_WORKLOAD_IMAGE")
+            );
+            assert_eq!(out.executable.path.as_str(), FIXTURE);
+            assert_eq!(
+                out.executable.sha256.as_str(),
+                var("DW_SANDBOX_FIXTURE_SHA256")
+            );
+            evidence(
+                "sandboxed-exec-names-the-pinned-image-and-executable",
+                "image-and-sha256-pinned",
+                E2E,
+                "broker-digest-proof",
+            );
+            let text = String::from_utf8(out.stdout.content.to_bytes()).unwrap();
+            assert!(text.contains("uid=10001"), "{text}");
+            evidence(
+                "sandboxed-exec-runs-as-the-environment-user",
+                "uid-10001",
+                E2E,
+                "oci-environment-user",
+            );
+            let body = b.exec("b-1", &call(FIXTURE, &["workload-identity"]));
+            let theirs = sandboxed(&body).environment_id.clone();
+            let container = container_of(&lab, &mine);
+            let other = container_of(&lab, &theirs);
+            lab.reap_later(&container);
+            let decoys = Decoys::new(
+                &lab.runtime,
+                &[
+                    vec![],
+                    vec![
+                        ("io.direwolf.owner", "direwolf"),
+                        ("io.direwolf.store", "0badc0de"),
+                        ("io.direwolf.environment", mine.as_str()),
+                        ("io.direwolf.run", a.run.as_str()),
+                        ("io.direwolf.role", "environment"),
+                    ],
+                ],
+            );
+
+            // A fenced caller ends nothing: a stale epoch, and the run's
+            // session named from a connection that is not its lease's
+            // holder, are each refused before anything is looked at.
+            let later = Epoch::new(a.epoch.get() + 1).unwrap();
+            let refused = a
+                .client
+                .call(&release_run_msg(&a.session, &a.run, later))
+                .body;
+            assert!(stale(&refused), "{refused:?}");
+            evidence(
+                "release-stale-epoch-refused-nothing-destroyed",
+                "STALE_EPOCH",
+                E2E,
+                "authority-lease-fence",
+            );
+            let refused = idle
+                .client
+                .call(&release_run_msg(&a.session, &a.run, a.epoch))
+                .body;
+            assert!(stale(&refused), "{refused:?}");
+            evidence(
+                "release-other-holder-refused-nothing-destroyed",
+                "STALE_EPOCH",
+                E2E,
+                "authority-lease-fence",
+            );
+            // A run the caller does not hold, named under its own lease, is
+            // acknowledged, as such a release always is -- and ends nothing.
+            let acked = idle
+                .client
+                .call(&release_run_msg(&idle.session, &a.run, idle.epoch))
+                .body;
+            assert!(matches!(acked, DwkpBody::Ack(_)), "{acked:?}");
+            assert!(lab.runtime.exists(&container));
+            assert_eq!(run_state(&lab, &a.run), "ACTIVE");
+            assert_eq!(intents(&lab), 0);
+            evidence(
+                "release-of-a-run-not-held-destroys-nothing",
+                "ACK-container-kept",
+                E2E,
+                "authority-run-ownership",
+            );
+
+            // The holder's release: `Ack` -- and the environment is gone
+            // when it is answered, removed by its recorded identity.
+            let released = a
+                .client
+                .call(&release_run_msg(&a.session, &a.run, a.epoch))
+                .body;
+            assert!(matches!(released, DwkpBody::Ack(_)), "{released:?}");
+            assert!(
+                !lab.runtime.exists(&container),
+                "gone when the release is answered"
+            );
+            assert_eq!(ended(&lab, &mine), "DESTROYED:RELEASED");
+            assert_eq!(run_state(&lab, &a.run), "RELEASED");
+            evidence(
+                "release-over-dwkp-destroys-the-environment",
+                "container-removed",
+                E2E,
+                "authority-release-teardown",
+            );
+            let intent = audit_records(&lab.dir.state(), "environment.destroy_intent")
+                .into_iter()
+                .find(|r| {
+                    super::super::state_support::text(r, "environment_id") == Some(mine.as_str())
+                })
+                .expect("the destruction's intent was audited");
+            assert_eq!(
+                super::super::state_support::text(&intent, "reason"),
+                Some("RELEASED")
+            );
+            assert!(
+                audit_records(&lab.dir.state(), "environment.destroyed")
+                    .iter()
+                    .any(|r| super::super::state_support::text(r, "environment_id")
+                        == Some(mine.as_str()))
+            );
+            evidence(
+                "release-audited",
+                "destroy_intent-RELEASED-then-destroyed",
+                E2E,
+                "authority-audit",
+            );
+
+            // Nothing else: the other run's environment, an unlabelled
+            // container of the same image, another store's copy of the
+            // released environment's labels.
+            assert!(lab.runtime.exists(&other));
+            for decoy in &decoys.ids {
+                assert!(lab.runtime.exists(decoy), "{decoy} was removed");
+            }
+            evidence(
+                "release-spares-another-runs-environment",
+                "container-kept",
+                E2E,
+                "authority-run-association",
+            );
+            evidence(
+                "release-spares-foreign-containers",
+                "unlabelled-and-another-stores-kept",
+                E2E,
+                "broker-exact-labels",
+            );
+            let body = b.exec("b-2", &call(FIXTURE, &["workload-identity"]));
+            assert_eq!(sandboxed(&body).environment_id, theirs);
+            assert_eq!(
+                sandboxed(&body).residue,
+                dwk_proto::dwkp::sandboxops::ResidueVerdict::Pass
+            );
+            evidence(
+                "release-other-run-still-runs",
+                "residue-pass",
+                E2E,
+                "authority-run-association",
+            );
+
+            // A repeat: `Ack`, nothing more.
+            let before = intents(&lab);
+            let again = a
+                .client
+                .call(&release_run_msg(&a.session, &a.run, a.epoch))
+                .body;
+            assert!(matches!(again, DwkpBody::Ack(_)), "{again:?}");
+            assert_eq!(intents(&lab), before);
+            assert!(lab.runtime.exists(&other));
+            evidence(
+                "release-repeated-over-dwkp-no-second-effect",
+                "ACK-nothing-destroyed",
+                E2E,
+                "authority-release-idempotent",
+            );
+            // The released run regains nothing: its launch is refused, and
+            // no environment is prepared for it.
+            let environments = rows(&lab, "SELECT count(*) FROM environment");
+            let body = a.exec("a-2", &call(FIXTURE, &["workload-identity"]));
+            assert_eq!(refusal(&body), "UNKNOWN_RUN");
+            assert_eq!(rows(&lab, "SELECT count(*) FROM environment"), environments);
+            evidence(
+                "released-run-launch-refused-over-dwkp",
+                "UNKNOWN_RUN",
+                E2E,
+                "authority-run-held-check",
+            );
+            // A run that never had an environment: released, nothing more.
+            let before = intents(&lab);
+            let acked = idle
+                .client
+                .call(&release_run_msg(&idle.session, &idle.run, idle.epoch))
+                .body;
+            assert!(matches!(acked, DwkpBody::Ack(_)), "{acked:?}");
+            assert_eq!(intents(&lab), before);
+            assert_eq!(run_state(&lab, &idle.run), "RELEASED");
+            evidence(
+                "release-without-an-environment-over-dwkp",
+                "ACK-nothing-destroyed",
+                E2E,
+                "authority-release-teardown",
+            );
+            lab.reap_later(&other);
+            drop(decoys);
+            served.stop();
+        }
+
+        #[test]
+        #[ignore = "needs a real OCI runtime: make sandbox-release-evidence"]
+        fn a_release_ends_an_in_flight_workload_and_every_process_it_left() {
+            let mut lab = Lab::new("m5d6-inflight", WorkloadBudget::default());
+            let (caller, session, epoch, run) = admitted(&mut lab);
+            let message = exec_message(
+                (&session, &run, epoch),
+                "inflight-1",
+                &call(FIXTURE, &["workload-agent", "300"]),
+            );
+            let Dispatched::Parked(mut parked) = lab
+                .authority()
+                .dispatch_parkable(&caller, &message)
+                .unwrap()
+            else {
+                panic!("a running launch is parked")
+            };
+            let environment = EnvironmentId::parse(&one(
+                &lab,
+                "SELECT environment_id FROM environment WHERE run_id = ?1",
+                run.as_str(),
+            ))
+            .unwrap();
+            let container = container_of(&lab, &environment);
+            lab.reap_later(&container);
+            for line in AGENT {
+                let procs = lab.runtime.awaited(&container, line);
+                assert!(
+                    procs.iter().all(|p| p.starts_with("uid=10001 ")),
+                    "{procs:?}"
+                );
+            }
+            evidence(
+                "release-in-flight-agent-and-descendants-running",
+                "plan-workers-and-daemon-as-10001",
+                REAL,
+                "runtime-census",
+            );
+
+            let since = Instant::now();
+            let released = lab
+                .authority()
+                .release_run(&caller, &session, &run, epoch)
+                .unwrap();
+            assert!(matches!(released, Reply::Done(())), "{released:?}");
+            assert!(
+                !lab.runtime.exists(&container),
+                "the release removed the environment the workload ran in"
+            );
+            assert_eq!(ended(&lab, &environment), "DESTROYED:RELEASED");
+            evidence(
+                "release-ends-in-flight-workload-and-descendants",
+                "container-removed-with-every-process",
+                REAL,
+                "authority-release-teardown",
+            );
+            let deadline = Instant::now() + Duration::from_secs(120);
+            let body = loop {
+                if let Some(body) = lab.authority().resume(&mut parked).unwrap() {
+                    break body;
+                }
+                assert!(Instant::now() < deadline, "the launch was never answered");
+                std::thread::sleep(Duration::from_millis(250));
+            };
+            let DwkpBody::ToolFailedV5(failure) = &body else {
+                panic!("not failed: {body:?}")
+            };
+            assert_eq!(failure.reason.as_str(), "OUTCOME_UNKNOWN");
+            assert!(
+                since.elapsed() < Duration::from_secs(120),
+                "ended by the release, not by its wall clock: {:?}",
+                since.elapsed()
+            );
+            assert_eq!(
+                one(
+                    &lab,
+                    "SELECT state FROM workload WHERE idempotency_key = ?1",
+                    "inflight-1"
+                ),
+                "UNKNOWN"
+            );
+            evidence(
+                "release-in-flight-workload-settled-unknown",
+                "OUTCOME_UNKNOWN",
+                REAL,
+                "authority-ledger",
+            );
+            // Never again: the key, in another run of the session.
+            let next = again(&mut lab, &caller, &session, epoch);
+            let workloads = workload_rows(&lab);
+            let environments = rows(&lab, "SELECT count(*) FROM environment");
+            let message = exec_message(
+                (&session, &next, epoch),
+                "inflight-1",
+                &call(FIXTURE, &["workload-agent", "300"]),
+            );
+            let Dispatched::Answer(body) = lab
+                .authority()
+                .dispatch_parkable(&caller, &message)
+                .unwrap()
+            else {
+                panic!("a replayed key was parked")
+            };
+            assert_eq!(refusal(&body), "IDEMPOTENCY_KEY_REUSED");
+            assert_eq!(workload_rows(&lab), workloads);
+            assert_eq!(rows(&lab, "SELECT count(*) FROM environment"), environments);
+            evidence(
+                "release-in-flight-workload-never-rerun",
+                "IDEMPOTENCY_KEY_REUSED",
+                REAL,
+                "authority-shared-idempotency-namespace",
+            );
+        }
+
+        #[test]
+        #[ignore = "needs a real OCI runtime: make sandbox-release-evidence"]
+        fn a_release_a_crash_or_a_lost_broker_interrupts_is_completed_at_the_next_start() {
+            // W12, W6 and W7 through a release: the authority stopped where a
+            // crash would, then a new incarnation on the same files.
+            for point in [
+                CrashPoint::ReleaseAfterIntent,
+                CrashPoint::EnvironmentDestroyAfterIntent,
+                CrashPoint::EnvironmentDestroyAfterBroker,
+            ] {
+                let mut lab = Lab::new(
+                    &format!("m5d6-crash-{}", point.letter()),
+                    WorkloadBudget::default(),
+                );
+                lab.start(Some(stop_at(point)));
+                let (caller, session, epoch, run) = admitted(&mut lab);
+                let (environment, container) = lab.ready(&run);
+                let reply = lab
+                    .authority()
+                    .workload_run(&run, &fixture(&["workload-identity"], "c-1"))
+                    .unwrap();
+                assert!(matches!(reply, WorkloadReply::Completed(_)), "{reply:?}");
+                poisoned(lab.authority().release_run(&caller, &session, &run, epoch));
+                assert_eq!(run_state(&lab, &run), "RELEASED", "{point}");
+                assert_eq!(ended(&lab, &environment), "DESTROYING:RELEASED", "{point}");
+                assert_eq!(
+                    lab.runtime.exists(&container),
+                    point != CrashPoint::EnvironmentDestroyAfterBroker,
+                    "{point}"
+                );
+                let workloads = workload_rows(&lab);
+                lab.start(None);
+                assert!(!lab.runtime.exists(&container), "{point}");
+                assert_eq!(ended(&lab, &environment), "DESTROYED:RELEASED", "{point}");
+                assert_eq!(run_state(&lab, &run), "RELEASED", "{point}");
+                evidence(
+                    &format!("release-crash-{}-completed-at-restart", point.letter()),
+                    "container-removed",
+                    REAL,
+                    "authority-reconciliation",
+                );
+                // The released run regains nothing: nothing it ran runs
+                // again, and nothing new runs for it.
+                let reply = lab
+                    .authority()
+                    .workload_run(&run, &fixture(&["workload-identity"], "c-1"))
+                    .unwrap();
+                assert!(
+                    !matches!(reply, WorkloadReply::Completed(_)),
+                    "{point}: {reply:?}"
+                );
+                assert_eq!(workload_rows(&lab), workloads, "{point}");
+                evidence(
+                    &format!("release-crash-{}-never-rerun", point.letter()),
+                    "nothing-recorded-or-run",
+                    REAL,
+                    "authority-run-ended",
+                );
+            }
+
+            // The broker lost: the release is answered, its destruction stays
+            // pending -- never a false success -- and the next start, a broker
+            // answering again, completes it.
+            let mut lab = Lab::new("m5d6-broker-lost", WorkloadBudget::default());
+            let (caller, session, epoch, run) = admitted(&mut lab);
+            let (environment, container) = lab.ready(&run);
+            lab.broker.kill();
+            let released = lab
+                .authority()
+                .release_run(&caller, &session, &run, epoch)
+                .unwrap();
+            assert!(matches!(released, Reply::Done(())), "{released:?}");
+            assert!(lab.runtime.exists(&container), "nothing could remove it");
+            assert_eq!(lab.state_of(&environment), EnvironmentState::Destroying);
+            assert!(
+                audit_records(&lab.dir.state(), "environment.destroy_failed")
+                    .iter()
+                    .any(|r| super::super::state_support::text(r, "environment_id")
+                        == Some(environment.as_str()))
+            );
+            evidence(
+                "release-broker-lost-destruction-pending",
+                "DESTROYING-container-kept",
+                REAL,
+                "authority-unconfirmed-is-pending",
+            );
+            lab.broker = Broker::start(&lab.broker_socket, own_uid(), &lab.broker_flags);
+            lab.start(None);
+            assert!(!lab.runtime.exists(&container));
+            assert_eq!(lab.state_of(&environment), EnvironmentState::Destroyed);
+            evidence(
+                "release-broker-lost-completed-at-restart",
+                "container-removed",
+                REAL,
+                "authority-reconciliation",
+            );
         }
     }
 }

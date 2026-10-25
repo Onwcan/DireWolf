@@ -228,9 +228,56 @@ struct Fake {
     writes: Mutex<VecDeque<Answer>>,
     /// How the next reclamations end (M5d.4); then each finds nothing.
     reclaims: Mutex<VecDeque<Answer>>,
+    /// How the next destructions end (M5d.6), and whether the fake removed
+    /// the environment before that answer; then each removes it, answered.
+    destroys: Mutex<VecDeque<(bool, Answer)>>,
+    /// Every destruction ordered: the environment, its run, the container it
+    /// named, and the environment's and the run's recorded states when the
+    /// order arrived (M5d.6).
+    destroyed: Mutex<Vec<Destroyed>>,
+    /// Done once while the next preparation is in the broker's hands (M5d.6):
+    /// what another handle onto the store does meanwhile.
+    during_prepare: Mutex<Option<Meanwhile>>,
+}
+
+/// One destruction the fake was ordered to perform (M5d.6).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Destroyed {
+    environment: EnvironmentId,
+    run: RunId,
+    container: Option<ContainerRef>,
+    /// `environment.state` and `run.state` when the order arrived.
+    states: (String, String),
+}
+
+/// What another handle does while a preparation is in the broker's hands.
+struct Meanwhile(Box<dyn FnOnce() + Send>);
+
+impl std::fmt::Debug for Meanwhile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Meanwhile")
+    }
 }
 
 impl Fake {
+    /// An environment's and its run's recorded states, as the store says now.
+    fn states_of(&self, environment: &EnvironmentId) -> (String, String) {
+        self.store.lock().unwrap().as_ref().map_or_else(
+            || (String::new(), String::new()),
+            |db| {
+                rusqlite::Connection::open(db)
+                    .unwrap()
+                    .query_row(
+                        "SELECT e.state, r.state FROM environment e JOIN run r \
+                         ON r.run_id = e.run_id WHERE e.environment_id = ?1",
+                        [environment.as_str()],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .unwrap()
+            },
+        )
+    }
+
     fn launching(&self) -> i64 {
         self.store.lock().unwrap().as_ref().map_or(0, |db| {
             rusqlite::Connection::open(db)
@@ -347,6 +394,10 @@ impl EffectBroker for Fake {
                 if let Some(error) = self.prepare_errors.lock().unwrap().pop_front() {
                     return Err(error);
                 }
+                let meanwhile = self.during_prepare.lock().unwrap().take();
+                if let Some(Meanwhile(act)) = meanwhile {
+                    act();
+                }
                 let n = self.containers.fetch_add(1, Ordering::SeqCst);
                 let container = ContainerRef::new(format!("{n:064x}")).unwrap();
                 if !self.prepares.lock().unwrap().pop_front().unwrap_or(true) {
@@ -391,6 +442,22 @@ impl EffectBroker for Fake {
                 ..
             } => {
                 self.record("environment.destroy", invocation, (None, None));
+                let states = self.states_of(&environment.0);
+                self.destroyed.lock().unwrap().push(Destroyed {
+                    environment: environment.0.clone(),
+                    run: environment.1.clone(),
+                    container: container.clone(),
+                    states,
+                });
+                if let Some((removed, answer)) = self.destroys.lock().unwrap().pop_front() {
+                    if removed {
+                        self.live
+                            .lock()
+                            .unwrap()
+                            .retain(|(id, ..)| *id != environment.0);
+                    }
+                    return answer;
+                }
                 self.live
                     .lock()
                     .unwrap()
@@ -1111,21 +1178,32 @@ fn an_ended_runs_environment_is_reclaimed_and_live_environments_are_bounded() {
     let (_, out) = result(&body);
     let ended = out.environment_id.clone();
     let (caller, session, epoch) = (fx.caller.unwrap(), fx.session.clone(), fx.epoch);
+    // Since M5d.6 a run's release destroys its environment at once; a run a
+    // lease's end reaps does not, and its environment idles until the next
+    // preparation ends it.
     assert!(matches!(
         fx.authority()
-            .release_run(&caller, &session, &first, epoch)
+            .release_lease(&caller, &session, epoch)
             .unwrap(),
         Reply::Done(())
     ));
-    // Released, its environment idles until the next preparation ends it.
+    assert_eq!(
+        fx.one(&format!(
+            "SELECT state FROM run WHERE run_id = '{}'",
+            first.as_str()
+        )),
+        "REAPED"
+    );
+    assert!(fx.fake.asked_for("environment.destroy").is_empty());
+    fx.lease();
     let second = fx.run("r2", &[GRANT]);
     let _ = fx.ran(&second, "b1", &call(FIXTURE, &[]));
     assert_eq!(
         fx.one(&format!(
-            "SELECT state FROM environment WHERE environment_id = '{}'",
+            "SELECT state || ':' || failure FROM environment WHERE environment_id = '{}'",
             ended.as_str()
         )),
-        "DESTROYED"
+        "DESTROYED:RECLAIMED"
     );
     assert_eq!(fx.fake.asked_for("environment.destroy").len(), 1);
     evidence("ended-runs-environment-reclaimed", "destroyed");
@@ -1764,3 +1842,7 @@ mod secret;
 /// M5d.4: the workspace contract on the authority's side.
 #[path = "workspace_route_tests.rs"]
 mod workspace;
+
+/// M5d.6: a run's release ends its environment.
+#[path = "release_route_tests.rs"]
+mod release;

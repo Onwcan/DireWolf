@@ -5,6 +5,7 @@
 **Verified hosted CI:** [run 39854518873](https://github.com/Onwcan/DireWolf/actions/runs/39854518873), **25/25 jobs successful**  
 **Status (as written):** Planning handoff only. M5d.5 NOT IMPLEMENTED. No M5d.5 evidence executed.  
 **Status (2026-10-23):** **Implemented on `0cc1fcc`; one-identity evidence passing locally; awaiting the owner's commit and hosted CI** -- see §11. The plan below is kept as it was written.  
+**Status (2026-10-25):** **Hosted CI green on `49bb8f8`** ([run 40134163102](https://github.com/Onwcan/DireWolf/actions/runs/40134163102), 26 of 26 jobs): the evidence is verified, the three-identity half included -- see §12. OD-5 is still the owner's; ADR-0052 stays **Proposed**.\
 **Authority of this document:** Technical plan, not an Accepted ADR; it does not approve any open owner decision.
 
 ## 1. Milestone boundary and source of truth
@@ -187,3 +188,9 @@ Do not use a `feat(m5d.5)` commit or mark the milestone complete solely because 
 | C04 | the task: no evidence container, workspace mount or broker socket directory remains, every pre-existing container kept; the job removes the users it created | PASS locally (4 pre-existing containers kept); the users' removal hosted only |
 
 **What hosted CI must show before M5d.5 is complete:** the `sandbox-agent` job green on the owner's committed SHA with all 25 three-identity cases exercised, every earlier job still green, and the aggregate `ci` reporting every required job (26 with this one).
+
+## 12. Hosted verification (2026-10-25)
+
+[Run 40134163102](https://github.com/Onwcan/DireWolf/actions/runs/40134163102) on `49bb8f8` (`main`) finished with every one of its 26 jobs successful, the aggregate `ci` among them. Its `sandbox-agent` job ran the three one-identity tests (50 cases) and the two three-identity tests (25 cases) with `DW_AGENT_PRIVILEGED=1`, so the rows §11 marked "hosted only" and "NOT EXERCISED until hosted" -- I01-I08, A09, the hosted A03 and C02's job -- were exercised there, and C04's identities were removed by the job. That verifies the evidence; it approves no owner decision: OD-5 (no persistent workload handle) is still the owner's, and ADR-0052 stays **Proposed**. After this checkpoint's commit (`5e66eda`), `35f68f1` renewed the evidence's leases by heartbeat and kept cleanup failures beside the suite's, and `49bb8f8` repaired CI's ADR-history step and a vulnerable `filelock`; neither changed product code.
+
+M5d.6 (ADR-0052 §8) makes a run's release destroy its environment. The agent evidence's `reclaim` helper -- release a run, launch another, find the first environment gone -- holds unchanged under it; only its comment, which said the release left the environment to the next preparation, was corrected.

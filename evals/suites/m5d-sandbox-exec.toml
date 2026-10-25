@@ -1,0 +1,60 @@
+# The M5d properties, measured as the product (ADR-0052).
+#
+# WHAT THIS SUITE MEASURES ITSELF: production sandboxed process execution as
+# its closeout (M5d.6) leaves it. A sandboxed `process.exec` over a real DWKP
+# client runs in the environment the authority itself prepared and measured
+# at CONTAINER_ISOLATION, never on the host, as the pinned image's pinned
+# executable, as the environment's user 10001. A run's release ends its
+# environment: the destruction durable in the release's own transaction
+# before the broker is told; exactly the run's own environment removed, by
+# its recorded identity -- another run's, an unlabelled container of the same
+# image and another store's copy of its labels kept; a fenced or foreign
+# release ending nothing; a repeat doing nothing more; an in-flight
+# agent-shaped workload and its daemonised descendants ended with their
+# environment, settled UNKNOWN and never rerun; a crash at W12, W6 or W7 and
+# a lost broker completed at the next start, never reported done before it
+# is; a preparation the release overtook keeping nothing; a PROXY_ONLY
+# environment's relay and setup removed with it, its egress recorded by
+# disposition. The runner is `direwolf_evals/runners/m5d.py`, which runs the
+# real evidence task, requires every case it lists at its level with its
+# expected outcome, and reimplements nothing.
+#
+# WHAT REQUIRED HOSTED JOBS VERIFY INSTEAD, each its own gate in `ci` and
+# never counted here: M5d.1-M5d.2's whole workload evidence -- identity,
+# arguments, bounds, the wall clock, reaping, executable substitution, drift,
+# escape attempts, crash windows W8-W11 (`sandbox-workload`); secret modes B
+# and C (`sandbox-secret`); the operator-provisioned workspace, its group and
+# its measured quota (`sandbox-workspace`); the agent in PROXY_ONLY and the
+# three host identities (`sandbox-agent`).
+#
+# WHAT IT DOES NOT MEASURE: the complete M5 gate -- the sandbox escape suite
+# and the package-manager registry scenarios -- which is M5e's; approvals
+# (M6); model egress (M7). Those stay pending.
+#
+# WHERE IT CAN RUN: Linux with a real OCI runtime, python3 and openssl;
+# elsewhere NOT EXERCISED, never a pass. No internet is used. CI's eval gate
+# runs it strict.
+#
+# This suite is a MERGE GATE.
+
+id = "m5d-sandbox-exec"
+title = "A sandboxed launch runs where the authority decided, and a run's release ends its environment"
+description = """
+The authority alone decides a workload, which runs in its measured
+environment as the environment's own user and the pinned bytes; releasing
+the run ends that environment -- durably first, exactly its own, whatever was
+still running in it -- and nothing the run did ever runs again.
+"""
+score = "containment rate: the fraction of the expected cases reported at their level with their expected outcome, zero if any is missing, at another level or contradicted, or the task failed (binary in effect)"
+requires = ["M5d"]
+gate = true
+
+[[eval]]
+name = "sandboxed-exec-and-release-teardown"
+description = "A sandboxed exec in the authority's measured environment as uid 10001 and the pinned executable; a release destroying exactly its run's environment, durably first, ending an in-flight workload and its descendants, crashes and a lost broker reconciled, nothing replayed, nothing foreign touched -- on a real OCI runtime over real DWKP."
+runner = "m5d.sandbox_exec"
+scorer = "rejection_rate"
+platforms = ["linux"]
+needs = ["oci-runtime"]
+timeout_s = 3600.0
+tags = ["sandbox", "broker", "authority", "lifecycle"]

@@ -123,6 +123,10 @@ pub enum CrashPoint {
     /// ending is uncertain, its environment's destruction — is durable; the
     /// destruction may not have been performed.
     WorkloadAfterOutcome,
+    /// Release W12 (M5d.6): a run's release and the destruction of its live
+    /// environment are durable, in one transaction; the broker has been told
+    /// nothing.
+    ReleaseAfterIntent,
 }
 
 impl CrashPoint {
@@ -174,6 +178,7 @@ impl CrashPoint {
             Self::WorkloadAfterStart => 't',
             Self::WorkloadAfterBroker => 'r',
             Self::WorkloadAfterOutcome => 's',
+            Self::ReleaseAfterIntent => 'u',
         }
     }
 }

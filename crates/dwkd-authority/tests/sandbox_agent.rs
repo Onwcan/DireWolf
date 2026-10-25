@@ -1240,9 +1240,10 @@ reason = "NO_MATCHING_RULE"
             ]
         }
 
-        /// End the run and have its environment destroyed the way an ended
-        /// run's is before M5d.6: by the authority reclaiming it before its
-        /// next preparation (ADR-0052 §2a). The destruction's audit record.
+        /// End the run and see its environment destroyed -- since M5d.6 by
+        /// its release itself; before, by the authority reclaiming it before
+        /// its next preparation (ADR-0052 §2a) -- gone once another run has
+        /// launched. The destruction's audit record.
         fn reclaim(&self, peer: &mut Peer, container: &str, next_session: u64) -> json::Object {
             let environment = self.environment_of(container);
             peer.release();
@@ -2331,6 +2332,112 @@ reason = "NO_MATCHING_RULE"
             E2E,
             "authority-shared-idempotency-namespace",
         );
+    }
+
+    // ---- M5d.6: a run's release ends its PROXY_ONLY environment ----------
+    //
+    // Not one of the agent evidence's own tests: `make sandbox-release-evidence`
+    // selects it by name, with this harness's PROXY_ONLY topology, relay and
+    // origins. Its lines are the release suite's.
+
+    const RELEASE_SUITE: &str = "sandbox-release";
+
+    #[test]
+    #[ignore = "needs a real OCI runtime: make sandbox-release-evidence"]
+    fn a_released_run_takes_its_proxy_only_environment_and_relay_down() {
+        let lab = Lab::new("m5d6r", None, &Workspace::Waiver);
+        let mut a = lab.peer(1);
+        let mut b = lab.peer(2);
+        let sink = lab.sink.port.to_string();
+        // Each run's environment, its proxy having counted traffic: a granted
+        // tunnel carried, and one to a name the run was not granted refused.
+        let granted = lab.fixture(&mut a, &["egress-connect", SINK, &sink, SINK, "10"]);
+        assert!(granted.contains("HTTP/1.1 200"), "{granted}");
+        let port = lab.good.port.to_string();
+        let denied = lab.fixture(&mut a, &["egress-connect", SECOND, &port, SECOND, "10"]);
+        assert!(!denied.contains("HTTP/1.1 200"), "{denied}");
+        let line = lab.fixture(&mut b, &["egress-connect", SINK, &sink, SINK, "10"]);
+        assert!(line.contains("HTTP/1.1 200"), "{line}");
+        let container = lab.container(&a.run);
+        let theirs = lab.container(&b.run);
+        let environment = lab.environment_of(&container);
+        let other = lab.environment_of(&theirs);
+        let relays = lab.runtime.role(&environment, "relay");
+        assert!(!relays.is_empty(), "a PROXY_ONLY environment has its relay");
+        let their_relays = lab.runtime.role(&other, "relay");
+        assert!(!their_relays.is_empty());
+
+        a.release();
+        assert!(
+            !lab.runtime.exists(&container),
+            "gone when the release is answered"
+        );
+        for role in ["environment", "relay", "setup"] {
+            assert!(
+                lab.runtime.role(&environment, role).is_empty(),
+                "a {role} container of the released environment remains"
+            );
+        }
+        for relay in &relays {
+            assert!(!lab.runtime.exists(relay), "{relay}");
+        }
+        evidence(
+            RELEASE_SUITE,
+            "release-removes-the-proxy-only-environment-relay-and-setup",
+            "every-role-removed",
+            E2E,
+            "authority-release-teardown",
+        );
+        let intent = audit_records(&lab.dir.state(), "environment.destroy_intent")
+            .into_iter()
+            .find(|r| super::state_support::text(r, "environment_id") == Some(environment.as_str()))
+            .expect("the destruction's intent was audited");
+        assert_eq!(
+            super::state_support::text(&intent, "reason"),
+            Some("RELEASED")
+        );
+        let destroyed = audit_records(&lab.dir.state(), "environment.destroyed")
+            .into_iter()
+            .find(|r| super::state_support::text(r, "environment_id") == Some(environment.as_str()))
+            .expect("the destruction was audited");
+        let dispositions = texts(&destroyed, "egress_dispositions");
+        let counted = |disposition: &str| {
+            dispositions
+                .iter()
+                .find_map(|d| d.strip_prefix(&format!("{disposition}=")))
+                .map_or(0, |n| n.parse::<u64>().unwrap())
+        };
+        // The refused tunnel, and the carried one -- closed by either side,
+        // or by the destruction itself.
+        assert!(counted("TARGET_NOT_GRANTED") >= 1, "{dispositions:?}");
+        assert!(
+            counted("CLOSED") + counted("ENVIRONMENT_CLOSED") >= 1,
+            "{dispositions:?}"
+        );
+        evidence(
+            RELEASE_SUITE,
+            "release-destruction-records-the-egress-by-disposition",
+            &dispositions.join(","),
+            E2E,
+            "authority-audit-at-destruction",
+        );
+
+        // The other run's environment and relay are its own, and it still
+        // reaches its origin.
+        assert!(lab.runtime.exists(&theirs));
+        for relay in &their_relays {
+            assert!(lab.runtime.exists(relay), "{relay}");
+        }
+        let line = lab.fixture(&mut b, &["egress-connect", SINK, &sink, SINK, "10"]);
+        assert!(line.contains("HTTP/1.1 200"), "{line}");
+        evidence(
+            RELEASE_SUITE,
+            "release-spares-another-runs-proxy-only-environment",
+            "relay-kept-and-reaching-its-origin",
+            E2E,
+            "authority-run-association",
+        );
+        lab.reaper.note(&theirs);
     }
 
     // ---- three identities --------------------------------------------------

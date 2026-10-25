@@ -1005,11 +1005,27 @@ impl Authority {
         ))
     }
 
-    /// `ReleaseRun`.
+    /// `ReleaseRun`. A release that ends an active run ends its execution
+    /// environment with it (M5d.6, ADR-0052 §8): in the transaction that
+    /// records the run `RELEASED`, its live environment -- at most one, by
+    /// the schema -- is recorded `DESTROYING`; then the broker removes exactly
+    /// the container recorded for it, by its labels, as every destruction
+    /// (ADR-0047 §12). A workload still running in it ends with it, and is
+    /// settled `UNKNOWN` or as collected, never run again.
+    ///
+    /// The answer is the release's, unchanged: `Ack` says the run's authority
+    /// is surrendered and its environment's destruction durable -- not that
+    /// the broker confirmed the removal. One it could not confirm stays
+    /// `DESTROYING`, is audited so, and is completed by the next destruction
+    /// or reclamation, or at the next start. A release acknowledged without
+    /// effect -- a repeat, a run already ended or someone else's -- destroys
+    /// nothing, and a fenced caller's is refused before anything is looked at.
     ///
     /// # Errors
     ///
-    /// [`AuthorityError`] when the authority cannot answer.
+    /// [`AuthorityError`] when the authority cannot answer. A crash hook at
+    /// [`CrashPoint::ReleaseAfterIntent`] or a destruction's points poisons
+    /// the store, as a crash would.
     pub fn release_run(
         &mut self,
         caller: &CallerContext,
@@ -1017,7 +1033,30 @@ impl Authority {
         run: &RunId,
         epoch: Epoch,
     ) -> Result<Reply<()>, AuthorityError> {
-        self.transact(|work| admission::release(work, caller, session, run, epoch))
+        let (reply, teardown) = self.transact(|work| {
+            let released = admission::release(work, caller, session, run, epoch)?;
+            // Only the request that released the run ends its environment.
+            let teardown = match released {
+                Reply::Done(true) => environment::begin_release(work, run)?,
+                Reply::Done(false) | Reply::Refused(_) => Vec::new(),
+            };
+            let reply = match released {
+                Reply::Done(_) => Reply::Done(()),
+                Reply::Refused(reason) => Reply::Refused(reason),
+            };
+            Ok((reply, teardown))
+        })?;
+        if !teardown.is_empty() {
+            self.shared.crash(CrashPoint::ReleaseAfterIntent)?;
+        }
+        for begun in teardown {
+            // A preparation in flight is left to its outcome, which finds
+            // the run ended (`environment::end_with_its_run`).
+            if let environment::DestroyBegun::Pending { record, invocation } = begun {
+                self.perform_destroy(record, invocation)?;
+            }
+        }
+        Ok(reply)
     }
 
     /// `QueryAuthority`.

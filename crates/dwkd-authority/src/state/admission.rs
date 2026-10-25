@@ -1345,13 +1345,17 @@ pub(super) fn load(work: &Work<'_>, run: &str) -> Result<Admission, AuthorityErr
 /// reaped, unknown, someone else's — is acknowledged without effect. Release
 /// only ever removes authority, and a trigger guarantees a released run is
 /// never active again.
+///
+/// `Done(true)` when this request released the run, `Done(false)` when it was
+/// acknowledged without effect: only the first ends what the run had
+/// (M5d.6, its environment), and only in the transaction that released it.
 pub(super) fn release(
     work: &mut Work<'_>,
     caller: &CallerContext,
     session: &SessionId,
     run: &RunId,
     epoch: Epoch,
-) -> Result<Reply<()>, AuthorityError> {
+) -> Result<Reply<bool>, AuthorityError> {
     if !lease::fence(work, caller, session, epoch)? {
         work.audit(
             AuditEvent::RunReleaseRefused,
@@ -1388,7 +1392,7 @@ pub(super) fn release(
                 .text("run_id", run.as_str()),
         )?;
     }
-    Ok(Reply::Done(()))
+    Ok(Reply::Done(changed == 1))
 }
 
 pub(super) const fn taint_rank(taint: TaintLevel) -> i64 {

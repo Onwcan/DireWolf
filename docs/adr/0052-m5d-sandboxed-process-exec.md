@@ -1,6 +1,6 @@
 # ADR-0052: M5d — production sandboxed `process.exec`: the authority decides a workload, the broker runs exactly that plan in a measured `oci-strict` environment, as the environment's own identity, and nothing of it outlives its invocation
 
-**Status:** Proposed (M5d.1, M5d.2 and M5d.3 built; M5d.2's refinements §§2a and 5a — OD-10 and OD-11 — approved by the owner on 2026-10-19 with conditions, §19; M5d.4 built, its hosted CI green at `1c8ccbe` (run 39854518873), OD-3, OD-6 and OD-12 — the `DIRECT` launch through the trusted launcher — still awaiting the owner's review, §§5a, 6, 10, 19; M5d.5 built, its one-identity evidence passing locally and its three-identity evidence hosted-only, awaiting the owner's commit and hosted CI, OD-5 for the owner, §§17, 19; this ADR's acceptance remains M5d.6's) · **Date:** 2026-10-13 · **Revised:** 2026-10-23 · **Would amend (on acceptance):** [ADR-0018](0018-authority-broker-split.md) (the broker runs workloads, never as its own uid), [ADR-0039](0039-durable-authority-state.md) (schema version 9: the workload ledger, §4), [ADR-0043](0043-m4b-private-broker-channel-and-brokered-fs-read.md) (private protocol version 8, §3), [ADR-0045](0045-m4d-process-execution-broker.md) (a process can run in an environment; the host floor is unchanged), [ADR-0047](0047-m5a-oci-execution-environment-and-measured-assurance.md) (the probe becomes the environment's init: it reaps orphans and, asked, ends every other process; `run_probe` gains a sibling, `run_workload`), [ADR-0050](0050-m5c-kernel-performed-net-http-ssrf-redirects-and-credential-egress.md) (§21's ptrace-posture prerequisite becomes a check the broker makes at start) · **Refines:** [ADR-0008](0008-sandbox-default.md) and [ADR-0024](0024-sandbox-network-topology.md) (as realised by [ADR-0048](0048-m5b-proxy-only-topology-and-connect-proxy.md)), [ADR-0046](0046-m4e-secret-handles-backends-injection-and-redaction.md) §13 (modes B/C reach a sandboxed target, M5d.3), [ADR-0051](0051-external-agent-interoperability.md) (Proposed; its M5d prerequisites), [SANDBOX.md](../SANDBOX.md) §§1–4, [POLICY.md](../POLICY.md) (`when.environment = "sandbox"`)
+**Status:** Proposed (M5d.1, M5d.2 and M5d.3 built; M5d.2's refinements §§2a and 5a — OD-10 and OD-11 — approved by the owner on 2026-10-19 with conditions, §19; M5d.4 built, its hosted CI green at `1c8ccbe` (run 39854518873), OD-3, OD-6 and OD-12 — the `DIRECT` launch through the trusted launcher — still awaiting the owner's review, §§5a, 6, 10, 19; M5d.5 built, its hosted CI green at `49bb8f8` (run 40134163102, the three-identity evidence included), OD-5 still for the owner, §§17, 19; M5d.6 built — a run's release destroys its environment (§8) and the gated eval `m5d-sandbox-exec` runs — its local gates passing, awaiting the owner's commit and hosted CI, §§8, 9, 17; this ADR's acceptance waits for that hosted run and the owner's decisions, §19) · **Date:** 2026-10-13 · **Revised:** 2026-10-25 · **Would amend (on acceptance):** [ADR-0018](0018-authority-broker-split.md) (the broker runs workloads, never as its own uid), [ADR-0039](0039-durable-authority-state.md) (schema version 9: the workload ledger, §4), [ADR-0043](0043-m4b-private-broker-channel-and-brokered-fs-read.md) (private protocol version 8, §3), [ADR-0045](0045-m4d-process-execution-broker.md) (a process can run in an environment; the host floor is unchanged), [ADR-0047](0047-m5a-oci-execution-environment-and-measured-assurance.md) (the probe becomes the environment's init: it reaps orphans and, asked, ends every other process; `run_probe` gains a sibling, `run_workload`), [ADR-0050](0050-m5c-kernel-performed-net-http-ssrf-redirects-and-credential-egress.md) (§21's ptrace-posture prerequisite becomes a check the broker makes at start) · **Refines:** [ADR-0008](0008-sandbox-default.md) and [ADR-0024](0024-sandbox-network-topology.md) (as realised by [ADR-0048](0048-m5b-proxy-only-topology-and-connect-proxy.md)), [ADR-0046](0046-m4e-secret-handles-backends-injection-and-redaction.md) §13 (modes B/C reach a sandboxed target, M5d.3), [ADR-0051](0051-external-agent-interoperability.md) (Proposed; its M5d prerequisites), [SANDBOX.md](../SANDBOX.md) §§1–4, [POLICY.md](../POLICY.md) (`when.environment = "sandbox"`)
 
 > **A workload runs only where the authority decided it may, as the
 > environment's own user, and is gone when its invocation is.** The authority
@@ -224,7 +224,11 @@ used unchanged, and no new way to reach them is public.
   at once across every run (as many as the broker supervises), a launch that
   would need another being refused `BUDGET_EXHAUSTED` before anything is
   prepared (`ended-runs-environment-reclaimed`, `live-environments-bounded`,
-  unit; `public-exec-ended-runs-environment-reclaimed`, real).
+  unit; `public-exec-ended-runs-environment-reclaimed`, real). **Since
+  M5d.6** a run's release destroys its environment itself (§8), so what this
+  reclaims is a run a lease's end reaped (`ReleaseLease`, a lease taken over,
+  a restart), and a destruction a release or an outcome could not complete;
+  both reclamation cases now end their first run by `ReleaseLease`.
 - **Preserved:** the kernel's decision of where it runs (OD-1);
   `CONTAINER_ISOLATION` as the minimum; no host fallback; the operator's
   pinned digests; the durable lifecycle and its reconciliation at start; no
@@ -239,7 +243,8 @@ used unchanged, and no new way to reach them is public.
   first holds the worker for that destruction too, bounded the same way, so
   a launch that needs an environment holds it for at most one destruction and
   one preparation. An ended run's environment idles until the next
-  preparation or start (M5d.6 makes the release destroy it); at most 16 are
+  preparation or start (M5d.6 makes the release destroy it — built, §8; a
+  reaped run's still idles); at most 16 are
   live, so the 17th concurrently active run with an environment is refused
   until one ends. The configuration is fixed for the server's life, so
   `IMAGE_CHANGED` guards a binding that today changes only across restarts
@@ -738,6 +743,49 @@ a workload is `LAUNCHING` — and while an environment is `UNKNOWN` or
 its workspace or that of any run bound to the same directory (§6); its
 `COMPLETED`, `FAILED` or `UNKNOWN` ends that.
 
+**As built (M5d.6): a run's release ends its environment.** `ReleaseRun`
+fences the caller first, as it always has; a request that is refused there
+(`STALE_EPOCH`) or acknowledged without effect — the run already ended, not
+in the caller's session, unknown, a repeat — looks at no environment and
+ends nothing. A request that releases an active run records, **in the same
+transaction** as the run's `RELEASED`, the destruction of its live
+environment — at most one, by the schema's `environment_one_live_per_run`,
+named by its recorded run alone — `DESTROYING`, reason `RELEASED`, audited
+after `run.released`; one already `DESTROYING` is tried again. Only then is
+the broker told, and it removes exactly the container recorded for it, by
+its labels, as every destruction (ADR-0047 §12) — in `PROXY_ONLY` its relay
+and setup with it, the egress counted by disposition in the destruction's
+record. A workload still running there is not waited for: it ends with the
+container, with every process it left, and its collection is settled
+`UNKNOWN` (an ending nobody can state), never run again; its environment is
+not destroyed twice. The release holds the authority's worker for that one
+destruction, bounded by the environment deadline, as a reclamation does
+(§2a). **The answer is unchanged:** `Ack`, which says the run's authority is
+surrendered and its environment's destruction durable — not that the
+broker confirmed the removal; a destruction it could not confirm (an
+unreachable broker, a lost answer) stays `DESTROYING`, audited
+`environment.destroy_failed`, never recorded done, and is completed by the
+next preparation's reclamation or by reconciliation at the next start. A
+preparation in flight when the release commits (possible only from another
+handle onto the store: one worker serves releases and launches in turn) is
+not destroyed under the broker; its outcome's transaction finds the run
+ended and records what it made `DESTROYING`, reason `RUN_ENDED`, and the
+launch is refused `ENVIRONMENT_UNAVAILABLE`. A released run is never active
+again (the `run_never_resurrects` trigger): its launches are refused
+`UNKNOWN_RUN` before anything is prepared, and its keys stay spent in the
+session's namespace; its budget is not refunded. **What this does not
+change:** the protocol, the schema and every public answer; one DWKP
+connection cannot overtake its own outstanding launch with a release (the
+server answers a connection's requests in order and the lease is that
+connection's), so a release over DWKP finds its run's workloads ended — the
+in-flight case is the authority's API and another handle's. **Not done:** a
+run a lease's end reaps (`ReleaseLease`, a takeover, a restart) is not
+released, and its environment is still reclaimed before the next
+preparation (§2a); the registry's `effect_bearing: false` for `ReleaseRun`
+is kept — the destruction is the authority ending what only the run's
+authority justified, chosen by nothing the request says — and is listed for
+the owner (§19).
+
 ### 9. Crash windows
 
 | Window | Durable state | On restart | Semantics |
@@ -746,6 +794,7 @@ its workspace or that of any run bound to the same directory (§6); its
 | W9 the broker running it | `LAUNCHING` | as W8 — the runtime keeps an `exec`'d process when its client dies, so only the environment's destruction ends it | UNKNOWN |
 | W10 answered, outcome not durable | `LAUNCHING` | as W8 | UNKNOWN |
 | W11 outcome durable, the environment's destruction pending | `COMPLETED`/`UNKNOWN` + `DESTROYING` | the destruction completes (W6/W7) | RETRY-SAFE |
+| W12 (M5d.6) a run's release durable, its environment's destruction pending, nothing sent | run `RELEASED` + `DESTROYING` | the destruction completes (W6/W7); the run is never active again | RETRY-SAFE |
 
 A broker killed while a workload runs leaves the workload running in its
 environment until the authority destroys it; the authority's answer is
@@ -1195,6 +1244,59 @@ case first: the wall clock's bound was 120 s for a 10 s agent, loose enough
 to let a fourfold clock through, and is now 10 to 35 s. No product code,
 protocol, schema or dependency changed.
 
+**As built (M5d.6).** `make sandbox-release-evidence` first runs the real
+authority and store against the route tests' **fake broker** (labelled so:
+its state machine, never a container's end) -- eight tests, 31 cases, each
+line naming its level `fake-broker` and what enforced it: the destruction
+`DESTROYING` with the run `RELEASED` when the broker's order arrives, the
+order naming exactly the run's environment, run and recorded container;
+another run of the same session kept and running; a repeat, a stale epoch,
+another holder, another session's run and an unknown run ending nothing; no
+environment, or no sandbox, destroying nothing; an in-flight workload's
+environment destroyed while it is `LAUNCHING`, the workload settled
+`UNKNOWN` and its key never run again; a preparation another handle's
+release overtook destroyed (`RUN_ENDED`) with nothing run; an unreachable
+broker and a lost answer leaving `DESTROYING` until the next start, or the
+next preparation, completes it; a run's own pending destruction completed by
+its release; W12, W6 and W7 through a release, each completed at restart
+with nothing rerun. Then real containers, selected by name and each required
+to run -- four tests, 29 cases, each line `dwkp-end-to-end` (a real DWKP
+client) or `real-oci` (the authority's own API over the released broker, for
+what one DWKP connection never interleaves): the launch a release ends, in
+the authority's measured environment at `CONTAINER_ISOLATION` as the pinned
+image's pinned executable and uid 10001; a stale epoch, another holder and a
+run not held refused or acknowledged with the container kept; the holder's
+release answered `Ack` with the container already gone, `destroy_intent`
+`RELEASED` then `destroyed` audited; another run's container, an unlabelled
+container of the same image and another store's copy of the released
+environment's labels all kept, the other run still running; a repeat
+ending nothing more; the released run's launch refused `UNKNOWN_RUN` with no
+environment prepared; an agent-shaped workload's plan, workers and
+daemonised helper ended with their container by a release while it ran,
+settled `UNKNOWN` well inside its wall clock and never rerun; W12, W6 and W7
+completed at restart, and a lost broker's destruction pending with the
+container kept until a broker answers again and the next start removes it;
+and, through the released `serve` in `PROXY_ONLY`, the release removing the
+environment, its relay and its setup, the egress recorded by disposition at
+the destruction, another run's relay kept and still reaching its origin. No
+container the evidence made may remain and every one that predates it must
+(4 kept locally). The hosted job is `sandbox-release`, required by `ci`; the
+gated eval `m5d-sandbox-exec` (`evals/src/direwolf_evals/runners/m5d.py`)
+runs the same task and requires every case at its level with its expected
+outcome. `make sandbox-release-mutations` weakens ten guards one at a time
+-- the release destroying nothing, the destruction recorded only after the
+release committed, a fenced release and one acknowledged without effect
+ending the environment, the teardown naming the session's or every live
+environment, the preparation keeping what a release overtook, an
+unconfirmed destruction recorded done, a restart leaving a pending
+destruction, a release leaving its run active -- and kills 10 of 10, each
+by the authority's state suites, every file restored and its SHA-256
+checked. The review found one mutant equivalent and replaced it: weakening
+only the route's own check that the run is held changes nothing a test can
+see, because the workload ledger refuses a run that is not active again,
+with the same `UNKNOWN_RUN`. No protocol, schema or dependency changed; the product change is the release's teardown, the
+preparation's ended-run check and one crash point (W12).
+
 **Not evidenced by M5d.1, and not claimed:** a workload in `PROXY_ONLY` (the
 evidence's environments are `NO_NETWORK`, so the agent-shaped workload's
 network attempts are refused for want of any network — M5d.5 runs it with
@@ -1212,8 +1314,8 @@ the evidence host's own posture is reported, `posture-reported-matches-host`).
 | **M5d.2** Public sandboxed `process.exec` | the DWKP route (§2), the shared idempotency namespace, results naming environment and level; `workspace_exec_hygiene` enforced in the environment; as built also private protocol 9's start and collection (§3), schema 10 (§4), OD-9, the production environment (§2a) and the trusted launcher (§5a) | hostile-client and eval coverage; the shipped packs' sandbox rules exercised; §§2a and 5a decided by the owner |
 | **M5d.3** Secrets B/C in the sandbox | §7; as built also tool messages version 6 (§2), private protocol 10 (§3), schema 11 (§4), TX055–TX056 (§15) | residue evidence as M4e's: the value only in the target, redacted on return — **built** |
 | **M5d.4** Workspace ownership and disk quota | §§6, 10 (OD-3, OD-6); as built also private protocol 11 (§3), probe report 3, every launch through the launcher (§5a, OD-12), the exclusion in time (§6), TX057–TX059 (§15) | the authority's tools and the workload both work on the workspace; a full disk refused, measured — **built; hosted CI green at `1c8ccbe` (run 39854518873); the owner's review of OD-3, OD-6 and OD-12 outstanding** |
-| **M5d.5** The agent-shaped escape suite and multi-identity evidence | a long-lived agent-shaped workload in `PROXY_ONLY` with declared origins; the hosted three-identity job; as built (§17) `make sandbox-agent-evidence`, the required hosted job `sandbox-agent`, `make sandbox-agent-mutations` -- no protocol, schema, dependency or product-code change | ADR-0050 §21's uid-boundary condition shown with real users — **built; the one-identity half passing locally; the three-identity half hosted-only, awaiting the owner's commit and hosted CI; OD-5 for the owner** |
-| **M5d.6** Closeout | run release destroys the environment; the gated eval `m5d-sandbox-exec`; this ADR accepted | every checkpoint's evidence in hosted CI |
+| **M5d.5** The agent-shaped escape suite and multi-identity evidence | a long-lived agent-shaped workload in `PROXY_ONLY` with declared origins; the hosted three-identity job; as built (§17) `make sandbox-agent-evidence`, the required hosted job `sandbox-agent`, `make sandbox-agent-mutations` -- no protocol, schema, dependency or product-code change | ADR-0050 §21's uid-boundary condition shown with real users — **built; the one-identity half passing locally; the three-identity half hosted-only, awaiting the owner's commit and hosted CI; OD-5 for the owner** — **hosted CI green at `49bb8f8`** (run 40134163102, 26 of 26 jobs, the three-identity half exercised): the condition shown; OD-5 still the owner's |
+| **M5d.6** Closeout | run release destroys the environment; the gated eval `m5d-sandbox-exec`; this ADR accepted | every checkpoint's evidence in hosted CI — **built (§§8, 9, 17): the release's teardown, `make sandbox-release-evidence`, the required hosted job `sandbox-release`, the gated eval; local gates passing; awaiting the owner's commit and hosted CI, then the owner's decisions (§19) before this ADR can be accepted** |
 
 ### 19. Owner decisions
 
@@ -1282,6 +1384,24 @@ the broker's evidence-only resolver, the run's test anchor in the agent's
 workspace, the unverified workspace of the one-identity half -- are labelled
 as fixtures, and none is a production setting.
 
+**M5d.6 (2026-10-25), awaiting the owner.** M5d.5's hosted CI passed at
+`49bb8f8` (run 40134163102); that verifies its evidence and approves no
+decision. M5d.6 built the release's teardown (§8) and the gated eval, and
+changed no protocol, schema or dependency. Nothing here is approved on the
+owner's behalf. Before this ADR can be **Accepted**, the owner is asked to
+decide, each explicitly: OD-1, OD-2, OD-7, OD-8 and OD-9 (recommended in
+this ADR since M5d.1-M5d.2 and built as recommended, never formally
+confirmed); OD-3, OD-6 and OD-12 (built in M5d.4, awaiting review since
+2026-10-20); OD-4 (built in M5d.3, "for the owner to confirm"); OD-5 (built
+in M5d.5: no handle); and two points M5d.6 raises -- that `ReleaseRun`'s
+`Ack` means the release and its environment's destruction are durable, not
+that the removal was confirmed (§8; the public answer is unchanged), and that
+`ReleaseRun` stays `effect_bearing: false` in the DWKP registry although a
+release now has the authority destroy the run's own environment. OD-10 and
+OD-11 stay approved with their conditions (above). A hosted run of M5d.6's
+committed implementation must pass first; the owner's decisions then decide
+this ADR's status.
+
 ## Consequences
 
 **Positive.** The first code DireWolf runs at an agent's request runs where
@@ -1305,7 +1425,11 @@ live, and `npm`-family tools and `cargo`, directly or through a wrapper, stay
 refused under the obligation until evidenced (§5a). M5d.3's credential
 reaches the program's whole process tree, not one process, and its return
 path redacts what an honest program echoes, not what a malicious one
-transforms (§7).
+transforms (§7). Since M5d.6 a released run's environment no longer idles —
+the release destroys it, holding the worker for that one destruction, at
+most the environment deadline — but a run a lease's end reaped still waits
+for the next preparation, and a release's `Ack` does not say the removal was
+confirmed (§8).
 
 ## Alternatives considered
 

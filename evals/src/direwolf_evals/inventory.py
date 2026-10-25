@@ -159,6 +159,21 @@ INVENTORY: Final[tuple[SecurityProperty, ...]] = (
         "a credential at its bound origin only and never across one, crashes "
         "UNKNOWN and never repeated, budgets never refilled.",
     ),
+    # --- measurable now: M5d, production sandboxed process.exec (ADR-0052) --
+    # What `m5d-sandbox-exec` measures itself; the workload, secret,
+    # workspace and three-identity evidence are their required jobs', not
+    # this property's.
+    SecurityProperty(
+        "A sandboxed launch runs only where the authority decided, and a run's "
+        "release ends its environment",
+        "M5d",
+        "m5d-sandbox-exec",
+        "A real OCI runtime over real DWKP: the launch in the authority's measured "
+        "environment as uid 10001 and the pinned executable, never the host; a "
+        "release destroying exactly its run's environment, durably first, an "
+        "in-flight workload and its descendants with it, crashes and a lost broker "
+        "reconciled, nothing replayed, nothing foreign touched.",
+    ),
     # --- pending: the mechanism does not exist yet -------------------------
     SecurityProperty(
         "Sandboxed workload egress, end to end (the complete M5 gate)",

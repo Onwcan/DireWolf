@@ -21,7 +21,8 @@ DW := $(PY) scripts/dw.py
         sandbox-foundation-evidence sandbox-egress-evidence sandbox-workload-evidence \
         net-http-evidence net-http-mutations sandbox-workload-mutations sandbox-secret-evidence \
         sandbox-secret-mutations sandbox-workspace-evidence sandbox-workspace-mutations \
-        sandbox-agent-evidence sandbox-agent-mutations d11-hardening-evidence d11-hardening-mutations d11-posture fuzz-smoke fuzz security docs \
+        sandbox-agent-evidence sandbox-agent-mutations sandbox-release-evidence \
+        sandbox-release-mutations d11-hardening-evidence d11-hardening-mutations d11-posture fuzz-smoke fuzz security docs \
         preflight tools hooks clean
 
 help:            ## List available commands
@@ -128,6 +129,12 @@ sandbox-agent-evidence: ## M5d.5 an agent-shaped workload in PROXY_ONLY over rea
 
 sandbox-agent-mutations: ## M5d.5 mutation review: each identity, proxy, policy, cleanup and non-replay guard weakened in turn must fail a unit suite or sandbox-agent-evidence (slow)
 	@$(DW) sandbox-agent-mutations
+
+sandbox-release-evidence: ## M5d.6 a run's release ends its environment: durable before the broker, exactly its own, an in-flight workload and its descendants ended, crashes and a lost broker reconciled, nothing replayed, other runs and foreign containers kept; a fake broker, then real OCI over real DWKP and the released serve
+	@$(DW) sandbox-release-evidence
+
+sandbox-release-mutations: ## M5d.6 mutation review: each release guard weakened in turn must fail a unit suite or sandbox-release-evidence (slow)
+	@$(DW) sandbox-release-mutations
 
 d11-hardening-evidence: ## D11 hardening: the worker's syscall filter, vouching from the kernel, start-up window, swap posture; real workers, observers, cgroups; root-only cases need DW_D11_PRIVILEGED=1
 	@$(DW) d11-hardening-evidence

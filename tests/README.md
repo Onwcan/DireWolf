@@ -300,6 +300,28 @@ container, workspace mount or broker socket directory may remain.
 `make sandbox-agent-mutations` weakens each identity, proxy, policy, cleanup
 and non-replay guard in turn, slow and local.
 
+**Sandbox release tests (M5d.6)** are the evidence behind
+`make sandbox-release-evidence` (ADR-0052 §8): a run's release ends its
+environment. In process, `state::workload_route::tests::release`
+(`crates/dwkd-authority/src/state/release_route_tests.rs`) drives the real
+authority and store against the route tests' **fake broker** -- labelled
+`fake-broker`, never a container's end: the destruction durable in the
+release's own transaction before the broker is told, exactly the run's
+environment named, fenced and foreign releases ending nothing, an in-flight
+workload's environment ended under it, a preparation another handle's
+release overtook keeping nothing, an unconfirmed destruction pending until
+reconciliation or the next preparation completes it, crash windows W12, W6
+and W7, and nothing the run did run again. Then real containers, selected by
+name: `linux::release` in `crates/dwkd-authority/tests/sandbox_workload.rs`
+(a real DWKP client through the server seam, and the authority's own API for
+what one DWKP connection never interleaves -- a release while its own launch
+runs, a crash, a lost broker) and `a_released_run_takes_its_proxy_only_environment_and_relay_down`
+in `sandbox_agent.rs` (the released `serve` in `PROXY_ONLY`). Each line names
+its level (`dwkp-end-to-end`, `real-oci`) and what enforced it; decoy
+containers -- unlabelled, and another store's copy of a released
+environment's labels -- must survive. `make sandbox-release-mutations`
+weakens each release guard in turn.
+
 **Brokered `fs.read` tests (M4b)** are real-process evidence for the private
 channel ([ADR-0043](../docs/adr/0043-m4b-private-broker-channel-and-brokered-fs-read.md)):
 `crates/dwkd-authority/tests/broker_fs_read.rs` drives the released authority and
