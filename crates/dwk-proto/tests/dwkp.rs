@@ -11,7 +11,7 @@ mod common;
 
 use dwk_proto::dwkp::messages::REFUSALS;
 use dwk_proto::dwkp::messages::{Handshake, HandshakeAccepted, LeaseGrant, ProtocolErrorPayload};
-use dwk_proto::dwkp::registry::{MESSAGES, OPERATIONS, WireStatus};
+use dwk_proto::dwkp::registry::{Layer, MESSAGES, OPERATIONS, WireStatus};
 use dwk_proto::dwkp::{self, DwkpBody, DwkpMessage};
 use dwk_proto::envelope::{Header, MessageType, Presence};
 use dwk_proto::version::{SUPPORTED_ENVELOPE, VersionRange, negotiate};
@@ -596,18 +596,37 @@ fn the_three_changed_responses_are_version_two_only() {
 }
 
 #[test]
-fn tool_invoke_is_the_only_defined_effect_bearing_operation() {
+fn the_effect_bearing_operations_are_the_tool_and_the_three_that_end_authority() {
     // M2 defined wire contracts and no effects; M3 added authority decisions
-    // and still no effects. M4b adds exactly one effect-bearing operation --
+    // and still no effects. M4b added exactly one effect-bearing operation --
     // ToolInvoke, with the broker that performs it and the canonicaliser that
     // makes its arguments decidable. CanonicalPreview, defined alongside it,
-    // performs nothing.
+    // performs nothing. The M5d closeout (ADR-0052 section 8) classifies as
+    // effect-bearing the three operations whose end of authority has the
+    // kernel destroy the ended runs' execution environments: AcquireLease (a
+    // new tenure reaps the old one's runs), ReleaseLease and ReleaseRun.
     let effect_bearing: Vec<&str> = OPERATIONS
         .iter()
         .filter(|o| o.status == WireStatus::Defined && o.effect_bearing)
         .map(|o| o.name)
         .collect();
-    assert_eq!(effect_bearing, ["ToolInvoke"]);
+    assert_eq!(
+        effect_bearing,
+        ["AcquireLease", "ReleaseLease", "ReleaseRun", "ToolInvoke"]
+    );
+    // None of the three can direct its effect: each is an authority
+    // primitive with an empty payload -- it names nothing to destroy -- and
+    // carries no idempotency key, each for its own reason rather than because
+    // of effect_bearing (PROTOCOL.md section 1): the two releases are
+    // idempotent for their holder, and AcquireLease is not idempotent at all --
+    // its holder's repeat is a rotation to a new epoch (ADR-0011).
+    for name in ["AcquireLease", "ReleaseLease", "ReleaseRun"] {
+        let op = OPERATIONS.iter().find(|o| o.name == name).unwrap();
+        assert_eq!(op.layer, Layer::AuthorityPrimitive, "{name}");
+        assert!(op.carries.contains("an empty payload"), "{name}");
+        assert!(!op.carries.contains("idempotency_key"), "{name}");
+        assert!(op.second_path.contains("ADR-0052 section 8"), "{name}");
+    }
 }
 
 #[test]

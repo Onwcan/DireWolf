@@ -15,7 +15,13 @@
 # a lost broker completed at the next start, never reported done before it
 # is; a preparation the release overtook keeping nothing; a PROXY_ONLY
 # environment's relay and setup removed with it, its egress recorded by
-# disposition. The runner is `direwolf_evals/runners/m5d.py`, which runs the
+# disposition. Since the M5d closeout (the owner's CD-3), a lease's end ends
+# its reaped runs' environments the same way: durably in the reaping
+# transaction, one removed at once and the rest by the next preparation or
+# start; a takeover ending an agent mid-invocation, UNKNOWN and never rerun;
+# a fenced or another holder's lease release ending nothing; a restart
+# destroying a reaped run's READY environment without measuring it; a crash
+# at W13 completed at the next start. The runner is `direwolf_evals/runners/m5d.py`, which runs the
 # real evidence task, requires every case it lists at its level with its
 # expected outcome, and reimplements nothing.
 #
@@ -43,7 +49,8 @@ description = """
 The authority alone decides a workload, which runs in its measured
 environment as the environment's own user and the pinned bytes; releasing
 the run ends that environment -- durably first, exactly its own, whatever was
-still running in it -- and nothing the run did ever runs again.
+still running in it -- and so does a lease's end, for every run it reaps;
+nothing the run did ever runs again.
 """
 score = "containment rate: the fraction of the expected cases reported at their level with their expected outcome, zero if any is missing, at another level or contradicted, or the task failed (binary in effect)"
 requires = ["M5d"]
@@ -51,7 +58,7 @@ gate = true
 
 [[eval]]
 name = "sandboxed-exec-and-release-teardown"
-description = "A sandboxed exec in the authority's measured environment as uid 10001 and the pinned executable; a release destroying exactly its run's environment, durably first, ending an in-flight workload and its descendants, crashes and a lost broker reconciled, nothing replayed, nothing foreign touched -- on a real OCI runtime over real DWKP."
+description = "A sandboxed exec in the authority's measured environment as uid 10001 and the pinned executable; a release destroying exactly its run's environment, durably first, ending an in-flight workload and its descendants; a lease's end ending its reaped runs' environments the same way; crashes and a lost broker reconciled, nothing replayed, nothing foreign touched -- on a real OCI runtime over real DWKP."
 runner = "m5d.sandbox_exec"
 scorer = "rejection_rate"
 platforms = ["linux"]

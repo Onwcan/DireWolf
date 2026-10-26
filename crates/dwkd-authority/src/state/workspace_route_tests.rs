@@ -39,7 +39,7 @@ fn bounded(image: &str) -> SandboxConfig {
 }
 
 /// What a fixture that writes declares.
-const WRITES: &[&str] = &[
+pub(super) const WRITES: &[&str] = &[
     "process.exec:*",
     "fs.read:*",
     "fs.stat:*",
@@ -69,7 +69,9 @@ fn writing() -> PolicySet {
     }
 }
 
-fn writer() -> Fixture {
+/// A fixture whose policy allows brokered writes (the release tests use it
+/// too, for what a lease's end leaves pending, ADR-0052 §8).
+pub(super) fn writer() -> Fixture {
     let mut fx = Fixture::with_declared(writing(), None, WRITES);
     fx.attach(IMAGE);
     fx
@@ -77,7 +79,7 @@ fn writer() -> Fixture {
 
 impl Fixture {
     /// A version-2 tool invocation of `payload`, answered.
-    fn tool(&mut self, run: &RunId, key: &str, payload: &str) -> DwkpBody {
+    pub(super) fn tool(&mut self, run: &RunId, key: &str, payload: &str) -> DwkpBody {
         let message = self.message(run, 2, "direwolf.tool.invoke", Some(key), payload);
         self.ask(&message)
     }
@@ -93,18 +95,18 @@ impl Fixture {
     }
 }
 
-fn write(path: &str) -> String {
+pub(super) fn write(path: &str) -> String {
     format!(r#"{{"fs_write":{{"path":"{path}","content":"6869"}}}}"#)
 }
 
-fn write_failed(body: &DwkpBody) -> FsFailureReason {
+pub(super) fn write_failed(body: &DwkpBody) -> FsFailureReason {
     match body {
         DwkpBody::ToolFailedV2(f) => f.reason,
         other => panic!("not a failed write: {other:?}"),
     }
 }
 
-fn write_done(body: &DwkpBody) {
+pub(super) fn write_done(body: &DwkpBody) {
     assert!(
         matches!(body, DwkpBody::ToolResultV2(r) if r.output.fs_write.is_some()),
         "not a write's result: {body:?}"

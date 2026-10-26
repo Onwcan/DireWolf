@@ -58,19 +58,33 @@
 //! admission ([`RELIABILITY.md`] §7: "a run suspended for three days must not
 //! resume on authority revoked yesterday").
 //!
+//! **What the run had ends with it** (the M5d closeout, ADR-0052 §8): in the
+//! transaction that reaps a run, the destruction of its live execution
+//! environment is recorded `DESTROYING` (reason `REAPED`), so nothing can run
+//! in it again; the request that ended the lease then has the broker remove
+//! at most one such environment, and the rest are removed by the next
+//! preparation's reclamation or at the next start. A lease that merely
+//! expires reaps nothing until the session is acquired again or the
+//! authority restarts: until then every request of its runs is fenced.
+//!
 //! [ADR-0011]: ../../../../../docs/adr/0011-session-concurrency.md
 //! [ADR-0036]: ../../../../../docs/adr/0036-m3-authority-operations-and-the-capability-wire-form.md
 //! [`DATA_MODEL.md`]: ../../../../../docs/DATA_MODEL.md
 //! [`RELIABILITY.md`]: ../../../../../docs/RELIABILITY.md
 
-use dwk_proto::wire::id::SessionId;
+use dwk_proto::wire::id::{RunId, SessionId};
 use dwk_proto::wire::scalar::{Epoch, RefusalReason, RefusedOperation};
 use rusqlite::OptionalExtension as _;
 
 use super::audit::{AuditEvent, Fields};
+use super::environment::{self, DestroyBegun};
 use super::error::AuthorityError;
 use super::identity::CallerContext;
 use super::{Reply, Work};
+
+/// What a lease's end left to the broker: the destruction, durable already,
+/// of the reaped runs' live environments (ADR-0052 §8).
+pub(super) type Teardown = Vec<DestroyBegun>;
 
 /// A lease lives this long without a heartbeat ([`RELIABILITY.md`] §7a).
 ///
@@ -196,13 +210,14 @@ pub(super) fn refusal_fields(
     }
 }
 
-/// `AcquireLease`.
+/// `AcquireLease`. A new tenure reaps the runs of the old one, and returns
+/// what their end left to the broker.
 pub(super) fn acquire(
     work: &mut Work<'_>,
     caller: &CallerContext,
     session: &SessionId,
     ttl_ms: u64,
-) -> Result<Reply<Epoch>, AuthorityError> {
+) -> Result<(Reply<Epoch>, Teardown), AuthorityError> {
     let now = work.now;
     let expires = now.saturating_add(ttl_ms);
     let (inc, conn) = holder_pair(caller);
@@ -223,7 +238,7 @@ pub(super) fn acquire(
                         None,
                     ),
                 )?;
-                return Ok(Reply::Refused(RefusalReason::LeaseHeld));
+                return Ok((Reply::Refused(RefusalReason::LeaseHeld), Vec::new()));
             }
             if lease.epoch >= MAX_EPOCH {
                 return Err(AuthorityError::EpochExhausted);
@@ -239,6 +254,7 @@ pub(super) fn acquire(
     };
     let epoch_sql = to_sql(epoch)?;
     let subject = caller.subject().storage_key();
+    let mut teardown = Vec::new();
     if current.is_none() {
         work.db(work.tx.execute(
             "INSERT INTO session_lease (session_id, epoch, state, holder_subject, \
@@ -267,7 +283,7 @@ pub(super) fn acquire(
                 to_sql(expires)?
             ],
         ))?;
-        reap(work, session, epoch, "lease_reacquired")?;
+        teardown = reap(work, session, epoch, "lease_reacquired")?;
     }
     work.audit(
         AuditEvent::LeaseAcquired,
@@ -280,7 +296,7 @@ pub(super) fn acquire(
             .int("expires_ms", expires),
     )?;
     Epoch::new(epoch)
-        .map(Reply::Done)
+        .map(|epoch| (Reply::Done(epoch), teardown))
         .ok_or(AuthorityError::EpochExhausted)
 }
 
@@ -323,7 +339,7 @@ pub(super) fn release(
     caller: &CallerContext,
     session: &SessionId,
     epoch: Epoch,
-) -> Result<Reply<()>, AuthorityError> {
+) -> Result<(Reply<()>, Teardown), AuthorityError> {
     let lease = load(work, session)?;
     let pair = holder_pair(caller);
     if let Some(lease) = &lease {
@@ -335,7 +351,7 @@ pub(super) fn release(
                  WHERE session_id = ?1",
                 rusqlite::params![session.as_str(), to_sql(pair.0)?, to_sql(pair.1)?],
             ))?;
-            reap(
+            let teardown = reap(
                 work,
                 session,
                 lease.epoch.saturating_add(1),
@@ -349,13 +365,14 @@ pub(super) fn release(
                     .text("session_id", session.as_str())
                     .int("epoch", lease.epoch),
             )?;
-            return Ok(Reply::Done(()));
+            return Ok((Reply::Done(()), teardown));
         }
+        // A retry of a release that happened ends nothing more.
         if lease.state == "RELEASED"
             && lease.epoch == epoch.get()
             && lease.last_holder == Some(pair)
         {
-            return Ok(Reply::Done(()));
+            return Ok((Reply::Done(()), Vec::new()));
         }
     }
     work.audit(
@@ -368,17 +385,20 @@ pub(super) fn release(
             Some(epoch),
         ),
     )?;
-    Ok(Reply::Refused(RefusalReason::StaleEpoch))
+    Ok((Reply::Refused(RefusalReason::StaleEpoch), Vec::new()))
 }
 
 /// End every active run of `session` admitted under an epoch below
-/// `below_epoch`. Each is audited.
+/// `below_epoch`. Each is audited, and the destruction of each one's live
+/// environment is begun in the same transaction (the M5d closeout, ADR-0052
+/// §8): what the lease's end leaves to the broker is returned, for the
+/// caller to perform after the commit.
 fn reap(
     work: &mut Work<'_>,
     session: &SessionId,
     below_epoch: u64,
     cause: &'static str,
-) -> Result<(), AuthorityError> {
+) -> Result<Teardown, AuthorityError> {
     let reaped: Vec<String> = {
         let mut statement = work.db(work.tx.prepare(
             "UPDATE run SET state = 'REAPED', ended_ms = ?3 \
@@ -390,7 +410,10 @@ fn reap(
         ))?;
         work.db(rows.collect::<rusqlite::Result<_>>())?
     };
+    let mut teardown = Vec::new();
     for run in reaped {
+        let id =
+            RunId::parse(&run).ok_or(AuthorityError::Invariant("a stored run_id is malformed"))?;
         work.audit(
             AuditEvent::RunReaped,
             Fields::new()
@@ -398,8 +421,9 @@ fn reap(
                 .text("run_id", run)
                 .text("cause", cause),
         )?;
+        teardown.extend(environment::begin_run_end(work, &id, "REAPED")?);
     }
-    Ok(())
+    Ok(teardown)
 }
 
 /// At startup: every live holder belonged to the previous process, so every

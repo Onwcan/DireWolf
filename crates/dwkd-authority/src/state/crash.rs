@@ -127,6 +127,10 @@ pub enum CrashPoint {
     /// environment are durable, in one transaction; the broker has been told
     /// nothing.
     ReleaseAfterIntent,
+    /// Reap W13 (the M5d closeout): a lease's end -- its runs `REAPED` and
+    /// the destruction of their live environments -- is durable, in one
+    /// transaction; the broker has been told nothing.
+    ReapAfterIntent,
 }
 
 impl CrashPoint {
@@ -179,6 +183,7 @@ impl CrashPoint {
             Self::WorkloadAfterBroker => 'r',
             Self::WorkloadAfterOutcome => 's',
             Self::ReleaseAfterIntent => 'u',
+            Self::ReapAfterIntent => 'v',
         }
     }
 }

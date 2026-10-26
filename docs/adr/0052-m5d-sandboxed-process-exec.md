@@ -1,6 +1,6 @@
 # ADR-0052: M5d — production sandboxed `process.exec`: the authority decides a workload, the broker runs exactly that plan in a measured `oci-strict` environment, as the environment's own identity, and nothing of it outlives its invocation
 
-**Status:** Proposed (M5d.1, M5d.2 and M5d.3 built; M5d.2's refinements §§2a and 5a — OD-10 and OD-11 — approved by the owner on 2026-10-19 with conditions, §19; M5d.4 built, its hosted CI green at `1c8ccbe` (run 39854518873), OD-3, OD-6 and OD-12 — the `DIRECT` launch through the trusted launcher — still awaiting the owner's review, §§5a, 6, 10, 19; M5d.5 built, its hosted CI green at `49bb8f8` (run 40134163102, the three-identity evidence included), OD-5 still for the owner, §§17, 19; M5d.6 built — a run's release destroys its environment (§8) and the gated eval `m5d-sandbox-exec` runs — its local gates passing, awaiting the owner's commit and hosted CI, §§8, 9, 17; this ADR's acceptance waits for that hosted run and the owner's decisions, §19) · **Date:** 2026-10-13 · **Revised:** 2026-10-25 · **Would amend (on acceptance):** [ADR-0018](0018-authority-broker-split.md) (the broker runs workloads, never as its own uid), [ADR-0039](0039-durable-authority-state.md) (schema version 9: the workload ledger, §4), [ADR-0043](0043-m4b-private-broker-channel-and-brokered-fs-read.md) (private protocol version 8, §3), [ADR-0045](0045-m4d-process-execution-broker.md) (a process can run in an environment; the host floor is unchanged), [ADR-0047](0047-m5a-oci-execution-environment-and-measured-assurance.md) (the probe becomes the environment's init: it reaps orphans and, asked, ends every other process; `run_probe` gains a sibling, `run_workload`), [ADR-0050](0050-m5c-kernel-performed-net-http-ssrf-redirects-and-credential-egress.md) (§21's ptrace-posture prerequisite becomes a check the broker makes at start) · **Refines:** [ADR-0008](0008-sandbox-default.md) and [ADR-0024](0024-sandbox-network-topology.md) (as realised by [ADR-0048](0048-m5b-proxy-only-topology-and-connect-proxy.md)), [ADR-0046](0046-m4e-secret-handles-backends-injection-and-redaction.md) §13 (modes B/C reach a sandboxed target, M5d.3), [ADR-0051](0051-external-agent-interoperability.md) (Proposed; its M5d prerequisites), [SANDBOX.md](../SANDBOX.md) §§1–4, [POLICY.md](../POLICY.md) (`when.environment = "sandbox"`)
+**Status:** Proposed (M5d.1, M5d.2 and M5d.3 built; M5d.2's refinements §§2a and 5a — OD-10 and OD-11 — approved by the owner on 2026-10-19 with conditions, §19; M5d.4 built, its hosted CI green at `1c8ccbe` (run 39854518873), OD-3, OD-6 and OD-12 — the `DIRECT` launch through the trusted launcher — still awaiting the owner's review, §§5a, 6, 10, 19; M5d.5 built, its hosted CI green at `49bb8f8` (run 40134163102, the three-identity evidence included), OD-5 still for the owner, §§17, 19; M5d.6 built — a run's release destroys its environment (§8) and the gated eval `m5d-sandbox-exec` runs — its hosted CI green at `d3d52e7` (run 40235421487, 27 of 27 jobs), §§8, 9, 17; the owner's decisions recorded on 2026-10-26 — OD-1 to OD-9 and OD-12 approved as built, the closeout's three decisions CD-1 to CD-3 taken, and the residual its review found accepted, §19; the closeout's change — a lease's end ends its reaped runs' environments, a restart destroys a reaped run's `READY` one, and `AcquireLease`, `ReleaseLease` and `ReleaseRun` are effect-bearing (§8) — built, its local gates passing, awaiting the owner's commit and a hosted CI run of it; this ADR's acceptance waits for that hosted run, §19) · **Date:** 2026-10-13 · **Revised:** 2026-10-26 · **Would amend (on acceptance):** [ADR-0011](0011-session-concurrency.md) (a lease's end — released, rotated, taken over or re-acquired after expiry — ends what its reaped runs had: their live environments' destructions durable in the reaping transaction, §8), [ADR-0018](0018-authority-broker-split.md) (the broker runs workloads, never as its own uid), [ADR-0036](0036-m3-authority-operations-and-the-capability-wire-form.md) (`ReleaseRun`, and with it `AcquireLease` and `ReleaseLease`, are effect-bearing authority primitives; still no idempotency key, §8), [ADR-0039](0039-durable-authority-state.md) (schema version 9: the workload ledger, §4), [ADR-0043](0043-m4b-private-broker-channel-and-brokered-fs-read.md) (private protocol version 8, §3), [ADR-0045](0045-m4d-process-execution-broker.md) (a process can run in an environment; the host floor is unchanged), [ADR-0047](0047-m5a-oci-execution-environment-and-measured-assurance.md) (the probe becomes the environment's init: it reaps orphans and, asked, ends every other process; `run_probe` gains a sibling, `run_workload`; §12's W5 — a restart destroys a `READY` environment whose run it reaped instead of measuring it again, §9), [ADR-0050](0050-m5c-kernel-performed-net-http-ssrf-redirects-and-credential-egress.md) (§21's ptrace-posture prerequisite becomes a check the broker makes at start) · **Refines:** [ADR-0008](0008-sandbox-default.md) and [ADR-0024](0024-sandbox-network-topology.md) (as realised by [ADR-0048](0048-m5b-proxy-only-topology-and-connect-proxy.md)), [ADR-0046](0046-m4e-secret-handles-backends-injection-and-redaction.md) §13 (modes B/C reach a sandboxed target, M5d.3), [ADR-0051](0051-external-agent-interoperability.md) (Proposed; its M5d prerequisites), [SANDBOX.md](../SANDBOX.md) §§1–4, [POLICY.md](../POLICY.md) (`when.environment = "sandbox"`)
 
 > **A workload runs only where the authority decided it may, as the
 > environment's own user, and is gone when its invocation is.** The authority
@@ -228,7 +228,13 @@ used unchanged, and no new way to reach them is public.
   M5d.6** a run's release destroys its environment itself (§8), so what this
   reclaims is a run a lease's end reaped (`ReleaseLease`, a lease taken over,
   a restart), and a destruction a release or an outcome could not complete;
-  both reclamation cases now end their first run by `ReleaseLease`.
+  both reclamation cases now end their first run by `ReleaseLease`. **Since
+  the M5d closeout** a lease's end records its reaped runs' environments
+  `DESTROYING` itself and removes one at once (§8), so what this reclaims is
+  the rest of a lease's end that ended more than one, and any destruction
+  that could not be confirmed; the unit case ends two runs by one
+  `ReleaseLease` and finds one destroyed, one `DESTROYING` until the next
+  preparation removes it.
 - **Preserved:** the kernel's decision of where it runs (OD-1);
   `CONTAINER_ISOLATION` as the minimum; no host fallback; the operator's
   pinned digests; the durable lifecycle and its reconciliation at start; no
@@ -243,8 +249,11 @@ used unchanged, and no new way to reach them is public.
   first holds the worker for that destruction too, bounded the same way, so
   a launch that needs an environment holds it for at most one destruction and
   one preparation. An ended run's environment idles until the next
-  preparation or start (M5d.6 makes the release destroy it — built, §8; a
-  reaped run's still idles); at most 16 are
+  preparation or start (M5d.6 makes the release destroy it — built, §8; the
+  closeout makes a lease's end record it `DESTROYING` and remove one at once,
+  §8; a lease that only expires reaps nothing, so its runs' environments
+  idle, fenced, until the session is acquired again or the authority
+  restarts); at most 16 are
   live, so the 17th concurrently active run with an environment is refused
   until one ends. The configuration is fixed for the server's life, so
   `IMAGE_CHANGED` guards a binding that today changes only across restarts
@@ -778,13 +787,95 @@ change:** the protocol, the schema and every public answer; one DWKP
 connection cannot overtake its own outstanding launch with a release (the
 server answers a connection's requests in order and the lease is that
 connection's), so a release over DWKP finds its run's workloads ended — the
-in-flight case is the authority's API and another handle's. **Not done:** a
-run a lease's end reaps (`ReleaseLease`, a takeover, a restart) is not
-released, and its environment is still reclaimed before the next
-preparation (§2a); the registry's `effect_bearing: false` for `ReleaseRun`
-is kept — the destruction is the authority ending what only the run's
-authority justified, chosen by nothing the request says — and is listed for
-the owner (§19).
+in-flight case is the authority's API and another handle's. **Not done in
+M5d.6** (the closeout below does both): a run a lease's end reaps
+(`ReleaseLease`, a takeover, a restart) is not released, and its environment
+is still reclaimed before the next preparation (§2a); the registry's
+`effect_bearing: false` for `ReleaseRun` is kept — the destruction is the
+authority ending what only the run's authority justified, chosen by nothing
+the request says — and is listed for the owner (§19).
+
+**As built (the M5d closeout; the owner's CD-1 to CD-3, 2026-10-26, §19):
+what a lease's end reaps ends with it.** ADR-0011's reaping is unchanged in
+when it happens: a holder's `ReleaseLease`; an `AcquireLease` that rotates the
+lease to another connection, takes it over after it expired, or acquires it
+again after it expired, was released or was invalidated; and the start of a
+new incarnation, which reaps every run the last one held. What changes is
+what a reaped run keeps. **In the transaction that records each run
+`REAPED`**, after `run.reaped` is audited, the destruction of its live
+environment is begun — `DESTROYING`, reason `REAPED`, named by its recorded
+run alone, exactly as a release names it (one already `DESTROYING` is tried
+again; a preparation in flight is not destroyed under the broker, its
+outcome finding the run ended, `RUN_ENDED`, as above). Only after that
+commits is the broker told anything, and **the request that ended the lease
+performs at most one destruction**: the worker is held for one exchange,
+bounded by the 120 s environment deadline as OD-10 bounds a reclamation (the
+owner confirmed that bound for this path, CD-3). A tenure that ended several
+runs with environments leaves the rest `DESTROYING`, audited, never recorded
+done; the next preparation's reclamation removes one (§2a) and the next start
+removes every one. A crash after the reaping commits and before anything is
+sent is W13 (§9). **Nothing is refused that was not refused before, and
+nothing ends that did not end before:** a live lease held by another is
+refused `LEASE_HELD` before any run is looked at; a stale or another holder's
+`ReleaseLease` is refused `STALE_EPOCH` and ends nothing; a repeated release
+is acknowledged and ends nothing more; another session's runs and
+environments, and containers the authority did not record, are never named.
+A workload still running in a reaped run's environment — the takeover case,
+an agent parked mid-invocation — ends with the container and every process
+it left, its collection settled `UNKNOWN`, its key spent in the session's
+namespace (`IDEMPOTENCY_KEY_REUSED` to the new holder, which inherits no run
+and no workload). **At start**, every run is reaped, so every `READY`
+environment of a run that is not `ACTIVE` has its destruction begun in the
+transaction that opens the incarnation, reason `REAPED`, and reconciliation
+by label performs it, where ADR-0047 §12's W5 measured it again and kept a
+clean one (amended here, §9); a pair of labelled twins stays `DESTROYING`,
+untouched, as every ambiguous reconciliation does. **CD-1 — the answers are
+unchanged:** `AcquireLease` still answers its epoch, and `ReleaseLease` and
+`ReleaseRun` still answer `Ack`, which says the authority surrendered is
+recorded and the environments' destruction durable — not that the broker
+confirmed a removal; no wire field, version or schema changed. **CD-2 — the
+registry:** `AcquireLease`, `ReleaseLease` and `ReleaseRun` are
+`effect_bearing: true`, because by the registry's own definition performing
+each can now change the world outside the kernel's records (it removes a
+container). They stay authority primitives with an empty payload and **no
+idempotency key**, each for its own reason — `effect_bearing` decides no key
+(PROTOCOL.md §1; ADR-0036 §8 gives keys to `AdmitRun` alone, ADR-0044 to
+`ToolInvoke` from version 2). `ReleaseRun` is idempotent under the fence, as
+ADR-0036 keeps it keyless: its live holder's repeat at the current epoch is
+acknowledged and ends nothing more. `ReleaseLease` is idempotent for its own
+holder only (ADR-0039 §7): the connection that released it, repeating the
+release at that epoch, is acknowledged and ends nothing more; any other
+caller or epoch is `STALE_EPOCH`. **`AcquireLease` is not idempotent**, and
+nothing deduplicates it: the kernel assigns the epoch, every success is a new
+tenure at a greater one, and the holder's repeat is ADR-0011's rotation,
+which fences its earlier epoch and reaps that tenure's runs — now beginning
+their environments' destruction too. That is defined behaviour, which a key
+would have to suppress; a lost grant is recovered by acquiring again, the
+lost tenure holding no run. In each the caller names no environment,
+container or label, and the kernel finds what to end by its own records and
+removes it by exact labels. The registry's `semantics_owner` and `second_path` say so, and the generated
+schema, `DWKP_OPERATIONS.md` and Python constants follow. **A residual, as
+decided (CD-3):** there is no expiry sweep. A lease that merely expires
+reaps nothing (ADR-0011): its holder is fenced at once (`STALE_EPOCH`), but
+its runs stay `ACTIVE` and their environments idle — counted among the 16 —
+until the session is acquired again or the authority restarts. The worker's
+tick still collects only parked launches; a timer that destroys
+environments by itself would be a new kind of action, and was not added.
+**A second residual, found in the closeout's review:** what a lease's end
+leaves `DESTROYING` holds back brokered changes in its workspace. M5d.4
+refuses a brokered name change, `SHARED_DIRECTORY`, while any run bound to
+the same directory has an environment `UNKNOWN` or `DESTROYING` (§6) —
+rightly, since one being destroyed may still hold a process — so after a
+tenure that ended more than one run with an environment, a new tenure's
+writes in that workspace are refused, and its staging reclamation waits,
+until the rest are removed: one by each later preparation (any run's first
+sandboxed launch), every one by the next start
+(`lease-pending-destruction-holds-brokered-changes`,
+`lease-pending-destruction-removed-then-changes-proceed`). It is fail-closed
+— nothing changes beside a possible writer — and is the availability cost of
+performing one destruction per request; the owner accepted it as a
+documented residual on 2026-10-26, keeping one destruction per request
+(§19).
 
 ### 9. Crash windows
 
@@ -795,6 +886,19 @@ the owner (§19).
 | W10 answered, outcome not durable | `LAUNCHING` | as W8 | UNKNOWN |
 | W11 outcome durable, the environment's destruction pending | `COMPLETED`/`UNKNOWN` + `DESTROYING` | the destruction completes (W6/W7) | RETRY-SAFE |
 | W12 (M5d.6) a run's release durable, its environment's destruction pending, nothing sent | run `RELEASED` + `DESTROYING` | the destruction completes (W6/W7); the run is never active again | RETRY-SAFE |
+| W13 (the M5d closeout) a lease's end durable, its reaped runs' destructions pending, nothing sent | runs `REAPED` + `DESTROYING` | every destruction completes (W6/W7); no run is active again | RETRY-SAFE |
+
+**W5, amended (the M5d closeout).** ADR-0047 §12 has a restart measure a
+`READY` environment again and keep a clean one. Since every run is reaped at
+start (ADR-0011), no `READY` environment found then can run a workload
+again: each is recorded `DESTROYING`, reason `REAPED`, in the transaction
+that opens the incarnation, and removed by its labels — never measured
+again, never kept (`restart-destroys-reaped-runs-ready-environments`,
+`restart-measures-no-reaped-environment`, unit and real). M5a's evidence
+keeps its case names and now shows the destruction: the W6 case restarts
+once before it plants its hook, so the reaped run's environment is removed
+first; and the twin case's record stays `DESTROYING`, untouched
+(`both-present-record-untouched`). M5d's W11 case now ends `DESTROYED`.
 
 A broker killed while a workload runs leaves the workload running in its
 environment until the authority destroys it; the authority's answer is
@@ -1297,6 +1401,52 @@ see, because the workload ledger refuses a run that is not active again,
 with the same `UNKNOWN_RUN`. No protocol, schema or dependency changed; the product change is the release's teardown, the
 preparation's ended-run check and one crash point (W12).
 
+**As built (the M5d closeout).** The same task, the same job and the same
+eval, every earlier case kept with its name, level and expected outcome. The
+fake-broker half is now **15 tests, 62 cases**; the 31 new ones cover a
+lease's end: a stale and another holder's `ReleaseLease` refused with nothing
+destroyed; the holder's release reaping its runs and recording each one's
+destruction `DESTROYING`, reason `REAPED`, before the broker's order arrives,
+and performing **one** — the other left `DESTROYING`; another session's
+environment kept; the audit in order (`run.reaped`, then the destruction's
+intent); a repeat ending nothing more; a reaped run's launch refused; the
+pending destruction removed by the next preparation; `LEASE_HELD` ending
+nothing; a rotation and a takeover after expiry each ending the old tenure's
+environments, the takeover's in-flight workload settled `UNKNOWN`, its key
+never run again, the new tenure inheriting nothing; a lease that only
+expires fenced and ending nothing, and its re-acquisition ending what it
+held; a restart destroying every reaped run's `READY` environment and
+measuring none; an unreachable broker leaving the destructions pending until
+the next start; W13, W6 and W7 through a lease's end, each completed at
+restart with nothing rerun; a preparation a lease's end overtook
+destroyed; and the residual (§8) -- a pending destruction holding a new
+tenure's brokered change `SHARED_DIRECTORY` until the next preparation
+removes it, the change then made. The real half is **6 tests, 45 cases**; the 16 new ones run over a
+real DWKP client and the released broker: a stale and another holder's
+`ReleaseLease` refused with every container kept; the holder's release
+removing one of its two runs' containers at once and acknowledging; another
+session's container and unlabelled containers of the same image kept; a
+repeat ending nothing more; the reaped run's launch refused `STALE_EPOCH`;
+the remaining container removed by the next preparation; a takeover after
+expiry ending an agent-shaped workload mid-invocation with every process it
+left, settled `UNKNOWN` well inside its wall clock, its key refused
+`IDEMPOTENCY_KEY_REUSED` to the new holder; a restart removing a reaped run's
+`READY` container without measuring it; W13 completed at restart; and,
+through the released `serve` in `PROXY_ONLY`, a `ReleaseLease` removing the
+environment, its relay and its setup. M5a's lifecycle evidence and M5d's W11
+case keep their names and show the new W5 (§9). `make
+sandbox-release-mutations` now weakens **14** guards — the ten above, with
+the four that touch a run's end retargeted to the shared teardown, and four
+more: a lease's end destroying nothing of its reaped runs, a run's end
+removing nothing at once, a lease's end removing every pending destruction
+at once (unbounded), and a restart keeping a reaped run's `READY`
+environment — and kills 14 of 14, each by the authority's state suites, every
+file restored and its SHA-256 checked. The product change is the reaping transaction's
+teardown, the bounded destruction after it, the restart's teardown of reaped
+runs' `READY` environments, one crash point (W13) and three registry
+entries' metadata; no protocol version, schema, public answer or dependency
+changed.
+
 **Not evidenced by M5d.1, and not claimed:** a workload in `PROXY_ONLY` (the
 evidence's environments are `NO_NETWORK`, so the agent-shaped workload's
 network attempts are refused for want of any network — M5d.5 runs it with
@@ -1315,24 +1465,24 @@ the evidence host's own posture is reported, `posture-reported-matches-host`).
 | **M5d.3** Secrets B/C in the sandbox | §7; as built also tool messages version 6 (§2), private protocol 10 (§3), schema 11 (§4), TX055–TX056 (§15) | residue evidence as M4e's: the value only in the target, redacted on return — **built** |
 | **M5d.4** Workspace ownership and disk quota | §§6, 10 (OD-3, OD-6); as built also private protocol 11 (§3), probe report 3, every launch through the launcher (§5a, OD-12), the exclusion in time (§6), TX057–TX059 (§15) | the authority's tools and the workload both work on the workspace; a full disk refused, measured — **built; hosted CI green at `1c8ccbe` (run 39854518873); the owner's review of OD-3, OD-6 and OD-12 outstanding** |
 | **M5d.5** The agent-shaped escape suite and multi-identity evidence | a long-lived agent-shaped workload in `PROXY_ONLY` with declared origins; the hosted three-identity job; as built (§17) `make sandbox-agent-evidence`, the required hosted job `sandbox-agent`, `make sandbox-agent-mutations` -- no protocol, schema, dependency or product-code change | ADR-0050 §21's uid-boundary condition shown with real users — **built; the one-identity half passing locally; the three-identity half hosted-only, awaiting the owner's commit and hosted CI; OD-5 for the owner** — **hosted CI green at `49bb8f8`** (run 40134163102, 26 of 26 jobs, the three-identity half exercised): the condition shown; OD-5 still the owner's |
-| **M5d.6** Closeout | run release destroys the environment; the gated eval `m5d-sandbox-exec`; this ADR accepted | every checkpoint's evidence in hosted CI — **built (§§8, 9, 17): the release's teardown, `make sandbox-release-evidence`, the required hosted job `sandbox-release`, the gated eval; local gates passing; awaiting the owner's commit and hosted CI, then the owner's decisions (§19) before this ADR can be accepted** |
+| **M5d.6** Closeout | run release destroys the environment; the gated eval `m5d-sandbox-exec`; this ADR accepted | every checkpoint's evidence in hosted CI — **built (§§8, 9, 17): the release's teardown, `make sandbox-release-evidence`, the required hosted job `sandbox-release`, the gated eval; hosted CI green at `d3d52e7` (run 40235421487, 27 of 27 jobs); the owner's decisions taken on 2026-10-26 (§19); the closeout's change they called for — a lease's end ending its reaped runs' environments, W13, the restart's W5, three effect-bearing registry entries (§§8, 9, 17) — built, its local gates passing, awaiting the owner's commit and a hosted CI run of it; this ADR is not accepted until that run passes** |
 
 ### 19. Owner decisions
 
 | # | Decision | Recommendation |
 |---|---|---|
-| OD-1 | Who chooses where `process.exec` runs | **the kernel**: a `READY` environment means sandbox, nothing means M4d's host floor; no runtime field, no fallback |
-| OD-2 | A sandboxed executable's identity | **the operator's image manifest** (path → SHA-256) beside the image digest, proved from outside before every run; workspace scripts run only as arguments of a manifest executable |
-| OD-3 | Workspace ownership | **(a) a workspace group** for V1; (c) copy-in/copy-out later where stronger isolation is wanted — **built in M5d.4 as (a)** (§6): the group 10001, the workload's own gid; a root of root or the authority, mode `2770`; nothing repaired; brokered changes excluded while a workload may write — for the owner to confirm |
-| OD-4 | Modes B/C delivery | **the trusted launcher over the exec's stdin** — **built in M5d.3** (§7), with the consumer resolved against the image manifest (§7 item 2), for the owner to confirm |
-| OD-5 | Concurrency and long-lived workloads | **one workload at a time per environment**; long-lived workloads with handles decided at M5d.5 — **recommended and built in M5d.5 (§17): no handle.** A long-lived agent is one bounded invocation (start, then collection, M5d.2) whose children and daemons live within its wall clock (at most 600 s) and are ended by `reap` when it returns; nothing outlives the invocation, no public operation names a running workload, and `process.status`/`kill` stay the host's. A client-visible persistent handle, or a workload that outlives one invocation, would need its own decision and evidence — for the owner to confirm, not approved |
-| OD-6 | Disk quota | **an operator-provided bounded filesystem, measured by the probe**; refuse when unbounded — **built in M5d.4** (§10): measured by the authority and the probe, the mount's own root, within a quarter below the declared quota, again before every workload; `ENOSPC` changes nothing — for the owner to confirm |
-| OD-7 | `local` | **not in M5d**; with M6, by its own ADR |
-| OD-8 | Default budgets | per workload ≤ 600 s and 128 KiB per stream; per run 100 workloads and 3 600 s |
-| OD-9 | What a concrete `process.exec:<path>` grant means for a run whose environment is a sandbox | **resolved against the image manifest** (path → the pinned digest) when the run is admitted with an execution environment configured, instead of the host's resolver; until then only `process.exec:*` covers a workload and policy narrows it — **built in M5d.2** (§2) |
+| OD-1 | Who chooses where `process.exec` runs | **the kernel**: a `READY` environment means sandbox, nothing means M4d's host floor; no runtime field, no fallback — **approved by the owner, 2026-10-26** |
+| OD-2 | A sandboxed executable's identity | **the operator's image manifest** (path → SHA-256) beside the image digest, proved from outside before every run; workspace scripts run only as arguments of a manifest executable — **approved by the owner, 2026-10-26** |
+| OD-3 | Workspace ownership | **(a) a workspace group** for V1; (c) copy-in/copy-out later where stronger isolation is wanted — **built in M5d.4 as (a)** (§6): the group 10001, the workload's own gid; a root of root or the authority, mode `2770`; nothing repaired; brokered changes excluded while a workload may write — **approved by the owner as built, 2026-10-26** |
+| OD-4 | Modes B/C delivery | **the trusted launcher over the exec's stdin** — **built in M5d.3** (§7), with the consumer resolved against the image manifest (§7 item 2) — **approved by the owner as built, 2026-10-26** |
+| OD-5 | Concurrency and long-lived workloads | **one workload at a time per environment**; long-lived workloads with handles decided at M5d.5 — **recommended and built in M5d.5 (§17): no handle.** A long-lived agent is one bounded invocation (start, then collection, M5d.2) whose children and daemons live within its wall clock (at most 600 s) and are ended by `reap` when it returns; nothing outlives the invocation, no public operation names a running workload, and `process.status`/`kill` stay the host's. A client-visible persistent handle, or a workload that outlives one invocation, would need its own decision and evidence — **approved by the owner as built, 2026-10-26: no handle** |
+| OD-6 | Disk quota | **an operator-provided bounded filesystem, measured by the probe**; refuse when unbounded — **built in M5d.4** (§10): measured by the authority and the probe, the mount's own root, within a quarter below the declared quota, again before every workload; `ENOSPC` changes nothing — **approved by the owner as built, 2026-10-26** |
+| OD-7 | `local` | **not in M5d**; with M6, by its own ADR — **approved by the owner, 2026-10-26** |
+| OD-8 | Default budgets | per workload ≤ 600 s and 128 KiB per stream; per run 100 workloads and 3 600 s — **approved by the owner, 2026-10-26** |
+| OD-9 | What a concrete `process.exec:<path>` grant means for a run whose environment is a sandbox | **resolved against the image manifest** (path → the pinned digest) when the run is admitted with an execution environment configured, instead of the host's resolver; until then only `process.exec:*` covers a workload and policy narrows it — **built in M5d.2** (§2) — **approved by the owner as built, 2026-10-26** |
 | OD-10 | How a production authority gets an environment (M5d.2) | **the operator's file at start, the authority preparing a run's environment on its first permitted launch** (§2a); no runtime-facing lifecycle operation; preparation's bounded hold on the worker accepted as stated, or made a start/collection pair before M5d.6 — **approved by the owner, 2026-10-19, with conditions (below)** |
 | OD-11 | How `workspace_exec_hygiene` is kept in an environment (M5d.2) | **the pinned probe as a trusted launcher**, the per-tool arguments first, undoing invocations and unevidenced tools refused (§5a); the residuals it does not reach stated, never claimed — **approved by the owner, 2026-10-19, with conditions (below)** |
-| OD-12 | How a workload gets the workspace's umask (M5d.4) | **every launch through the pinned probe**, `DIRECT` included as the variable-free profile `direct`, every profile setting the umask `0007` before its `exec` (§5a); the target, its arguments, its identity, its descriptors and its standard input unchanged — **built in M5d.4; flagged for the owner's review, not approved** |
+| OD-12 | How a workload gets the workspace's umask (M5d.4) | **every launch through the pinned probe**, `DIRECT` included as the variable-free profile `direct`, every profile setting the umask `0007` before its `exec` (§5a); the target, its arguments, its identity, its descriptors and its standard input unchanged — **built in M5d.4; approved by the owner as built, 2026-10-26** |
 
 **Owner decisions, 2026-10-19 (M5d.2).** OD-10 and OD-11 are approved for
 M5d.2's implementation, on these conditions, each met as stated; the ADR
@@ -1402,6 +1552,57 @@ OD-11 stay approved with their conditions (above). A hosted run of M5d.6's
 committed implementation must pass first; the owner's decisions then decide
 this ADR's status.
 
+**Owner decisions, 2026-10-26 (the M5d closeout).** M5d.6's hosted CI passed
+at `d3d52e7` (run 40235421487, 27 of 27 jobs); that verified its evidence and
+approved nothing. The owner then decided, in the closeout's review, each
+explicitly:
+
+- **OD-1 to OD-9 and OD-12: approved exactly as recommended and built**
+  (the table above). OD-10 and OD-11 keep their 2026-10-19 approvals and
+  conditions.
+- **CD-1, `ReleaseRun`'s `Ack`: approved, no wire change.** `Ack` means the
+  run's authority is surrendered and its environment's destruction durable,
+  not that the broker confirmed the removal; an unconfirmed destruction stays
+  `DESTROYING` and is completed by the next preparation or start (§8). The
+  same holds for `ReleaseLease`'s `Ack` since the closeout.
+- **CD-2, `effect_bearing`: true** for `ReleaseRun`, `ReleaseLease` and
+  `AcquireLease` — each can now remove a container — with no idempotency key,
+  an empty payload and the kernel alone choosing what ends (§8).
+- **CD-3, a lease's end: the destruction's intent in the reaping
+  transaction, and one destruction performed by the request that ended the
+  lease** (§8). Every `REAPED` transition records its runs' live
+  environments `DESTROYING` in the same transaction; the request performs at
+  most one, holding the worker for at most the 120 s environment deadline —
+  the owner confirmed OD-10's bound for this path; the rest are completed by
+  the next preparation's reclamation or the next start; a restart destroys
+  every reaped run's `READY` environment, amending ADR-0047 §12's W5 (§9)
+  with M5a's and M5d's W11 evidence adjusted to it; and no expiry sweep is
+  added, so an expired lease's runs stay fenced, their environments idle,
+  until the session is acquired again or the authority restarts — a
+  documented residual (§§2a, 8).
+
+These decisions changed product code, the operation inventory's metadata and
+the gating evidence, so a hosted CI run of the committed closeout change is
+required before this ADR is accepted; none has run when this was written.
+The decisions are recorded here as the owner gave them; nothing in this ADR
+presents that run, or acceptance, as having happened.
+
+**Raised by the closeout's review; accepted by the owner as a residual,
+2026-10-26.** Building
+CD-3 showed one consequence its text did not name: a destruction a lease's
+end leaves `DESTROYING` excludes brokered changes in the workspace it shares
+(M5d.4, §6) until it is removed, so after a tenure that ended several runs
+with environments, a new tenure's `fs.write`, `fs.patch`, `fs.move` and
+`fs.delete` there are refused `SHARED_DIRECTORY` until enough later
+preparations, or a restart, have removed them (§8; measured by the unit
+cases named there). The implementation keeps the owner's choice as given —
+one destruction per request, no sweep — and keeps M5d.4's exclusion
+unrelaxed. The owner then decided, explicitly: **accept the hold as a
+documented residual and keep one destruction per request** — no later
+request completes pending destructions, and OD-10's bound is not extended
+again. The decision changes no code; the hosted run this ADR waits for
+measures the code as it is.
+
 ## Consequences
 
 **Positive.** The first code DireWolf runs at an agent's request runs where
@@ -1429,7 +1630,13 @@ transforms (§7). Since M5d.6 a released run's environment no longer idles —
 the release destroys it, holding the worker for that one destruction, at
 most the environment deadline — but a run a lease's end reaped still waits
 for the next preparation, and a release's `Ack` does not say the removal was
-confirmed (§8).
+confirmed (§8). Since the closeout a lease's end destroys one of its reaped
+runs' environments at once and records the rest `DESTROYING`, so a tenure
+with many leaves the rest to the next preparations or the next start; a
+lease that only expires ends nothing until its session is acquired again or
+the authority restarts; and three lease and run operations are
+effect-bearing, so a client that counts effect-bearing calls counts them
+(§8).
 
 ## Alternatives considered
 

@@ -5,7 +5,10 @@ evidence task -- `scripts/dw.py sandbox-release-evidence`: the real authority
 against the route tests' fake broker for its state machine, then the released
 broker, a real OCI runtime, the real authority over a real DWKP client and the
 released `serve --sandbox-config` -- and judges the evidence lines each passing
-case prints after its assertions held (ADR-0052 §§8, 17).
+case prints after its assertions held (ADR-0052 §§8, 17). Since the M5d
+closeout that includes what a lease's end ends: its reaped runs'
+environments, a takeover's in-flight workload, a restart's reaped `READY`
+environments and crash window W13 (the owner's CD-3).
 
 Every case the runner expects is listed here with the level it must be
 measured at and the outcome it must report. A case that silently stopped
@@ -81,6 +84,34 @@ _UNIT_EXPECTED: Final[dict[str, str]] = {
     "release-completes-its-runs-pending-destruction": "DESTROYED",
     **{f"release-crash-{w}-environment-destroyed-at-restart": "DESTROYED" for w in "ukl"},
     **{f"release-crash-{w}-never-rerun": "IDEMPOTENCY_KEY_REUSED" for w in "ukl"},
+    # The M5d closeout (CD-3): a lease's end ends its runs' environments.
+    "lease-release-stale-refused-nothing-destroyed": "STALE_EPOCH",
+    "lease-release-other-holder-refused-nothing-destroyed": "STALE_EPOCH",
+    "lease-release-reaps-and-destroys-durably-first": "DESTROYING-and-REAPED-at-the-order",
+    "lease-release-destroys-at-most-one-at-once": "1-destroyed-1-pending",
+    "lease-release-spares-another-sessions-environment": "READY",
+    "lease-release-audited-in-order": "run.reaped-then-destroy_intent-then-destroyed",
+    "lease-release-repeated-no-second-effect": "ACK-nothing-destroyed",
+    "lease-reaped-runs-launch-refused": "STALE_EPOCH",
+    "lease-pending-destruction-completed-by-the-next-preparation": "DESTROYED",
+    "lease-held-refused-nothing-destroyed": "LEASE_HELD",
+    "lease-rotation-ends-the-old-tenures-environment": "DESTROYED",
+    "lease-rotation-new-tenure-runs": "new-environment",
+    "lease-takeover-ends-the-old-tenures-environment": "DESTROYED-while-LAUNCHING",
+    "lease-takeover-in-flight-workload-settled-unknown": "OUTCOME_UNKNOWN",
+    "lease-takeover-key-never-reruns": "IDEMPOTENCY_KEY_REUSED",
+    "lease-takeover-never-inherits": "new-environment",
+    "lease-expiry-alone-fences-and-destroys-nothing": "STALE_EPOCH-and-READY-until-acquired",
+    "lease-expired-reacquire-destroys": "DESTROYED",
+    "restart-destroys-reaped-runs-ready-environments": "DESTROYED",
+    "restart-measures-no-reaped-environment": "not-measured",
+    "lease-release-broker-unreachable-pending": "DESTROYING",
+    "lease-release-broker-unreachable-completed-at-restart": "DESTROYED",
+    **{f"lease-crash-{w}-completed-at-restart": "DESTROYED" for w in "vkl"},
+    **{f"lease-crash-{w}-never-rerun": "IDEMPOTENCY_KEY_REUSED" for w in "vkl"},
+    "lease-end-during-preparation-environment-destroyed": "RUN_ENDED",
+    "lease-pending-destruction-holds-brokered-changes": "SHARED_DIRECTORY",
+    "lease-pending-destruction-removed-then-changes-proceed": "written",
 }
 
 # Real containers: the level each case is measured at, and what it reports.
@@ -119,6 +150,32 @@ _REAL_EXPECTED: Final[dict[str, tuple[str, str]]] = {
     "release-spares-another-runs-proxy-only-environment": (
         E2E,
         "relay-kept-and-reaching-its-origin",
+    ),
+    # The M5d closeout (CD-3): a lease's end, a takeover, a restart, W13.
+    "lease-release-over-dwkp-stale-refused": (E2E, "STALE_EPOCH"),
+    "lease-release-over-dwkp-other-holder-refused": (E2E, "STALE_EPOCH"),
+    "lease-release-over-dwkp-destroys-one-at-once": (E2E, "1-removed-1-pending"),
+    "lease-release-over-dwkp-spares-another-session": (E2E, "container-kept"),
+    "lease-release-over-dwkp-spares-foreign-containers": (
+        E2E,
+        "unlabelled-and-another-stores-kept",
+    ),
+    "lease-release-over-dwkp-repeated-no-second-effect": (E2E, "ACK-nothing-destroyed"),
+    "lease-reaped-run-launch-refused-over-dwkp": (E2E, "STALE_EPOCH"),
+    "lease-pending-destruction-removed-by-the-next-preparation": (E2E, "container-removed"),
+    "lease-takeover-in-flight-agent-running": (REAL, "plan-workers-and-daemon-as-10001"),
+    "lease-takeover-ends-in-flight-workload-and-descendants": (
+        REAL,
+        "container-removed-with-every-process",
+    ),
+    "lease-takeover-in-flight-workload-settled-unknown": (REAL, "OUTCOME_UNKNOWN"),
+    "lease-takeover-workload-never-rerun": (REAL, "IDEMPOTENCY_KEY_REUSED"),
+    "restart-destroys-a-reaped-runs-ready-environment": (REAL, "container-removed"),
+    "restart-measures-no-reaped-environment": (REAL, "not-measured"),
+    "lease-crash-v-completed-at-restart": (REAL, "container-removed"),
+    "lease-release-removes-the-proxy-only-environment-relay-and-setup": (
+        E2E,
+        "every-role-removed",
     ),
 }
 

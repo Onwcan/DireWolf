@@ -171,7 +171,8 @@ INVENTORY: Final[tuple[SecurityProperty, ...]] = (
         "A real OCI runtime over real DWKP: the launch in the authority's measured "
         "environment as uid 10001 and the pinned executable, never the host; a "
         "release destroying exactly its run's environment, durably first, an "
-        "in-flight workload and its descendants with it, crashes and a lost broker "
+        "in-flight workload and its descendants with it, and a lease's end ending its "
+        "reaped runs' environments the same way; crashes and a lost broker "
         "reconciled, nothing replayed, nothing foreign touched.",
     ),
     # --- pending: the mechanism does not exist yet -------------------------

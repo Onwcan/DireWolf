@@ -1173,39 +1173,48 @@ fn a_preparation_past_its_deadline_is_unknown_refused_and_never_on_the_host() {
 #[test]
 fn an_ended_runs_environment_is_reclaimed_and_live_environments_are_bounded() {
     let mut fx = fixture();
-    let first = fx.run("r1", &[GRANT]);
-    let body = fx.ran(&first, "a1", &call(FIXTURE, &[]));
-    let (_, out) = result(&body);
-    let ended = out.environment_id.clone();
+    // A lease's end reaps its runs and records each one's environment
+    // DESTROYING at once; the request removes at most one (the M5d closeout,
+    // ADR-0052 §8), and the next preparation reclaims what is still pending.
+    let mut ended = Vec::new();
+    for (n, key) in [("r1", "a1"), ("r1b", "a2")] {
+        let run = fx.run(n, &[GRANT]);
+        let body = fx.ran(&run, key, &call(FIXTURE, &[]));
+        ended.push((run, result(&body).1.environment_id.clone()));
+    }
     let (caller, session, epoch) = (fx.caller.unwrap(), fx.session.clone(), fx.epoch);
-    // Since M5d.6 a run's release destroys its environment at once; a run a
-    // lease's end reaps does not, and its environment idles until the next
-    // preparation ends it.
     assert!(matches!(
         fx.authority()
             .release_lease(&caller, &session, epoch)
             .unwrap(),
         Reply::Done(())
     ));
-    assert_eq!(
+    let state_of = |fx: &Fixture, environment: &EnvironmentId| {
         fx.one(&format!(
-            "SELECT state FROM run WHERE run_id = '{}'",
-            first.as_str()
-        )),
-        "REAPED"
-    );
-    assert!(fx.fake.asked_for("environment.destroy").is_empty());
+            "SELECT state || ':' || failure FROM environment WHERE environment_id = '{}'",
+            environment.as_str()
+        ))
+    };
+    let mut states: Vec<String> = ended.iter().map(|(_, e)| state_of(&fx, e)).collect();
+    states.sort();
+    assert_eq!(states, ["DESTROYED:REAPED", "DESTROYING:REAPED"]);
+    for (run, _) in &ended {
+        assert_eq!(
+            fx.one(&format!(
+                "SELECT state FROM run WHERE run_id = '{}'",
+                run.as_str()
+            )),
+            "REAPED"
+        );
+    }
+    assert_eq!(fx.fake.asked_for("environment.destroy").len(), 1);
     fx.lease();
     let second = fx.run("r2", &[GRANT]);
     let _ = fx.ran(&second, "b1", &call(FIXTURE, &[]));
-    assert_eq!(
-        fx.one(&format!(
-            "SELECT state || ':' || failure FROM environment WHERE environment_id = '{}'",
-            ended.as_str()
-        )),
-        "DESTROYED:RECLAIMED"
-    );
-    assert_eq!(fx.fake.asked_for("environment.destroy").len(), 1);
+    for (_, environment) in &ended {
+        assert_eq!(state_of(&fx, environment), "DESTROYED:REAPED");
+    }
+    assert_eq!(fx.fake.asked_for("environment.destroy").len(), 2);
     evidence("ended-runs-environment-reclaimed", "destroyed");
     // Live environments are bounded across runs: with as many as the broker
     // supervises, another launch is refused before anything is prepared.
@@ -1735,15 +1744,28 @@ fn a_residue_not_proved_clean_is_answered_and_takes_the_environment_down() {
 
 /// W8–W11 (ADR-0052 §9) through the public route: a crash at each window,
 /// then a restart -- the workload `UNKNOWN` (or its outcome kept), its
-/// environment destroyed when nothing proves it quiet, and the key never
-/// run again.
+/// environment destroyed because nothing proves it quiet, and the key never
+/// run again. Since the M5d closeout the restart destroys a clean one too
+/// (W11): the restart reaps its run, which can never use it again.
 #[test]
 fn a_crash_in_every_window_of_the_public_route_is_never_run_again() {
-    for (point, state, destroyed) in [
-        (CrashPoint::WorkloadAfterIntent, "UNKNOWN", true),
-        (CrashPoint::WorkloadAfterStart, "UNKNOWN", true),
-        (CrashPoint::WorkloadAfterBroker, "UNKNOWN", true),
-        (CrashPoint::WorkloadAfterOutcome, "COMPLETED", false),
+    for (point, state, why) in [
+        (
+            CrashPoint::WorkloadAfterIntent,
+            "UNKNOWN",
+            "WORKLOAD_INTERRUPTED",
+        ),
+        (
+            CrashPoint::WorkloadAfterStart,
+            "UNKNOWN",
+            "WORKLOAD_INTERRUPTED",
+        ),
+        (
+            CrashPoint::WorkloadAfterBroker,
+            "UNKNOWN",
+            "WORKLOAD_INTERRUPTED",
+        ),
+        (CrashPoint::WorkloadAfterOutcome, "COMPLETED", "REAPED"),
     ] {
         let mut fx = Fixture::with(custom(), Some(stop_at(point)));
         fx.attach(IMAGE);
@@ -1772,14 +1794,13 @@ fn a_crash_in_every_window_of_the_public_route_is_never_run_again() {
             state,
             "{point}"
         );
-        let environment_state = fx.one(&format!(
-            "SELECT state FROM environment WHERE environment_id = '{}'",
-            environment.as_str()
-        ));
         assert_eq!(
-            environment_state == "DESTROYED",
-            destroyed,
-            "{point}: {environment_state}"
+            fx.one(&format!(
+                "SELECT state || ':' || failure FROM environment WHERE environment_id = '{}'",
+                environment.as_str()
+            )),
+            format!("DESTROYED:{why}"),
+            "{point}"
         );
         // The retry of the same key, after the restart: refused, never run.
         // The run is fenced by the new epoch; a run of the new one asks.

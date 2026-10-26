@@ -1039,9 +1039,10 @@ reason = "NO_MATCHING_RULE"
             )
             .unwrap();
         assert_eq!(state, "COMPLETED");
-        // A clean residue left nothing to destroy: the environment was
-        // measured again at the restart and kept.
-        assert_eq!(lab.state_of(&environment), EnvironmentState::Ready);
+        // A clean residue left nothing for the outcome to destroy; the
+        // restart reaped the run, and since the M5d closeout its environment
+        // with it (ADR-0052 §8) -- the outcome is kept all the same.
+        assert_eq!(lab.state_of(&environment), EnvironmentState::Destroyed);
         evidence("crash-w11-outcome-kept", "completed");
     }
 
@@ -1496,14 +1497,47 @@ reason = "NO_MATCHING_RULE"
         );
         evidence("public-no-lifecycle-operation", "UNKNOWN_OPERATION");
 
-        // A run a lease's end reaped leaves its environment idle until the
-        // authority next prepares one; then it is destroyed first (ADR-0052
-        // §2a). (Since M5d.6 a run's own release destroys it at once:
-        // `release::`, `make sandbox-release-evidence`.)
+        // An environment whose destruction is still pending is destroyed
+        // before the authority next prepares one (ADR-0052 §2a). Since the
+        // M5d closeout a lease's end records every reaped run's environment
+        // DESTROYING and removes at most one at once (`release::`, `make
+        // sandbox-release-evidence`): a second run in the session leaves one
+        // pending for the reclamation.
+        let first = a.run.clone();
+        let n = next_message();
+        let admitted = a
+            .client
+            .call(&super::state_support::admit_msg(
+                &a.session,
+                a.epoch,
+                &format!("admit-1b-{n}"),
+                "operator",
+                &[],
+                &["process.exec:*"],
+                n,
+            ))
+            .body;
+        let DwkpBody::RunGrant(grant) = admitted else {
+            panic!("a second run: {admitted:?}")
+        };
+        a.run = grant.run_id;
+        let body = a.exec("p-second", &call(FIXTURE, &["workload-identity"]));
+        let second: String = super::state_support::raw(&lab.dir.state())
+            .query_row(
+                "SELECT container FROM environment WHERE environment_id = ?1",
+                [sandboxed(&body).environment_id.as_str()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        a.run = first;
         let release = super::state_support::release_lease_msg(&a.session, a.epoch);
         let released = a.client.call(&release).body;
         assert!(matches!(released, DwkpBody::Ack(_)), "{released:?}");
-        assert!(lab.runtime.exists(&container), "reaped, still idle");
+        let left: Vec<&String> = [&container, &second]
+            .into_iter()
+            .filter(|c| lab.runtime.exists(c))
+            .collect();
+        assert_eq!(left.len(), 1, "one removed at once, one pending: {left:?}");
         let mut c = Peer::admit(served.path(), 3, &["process.exec:*"], binder(&served));
         let body = c.exec("c-1", &call(FIXTURE, &["workload-identity"]));
         assert_eq!(
@@ -1511,8 +1545,8 @@ reason = "NO_MATCHING_RULE"
             dwk_proto::dwkp::sandboxops::ResidueVerdict::Pass
         );
         assert!(
-            !lab.runtime.exists(&container),
-            "the ended run's environment was reclaimed"
+            !lab.runtime.exists(&container) && !lab.runtime.exists(&second),
+            "the ended run's pending environment was reclaimed"
         );
         evidence(
             "public-exec-ended-runs-environment-reclaimed",
@@ -3729,6 +3763,338 @@ reason = "NO_MATCHING_RULE"
             assert_eq!(lab.state_of(&environment), EnvironmentState::Destroyed);
             evidence(
                 "release-broker-lost-completed-at-restart",
+                "container-removed",
+                REAL,
+                "authority-reconciliation",
+            );
+        }
+
+        // ---- the M5d closeout: a lease's end ends its runs' environments ----
+
+        /// A second run in `peer`'s session, under its lease, and the
+        /// container of the environment a workload of it ran in.
+        fn second_run(peer: &mut Peer, lab: &Lab, key: &str) -> (RunId, String) {
+            let first = peer.run.clone();
+            let n = next_message();
+            let admitted = peer
+                .client
+                .call(&admit_msg(
+                    &peer.session,
+                    peer.epoch,
+                    &format!("second-{n}"),
+                    "operator",
+                    &[],
+                    &["process.exec:*"],
+                    n,
+                ))
+                .body;
+            let DwkpBody::RunGrant(grant) = admitted else {
+                panic!("a second run: {admitted:?}")
+            };
+            peer.run = grant.run_id.clone();
+            let body = peer.exec(key, &call(FIXTURE, &["workload-identity"]));
+            let container = container_of(lab, &sandboxed(&body).environment_id);
+            peer.run = first;
+            (grant.run_id, container)
+        }
+
+        fn environment_of(lab: &Lab, container: &str) -> EnvironmentId {
+            EnvironmentId::parse(&one(
+                lab,
+                "SELECT environment_id FROM environment WHERE container = ?1",
+                container,
+            ))
+            .unwrap()
+        }
+
+        #[test]
+        #[ignore = "needs a real OCI runtime: make sandbox-release-evidence"]
+        fn a_lease_end_over_dwkp_destroys_its_runs_environments_and_nothing_else() {
+            let mut lab = Lab::new("m5d-lease", WorkloadBudget::default());
+            let served = lab.serve();
+            let mut a = Peer::admit(served.path(), 1, &["process.exec:*"], binder(&served));
+            let mut b = Peer::admit(served.path(), 2, &["process.exec:*"], binder(&served));
+            let body = a.exec("a-1", &call(FIXTURE, &["workload-identity"]));
+            let first = container_of(&lab, &sandboxed(&body).environment_id);
+            lab.reap_later(&first);
+            let (second_id, second) = second_run(&mut a, &lab, "a-2");
+            let body = b.exec("b-1", &call(FIXTURE, &["workload-identity"]));
+            let other = container_of(&lab, &sandboxed(&body).environment_id);
+            let first_env = environment_of(&lab, &first);
+            let decoys = Decoys::new(
+                &lab.runtime,
+                &[
+                    vec![],
+                    vec![
+                        ("io.direwolf.owner", "direwolf"),
+                        ("io.direwolf.store", "0badc0de"),
+                        ("io.direwolf.environment", first_env.as_str()),
+                        ("io.direwolf.run", a.run.as_str()),
+                        ("io.direwolf.role", "environment"),
+                    ],
+                ],
+            );
+
+            // A fenced caller ends nothing.
+            let later = Epoch::new(a.epoch.get() + 1).unwrap();
+            let refused = a
+                .client
+                .call(&super::super::state_support::release_lease_msg(
+                    &a.session, later,
+                ))
+                .body;
+            assert!(stale(&refused), "{refused:?}");
+            evidence(
+                "lease-release-over-dwkp-stale-refused",
+                "STALE_EPOCH",
+                E2E,
+                "authority-lease-fence",
+            );
+            let refused = b
+                .client
+                .call(&super::super::state_support::release_lease_msg(
+                    &a.session, a.epoch,
+                ))
+                .body;
+            assert!(stale(&refused), "{refused:?}");
+            assert!(lab.runtime.exists(&first) && lab.runtime.exists(&second));
+            assert_eq!(intents(&lab), 0);
+            evidence(
+                "lease-release-over-dwkp-other-holder-refused",
+                "STALE_EPOCH",
+                E2E,
+                "authority-lease-fence",
+            );
+
+            // The holder's release: both runs reaped, both environments'
+            // destruction durable, one removed when it is answered.
+            let released = a
+                .client
+                .call(&super::super::state_support::release_lease_msg(
+                    &a.session, a.epoch,
+                ))
+                .body;
+            assert!(matches!(released, DwkpBody::Ack(_)), "{released:?}");
+            assert_eq!(run_state(&lab, &a.run), "REAPED");
+            assert_eq!(run_state(&lab, &second_id), "REAPED");
+            let left: Vec<&String> = [&first, &second]
+                .into_iter()
+                .filter(|c| lab.runtime.exists(c))
+                .collect();
+            assert_eq!(left.len(), 1, "{left:?}");
+            assert_eq!(
+                ended(&lab, &environment_of(&lab, left[0])),
+                "DESTROYING:REAPED"
+            );
+            evidence(
+                "lease-release-over-dwkp-destroys-one-at-once",
+                "1-removed-1-pending",
+                E2E,
+                "authority-lease-reap-teardown",
+            );
+            assert!(lab.runtime.exists(&other));
+            for decoy in &decoys.ids {
+                assert!(lab.runtime.exists(decoy), "{decoy} was removed");
+            }
+            evidence(
+                "lease-release-over-dwkp-spares-another-session",
+                "container-kept",
+                E2E,
+                "authority-run-association",
+            );
+            evidence(
+                "lease-release-over-dwkp-spares-foreign-containers",
+                "unlabelled-and-another-stores-kept",
+                E2E,
+                "broker-exact-labels",
+            );
+            // A retry ends nothing more; the reaped runs regain nothing.
+            let before = intents(&lab);
+            let again = a
+                .client
+                .call(&super::super::state_support::release_lease_msg(
+                    &a.session, a.epoch,
+                ))
+                .body;
+            assert!(matches!(again, DwkpBody::Ack(_)), "{again:?}");
+            assert_eq!(intents(&lab), before);
+            evidence(
+                "lease-release-over-dwkp-repeated-no-second-effect",
+                "ACK-nothing-destroyed",
+                E2E,
+                "authority-release-idempotent",
+            );
+            let environments = rows(&lab, "SELECT count(*) FROM environment");
+            let body = a.exec("a-3", &call(FIXTURE, &["workload-identity"]));
+            assert_eq!(refusal(&body), "STALE_EPOCH");
+            assert_eq!(rows(&lab, "SELECT count(*) FROM environment"), environments);
+            evidence(
+                "lease-reaped-run-launch-refused-over-dwkp",
+                "STALE_EPOCH",
+                E2E,
+                "authority-lease-fence",
+            );
+            // The next preparation removes the pending one.
+            let mut c = Peer::admit(served.path(), 3, &["process.exec:*"], binder(&served));
+            let body = c.exec("c-1", &call(FIXTURE, &["workload-identity"]));
+            assert!(!lab.runtime.exists(&first) && !lab.runtime.exists(&second));
+            assert!(lab.runtime.exists(&other));
+            evidence(
+                "lease-pending-destruction-removed-by-the-next-preparation",
+                "container-removed",
+                E2E,
+                "authority-reclamation",
+            );
+            lab.reap_later(&container_of(&lab, &sandboxed(&body).environment_id));
+            drop(decoys);
+            served.stop();
+        }
+
+        #[test]
+        #[ignore = "needs a real OCI runtime: make sandbox-release-evidence"]
+        fn a_takeover_a_restart_or_a_crash_ends_a_reaped_runs_environment() {
+            let mut lab = Lab::new("m5d-takeover", WorkloadBudget::default());
+            // The takeover: the holder's agent runs; its lease expires; a new
+            // holder acquires the session, reaping the old tenure's run.
+            let (caller, session, epoch, run) = admitted(&mut lab);
+            let message = exec_message(
+                (&session, &run, epoch),
+                "takeover-1",
+                &call(FIXTURE, &["workload-agent", "300"]),
+            );
+            let Dispatched::Parked(mut parked) = lab
+                .authority()
+                .dispatch_parkable(&caller, &message)
+                .unwrap()
+            else {
+                panic!("a running launch is parked")
+            };
+            let environment = EnvironmentId::parse(&one(
+                &lab,
+                "SELECT environment_id FROM environment WHERE run_id = ?1",
+                run.as_str(),
+            ))
+            .unwrap();
+            let container = container_of(&lab, &environment);
+            lab.reap_later(&container);
+            for line in AGENT {
+                lab.runtime.awaited(&container, line);
+            }
+            evidence(
+                "lease-takeover-in-flight-agent-running",
+                "plan-workers-and-daemon-as-10001",
+                REAL,
+                "runtime-census",
+            );
+            lab.clock
+                .advance(dwkd_authority::state::DEFAULT_LEASE_TTL_MS + 1);
+            let since = Instant::now();
+            let taker = lab.authority().connect(subject(1000));
+            let Reply::Done(taken) = lab.authority().acquire_lease(&taker, &session).unwrap()
+            else {
+                panic!("a takeover of an expired lease")
+            };
+            assert_eq!(run_state(&lab, &run), "REAPED");
+            assert!(
+                !lab.runtime.exists(&container),
+                "the takeover removed the old tenure's environment"
+            );
+            assert_eq!(ended(&lab, &environment), "DESTROYED:REAPED");
+            evidence(
+                "lease-takeover-ends-in-flight-workload-and-descendants",
+                "container-removed-with-every-process",
+                REAL,
+                "authority-lease-reap-teardown",
+            );
+            let deadline = Instant::now() + Duration::from_secs(120);
+            let body = loop {
+                if let Some(body) = lab.authority().resume(&mut parked).unwrap() {
+                    break body;
+                }
+                assert!(Instant::now() < deadline, "the launch was never answered");
+                std::thread::sleep(Duration::from_millis(250));
+            };
+            let DwkpBody::ToolFailedV5(failure) = &body else {
+                panic!("not failed: {body:?}")
+            };
+            assert_eq!(failure.reason.as_str(), "OUTCOME_UNKNOWN");
+            assert!(
+                since.elapsed() < Duration::from_secs(120),
+                "{:?}",
+                since.elapsed()
+            );
+            evidence(
+                "lease-takeover-in-flight-workload-settled-unknown",
+                "OUTCOME_UNKNOWN",
+                REAL,
+                "authority-ledger",
+            );
+            // The new holder inherits nothing: the key is spent.
+            let next = again(&mut lab, &taker, &session, taken);
+            let workloads = workload_rows(&lab);
+            let message = exec_message(
+                (&session, &next, taken),
+                "takeover-1",
+                &call(FIXTURE, &["workload-agent", "300"]),
+            );
+            let Dispatched::Answer(body) =
+                lab.authority().dispatch_parkable(&taker, &message).unwrap()
+            else {
+                panic!("a replayed key was parked")
+            };
+            assert_eq!(refusal(&body), "IDEMPOTENCY_KEY_REUSED");
+            assert_eq!(workload_rows(&lab), workloads);
+            evidence(
+                "lease-takeover-workload-never-rerun",
+                "IDEMPOTENCY_KEY_REUSED",
+                REAL,
+                "authority-shared-idempotency-namespace",
+            );
+
+            // A restart reaps every run, and their READY environments with
+            // them: destroyed by their labels, never measured again and kept.
+            let (_, _, _, kept) = admitted(&mut lab);
+            let (environment, container) = lab.ready(&kept);
+            let measured = |lab: &Lab| {
+                audit_records(&lab.dir.state(), "environment.measured")
+                    .iter()
+                    .filter(|r| {
+                        super::super::state_support::text(r, "environment_id")
+                            == Some(environment.as_str())
+                    })
+                    .count()
+            };
+            let before = measured(&lab);
+            lab.start(None);
+            assert!(!lab.runtime.exists(&container));
+            assert_eq!(ended(&lab, &environment), "DESTROYED:REAPED");
+            evidence(
+                "restart-destroys-a-reaped-runs-ready-environment",
+                "container-removed",
+                REAL,
+                "authority-start-teardown",
+            );
+            assert_eq!(measured(&lab), before);
+            evidence(
+                "restart-measures-no-reaped-environment",
+                "not-measured",
+                REAL,
+                "authority-start-teardown",
+            );
+
+            // W13: the lease's end and the destruction durable, nothing sent.
+            lab.start(Some(stop_at(CrashPoint::ReapAfterIntent)));
+            let (caller, session, epoch, run) = admitted(&mut lab);
+            let (environment, container) = lab.ready(&run);
+            poisoned(lab.authority().release_lease(&caller, &session, epoch));
+            assert_eq!(run_state(&lab, &run), "REAPED");
+            assert_eq!(ended(&lab, &environment), "DESTROYING:REAPED");
+            assert!(lab.runtime.exists(&container), "nothing was sent");
+            lab.start(None);
+            assert!(!lab.runtime.exists(&container));
+            assert_eq!(ended(&lab, &environment), "DESTROYED:REAPED");
+            evidence(
+                "lease-crash-v-completed-at-restart",
                 "container-removed",
                 REAL,
                 "authority-reconciliation",

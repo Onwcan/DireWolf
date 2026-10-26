@@ -122,10 +122,13 @@ def _printed(source: Path, suite_marker: str) -> set[str]:
     text = source.read_text(encoding="utf-8")
     start = text.index(suite_marker)
     names = set(re.findall(r"evidence\(\s*(?:RELEASE_SUITE,\s*)?\"([a-z0-9-]+)\"", text[start:]))
-    for template in re.findall(
-        r"evidence\(\s*&format!\(\s*\"(release-crash-\{\}-[a-z-]+)\"", text[start:]
-    ):
-        names |= {template.replace("{}", letter) for letter in "ukl"}
+    # A release's crash windows are W12 (`u`), W6 and W7; a lease's end's
+    # (the M5d closeout) W13 (`v`), W6 and W7.
+    for prefix, letters in (("release", "ukl"), ("lease", "vkl")):
+        for template in re.findall(
+            rf"evidence\(\s*&format!\(\s*\"({prefix}-crash-\{{\}}-[a-z-]+)\"", text[start:]
+        ):
+            names |= {template.replace("{}", letter) for letter in letters}
     for template in re.findall(r"&format!\(\"(release-\{case\}-[a-z-]+)\"\)", text[start:]):
         names |= {
             template.replace("{case}", case) for case in ("broker-unreachable", "answer-lost")

@@ -586,3 +586,486 @@ fn a_crash_in_every_window_of_a_release_is_completed_at_restart_and_nothing_reru
         );
     }
 }
+
+// ---- the M5d closeout: a lease's end ends its runs' environments (CD-3) ------
+
+/// The lease's own holder, at its epoch, and its session.
+fn holder(fx: &Fixture) -> (CallerContext, SessionId, Epoch) {
+    (fx.caller.unwrap(), fx.session.clone(), fx.epoch)
+}
+
+/// An environment's state and its destruction's reason.
+fn ended_as(fx: &Fixture, environment: &EnvironmentId) -> String {
+    fx.one(&format!(
+        "SELECT state || ':' || COALESCE(failure, '') FROM environment \
+         WHERE environment_id = '{}'",
+        environment.as_str()
+    ))
+}
+
+/// A run of this session, with an environment a workload ran in.
+fn ran_in(fx: &mut Fixture, name: &str, key: &str) -> (RunId, EnvironmentId) {
+    let run = fx.run(name, &[GRANT]);
+    let body = fx.ran(&run, key, &call(FIXTURE, &[]));
+    let environment = result(&body).1.environment_id.clone();
+    (run, environment)
+}
+
+/// Another session's run, with its environment, under its own lease; the
+/// fixture's own holder is restored after.
+fn foreign_run(fx: &mut Fixture) -> (RunId, EnvironmentId) {
+    let (caller, session, epoch) = holder(fx);
+    let other = SessionId::from_uuid(uuid(3)).unwrap();
+    fx.authority()
+        .operator()
+        .bind_session_workspace(&other, &WorkspaceId::new("ws").unwrap())
+        .unwrap();
+    fx.session = other;
+    fx.lease();
+    let found = ran_in(fx, "fo", "fo1");
+    fx.session = session;
+    fx.caller = Some(caller);
+    fx.epoch = epoch;
+    found
+}
+
+#[test]
+fn a_lease_release_ends_its_runs_environments_durably_first_and_one_at_once() {
+    let mut fx = fixture();
+    let (a, env_a) = ran_in(&mut fx, "ra", "a1");
+    let (b, env_b) = ran_in(&mut fx, "rb", "b1");
+    let (foreign, env_foreign) = foreign_run(&mut fx);
+    let (caller, session, epoch) = holder(&fx);
+
+    // A fenced caller ends nothing: a stale epoch, another holder.
+    let later = Epoch::new(epoch.get() + 1).unwrap();
+    let reply = fx
+        .authority()
+        .release_lease(&caller, &session, later)
+        .unwrap();
+    assert!(matches!(reply, Reply::Refused(RefusalReason::StaleEpoch)));
+    evidence(
+        "lease-release-stale-refused-nothing-destroyed",
+        "STALE_EPOCH",
+        "authority-lease-fence",
+    );
+    let stranger = fx.authority().connect(AuthenticatedSubject::unix_uid(1000));
+    let reply = fx
+        .authority()
+        .release_lease(&stranger, &session, epoch)
+        .unwrap();
+    assert!(matches!(reply, Reply::Refused(RefusalReason::StaleEpoch)));
+    assert!(fx.fake.destroyed.lock().unwrap().is_empty());
+    assert_eq!(fx.run_state(&a), "ACTIVE");
+    evidence(
+        "lease-release-other-holder-refused-nothing-destroyed",
+        "STALE_EPOCH",
+        "authority-lease-fence",
+    );
+
+    // The holder's release: both runs reaped and both environments'
+    // destruction durable in its transaction; the broker asked once.
+    let reply = fx
+        .authority()
+        .release_lease(&caller, &session, epoch)
+        .unwrap();
+    assert!(matches!(reply, Reply::Done(())));
+    assert_eq!(fx.run_state(&a), "REAPED");
+    assert_eq!(fx.run_state(&b), "REAPED");
+    let destroyed = fx.fake.destroyed.lock().unwrap().clone();
+    assert_eq!(destroyed.len(), 1, "{destroyed:?}");
+    assert!([&env_a, &env_b].contains(&&destroyed[0].environment));
+    assert_eq!(
+        destroyed[0].states,
+        ("DESTROYING".to_owned(), "REAPED".to_owned())
+    );
+    evidence(
+        "lease-release-reaps-and-destroys-durably-first",
+        "DESTROYING-and-REAPED-at-the-order",
+        "authority-ledger-intent-first",
+    );
+    let mut ends = vec![ended_as(&fx, &env_a), ended_as(&fx, &env_b)];
+    ends.sort();
+    assert_eq!(ends, ["DESTROYED:REAPED", "DESTROYING:REAPED"]);
+    evidence(
+        "lease-release-destroys-at-most-one-at-once",
+        "1-destroyed-1-pending",
+        "authority-bounded-teardown",
+    );
+    assert_eq!(fx.state_of(&env_foreign), "READY");
+    assert_eq!(fx.run_state(&foreign), "ACTIVE");
+    evidence(
+        "lease-release-spares-another-sessions-environment",
+        "READY",
+        "authority-run-association",
+    );
+    let events = fx.events();
+    let first = |event: AuditEvent| events.iter().position(|e| e == event.as_str()).unwrap();
+    let last = |event: AuditEvent| events.iter().rposition(|e| e == event.as_str()).unwrap();
+    assert!(last(AuditEvent::RunReaped) < last(AuditEvent::EnvironmentDestroyIntent));
+    assert!(first(AuditEvent::EnvironmentDestroyIntent) < last(AuditEvent::EnvironmentDestroyed));
+    assert!(last(AuditEvent::EnvironmentDestroyIntent) < last(AuditEvent::LeaseReleased));
+    evidence(
+        "lease-release-audited-in-order",
+        "run.reaped-then-destroy_intent-then-destroyed",
+        "authority-audit",
+    );
+
+    // A retry is acknowledged and ends nothing more.
+    let intents = count(&fx.events(), AuditEvent::EnvironmentDestroyIntent);
+    let reply = fx
+        .authority()
+        .release_lease(&caller, &session, epoch)
+        .unwrap();
+    assert!(matches!(reply, Reply::Done(())));
+    assert_eq!(fx.fake.destroyed.lock().unwrap().len(), 1);
+    assert_eq!(
+        count(&fx.events(), AuditEvent::EnvironmentDestroyIntent),
+        intents
+    );
+    evidence(
+        "lease-release-repeated-no-second-effect",
+        "ACK-nothing-destroyed",
+        "authority-release-idempotent",
+    );
+    // The reaped runs regain nothing.
+    let prepares = fx.fake.asked_for("environment.prepare").len();
+    let body = fx.answered(&a, "a2", &call(FIXTURE, &[]));
+    assert_eq!(refused(&body), R::StaleEpoch);
+    assert_eq!(fx.fake.asked_for("environment.prepare").len(), prepares);
+    evidence(
+        "lease-reaped-runs-launch-refused",
+        "STALE_EPOCH",
+        "authority-lease-fence",
+    );
+    // The next preparation completes what is pending.
+    fx.lease();
+    let _ = ran_in(&mut fx, "rc", "c1");
+    assert_eq!(ended_as(&fx, &env_a), "DESTROYED:REAPED");
+    assert_eq!(ended_as(&fx, &env_b), "DESTROYED:REAPED");
+    assert_eq!(fx.state_of(&env_foreign), "READY");
+    evidence(
+        "lease-pending-destruction-completed-by-the-next-preparation",
+        "DESTROYED",
+        "authority-reclamation",
+    );
+}
+
+#[test]
+fn a_new_tenure_ends_the_old_tenures_environments_and_inherits_nothing() {
+    let mut fx = fixture();
+    // A live lease held by another is refused before anything is looked at.
+    let (a, env_a) = ran_in(&mut fx, "ra", "a1");
+    let (_, session, _) = holder(&fx);
+    let stranger = fx.authority().connect(AuthenticatedSubject::unix_uid(1000));
+    let reply = fx.authority().acquire_lease(&stranger, &session).unwrap();
+    assert!(matches!(reply, Reply::Refused(RefusalReason::LeaseHeld)));
+    assert_eq!(fx.state_of(&env_a), "READY");
+    assert!(fx.fake.destroyed.lock().unwrap().is_empty());
+    evidence(
+        "lease-held-refused-nothing-destroyed",
+        "LEASE_HELD",
+        "authority-lease-holder",
+    );
+    // The holder's rotation reaps its old tenure's run and ends its
+    // environment; the new tenure's run gets a new one.
+    let (caller, _, _) = holder(&fx);
+    let Reply::Done(rotated) = fx.authority().acquire_lease(&caller, &session).unwrap() else {
+        panic!("a rotation")
+    };
+    fx.epoch = rotated;
+    assert_eq!(fx.run_state(&a), "REAPED");
+    assert_eq!(ended_as(&fx, &env_a), "DESTROYED:REAPED");
+    evidence(
+        "lease-rotation-ends-the-old-tenures-environment",
+        "DESTROYED",
+        "authority-lease-reap-teardown",
+    );
+    let b = fx.run("rb", &[GRANT]);
+    let env_b = fx.ready(&b);
+    assert_ne!(env_b, env_a);
+    evidence(
+        "lease-rotation-new-tenure-runs",
+        "new-environment",
+        "authority-run-association",
+    );
+    // A takeover after expiry, while the old holder's workload runs: the
+    // environment is destroyed under it, the workload settled UNKNOWN, and
+    // the new holder inherits neither.
+    fx.fake.running(1);
+    let Dispatched::Parked(parked) = fx.exec(&b, "w1", &call(FIXTURE, &["workload-daemon"])) else {
+        panic!("a running launch is parked")
+    };
+    fx.clock.advance(crate::state::DEFAULT_LEASE_TTL_MS + 1);
+    let new_holder = fx.authority().connect(AuthenticatedSubject::unix_uid(1000));
+    let Reply::Done(taken) = fx.authority().acquire_lease(&new_holder, &session).unwrap() else {
+        panic!("a takeover of an expired lease")
+    };
+    assert_eq!(fx.run_state(&b), "REAPED");
+    assert_eq!(ended_as(&fx, &env_b), "DESTROYED:REAPED");
+    let orders = fx.fake.asked_for("environment.destroy");
+    assert_eq!(orders.last().unwrap().launching, 1);
+    evidence(
+        "lease-takeover-ends-the-old-tenures-environment",
+        "DESTROYED-while-LAUNCHING",
+        "authority-lease-reap-teardown",
+    );
+    fx.fake.then_collect(Err(BrokerError::after_sending(
+        BrokerFailure::Indeterminate(Indeterminate::WorkloadUnconfirmed),
+    )));
+    let body = fx.settle(parked);
+    assert_eq!(failed(&body).0, F::OutcomeUnknown);
+    assert_eq!(
+        fx.one("SELECT state FROM workload WHERE idempotency_key = 'w1'"),
+        "UNKNOWN"
+    );
+    evidence(
+        "lease-takeover-in-flight-workload-settled-unknown",
+        "OUTCOME_UNKNOWN",
+        "authority-ledger",
+    );
+    fx.caller = Some(new_holder);
+    fx.epoch = taken;
+    let c = fx.run("rc", &[GRANT]);
+    let starts = fx.fake.asked_for("workload.start").len();
+    let body = fx.answered(&c, "w1", &call(FIXTURE, &[]));
+    assert_eq!(refused(&body), R::IdempotencyKeyReused);
+    assert_eq!(fx.fake.asked_for("workload.start").len(), starts);
+    evidence(
+        "lease-takeover-key-never-reruns",
+        "IDEMPOTENCY_KEY_REUSED",
+        "authority-shared-idempotency-namespace",
+    );
+    let env_c = fx.ready(&c);
+    assert!(![&env_a, &env_b].contains(&&env_c));
+    evidence(
+        "lease-takeover-never-inherits",
+        "new-environment",
+        "authority-run-association",
+    );
+}
+
+#[test]
+fn a_lease_that_only_expires_ends_nothing_until_its_session_is_acquired_again() {
+    let mut fx = fixture();
+    let (a, env_a) = ran_in(&mut fx, "ra", "a1");
+    fx.clock.advance(crate::state::DEFAULT_LEASE_TTL_MS + 1);
+    // Expiry itself is no event: the run is fenced, nothing is destroyed.
+    let prepares = fx.fake.asked_for("environment.prepare").len();
+    let body = fx.answered(&a, "a2", &call(FIXTURE, &[]));
+    assert_eq!(refused(&body), R::StaleEpoch);
+    assert_eq!(fx.fake.asked_for("environment.prepare").len(), prepares);
+    assert_eq!(fx.run_state(&a), "ACTIVE");
+    assert_eq!(fx.state_of(&env_a), "READY");
+    assert!(fx.fake.destroyed.lock().unwrap().is_empty());
+    evidence(
+        "lease-expiry-alone-fences-and-destroys-nothing",
+        "STALE_EPOCH-and-READY-until-acquired",
+        "authority-lease-fence",
+    );
+    // The session's next acquire reaps it, and its environment ends.
+    fx.lease();
+    assert_eq!(fx.run_state(&a), "REAPED");
+    assert_eq!(ended_as(&fx, &env_a), "DESTROYED:REAPED");
+    evidence(
+        "lease-expired-reacquire-destroys",
+        "DESTROYED",
+        "authority-lease-reap-teardown",
+    );
+}
+
+#[test]
+fn a_restart_destroys_every_reaped_runs_ready_environment_and_measures_none() {
+    let mut fx = fixture();
+    let (a, env_a) = ran_in(&mut fx, "ra", "a1");
+    let (b, env_b) = ran_in(&mut fx, "rb", "b1");
+    let measured = fx.fake.asked_for("environment.measure").len();
+    fx.restart(Some(IMAGE));
+    assert_eq!(fx.run_state(&a), "REAPED");
+    assert_eq!(fx.run_state(&b), "REAPED");
+    assert_eq!(ended_as(&fx, &env_a), "DESTROYED:REAPED");
+    assert_eq!(ended_as(&fx, &env_b), "DESTROYED:REAPED");
+    assert!(fx.fake.live.lock().unwrap().is_empty());
+    evidence(
+        "restart-destroys-reaped-runs-ready-environments",
+        "DESTROYED",
+        "authority-reconciliation",
+    );
+    assert_eq!(fx.fake.asked_for("environment.measure").len(), measured);
+    evidence(
+        "restart-measures-no-reaped-environment",
+        "not-measured",
+        "authority-start-teardown",
+    );
+}
+
+#[test]
+fn a_lease_end_the_broker_or_a_crash_interrupts_is_completed_and_nothing_reruns() {
+    // The broker cannot be reached: pending, never a false success.
+    let mut fx = fixture();
+    let (_, env_a) = ran_in(&mut fx, "ra", "a1");
+    fx.fake
+        .destroys
+        .lock()
+        .unwrap()
+        .push_back((false, unreachable()));
+    let (caller, session, epoch) = holder(&fx);
+    let reply = fx
+        .authority()
+        .release_lease(&caller, &session, epoch)
+        .unwrap();
+    assert!(matches!(reply, Reply::Done(())));
+    assert_eq!(ended_as(&fx, &env_a), "DESTROYING:REAPED");
+    assert_eq!(count(&fx.events(), AuditEvent::EnvironmentDestroyFailed), 1);
+    evidence(
+        "lease-release-broker-unreachable-pending",
+        "DESTROYING",
+        "authority-unconfirmed-is-pending",
+    );
+    fx.restart(Some(IMAGE));
+    assert_eq!(ended_as(&fx, &env_a), "DESTROYED:REAPED");
+    evidence(
+        "lease-release-broker-unreachable-completed-at-restart",
+        "DESTROYED",
+        "authority-reconciliation",
+    );
+    // W13, W6 and W7 through a lease's end.
+    for point in [
+        CrashPoint::ReapAfterIntent,
+        CrashPoint::EnvironmentDestroyAfterIntent,
+        CrashPoint::EnvironmentDestroyAfterBroker,
+    ] {
+        let mut fx = Fixture::with(custom(), Some(stop_at(point)));
+        fx.attach(IMAGE);
+        let (run, environment) = ran_in(&mut fx, "r1", "w1");
+        let (caller, session, epoch) = holder(&fx);
+        assert!(
+            fx.authority()
+                .release_lease(&caller, &session, epoch)
+                .is_err(),
+            "{point}: the hook stopped it"
+        );
+        assert_eq!(fx.run_state(&run), "REAPED", "{point}");
+        assert_eq!(ended_as(&fx, &environment), "DESTROYING:REAPED", "{point}");
+        assert_eq!(
+            fx.fake.asked_for("environment.destroy").len(),
+            usize::from(point == CrashPoint::EnvironmentDestroyAfterBroker),
+            "{point}"
+        );
+        let starts = fx.fake.asked_for("workload.start").len();
+        fx.restart(Some(IMAGE));
+        assert_eq!(ended_as(&fx, &environment), "DESTROYED:REAPED", "{point}");
+        assert_eq!(fx.run_state(&run), "REAPED", "{point}: never active again");
+        evidence(
+            &format!("lease-crash-{}-completed-at-restart", point.letter()),
+            "DESTROYED",
+            "authority-reconciliation",
+        );
+        let again = fx.run("r2", &[GRANT]);
+        let body = fx.answered(&again, "w1", &call(FIXTURE, &[]));
+        assert_eq!(refused(&body), R::IdempotencyKeyReused, "{point}");
+        assert_eq!(fx.fake.asked_for("workload.start").len(), starts, "{point}");
+        evidence(
+            &format!("lease-crash-{}-never-rerun", point.letter()),
+            "IDEMPOTENCY_KEY_REUSED",
+            "authority-shared-idempotency-namespace",
+        );
+    }
+}
+
+#[test]
+fn a_run_reaped_while_its_environment_is_prepared_never_keeps_it() {
+    let mut fx = fixture();
+    let run = fx.run("r1", &[GRANT]);
+    let mut other = fx.authority().handle().unwrap();
+    let (caller, session, epoch) = holder(&fx);
+    let seen = Arc::new(Mutex::new(None));
+    let saw = Arc::clone(&seen);
+    *fx.fake.during_prepare.lock().unwrap() = Some(Meanwhile(Box::new(move || {
+        let reply = other.release_lease(&caller, &session, epoch).unwrap();
+        *saw.lock().unwrap() = Some(matches!(reply, Reply::Done(())));
+    })));
+    let body = fx.answered(&run, "p1", &call(FIXTURE, &[]));
+    assert_eq!(refused(&body), R::EnvironmentUnavailable);
+    assert_eq!(
+        *seen.lock().unwrap(),
+        Some(true),
+        "the lease's end went through"
+    );
+    assert_eq!(fx.run_state(&run), "REAPED");
+    assert_eq!(
+        fx.one(&format!(
+            "SELECT state || ':' || failure FROM environment WHERE run_id = '{}'",
+            run.as_str()
+        )),
+        "DESTROYED:RUN_ENDED"
+    );
+    assert!(fx.fake.asked_for("workload.start").is_empty());
+    evidence(
+        "lease-end-during-preparation-environment-destroyed",
+        "RUN_ENDED",
+        "authority-preparation-outcome-check",
+    );
+}
+
+/// What a lease's end could not destroy at once stays `DESTROYING` (CD-3),
+/// and an environment being destroyed may still hold a process, so a
+/// brokered change in the same workspace waits -- `SHARED_DIRECTORY`, as
+/// M5d.4 excludes it -- until the next preparation or start removes it: the
+/// residual the closeout's review found, fail-closed, never a change beside
+/// it.
+#[test]
+fn a_lease_ends_pending_destruction_holds_brokered_changes_until_it_is_removed() {
+    use super::workspace::{WRITES, write, write_done, write_failed, writer};
+    let mut fx = writer();
+    let (a, env_a) = {
+        let run = fx.run("wa", WRITES);
+        let body = fx.ran(&run, "wa1", &call(FIXTURE, &[]));
+        (run, result(&body).1.environment_id.clone())
+    };
+    let (b, env_b) = {
+        let run = fx.run("wb", WRITES);
+        let body = fx.ran(&run, "wb1", &call(FIXTURE, &[]));
+        (run, result(&body).1.environment_id.clone())
+    };
+    let (caller, session, epoch) = holder(&fx);
+    let reply = fx
+        .authority()
+        .release_lease(&caller, &session, epoch)
+        .unwrap();
+    assert!(matches!(reply, Reply::Done(())));
+    assert_eq!(fx.run_state(&a), "REAPED");
+    assert_eq!(fx.run_state(&b), "REAPED");
+    let mut ends = vec![ended_as(&fx, &env_a), ended_as(&fx, &env_b)];
+    ends.sort();
+    assert_eq!(ends, ["DESTROYED:REAPED", "DESTROYING:REAPED"]);
+
+    // A new tenure's run in the same workspace: its change waits, and the
+    // broker is never asked.
+    fx.lease();
+    let next = fx.run("wn", WRITES);
+    let body = fx.tool(&next, "wn1", &write("/workspace/a.txt"));
+    assert_eq!(
+        write_failed(&body),
+        dwk_proto::wire::scalar::FsFailureReason::SharedDirectory
+    );
+    assert!(fx.fake.asked_for("fs.write").is_empty());
+    evidence(
+        "lease-pending-destruction-holds-brokered-changes",
+        "SHARED_DIRECTORY",
+        "authority-workspace-exclusion",
+    );
+
+    // The next preparation removes it first; the change then proceeds.
+    let _ = fx.ran(&next, "wn2", &call(FIXTURE, &[]));
+    assert_eq!(ended_as(&fx, &env_a), "DESTROYED:REAPED");
+    assert_eq!(ended_as(&fx, &env_b), "DESTROYED:REAPED");
+    let body = fx.tool(&next, "wn3", &write("/workspace/a.txt"));
+    write_done(&body);
+    assert_eq!(fx.fake.asked_for("fs.write").len(), 1);
+    evidence(
+        "lease-pending-destruction-removed-then-changes-proceed",
+        "written",
+        "authority-reclamation",
+    );
+}

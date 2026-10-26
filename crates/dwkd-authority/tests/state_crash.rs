@@ -165,7 +165,8 @@ fn assert_recovered(state: &Path, point: CrashPoint, report: &StartReport) {
         | CrashPoint::WorkloadAfterStart
         | CrashPoint::WorkloadAfterBroker
         | CrashPoint::WorkloadAfterOutcome
-        | CrashPoint::ReleaseAfterIntent => {
+        | CrashPoint::ReleaseAfterIntent
+        | CrashPoint::ReapAfterIntent => {
             unreachable!("{point} is not a transaction crash point")
         }
     }

@@ -5769,7 +5769,7 @@ def task_sandbox_agent_mutations() -> None:
 # told, which environment is named, what stays pending, what never reruns),
 # never that a container ended.
 RELEASE_UNIT_FILTER = "state::workload_route::tests::release::"
-RELEASE_UNIT_TESTS = 8
+RELEASE_UNIT_TESTS = 15
 RELEASE_UNIT_CASES = tuple(
     ("authority-release", case)
     for case in (
@@ -5804,6 +5804,40 @@ RELEASE_UNIT_CASES = tuple(
             for letter in ("u", "k", "l")
             for what in ("environment-destroyed-at-restart", "never-rerun")
         ),
+        # The M5d closeout (CD-3): a lease's end, a new tenure, expiry alone,
+        # a restart, a lost broker, W13 (`v`), W6 and W7, a preparation.
+        "lease-release-stale-refused-nothing-destroyed",
+        "lease-release-other-holder-refused-nothing-destroyed",
+        "lease-release-reaps-and-destroys-durably-first",
+        "lease-release-destroys-at-most-one-at-once",
+        "lease-release-spares-another-sessions-environment",
+        "lease-release-audited-in-order",
+        "lease-release-repeated-no-second-effect",
+        "lease-reaped-runs-launch-refused",
+        "lease-pending-destruction-completed-by-the-next-preparation",
+        "lease-held-refused-nothing-destroyed",
+        "lease-rotation-ends-the-old-tenures-environment",
+        "lease-rotation-new-tenure-runs",
+        "lease-takeover-ends-the-old-tenures-environment",
+        "lease-takeover-in-flight-workload-settled-unknown",
+        "lease-takeover-key-never-reruns",
+        "lease-takeover-never-inherits",
+        "lease-expiry-alone-fences-and-destroys-nothing",
+        "lease-expired-reacquire-destroys",
+        "restart-destroys-reaped-runs-ready-environments",
+        "restart-measures-no-reaped-environment",
+        "lease-release-broker-unreachable-pending",
+        "lease-release-broker-unreachable-completed-at-restart",
+        *(
+            f"lease-crash-{letter}-{what}"
+            for letter in ("v", "k", "l")
+            for what in ("completed-at-restart", "never-rerun")
+        ),
+        "lease-end-during-preparation-environment-destroyed",
+        # The residual CD-3 leaves: a pending destruction holds brokered
+        # changes in the workspace until it is removed.
+        "lease-pending-destruction-holds-brokered-changes",
+        "lease-pending-destruction-removed-then-changes-proceed",
     )
 )
 
@@ -5817,6 +5851,9 @@ RELEASE_WORKLOAD_TESTS = (
     "linux::release::a_release_over_dwkp_destroys_its_environment_and_nothing_else",
     "linux::release::a_release_ends_an_in_flight_workload_and_every_process_it_left",
     "linux::release::a_release_a_crash_or_a_lost_broker_interrupts_is_completed_at_the_next_start",
+    # The M5d closeout (CD-3).
+    "linux::release::a_lease_end_over_dwkp_destroys_its_runs_environments_and_nothing_else",
+    "linux::release::a_takeover_a_restart_or_a_crash_ends_a_reaped_runs_environment",
 )
 RELEASE_AGENT_TESTS = ("linux::a_released_run_takes_its_proxy_only_environment_and_relay_down",)
 RELEASE_CASES = tuple(
@@ -5855,6 +5892,24 @@ RELEASE_CASES = tuple(
         "release-removes-the-proxy-only-environment-relay-and-setup",
         "release-destruction-records-the-egress-by-disposition",
         "release-spares-another-runs-proxy-only-environment",
+        # The M5d closeout (CD-3): a lease's end over DWKP, a takeover with an
+        # agent running, a restart, W13, and PROXY_ONLY.
+        "lease-release-over-dwkp-stale-refused",
+        "lease-release-over-dwkp-other-holder-refused",
+        "lease-release-over-dwkp-destroys-one-at-once",
+        "lease-release-over-dwkp-spares-another-session",
+        "lease-release-over-dwkp-spares-foreign-containers",
+        "lease-release-over-dwkp-repeated-no-second-effect",
+        "lease-reaped-run-launch-refused-over-dwkp",
+        "lease-pending-destruction-removed-by-the-next-preparation",
+        "lease-takeover-in-flight-agent-running",
+        "lease-takeover-ends-in-flight-workload-and-descendants",
+        "lease-takeover-in-flight-workload-settled-unknown",
+        "lease-takeover-workload-never-rerun",
+        "restart-destroys-a-reaped-runs-ready-environment",
+        "restart-measures-no-reaped-environment",
+        "lease-crash-v-completed-at-restart",
+        "lease-release-removes-the-proxy-only-environment-relay-and-setup",
     )
 )
 # What each line must say it is: a fake broker's line is never a container's
@@ -6009,13 +6064,13 @@ RELEASE_MUTATIONS = (
     (
         "a release ends nothing of its run",
         "crates/dwkd-authority/src/state/mod.rs",
-        "                Reply::Done(true) => environment::begin_release(work, run)?,",
+        '                Reply::Done(true) => environment::begin_run_end(work, run, "RELEASED")?,',
         "                Reply::Done(true) => Vec::new(),",
     ),
     (
         "the environment's destruction is recorded only after the release committed",
         "crates/dwkd-authority/src/state/mod.rs",
-        "                Reply::Done(true) => environment::begin_release(work, run)?,\n"
+        '                Reply::Done(true) => environment::begin_run_end(work, run, "RELEASED")?,\n'
         "                Reply::Done(false) | Reply::Refused(_) => Vec::new(),\n"
         "            };\n"
         "            let reply = match released {\n"
@@ -6024,9 +6079,7 @@ RELEASE_MUTATIONS = (
         "            };\n"
         "            Ok((reply, teardown))\n"
         "        })?;\n"
-        "        if !teardown.is_empty() {\n"
-        "            self.shared.crash(CrashPoint::ReleaseAfterIntent)?;\n"
-        "        }\n",
+        "        self.end_runs(teardown, CrashPoint::ReleaseAfterIntent)?;\n",
         '                Reply::Done(true) => vec![environment::DestroyBegun::Refused("LATER")],\n'
         "                Reply::Done(false) | Reply::Refused(_) => Vec::new(),\n"
         "            };\n"
@@ -6036,27 +6089,27 @@ RELEASE_MUTATIONS = (
         "            };\n"
         "            Ok((reply, teardown))\n"
         "        })?;\n"
-        "        if !teardown.is_empty() {\n"
-        "            self.shared.crash(CrashPoint::ReleaseAfterIntent)?;\n"
-        "        }\n"
         "        let teardown = if teardown.is_empty() {\n"
         "            teardown\n"
         "        } else {\n"
-        "            self.transact(|work| environment::begin_release(work, run))?\n"
-        "        };\n",
+        "            self.shared.crash(CrashPoint::ReleaseAfterIntent)?;\n"
+        '            self.transact(|work| environment::begin_run_end(work, run, "RELEASED"))?\n'
+        "        };\n"
+        "        self.end_runs(teardown, CrashPoint::ReleaseAfterIntent)?;\n",
     ),
     (
         "a fenced release ends the run's environment",
         "crates/dwkd-authority/src/state/mod.rs",
         "                Reply::Done(false) | Reply::Refused(_) => Vec::new(),",
         "                Reply::Done(false) => Vec::new(),\n"
-        "                Reply::Refused(_) => environment::begin_release(work, run)?,",
+        '                Reply::Refused(_) => environment::begin_run_end(work, run, "RELEASED")?,',
     ),
     (
         "a release acknowledged without effect ends the named run's environment",
         "crates/dwkd-authority/src/state/mod.rs",
         "                Reply::Done(false) | Reply::Refused(_) => Vec::new(),",
-        "                Reply::Done(false) => environment::begin_release(work, run)?,\n"
+        "                Reply::Done(false) => "
+        'environment::begin_run_end(work, run, "RELEASED")?,\n'
         "                Reply::Refused(_) => Vec::new(),",
     ),
     (
@@ -6104,6 +6157,41 @@ RELEASE_MUTATIONS = (
         "crates/dwkd-authority/src/state/admission.rs",
         "SET state = 'RELEASED', ended_ms = ?5 WHERE run_id = ?1 AND session_id = ?2",
         "SET state = state, ended_ms = NULLIF(?5, ?5) WHERE run_id = ?1 AND session_id = ?2",
+    ),
+    # The M5d closeout (CD-3): a lease's end, a new tenure and a restart.
+    (
+        "a lease's end destroys nothing of its reaped runs",
+        "crates/dwkd-authority/src/state/lease.rs",
+        '        teardown.extend(environment::begin_run_end(work, &id, "REAPED")?);',
+        "        let _ = &id;",
+    ),
+    (
+        "a run's end removes nothing at once",
+        "crates/dwkd-authority/src/state/mod.rs",
+        "            self.perform_destroy(record, invocation)?;\n        }\n        Ok(())",
+        "            let _ = (record, invocation);\n        }\n        Ok(())",
+    ),
+    (
+        "a lease's end removes every pending destruction at once, unbounded",
+        "crates/dwkd-authority/src/state/mod.rs",
+        "        let first = teardown\n"
+        "            .into_iter()\n"
+        "            .find(|begun| matches!(begun, environment::DestroyBegun::Pending { .. }));\n"
+        "        if let Some(environment::DestroyBegun::Pending { record, invocation }) "
+        "= first {\n",
+        "        for begun in teardown {\n"
+        "            let environment::DestroyBegun::Pending { record, invocation } = begun else {\n"
+        "                continue;\n"
+        "            };\n"
+        "            self.perform_destroy(record, invocation)?;\n"
+        "        }\n"
+        "        if let Some(environment::DestroyBegun::Pending { record, invocation }) = None {\n",
+    ),
+    (
+        "a restart keeps a reaped run's READY environment",
+        "crates/dwkd-authority/src/state/mod.rs",
+        "            environment::begin_reaped_at_start(work)?;",
+        "            let _ = &work;",
     ),
 )
 

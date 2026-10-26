@@ -24,7 +24,7 @@
 //! | W2 intent durable, nothing sent | `PREPARING` | `UNKNOWN`; reconciliation finds no label: `LOST` | NON-RETRYABLE for that id; a new environment may be prepared |
 //! | W3 the broker mid-preparation | `PREPARING` | `UNKNOWN`; a labelled container is reaped: `DESTROYED` | UNKNOWN |
 //! | W4 answered, outcome not durable | `PREPARING` | as W3 | UNKNOWN |
-//! | W5 outcome durable | `READY` / `REFUSED` | `READY` is measured again: clean stays, drift is destroyed | — |
+//! | W5 outcome durable | `READY` / `REFUSED` | a restart reaps every run, so a `READY` one is destroyed (the M5d closeout; ADR-0047 had it measured again and kept) | — |
 //! | W6 destruction intent durable, nothing sent | `DESTROYING` | removed by label, or found gone: `DESTROYED` | RETRY-SAFE |
 //! | W7 the broker removed it, answer lost | `DESTROYING` | found gone: `DESTROYED` | RETRY-SAFE |
 //!
@@ -32,11 +32,14 @@
 //! incarnation left becomes `UNKNOWN` at start ([`reconcile_open`]), and
 //! only reconciliation — which removes by label, exactly — ends it.
 //!
-//! A run's release (M5d.6) begins its live environment's destruction in the
-//! release's own transaction ([`begin_release`]): a crash after it (W12,
-//! `CrashPoint::ReleaseAfterIntent`) is W6 for that environment, and a
-//! preparation whose run ended under it destroys what it made
-//! ([`end_with_its_run`]).
+//! A run's end begins its live environment's destruction in the transaction
+//! that ends it ([`begin_run_end`]): its release (M5d.6; a crash after it is
+//! W12, `CrashPoint::ReleaseAfterIntent`) and its reaping when its lease ends
+//! (the M5d closeout; W13, `CrashPoint::ReapAfterIntent`), each W6 for that
+//! environment; a new incarnation begins the destruction of every `READY`
+//! environment of a run that is not active ([`begin_reaped_at_start`]) where
+//! W5 used to measure it again and keep it; and a preparation whose run
+//! ended under it destroys what it made ([`end_with_its_run`]).
 
 use dwk_proto::brokerp::OwnedEnvironment;
 use dwk_proto::brokerp::egress::{EgressCounters, EgressGrant};
@@ -533,16 +536,18 @@ pub(super) fn begin_destroy(
     Ok(DestroyBegun::Pending { record, invocation })
 }
 
-/// A run's release (M5d.6, ADR-0052 §8): the destruction of every live
-/// environment of `run` -- at most one, by the schema's
-/// `environment_one_live_per_run` -- begun in the release's own transaction,
-/// so the run's end and its environment's are durable together. Only
-/// records whose recorded run is `run` are named; one being destroyed
-/// already is tried again; a preparation still in flight is left to its
-/// outcome, which finds the run ended ([`end_with_its_run`]).
-pub(super) fn begin_release(
+/// A run's end -- its release (M5d.6, reason `RELEASED`) or its reaping when
+/// its lease ends (the M5d closeout, `REAPED`; ADR-0052 §8): the
+/// destruction of every live environment of `run` -- at most one, by the
+/// schema's `environment_one_live_per_run` -- begun in the transaction that
+/// ends the run, so the run's end and its environment's are durable
+/// together. Only records whose recorded run is `run` are named; one being
+/// destroyed already is tried again; a preparation still in flight is left
+/// to its outcome, which finds the run ended ([`end_with_its_run`]).
+pub(super) fn begin_run_end(
     work: &mut Work<'_>,
     run: &RunId,
+    reason: &'static str,
 ) -> Result<Vec<DestroyBegun>, AuthorityError> {
     let mut statement = work.db(work.tx.prepare(
         "SELECT environment_id FROM environment \
@@ -560,9 +565,35 @@ pub(super) fn begin_release(
         let environment = EnvironmentId::parse(id).ok_or(AuthorityError::Invariant(
             "a stored environment id is malformed",
         ))?;
-        begun.push(begin_destroy(work, &environment, "RELEASED")?);
+        begun.push(begin_destroy(work, &environment, reason)?);
     }
     Ok(begun)
+}
+
+/// A new incarnation's start (the M5d closeout, ADR-0052 §9, amending
+/// ADR-0047 §12's W5): every run the previous one held has just been reaped,
+/// so a `READY` environment of a run that is not `ACTIVE` can never run a
+/// workload again. Its destruction is begun here, in the transaction that
+/// opens the incarnation, and reconciliation by label performs it -- it is
+/// never measured again and kept. Returns how many were begun.
+pub(super) fn begin_reaped_at_start(work: &mut Work<'_>) -> Result<u64, AuthorityError> {
+    let mut statement = work.db(work.tx.prepare(
+        "SELECT e.environment_id FROM environment e JOIN run r ON r.run_id = e.run_id \
+         WHERE e.state = 'READY' AND r.state <> 'ACTIVE' ORDER BY e.environment_id",
+    ))?;
+    let rows = work.db(statement.query_map([], |row| row.get::<_, String>(0)))?;
+    let mut ended = Vec::new();
+    for row in rows {
+        ended.push(work.db(row)?);
+    }
+    drop(statement);
+    for id in &ended {
+        let environment = EnvironmentId::parse(id).ok_or(AuthorityError::Invariant(
+            "a stored environment id is malformed",
+        ))?;
+        begin_destroy(work, &environment, "REAPED")?;
+    }
+    Ok(u64::try_from(ended.len()).unwrap_or(u64::MAX))
 }
 
 /// A preparation's outcome in a run that ended while the broker prepared

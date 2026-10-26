@@ -515,11 +515,18 @@ mod linux {
         );
         evidence("one-environment-per-run", "environment-exists");
 
+        // A restart reaps the run, and since the M5d closeout its READY
+        // environment with it (ADR-0052 §8, amending ADR-0047 §12's W5, which
+        // measured it again and kept it): destroyed by its labels.
+        let report = lab.start(None);
+        assert!(report.pending_destroyed >= 1, "{report:?}");
+        assert_eq!(lab.state_of(&environment), EnvironmentState::Destroyed);
+        assert!(!lab.runtime.exists(&container));
+
         // W6: the destruction is durable, the broker told nothing.
         lab.start(Some(stop_at(CrashPoint::EnvironmentDestroyAfterIntent)));
-        // A restart ends the run but not the environment: it is measured again
-        // and kept (the reconciliation of a READY, running one).
-        assert_eq!(lab.state_of(&environment), EnvironmentState::Ready);
+        let run = lab.admit();
+        let (environment, container) = lab.ready(&run);
         poisoned(lab.authority().environment_destroy(&environment));
         assert_eq!(lab.row("DESTROYING"), environment);
         assert!(lab.runtime.exists(&container), "not yet removed");
@@ -603,6 +610,13 @@ mod linux {
             rt.create(name, &image, &refs)
         };
         let tag = std::process::id();
+        // The twin exists before any restart: a restart reaps the READY
+        // environment's run, and its destruction (the M5d closeout) must meet
+        // the ambiguity, not run before it.
+        let twin = create(
+            &format!("dw-m5a-twin-{tag}"),
+            &pairs(&exact(ready.as_str(), first_run.as_str())),
+        );
 
         // W4: the broker created, measured and kept a container; the
         // authority stopped before recording it.
@@ -619,10 +633,6 @@ mod linux {
         let copied = create(
             &format!("dw-m5a-copied-{tag}"),
             &pairs(&exact(copied_env.as_str(), run.as_str())),
-        );
-        let twin = create(
-            &format!("dw-m5a-twin-{tag}"),
-            &pairs(&exact(ready.as_str(), first_run.as_str())),
         );
         // A copy naming a recorded environment of another run.
         let copied_run = create(
@@ -652,10 +662,12 @@ mod linux {
             "foreign-copied-labels-survive",
             "copied-env-and-copied-run-present",
         );
+        // Its run was reaped, so its destruction is recorded; the twin makes
+        // it ambiguous, and nothing is removed under an ambiguity.
         assert!(rt.exists(&twin) && rt.exists(&ready_container));
-        assert_eq!(lab.state_of(&ready), EnvironmentState::Ready);
+        assert_eq!(lab.state_of(&ready), EnvironmentState::Destroying);
         assert!(report.ambiguous >= 1, "{report:?}");
-        evidence("ambiguous-twins-untouched", "both-present-record-ready");
+        evidence("ambiguous-twins-untouched", "both-present-record-untouched");
         rt.remove(&twin);
 
         // An orphan: an environment the store recorded and ended, whose

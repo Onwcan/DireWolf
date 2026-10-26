@@ -731,6 +731,12 @@ impl Authority {
             // container: UNKNOWN, never prepared again; reconciliation by
             // label ends it.
             let environment_unknown = environment::reconcile_open(work)?;
+            // Every run the previous incarnation held is reaped above: a
+            // READY environment of a run that is not active can never run a
+            // workload again, so its destruction is made durable now (the
+            // M5d closeout, ADR-0052 §8) and reconciliation by label performs
+            // it -- it is never measured again and kept.
+            environment::begin_reaped_at_start(work)?;
             let interrupted = fs_interrupted.saturating_add(process_interrupted);
             let unknown = fs_unknown
                 .saturating_add(process_unknown)
@@ -900,18 +906,25 @@ impl Authority {
         Ok(result)
     }
 
-    /// `AcquireLease` for `session`.
+    /// `AcquireLease` for `session`. A new tenure -- a rotation by the holder,
+    /// a lease re-acquired after its expiry, release or a restart -- reaps
+    /// the old tenure's runs, and their environments end with them (the M5d
+    /// closeout, ADR-0052 §8; [`Authority::end_runs`]).
     ///
     /// # Errors
     ///
-    /// [`AuthorityError`] when the authority cannot answer.
+    /// [`AuthorityError`] when the authority cannot answer. A crash hook at
+    /// [`CrashPoint::ReapAfterIntent`] or a destruction's points poisons the
+    /// store, as a crash would.
     pub fn acquire_lease(
         &mut self,
         caller: &CallerContext,
         session: &SessionId,
     ) -> Result<Reply<Epoch>, AuthorityError> {
         let ttl = self.shared.lease_ttl_ms;
-        self.transact(|work| lease::acquire(work, caller, session, ttl))
+        let (reply, teardown) = self.transact(|work| lease::acquire(work, caller, session, ttl))?;
+        self.end_runs(teardown, CrashPoint::ReapAfterIntent)?;
+        Ok(reply)
     }
 
     /// `Heartbeat`.
@@ -929,18 +942,55 @@ impl Authority {
         self.transact(|work| lease::heartbeat(work, caller, session, epoch, ttl))
     }
 
-    /// `ReleaseLease`.
+    /// `ReleaseLease`. The session's runs are reaped, and their environments
+    /// end with them (the M5d closeout, ADR-0052 §8; [`Authority::end_runs`]);
+    /// a fenced request, or a retry of a release that happened, ends nothing.
+    /// The answer is unchanged: `Ack` says the lease and its runs' authority
+    /// are surrendered and the environments' destruction durable, not that
+    /// the broker confirmed a removal.
     ///
     /// # Errors
     ///
-    /// [`AuthorityError`] when the authority cannot answer.
+    /// [`AuthorityError`] when the authority cannot answer. A crash hook at
+    /// [`CrashPoint::ReapAfterIntent`] or a destruction's points poisons the
+    /// store, as a crash would.
     pub fn release_lease(
         &mut self,
         caller: &CallerContext,
         session: &SessionId,
         epoch: Epoch,
     ) -> Result<Reply<()>, AuthorityError> {
-        self.transact(|work| lease::release(work, caller, session, epoch))
+        let (reply, teardown) =
+            self.transact(|work| lease::release(work, caller, session, epoch))?;
+        self.end_runs(teardown, CrashPoint::ReapAfterIntent)?;
+        Ok(reply)
+    }
+
+    /// What the end of runs left to the broker (ADR-0052 §8): the
+    /// destruction, durable already, of their live environments. **At most
+    /// one is performed now** -- each is one broker exchange within the
+    /// environment deadline, so a request that ends runs holds the worker for
+    /// at most one destruction (OD-10's bound, as the owner confirmed for the
+    /// M5d closeout) -- and the rest stay `DESTROYING`: nothing can run in
+    /// them, and the next preparation's reclamation or the next start removes
+    /// each by its labels. A preparation still in flight is left to its
+    /// outcome, which finds its run ended (`environment::end_with_its_run`).
+    fn end_runs(
+        &mut self,
+        teardown: lease::Teardown,
+        point: CrashPoint,
+    ) -> Result<(), AuthorityError> {
+        if teardown.is_empty() {
+            return Ok(());
+        }
+        self.shared.crash(point)?;
+        let first = teardown
+            .into_iter()
+            .find(|begun| matches!(begun, environment::DestroyBegun::Pending { .. }));
+        if let Some(environment::DestroyBegun::Pending { record, invocation }) = first {
+            self.perform_destroy(record, invocation)?;
+        }
+        Ok(())
     }
 
     /// `AdmitRun`, given the **decoded** request: its canonical form is what
@@ -1037,7 +1087,7 @@ impl Authority {
             let released = admission::release(work, caller, session, run, epoch)?;
             // Only the request that released the run ends its environment.
             let teardown = match released {
-                Reply::Done(true) => environment::begin_release(work, run)?,
+                Reply::Done(true) => environment::begin_run_end(work, run, "RELEASED")?,
                 Reply::Done(false) | Reply::Refused(_) => Vec::new(),
             };
             let reply = match released {
@@ -1046,16 +1096,7 @@ impl Authority {
             };
             Ok((reply, teardown))
         })?;
-        if !teardown.is_empty() {
-            self.shared.crash(CrashPoint::ReleaseAfterIntent)?;
-        }
-        for begun in teardown {
-            // A preparation in flight is left to its outcome, which finds
-            // the run ended (`environment::end_with_its_run`).
-            if let environment::DestroyBegun::Pending { record, invocation } = begun {
-                self.perform_destroy(record, invocation)?;
-            }
-        }
+        self.end_runs(teardown, CrashPoint::ReleaseAfterIntent)?;
         Ok(reply)
     }
 

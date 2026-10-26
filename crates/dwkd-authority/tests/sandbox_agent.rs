@@ -2438,6 +2438,32 @@ reason = "NO_MATCHING_RULE"
             "authority-run-association",
         );
         lab.reaper.note(&theirs);
+
+        // The M5d closeout: the other run's lease ends, and with it its
+        // PROXY_ONLY environment, relay and setup -- the lease's end reaps
+        // the run and its only environment is removed when it is answered.
+        b.renew();
+        let message = super::state_support::release_lease_msg(&b.session, b.epoch);
+        b.send(&message);
+        let released = b.answer(PROMPT);
+        assert!(matches!(released, DwkpBody::Ack(_)), "{released:?}");
+        assert!(
+            !lab.runtime.exists(&theirs),
+            "gone when the lease's end is answered"
+        );
+        for role in ["environment", "relay", "setup"] {
+            assert!(
+                lab.runtime.role(&other, role).is_empty(),
+                "a {role} container of the reaped run's environment remains"
+            );
+        }
+        evidence(
+            RELEASE_SUITE,
+            "lease-release-removes-the-proxy-only-environment-relay-and-setup",
+            "every-role-removed",
+            E2E,
+            "authority-lease-reap-teardown",
+        );
     }
 
     // ---- three identities --------------------------------------------------

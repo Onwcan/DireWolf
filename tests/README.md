@@ -322,6 +322,15 @@ containers -- unlabelled, and another store's copy of a released
 environment's labels -- must survive. `make sandbox-release-mutations`
 weakens each release guard in turn.
 
+Since the M5d closeout (ADR-0052 §8, the owner's CD-3) the same tests cover
+a lease's end: in process, `ReleaseLease`, a rotation, a takeover after
+expiry, an expired lease acquired again and a restart, each recording its
+reaped runs' environments `DESTROYING` in the reaping transaction and
+removing at most one at once, expiry alone ending nothing, crash windows
+W13, W6 and W7; with real containers, `a_lease_end_over_dwkp_destroys_its_runs_environments_and_nothing_else`
+and `a_takeover_a_restart_or_a_crash_ends_a_reaped_runs_environment` in
+`sandbox_workload.rs`, and a `ReleaseLease` in the `PROXY_ONLY` test.
+
 **Brokered `fs.read` tests (M4b)** are real-process evidence for the private
 channel ([ADR-0043](../docs/adr/0043-m4b-private-broker-channel-and-brokered-fs-read.md)):
 `crates/dwkd-authority/tests/broker_fs_read.rs` drives the released authority and

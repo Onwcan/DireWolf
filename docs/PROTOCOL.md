@@ -78,7 +78,7 @@ The example is illustrative: a real version-1 `direwolf.tool.invoke` (defined fr
 | `session_id`, `run_id` | `ses_` / `run_` + UUIDv7 | Claims; compared with kernel state from M3 |
 | bounded arrays | JSON array with a `maxItems` its type fixes | Length checked before any item is decoded; `null` is never an item |
 | `epoch` | integer 1 – 2^53−1; requires `session_id` | A claim, fenced against the kernel's value (§3) |
-| `idempotency_key` | `[A-Za-z0-9][A-Za-z0-9._:-]{0,127}` | Required on `AdmitRun`, forbidden elsewhere. Names an *attempt*, not a run |
+| `idempotency_key` | `[A-Za-z0-9][A-Za-z0-9._:-]{0,127}` | Required on `AdmitRun` and on `ToolInvoke` from version 2, forbidden on every other message (below). Names an *attempt* — an admission, an invocation — not a run |
 | `payload` | object | Typed per `schema` |
 
 Each message declares every optional envelope field as required, optional or **forbidden**; a forbidden field present is `FORBIDDEN_FIELD`. `null` is never a value — an optional field is omitted.
@@ -86,21 +86,87 @@ Each message declares every optional envelope field as required, optional or **f
 - `schema` is a namespaced string; `schema_version` is an integer that bumps only on breaking payload changes.
 - `correlation_id` groups everything belonging to one logical operation; `causation_id` points at the direct cause. Together they reconstruct the full tree of "what led to this."
 - `epoch` is the session lease epoch — see §3.
-- `idempotency_key` is **mandatory on any request that mutates authority state
-  or causes an effect**, and forbidden on every other operation. An earlier
-  draft of this rule said "any request with a side effect", which names the
-  wrong property: `AdmitRun` causes no effect outside the kernel and still mints
+- `idempotency_key` is **required where a lost answer could otherwise turn one
+  attempt into a second, different change — a second admitted run, a tool call
+  performed twice — and forbidden on every other message**. Each message's
+  envelope rule says which; no DWKP request makes it optional. An earlier draft
+  of this rule said "any request with a side effect", which names the wrong
+  property: `AdmitRun` causes no effect outside the kernel and still mints
   authority, so a retry of it that is not deduplicated produces a second
-  admitted run. As of M3a `AdmitRun` is the one operation that carries a key,
-  and it **requires** one — an optional key is a safe path the careless caller
-  does not take. The kernel deduplicates on
-  `(authenticated peer identity, session_id, idempotency_key)`, binds the key to
-  the canonical request with `id`, `ts`, `correlation_id` and `causation_id`
-  removed, returns the recorded answer on a match and **refuses** on a mismatch;
-  epoch fencing is checked first, so a key is never a way past the fence
-  ([ADR-0036](adr/0036-m3-authority-operations-and-the-capability-wire-form.md)
-  §8). `ReleaseRun` needs no key because it is idempotent by shape, and
-  `QueryAuthority` needs none because it is pure.
+  admitted run. The wording that replaced it — "any request that mutates
+  authority state or causes an effect" — was not the rule the wire enforces
+  either: the lease and release operations below mutate authority state, three
+  of them can cause an effect since the M5d closeout, and none carries a key.
+  Two operations require one, and **require** it — an optional key is a safe
+  path the careless caller does not take:
+  - `AdmitRun` (M3a). The kernel deduplicates on
+    `(authenticated peer identity, session_id, idempotency_key)`, binds the key
+    to the canonical request with `id`, `ts`, `correlation_id` and
+    `causation_id` removed, returns the recorded answer on a match and
+    **refuses** on a mismatch; epoch fencing is checked first, so a key is never
+    a way past the fence
+    ([ADR-0036](adr/0036-m3-authority-operations-and-the-capability-wire-form.md)
+    §8, as amended by
+    [ADR-0040](adr/0040-m3d-reconciliation-admission-across-tenures-and-undecidable-proposals.md)).
+  - `ToolInvoke` from version 2 (M4c): `fs.move` and `fs.delete` are not
+    retry-safe, so the key names one invocation, never performed twice
+    ([ADR-0044](adr/0044-m4c-filesystem-operations-plans-and-atomic-mutation.md)).
+    Version 1 carries `fs_read` only, and forbids it.
+
+  Every other request forbids the field, each for a stated reason rather than
+  by default:
+  - `ReleaseRun` is idempotent under the fence: the lease's live holder, at
+    its current epoch, releasing a run that is not active under it — already
+    released or reaped, another's, never admitted — is acknowledged and ends
+    nothing more; a caller that is not the live holder at that epoch is
+    `STALE_EPOCH`. A repeat cannot do a second thing, so it needs no key
+    (ADR-0036 §8).
+  - `ReleaseLease` is idempotent for its own holder only: the connection that
+    released the lease, repeating that release at the epoch it released, is
+    acknowledged and ends nothing more; every other release — another
+    connection, another epoch, a lease that expired, was invalidated or never
+    existed — is `STALE_EPOCH`
+    ([ADR-0039](adr/0039-durable-authority-state.md) §7). A caller whose
+    connection was lost with the answer recovers with `AcquireLease`, which a
+    released lease grants at once and a lease still held grants once it
+    expires — not with a repeat.
+  - `AcquireLease` is **not** idempotent, and nothing deduplicates it. The
+    kernel assigns the epoch — the request carries none, and the caller cannot
+    choose one — and every success begins a new tenure at an epoch strictly
+    greater than any the session has had. The holder acquiring again is a
+    deliberate rotation, not a replay: it fences every request under the
+    earlier epoch and reaps the runs admitted under it, which since the M5d
+    closeout also begins the destruction of their execution environments
+    ([ADR-0011](adr/0011-session-concurrency.md), ADR-0039 §7). A key would
+    either suppress that defined new tenure or mean nothing. A lost grant is
+    recovered by acquiring again: the tenure whose epoch was lost holds no run,
+    because a run is admitted only under an epoch its caller presents. A live
+    lease held by another connection is `LEASE_HELD`, and an exhausted epoch
+    counter fails closed.
+  - `Heartbeat` only renews a live lease, by one TTL from now; a repeat grants
+    nothing new. `QueryAuthority` and `CanonicalPreview` are pure, and
+    `Handshake` precedes any authority state.
+
+  **`effect_bearing` does not decide a key.** The operation inventory
+  ([DWKP_OPERATIONS.md](DWKP_OPERATIONS.md)) records three separate things:
+  `effect_bearing`, whether performing an operation can change the world
+  outside the kernel's own records; `authority_bearing`, whether it can grant,
+  extend or exercise authority; and the envelope rule, whether a key is
+  required or forbidden, which follows from the operation's replay semantics
+  above. Since the M5d closeout `AcquireLease`, `ReleaseLease` and `ReleaseRun`
+  are `effect_bearing`, because ending a run's authority now has the kernel
+  destroy the run's execution environment
+  ([ADR-0052](adr/0052-m5d-sandboxed-process-exec.md) §8, Proposed). That is
+  kernel-owned cleanup, not an effect the caller directs: no field names an
+  environment, container or label; the kernel finds them by its own records of
+  the ended runs, makes their destruction durable before the broker is told and
+  removes them by their exact labels; and `Ack` says the destruction is
+  durable, not that a removal was confirmed — an unconfirmed one stays pending
+  until reconciliation completes it. A repeat of either release destroys
+  nothing a first did not, and a repeat of `AcquireLease` is a defined new
+  tenure, so none of the three gained a key and none changed on the wire. An
+  effect a caller directs — a `ToolInvoke` — still passes every authority and
+  policy gate, and carries its mandatory key.
 
 ### Compatibility rules — **per protocol, not blanket**
 
@@ -260,9 +326,12 @@ the epoch.
 and `STALE_EPOCH` does **not** report the kernel's current epoch — that is the
 one value a fenced runtime needs to un-fence itself. "Unknown" answers are
 deliberately indistinguishable from "already released", so a refusal is not a
-probe for which sessions, leases and runs exist. Release operations stay
-idempotent: releasing a run or a lease the kernel no longer records is
-acknowledged, not refused.
+probe for which sessions, leases and runs exist. Releases stay idempotent for
+their own caller rather than refused as unknown: the lease's live holder
+releasing a run that is not active under it is acknowledged, and a holder
+repeating its own lease release at the epoch it released is acknowledged; any
+other lease release is `STALE_EPOCH`, the one answer a session that never had a
+lease gets too (§1).
 
 The reason set is sized for the operations M3 actually has. Adding one widens
 a closed enum, which is breaking, and bumps `schema_version`
@@ -401,7 +470,7 @@ Design properties. As of M3e the rows about the kernel's identity of the runtime
 | Other local processes cannot impersonate the runtime | Kernel peer credentials checked against the operator's uid list before a byte is read (M3e, Linux) |
 | The runtime cannot choose its identity | The subject is the kernel-reported uid; the lease holder is minted per connection; no DWKP field carries either (M3e) |
 | Zombie runtime cannot act | Epoch fencing; the `STALE_EPOCH` refusal withholds the current epoch, so being fenced tells a caller nothing it could use to unfence itself |
-| A refusal is not a probe | One `UNKNOWN_RUN` answer for "never existed" and "already released"; no `UNKNOWN_LEASE`; releases stay idempotent |
+| A refusal is not a probe | One `UNKNOWN_RUN` answer for "never existed" and "already released"; no `UNKNOWN_LEASE`; releases stay idempotent for their own caller (§1) |
 | Replay of a request that mints or spends authority | Idempotency key scoped to the authenticated peer and session, bound to the canonical request (not the epoch), checked only after the epoch fence, and recorded in `kernel.db` for the life of the store — no finite dedupe window, because a window reopens duplicate admission for any retry slower than it. A retry receives the recorded grant only while its run is active under the caller's lease; after that it is `ADMISSION_ENDED`, never a second admission and never a replay of ended authority ([ADR-0039](adr/0039-durable-authority-state.md) §8, [ADR-0040](adr/0040-m3d-reconciliation-admission-across-tenures-and-undecidable-proposals.md)) |
 | Gateway compromise | Gateway holds no authority; approvals relayed, not generated |
 | Parser exploitation | Rust parser, `#![forbid(unsafe_code)]` and no third-party dependency, 1 MiB frame cap, depth 32, lexical duplicate-key rejection; fuzzed with libFuzzer weekly and on protocol pull requests, plus a stable mutation harness in every test run (M2) |
