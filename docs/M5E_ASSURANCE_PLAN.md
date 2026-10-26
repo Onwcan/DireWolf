@@ -1,0 +1,239 @@
+# M5e — The M5 defensive assurance gate: gap analysis and implementation plan
+
+**Project:** [DireWolf](https://github.com/Onwcan/DireWolf)\
+**Baseline:** `f8aeef97ec0bcc356d8a2421be709496fe275d70` (`main`, verified 2026-10-26)\
+**Verified hosted CI of the baseline:** [run 40331005080](https://github.com/Onwcan/DireWolf/actions/runs/40331005080), 27 of 27 jobs successful\
+**Status (as written, 2026-10-26):** Planning only. M5e is NOT STARTED: no M5e code, evidence or CI job exists, and no M5e evidence has run. M5 stays IN PROGRESS.\
+**Authority of this document:** a technical plan, not an ADR. It approves no decision. The one architectural proposal it relies on, [ADR-0054](adr/0054-m5e-npm-hygiene-profile.md), is **Proposed**; every other open point is listed for the owner in §10.
+
+## 1. Scope, sources and the owner's directions
+
+M5e is the milestone that turns M5's slices into one gate: the complete escape,
+SSRF and persistence suites as merge gates, the weakened-profile closure for
+`PROXY_ONLY`, and package-manager acceptance — a real `pip install` and
+`npm install` succeeding against an allowlisted registry and failing against a
+non-allowlisted one ([ROADMAP.md](ROADMAP.md), M5e and "The M5 contract").
+
+Read for this plan, at the baseline: [ROADMAP.md](ROADMAP.md) (M5a–M5e and the
+M5 contract), [SANDBOX.md](SANDBOX.md) (§§2, 4, 4a, 6),
+[NETWORK_SECURITY.md](NETWORK_SECURITY.md) (§§1–3, 8, 9),
+[EVALS.md](EVALS.md) (§§3, 8), [ADR-0052](adr/0052-m5d-sandboxed-process-exec.md)
+(§§1, 5a, 8, 17, 19), `crates/dwkd-authority/src/resource/exec/hygiene.rs`,
+`crates/dwk-sandbox-profile/src/lib.rs` (`HYGIENE_ENVIRONMENT`,
+`PROXY_VARIABLES`), the broker's and the authority's real-container suites
+(`sandbox_foundation.rs`, `sandbox_egress.rs`, `sandbox_workload.rs`,
+`sandbox_agent.rs`), `scripts/dw.py` (every evidence task, its case lists and
+its image builders), `Makefile`, `.github/workflows/ci.yml`, and the eval
+suites, runners, inventory and baseline under `evals/`.
+
+The owner's directions of 2026-10-26, for design and planning — **not** an
+acceptance of anything:
+
+1. Draft [ADR-0054](adr/0054-m5e-npm-hygiene-profile.md) as **Proposed**: a
+   narrowly scoped, evidence-backed npm execution profile. npm stays
+   fail-closed (`HYGIENE_NOT_EVIDENCED`) until the profile is validated and
+   the owner accepts it.
+2. Host-local execution (`local`) stays deferred to M6, as the accepted
+   ADR-0052's OD-7 decided.
+3. pip and npm registry verification is hermetic and **hosted** (CI): no new
+   tooling is installed on the developer's WSL host.
+4. The audit model stays as it is: each case is attributed to an existing
+   authority or broker event, or to measured environment evidence — no new
+   per-attempt audit event inside the sandbox.
+
+Out of scope here: implementing anything, running uncontrolled exhaustion,
+reaching any third-party system, and weakening a production control to make a
+test pass.
+
+## 2. The requirements M5e must meet
+
+| ID | Requirement | Source |
+|---|---|---|
+| R1 | Every hard rule of `oci-strict` verified at runtime by the measured-assurance probe, not merely configured | M5 contract; SANDBOX.md §2 |
+| R2 | A weakened-profile meta-test for each hard rule makes the gate fail | M5 contract; SANDBOX.md §6 |
+| R3 | Weakened-profile closure for `PROXY_ONLY`: the weakenings also hold, and are caught, in a `PROXY_ONLY` environment | M5e deliverables |
+| R4 | From `PROXY_ONLY`, no route to any address but the proxy endpoint (direct TCP, UDP, DNS, raw sockets) | M5 contract; NETWORK_SECURITY.md §9 |
+| R5 | Network destination authorization: only the run's exact grants are tunnelled; CONNECT form, host and SNI agree | NETWORK_SECURITY.md §2; ADR-0048 |
+| R6 | TLS verification: the client verifies the origin; the kernel's own requests verify every hop | NETWORK_SECURITY.md §§2, 4 |
+| R7 | The full SSRF suite (blocked ranges, metadata by IP and name, rebinding, mixed answers, IPv4-mapped, NAT64, redirects, credential leakage) | M5 contract; NETWORK_SECURITY.md §9 |
+| R8 | Resource exhaustion bounded: fork, memory, disk, descriptors, file size, wall clock — without uncontrolled experiments | M5 contract; SANDBOX.md §6 |
+| R9 | Cross-run isolation and persistence: nothing of one run reaches or survives into another | M5 contract; SANDBOX.md §§2, 6 |
+| R10 | Environment lifecycle and cleanup: orphans reaped exactly; a run's and a lease's end end its environment | M5 contract; ADR-0052 §8 |
+| R11 | Re-attach by run-id label after a container-runtime restart | M5 contract; RELIABILITY.md (container runtime restart) |
+| R12 | A tampered or substituted assurance probe, and a configuration that looks hardened while the running environment differs, are caught | M5 contract (adversarial) |
+| R13 | A fronted request through an allowlisted shared host stays within its byte budget and connection count | M5 contract (adversarial); NETWORK_SECURITY.md |
+| R14 | A real `pip install` succeeds against an allowlisted registry and fails against a non-allowlisted one | M5 contract |
+| R15 | A real `npm install` succeeds against an allowlisted registry and fails against a non-allowlisted one | M5 contract |
+| R16 | Every containment is attributed to what enforced it | SANDBOX.md §6; owner direction 4 |
+| R17 | CI and eval evidence cannot turn a missing or weakened case into a green check | EVALS.md §§3, 8; every `test_ci_*` |
+| R18 | `local` behind opt-in | M5 contract — **deferred to M6** (ADR-0052 OD-7, accepted; owner direction 2) |
+
+## 3. Requirements-to-evidence matrix
+
+"Hosted" means the named cases are required by a task that is a required job
+of the `ci` aggregate and passed in hosted CI at the baseline (run
+40331005080). A case named here is a case the task requires by name; nothing is
+listed as verified on any other basis.
+
+| ID | Existing evidence (task: cases) | Status | Gap, and the M5e work |
+|---|---|---|---|
+| R1 | `sandbox-foundation-evidence`: the probe's measured invariants on a real runtime; `host-pid-private`, `host-ipc-private`, `host-uts-private`, `container-pid-private`; the strict profile measured from the runtime's record and from inside | Hosted | None for the rules M5a measures. Restate the rule-to-invariant map in the gate (M5e.6). |
+| R2 | `sandbox-foundation-evidence`: `every_weakened_profile_is_detected` — `weakened-writable-root`, `-root-user`, `-privileged`, `-runtime-socket-mounted`, `-capability-added`, `-seccomp-unconfined`, `-seccomp-default-profile`, `-host-network`, `-host-pid`, `-host-ipc`, `-no-new-privileges-disabled`, `-resource-limits-dropped`, `-extra-device`, `-mutable-image-tag`, `weakened-count`; `drift-pids-limit-raised` | Hosted | No `weakened-host-uts` case (UTS is measured, not weakened). The gate's own failure is shown per task (a missed case fails it); an M5-level meta-test is M5e.6's. |
+| R3 | `sandbox-egress-evidence`: `weakened_topologies_are_detected` — `weakened-bridge-network`, `weakened-missing-relay`, `weakened-relay-tampered`, `weakened-proxy-variables-removed`, `drift-extra-peer-listening`, `drift-fake-resolver-in-namespace`, `drift-egress-directory-opened`, `drift-setup-left-running`, `drift-relay-stopped`, `weakened-topology-count` | Partial | R2's profile weakenings run on the evidence topology (`NO_NETWORK`); R3's topology weakenings run on `PROXY_ONLY`. **Not shown:** the profile weakenings on a `PROXY_ONLY` environment. M5e.2 adds them (writable root, root user, privileged, socket, capability, seccomp, host namespaces, no-new-privileges, limits, device) on `PROXY_ONLY`. |
+| R4 | `sandbox-egress-evidence`: `bypass-raw-ipv4`, `-raw-ipv6`, `-icmp`, `-vsock`, `-udp-external`, `-udp-ipv6-external`, `-dns-external`, `-dns-ipv6-external`, `-dns-local-stub`, `-dns-desktop-host`, `-dns-embedded-runtime-resolver`, `-tcp-external-dns`, `-tcp-private-lan`, `-tcp-host-loopback-origin`, `-tcp-cloud-metadata`, `-tcp-nat64-metadata`, `-tcp-ipv4-mapped`, `-tcp-link-local-neighbour`, `bypass-proxy-variable-redirected`; `sandbox-agent-evidence`: `a06-*`, `a07-*` | Hosted | None for the topology. For package managers: M5e.4 repeats direct-route attempts from the pip and npm invocations themselves. |
+| R5 | `sandbox-egress-evidence` (strict CONNECT parse, exact grants, tunnel limit); `sandbox-agent-evidence`: `a05-connect-absolute-form-refused`, `a05-connect-address-literal-refused`, `a05-connect-another-method-refused`, `a05-connect-host-header-disagrees-refused`, `a05-connect-host-not-canonical-refused`, `a05-connect-smuggled-body-refused`, `a05-tls-sni-mismatch-closed`, `a05-tls-sni-missing-closed` | Hosted | **Missing for registries:** an ungranted registry, a tarball or wheel on an ungranted host, and a redirect to one. M5e.4. |
+| R6 | Sandbox egress is an opaque tunnel, so TLS is the client's: `a03-https-granted-origin-tls-verified`, `a05-tls-untrusted-issuer-refused-by-the-client`, `a05-tls-certificate-for-another-name-refused-by-the-client`. The kernel's own path: `net-http-evidence` (verified per hop) | Hosted | **Missing for pip and npm:** each verifies the fixture registry under a per-run CA, refuses an untrusted issuer, and its verification is not turned off by an argument (ADR-0054 for npm; §10 OD-E2 for pip). M5e.4–M5e.5. |
+| R7 | Kernel path, `net-http-evidence`: `ssrf-*` (IP literals, `ssrf-ipv4-mapped`, `ssrf-6to4`, `ssrf-mixed-answer`, …), `dns-rebinding-pinned-within-request`, `dns-rebinding-next-request`, `redirect-*` (`-blocked-address`, `-metadata-name`, `-mixed-address`, `-ungranted-host`, `-sixth-hop`, `-downgrade`, …), `credential-cross-origin-redirect`, `origin-confusion-idna-label`, and the authority's own pipeline: `guard-loopback-answer`, `guard-metadata-ip-answer`, `guard-mixed-answer`, `metadata-name-before-resolution`. Proxy path, `sandbox-egress-evidence`: `resolver-metadata-blocked`, `resolver-rebinding-pinned`, `resolver-mixed-refused-outright`, `bypass-tcp-cloud-metadata`, `bypass-tcp-nat64-metadata`, `bypass-tcp-ipv4-mapped` | Hosted | The suite is spread over two tasks and has no single gate. M5e.6's gate requires both, by name. Out of M5's scope and stated so: link-preview and markdown-image exfiltration (channels, M10+) and a `LOCAL_ONLY` model call (M7). |
+| R8 | `sandbox-foundation-evidence`: `resource-pids-bounded`, `resource-memory-oom-killed`, `resource-file-size-bounded`; `sandbox-workload-evidence`: `workload-fork-loop-reaped`, `workload-daemon-reaped`, `workload-wall-clock-timed-out`; `sandbox-workspace-evidence`: `workload-fills-to-enospc`; the 16-environment and workload budgets (`public-exec-budget-exhausted-refused`) | Hosted (the privileged workspace half hosted-only) | **Not shown:** one environment at its limits leaves another run's environment, the broker and the authority serving (a bounded neighbour case). M5e.2 adds it inside the existing caps — never an unbounded experiment. |
+| R9 | `persistence-tmp-marker-not-inherited`, `workload-nothing-persists`, `release-spares-another-runs-environment`, `release-other-run-still-runs`, `release-spares-another-runs-proxy-only-environment`, one environment per run (schema, ADR-0052 §4) | Hosted | **Not shown as one suite:** run A's processes cannot see or signal run B's; A cannot reach B's relay or environment; B's environment never reuses A's container. M5e.2. **By design and stated:** runs bound to one workspace directory share it (ADR-0052 §6) — a documented residual, not a gap. |
+| R10 | `orphan-ended-record-reaped`, `reconcile-helper-orphan-reaped`, `broker-restart-orphans`, `foreign-*`; the release and lease teardown (`sandbox-release-evidence`, 62 + 45 cases) | Hosted | None. |
+| R11 | Reconciliation at an **authority** start: stopped environments destroyed, missing ones `LOST`, twins untouched | Partial | **Not evidenced:** a **runtime** restart under a running authority — the containers' end detected and settled, nothing believed still running. Hosted-only (it restarts the runner's daemon). M5e.2. |
+| R12 | `tamper-substituted-probe`, `tamper-changed-byte`, `tamper-extra-field`, `tamper-truncated-output`, `tamper-malformed-output`, `tamper-flood-output`, `tamper-hang-timeout`; `drift-*`; `mount-substitution-destroys-before-the-workload` (the workspace's privileged half) | Hosted | None. |
+| R13 | `fronting-residual-carried-and-bounded`, `budget-*`, `a08-tunnel-limit`, `a08-download-budget`, `a08-upload-budget` | Hosted | None; the residual stays stated (NETWORK_SECURITY.md). |
+| R14 | — | **Missing** | No pip in any evidence image (the tools image copies the standard library only, `ensurepip` excluded), no registry fixture, no case. `pip` falls under the obligation's "anything else" row and is kept with **no** pip-specific neutralisation (§4, G3). M5e.3–M5e.4. |
+| R15 | — | **Missing, and refused by design** | npm is `HYGIENE_NOT_EVIDENCED` (ADR-0052 §5a), although `npm_config_ignore_scripts=true` is already among the launcher's variables. ADR-0054 (Proposed) defines the profile and the evidence it needs. M5e.3–M5e.5. |
+| R16 | `sandbox-agent-evidence` and `sandbox-release-evidence` lines carry `level` and `enforcement`; `environment.refused` and `environment.drifted` records; the broker's egress counted by disposition | Partial | M5a, M5b and M5d.1–M5d.4 evidence lines carry only `suite`, `case`, `outcome`, and M5b's containment is recorded "not yet per attempt" (SANDBOX.md §6). M5e.1 adds attribution to every line, from existing events and measurements only (owner direction 4); §10 OD-E1 settles §6's wording. |
+| R17 | `tests/architecture/test_ci_*` (each job present, unconditional, required by `ci`, exact command; the task's and the eval's case lists equal); the strict eval gate under GitHub Actions; the reviewed baseline (`evals/baselines/main.json`, never rewritten by a run); mutation campaigns; the ADR history anchor | Hosted | Each new job, task and eval gets the same treatment (M5e.6). The negative controls run by hand for M5d.6 become committed tests. |
+| R18 | — | Deferred | `local` is M6's (ADR-0052 OD-7). The ROADMAP's M5 contract and M5e section say so; §10 OD-E5 asks the owner to confirm M5's acceptance wording. |
+
+## 4. Gap analysis
+
+- **G1 — Package-manager acceptance does not exist (R14, R15).** No pip or npm
+  is in any evidence image; no registry fixture exists; no case runs either
+  tool. The tools image (`scripts/dw.py`, `_tools_image`) is built offline
+  `FROM scratch` from the host's own bytes — the host's git, Python's standard
+  library without `ensurepip`, and the locked pytest.
+- **G2 — npm is fail-closed (R15).** `npm`, `npx`, `pnpm`, `yarn`, `bun`,
+  `cargo` and their wrappers are `HYGIENE_NOT_EVIDENCED`
+  (`hygiene.rs`, `UNEVIDENCED`). The accepted ADR-0052 §5a lifts that only on
+  real-tool evidence; a profile changes an accepted decision, so it needs its
+  own ADR: ADR-0054.
+- **G3 — pip is kept with nothing pip-specific (R14, R6).** A `pip` executable
+  matches no family in `hygiene()` and is `Kept` with an empty prefix ("it
+  reads none of them"), and `python -m pip` is the Python family (the
+  variables, `-E` refused). pip reads its own configuration from the image
+  (the operator's) and options from a requirements file in the workspace, can
+  disable TLS verification for a host (`--trusted-host`), and runs a source
+  distribution's build backend — package code, the same class of risk as an
+  npm lifecycle script, which the obligation does neutralise for npm. Whether
+  pip needs a profile is the owner's decision (§10 OD-E2); this plan does not
+  change pip's behaviour.
+- **G4 — Attribution is incomplete (R16).** See R16.
+- **G5 — Weakened-profile closure for `PROXY_ONLY` is not shown (R3).** See R3;
+  plus `weakened-host-uts` (R2).
+- **G6 — Runtime restart is not evidenced (R11).**
+- **G7 — Cross-run isolation is evidenced in parts, not as a suite (R9).**
+- **G8 — No bounded neighbour case for exhaustion (R8).**
+- **G9 — `M5` is not an available milestone.** `AVAILABLE_MILESTONES` ends at
+  `M5d` (`evals/src/direwolf_evals/runner.py`); the pending
+  `pending-kernel/sandbox-egress` eval requires `M5` and has no runner. That
+  runner's docstring still calls ADR-0052 Proposed — a stale comment, to be
+  corrected with the runner's next change.
+- **G10 — The M5 contract still lists `local` (R18).** Deferred to M6; the
+  ROADMAP now says so beside the contract.
+
+## 5. Architectural decisions
+
+| Decision | Where | State |
+|---|---|---|
+| An evidence-backed npm profile for `workspace_exec_hygiene`, narrowly scoped (`npm ci` and `npm install` of registry packages only) | [ADR-0054](adr/0054-m5e-npm-hygiene-profile.md) | **Proposed** — would amend ADR-0052 §5a on acceptance |
+| npm stays `HYGIENE_NOT_EVIDENCED` until ADR-0054 is accepted | ADR-0052 §5a (accepted) | In force |
+| `local` is M6's | ADR-0052 OD-7 (accepted) | In force; recorded in ROADMAP M5e and the M5 contract |
+| Package-manager tools for the evidence come from the hosted runner, not the developer's host | owner direction 3; this plan §6 | Direction; the provenance rule is §10 OD-E4 |
+| Attribution from existing events and measurements; no new per-attempt audit event | owner direction 4; this plan M5e.1 | Direction; §6's wording is §10 OD-E1 |
+| How an unaccepted profile is exercised in evidence without being enabled in production | ADR-0054 §7 | Proposed; §10 OD-E3 |
+
+## 6. Safe implementation sequence
+
+Each step keeps every production control as it is; each lands with its own
+local gates, then the owner's commit and a hosted run, before the next. No step
+enables npm in production.
+
+| Step | Delivers | Product change | Exit |
+|---|---|---|---|
+| **M5e.1** Attribution | `level` and `enforcement` on every line of `sandbox-foundation`, `sandbox-egress`, `sandbox-workload`, `sandbox-secret` and `sandbox-workspace` evidence, each naming the existing mechanism (the probe's measured invariant, `environment.refused`/`.drifted`, the proxy's decision and the egress disposition counters, the authority's refusal, the namespace's errno, the client's own TLS verification); each `require_*` refuses a line without them | none (test and task code) | every existing case still reports, now attributed; the negative controls of M5d.6 generalised |
+| **M5e.2** Closure | the profile weakenings on `PROXY_ONLY` (R3), `weakened-host-uts` (R2); the cross-run suite (R9); a bounded neighbour case (R8); a runtime restart under a running authority (R11), hosted-only | none expected; a finding is a separate, reviewed change | each new case required by name; the restart case NOT EXERCISED locally, required hosted |
+| **M5e.3** Fixtures | §7's registries, generated deterministically from synthetic content, served by the existing per-run-PKI HTTPS origin on loopback through the broker's evidence-only resolver; unit tests of the generators | none | fixtures reproducible bit for bit from a seed; no network beyond loopback |
+| **M5e.4** pip, and npm refused | a registry tools image built **on the runner** (§8); pip against the granted fixture registry and against an ungranted one; npm **refused** `HYGIENE_NOT_EVIDENCED` before anything is prepared — today's fail-closed behaviour, evidenced | none (pip as it is today, unless §10 OD-E2 decides otherwise) | `make sandbox-registry-evidence` hosted-green; locally NOT EXERCISED, by design |
+| **M5e.5** The npm profile | ADR-0054's profile in `hygiene.rs`, reachable only as ADR-0054 §7 decides; its evidence (ADR-0054 §8) and mutation review | yes, behind the decided fence; production still fail-closed | every ADR-0054 §8 case hosted-green |
+| **M5e.6** The gate | an eval suite requiring `M5e` that runs the M5 evidence tasks and requires every case at its level with its attribution; architecture tests for each new job; committed negative controls; the owner's decisions; on ADR-0054's acceptance, npm's profile enabled; then `M5` joins the available milestones and `pending-kernel/sandbox-egress` gets its runner | the enabling change only after acceptance | hosted green on the committed tree; M5's acceptance is the owner's |
+
+## 7. Hermetic fixtures
+
+All synthetic, generated at test time from a seed, served on loopback, never
+fetched:
+
+- **A PEP 503 "simple" index** over HTTPS: a pure-Python wheel (`ZIP` with
+  `METADATA`, `WHEEL` and `RECORD` written by the standard library) whose import
+  writes nothing; a second wheel depending on the first; a source distribution
+  whose build backend would write a marker if it ran (to show whether pip
+  builds it); a tampered wheel whose `RECORD` hash disagrees.
+- **An npm registry**: a packument (`GET /<name>`) per package and its `.tgz`
+  (written with `tarfile`), with `dist.integrity` (sha512) and `dist.tarball`;
+  a package with `preinstall`, `install`, `postinstall` and `prepare` scripts
+  that would each write a marker; a dependency whose tarball URL names an
+  ungranted host; a dependency named by a git URL, whose `prepare` script
+  would write a marker; a packument redirecting to an ungranted host; a tampered
+  tarball; a `package-lock.json` the evidence generates for `npm ci`; and a
+  workspace `.npmrc` that tries to turn scripts back on, change the user and
+  global configuration, and turn TLS verification off.
+- **Two origins**: the granted registry and an ungranted one with a valid
+  certificate from the same per-run CA, so a refusal is the proxy's decision,
+  never a TLS failure.
+- **A per-run CA**, its anchor placed in the workspace as a labelled fixture —
+  the pattern M5d.5 uses for the agent's origins — never a production setting.
+- Reached through the broker's evidence-only resolver
+  (`--allow-evidence-egress`, logged as such), as M5b and M5d.5 do: the
+  production IP guard is unchanged and still refuses loopback.
+
+## 8. CI jobs and tasks
+
+| Task | Job (required by `ci`) | Runs | Notes |
+|---|---|---|---|
+| `make sandbox-registry-evidence` | `sandbox-registry` | hosted only | builds the registry tools image on the runner from runner-provided `python3`/pip and `node`/npm, offline `FROM scratch`, `--network none`, named by content; prints each tool's version and SHA-256; NOT EXERCISED locally, never a pass |
+| `make sandbox-registry-mutations` | — | manual | each guard weakened in turn; mutants killable only by the hosted evidence are reported as such, never counted as killed locally (§10 OD-E7) |
+| `make sandbox-closure-evidence` (or new cases in the existing tasks) | existing jobs, or `sandbox-closure` | local and hosted; the runtime-restart case hosted-only | the restart case runs only on a disposable runner, as `sandbox-workspace` and `sandbox-agent` already provision identities there |
+| the M5e gate eval | `evals` (strict) | hosted; local reports NOT EXERCISED for the hosted-only parts | requires `M5e`; `M5` only at acceptance |
+
+Each new job gets the `test_ci_*` treatment: present, Linux, unconditional, no
+`continue-on-error`, no secrets, exactly its command, required once by `ci`;
+its case lists equal to what its suites print; its evidence lines' levels and
+attribution checked; and a committed negative control showing a dropped case,
+a wrong level, a missing attribution and a weakened workflow each fail.
+
+## 9. Local versus hosted verification
+
+| Evidence | Local (WSL, one identity, Docker) | Hosted |
+|---|---|---|
+| M5a foundation, M5b egress, M5c `net.http`, M5d workload, secret and release | runs | required |
+| M5d.4 workspace, privileged half | NOT EXERCISED | required |
+| M5d.5 agent, three-identity half | NOT EXERCISED | required |
+| authority peer-credential check (second identity) | NOT EXERCISED | required |
+| M5e.1 attribution | runs | required |
+| M5e.2 closure: weakenings on `PROXY_ONLY`, cross-run, neighbour | runs | required |
+| M5e.2 runtime restart | NOT EXERCISED | required (disposable runner) |
+| M5e.3 fixture generators | runs | required |
+| M5e.4–M5e.5 pip and npm against the fixtures | NOT EXERCISED (no pip or npm installed on the host, by decision) | required |
+| M5e.6 gate | the local parts | required |
+
+## 10. Owner decisions still open
+
+| # | Decision | Recommendation |
+|---|---|---|
+| OD-E1 | SANDBOX.md §6 asks for "an audit record naming the denial" for each contained attempt; M5b records containment in the environment's measurement, "not yet per attempt". Is an **attributed** denial — the case names the existing event or measurement that enforced it — what §6 means? | Yes: attribution from existing events and measurements (direction 4), §6's sentence reworded to say so in the M5e change; no new per-attempt event |
+| OD-E2 | pip: today a `pip` executable is kept with nothing pip-specific (G3). Does M5e add a pip profile (refuse `--trusted-host`, `--no-verify` forms and `--index-url` over HTTP; `--only-binary :all:` so no build backend runs), with its own evidence — in ADR-0054 or a sibling ADR? | Yes, a pip profile in a sibling Proposed ADR, so ADR-0054 stays narrow; until then M5e.4 evidences pip as it is and says what it does not neutralise |
+| OD-E3 | How the npm profile is exercised before acceptance without being enabled in production (ADR-0054 §7) | An evidence-only start-up option of the authority, logged `REDUCED ASSURANCE` and fenced by an architecture rule, removed when ADR-0054 is accepted |
+| OD-E4 | The registry tools' provenance: the runner's preinstalled Node.js/npm and Python/pip, or pinned versions verified by checksum | Pinned versions verified by checksum, from the runner's tool cache or a pinned setup action; the image records each tool's digest either way |
+| OD-E5 | M5's acceptance wording: the contract lists `local` (deferred to M6) and says `npm install` (ADR-0054 allows `install` and `ci`) | Confirm that M5's acceptance excludes `local`, and that `npm install` and `npm ci` both satisfy it |
+| OD-E6 | ADR-0054's surface: whether `--cafile`/`--ca` stay allowed (the evidence's per-run CA needs one) and `--strict-ssl=false` stays refused | Allow a CA file, refuse turning verification off (ADR-0054 §4) |
+| OD-E7 | Mutation review for hosted-only evidence: run the registry campaign hosted (manual workflow) or accept unit-killable mutants only | A manual hosted run, its result recorded; never a local kill claimed for a hosted-only case |
+| OD-E8 | Whether a runtime restart (R11) is an M5e gate case or a documented M6+ reliability item | An M5e case, hosted-only on a disposable runner |
+
+## 11. What this plan does not do or claim
+
+It changes no code, evidence, CI job, eval or baseline. It does not start M5e,
+accept ADR-0054, or mark M5e or M5 complete. It claims nothing as verified that
+no required case shows: §3's "Hosted" rows name cases a required job ran at the
+baseline; every other row is a gap. M5e's evidence, like M5d's, will show what
+its cases show — not that a container is a VM, that the host kernel is
+untrusted, or that a package's own code is safe once a workload runs it.

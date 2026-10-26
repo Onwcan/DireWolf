@@ -453,16 +453,24 @@ here — not a deployment, and not a certification.
 
 #### M5e · The M5 adversarial gate and closeout — **NOT STARTED**
 
+**Planned, not started (2026-10-26).** The gap analysis, the requirements-to-evidence matrix,
+the implementation sequence and the owner decisions still open are in
+[M5E_ASSURANCE_PLAN.md](M5E_ASSURANCE_PLAN.md); the npm profile M5's package-manager
+acceptance needs is [ADR-0054](adr/0054-m5e-npm-hygiene-profile.md), **Proposed** — until it
+is accepted, npm stays refused as ADR-0052 §5a decided. No M5e code, evidence or CI job
+exists yet.
+
 **Deps:** M5a–M5d. **Deliverables:** the complete escape, SSRF and persistence suites as
 merge gates; weakened-profile closure for `PROXY_ONLY`; package-manager acceptance
 (`pip install`, `npm install` against allowlisted and non-allowlisted registries).
 **Acceptance:** the milestone contract below, in full; `M5` joins the available milestones.
 **Adversarial:** everything above, together.
-**Deferred:** gVisor/Kata/Firecracker, SSH, remote workers.
+**Deferred:** gVisor/Kata/Firecracker, SSH, remote workers; the `local` environment (M6, by its own
+ADR — [ADR-0052](adr/0052-m5d-sandboxed-process-exec.md) OD-7, accepted).
 
 #### The M5 contract
 
-**Deps:** M4. **Deliverables:** `ExecutionEnvironment` trait; `oci-strict` profile with `PROXY_ONLY` networking ([ADR-0024](adr/0024-sandbox-network-topology.md)); supervisor with lifecycle, limits, reaping, and **re-attach by run-id label** after a container-runtime restart; `local` environment behind opt-in; `AssuranceLevel` surfaced to policy; CONNECT proxy with IP guard, DNS pinning, SNI/host agreement and byte budgets; kernel-performed `net.http`; **measured assurance** ([COMPETITIVE_ANALYSIS.md](COMPETITIVE_ANALYSIS.md) §17 G2) -- an authority-provided, read-only, digest-checked probe run inside each environment checks every hard rule of [SANDBOX.md](SANDBOX.md) §2 as PASS or FAIL (no weighted score), the effective `AssuranceLevel` is the lower of declared and measured, and a failed required invariant refuses the environment and is audited.
+**Deps:** M4. **Deliverables:** `ExecutionEnvironment` trait; `oci-strict` profile with `PROXY_ONLY` networking ([ADR-0024](adr/0024-sandbox-network-topology.md)); supervisor with lifecycle, limits, reaping, and **re-attach by run-id label** after a container-runtime restart; `local` environment behind opt-in (deferred to M6 by ADR-0052 OD-7, accepted; the owner's confirmation of M5's acceptance wording is open, [M5E_ASSURANCE_PLAN.md](M5E_ASSURANCE_PLAN.md) §10 OD-E5); `AssuranceLevel` surfaced to policy; CONNECT proxy with IP guard, DNS pinning, SNI/host agreement and byte budgets; kernel-performed `net.http`; **measured assurance** ([COMPETITIVE_ANALYSIS.md](COMPETITIVE_ANALYSIS.md) §17 G2) -- an authority-provided, read-only, digest-checked probe run inside each environment checks every hard rule of [SANDBOX.md](SANDBOX.md) §2 as PASS or FAIL (no weighted score), the effective `AssuranceLevel` is the lower of declared and measured, and a failed required invariant refuses the environment and is audited.
 **Acceptance:** defaults from [SANDBOX.md](SANDBOX.md) §2 verified at runtime, not merely configured -- by the measured-assurance probe, and a **weakened-profile meta-test for each hard rule** (a bridge network, a writable root, an added capability, unconfined seccomp, a mounted container socket) must make the gate fail; from a `PROXY_ONLY` sandbox, **no route exists to any address but the proxy endpoint** (verified by attempting direct connections and direct DNS); a real package manager (`pip install`, `npm install`) succeeds against an allowlisted registry and fails against a non-allowlisted one; orphan reaping exact; the opaque tunnel's residuals, domain fronting through an allowlisted shared host among them, are stated in [NETWORK_SECURITY.md](NETWORK_SECURITY.md) and bounded by the byte budget (G7).
 **Adversarial:** full escape suite; full SSRF suite; resource exhaustion; cross-run persistence attempts; a configuration that looks hardened while the running environment differs; a tampered or substituted assurance probe; a fronted request through an allowlisted shared host, which must stay within its byte budget and connection count.
 **Deferred:** gVisor/Kata/Firecracker, SSH, remote workers.
