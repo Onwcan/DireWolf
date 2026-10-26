@@ -166,7 +166,7 @@ Stronger than (B): not visible in `environ`, and it disappears when the environm
 > with the same pre-M5 status as mode (B) (ADR-0046 §13).
 
 
-**In an execution environment (M5d.3, [ADR-0052](adr/0052-m5d-sandboxed-process-exec.md) §7, Proposed).**
+**In an execution environment (M5d.3, [ADR-0052](adr/0052-m5d-sandboxed-process-exec.md) §7).**
 Modes B and C reach a **sandboxed** process -- the only place they reach in
 a build a user runs. A version-6 `process.exec` names a handle
 (`credential_handle`); the kernel checks the metadata, binds the consumer to
