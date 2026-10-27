@@ -164,6 +164,35 @@ fn drain(
     });
 }
 
+/// Both drains' results -- and each drain joined once it has answered, so
+/// that when this returns no drain thread is left and no pipe end it read is
+/// still open. Sending is a drain's last act, so the join waits only for it
+/// to drop its pipe and return. Without the join the broker answered its
+/// exchange while the two threads and their two descriptors were still
+/// alive: a census taken on the answer could count them (CI run
+/// 40351592777). `None` when either has not answered by `until`: that one
+/// may be blocked on a pipe a descendant still holds, and is left to end with
+/// the pipe rather than waited for.
+fn gathered(
+    received: &mpsc::Receiver<Drained>,
+    drains: (thread::JoinHandle<()>, thread::JoinHandle<()>),
+    until: Instant,
+) -> Option<(Drained, Drained)> {
+    let mut out = None;
+    let mut err = None;
+    while out.is_none() || err.is_none() {
+        let left = until.saturating_duration_since(Instant::now());
+        match received.recv_timeout(left) {
+            Ok(drained) if drained.stdout => out = Some(drained),
+            Ok(drained) => err = Some(drained),
+            Err(_) => return None,
+        }
+    }
+    let _ = drains.0.join();
+    let _ = drains.1.join();
+    out.zip(err)
+}
+
 fn exited(pidfd: &OwnedFd) -> bool {
     matches!(
         rustix::process::waitid(
@@ -234,11 +263,11 @@ pub(crate) fn run(
             .name("run-stderr".to_owned())
             .spawn(move || drain(stderr, false, err_limit, &err_sent, err_redactor)),
     );
-    if drains.0.is_err() || drains.1.is_err() {
+    let (Ok(out_drain), Ok(err_drain)) = drains else {
         kill_group(&pidfd, pid);
         let _ = child.wait();
         return Err(Failure::Unconfirmed);
-    }
+    };
 
     // The leader's end, seen without reaping it: its group id is still its
     // own while it is unreaped, so the group can be killed safely.
@@ -254,18 +283,8 @@ pub(crate) fn run(
     kill_group(&pidfd, pid);
     let status = child.wait();
 
-    let mut out = None;
-    let mut err = None;
     let until = bounds.deadline.max(Instant::now()) + DRAIN_GRACE;
-    while out.is_none() || err.is_none() {
-        let left = until.saturating_duration_since(Instant::now());
-        match received.recv_timeout(left) {
-            Ok(drained) if drained.stdout => out = Some(drained),
-            Ok(drained) => err = Some(drained),
-            Err(_) => return Err(Failure::Unconfirmed),
-        }
-    }
-    let (Some(out), Some(err)) = (out, err) else {
+    let Some((out, err)) = gathered(&received, (out_drain, err_drain), until) else {
         return Err(Failure::Unconfirmed);
     };
     let ended = if timed_out {
@@ -289,4 +308,109 @@ pub(crate) fn run(
         stderr: err.kept,
         stderr_observed: err.observed,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::panic)]
+
+    use std::io::Read;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    use super::{Drained, drain, gathered};
+
+    /// A stream at end of file whose closing takes `close` and is then
+    /// recorded: a pipe end its drain still holds after answering.
+    struct Pipe {
+        close: Duration,
+        closed: Arc<AtomicBool>,
+    }
+
+    impl Read for Pipe {
+        fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+            Ok(0)
+        }
+    }
+
+    impl Drop for Pipe {
+        fn drop(&mut self) {
+            thread::sleep(self.close);
+            self.closed.store(true, Ordering::SeqCst);
+        }
+    }
+
+    /// A stream that yields nothing until `held` has passed: a pipe a
+    /// descendant keeps open.
+    struct Held(Duration);
+
+    impl Read for Held {
+        fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+            thread::sleep(self.0);
+            Ok(0)
+        }
+    }
+
+    fn spawned(
+        reader: impl Read + Send + 'static,
+        stdout: bool,
+        sent: &mpsc::Sender<Drained>,
+    ) -> thread::JoinHandle<()> {
+        let sent = sent.clone();
+        thread::spawn(move || drain(reader, stdout, 16, &sent, None))
+    }
+
+    #[test]
+    fn both_drains_are_joined_before_their_output_is_returned() {
+        let closed = [
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+        ];
+        let (sent, received) = mpsc::channel();
+        let pipe = |closed: &Arc<AtomicBool>| Pipe {
+            close: Duration::from_millis(200),
+            closed: Arc::clone(closed),
+        };
+        let drains = (
+            spawned(pipe(&closed[0]), true, &sent),
+            spawned(pipe(&closed[1]), false, &sent),
+        );
+        let Some((out, err)) =
+            gathered(&received, drains, Instant::now() + Duration::from_secs(10))
+        else {
+            panic!("both drains answered");
+        };
+        assert!(out.stdout && !err.stdout);
+        // Each answered before its pipe closed; neither is still open now.
+        assert!(
+            closed.iter().all(|c| c.load(Ordering::SeqCst)),
+            "a drain still held its pipe when the output was returned"
+        );
+    }
+
+    #[test]
+    fn a_drain_that_never_answers_is_not_waited_for() {
+        let (sent, received) = mpsc::channel();
+        let drains = (
+            spawned(&b"out"[..], true, &sent),
+            spawned(Held(Duration::from_secs(3)), false, &sent),
+        );
+        let since = Instant::now();
+        assert!(
+            gathered(
+                &received,
+                drains,
+                Instant::now() + Duration::from_millis(100)
+            )
+            .is_none()
+        );
+        assert!(
+            since.elapsed() < Duration::from_secs(2),
+            "{:?}",
+            since.elapsed()
+        );
+    }
 }

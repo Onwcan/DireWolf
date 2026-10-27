@@ -3317,6 +3317,7 @@ WORKLOAD_CASES = (
             "workload-collect-other-generation-indeterminate",
             "broker-restart-collection-indeterminate",
             "workload-environment-removed-mid-run-not-clean",
+            "broker-holds-nothing-after-an-answered-exchange",
             "broker-holds-nothing-after-its-workloads",
             # M5d.2: workspace_exec_hygiene by the trusted launcher, with the
             # real git, Python and pytest (ADR-0052 §5a) -- and what it

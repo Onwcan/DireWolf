@@ -1,6 +1,6 @@
 # ADR-0054: M5e — an evidence-backed npm profile for `workspace_exec_hygiene`: `npm ci` and `npm install` of registry packages with scripts off and configuration pinned, everything else still refused
 
-**Status:** Proposed · **Date:** 2026-10-26 · **Would amend (on acceptance):** [ADR-0052](0052-m5d-sandboxed-process-exec.md) §5a (`npm` leaves the tools the obligation refuses as unevidenced, for this profile only; `npx`, `pnpm`, `yarn`, `bun`, `cargo`, a `cargo-*` binary, `rustup`, `corepack`, and a runner naming any of them stay refused) · **Refines:** [ADR-0048](0048-m5b-proxy-only-topology-and-connect-proxy.md) (a package registry is one more exact `network.https` grant through the proxy), [SANDBOX.md](../SANDBOX.md) §4a · **Addresses:** [ADR-0000](0000-authority-plane-separation.md) (no second path, §10) · **Plan:** [M5E_ASSURANCE_PLAN.md](../M5E_ASSURANCE_PLAN.md)
+**Status:** Proposed (its open points decided by the owner on 2026-10-26, [plan](../M5E_ASSURANCE_PLAN.md) §10; not accepted) · **Date:** 2026-10-26 · **Would amend (on acceptance):** [ADR-0052](0052-m5d-sandboxed-process-exec.md) §5a (`npm` leaves the tools the obligation refuses as unevidenced, for this profile only; `npx`, `pnpm`, `yarn`, `bun`, `cargo`, a `cargo-*` binary, `rustup`, `corepack`, and a runner naming any of them stay refused) · **Refines:** [ADR-0048](0048-m5b-proxy-only-topology-and-connect-proxy.md) (a package registry is one more exact `network.https` grant through the proxy), [SANDBOX.md](../SANDBOX.md) §4a · **Addresses:** [ADR-0000](0000-authority-plane-separation.md) (no second path, §10) · **Plan:** [M5E_ASSURANCE_PLAN.md](../M5E_ASSURANCE_PLAN.md)
 
 > **npm runs in an environment only as `npm ci` or `npm install` of registry
 > packages, with lifecycle scripts off and its configuration pinned by the
@@ -75,8 +75,9 @@ a tarball, a git or hosting shorthand (`github:`, `user/repo`), `file:`,
 — `npm_config_ignore_scripts=true` as today, and, added by this ADR:
 `npm_config_userconfig=/dev/null`, `npm_config_globalconfig=/dev/null`,
 `npm_config_strict_ssl=true`, `npm_config_update_notifier=false`,
-`npm_config_audit=false`, `npm_config_fund=false` and
-`npm_config_cache=/tmp/.npm` (the only writable place outside the workspace).
+`npm_config_audit=false`, `npm_config_fund=false`,
+`npm_config_cache=/tmp/.npm` (the only writable place outside the workspace)
+and `npm_config_cafile=/etc/direwolf/npm-ca.pem` (§4).
 None comes from the caller, none is spelled on the runtime's command line,
 and each is a reserved name a mode B secret may not take (ADR-0052 §7).
 
@@ -92,11 +93,11 @@ Before any intent, `OBLIGATION_UNENFORCEABLE` (`HYGIENE_OVERRIDDEN_BY_ARGV`)
 for an invocation whose own arguments include any of: `--ignore-scripts=false`
 or `--no-ignore-scripts`; `--userconfig` or `--globalconfig`;
 `--strict-ssl=false` or `--no-strict-ssl`; `-g`, `--global`, `--location`,
-or `--prefix`; `--script-shell` or `--node-options`; `--foreground-scripts`.
+or `--prefix`; `--script-shell` or `--node-options`; `--foreground-scripts`;
+`--cafile` or `--ca` (§4).
 Each sets something the profile pins, or writes outside the workspace and
 `/tmp`, or matters only to a script the profile keeps from running — refused
-either way. `--registry`, a scoped `--@scope:registry`, `--cafile` and `--ca`
-are allowed (§4).
+either way. `--registry` and a scoped `--@scope:registry` are allowed (§4).
 
 ### 4. Destinations and TLS
 
@@ -105,11 +106,17 @@ run's exact `network.https` grants, enforced by the proxy (ADR-0048): a
 registry, a tarball host or a redirect target that is not granted is refused
 at `CONNECT`, attributed to the proxy's decision, whatever the workspace's
 `.npmrc`, `package.json` or lockfile names. A plain-HTTP registry is not
-reachable at all. TLS is end to end through the opaque tunnel and npm's own:
-the profile pins verification on and refuses turning it off (§3), and allows
-a CA file, so an operator's private registry — and the evidence's per-run CA,
-a labelled fixture — can be trusted. Whether a CA file should be allowed in
-production is the owner's decision (plan OD-E6).
+reachable at all. TLS is end to end through the opaque tunnel and npm's own,
+and **the workload does not choose whom npm trusts** (the owner's decision
+OD-E6, 2026-10-26): the profile pins verification on and refuses turning it
+off; it refuses `--cafile` and `--ca`; and the launcher points npm at one trust
+file in the image, `/etc/direwolf/npm-ca.pem` (proposed path), which the operator
+provides and the image manifest pins by digest. As npm documents it, that file
+is npm's whole trust store — an operator using the public registry puts public
+roots in it, one using a private registry its own CA — and a missing file makes
+npm's TLS fail, closed. The evidence bakes its per-run CA into the CI-built
+image at that path, and §8 measures that a workspace `.npmrc` naming a CA takes
+no effect.
 
 ### 5. Integrity
 
@@ -143,15 +150,16 @@ unless the evidence's other fixture options are present, named in no shipped
 configuration, and fenced by an architecture rule that only the evidence
 harness may pass it. Without the option, nothing changes. The change that
 implements this ADR's acceptance removes the option and moves `npm` out of
-`UNEVIDENCED`. The fence itself is the owner's decision (plan OD-E3).
+`UNEVIDENCED`. The owner chose this fence on 2026-10-26 (plan OD-E3).
 
 ### 8. The evidence acceptance requires
 
-`make sandbox-registry-evidence`, a required hosted job, on the runner's own
-npm (built into an offline `FROM scratch` image named by content, each tool's
-digest printed), against the plan's hermetic fixtures (plan §7): a granted
-registry and an ungranted one, both on loopback behind the broker's
-evidence-only resolver, with certificates from a per-run CA. Every case is
+`make sandbox-registry-evidence`, a required hosted job, on a pinned npm whose
+checksum is verified before use (plan OD-E4), built into an offline
+`FROM scratch` image named by content with each tool's digest printed, against
+the plan's hermetic fixtures (plan §7): a granted registry and an ungranted
+one, both on loopback behind the broker's evidence-only resolver, with
+certificates from a per-run CA baked into the image at the trust path (§4). Every case is
 required by name, at its level, with what enforced it. Locally it is NOT
 EXERCISED, never a pass.
 
@@ -166,6 +174,8 @@ EXERCISED, never a pass.
 | `npm-lifecycle-scripts-not-run` | no marker from any of the root's or a dependency's four scripts | the launcher's variable and the authority's prefix |
 | `npm-project-npmrc-cannot-reenable-scripts` | no marker with the workspace `.npmrc` asking for scripts | precedence, measured |
 | `npm-project-npmrc-cannot-disable-tls` | the untrusted issuer still refused | precedence, measured |
+| `npm-project-npmrc-cannot-replace-ca` | a workspace `.npmrc` naming its own CA leaves the image's trust file in force | precedence, measured |
+| `npm-missing-trust-file-fails-closed` | an image without the trust file installs nothing | npm's own TLS verification |
 | `npm-git-dependency-not-prepared` | no git fetch and no `prepare` marker | the proxy's decision; the variable |
 | `npm-untrusted-issuer-refused` | nothing installed | npm's own TLS verification |
 | `npm-tampered-tarball-refused` | `EINTEGRITY`, nothing installed | npm's integrity check |
@@ -187,7 +197,8 @@ or withdrawn, never accepted with that case dropped.
 allowlist, the spec filter, each refusal of §3, each added variable, the
 prefix, `npx`'s refusal, the §7 fence — and each must fail a unit suite or
 the hosted evidence. A mutant only the hosted evidence can kill is reported
-as such from a hosted run, never counted as killed locally (plan OD-E7).
+as such from a hosted run the owner triggers by hand, never counted as killed
+locally (plan OD-E7).
 
 ### 10. ADR-0000: no second path
 
@@ -207,13 +218,13 @@ profile's refusals are pure functions of the identity and the arguments, as
 the obligation's are today.
 
 **Negative.** A package that needs its install scripts or a native build does
-not work. Seven more fixed variables in every hygiene launch: the launcher's
+not work. Eight more fixed variables in every hygiene launch: the launcher's
 measured variable set changes, and with it ADR-0052's evidence
-(`hygiene-launcher-adds-exactly-its-variables`). Allowing a CA file lets a
-workload trust a CA of its choosing for its own connections, within its
-grants. The evidence-only option is one more start-up switch to fence until
+(`hygiene-launcher-adds-exactly-its-variables`). An operator must ship npm's
+trust file in the image — public roots for the public registry, its own CA
+for a private one — or npm connects nowhere. The evidence-only option is one more start-up switch to fence until
 acceptance removes it. npm's documented precedence is relied on only as far
-as §8 measures it, on the version the runner provides; a later npm needs the
+as §8 measures it, on the pinned version; a later npm needs the
 evidence again.
 
 ## Alternatives considered
@@ -228,7 +239,11 @@ evidence again.
   exists for this.
 - **`npm ci` only.** Narrower, and a lockfile pins every tarball; but the
   contract says `npm install`, so `install` of registry names is kept with the
-  spec filter (plan OD-E5).
+  spec filter (the owner's decision OD-E5: both count).
+- **A CA file the invocation names** (`--cafile`, `--ca`), for private
+  registries. Rejected by the owner (OD-E6): the workload would choose whom
+  npm trusts; the operator's trust file in the image serves private
+  registries instead.
 - **A kernel-side registry client** that fetches packages for the workload, as
   `net.http` does for the kernel. Rejected for M5e: the kernel would parse a
   package protocol, a far larger surface than an exact grant through the

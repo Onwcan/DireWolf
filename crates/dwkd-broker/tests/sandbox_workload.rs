@@ -515,6 +515,16 @@ mod linux {
         drop(fds);
         let outcome = BrokerOutcome::decode_frame_body(&frame(&mut stream)?).unwrap();
         assert_eq!(outcome.channel, hello.channel);
+        // One exchange per connection: the broker closes after its answer,
+        // and the exchange is over at the broker only then. Waiting for the
+        // close is what lets a census taken after this return count nothing
+        // of it (CI run 40351592777).
+        let mut more = [0u8; 1];
+        match stream.read(&mut more) {
+            Ok(0) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset => {}
+            other => panic!("the broker kept the connection after its answer: {other:?}"),
+        }
         Some(outcome.result())
     }
 
@@ -933,10 +943,28 @@ mod linux {
         // hardened broker refuses (M4e): this one is started
         // `--allow-dumpable`; nothing else here depends on that.
         let broker = Broker::start_with(&socket, None, &["--allow-dumpable"]);
+        // At rest, before any exchange: what the broker holds whenever it
+        // serves nothing.
+        let rest = broker.census();
         let workspace = dir.workspace("ws");
         let (s, container) = prepared(&socket, &ev, &workspace);
         let env = (&s, &container);
+        // An answered exchange leaves nothing behind: each runtime step's two
+        // drain threads, and the pipes they read, are joined before the
+        // broker answers, and the exchange ends with the broker's close. So
+        // this is read once, at once, and exact. CI run 40351592777 read
+        // (7, 3, 0) here -- two drains not yet gone -- and so expected that
+        // much again after the workloads, where the broker, at rest, held
+        // (5, 1, 0).
         let idle = broker.census();
+        assert_eq!(
+            idle, rest,
+            "an answered preparation left more than the broker holds at rest"
+        );
+        evidence(
+            "broker-holds-nothing-after-an-answered-exchange",
+            &format!("fds-{}-threads-{}-children-{}", idle.0, idle.1, idle.2),
+        );
         let sleeper = invocation();
         let since = Instant::now();
         let generation = started(
