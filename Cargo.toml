@@ -63,7 +63,7 @@ dwk-sandbox-profile = { path = "crates/dwk-sandbox-profile" }
 # smaller closure is also the more capable one.  No derive macros anywhere: a
 # derive that silently accepts a field is the failure strict configuration
 # exists to prevent (ADR-0035 section 2).
-toml = { version = "=1.1.6", default-features = false, features = ["parse"] }
+toml = { version = "=1.1.8", default-features = false, features = ["parse"] }
 
 # kernel.db (M3d). `bundled` compiles SQLite's C amalgamation into the
 # authority: the largest trusted-code addition in the project, accepted by
@@ -75,12 +75,12 @@ toml = { version = "=1.1.6", default-features = false, features = ["parse"] }
 # Pinned exactly for the same reason as `toml`. No default features: the
 # defaults turn on a prepared-statement cache (`hashlink`) and a WebAssembly
 # backend, and the authority needs neither.
-rusqlite = { version = "=0.40.2", default-features = false, features = ["bundled"] }
+rusqlite = { version = "=0.41.0", default-features = false, features = ["bundled"] }
 
 # The audit hash chain and every content-derived identity (policy revision,
 # AdmitRun request digest). RustCrypto's implementation, pure Rust, no
 # default features: no `alloc` convenience API and no OID tables.
-sha2 = { version = "=0.11.0", default-features = false }
+sha2 = { version = "=0.11.1", default-features = false }
 
 # Peer credentials (M3e): the uid the kernel attaches to the other end of a
 # Unix-domain socket (`SO_PEERCRED`), which stable Rust's standard library does
@@ -105,7 +105,7 @@ rustix = { version = "=1.1.5", default-features = false, features = ["std", "net
 # it (ADR-0034); it re-enters for the RESOURCE layer only: `dwk-proto` may not
 # depend on it (RS016) and only `crate::resource::fs` may name it (TX012).
 # No default features: `std` adds nothing the checks use.
-unicode-normalization = { version = "=0.1.25", default-features = false }
+unicode-normalization = { version = "=0.1.26", default-features = false }
 
 # --- M4e: the secret backends and secret material (ADR-0046) ---------------
 # Measured before they were chosen (ADR-0046 §20: linked, build-only,
@@ -118,16 +118,16 @@ unicode-normalization = { version = "=0.1.25", default-features = false }
 # and no pre-release post-quantum crates (`kem 0.3.0-pre.0`, `ml-kem`), which
 # 0.12 requires even with every feature off. Default features off: no armor,
 # no plugins, no SSH recipients, no async, no CLI helpers.
-age = { version = "=0.11.5", default-features = false }
+age = { version = "=0.12.1", default-features = false }
 # `zeroize`: secret material is `Zeroizing<Vec<u8>>`, scrubbed on drop. Already
 # in `age`'s closure; named directly so the type is ours, not a re-export.
-zeroize = { version = "=1.9.0", default-features = false, features = ["alloc"] }
+zeroize = { version = "=1.9.1", default-features = false, features = ["alloc"] }
 # `hmac`: the redaction index's in-memory fingerprints, HMAC-SHA-256 under a
 # per-process random key (never persisted). Same `digest` generation as the
 # authority's `sha2`: three new small crates (`hmac`, `ctutils`, `cmov`).
 hmac = { version = "=0.13.0", default-features = false }
 # `getrandom`: the per-process fingerprint key. Already in `age`'s closure.
-getrandom = { version = "=0.2.17", default-features = false }
+getrandom = { version = "=0.3.4", default-features = false }
 # Linux keychain: the kernel keyring (keyutils), through a maintained safe
 # wrapper over the `keyctl` syscalls. No D-Bus, no native library: it works on
 # a headless host, which Secret Service does not (ADR-0046 §6).
@@ -182,13 +182,13 @@ rustls = { version = "=0.23.46", default-features = false, features = ["ring", "
 # `rustls-webpki` (through `rustls`, not named here), is locked at 0.103.16 for
 # RUSTSEC-2026-0382 (distrusted emSign intermediates' keys), within the range
 # `rustls` 0.23.46 already accepts.
-webpki-roots = { version = "=1.0.10", default-features = false }
+webpki-roots = { version = "=1.0.11", default-features = false }
 # HTTP/1.1 framing (D2): a sans-I/O protocol library over `httparse` -- every
 # buffer is the broker's, so the buffer a credential header is written into is
 # `Zeroizing` and nothing else ever holds it in plaintext (ADR-0050 §9). No
 # I/O, no pool, no redirect following (the broker never calls it), no proxy, no
 # resolver. Only its `client` half.
-ureq-proto = { version = "=0.6.4", default-features = false, features = ["client"] }
+ureq-proto = { version = "=0.6.5", default-features = false, features = ["client"] }
 # `Bytes::from_owner`: the credential header's value is a `Bytes` whose owner
 # is `Zeroizing`, so dropping the request scrubs it. Already in the closure of
 # `http`, whose request and header types `ureq-proto` speaks and re-exports.
@@ -209,7 +209,7 @@ seccompiler = { version = "=0.5.0", default-features = false }
 # (`SYS_*`, `SECCOMP_RET_*`, `F_*`, `SO_*`, `PROT_*`): bindings only, no C,
 # and already in the tree (`nix`, `seccompiler`). A direct edge, not a new
 # crate.
-libc = { version = "=0.2.189", default-features = false }
+libc = { version = "=0.2.191", default-features = false }
 
 # --- dev-only: tests, property tests, differential oracles ------------------
 # Never linked into a shipped binary. dwcheck excludes dev-only edges from the
