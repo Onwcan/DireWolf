@@ -21,6 +21,7 @@ it is about to create.
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import hashlib
 import json
 import os
@@ -2697,7 +2698,8 @@ def task_sandbox_foundation_evidence() -> None:
     built statically and proved static from their ELF headers; their digests
     are pinned; the evidence images are built offline `FROM scratch` and
     named by content; a trusted runtime client is chosen. Then the broker's
-    and the authority's real-container suites run, every case must report,
+    and the authority's real-container suites run, every case must report at
+    its level with what enforced it (M5e.1, `require_attributed_evidence`),
     no container the evidence made may remain, and every container that was
     there before must still be there.
 
@@ -2859,7 +2861,7 @@ def task_sandbox_foundation_evidence() -> None:
             f"{len(removed)} container(s) that predate the evidence are gone: {removed}"
         )
     print(f"{GREEN}cleanup: no evidence container remains; {len(before)} pre-existing kept{OFF}")
-    records = require_sandbox_evidence("\n".join(outputs), SANDBOX_CASES)
+    records = require_attributed_evidence("\n".join(outputs), SANDBOX_CASES)
     latency = [r for r in records if r.get("case") == "latency"]
     if latency:
         print(f"{BOLD}latency{OFF} {json.dumps(latency[0], sort_keys=True)}")
@@ -3025,9 +3027,10 @@ def task_sandbox_egress_evidence() -> None:
     are fixtures -- the broker's evidence-only resolver file and a loopback
     origin -- and the boundary is not.
 
-    Then every suite must run every test and every case must report; no
-    container or network the evidence made may remain, and every one that was
-    there before must still be there. No runtime: NOT EXERCISED, which fails.
+    Then every suite must run every test and every case must report at its
+    level with what enforced it (M5e.1); no container or network the evidence
+    made may remain, and every one that was there before must still be there.
+    No runtime: NOT EXERCISED, which fails.
     Linux only.
     """
     if not sys.platform.startswith("linux"):
@@ -3197,7 +3200,7 @@ def task_sandbox_egress_evidence() -> None:
         f"{GREEN}cleanup: no evidence container or network remains; {len(before_containers)} "
         f"container(s) and {len(before_networks)} network(s) pre-existing kept{OFF}"
     )
-    require_sandbox_evidence("\n".join(outputs), EGRESS_CASES)
+    require_attributed_evidence("\n".join(outputs), EGRESS_CASES)
     uvrun("dwcheck", "closure", "--report")
 
 
@@ -3523,9 +3526,10 @@ def task_sandbox_workload_evidence() -> None:
     (M5d.2) a real DWKP client reaching them through the public route, the
     released `serve --sandbox-config` included.
 
-    Every suite must run every test and every case must report; no container
-    the evidence made may remain, and every container that was there before
-    must still be there. No runtime: NOT EXERCISED, which fails. Linux only.
+    Every suite must run every test and every case must report at its level
+    with what enforced it (M5e.1); no container the evidence made may remain,
+    and every container that was there before must still be there. No
+    runtime: NOT EXERCISED, which fails. Linux only.
     """
     client, socket, variables, before, images = _workload_setup()
     os.environ.update(variables)
@@ -3574,7 +3578,7 @@ def task_sandbox_workload_evidence() -> None:
             f"{len(removed)} container(s) that predate the evidence are gone: {removed}"
         )
     print(f"{GREEN}cleanup: no evidence container remains; {len(before)} pre-existing kept{OFF}")
-    require_sandbox_evidence("\n".join(outputs), WORKLOAD_CASES)
+    require_attributed_evidence("\n".join(outputs), WORKLOAD_CASES)
     uvrun("dwcheck", "closure", "--report")
 
 
@@ -4185,7 +4189,7 @@ def task_sandbox_secret_evidence() -> None:
         "--test-threads=1",
     )
     require_tests_ran(unit)
-    require_secret_evidence(unit, SECRET_SANDBOX_UNIT_CASES)
+    require_attributed_evidence(unit, SECRET_SANDBOX_UNIT_CASES, SECRET_EVIDENCE_PREFIX)
     client, socket, variables, before, images = _workload_setup()
     os.environ.update(variables)
     outputs: list[str] = []
@@ -4233,7 +4237,7 @@ def task_sandbox_secret_evidence() -> None:
             f"{len(removed)} container(s) that predate the evidence are gone: {removed}"
         )
     print(f"{GREEN}cleanup: no evidence container remains; {len(before)} pre-existing kept{OFF}")
-    require_sandbox_evidence("\n".join(outputs), SECRET_SANDBOX_CASES)
+    require_attributed_evidence("\n".join(outputs), SECRET_SANDBOX_CASES)
     uvrun("dwcheck", "closure", "--report")
 
 
@@ -4775,32 +4779,6 @@ def _unprovision_workspaces(base: Path) -> None:
     print(f"{GREEN}cleanup: no workspace mount, loop device or directory remains{OFF}")
 
 
-def require_workspace_unit_evidence(output: str) -> None:
-    """Every in-process (suite, case) must have printed its
-    WORKSPACE-EVIDENCE line."""
-    reported: set[tuple[str, str]] = set()
-    for line in output.splitlines():
-        at = line.find(WORKSPACE_EVIDENCE_PREFIX)
-        if at < 0:
-            continue
-        try:
-            record = json.loads(line[at + len(WORKSPACE_EVIDENCE_PREFIX) :])
-        except json.JSONDecodeError as exc:
-            raise TaskError(f"unreadable evidence line: {line[:200]}") from exc
-        if not isinstance(record, dict) or not record.get("outcome"):
-            raise TaskError(f"malformed evidence line: {line[:200]}")
-        reported.add((str(record.get("suite")), str(record.get("case"))))
-    missing = [
-        f"{suite}/{case}" for suite, case in WORKSPACE_UNIT_CASES if (suite, case) not in reported
-    ]
-    if missing:
-        raise TaskError(
-            f"NOT EXERCISED: {len(missing)} in-process workspace case(s) did not report: "
-            + ", ".join(missing)
-        )
-    print(f"{GREEN}workspace in-process evidence: {len(WORKSPACE_UNIT_CASES)} cases reported{OFF}")
-
-
 def task_sandbox_workspace_evidence() -> None:
     """M5d.4's evidence: `_sandbox_workspace_evidence`, its privileged half
     required."""
@@ -4822,8 +4800,9 @@ def _sandbox_workspace_evidence(*, require_privileged: bool) -> None:
     ENOSPC on a dedicated 64 MiB ext4 image with another workspace untouched,
     and the released `serve --sandbox-config` with a quota.
 
-    Every case must report. Without the privileged half the task FAILS, NOT
-    EXERCISED, after reporting the rest: the unverified-workspace waiver is
+    Every case must report at its level with what enforced it (M5e.1), a
+    provisioned host's at its own. Without the privileged half the task
+    FAILS, NOT EXERCISED, after reporting the rest: the unverified-workspace waiver is
     never evidence of the production guarantee. No container, mount, loop
     device or directory the evidence made may remain. Linux only.
     """
@@ -4852,7 +4831,7 @@ def _sandbox_workspace_evidence(*, require_privileged: bool) -> None:
         "--nocapture",
         "--test-threads=1",
     )
-    require_workspace_unit_evidence(unit)
+    require_attributed_evidence(unit, WORKSPACE_UNIT_CASES, WORKSPACE_EVIDENCE_PREFIX)
     privileged = workspace_privileged()
     base = _workspace_base()
     client, socket, variables, before, images = _workload_setup()
@@ -4911,8 +4890,15 @@ def _sandbox_workspace_evidence(*, require_privileged: bool) -> None:
             f"{len(removed)} container(s) that predate the evidence are gone: {removed}"
         )
     print(f"{GREEN}cleanup: no evidence container remains; {len(before)} pre-existing kept{OFF}")
-    require_sandbox_evidence("\n".join(outputs), WORKSPACE_CASES)
-    if not privileged and not require_privileged:
+    if privileged:
+        # One account of both halves: their lines are one output.
+        require_attributed_evidence(
+            "\n".join(outputs), WORKSPACE_CASES + WORKSPACE_PRIVILEGED_CASES
+        )
+        uvrun("dwcheck", "closure", "--report")
+        return
+    require_attributed_evidence("\n".join(outputs), WORKSPACE_CASES)
+    if not require_privileged:
         # A mutant's run: what could run here ran; the privileged half
         # is NOT EXERCISED, and never counted as a kill.
         print(
@@ -4920,17 +4906,14 @@ def _sandbox_workspace_evidence(*, require_privileged: bool) -> None:
             "workspace case(s)"
         )
         return
-    if not privileged:
-        raise TaskError(
-            f"NOT EXERCISED: {len(WORKSPACE_PRIVILEGED_CASES)} case(s) need an "
-            "operator-provisioned workspace -- the group 10001, filesystems of their own, "
-            "sudo -- which only DW_WORKSPACE_PRIVILEGED=1 provisions (the hosted "
-            "`sandbox-workspace` job). The unverified-workspace waiver is not evidence of "
-            "the production guarantee: "
-            + ", ".join(f"{suite}/{case}" for suite, case in WORKSPACE_PRIVILEGED_CASES)
-        )
-    require_sandbox_evidence("\n".join(outputs), WORKSPACE_PRIVILEGED_CASES)
-    uvrun("dwcheck", "closure", "--report")
+    raise TaskError(
+        f"NOT EXERCISED: {len(WORKSPACE_PRIVILEGED_CASES)} case(s) need an "
+        "operator-provisioned workspace -- the group 10001, filesystems of their own, "
+        "sudo -- which only DW_WORKSPACE_PRIVILEGED=1 provisions (the hosted "
+        "`sandbox-workspace` job). The unverified-workspace waiver is not evidence of "
+        "the production guarantee: "
+        + ", ".join(f"{suite}/{case}" for suite, case in WORKSPACE_PRIVILEGED_CASES)
+    )
 
 
 # The mutation review (ADR-0052 §17): each line weakens one guard of M5d.4's,
@@ -5201,6 +5184,687 @@ def task_sandbox_workspace_mutations() -> None:
         f"{GREEN}sandbox workspace mutation review: {len(killed)} of "
         f"{len(WORKSPACE_MUTATIONS)} killed{OFF}"
     )
+
+
+# --- M5e.1: every line of evidence attributed (OD-E1) ------------------------
+
+# The plan's M5e.1 (docs/M5E_ASSURANCE_PLAN.md §6) and the owner's OD-E1:
+# every line of the foundation, egress, workload, secret and workspace
+# evidence says what kind of evidence it is (`level`) and what enforced, or
+# observed, what it shows (`enforcement`) -- an existing mechanism only: an
+# invariant the broker measured, the kernel refusing under the profile, the
+# CONNECT proxy's decision and its counters, the authority's gates, ledger,
+# reconciliation or audit. No new per-attempt audit event: a contained
+# attempt is attributed, not individually audited (SANDBOX.md §6, which
+# names every level and mechanism below). The agent's and the release's
+# evidence keep their own, earlier contracts (`require_agent_evidence`,
+# `require_release_evidence`).
+#
+# The levels, from the least to the most of the product: the product's code
+# in this process (`in-process`); the REAL authority and store against the
+# route tests' FAKE broker, which contains nothing (`fake-broker`); the
+# released broker on a REAL runtime, this process playing the authority or
+# calling the real authority's own API (`real-oci`); a REAL DWKP client on
+# the authority's socket, the seam's or the released `serve`'s
+# (`dwkp-end-to-end`); and what only an operator-provisioned host runs -- the
+# group 10001, filesystems of their own, sudo -- which only
+# `DW_WORKSPACE_PRIVILEGED=1` provisions (`privileged-oci`).
+ATTRIBUTION_LEVELS = frozenset(
+    ("in-process", "fake-broker", "real-oci", "dwkp-end-to-end", "privileged-oci")
+)
+# Every mechanism a line may name. `telemetry` is not containment: it is the
+# foundation's latency, which must say `measured` and carry its numbers.
+ATTRIBUTION_MECHANISMS = frozenset(
+    (
+        # The broker's measured assurance (ADR-0047), and what it pins.
+        "measured-host",
+        "measured-inside",
+        "measured-both",
+        "measured-before-work",
+        "probe-digest-pin",
+        "probe-report-validation",
+        "probe-step-deadline",
+        "relay-digest-pin",
+        "executable-digest-pin",
+        "workspace-contract-measured",
+        # The profile, as the kernel holds it.
+        "capabilities-and-seccomp",
+        "capabilities",
+        "seccomp",
+        "no-new-privileges",
+        "oci-user",
+        "read-only-root",
+        "container-tmpfs",
+        "mount-namespace",
+        "workspace-mount",
+        "cgroup-limit",
+        "rlimit",
+        "filesystem-quota",
+        # The environment's network (the egress evidence's own words).
+        "topology-no-route",
+        "topology-nothing-listening",
+        "topology-no-resolver",
+        "platform",
+        "platform-or-capabilities",
+        "proxy-only-topology",
+        "egress-socket-acl",
+        "egress-listener-lifecycle",
+        "egress-disposition-counters",
+        "launch-environment",
+        "relay-and-connect-proxy-grant",
+        "connect-proxy:grant",
+        "connect-proxy:canonical-target",
+        "connect-proxy:address-guard",
+        "connect-proxy:resolver",
+        "connect-proxy:resolver-deadline",
+        "connect-proxy:server-name",
+        "connect-proxy:upload-budget",
+        "connect-proxy:download-budget",
+        "connect-proxy:tunnel-limit",
+        # The broker's own lifecycle, launch and judgement.
+        "exact-label-ownership",
+        "exact-label-cleanup",
+        "fresh-container-per-environment",
+        "runtime-client",
+        "broker-admission",
+        "broker-start-up-admission",
+        "broker-start-up-posture",
+        "broker-workspace-convention",
+        "broker-launch",
+        "broker-log-discipline",
+        "broker-wall-clock",
+        "broker-start-collect",
+        "broker-workload-admission",
+        "broker-census",
+        "broker-judgement-before-exec",
+        "broker-fail-closed",
+        "broker-secret-admission",
+        "ending-classification",
+        "output-bound",
+        "output-redaction",
+        "environment-init-reap",
+        "residue-measurement",
+        "workload-generation",
+        "direct-launcher",
+        "hygiene-launcher",
+        "trusted-launcher",
+        "secret-stdin-handoff",
+        # The authority's (ADR-0047 §§11-13, ADR-0052).
+        "authority-gates",
+        "authority-plan",
+        "authority-policy",
+        "authority-capability",
+        "authority-obligation",
+        "authority-image-manifest",
+        "authority-request-bounds",
+        "authority-run-budget",
+        "authority-taint",
+        "authority-route",
+        "authority-environment-decision",
+        "authority-environment-judgement",
+        "authority-grant-derivation",
+        "authority-workspace-contract",
+        "authority-workspace-exclusion",
+        "authority-ledger",
+        "authority-ledger-intent-first",
+        "authority-idempotency",
+        "authority-lease-fence",
+        "authority-reconciliation",
+        "authority-reclamation",
+        "authority-audit",
+        "authority-audit-at-destruction",
+        "kernel-process-credentials",
+        "dwkp-schema",
+        "secret-metadata",
+        "secret-backend",
+        "secret-value-validation",
+        "secret-not-persisted",
+        # The workspace group (ADR-0052 §6), as the agent's evidence words it.
+        "workspace-group-10001",
+        "workspace-root-2770",
+        # What a case observes rather than what enforces: the test's own
+        # listing of the environment's processes, and the residuals ADR-0052
+        # states -- contained by the environment, never neutralised.
+        "runtime-process-list",
+        "residual-contained-by-the-environment",
+        "residual-inherited-by-descendants",
+        "telemetry",
+    )
+)
+
+_IN = "in-process"
+_FAKE = "fake-broker"
+_OCI = "real-oci"
+_DWKP = "dwkp-end-to-end"
+_PRIV = "privileged-oci"
+# The egress evidence's bypass cases say what refused them as they ran
+# (`mechanism=` in the outcome): any the attempt's errno can mean.
+_DIRECT = ("topology-no-route", "platform")
+_RAW = ("capabilities", "topology-no-route", "platform")
+
+# The contract: for each suite, `(pattern, level, mechanism or mechanisms)`,
+# the first whose pattern (`fnmatch`) names the case giving its level and
+# the mechanisms its line may name. A case no rule names is unattributed,
+# which fails; a rule that names no required case is a test failure
+# (`tests/architecture/test_m5e_attribution.py`).
+ATTRIBUTION: dict[str, tuple[tuple[str, str, str | tuple[str, ...]], ...]] = {
+    # M5a: the broker on a real runtime, this process the authority.
+    "sandbox-broker": (
+        ("latency", _OCI, "telemetry"),
+        ("prepare-clean", _OCI, "measured-both"),
+        ("runtime-version-reported", _OCI, "measured-host"),
+        ("host-*", _OCI, "measured-host"),
+        ("container-*", _OCI, "measured-inside"),
+        ("escape-*", _OCI, "capabilities-and-seccomp"),
+        ("measure-clean-again", _OCI, "measured-both"),
+        ("list-owned-exact-labels", _OCI, "exact-label-ownership"),
+        ("destroy-*", _OCI, "exact-label-cleanup"),
+        ("baseline-conforming", _OCI, "measured-both"),
+        # One vantage alone catches these two weakenings; both, the rest.
+        ("weakened-host-ipc", _OCI, "measured-host"),
+        ("weakened-mutable-image-tag", _OCI, "measured-host"),
+        ("weakened-*", _OCI, "measured-both"),
+        ("tamper-changed-byte", _OCI, "probe-digest-pin"),
+        ("tamper-substituted-probe", _OCI, "probe-digest-pin"),
+        ("tamper-hang-timeout", _OCI, "probe-step-deadline"),
+        ("tamper-*", _OCI, "probe-report-validation"),
+        ("foreign-*", _OCI, "exact-label-ownership"),
+        ("drift-pids-limit-raised", _OCI, "measured-both"),
+        ("run-isolation-distinct-environments", _OCI, "fresh-container-per-environment"),
+        ("run-isolation-tmp", _OCI, "measured-inside"),
+        ("run-isolation-destroy-one-leaves-other", _OCI, "measured-both"),
+        ("persistence-tmp-marker-not-inherited", _OCI, "container-tmpfs"),
+        ("exit-stopped-unobservable-inside", _OCI, "measured-host"),
+        ("exit-*", _OCI, "runtime-client"),
+        ("topology-*", _OCI, "broker-admission"),
+        ("refusals-create-nothing", _OCI, "broker-admission"),
+        ("crash-w3-broker-after-create-labelled", _OCI, "exact-label-ownership"),
+        ("crash-w3-reaped-by-label", _OCI, "exact-label-cleanup"),
+        ("resource-pids-bounded", _OCI, "cgroup-limit"),
+        ("resource-memory-oom-killed", _OCI, "cgroup-limit"),
+        ("resource-fds-bounded", _OCI, "rlimit"),
+        ("resource-file-size-bounded", _OCI, "rlimit"),
+        ("subprocess-and-thread-creation", _OCI, "seccomp"),
+    ),
+    # M5a: the real authority's own API over the real broker and runtime.
+    "sandbox-authority": (
+        ("*-intent-durable-before-broker", _OCI, "authority-ledger-intent-first"),
+        ("prepare-ready-recorded", _OCI, "authority-ledger"),
+        ("destroy-recorded", _OCI, "authority-ledger"),
+        ("destroy-idempotent", _OCI, "authority-ledger"),
+        ("effective-assurance-container-isolation", _OCI, "authority-environment-judgement"),
+        ("measure-clean", _OCI, "authority-environment-judgement"),
+        ("drift-destroyed", _OCI, "authority-environment-judgement"),
+        ("one-environment-per-run", _OCI, "authority-environment-decision"),
+        ("audit-lifecycle", _OCI, "authority-audit"),
+        ("crash-*", _OCI, "authority-reconciliation"),
+        ("orphan-ended-record-reaped", _OCI, "authority-reconciliation"),
+        ("ambiguous-twins-untouched", _OCI, "authority-reconciliation"),
+        ("foreign-*", _OCI, "exact-label-ownership"),
+    ),
+    # M5b: PROXY_ONLY on a real runtime, every byte through the real relay
+    # and the broker's real CONNECT proxy.
+    "sandbox-egress": (
+        ("proxy-only-prepare-clean", _OCI, "measured-both"),
+        ("proxy-only-host-*", _OCI, "measured-host"),
+        ("proxy-only-container-*", _OCI, "measured-inside"),
+        ("proxy-only-environment-and-relay-only", _OCI, "proxy-only-topology"),
+        ("proxy-only-relay-shares-the-namespace-unprivileged", _OCI, "proxy-only-topology"),
+        ("proxy-only-socket-mounted-in-relay-only", _OCI, "proxy-only-topology"),
+        ("proxy-only-listener-open", _OCI, "egress-socket-acl"),
+        ("proxy-only-socket-directory-relay-uid-only", _OCI, "egress-socket-acl"),
+        ("proxy-only-listed-with-roles", _OCI, "exact-label-ownership"),
+        ("proxy-only-measure-clean-again", _OCI, "measured-both"),
+        ("proxy-only-destroy-removes-every-role", _OCI, "exact-label-cleanup"),
+        ("proxy-only-destroy-closes-listener", _OCI, "egress-listener-lifecycle"),
+        ("proxy-only-destroy-counters", _OCI, "egress-disposition-counters"),
+        ("proxy-only-destroy-idempotent", _OCI, "exact-label-cleanup"),
+        ("tunnel-granted-carries-bytes", _OCI, "relay-and-connect-proxy-grant"),
+        ("tunnel-via-proxy-variable", _OCI, "relay-and-connect-proxy-grant"),
+        ("tunnel-host-not-granted", _OCI, "connect-proxy:grant"),
+        ("tunnel-port-not-granted", _OCI, "connect-proxy:grant"),
+        ("tunnel-address-literal-refused", _OCI, "connect-proxy:canonical-target"),
+        ("tunnel-sni-*-closed", _OCI, "connect-proxy:server-name"),
+        ("tunnel-ech-refused", _OCI, "connect-proxy:server-name"),
+        ("tunnel-plain-http-refused", _OCI, "connect-proxy:server-name"),
+        ("resolver-failure", _OCI, "connect-proxy:resolver"),
+        ("resolver-timeout", _OCI, "connect-proxy:resolver-deadline"),
+        ("resolver-*", _OCI, "connect-proxy:address-guard"),
+        ("counters-at-destroy-by-disposition", _OCI, "egress-disposition-counters"),
+        ("audit-observability-no-payload", _OCI, "egress-disposition-counters"),
+        ("budget-upload-*", _OCI, "connect-proxy:upload-budget"),
+        ("budget-download-exhausted", _OCI, "connect-proxy:download-budget"),
+        ("budget-tunnel-limit", _OCI, "connect-proxy:tunnel-limit"),
+        ("fronting-residual-carried-and-bounded", _OCI, "connect-proxy:upload-budget"),
+        # The environment's own loopback has nothing on the host's port.
+        ("bypass-tcp-host-loopback-origin", _OCI, ("topology-nothing-listening", *_DIRECT)),
+        ("bypass-tcp-*", _OCI, _DIRECT),
+        ("bypass-udp-*", _OCI, _DIRECT),
+        ("bypass-proxy-address-other-ports", _OCI, "topology-nothing-listening"),
+        ("bypass-dns-*", _OCI, "topology-no-resolver"),
+        ("bypass-library-resolver*", _OCI, "topology-no-resolver"),
+        ("bypass-raw-*", _OCI, _RAW),
+        ("bypass-packet", _OCI, _RAW),
+        ("bypass-vsock", _OCI, ("seccomp", "topology-no-route", "platform")),
+        ("bypass-icmp", _OCI, ("topology-no-route", "platform-or-capabilities")),
+        ("bypass-proxy-variable-*", _OCI, "topology-no-route"),
+        ("bypass-origin-never-reached", _OCI, "topology-no-route"),
+        ("proxy-variables-*", _OCI, "launch-environment"),
+        ("runtime-client-config-proxies-ignored", _OCI, "launch-environment"),
+        ("weakened-proxy-variables-removed", _OCI, "measured-host"),
+        ("weakened-relay-tampered", _OCI, "relay-digest-pin"),
+        ("weakened-*", _OCI, "measured-both"),
+        ("drift-relay-stopped", _OCI, "measured-both"),
+        ("drift-extra-peer-listening", _OCI, "measured-inside"),
+        ("drift-fake-resolver-in-namespace", _OCI, "measured-inside"),
+        ("drift-*", _OCI, "measured-host"),
+        ("crash-*", _OCI, "exact-label-cleanup"),
+        ("restart-proxy-closed-fails-closed", _OCI, "measured-both"),
+        ("foreign-resources-untouched", _OCI, "exact-label-ownership"),
+        ("production-proxy-only-prepared", _OCI, "measured-both"),
+        ("production-no-fixture-resolver", _OCI, "connect-proxy:resolver"),
+        ("production-loopback-blocked-no-exception", _OCI, "connect-proxy:address-guard"),
+        ("production-proxy-only-needs-its-grant", _OCI, "broker-admission"),
+    ),
+    # M5b: the grant the real authority derives, through its own API.
+    "sandbox-authority-egress": (
+        ("grant-*", _OCI, "authority-grant-derivation"),
+        ("audit-intent-records-grant", _OCI, "authority-audit"),
+        ("audit-measured-counters", _OCI, "authority-audit"),
+        ("audit-destroyed-counters", _OCI, "authority-audit-at-destruction"),
+        ("tunnel-through-authority-prepared-environment", _OCI, "relay-and-connect-proxy-grant"),
+        ("wildcard-covered-name-not-granted", _OCI, "connect-proxy:grant"),
+        ("reconcile-helper-orphan-reaped", _OCI, "authority-reconciliation"),
+    ),
+    # M5d.1-M5d.2: workloads the broker runs in its real environments.
+    "sandbox-workload": (
+        ("workload-runs-as-uid-10001", _OCI, "oci-user"),
+        ("workload-no-capabilities", _OCI, "capabilities"),
+        ("workload-no-new-privileges", _OCI, "no-new-privileges"),
+        ("workload-seccomp-filter", _OCI, "seccomp"),
+        ("workload-cwd-workspace", _OCI, "broker-launch"),
+        ("workload-arguments-exact-bytes", _OCI, "broker-launch"),
+        ("workload-flags-in-arguments-inert", _OCI, "broker-launch"),
+        ("workload-environment-container-only", _OCI, "launch-environment"),
+        ("workload-exit-code", _OCI, "ending-classification"),
+        ("workload-killed-by-signal", _OCI, "ending-classification"),
+        ("workload-ambiguous-exit-unobservable", _OCI, "ending-classification"),
+        ("workload-log-has-no-argument-or-output", _OCI, "broker-log-discipline"),
+        ("workload-output-held-open-child-reaped", _OCI, "environment-init-reap"),
+        ("workload-output-*", _OCI, "output-bound"),
+        ("workload-wall-clock-timed-out", _OCI, "broker-wall-clock"),
+        ("workload-residue-clean", _OCI, "residue-measurement"),
+        ("workload-environment-removed-mid-run-not-clean", _OCI, "residue-measurement"),
+        ("workload-executable-*", _OCI, "executable-digest-pin"),
+        ("workload-refused-ran-nothing", _OCI, "executable-digest-pin"),
+        ("workload-drifted-environment-refused", _OCI, "measured-before-work"),
+        ("workload-stopped-environment-refused", _OCI, "measured-before-work"),
+        ("workload-foreign-environment-refused", _OCI, "exact-label-ownership"),
+        ("workload-missing-environment-refused", _OCI, "runtime-client"),
+        ("workload-nothing-ran-in-a-refused-environment", _OCI, "broker-admission"),
+        ("workload-root-read-only", _OCI, "read-only-root"),
+        ("workload-etc-read-only", _OCI, "read-only-root"),
+        ("workload-dot-dot-escape-refused", _OCI, "read-only-root"),
+        ("workload-tmp-writable", _OCI, "container-tmpfs"),
+        ("workload-workspace-writable-as-10001", _OCI, "workspace-mount"),
+        ("workload-no-runtime-socket", _OCI, "mount-namespace"),
+        ("workload-no-host-path", _OCI, "mount-namespace"),
+        ("workload-direct-tcp-refused", _OCI, "topology-no-route"),
+        ("workload-direct-dns-refused", _OCI, "topology-no-resolver"),
+        ("workload-start-answered-before-it-ends", _OCI, "broker-start-collect"),
+        ("workload-collected-ending-repeats", _OCI, "broker-start-collect"),
+        ("workload-second-in-environment-refused", _OCI, "broker-workload-admission"),
+        ("workload-collect-other-generation-indeterminate", _OCI, "workload-generation"),
+        ("workload-timed-out-reaped", _OCI, "environment-init-reap"),
+        ("workload-tree-reaped", _OCI, "environment-init-reap"),
+        ("workload-setsid-reaped", _OCI, "environment-init-reap"),
+        ("workload-daemon-reaped", _OCI, "environment-init-reap"),
+        ("workload-fork-loop-reaped", _OCI, "environment-init-reap"),
+        ("workload-nothing-persists", _OCI, "environment-init-reap"),
+        ("workload-no-zombies", _OCI, "environment-init-reap"),
+        ("workload-environment-reusable-after-reap", _OCI, "environment-init-reap"),
+        ("agent-shaped-plan-and-workers-wrote", _OCI, "workspace-mount"),
+        ("agent-shaped-files-on-host-as-10001", _OCI, "workspace-mount"),
+        ("agent-shaped-network-refused", _OCI, "topology-no-route"),
+        ("agent-shaped-helpers-and-workers-ended", _OCI, "environment-init-reap"),
+        ("agent-shaped-residue-clean", _OCI, "residue-measurement"),
+        ("identity-authority-*-uid-refused", _OCI, "broker-start-up-admission"),
+        ("posture-reported-matches-host", _OCI, "broker-start-up-posture"),
+        ("broker-crash-before-exec-nothing-ran", _OCI, "broker-judgement-before-exec"),
+        ("broker-crash-mid-workload-no-answer", _OCI, "broker-fail-closed"),
+        ("broker-crash-workload-still-running", _OCI, "runtime-process-list"),
+        ("broker-restart-destroy-ends-it", _OCI, "exact-label-cleanup"),
+        ("broker-restart-collection-indeterminate", _OCI, "workload-generation"),
+        ("broker-serves-others-while-a-workload-runs", _OCI, "broker-start-collect"),
+        ("broker-holds-nothing-*", _OCI, "broker-census"),
+        ("hygiene-residual-*", _OCI, "residual-contained-by-the-environment"),
+        ("hygiene-*", _OCI, "hygiene-launcher"),
+    ),
+    # M5d.1 through the real authority's own API; M5d.2 over a real DWKP
+    # client, the seam's and the released `serve --sandbox-config`.
+    "sandbox-authority-workload": (
+        ("authority-workload-completed", _OCI, "authority-route"),
+        ("authority-workload-ledger-completed", _OCI, "authority-ledger"),
+        ("authority-workload-environment-kept-when-clean", _OCI, "authority-environment-judgement"),
+        ("authority-workload-audited", _OCI, "authority-audit"),
+        ("authority-workload-taint-raised", _OCI, "authority-taint"),
+        ("authority-workload-obligation-*", _OCI, "authority-obligation"),
+        ("authority-workload-replayed-never-rerun", _OCI, "authority-idempotency"),
+        ("authority-workload-key-reused-differently-refused", _OCI, "authority-idempotency"),
+        ("authority-workload-no-environment-refused", _OCI, "authority-environment-decision"),
+        ("authority-workload-never-on-the-host", _OCI, "authority-environment-decision"),
+        ("authority-workload-no-ready-environment-refused", _OCI, "authority-environment-decision"),
+        ("authority-workload-not-in-manifest-refused", _OCI, "authority-image-manifest"),
+        ("authority-workload-bounds-refused", _OCI, "authority-request-bounds"),
+        ("authority-workload-policy-denied", _OCI, "authority-policy"),
+        ("authority-workload-no-capability-denied", _OCI, "authority-capability"),
+        ("authority-workload-refusals-record-no-intent", _OCI, "authority-gates"),
+        ("authority-workload-drifted-*", _OCI, "authority-environment-judgement"),
+        ("authority-workload-budget-*", _OCI, "authority-run-budget"),
+        ("crash-w9-running-after-start", _OCI, "runtime-process-list"),
+        ("crash-*", _OCI, "authority-reconciliation"),
+        ("unknown-ending-recorded", _OCI, "authority-ledger"),
+        ("unknown-ending-environment-destroyed", _OCI, "authority-reconciliation"),
+        ("unknown-ending-never-rerun", _OCI, "authority-idempotency"),
+        (
+            "public-exec-environment-prepared-by-the-authority",
+            _DWKP,
+            "authority-environment-decision",
+        ),
+        ("public-exec-result-names-*", _DWKP, "authority-environment-judgement"),
+        ("public-exec-runs-as-the-sandbox-user", _DWKP, "oci-user"),
+        ("public-exec-caller-from-the-transport", _DWKP, "kernel-process-credentials"),
+        ("public-exec-never-on-the-host", _DWKP, "authority-environment-decision"),
+        ("public-exec-two-runs-at-once-*", _DWKP, "authority-environment-decision"),
+        ("public-exec-output-bounded", _DWKP, "output-bound"),
+        ("public-exec-detached-child-reaped", _DWKP, "environment-init-reap"),
+        ("public-exec-authority-answers-during-a-workload", _DWKP, "authority-route"),
+        ("public-exec-broker-answers-during-a-workload", _DWKP, "broker-start-collect"),
+        ("public-exec-key-from-another-holder-fenced", _DWKP, "authority-lease-fence"),
+        ("public-exec-long-workload-timed-out-and-reaped", _DWKP, "broker-wall-clock"),
+        ("public-exec-key-never-runs-twice", _DWKP, "authority-idempotency"),
+        ("public-exec-cross-tool-key-refused", _DWKP, "authority-idempotency"),
+        ("public-exec-smuggled-environment-refused", _DWKP, "dwkp-schema"),
+        ("public-no-lifecycle-operation", _DWKP, "dwkp-schema"),
+        ("public-exec-unknown-outcome-reported", _DWKP, "authority-ledger"),
+        ("public-exec-unknown-destroys-environment", _DWKP, "authority-reconciliation"),
+        ("public-exec-budget-exhausted-refused", _DWKP, "authority-run-budget"),
+        ("public-exec-unpinned-image-bytes-refused", _DWKP, "executable-digest-pin"),
+        ("public-exec-ended-runs-environment-reclaimed", _DWKP, "authority-reclamation"),
+        ("od9-concrete-grant-runs-the-manifests-executable", _DWKP, "authority-image-manifest"),
+        ("od9-concrete-grant-covers-nothing-else", _DWKP, "authority-capability"),
+        # Dispatched through the authority's own API, not a DWKP client.
+        ("od9-host-resolved-grant-covers-no-image-executable", _OCI, "authority-capability"),
+        ("shipped-*-hygiene-undone-or-unevidenced-denied", _DWKP, "authority-obligation"),
+        ("shipped-*", _DWKP, "hygiene-launcher"),
+        ("production-serve-attaches-*", _DWKP, "authority-environment-decision"),
+        ("production-serve-prepares-and-runs", _DWKP, "authority-route"),
+        ("production-crash-mid-workload-unknown-destroyed", _DWKP, "authority-reconciliation"),
+        ("production-replay-after-restart-refused", _DWKP, "authority-idempotency"),
+    ),
+    # M5d.3: the authority's pipeline against the fake broker, real values in
+    # the kernel keyring -- what it decides, records and refuses, never
+    # delivery.
+    "authority-workload-secret": (
+        ("read-once-after-both-intents", _FAKE, "authority-ledger-intent-first"),
+        ("kernel-chooses-c-before-b", _FAKE, "authority-plan"),
+        ("preview-reads-nothing", _FAKE, "authority-plan"),
+        ("intent-linked-recorded-counted", _FAKE, "authority-ledger"),
+        ("no-plaintext-in-kernel-db-or-audit", _FAKE, "secret-not-persisted"),
+        ("replay-never-hands-over-again", _FAKE, "authority-idempotency"),
+        ("ordinary-launch-unchanged", _FAKE, "authority-route"),
+        ("v5-cannot-name-a-credential", _FAKE, "dwkp-schema"),
+        ("refused-*", _FAKE, "secret-metadata"),
+        ("stored-grant-*", _FAKE, "secret-metadata"),
+        ("not-granted-denied", _FAKE, "authority-capability"),
+        ("no-refusal-reaches-the-broker", _FAKE, "authority-gates"),
+        ("default-deny", _FAKE, "authority-policy"),
+        ("host-rule-is-no-sandbox-rule", _FAKE, "authority-policy"),
+        ("approval-required", _FAKE, "authority-policy"),
+        ("obligation-unenforceable", _FAKE, "authority-obligation"),
+        ("failed-backend-missing", _FAKE, "secret-backend"),
+        ("failed-nul-in-a-variable", _FAKE, "secret-value-validation"),
+        ("broker-refusal-failed", _FAKE, "authority-ledger"),
+        ("unknown-start-unknown-use", _FAKE, "authority-ledger"),
+        ("missing-redaction-count-unknown", _FAKE, "authority-ledger"),
+        ("crash-*", _FAKE, "authority-reconciliation"),
+        ("no-host-fallback", _FAKE, "authority-environment-decision"),
+    ),
+    # M5d.3: a synthetic credential in the broker's real environment.
+    "sandbox-secret": (
+        ("fd-at-spawn-residue-clean", _OCI, "residue-measurement"),
+        ("*-inherited-by-a-descendant", _OCI, "residual-inherited-by-descendants"),
+        ("*-with-hygiene", _OCI, "hygiene-launcher"),
+        ("*-not-in-inspect-logs-events-argv", _OCI, "secret-stdin-handoff"),
+        ("fd-at-spawn-*", _OCI, "trusted-launcher"),
+        ("env-at-spawn-*", _OCI, "trusted-launcher"),
+        ("launcher-*", _OCI, "trusted-launcher"),
+        ("broker-log-names-the-mode-only", _OCI, "broker-log-discipline"),
+        ("redacted-across-reads-*", _OCI, "output-redaction"),
+        ("refused-*", _OCI, "broker-secret-admission"),
+        ("value-unread-when-the-judgement-refuses", _OCI, "broker-secret-admission"),
+        ("collected-only-under-its-generation", _OCI, "workload-generation"),
+        ("an-ordinary-workload-is-unchanged", _OCI, "broker-launch"),
+        ("crash-after-read-nothing-ran", _OCI, "broker-judgement-before-exec"),
+    ),
+    # M5d.3 over a real DWKP client; its crash windows through the
+    # authority's own dispatch.
+    "sandbox-authority-secret": (
+        ("public-plan-states-both-actions", _DWKP, "authority-plan"),
+        ("public-preview-reads-nothing", _DWKP, "authority-plan"),
+        ("public-*-at-spawn-delivered", _DWKP, "trusted-launcher"),
+        ("public-echo-redacted", _DWKP, "output-redaction"),
+        ("public-no-plaintext-durable-or-logged", _DWKP, "secret-not-persisted"),
+        ("public-never-on-the-host", _DWKP, "authority-environment-decision"),
+        ("public-replay-refused", _DWKP, "authority-idempotency"),
+        ("public-ungranted-handle-denied", _DWKP, "authority-capability"),
+        ("public-unconfigured-handle-refused", _DWKP, "secret-metadata"),
+        ("public-ordinary-launch-unchanged", _DWKP, "authority-route"),
+        ("public-hostile-credential-frames-refused", _DWKP, "dwkp-schema"),
+        ("crash-*", _OCI, "authority-reconciliation"),
+        ("shipped-*", _DWKP, "authority-policy"),
+        ("production-serve-delivers-from-the-operators-files", _DWKP, "secret-backend"),
+        ("production-crash-mid-workload-unknown-destroyed", _DWKP, "authority-reconciliation"),
+        ("production-replay-after-restart-refused", _DWKP, "authority-idempotency"),
+        ("production-no-plaintext-durable", _DWKP, "secret-not-persisted"),
+    ),
+    # M5d.4 in process: the broker's exchange code and a real full tmpfs of
+    # its own; the authority against the fake broker.
+    "broker-exchange": (
+        ("broker-group-convention-refused", _IN, "broker-workspace-convention"),
+        ("broker-full-filesystem-*", _IN, "filesystem-quota"),
+    ),
+    "authority-route": (
+        ("authority-workspace-drift-answered-not-clean", _FAKE, "authority-environment-judgement"),
+        ("authority-unbounded-workspace-refused", _FAKE, "authority-workspace-contract"),
+        ("authority-refused-before-the-broker", _FAKE, "authority-workspace-contract"),
+        ("authority-unverified-workspace-said", _FAKE, "authority-workspace-contract"),
+        ("authority-replaced-workspace-destroys", _FAKE, "authority-workspace-contract"),
+        ("authority-*", _FAKE, "authority-workspace-exclusion"),
+    ),
+    # M5d.4 on a real runtime: the broker judging the probe's facts against
+    # the bound it was sent; what only a provisioned host runs is its own
+    # level, never the level of a case that ran here.
+    "sandbox-workspace": (
+        ("broker-unverified-workspace-refused-without-the-flag", _OCI, "broker-admission"),
+        ("broker-bounded-*-accepted", _PRIV, "workspace-contract-measured"),
+        ("broker-capacity-drift-refused-before-work", _PRIV, "measured-before-work"),
+        ("broker-*", _OCI, "workspace-contract-measured"),
+    ),
+    "sandbox-authority-workspace": (
+        (
+            "authority-unprovisioned-workspace-refused-before-the-broker",
+            _OCI,
+            "authority-workspace-contract",
+        ),
+        ("authority-unprovisioned-workspace-runs-nothing", _OCI, "authority-environment-decision"),
+        ("production-serve-unprovisioned-workspace-refused", _DWKP, "authority-workspace-contract"),
+        ("umask-0007-through-the-direct-launcher", _OCI, "direct-launcher"),
+        ("workspace-tmp-var-tmp-distinct", _OCI, "mount-namespace"),
+        ("exclusion-*", _DWKP, "authority-workspace-exclusion"),
+        ("bounded-*-accepted", _PRIV, "workspace-contract-measured"),
+        ("host-and-container-identity-agree", _PRIV, "workspace-contract-measured"),
+        ("subdirectory-of-a-bounded-filesystem-refused", _PRIV, "workspace-contract-measured"),
+        ("production-serve-bounded-workspace", _PRIV, "workspace-contract-measured"),
+        ("workload-makes-broker-reads", _PRIV, "workspace-group-10001"),
+        ("broker-makes-workload-modifies", _PRIV, "workspace-group-10001"),
+        ("broker-replaces-workload-reads", _PRIV, "workspace-group-10001"),
+        ("another-identity-cannot-write-or-read", _PRIV, "workspace-root-2770"),
+        ("wrong-gid-refused", _PRIV, "authority-workspace-contract"),
+        ("missing-setgid-refused", _PRIV, "authority-workspace-contract"),
+        ("group-only-mode-world-readable-refused", _PRIV, "authority-workspace-contract"),
+        ("world-writable-root-refused", _PRIV, "authority-workspace-contract"),
+        ("workload-owned-root-refused", _PRIV, "authority-workspace-contract"),
+        ("foreign-owned-root-refused", _PRIV, "authority-workspace-contract"),
+        ("quota-mismatch-refused", _PRIV, "authority-workspace-contract"),
+        ("unbounded-host-directory-refused", _PRIV, "authority-workspace-contract"),
+        ("*-destroys-before-the-workload", _PRIV, "authority-workspace-contract"),
+        ("workload-fills-to-enospc", _PRIV, "filesystem-quota"),
+        ("full-workspace-write-fails-unchanged", _PRIV, "filesystem-quota"),
+        ("other-workspace-unaffected", _PRIV, "filesystem-quota"),
+        ("space-recovered-after-removal", _PRIV, "filesystem-quota"),
+        ("durability-valid-after-a-full-workspace", _PRIV, "authority-ledger"),
+    ),
+}
+# Every case any of the five tasks requires: a line naming another case of
+# their suites is a case the inventory lost, or one renamed.
+ATTRIBUTED_CASES = frozenset(
+    (
+        *SANDBOX_CASES,
+        *EGRESS_CASES,
+        *WORKLOAD_CASES,
+        *SECRET_SANDBOX_UNIT_CASES,
+        *SECRET_SANDBOX_CASES,
+        *WORKSPACE_UNIT_CASES,
+        *WORKSPACE_CASES,
+        *WORKSPACE_PRIVILEGED_CASES,
+    )
+)
+# The foundation's latency: its numbers, not containment.
+TELEMETRY_FIELDS = (
+    "rounds",
+    "prepare_ms_median",
+    "prepare_ms_p95",
+    "measure_ms_median",
+    "measure_ms_p95",
+    "destroy_ms_median",
+    "destroy_ms_p95",
+)
+
+
+def attribution(suite: str, case: str) -> tuple[str, frozenset[str]] | None:
+    """The level a case's line must say and the mechanisms it may name, by
+    the first rule of its suite that names it; `None` when none does."""
+    for pattern, level, mechanisms in ATTRIBUTION.get(suite, ()):
+        if fnmatch.fnmatchcase(case, pattern):
+            named = (mechanisms,) if isinstance(mechanisms, str) else mechanisms
+            return level, frozenset(named)
+    return None
+
+
+def require_attributed_evidence(
+    output: str,
+    cases: tuple[tuple[str, str], ...],
+    prefix: str = SANDBOX_EVIDENCE_PREFIX,
+) -> list[dict[str, object]]:
+    """Every (suite, case) reported once, exercised, at its level and
+    attributed to what enforced or observed it (M5e.1, OD-E1).
+
+    A line fails the task, its suite and case named, when its JSON is
+    unreadable; it has no suite or case; its suite is not one `cases` names,
+    or its case is in no task's inventory; it is reported twice (a duplicate
+    never stands in for a missing case); it has no outcome; its level or
+    enforcement is missing, outside the vocabulary or not the one
+    `ATTRIBUTION` gives the case -- a fake broker's line offered as a
+    container's, an unprivileged case's as a provisioned host's, a mechanism
+    the case does not exercise; or it is telemetry without its numbers. A
+    required case that says NOT EXERCISED, or never reports, fails as NOT
+    EXERCISED; and zero required cases fail too.
+    """
+    if not cases:
+        raise TaskError("attributed evidence: zero cases required")
+    suites = {suite for suite, _ in cases}
+    required = set(cases)
+    seen: dict[tuple[str, str], dict[str, object]] = {}
+    unexercised: list[str] = []
+    problems: list[str] = []
+    for line in output.splitlines():
+        at = line.find(prefix)
+        if at < 0:
+            continue
+        try:
+            record = json.loads(line[at + len(prefix) :])
+        except json.JSONDecodeError as exc:
+            raise TaskError(f"unreadable evidence line: {line[:200]}") from exc
+        if not isinstance(record, dict):
+            raise TaskError(f"malformed evidence line: {line[:200]}")
+        suite, case = record.get("suite"), record.get("case")
+        if not (isinstance(suite, str) and suite and isinstance(case, str) and case):
+            raise TaskError(f"evidence without its suite or case: {line[:200]}")
+        named = f"{suite}/{case}"
+        if suite not in suites:
+            problems.append(f"{named}: a suite this task does not run")
+            continue
+        if (suite, case) not in ATTRIBUTED_CASES:
+            problems.append(f"{named}: a case no task requires -- renamed, or never listed")
+            continue
+        if (suite, case) in seen:
+            problems.append(f"{named}: reported twice")
+            continue
+        seen[(suite, case)] = record
+        outcome = record.get("outcome")
+        if not isinstance(outcome, str) or not outcome:
+            problems.append(f"{named}: no outcome")
+            continue
+        if outcome.lower().replace(" ", "-").startswith("not-exercised"):
+            if (suite, case) in required:
+                unexercised.append(named)
+            continue
+        contract = attribution(suite, case)
+        if contract is None:
+            problems.append(f"{named}: no attribution in the contract")
+            continue
+        level, mechanisms = contract
+        said, enforcement = record.get("level"), record.get("enforcement")
+        if said != level:
+            problems.append(f"{named}: at level {said!r}, which must be {level!r}")
+        if not isinstance(enforcement, str) or not enforcement:
+            problems.append(f"{named}: names no enforcement")
+        elif enforcement not in ATTRIBUTION_MECHANISMS:
+            problems.append(f"{named}: enforcement {enforcement!r} is no known mechanism")
+        elif enforcement not in mechanisms:
+            problems.append(
+                f"{named}: enforcement {enforcement!r} is not what this case exercises "
+                f"({', '.join(sorted(mechanisms))})"
+            )
+        numbers = [record.get(field) for field in TELEMETRY_FIELDS]
+        if "telemetry" in mechanisms and (
+            outcome != "measured"
+            or not all(isinstance(n, int) and not isinstance(n, bool) and n >= 0 for n in numbers)
+        ):
+            problems.append(f"{named}: telemetry must say `measured` and carry its numbers")
+    if problems:
+        raise TaskError(
+            f"{len(problems)} evidence line(s) not attributed as the contract says: "
+            + "; ".join(problems[:20])
+        )
+    missing = sorted(f"{suite}/{case}" for suite, case in required if (suite, case) not in seen)
+    if unexercised or missing:
+        raise TaskError(
+            f"NOT EXERCISED: {len(unexercised) + len(missing)} required case(s): "
+            + ", ".join([*unexercised, *missing][:40])
+        )
+    levels: dict[str, int] = {}
+    for suite, case in cases:
+        level = str(seen[(suite, case)]["level"])
+        levels[level] = levels.get(level, 0) + 1
+    print(
+        f"{GREEN}attributed evidence: {len(cases)} cases reported, each at its level with its "
+        "enforcement ("
+        + ", ".join(f"{level} {count}" for level, count in sorted(levels.items()))
+        + f"){OFF}"
+    )
+    return [seen[key] for key in cases]
 
 
 # --- M5d.5: the agent-shaped workload and three identities (ADR-0052 §§11, 13, 17) ---

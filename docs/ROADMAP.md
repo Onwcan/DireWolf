@@ -155,7 +155,7 @@ and serving on Linux only. **M5 is in progress: M5a, M5b and M5c are complete (s
 **Adversarial:** the full path-traversal set ([EVALS.md](EVALS.md) §3) including Unicode normalisation and TOCTOU swap races in a tight loop; secret-in-output detection; core-dump inspection for secret residue.
 **Deferred:** remote fs, Windows-native hardening beyond the fallback walker.
 
-### M5 · Sandbox — **IN PROGRESS** (M5a complete, hosted acceptance passed; M5b complete, hosted acceptance passed; M5c complete, ADR-0050 accepted, hosted acceptance passed; M5d complete, ADR-0052 accepted 2026-10-26, hosted acceptance passed; M5e not started — M5 is complete only when M5e meets its own acceptance)
+### M5 · Sandbox — **IN PROGRESS** (M5a complete, hosted acceptance passed; M5b complete, hosted acceptance passed; M5c complete, ADR-0050 accepted, hosted acceptance passed; M5d complete, ADR-0052 accepted 2026-10-26, hosted acceptance passed; M5e in progress, M5e.1 built and pending hosted CI — M5 is complete only when M5e meets its own acceptance)
 
 M5 is two products in one (a sandbox *and* an egress proxy), so it is decomposed like M4
 ([ADR-0047](adr/0047-m5a-oci-execution-environment-and-measured-assurance.md)). The
@@ -451,16 +451,27 @@ and package-manager acceptance are M5e's, and the `local` environment is M6's (O
 stays in progress until M5e meets its own acceptance. Passing CI is the evidence named
 here — not a deployment, and not a certification.
 
-#### M5e · The M5 adversarial gate and closeout — **NOT STARTED**
+#### M5e · The M5 adversarial gate and closeout — **IN PROGRESS** (M5e.1 built, pending hosted CI; M5e.2–M5e.6 not complete)
 
-**Planned, not started (2026-10-26).** The gap analysis, the requirements-to-evidence matrix,
+**Planned 2026-10-26.** The gap analysis, the requirements-to-evidence matrix,
 the implementation sequence and the owner's decisions of 2026-10-26 on its open points are in
 [M5E_ASSURANCE_PLAN.md](M5E_ASSURANCE_PLAN.md); the npm profile M5's package-manager
 acceptance needs is [ADR-0054](adr/0054-m5e-npm-hygiene-profile.md), **Proposed** — until it
 is accepted, npm stays refused as ADR-0052 §5a decided — and pip's is
 [ADR-0055](adr/0055-m5e-pip-hygiene-profile.md), **Proposed** (drafted 2026-10-27), pip's behaviour unchanged
-until it is accepted. No M5e evidence or CI job exists yet; the groundwork so far is
-documentation and one test that holds the plan's cited cases to the tasks that require them.
+until it is accepted.
+
+**M5e.1, attribution — BUILT, pending a hosted CI run of the committed tree (2026-10-27).**
+Every line of the foundation, egress, workload, secret and workspace evidence, their
+in-process halves included, now says its level and the existing mechanism that enforced or
+observed it, and each of the five tasks refuses a line that is missing, unreadable,
+duplicated, NOT EXERCISED, at another level or attributed to anything the contract does not
+give its case ([SANDBOX.md](SANDBOX.md) §6a; the owner's OD-E1). No product code, CI job,
+eval or production control changed; every case required before is required still. It passed
+locally on a real runtime; it is complete only once a hosted run of the owner's commit passes.
+Still to do: M5e.2's closure (the profile weakenings on `PROXY_ONLY`, cross-run isolation, a
+bounded neighbour, a runtime restart under a running authority), M5e.3–M5e.5's registry
+fixtures and pip and npm evidence, and M5e.6's gate.
 
 **Deps:** M5a–M5d. **Deliverables:** the complete escape, SSRF and persistence suites as
 merge gates; weakened-profile closure for `PROXY_ONLY`; package-manager acceptance

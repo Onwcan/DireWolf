@@ -265,6 +265,24 @@ cases are NOT EXERCISED and the task fails after reporting the rest: the
 unverified workspace is never evidence of the production guarantee. No
 container, mount, loop device or directory the evidence made may remain.
 
+**Every line attributed (M5e.1).** Since M5e.1 every `SANDBOX-EVIDENCE`,
+`SECRET-EVIDENCE` and `WORKSPACE-EVIDENCE` line of the foundation, egress,
+workload, secret and workspace tasks is canonical JSON (`dwk_proto::json`)
+naming, besides its suite, case and outcome, its **level** (`in-process`,
+`fake-broker`, `real-oci`, `dwkp-end-to-end`, `privileged-oci`) and its
+**enforcement**: the existing mechanism that enforced or observed the case
+([SANDBOX.md](../docs/SANDBOX.md) §6a). Where the test itself classifies what
+refused an attempt -- the vantage that caught a weakening, the errno a bypass
+got, the decision the proxy gave -- the line says that; otherwise the call
+names it. `scripts/dw.py`'s `ATTRIBUTION` gives each required case its level
+and mechanisms, and `require_attributed_evidence` fails a task, naming the
+suite and case, on any line that is unreadable, unknown, reported twice,
+NOT EXERCISED, at another level or attributed otherwise.
+`tests/architecture/test_m5e_attribution.py` holds that contract to the
+suites' sources, without a runtime, and shows the gate refusing each kind of
+misleading line with synthetic lines -- which test the gate only, never
+containment.
+
 **Sandbox agent tests (M5d.5)** are the evidence behind
 `make sandbox-agent-evidence` (ADR-0052 §§11, 13, 17;
 [the M5d.5 handoff](../docs/M5D5_IMPLEMENTATION_HANDOFF.md)):

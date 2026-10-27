@@ -79,6 +79,7 @@ mod linux {
         SecretHandle, StreamLimit,
     };
     use dwk_proto::frame::FrameDecoder;
+    use dwk_proto::json::{Object, Value, to_canonical_string};
     use dwk_proto::wire::id::{EnvironmentId, InvocationId, RunId};
     use dwk_proto::wire::scalar::{ContentDigest, HostPath, ProcessArg};
     use dwk_sandbox_profile as profile;
@@ -89,6 +90,9 @@ mod linux {
     const PROMPT: Duration = Duration::from_secs(10);
     const PEER_WAIT: Duration = Duration::from_secs(180);
     const SUITE: &str = "sandbox-secret";
+    /// What every line of this suite is (M5e.1): the released broker on a
+    /// real runtime, this process playing the authority.
+    const LEVEL: &str = "real-oci";
     const FIXTURE: &str = "/usr/libexec/direwolf/sandbox-fixture";
     const HANDLE: &str = "deploy-key";
     const PLACEHOLDER: &str = "[redacted:deploy-key]";
@@ -96,9 +100,26 @@ mod linux {
 
     static UNIQUE: AtomicU64 = AtomicU64::new(0);
 
-    fn evidence(case: &str, outcome: &str) {
+    /// One line of evidence, printed only after the assertions before it
+    /// held: the case, how it ended, and what enforced or observed it (M5e.1,
+    /// OD-E1) -- canonical JSON, so no outcome can break the line. No line
+    /// carries a value: outcomes name lengths, fingerprints and modes.
+    fn evidence(case: &str, outcome: &str, enforcement: &str) {
+        let mut fields = Object::new();
+        for (key, value) in [
+            ("suite", SUITE),
+            ("case", case),
+            ("outcome", outcome),
+            ("level", LEVEL),
+            ("enforcement", enforcement),
+        ] {
+            fields
+                .insert(key.to_owned(), Value::String(value.to_owned()))
+                .unwrap();
+        }
         println!(
-            "SANDBOX-EVIDENCE {{\"suite\":\"{SUITE}\",\"case\":\"{case}\",\"outcome\":\"{outcome}\"}}"
+            "SANDBOX-EVIDENCE {}",
+            to_canonical_string(&Value::Object(fields))
         );
     }
 
@@ -736,16 +757,29 @@ mod linux {
         evidence(
             "fd-at-spawn-delivers-exactly-the-value",
             "fd3=pipe len+fnv match",
+            "trusted-launcher",
         );
         assert_eq!(line(&out, "eof"), "1");
-        evidence("fd-at-spawn-one-shot", "eof after the value");
+        evidence(
+            "fd-at-spawn-one-shot",
+            "eof after the value",
+            "trusted-launcher",
+        );
         assert_eq!(line(&out, "stdin"), "/dev/null");
-        evidence("fd-at-spawn-stdin-is-dev-null", "/dev/null");
+        evidence(
+            "fd-at-spawn-stdin-is-dev-null",
+            "/dev/null",
+            "trusted-launcher",
+        );
         assert_eq!(line(&out, "fds"), "0,1,2,3");
-        evidence("fd-at-spawn-only-descriptor-three", "0,1,2,3");
+        evidence(
+            "fd-at-spawn-only-descriptor-three",
+            "0,1,2,3",
+            "trusted-launcher",
+        );
         assert_eq!(got.redactions.map(|c| c.get()), Some(0));
         assert_eq!(got.residue, Verdict::Pass);
-        evidence("fd-at-spawn-residue-clean", "pass");
+        evidence("fd-at-spawn-residue-clean", "pass", "residue-measurement");
 
         // A descendant inherits descriptor 3: the residual, measured.
         let value2 = synthetic(32);
@@ -766,6 +800,7 @@ mod linux {
         evidence(
             "fd-at-spawn-inherited-by-a-descendant",
             "child.fd3=pipe (residual)",
+            "residual-inherited-by-descendants",
         );
 
         // The hygiene launcher composes with it: its variables, and fd 3.
@@ -787,7 +822,11 @@ mod linux {
                 "{name}"
             );
         }
-        evidence("fd-at-spawn-with-hygiene", "hygiene variables set");
+        evidence(
+            "fd-at-spawn-with-hygiene",
+            "hygiene variables set",
+            "hygiene-launcher",
+        );
 
         // In no argument, record, log or event of the runtime's, nor the
         // broker's own log.
@@ -803,9 +842,17 @@ mod linux {
             String::from_utf8_lossy(&records).contains(profile::LAUNCH_SECRET_FD),
             "the events show the launcher's profile (argv is visible; the value is not)"
         );
-        evidence("fd-at-spawn-not-in-inspect-logs-events-argv", "absent");
+        evidence(
+            "fd-at-spawn-not-in-inspect-logs-events-argv",
+            "absent",
+            "secret-stdin-handoff",
+        );
         assert!(broker.stderr().contains("secret=FD_AT_SPAWN"));
-        evidence("broker-log-names-the-mode-only", "secret=FD_AT_SPAWN");
+        evidence(
+            "broker-log-names-the-mode-only",
+            "secret=FD_AT_SPAWN",
+            "broker-log-discipline",
+        );
         destroy(&socket, &ev, &s, &container);
     }
 
@@ -843,7 +890,11 @@ mod linux {
             line(&out, "fnv") == fnv(&value),
             "a different value arrived"
         );
-        evidence("env-at-spawn-delivers-exactly-the-value", "len+fnv match");
+        evidence(
+            "env-at-spawn-delivers-exactly-the-value",
+            "len+fnv match",
+            "trusted-launcher",
+        );
         let names: Vec<&str> = line(&out, "names").split(',').collect();
         assert!(names.contains(&VARIABLE));
         for name in &names {
@@ -852,10 +903,18 @@ mod linux {
                 "an unexpected variable: {name}"
             );
         }
-        evidence("env-at-spawn-only-its-variable-added", &names.join("+"));
+        evidence(
+            "env-at-spawn-only-its-variable-added",
+            &names.join("+"),
+            "trusted-launcher",
+        );
         assert_eq!(line(&out, "stdin"), "/dev/null");
         assert_eq!(line(&out, "fds"), "0,1,2");
-        evidence("env-at-spawn-no-extra-descriptor", "0,1,2");
+        evidence(
+            "env-at-spawn-no-extra-descriptor",
+            "0,1,2",
+            "trusted-launcher",
+        );
 
         let value2 = synthetic(32);
         let child = text(&ran(
@@ -874,6 +933,7 @@ mod linux {
         evidence(
             "env-at-spawn-inherited-by-a-descendant",
             "child.set=1 (residual)",
+            "residual-inherited-by-descendants",
         );
 
         let value3 = synthetic(24);
@@ -895,7 +955,11 @@ mod linux {
                 "{name}"
             );
         }
-        evidence("env-at-spawn-with-hygiene", "variable and hygiene set");
+        evidence(
+            "env-at-spawn-with-hygiene",
+            "variable and hygiene set",
+            "hygiene-launcher",
+        );
 
         let records = runtime_records(&ev, &container, since);
         for v in [&value, &value2, &value3] {
@@ -913,6 +977,7 @@ mod linux {
         evidence(
             "env-at-spawn-not-in-inspect-logs-events-argv",
             "absent; no --env",
+            "secret-stdin-handoff",
         );
         destroy(&socket, &ev, &s, &container);
     }
@@ -963,6 +1028,7 @@ mod linux {
             evidence(
                 &format!("redacted-across-reads-{case}"),
                 "6 occurrences, 0 bytes back",
+                "output-redaction",
             );
         }
         destroy(&socket, &ev, &s, &container);
@@ -994,7 +1060,11 @@ mod linux {
             refusal(try_secret_start(&socket, &ev, env, fd(), vec![file])),
             BrokerRefusal::SecretDescriptor
         );
-        evidence("refused-not-a-pipe", "SECRET_DESCRIPTOR");
+        evidence(
+            "refused-not-a-pipe",
+            "SECRET_DESCRIPTOR",
+            "broker-secret-admission",
+        );
         let (reader, writer) = std::io::pipe().unwrap();
         assert_eq!(
             refusal(try_secret_start(
@@ -1006,7 +1076,11 @@ mod linux {
             )),
             BrokerRefusal::SecretDescriptor
         );
-        evidence("refused-a-write-end", "SECRET_DESCRIPTOR");
+        evidence(
+            "refused-a-write-end",
+            "SECRET_DESCRIPTOR",
+            "broker-secret-admission",
+        );
         let (held, mut open_writer) = std::io::pipe().unwrap();
         open_writer.write_all(b"partial").unwrap();
         assert_eq!(
@@ -1020,7 +1094,11 @@ mod linux {
             BrokerRefusal::SecretDescriptor
         );
         drop((reader, open_writer));
-        evidence("refused-a-stalled-pipe", "SECRET_DESCRIPTOR");
+        evidence(
+            "refused-a-stalled-pipe",
+            "SECRET_DESCRIPTOR",
+            "broker-secret-admission",
+        );
         assert_eq!(
             refusal(try_secret_start(
                 &socket,
@@ -1031,7 +1109,7 @@ mod linux {
             )),
             BrokerRefusal::SecretEmpty
         );
-        evidence("refused-empty", "SECRET_EMPTY");
+        evidence("refused-empty", "SECRET_EMPTY", "broker-secret-admission");
         let big = synthetic(dwk_proto::brokerp::MAX_SECRET_BYTES + 1);
         assert_eq!(
             refusal(try_secret_start(
@@ -1043,7 +1121,11 @@ mod linux {
             )),
             BrokerRefusal::SecretTooLarge
         );
-        evidence("refused-past-32-kib", "SECRET_TOO_LARGE");
+        evidence(
+            "refused-past-32-kib",
+            "SECRET_TOO_LARGE",
+            "broker-secret-admission",
+        );
         let env_start = (
             invocation(),
             workload(
@@ -1063,7 +1145,11 @@ mod linux {
             )),
             BrokerRefusal::SecretUnsafeBytes
         );
-        evidence("refused-nul-in-a-variable", "SECRET_UNSAFE_BYTES");
+        evidence(
+            "refused-nul-in-a-variable",
+            "SECRET_UNSAFE_BYTES",
+            "broker-secret-admission",
+        );
         // Exactly three descriptors.
         assert_eq!(
             refusal(try_secret_start(&socket, &ev, env, fd(), Vec::new())),
@@ -1079,7 +1165,11 @@ mod linux {
             )),
             BrokerRefusal::DescriptorCount
         );
-        evidence("refused-not-three-descriptors", "DESCRIPTOR_COUNT");
+        evidence(
+            "refused-not-three-descriptors",
+            "DESCRIPTOR_COUNT",
+            "broker-secret-admission",
+        );
         // The executable is proved first: one the manifest does not pin is
         // refused, and the value is still unread in its pipe.
         let value = synthetic(40);
@@ -1104,7 +1194,11 @@ mod linux {
             .read_to_end(&mut left)
             .unwrap();
         assert!(left == value, "the broker read the value before judging");
-        evidence("value-unread-when-the-judgement-refuses", "pipe still full");
+        evidence(
+            "value-unread-when-the-judgement-refuses",
+            "pipe still full",
+            "broker-secret-admission",
+        );
         // A running workload is collected only under its own generation.
         let value = synthetic(16);
         let invocation = invocation();
@@ -1136,6 +1230,7 @@ mod linux {
         evidence(
             "collected-only-under-its-generation",
             "other generation unconfirmed",
+            "workload-generation",
         );
         // An ordinary start is unchanged: no descriptor 3, no redaction count.
         let (runtime, exe, cwd) = runtime(&ev);
@@ -1148,7 +1243,11 @@ mod linux {
         assert_eq!(line(&out, "stdin"), "/dev/null");
         assert_eq!(line(&out, "fds"), "0,1,2");
         assert_eq!(plain.redactions, None);
-        evidence("an-ordinary-workload-is-unchanged", "fd3 absent, no count");
+        evidence(
+            "an-ordinary-workload-is-unchanged",
+            "fd3 absent, no count",
+            "broker-launch",
+        );
         destroy(&socket, &ev, &s, &container);
     }
 
@@ -1200,7 +1299,11 @@ mod linux {
         assert!(ok.status.success());
         let out = String::from_utf8_lossy(&ok.stdout).into_owned();
         assert!(line(&out, "fnv") == fnv(&value));
-        evidence("launcher-accepts-one-exact-frame", "ran");
+        evidence(
+            "launcher-accepts-one-exact-frame",
+            "ran",
+            "trusted-launcher",
+        );
         let too_long = {
             let mut bytes = 32_769u32.to_be_bytes().to_vec();
             bytes.extend(synthetic(32_769));
@@ -1226,7 +1329,11 @@ mod linux {
             );
             assert!(refused.stdout.is_empty(), "{case}: the program ran");
         }
-        evidence("launcher-refuses-every-other-frame", "127, nothing ran");
+        evidence(
+            "launcher-refuses-every-other-frame",
+            "127, nothing ran",
+            "trusted-launcher",
+        );
         for (case, words) in [
             (
                 "a proxy variable",
@@ -1279,6 +1386,7 @@ mod linux {
         evidence(
             "launcher-refuses-reserved-names-and-bad-words",
             "127, nothing ran",
+            "trusted-launcher",
         );
         destroy(&socket, &ev, &s, &container);
     }
@@ -1325,7 +1433,11 @@ mod linux {
             "the program ran:\n{listing}"
         );
         assert!(!holds(listing.as_bytes(), &value));
-        evidence("crash-after-read-nothing-ran", "init only");
+        evidence(
+            "crash-after-read-nothing-ran",
+            "init only",
+            "broker-judgement-before-exec",
+        );
         drop(broker);
         let _broker = Broker::start(&socket, None);
         destroy(&socket, &ev, &s, &container);

@@ -73,6 +73,7 @@ mod linux {
         ProcessArgs, RuntimeSpec, StreamLimit,
     };
     use dwk_proto::frame::FrameDecoder;
+    use dwk_proto::json::{Object, Value, to_canonical_string};
     use dwk_proto::wire::id::{EnvironmentId, InvocationId, RunId};
     use dwk_proto::wire::scalar::{ContentDigest, HostPath, ProcessArg};
     use dwk_sandbox_profile as profile;
@@ -84,15 +85,50 @@ mod linux {
     /// Longer than any workload these tests run, its judgement and `reap`.
     const PEER_WAIT: Duration = Duration::from_secs(180);
     const SUITE: &str = "sandbox-workload";
+    /// What every line of M5d.1's suite is (M5e.1): the released broker on
+    /// a real runtime, this process playing the authority.
+    const LEVEL: &str = "real-oci";
     /// Where the evidence image carries the workload fixture.
     const FIXTURE: &str = "/usr/libexec/direwolf/sandbox-fixture";
 
     static UNIQUE: AtomicU64 = AtomicU64::new(0);
 
-    fn evidence(case: &str, outcome: &str) {
+    /// One line of evidence, printed only after the assertions before it
+    /// held: `suite`'s case, how it ended, its level and what enforced or
+    /// observed it (M5e.1, OD-E1) -- canonical JSON, so no outcome can break
+    /// the line.
+    fn evidence_line(suite: &str, case: &str, outcome: &str, level: &str, enforcement: &str) {
+        let mut fields = Object::new();
+        for (key, value) in [
+            ("suite", suite),
+            ("case", case),
+            ("outcome", outcome),
+            ("level", level),
+            ("enforcement", enforcement),
+        ] {
+            fields
+                .insert(key.to_owned(), Value::String(value.to_owned()))
+                .unwrap();
+        }
         println!(
-            "SANDBOX-EVIDENCE {{\"suite\":\"{SUITE}\",\"case\":\"{case}\",\"outcome\":\"{outcome}\"}}"
+            "SANDBOX-EVIDENCE {}",
+            to_canonical_string(&Value::Object(fields))
         );
+    }
+
+    fn evidence(case: &str, outcome: &str, enforcement: &str) {
+        evidence_line(SUITE, case, outcome, LEVEL, enforcement);
+    }
+
+    /// What refused direct attempts from a `NO_NETWORK` environment, by the
+    /// errno each reported: no route at all (`ENETUNREACH`), or something
+    /// this evidence does not attribute -- which the task then refuses.
+    fn routeless(attempts: &[&str]) -> &'static str {
+        if attempts.iter().all(|a| a.contains("errno=101")) {
+            "topology-no-route"
+        } else {
+            "unexpected"
+        }
     }
 
     fn own_uid() -> u32 {
@@ -755,19 +791,19 @@ mod linux {
         let out = text(&identity);
         assert!(line(&out, "uid").split(',').all(|u| u == "10001"), "{out}");
         assert!(line(&out, "gid").split(',').all(|g| g == "10001"), "{out}");
-        evidence("workload-runs-as-uid-10001", "uid=gid=10001");
+        evidence("workload-runs-as-uid-10001", "uid=gid=10001", "oci-user");
         assert_eq!(line(&out, "capeff"), "0000000000000000", "{out}");
         assert_eq!(line(&out, "capprm"), "0000000000000000", "{out}");
-        evidence("workload-no-capabilities", "capeff=0");
+        evidence("workload-no-capabilities", "capeff=0", "capabilities");
         assert_eq!(line(&out, "nonewprivs"), "1", "{out}");
-        evidence("workload-no-new-privileges", "1");
+        evidence("workload-no-new-privileges", "1", "no-new-privileges");
         assert_eq!(line(&out, "seccomp"), "2", "{out}");
-        evidence("workload-seccomp-filter", "2");
+        evidence("workload-seccomp-filter", "2", "seccomp");
         assert_eq!(line(&out, "cwd"), "/workspace", "{out}");
-        evidence("workload-cwd-workspace", "/workspace");
+        evidence("workload-cwd-workspace", "/workspace", "broker-launch");
         assert_eq!(identity.residue, Verdict::Pass);
         assert_eq!(identity.remaining_processes.get(), 0);
-        evidence("workload-residue-clean", "pass");
+        evidence("workload-residue-clean", "pass", "residue-measurement");
 
         // Flags after the executable are the program's bytes, never the
         // runtime client's options.
@@ -794,13 +830,17 @@ mod linux {
             });
         }
         assert_eq!(echoed.trim_end(), expected);
-        evidence("workload-arguments-exact-bytes", "echoed");
+        evidence("workload-arguments-exact-bytes", "echoed", "broker-launch");
         let mut args = vec!["workload-identity"];
         args.extend_from_slice(&hostile);
         let still = text(&ran(&socket, &ev, env, &args));
         assert!(line(&still, "uid").split(',').all(|u| u == "10001"));
         assert_eq!(line(&still, "capeff"), "0000000000000000");
-        evidence("workload-flags-in-arguments-inert", "uid=10001 capeff=0");
+        evidence(
+            "workload-flags-in-arguments-inert",
+            "uid=10001 capeff=0",
+            "broker-launch",
+        );
 
         // Its environment is the container's, never the broker's.
         let names = text(&ran(&socket, &ev, env, &["workload-env"]));
@@ -814,20 +854,28 @@ mod linux {
                 "an unexpected variable: {name} in {names:?}"
             );
         }
-        evidence("workload-environment-container-only", &names.join("+"));
+        evidence(
+            "workload-environment-container-only",
+            &names.join("+"),
+            "launch-environment",
+        );
 
         // How it ended, as the runtime and the container say.
         let exited = ran(&socket, &ev, env, &["workload-exit", "3"]);
         assert_eq!(exited.ending, WorkloadEnding::Exited);
         assert_eq!(exited.exit_code.map(|c| c.get()), Some(3));
-        evidence("workload-exit-code", "3");
+        evidence("workload-exit-code", "3", "ending-classification");
         let killed = ran(&socket, &ev, env, &["workload-kill-self"]);
         assert_eq!(killed.ending, WorkloadEnding::Killed);
         assert_eq!(killed.signal.map(|s| s.get()), Some(9));
-        evidence("workload-killed-by-signal", "9");
+        evidence("workload-killed-by-signal", "9", "ending-classification");
         let ambiguous = ran(&socket, &ev, env, &["workload-exit", "125"]);
         assert_eq!(ambiguous.ending, WorkloadEnding::Unobservable);
-        evidence("workload-ambiguous-exit-unobservable", "125");
+        evidence(
+            "workload-ambiguous-exit-unobservable",
+            "125",
+            "ending-classification",
+        );
         // The broker's log names how it ended and how much it wrote, never
         // what it wrote.
         let log = broker.stderr();
@@ -837,7 +885,11 @@ mod linux {
             !log.contains("ooooo") && !log.contains("eeeee"),
             "output reached the log"
         );
-        evidence("workload-log-has-no-argument-or-output", "lengths-only");
+        evidence(
+            "workload-log-has-no-argument-or-output",
+            "lengths-only",
+            "broker-log-discipline",
+        );
         destroy(&socket, &ev, &s, &container);
     }
 
@@ -869,10 +921,10 @@ mod linux {
         assert_eq!(flood.stdout.content.to_bytes().len(), 4096);
         assert_eq!(flood.stderr.content.to_bytes().len(), 4096);
         assert!(flood.stdout.truncated && flood.stderr.truncated);
-        evidence("workload-output-bounded", "4096+4096");
+        evidence("workload-output-bounded", "4096+4096", "output-bound");
         assert_eq!(flood.stdout.observed.get(), 300_000);
         assert_eq!(flood.stderr.observed.get(), 200_000);
-        evidence("workload-output-counted", "300000+200000");
+        evidence("workload-output-counted", "300000+200000", "output-bound");
 
         let since = Instant::now();
         let slow = ended(run_workload(
@@ -896,14 +948,18 @@ mod linux {
             "{:?}",
             since.elapsed()
         );
-        evidence("workload-wall-clock-timed-out", "3s");
+        evidence("workload-wall-clock-timed-out", "3s", "broker-wall-clock");
         // The runtime kept the `exec`'d process when its client died; `reap`
         // ended it.
         assert_eq!(slow.residue, Verdict::Pass);
         assert!(slow.ended_processes.get() >= 1, "{slow:?}");
         let left = ev.look(container.as_str(), &["workload-ps"]);
         assert_eq!(line(&left, "others"), "1", "init alone: {left}");
-        evidence("workload-timed-out-reaped", "init-alone");
+        evidence(
+            "workload-timed-out-reaped",
+            "init-alone",
+            "environment-init-reap",
+        );
 
         // A child left holding the output open: the runtime ends the `exec`
         // when the program exits (measured: it does not wait for the
@@ -928,6 +984,7 @@ mod linux {
         evidence(
             "workload-output-held-open-child-reaped",
             "exited-child-reaped",
+            "environment-init-reap",
         );
         destroy(&socket, &ev, &s, &container);
     }
@@ -964,6 +1021,7 @@ mod linux {
         evidence(
             "broker-holds-nothing-after-an-answered-exchange",
             &format!("fds-{}-threads-{}-children-{}", idle.0, idle.1, idle.2),
+            "broker-census",
         );
         let sleeper = invocation();
         let since = Instant::now();
@@ -982,7 +1040,11 @@ mod linux {
         // Answered after the judgement, not after the workload.
         let answered = since.elapsed();
         assert!(answered < Duration::from_secs(15), "{answered:?}");
-        evidence("workload-start-answered-before-it-ends", "under-15s");
+        evidence(
+            "workload-start-answered-before-it-ends",
+            "under-15s",
+            "broker-start-collect",
+        );
         // The broker serves the next exchange while the workload runs: a
         // measurement of the very environment, and a collection.
         let (runtime, exe, cwd) = runtime(&ev);
@@ -1010,6 +1072,7 @@ mod linux {
         evidence(
             "broker-serves-others-while-a-workload-runs",
             "measure+collect",
+            "broker-start-collect",
         );
         // One workload at a time in an environment: a second is refused
         // before anything runs (`reap` would end the first's processes).
@@ -1028,7 +1091,11 @@ mod linux {
         .unwrap();
         assert_eq!(refusal(second), BrokerRefusal::WorkloadInUse);
         assert!(!workspace.join("second").exists());
-        evidence("workload-second-in-environment-refused", "WORKLOAD_IN_USE");
+        evidence(
+            "workload-second-in-environment-refused",
+            "WORKLOAD_IN_USE",
+            "broker-workload-admission",
+        );
         // A collection naming another generation is indeterminate.
         let stranger = BrokerGeneration::new("0".repeat(32)).unwrap();
         assert_eq!(
@@ -1040,6 +1107,7 @@ mod linux {
         evidence(
             "workload-collect-other-generation-indeterminate",
             "WORKLOAD_UNCONFIRMED",
+            "workload-generation",
         );
         // It ends on its own clock, and every collection after says how.
         let deadline = Instant::now() + PEER_WAIT;
@@ -1055,7 +1123,11 @@ mod linux {
         assert_eq!(ending.residue, Verdict::Pass);
         let again = ended(try_collect(&socket, &sleeper, &generation).unwrap());
         assert_eq!(again, ending);
-        evidence("workload-collected-ending-repeats", "same-ending");
+        evidence(
+            "workload-collected-ending-repeats",
+            "same-ending",
+            "broker-start-collect",
+        );
         // The environment removed from outside while a workload runs in it:
         // collections say how it ended without ever calling the residue
         // clean, so the authority destroys what is left.
@@ -1087,6 +1159,7 @@ mod linux {
         evidence(
             "workload-environment-removed-mid-run-not-clean",
             &format!("{}-{}", gone.ending.as_str(), gone.residue.as_str()),
+            "residue-measurement",
         );
         // Every workload ended: the broker holds what it held idle -- no
         // descriptor, supervising thread or runtime client is left.
@@ -1102,6 +1175,7 @@ mod linux {
         evidence(
             "broker-holds-nothing-after-its-workloads",
             &format!("fds-{}-threads-{}-children-{}", idle.0, idle.1, idle.2),
+            "broker-census",
         );
     }
 
@@ -1170,6 +1244,7 @@ mod linux {
         evidence(
             "hygiene-launcher-adds-exactly-its-variables",
             &kept.len().to_string(),
+            "hygiene-launcher",
         );
 
         // git: the image's system configuration is read directly, and not
@@ -1187,7 +1262,11 @@ mod linux {
         let hygienic = read(WorkloadLaunch::Hygiene);
         assert_eq!(hygienic.exit_code.map(|c| c.get()), Some(1), "{hygienic:?}");
         assert_eq!(text(&hygienic), "");
-        evidence("hygiene-git-system-config-not-read", "exit-1-empty");
+        evidence(
+            "hygiene-git-system-config-not-read",
+            "exit-1-empty",
+            "hygiene-launcher",
+        );
         // What the obligation never reaches: a repository's own
         // configuration, which the environment contains instead.
         let made = run(launched(
@@ -1220,7 +1299,11 @@ mod linux {
             WorkloadLaunch::Hygiene,
         ));
         assert_eq!(text(&local).trim(), "repository", "{local:?}");
-        evidence("hygiene-residual-repository-config-read", "contained");
+        evidence(
+            "hygiene-residual-repository-config-read",
+            "contained",
+            "residual-contained-by-the-environment",
+        );
 
         // Python: a module in the working directory shadows the standard
         // library when the working directory is on `sys.path` -- and is
@@ -1249,6 +1332,7 @@ mod linux {
         evidence(
             "hygiene-python-working-directory-not-on-path",
             "stdlib-imported",
+            "hygiene-launcher",
         );
 
         // pytest: no cache in the workspace with the obligation's arguments,
@@ -1287,8 +1371,16 @@ mod linux {
                 "{name}"
             );
         }
-        evidence("hygiene-pytest-cache-not-written", "no-pytest-cache");
-        evidence("hygiene-residual-conftest-runs", "contained");
+        evidence(
+            "hygiene-pytest-cache-not-written",
+            "no-pytest-cache",
+            "hygiene-launcher",
+        );
+        evidence(
+            "hygiene-residual-conftest-runs",
+            "contained",
+            "residual-contained-by-the-environment",
+        );
         destroy(&socket, &tools, &s, &container);
     }
 
@@ -1313,14 +1405,30 @@ mod linux {
         assert!(tree.ended_processes.get() >= 3, "{tree:?}");
         assert_eq!(tree.residue, Verdict::Pass);
         assert_eq!(tree.remaining_processes.get(), 0);
-        evidence("workload-tree-reaped", "child");
-        evidence("workload-setsid-reaped", "own-session");
-        evidence("workload-daemon-reaped", "orphaned-to-init");
+        evidence("workload-tree-reaped", "child", "environment-init-reap");
+        evidence(
+            "workload-setsid-reaped",
+            "own-session",
+            "environment-init-reap",
+        );
+        evidence(
+            "workload-daemon-reaped",
+            "orphaned-to-init",
+            "environment-init-reap",
+        );
         let left = ev.look(container.as_str(), &["workload-ps"]);
         assert_eq!(line(&left, "others"), "1", "{left}");
         assert!(!line(&left, "pids").contains(":Z"), "a zombie: {left}");
-        evidence("workload-nothing-persists", "init-alone");
-        evidence("workload-no-zombies", "init-reaped");
+        evidence(
+            "workload-nothing-persists",
+            "init-alone",
+            "environment-init-reap",
+        );
+        evidence(
+            "workload-no-zombies",
+            "init-reaped",
+            "environment-init-reap",
+        );
 
         let looped = ran(&socket, &ev, env, &["workload-fork-loop", "60"]);
         assert_eq!(line(&text(&looped), "spawned"), "60");
@@ -1328,12 +1436,16 @@ mod linux {
         assert_eq!(looped.residue, Verdict::Pass);
         let left = ev.look(container.as_str(), &["workload-ps"]);
         assert_eq!(line(&left, "others"), "1", "{left}");
-        evidence("workload-fork-loop-reaped", "60");
+        evidence("workload-fork-loop-reaped", "60", "environment-init-reap");
         // The environment is still the clean one it was: another workload
         // runs in it.
         let after = ran(&socket, &ev, env, &["workload-exit", "0"]);
         assert_eq!(after.exit_code.map(|c| c.get()), Some(0));
-        evidence("workload-environment-reusable-after-reap", "exited-0");
+        evidence(
+            "workload-environment-reusable-after-reap",
+            "exited-0",
+            "environment-init-reap",
+        );
         destroy(&socket, &ev, &s, &container);
     }
 
@@ -1365,7 +1477,11 @@ mod linux {
             )),
             BrokerRefusal::DigestMismatch
         );
-        evidence("workload-executable-substituted-refused", "digest-mismatch");
+        evidence(
+            "workload-executable-substituted-refused",
+            "digest-mismatch",
+            "executable-digest-pin",
+        );
         // A path the image does not hold.
         assert_eq!(
             refusal(run_workload(
@@ -1381,7 +1497,11 @@ mod linux {
             )),
             BrokerRefusal::DigestMismatch
         );
-        evidence("workload-executable-missing-refused", "digest-mismatch");
+        evidence(
+            "workload-executable-missing-refused",
+            "digest-mismatch",
+            "executable-digest-pin",
+        );
         // Another file of the image under the fixture's digest.
         assert_eq!(
             refusal(run_workload(
@@ -1397,9 +1517,17 @@ mod linux {
             )),
             BrokerRefusal::DigestMismatch
         );
-        evidence("workload-executable-other-file-refused", "digest-mismatch");
+        evidence(
+            "workload-executable-other-file-refused",
+            "digest-mismatch",
+            "executable-digest-pin",
+        );
         assert!(!workspace.join("sub").exists() && !workspace.join("other").exists());
-        evidence("workload-refused-ran-nothing", "no-marker");
+        evidence(
+            "workload-refused-ran-nothing",
+            "no-marker",
+            "executable-digest-pin",
+        );
         destroy(&socket, &ev, &s, &container);
     }
 
@@ -1437,6 +1565,7 @@ mod linux {
         evidence(
             "workload-drifted-environment-refused",
             "environment-not-clean",
+            "measured-before-work",
         );
 
         // Stopped.
@@ -1454,6 +1583,7 @@ mod linux {
         evidence(
             "workload-stopped-environment-refused",
             "environment-not-clean",
+            "measured-before-work",
         );
 
         // Another environment's container, named as this one's.
@@ -1471,6 +1601,7 @@ mod linux {
         evidence(
             "workload-foreign-environment-refused",
             "foreign-environment",
+            "exact-label-ownership",
         );
 
         // Gone.
@@ -1487,11 +1618,16 @@ mod linux {
         evidence(
             "workload-missing-environment-refused",
             "environment-not-found",
+            "runtime-client",
         );
         for name in ["drift", "stopped", "foreign", "gone"] {
             assert!(!workspace.join(name).exists(), "{name} ran");
         }
-        evidence("workload-nothing-ran-in-a-refused-environment", "no-marker");
+        evidence(
+            "workload-nothing-ran-in-a-refused-environment",
+            "no-marker",
+            "broker-admission",
+        );
         destroy(&socket, &ev, &s, &container);
         destroy(&socket, &ev, &s2, &container2);
     }
@@ -1525,29 +1661,37 @@ mod linux {
         // EROFS (30) for a read-only root, a read-only `/usr`, `/etc`.
         assert_eq!(line(&out, "root"), "errno=30", "{out}");
         assert_eq!(line(&out, "usr"), "errno=30", "{out}");
-        evidence("workload-root-read-only", "EROFS");
+        evidence("workload-root-read-only", "EROFS", "read-only-root");
         assert_eq!(line(&out, "etc"), "errno=30", "{out}");
-        evidence("workload-etc-read-only", "EROFS");
+        evidence("workload-etc-read-only", "EROFS", "read-only-root");
         assert_eq!(line(&out, "dotdot"), "errno=30", "{out}");
-        evidence("workload-dot-dot-escape-refused", "EROFS");
+        evidence("workload-dot-dot-escape-refused", "EROFS", "read-only-root");
         assert_eq!(line(&out, "tmp"), "written", "{out}");
-        evidence("workload-tmp-writable", "written");
+        evidence("workload-tmp-writable", "written", "container-tmpfs");
         assert_eq!(line(&out, "workspace"), "written", "{out}");
         let inside = workspace.join("direwolf-inside");
         assert_eq!(
             std::fs::metadata(&inside).unwrap().uid(),
             profile::SANDBOX_UID
         );
-        evidence("workload-workspace-writable-as-10001", "written");
+        evidence(
+            "workload-workspace-writable-as-10001",
+            "written",
+            "workspace-mount",
+        );
         assert_eq!(line(&out, "runtime_sockets"), "0", "{out}");
-        evidence("workload-no-runtime-socket", "0");
+        evidence("workload-no-runtime-socket", "0", "mount-namespace");
         for host in [socket_text.as_str(), scratch_text.as_str()] {
             assert!(
                 out.contains(&format!("host_path={host} exists=false")),
                 "{host}: {out}"
             );
         }
-        evidence("workload-no-host-path", "broker-socket-and-scratch-absent");
+        evidence(
+            "workload-no-host-path",
+            "broker-socket-and-scratch-absent",
+            "mount-namespace",
+        );
 
         let tcp = text(&ran(
             &socket,
@@ -1556,13 +1700,21 @@ mod linux {
             &["egress-direct", "tcp", "1.1.1.1", "443"],
         ));
         assert!(tcp.contains("errno="), "{tcp}");
-        evidence("workload-direct-tcp-refused", tcp.trim());
+        evidence(
+            "workload-direct-tcp-refused",
+            tcp.trim(),
+            routeless(&[&tcp]),
+        );
         let dns = text(&ran(&socket, &ev, env, &["egress-dns", "8.8.8.8"]));
         assert!(
             !dns.contains("answered") && !dns.contains("tcp-connected"),
             "{dns}"
         );
-        evidence("workload-direct-dns-refused", "no-answer");
+        evidence(
+            "workload-direct-dns-refused",
+            "no-answer",
+            "topology-no-resolver",
+        );
         destroy(&socket, &ev, &s, &container);
     }
 
@@ -1586,12 +1738,17 @@ mod linux {
         assert_eq!(line(&out, "workers"), "2", "{out}");
         assert_eq!(line(&out, "read"), "true", "{out}");
         assert!(line(&out, "files").parse::<u32>().unwrap() >= 3, "{out}");
-        evidence("agent-shaped-plan-and-workers-wrote", "plan+2-workers");
+        evidence(
+            "agent-shaped-plan-and-workers-wrote",
+            "plan+2-workers",
+            "workspace-mount",
+        );
         assert!(line(&out, "tcp").starts_with("errno="), "{out}");
         assert!(line(&out, "udp").starts_with("errno="), "{out}");
         evidence(
             "agent-shaped-network-refused",
             &format!("tcp {} udp {}", line(&out, "tcp"), line(&out, "udp")),
+            routeless(&[line(&out, "tcp"), line(&out, "udp")]),
         );
         // Two workers and the helper's child outlived it; `reap` ended
         // every one.
@@ -1599,8 +1756,12 @@ mod linux {
         assert_eq!(agent.residue, Verdict::Pass);
         let left = ev.look(container.as_str(), &["workload-ps"]);
         assert_eq!(line(&left, "others"), "1", "{left}");
-        evidence("agent-shaped-helpers-and-workers-ended", "init-alone");
-        evidence("agent-shaped-residue-clean", "pass");
+        evidence(
+            "agent-shaped-helpers-and-workers-ended",
+            "init-alone",
+            "environment-init-reap",
+        );
+        evidence("agent-shaped-residue-clean", "pass", "residue-measurement");
         for name in ["plan.txt", "worker-1.txt", "worker-2.txt"] {
             let path = workspace.join("agent").join(name);
             assert_eq!(
@@ -1609,7 +1770,11 @@ mod linux {
                 "{name}"
             );
         }
-        evidence("agent-shaped-files-on-host-as-10001", "3-files");
+        evidence(
+            "agent-shaped-files-on-host-as-10001",
+            "3-files",
+            "workspace-mount",
+        );
         destroy(&socket, &ev, &s, &container);
     }
 
@@ -1637,7 +1802,7 @@ mod linux {
             assert_ne!(code, Some(0), "{stderr}");
             assert!(stderr.contains(role), "{stderr}");
             assert!(!dir.socket().exists(), "a refused broker bound its socket");
-            evidence(case, "refused-before-binding");
+            evidence(case, "refused-before-binding", "broker-start-up-admission");
         }
         let scope = std::fs::read_to_string("/proc/sys/kernel/yama/ptrace_scope")
             .ok()
@@ -1664,6 +1829,7 @@ mod linux {
         evidence(
             "posture-reported-matches-host",
             &format!("ptrace_scope={expected}"),
+            "broker-start-up-posture",
         );
     }
 
@@ -1697,7 +1863,11 @@ mod linux {
             assert!(answer.is_none(), "{answer:?}");
         }
         assert!(!workspace.join("judged").exists());
-        evidence("broker-crash-before-exec-nothing-ran", "no-marker");
+        evidence(
+            "broker-crash-before-exec-nothing-ran",
+            "no-marker",
+            "broker-judgement-before-exec",
+        );
 
         // During it: the start was answered; then no collection is, and the
         // workload runs on in its environment — the runtime keeps an
@@ -1731,10 +1901,18 @@ mod linux {
         broker.kill();
         let answer = try_collect(&socket, &crashed, &generation);
         assert!(answer.is_none(), "an answer from a dead broker: {answer:?}");
-        evidence("broker-crash-mid-workload-no-answer", "none");
+        evidence(
+            "broker-crash-mid-workload-no-answer",
+            "none",
+            "broker-fail-closed",
+        );
         let seen = ev.look(container.as_str(), &["workload-ps"]);
         assert!(line(&seen, "others").parse::<u32>().unwrap() >= 2, "{seen}");
-        evidence("broker-crash-workload-still-running", "outlived-its-client");
+        evidence(
+            "broker-crash-workload-still-running",
+            "outlived-its-client",
+            "runtime-process-list",
+        );
         // A restarted broker supervises nothing of the dead one's: its
         // collection is indeterminate, never an ending it did not see.
         let _broker = Broker::start(&socket, None);
@@ -1747,11 +1925,16 @@ mod linux {
         evidence(
             "broker-restart-collection-indeterminate",
             "WORKLOAD_UNCONFIRMED",
+            "workload-generation",
         );
         // What ends it is the environment's destruction.
         destroy(&socket, &ev, &s, &container);
         assert!(!ev.exists(container.as_str()));
-        evidence("broker-restart-destroy-ends-it", "container-removed");
+        evidence(
+            "broker-restart-destroy-ends-it",
+            "container-removed",
+            "exact-label-cleanup",
+        );
     }
 
     /// M5d.4 (ADR-0052 §§6, 10, 17; OD-3(a), OD-6): what the broker judges
@@ -1772,11 +1955,15 @@ mod linux {
         use super::*;
 
         const WORKSPACE_SUITE: &str = "sandbox-workspace";
+        /// What a line is (M5e.1): the released broker on a real runtime
+        /// (`OCI`) -- and, where it says `PRIV`, on a workspace only an
+        /// operator-provisioned host has, which only
+        /// `DW_WORKSPACE_PRIVILEGED=1` provisions.
+        const OCI: &str = "real-oci";
+        const PRIV: &str = "privileged-oci";
 
-        fn evidence(case: &str, outcome: &str) {
-            println!(
-                "SANDBOX-EVIDENCE {{\"suite\":\"{WORKSPACE_SUITE}\",\"case\":\"{case}\",\"outcome\":\"{outcome}\"}}"
-            );
+        fn evidence(case: &str, outcome: &str, level: &str, enforcement: &str) {
+            evidence_line(WORKSPACE_SUITE, case, outcome, level, enforcement);
         }
 
         /// Every container the runtime holds, by id.
@@ -1871,6 +2058,8 @@ mod linux {
             evidence(
                 "broker-unverified-workspace-refused-without-the-flag",
                 "WORKSPACE_UNVERIFIED",
+                OCI,
+                "broker-admission",
             );
         }
 
@@ -1919,10 +2108,20 @@ mod linux {
                     assert_eq!(identity, Verdict::Pass, "{case}");
                 }
                 assert_eq!(containers(&ev), before, "{case}: its container was removed");
-                evidence(case, "not-retained");
+                evidence(case, "not-retained", OCI, "workspace-contract-measured");
             }
-            evidence("broker-host-and-container-identity-agree", "pass");
-            evidence("broker-runtime-probe-disagreement-refused", "not-retained");
+            evidence(
+                "broker-host-and-container-identity-agree",
+                "pass",
+                OCI,
+                "workspace-contract-measured",
+            );
+            evidence(
+                "broker-runtime-probe-disagreement-refused",
+                "not-retained",
+                OCI,
+                "workspace-contract-measured",
+            );
         }
 
         #[test]
@@ -1956,7 +2155,7 @@ mod linux {
                         "{case} {invariant:?}"
                     );
                 }
-                evidence(case, "retained");
+                evidence(case, "retained", PRIV, "workspace-contract-measured");
                 kept.push((s, prepared.container.unwrap()));
             }
             // The tmpfs grown under its environment: the next workload is
@@ -2002,6 +2201,8 @@ mod linux {
             evidence(
                 "broker-capacity-drift-refused-before-work",
                 "ENVIRONMENT_NOT_CLEAN",
+                PRIV,
+                "measured-before-work",
             );
             for (s, container) in &kept {
                 destroy(&socket, &ev, s, container);

@@ -412,10 +412,28 @@ fn failed6(body: &DwkpBody) -> (F, Option<bool>) {
 }
 
 /// One line of `make sandbox-secret-evidence`'s in-process half, printed
-/// only after the assertions before it held. A fake broker: not delivery.
-fn secret_evidence(case: &str, outcome: &str) {
+/// only after the assertions before it held. A fake broker: not delivery --
+/// labelled `fake-broker` (M5e.1), with what of the authority's decided it.
+fn secret_evidence(case: &str, outcome: &str, enforcement: &str) {
+    use dwk_proto::json::{Number, Object, Value, to_canonical_string};
+    let mut fields = Object::new();
+    for (key, value) in [
+        ("suite", "authority-workload-secret"),
+        ("case", case),
+        ("outcome", outcome),
+        ("level", "fake-broker"),
+        ("enforcement", enforcement),
+    ] {
+        fields
+            .insert(key.to_owned(), Value::String(value.to_owned()))
+            .unwrap();
+    }
+    fields
+        .insert("count".to_owned(), Value::Number(Number::Int(1)))
+        .unwrap();
     println!(
-        "SECRET-EVIDENCE {{\"suite\":\"authority-workload-secret\",\"case\":\"{case}\",\"outcome\":\"{outcome}\",\"count\":1}}"
+        "SECRET-EVIDENCE {}",
+        to_canonical_string(&Value::Object(fields))
     );
 }
 
@@ -472,8 +490,12 @@ fn a_credential_is_read_only_after_both_intents_and_handed_over_once_as_a_pipe()
         );
         assert_eq!(last.secret.handle.as_str(), handle);
     }
-    secret_evidence("read-once-after-both-intents", "1 read, 2 intents open");
-    secret_evidence("kernel-chooses-c-before-b", "FD_AT_SPAWN");
+    secret_evidence(
+        "read-once-after-both-intents",
+        "1 read, 2 intents open",
+        "authority-ledger-intent-first",
+    );
+    secret_evidence("kernel-chooses-c-before-b", "FD_AT_SPAWN", "authority-plan");
     // Each delivery recorded, linked and counted once; the workload's own
     // intent names the injection; nothing durable holds a value.
     assert_eq!(
@@ -512,11 +534,19 @@ fn a_credential_is_read_only_after_both_intents_and_handed_over_once_as_a_pipe()
         .filter(|r| r.text("environment") == Some("sandbox"))
         .count();
     assert_eq!(used, 3);
-    secret_evidence("intent-linked-recorded-counted", "3 injected, 3 links");
+    secret_evidence(
+        "intent-linked-recorded-counted",
+        "3 injected, 3 links",
+        "authority-ledger",
+    );
     for v in [&values.deploy, &values.env, &values.both] {
         assert!(!fx.durable_holds(v), "a value is durable");
     }
-    secret_evidence("no-plaintext-in-kernel-db-or-audit", "absent");
+    secret_evidence(
+        "no-plaintext-in-kernel-db-or-audit",
+        "absent",
+        "secret-not-persisted",
+    );
     // A key names one invocation: never a second handoff or launch.
     let handed = fx.secrets_handed().len();
     let before = reads_on_this_thread();
@@ -528,7 +558,11 @@ fn a_credential_is_read_only_after_both_intents_and_handed_over_once_as_a_pipe()
     assert_eq!(refused6(&again), R::IdempotencyKeyReused);
     assert_eq!(reads_on_this_thread() - before, 0);
     assert_eq!(fx.secrets_handed().len(), handed);
-    secret_evidence("replay-never-hands-over-again", "IDEMPOTENCY_KEY_REUSED");
+    secret_evidence(
+        "replay-never-hands-over-again",
+        "IDEMPOTENCY_KEY_REUSED",
+        "authority-idempotency",
+    );
     // The ordinary launch is unchanged at version 6 and at version 5: one
     // action, an ordinary start, no pipe.
     let plain = fx.launch6(&run, "s1-plain", &call(FIXTURE, &["status"]));
@@ -538,7 +572,11 @@ fn a_credential_is_read_only_after_both_intents_and_handed_over_once_as_a_pipe()
     assert_eq!(result(&v5).0.actions.as_slice().len(), 1);
     assert_eq!(fx.secrets_handed().len(), handed);
     assert!(fx.fake.operations().contains(&"workload.start"));
-    secret_evidence("ordinary-launch-unchanged", "one action, no pipe");
+    secret_evidence(
+        "ordinary-launch-unchanged",
+        "one action, no pipe",
+        "authority-route",
+    );
     // A preview decides both and reads, records and hands over nothing.
     let rows = fx.count("SELECT count(*) FROM secret_injection");
     let before = reads_on_this_thread();
@@ -549,7 +587,7 @@ fn a_credential_is_read_only_after_both_intents_and_handed_over_once_as_a_pipe()
     );
     assert_eq!(reads_on_this_thread() - before, 0);
     assert_eq!(fx.count("SELECT count(*) FROM secret_injection"), rows);
-    secret_evidence("preview-reads-nothing", "both decided");
+    secret_evidence("preview-reads-nothing", "both decided", "authority-plan");
     // A version-5 call cannot name a credential at all.
     let v5 = format!(
         r#"{{"v":1,"id":"msg_{id}","type":"request","schema":"direwolf.tool.invoke","schema_version":5,"ts":"2026-10-18T10:00:02.000Z","session_id":"{session}","run_id":"{run}","epoch":{epoch},"idempotency_key":"s1-v5c","payload":{{"process_exec":{call}}}}}"#,
@@ -563,7 +601,11 @@ fn a_credential_is_read_only_after_both_intents_and_handed_over_once_as_a_pipe()
         dwkp::decode_body(v5.as_bytes()).is_err(),
         "version 5 has no credential_handle"
     );
-    secret_evidence("v5-cannot-name-a-credential", "schema violation");
+    secret_evidence(
+        "v5-cannot-name-a-credential",
+        "schema violation",
+        "dwkp-schema",
+    );
 }
 
 #[test]
@@ -612,7 +654,7 @@ fn every_refusal_and_denial_reads_nothing_records_no_use_and_runs_nothing() {
         assert_eq!(fx.last_denial().as_deref(), Some(reason), "{case}");
         assert_eq!(reads_on_this_thread() - before, 0, "{case}");
         assert_eq!(rows(&fx), quiet, "{case}");
-        secret_evidence(&format!("refused-{case}"), reason);
+        secret_evidence(&format!("refused-{case}"), reason, "secret-metadata");
     }
     // Not granted: both gates decide, the injection is denied, nothing runs.
     let before = reads_on_this_thread();
@@ -640,7 +682,11 @@ fn every_refusal_and_denial_reads_nothing_records_no_use_and_runs_nothing() {
     assert_eq!(fx.last_denial().as_deref(), Some("CAPABILITY_NOT_GRANTED"));
     assert_eq!(reads_on_this_thread() - before, 0);
     assert_eq!(rows(&fx), quiet);
-    secret_evidence("not-granted-denied", "NO_CAPABILITY");
+    secret_evidence(
+        "not-granted-denied",
+        "NO_CAPABILITY",
+        "authority-capability",
+    );
     // A revision the run was not admitted with: replaced, then revoked.
     for (revision, state, want) in [(2, "CONFIGURED", "REPLACED"), (3, "REVOKED", "REVOKED")] {
         let metadata = format!("{{\"r\":{revision}}}");
@@ -664,12 +710,20 @@ fn every_refusal_and_denial_reads_nothing_records_no_use_and_runs_nothing() {
         assert_eq!(refused6(&body), R::CredentialUnavailable);
         assert_eq!(fx.last_denial().as_deref(), Some(want));
         assert_eq!(reads_on_this_thread() - before, 0);
-        secret_evidence(&format!("stored-grant-{}", want.to_lowercase()), want);
+        secret_evidence(
+            &format!("stored-grant-{}", want.to_lowercase()),
+            want,
+            "secret-metadata",
+        );
     }
     assert_eq!(rows(&fx), quiet);
     assert!(fx.secrets_handed().is_empty());
     assert!(!fx.fake.operations().contains(&"workload.secret_start"));
-    secret_evidence("no-refusal-reaches-the-broker", "0 secret starts");
+    secret_evidence(
+        "no-refusal-reaches-the-broker",
+        "0 secret starts",
+        "authority-gates",
+    );
 }
 
 #[test]
@@ -712,7 +766,14 @@ fn policy_must_allow_the_use_in_a_sandbox_and_approvals_stay_closed_until_m6() {
             "{case}"
         );
         assert_eq!(fx.count("SELECT count(*) FROM workload"), 0, "{case}");
-        secret_evidence(case, reason.as_str());
+        // The policy denied it -- or allowed it with an obligation no
+        // launch can keep.
+        let enforcement = if reason == ProcessDecisionReason::ObligationUnenforceable {
+            "authority-obligation"
+        } else {
+            "authority-policy"
+        };
+        secret_evidence(case, reason.as_str(), enforcement);
     }
 }
 
@@ -751,7 +812,13 @@ fn a_credential_that_cannot_be_read_or_carried_fails_the_launch_before_anything_
         );
         assert_eq!(stored.as_deref(), Some(failure), "{case}");
         assert!(fx.secrets_handed().is_empty(), "{case}: handed over");
-        secret_evidence(&format!("failed-{case}"), failure);
+        // The backend had nothing; or what it had is no variable's value.
+        let enforcement = if failure == "BACKEND_ITEM_MISSING" {
+            "secret-backend"
+        } else {
+            "secret-value-validation"
+        };
+        secret_evidence(&format!("failed-{case}"), failure, enforcement);
     }
     // The broker refuses what it would not carry: nothing ran.
     fx.fake
@@ -768,7 +835,11 @@ fn a_credential_that_cannot_be_read_or_carried_fails_the_launch_before_anything_
         fx.one("SELECT state FROM secret_injection ORDER BY rowid DESC LIMIT 1"),
         "FAILED"
     );
-    secret_evidence("broker-refusal-failed", "CREDENTIAL_FAILED");
+    secret_evidence(
+        "broker-refusal-failed",
+        "CREDENTIAL_FAILED",
+        "authority-ledger",
+    );
     // A start nothing confirms: both UNKNOWN, the environment destroyed,
     // the use not counted.
     let environment = fx.one(&format!(
@@ -801,6 +872,7 @@ fn a_credential_that_cannot_be_read_or_carried_fails_the_launch_before_anything_
     secret_evidence(
         "unknown-start-unknown-use",
         "UNKNOWN, environment destroyed",
+        "authority-ledger",
     );
     // A collection that names no redaction count for a secret-bearing
     // workload is a broker that does not keep the protocol. (The launch
@@ -815,7 +887,11 @@ fn a_credential_that_cannot_be_read_or_carried_fails_the_launch_before_anything_
         &launch_call(FIXTURE, &["x"], Some(DEPLOY)),
     );
     assert_eq!(failed6(&body).0, F::OutcomeUnknown);
-    secret_evidence("missing-redaction-count-unknown", "BROKER_PROTOCOL_ERROR");
+    secret_evidence(
+        "missing-redaction-count-unknown",
+        "BROKER_PROTOCOL_ERROR",
+        "authority-ledger",
+    );
     for v in [&values.deploy, &values.env] {
         assert!(!fx.durable_holds(v));
     }
@@ -904,6 +980,7 @@ fn a_crash_in_every_window_leaves_the_use_unknown_and_never_hands_it_over_again(
         secret_evidence(
             &format!("crash-{}", point.letter()),
             after.unwrap_or("nothing-recorded"),
+            "authority-reconciliation",
         );
     }
 }
@@ -938,6 +1015,10 @@ fn a_credential_reaches_no_process_without_an_execution_environment() {
         .find(|r| r.event() == "tool.refused")
         .unwrap();
     assert_eq!(refusal.text("detail"), Some("NO_EXECUTION_ENVIRONMENT"));
-    secret_evidence("no-host-fallback", "CREDENTIAL_UNAVAILABLE");
+    secret_evidence(
+        "no-host-fallback",
+        "CREDENTIAL_UNAVAILABLE",
+        "authority-environment-decision",
+    );
     let _ = NEXT_MESSAGE.load(Ordering::SeqCst);
 }

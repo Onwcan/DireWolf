@@ -18,16 +18,32 @@ use std::path::Path;
 
 use dwk_proto::brokerp::sandbox::{WORKSPACE_GROUP, WORKSPACE_ROOT_MODE};
 use dwk_proto::brokerp::{BrokerRefusal, OutcomeResult};
+use dwk_proto::json::{Object, Value, to_canonical_string};
 use dwk_proto::wire::scalar::StatKind;
 use rustix::io::Errno;
 
 use super::super::staging::{denied_or, exclusive, room_or_io};
 use super::{Scratch, delete_authorisation, identity, refused, run, write_authorisation};
 
-/// One line of M5d.4 evidence for `make sandbox-workspace-evidence`.
-fn evidence(case: &str, outcome: &str) {
+/// One line of M5d.4 evidence for `make sandbox-workspace-evidence`: the
+/// broker's exchange code in this process (`in-process`, M5e.1), never a
+/// broker serving an environment, and what enforced the case.
+fn evidence(case: &str, outcome: &str, enforcement: &str) {
+    let mut fields = Object::new();
+    for (key, value) in [
+        ("suite", "broker-exchange"),
+        ("case", case),
+        ("outcome", outcome),
+        ("level", "in-process"),
+        ("enforcement", enforcement),
+    ] {
+        fields
+            .insert(key.to_owned(), Value::String(value.to_owned()))
+            .unwrap();
+    }
     println!(
-        "WORKSPACE-EVIDENCE {{\"suite\":\"broker-exchange\",\"case\":\"{case}\",\"outcome\":\"{outcome}\"}}"
+        "WORKSPACE-EVIDENCE {}",
+        to_canonical_string(&Value::Object(fields))
     );
 }
 
@@ -64,6 +80,7 @@ fn a_directory_of_the_workspace_group_keeps_its_convention_or_nothing_changes_in
     evidence(
         "broker-group-convention-refused",
         "WORKSPACE_GROUP_CONTRACT",
+        "broker-workspace-convention",
     );
 }
 
@@ -148,10 +165,26 @@ fn a_full_filesystem_is_no_space_for_every_change_and_nothing_changes() {
     // The host's own directory never held anything: the tmpfs was the
     // child's, in the child's mount namespace, and went with it.
     assert!(scratch.names().is_empty(), "{:?}", scratch.names());
-    evidence("broker-full-filesystem-write", "NO_SPACE");
-    evidence("broker-full-filesystem-create", "NO_SPACE");
-    evidence("broker-full-filesystem-delete", "NO_SPACE");
-    evidence("broker-full-filesystem-nothing-changed", "unchanged");
+    evidence(
+        "broker-full-filesystem-write",
+        "NO_SPACE",
+        "filesystem-quota",
+    );
+    evidence(
+        "broker-full-filesystem-create",
+        "NO_SPACE",
+        "filesystem-quota",
+    );
+    evidence(
+        "broker-full-filesystem-delete",
+        "NO_SPACE",
+        "filesystem-quota",
+    );
+    evidence(
+        "broker-full-filesystem-nothing-changed",
+        "unchanged",
+        "filesystem-quota",
+    );
 }
 
 /// Inside the namespaces: mount a 256 KiB tmpfs, fill it to the kernel's

@@ -68,6 +68,7 @@ mod linux {
         EnvironmentPrepareAuthorisation, EnvironmentSpec, OutcomeResult, RuntimeSpec,
     };
     use dwk_proto::frame::FrameDecoder;
+    use dwk_proto::json::{Number, Object, Value, to_canonical_string};
     use dwk_proto::wire::id::{EnvironmentId, InvocationId, RunId};
     use dwk_proto::wire::scalar::{ContentDigest, HostPath};
     use dwk_sandbox_profile as profile;
@@ -79,13 +80,57 @@ mod linux {
     /// Longer than the broker's own environment deadline.
     const PEER_WAIT: Duration = Duration::from_secs(150);
     const SUITE: &str = "sandbox-broker";
+    /// What every line of this suite is (M5e.1): the released broker on a
+    /// real runtime, this process playing the authority.
+    const LEVEL: &str = "real-oci";
 
     static UNIQUE: AtomicU64 = AtomicU64::new(0);
 
-    fn evidence(case: &str, outcome: &str) {
+    /// One line of evidence, printed only after the assertions before it
+    /// held: the case, how it ended, and what enforced or observed it (M5e.1,
+    /// OD-E1) -- canonical JSON, so no outcome can break the line. `numbers`
+    /// are the latency's, which is telemetry and nothing more.
+    fn evidence_line(case: &str, outcome: &str, enforcement: &str, numbers: &[(&str, u64)]) {
+        let mut fields = Object::new();
+        for (key, value) in [
+            ("suite", SUITE),
+            ("case", case),
+            ("outcome", outcome),
+            ("level", LEVEL),
+            ("enforcement", enforcement),
+        ] {
+            fields
+                .insert(key.to_owned(), Value::String(value.to_owned()))
+                .unwrap();
+        }
+        for (key, value) in numbers {
+            let value = Number::from_i64(i64::try_from(*value).unwrap()).unwrap();
+            fields
+                .insert((*key).to_owned(), Value::Number(value))
+                .unwrap();
+        }
         println!(
-            "SANDBOX-EVIDENCE {{\"suite\":\"{SUITE}\",\"case\":\"{case}\",\"outcome\":\"{outcome}\"}}"
+            "SANDBOX-EVIDENCE {}",
+            to_canonical_string(&Value::Object(fields))
         );
+    }
+
+    fn evidence(case: &str, outcome: &str, enforcement: &str) {
+        evidence_line(case, outcome, enforcement, &[]);
+    }
+
+    /// The vantage that measured `invariants`: the host's (the runtime's
+    /// record and the broker's own), the probe's from inside, or both.
+    fn vantage(invariants: &[I]) -> &'static str {
+        let host = invariants.iter().any(|i| i.as_str().starts_with("HOST_"));
+        let inside = invariants
+            .iter()
+            .any(|i| i.as_str().starts_with("CONTAINER_"));
+        match (host, inside) {
+            (true, false) => "measured-host",
+            (false, true) => "measured-inside",
+            _ => "measured-both",
+        }
     }
 
     fn own_uid() -> u32 {
@@ -627,11 +672,13 @@ mod linux {
         evidence(
             "prepare-clean",
             &format!("pass-{}", measurement.checks.len()),
+            "measured-both",
         );
         let version = measurement.runtime_version.as_ref().unwrap();
         evidence(
             "runtime-version-reported",
             &format!("runtime-{}", version.as_str()),
+            "measured-host",
         );
 
         // Each hard rule, measured: the invariants the evidence names one by
@@ -686,7 +733,14 @@ mod linux {
             ("escape-keyring-blocked", I::ContainerKeyringBlocked),
         ] {
             assert_eq!(verdict(&measurement, invariant), Verdict::Pass, "{case}");
-            evidence(case, "pass");
+            // An escape is the probe's attempt from inside, refused by the
+            // profile; every other invariant is measured from its vantage.
+            let enforcement = if case.starts_with("escape-") {
+                "capabilities-and-seccomp"
+            } else {
+                vantage(&[invariant])
+            };
+            evidence(case, "pass", enforcement);
         }
 
         // Measured again: still clean.
@@ -695,7 +749,7 @@ mod linux {
             .unwrap();
         assert_eq!(again.state, ContainerState::Running);
         assert!(not_passing(&again.measurement.unwrap()).is_empty());
-        evidence("measure-clean-again", "pass");
+        evidence("measure-clean-again", "pass", "measured-both");
 
         // Listed as this store's, with exact labels.
         let listed = list(&socket, &ev);
@@ -703,7 +757,7 @@ mod linux {
         assert_eq!(mine.len(), 1);
         assert!(mine[0].labels_exact);
         assert_eq!(mine[0].environment_id.as_ref(), Some(&e));
-        evidence("list-owned-exact-labels", "listed");
+        evidence("list-owned-exact-labels", "listed", "exact-label-ownership");
 
         // Destroyed exactly, and a second destruction finds nothing.
         let destroyed = done(destroy(&socket, &ev, (&e, &r), Some(&container)))
@@ -712,12 +766,16 @@ mod linux {
         assert_eq!(destroyed.state, DestroyState::Removed);
         assert_eq!(destroyed.container.as_ref(), Some(&container));
         assert!(!ev.exists(container.as_str()));
-        evidence("destroy-removed", "removed");
+        evidence("destroy-removed", "removed", "exact-label-cleanup");
         let again = done(destroy(&socket, &ev, (&e, &r), Some(&container)))
             .environment_destroy
             .unwrap();
         assert_eq!(again.state, DestroyState::AlreadyGone);
-        evidence("destroy-already-gone", "already-gone");
+        evidence(
+            "destroy-already-gone",
+            "already-gone",
+            "exact-label-cleanup",
+        );
     }
 
     // ---- the meta-tests: one weakening at a time ---------------------------
@@ -1017,7 +1075,7 @@ mod linux {
             );
             if caught.is_empty() {
                 assert!(found.is_empty(), "{case}: {found:?}");
-                evidence(case, "clean");
+                evidence(case, "clean", "measured-both");
                 continue;
             }
             for invariant in caught {
@@ -1039,11 +1097,13 @@ mod linux {
                         .join("+"),
                     measurement.measure_ms.get()
                 ),
+                vantage(caught),
             );
         }
         evidence(
             "weakened-count",
             &format!("detected-{weakened}-of-{weakened}"),
+            "measured-both",
         );
     }
 
@@ -1131,9 +1191,21 @@ mod linux {
             if case == "tamper-hang-timeout" {
                 // Bounded by the probe step, well inside the exchange.
                 assert!(took < Duration::from_secs(100), "{took:?}");
-                evidence(case, &format!("refused-after-{}s", took.as_secs()));
+                evidence(
+                    case,
+                    &format!("refused-after-{}s", took.as_secs()),
+                    "probe-step-deadline",
+                );
+            } else if digest == Verdict::Fail {
+                // Other bytes than the pinned probe's: never run.
+                evidence(case, "refused-unobservable-removed", "probe-digest-pin");
             } else {
-                evidence(case, "refused-unobservable-removed");
+                // The pinned bytes ran, and said something that is no report.
+                evidence(
+                    case,
+                    "refused-unobservable-removed",
+                    "probe-report-validation",
+                );
             }
         }
     }
@@ -1215,7 +1287,7 @@ mod linux {
                 "listed {id}"
             );
         }
-        evidence("foreign-not-listed", "absent-5");
+        evidence("foreign-not-listed", "absent-5", "exact-label-ownership");
         // Destroying the environment those labels name touches none of them:
         // nothing is labelled as it in this store.
         let destroyed = done(destroy(&socket, &ev, (&e, &r), None))
@@ -1229,13 +1301,21 @@ mod linux {
             refusal(destroy(&socket, &ev, (&e, &r), Some(&named))),
             BrokerRefusal::ForeignEnvironment
         );
-        evidence("foreign-destroy-refused", "foreign-environment");
+        evidence(
+            "foreign-destroy-refused",
+            "foreign-environment",
+            "exact-label-ownership",
+        );
         let s = spec(&e, &r, &dir.workspace("ws"), &ev.image, &ev.probe_sha256);
         assert_eq!(
             refusal(measure(&socket, &ev, &s, &named)),
             BrokerRefusal::ForeignEnvironment
         );
-        evidence("foreign-measure-refused", "foreign-environment");
+        evidence(
+            "foreign-measure-refused",
+            "foreign-environment",
+            "exact-label-ownership",
+        );
 
         // A container carrying exactly this store's labels for one
         // environment is destroyed by those labels, exactly — the broker's
@@ -1269,12 +1349,12 @@ mod linux {
             .unwrap();
         assert_eq!(removed.state, DestroyState::Removed);
         assert!(!ev.exists(&labelled));
-        evidence("destroy-by-label-exact", "removed");
+        evidence("destroy-by-label-exact", "removed", "exact-label-cleanup");
         for id in &foreign {
             assert!(ev.exists(id), "{id} was touched");
             ev.remove(id);
         }
-        evidence("foreign-survive", "5-present");
+        evidence("foreign-survive", "5-present", "exact-label-ownership");
     }
 
     // ---- drift, persistence, isolation -------------------------------------
@@ -1306,7 +1386,11 @@ mod linux {
             .unwrap();
         assert_eq!(verdict(&measured, I::HostResourceLimits), Verdict::Fail);
         assert_eq!(verdict(&measured, I::ContainerCgroupLimits), Verdict::Fail);
-        evidence("drift-pids-limit-raised", "detected-host-and-inside");
+        evidence(
+            "drift-pids-limit-raised",
+            "detected-host-and-inside",
+            "measured-both",
+        );
         ev.remove(container.as_str());
     }
 
@@ -1341,12 +1425,17 @@ mod linux {
         evidence(
             "run-isolation-distinct-environments",
             "distinct-ids-and-containers",
+            "fresh-container-per-environment",
         );
         for measured in [&ma, &mb] {
             assert_eq!(verdict(measured, I::ContainerTmpWritable), Verdict::Pass);
             assert_eq!(verdict(measured, I::ContainerTmpFresh), Verdict::Pass);
         }
-        evidence("run-isolation-tmp", "each-fresh-with-own-marker");
+        evidence(
+            "run-isolation-tmp",
+            "each-fresh-with-own-marker",
+            "measured-inside",
+        );
         // Each is labelled as itself only.
         let listed = list(&socket, &ev);
         for (container, e, r) in [(&ca, &ea, &run_a), (&cb, &eb, &run_b)] {
@@ -1366,7 +1455,11 @@ mod linux {
             .unwrap();
         assert_eq!(still.state, ContainerState::Running);
         assert!(not_passing(&still.measurement.unwrap()).is_empty());
-        evidence("run-isolation-destroy-one-leaves-other", "other-clean");
+        evidence(
+            "run-isolation-destroy-one-leaves-other",
+            "other-clean",
+            "measured-both",
+        );
         // Run A's next environment starts from nothing.
         let ec = environment();
         let sc = spec(&ec, &run_a, &wa, &ev.image, &ev.probe_sha256);
@@ -1407,6 +1500,7 @@ mod linux {
         evidence(
             "persistence-tmp-marker-not-inherited",
             "absent-after-destroy",
+            "container-tmpfs",
         );
     }
 
@@ -1437,7 +1531,11 @@ mod linux {
             verdict(&measurement, I::ContainerUidGid),
             Verdict::Unobservable
         );
-        evidence("exit-stopped-unobservable-inside", "exited");
+        evidence(
+            "exit-stopped-unobservable-inside",
+            "exited",
+            "measured-host",
+        );
 
         // Gone: not found, never mistaken for a clean exit.
         ev.remove(container.as_str());
@@ -1445,7 +1543,11 @@ mod linux {
             refusal(measure(&socket, &ev, &s, &container)),
             BrokerRefusal::EnvironmentNotFound
         );
-        evidence("exit-gone-not-found", "environment-not-found");
+        evidence(
+            "exit-gone-not-found",
+            "environment-not-found",
+            "runtime-client",
+        );
 
         // A runtime that cannot be reached: refused, nothing created.
         let (e2, r2) = (environment(), run());
@@ -1456,7 +1558,11 @@ mod linux {
             refusal(prepare(&socket, &bad, &s2)),
             BrokerRefusal::RuntimeUnavailable
         );
-        evidence("exit-runtime-unavailable", "runtime-unavailable");
+        evidence(
+            "exit-runtime-unavailable",
+            "runtime-unavailable",
+            "runtime-client",
+        );
 
         // An image that is not present: never pulled, refused.
         let absent = format!("sha256:{}", "0".repeat(64));
@@ -1465,7 +1571,11 @@ mod linux {
             refusal(prepare(&socket, &ev, &s3)),
             BrokerRefusal::ImageMissing
         );
-        evidence("exit-image-missing-never-pulled", "image-missing");
+        evidence(
+            "exit-image-missing-never-pulled",
+            "image-missing",
+            "runtime-client",
+        );
 
         // PROXY_ONLY exists since M5b (ADR-0048), and is never prepared
         // without the grant and relay digest the authority decided;
@@ -1476,7 +1586,11 @@ mod linux {
             refusal(prepare(&socket, &ev, &proxy)),
             BrokerRefusal::ProxyUnavailable
         );
-        evidence("topology-proxy-only-needs-its-grant", "proxy-unavailable");
+        evidence(
+            "topology-proxy-only-needs-its-grant",
+            "proxy-unavailable",
+            "broker-admission",
+        );
         drop(broker);
         let plain = Scratch::new("exits-plain");
         let _production = Broker::start(&plain.socket(), false, None);
@@ -1487,6 +1601,7 @@ mod linux {
         evidence(
             "topology-no-network-needs-evidence-flag",
             "topology-unavailable",
+            "broker-admission",
         );
         // Nothing was created by any of these.
         let listed = list(&plain.socket(), &ev);
@@ -1496,7 +1611,7 @@ mod linux {
                 .any(|o| o.environment_id.as_ref() == Some(&e2)),
             "a refused preparation left a container"
         );
-        evidence("refusals-create-nothing", "none-listed");
+        evidence("refusals-create-nothing", "none-listed", "broker-admission");
     }
 
     #[test]
@@ -1539,13 +1654,17 @@ mod linux {
             .collect();
         assert_eq!(found.len(), 1, "exactly one labelled container");
         assert!(found[0].labels_exact);
-        evidence("crash-w3-broker-after-create-labelled", "found-by-label");
+        evidence(
+            "crash-w3-broker-after-create-labelled",
+            "found-by-label",
+            "exact-label-ownership",
+        );
         let reaped = done(destroy(&socket, &ev, (&e, &r), None))
             .environment_destroy
             .unwrap();
         assert_eq!(reaped.state, DestroyState::Removed);
         assert!(!ev.exists(found[0].container.as_str()));
-        evidence("crash-w3-reaped-by-label", "removed");
+        evidence("crash-w3-reaped-by-label", "removed", "exact-label-cleanup");
     }
 
     // ---- resources, under bounded pressure ---------------------------------
@@ -1597,6 +1716,7 @@ mod linux {
         evidence(
             "subprocess-and-thread-creation",
             "child-exit-0-thread-joined",
+            "seccomp",
         );
 
         // PIDs: the environment refuses the task past its limit.
@@ -1608,6 +1728,7 @@ mod linux {
         evidence(
             "resource-pids-bounded",
             &format!("threads-{threads}-refused"),
+            "cgroup-limit",
         );
 
         // Descriptors: RLIMIT_NOFILE.
@@ -1616,7 +1737,11 @@ mod linux {
         let opened = field(&out, "opened").unwrap();
         assert!(opened < profile::RLIMIT_NOFILE, "{out}");
         assert!(out.contains("refused=Some(24)"), "EMFILE: {out}");
-        evidence("resource-fds-bounded", &format!("opened-{opened}-emfile"));
+        evidence(
+            "resource-fds-bounded",
+            &format!("opened-{opened}-emfile"),
+            "rlimit",
+        );
 
         // Memory: the ceiling ends the allocation — the kernel's OOM killer,
         // counted in the cgroup's own events — long before 4 GiB.
@@ -1635,6 +1760,7 @@ mod linux {
         evidence(
             "resource-memory-oom-killed",
             &format!("killed-at-{reached}mib-oom_kill-{kills}"),
+            "cgroup-limit",
         );
 
         // File size: RLIMIT_FSIZE stops the file at exactly its bound.
@@ -1645,6 +1771,7 @@ mod linux {
         evidence(
             "resource-file-size-bounded",
             &format!("stopped-at-{size}-exit-{}", code.unwrap_or(-1)),
+            "rlimit",
         );
         ev.remove(&id);
     }
@@ -1691,18 +1818,20 @@ mod linux {
         for list in [&mut prepare_ms, &mut measure_ms, &mut destroy_ms] {
             list.sort_unstable();
         }
-        println!(
-            "SANDBOX-EVIDENCE {{\"suite\":\"{SUITE}\",\"case\":\"latency\",\"outcome\":\"measured\",\
-             \"rounds\":{rounds},\
-             \"prepare_ms_median\":{},\"prepare_ms_p95\":{},\
-             \"measure_ms_median\":{},\"measure_ms_p95\":{},\
-             \"destroy_ms_median\":{},\"destroy_ms_p95\":{}}}",
-            percentile(&prepare_ms, 50),
-            percentile(&prepare_ms, 95),
-            percentile(&measure_ms, 50),
-            percentile(&measure_ms, 95),
-            percentile(&destroy_ms, 50),
-            percentile(&destroy_ms, 95),
+        // Telemetry: the broker's own timings, never a containment.
+        evidence_line(
+            "latency",
+            "measured",
+            "telemetry",
+            &[
+                ("rounds", u64::try_from(rounds).unwrap()),
+                ("prepare_ms_median", percentile(&prepare_ms, 50).into()),
+                ("prepare_ms_p95", percentile(&prepare_ms, 95).into()),
+                ("measure_ms_median", percentile(&measure_ms, 50).into()),
+                ("measure_ms_p95", percentile(&measure_ms, 95).into()),
+                ("destroy_ms_median", percentile(&destroy_ms, 50).into()),
+                ("destroy_ms_p95", percentile(&destroy_ms, 95).into()),
+            ],
         );
     }
 }

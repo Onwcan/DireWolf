@@ -15,10 +15,25 @@ use dwk_proto::wire::scalar::FsFailureReason;
 use super::*;
 
 /// One line of `make sandbox-workspace-evidence`'s in-process half, printed
-/// only after the assertions before it held. A fake broker: not containment.
-fn evidence(case: &str, outcome: &str) {
+/// only after the assertions before it held. A fake broker: not containment
+/// -- labelled `fake-broker` (M5e.1), with what of the authority's decided it.
+fn evidence(case: &str, outcome: &str, enforcement: &str) {
+    use dwk_proto::json::{Object, Value, to_canonical_string};
+    let mut fields = Object::new();
+    for (key, value) in [
+        ("suite", "authority-route"),
+        ("case", case),
+        ("outcome", outcome),
+        ("level", "fake-broker"),
+        ("enforcement", enforcement),
+    ] {
+        fields
+            .insert(key.to_owned(), Value::String(value.to_owned()))
+            .unwrap();
+    }
     println!(
-        "WORKSPACE-EVIDENCE {{\"suite\":\"authority-route\",\"case\":\"{case}\",\"outcome\":\"{outcome}\"}}"
+        "WORKSPACE-EVIDENCE {}",
+        to_canonical_string(&Value::Object(fields))
     );
 }
 
@@ -145,8 +160,16 @@ fn a_workspace_not_the_contracts_is_refused_before_the_broker_hears_of_it() {
             .all(|r| r.contains("BOUNDED") && r.contains("67108864")),
         "{intents:?}"
     );
-    evidence("authority-unbounded-workspace-refused", "WORKSPACE_GROUP");
-    evidence("authority-refused-before-the-broker", "not-asked");
+    evidence(
+        "authority-unbounded-workspace-refused",
+        "WORKSPACE_GROUP",
+        "authority-workspace-contract",
+    );
+    evidence(
+        "authority-refused-before-the-broker",
+        "not-asked",
+        "authority-workspace-contract",
+    );
 }
 
 #[test]
@@ -160,7 +183,11 @@ fn the_evidence_harnesses_workspace_is_said_wherever_it_is_used() {
         intents.iter().all(|r| r.contains("UNVERIFIED_EVIDENCE")),
         "{intents:?}"
     );
-    evidence("authority-unverified-workspace-said", "UNVERIFIED_EVIDENCE");
+    evidence(
+        "authority-unverified-workspace-said",
+        "UNVERIFIED_EVIDENCE",
+        "authority-workspace-contract",
+    );
 }
 
 #[test]
@@ -211,10 +238,23 @@ fn no_name_changes_while_a_workload_may_run_in_the_workspace() {
     evidence(
         "authority-write-excluded-during-a-workload",
         "SHARED_DIRECTORY",
+        "authority-workspace-exclusion",
     );
-    evidence("authority-other-runs-write-excluded", "SHARED_DIRECTORY");
-    evidence("authority-read-served-during-a-workload", "served");
-    evidence("authority-write-after-the-workload", "done");
+    evidence(
+        "authority-other-runs-write-excluded",
+        "SHARED_DIRECTORY",
+        "authority-workspace-exclusion",
+    );
+    evidence(
+        "authority-read-served-during-a-workload",
+        "served",
+        "authority-workspace-exclusion",
+    );
+    evidence(
+        "authority-write-after-the-workload",
+        "done",
+        "authority-workspace-exclusion",
+    );
 }
 
 #[test]
@@ -260,10 +300,15 @@ fn an_environment_whose_end_nothing_proved_excludes_until_it_is_gone() {
     let body = fx.tool(&run, "ds-3", &write("/workspace/a.txt"));
     write_done(&body);
     assert_eq!(fx.fake.asked_for("fs.write").len(), 1);
-    evidence("authority-unknown-environment-excludes", "SHARED_DIRECTORY");
+    evidence(
+        "authority-unknown-environment-excludes",
+        "SHARED_DIRECTORY",
+        "authority-workspace-exclusion",
+    );
     evidence(
         "authority-destroying-environment-excludes",
         "SHARED_DIRECTORY",
+        "authority-workspace-exclusion",
     );
 }
 
@@ -309,7 +354,11 @@ fn a_reclamation_waits_while_a_workload_may_run_in_the_workspace() {
     assert_eq!((sweep.pending, sweep.absent), (0, 1));
     assert_eq!(fx.fake.asked_for("fs.reclaim").len(), 2);
     assert_eq!(fx.count(expected), 0);
-    evidence("authority-reclamation-waits-for-the-workload", "EXPECTED");
+    evidence(
+        "authority-reclamation-waits-for-the-workload",
+        "EXPECTED",
+        "authority-workspace-exclusion",
+    );
 }
 
 #[test]
@@ -330,7 +379,11 @@ fn a_workspace_replaced_under_a_ready_environment_takes_it_down_before_the_next_
         fx.one("SELECT failure FROM workload ORDER BY intent_ms DESC LIMIT 1"),
         "WORKSPACE_CHANGED"
     );
-    evidence("authority-replaced-workspace-destroys", "WORKSPACE_CHANGED");
+    evidence(
+        "authority-replaced-workspace-destroys",
+        "WORKSPACE_CHANGED",
+        "authority-workspace-contract",
+    );
 }
 
 #[test]
@@ -358,5 +411,6 @@ fn a_workspace_no_longer_the_contracts_is_answered_as_an_environment_not_clean()
     evidence(
         "authority-workspace-drift-answered-not-clean",
         "ENVIRONMENT_NOT_CLEAN",
+        "authority-environment-judgement",
     );
 }

@@ -6,6 +6,7 @@
 **Status (as written, 2026-10-26):** Planning only. M5e is NOT STARTED: no M5e code, evidence or CI job exists, and no M5e evidence has run. M5 stays IN PROGRESS.\
 **Status (2026-10-26, later):** the owner decided the plan's eight open points, OD-E1 to OD-E8 (§10). M5e is still NOT STARTED.\
 **Status (2026-10-27):** the sibling pip ADR the owner decided on (OD-E2) is drafted, [ADR-0055](adr/0055-m5e-pip-hygiene-profile.md), **Proposed**; SANDBOX.md §6 says what a contained attempt's evidence is (OD-E1); and a test now holds every evidence case §3 cites to the task that requires it. That is M5e.1's groundwork, not M5e.1: no evidence line has changed. M5e is still NOT STARTED.\
+**Status (2026-10-27, later):** after the groundwork's hosted run ([40497912001](https://github.com/Onwcan/DireWolf/actions/runs/40497912001), `a0d6ade`, 27 of 27), **M5e.1 is built**: every line of the five suites' evidence says its level and enforcement, and each task refuses one that does not as the contract says ([SANDBOX.md](SANDBOX.md) §6a; R16 below). It passed locally on a real runtime; it is complete when a hosted run of the owner's commit passes. M5e is IN PROGRESS; M5e.2–M5e.6 are not complete.\
 **Authority of this document:** a technical plan, not an ADR. It approves nothing itself; the owner's decisions are recorded in §10 as given. [ADR-0054](adr/0054-m5e-npm-hygiene-profile.md) stays **Proposed**.
 
 ## 1. Scope, sources and the owner's directions
@@ -94,7 +95,7 @@ listed as verified on any other basis.
 | R13 | `fronting-residual-carried-and-bounded`, `budget-*`, `a08-tunnel-limit`, `a08-download-budget`, `a08-upload-budget` | Hosted | None; the residual stays stated (NETWORK_SECURITY.md). |
 | R14 | — | **Missing** | No pip in any evidence image (the tools image copies the standard library only, `ensurepip` excluded), no registry fixture, no case. `pip` falls under the obligation's "anything else" row and is kept with **no** pip-specific neutralisation — reachable only under an operator policy without `argv_safe`, since the shipped packs deny `pip install` (R3) (§4, G3). [ADR-0055](adr/0055-m5e-pip-hygiene-profile.md) proposes the profile. M5e.3–M5e.5. |
 | R15 | — | **Missing, and refused by design** | npm is `HYGIENE_NOT_EVIDENCED` (ADR-0052 §5a), although `npm_config_ignore_scripts=true` is already among the launcher's variables. ADR-0054 (Proposed) defines the profile and the evidence it needs. M5e.3–M5e.5. |
-| R16 | `sandbox-agent-evidence` and `sandbox-release-evidence` lines carry `level` and `enforcement`; `environment.refused` and `environment.drifted` records; the broker's egress counted by disposition | Partial | M5a, M5b and M5d.1–M5d.4 evidence lines carry only `suite`, `case`, `outcome`, and M5b's containment is recorded "not yet per attempt" (SANDBOX.md §6). M5e.1 adds attribution to every line, from existing events and measurements only (owner direction 4), and rewords §6 to match (OD-E1, decided). |
+| R16 | `sandbox-agent-evidence` and `sandbox-release-evidence` lines carry `level` and `enforcement`; `environment.refused` and `environment.drifted` records; the broker's egress counted by disposition; since M5e.1 (built 2026-10-27, pending hosted CI), every line of `sandbox-foundation-evidence`, `sandbox-egress-evidence`, `sandbox-workload-evidence`, `sandbox-secret-evidence` and `sandbox-workspace-evidence` too, each case held to its level and mechanisms (`scripts/dw.py`, `ATTRIBUTION`; SANDBOX.md §6a) | Built (M5e.1), pending hosted | Was: M5a, M5b and M5d.1–M5d.4 lines carried only `suite`, `case`, `outcome`. M5e.1 added attribution to every line, from existing events and measurements only (owner direction 4), and §6 says so (OD-E1, decided). Hosted verification of the owner's commit remains. |
 | R17 | `tests/architecture/test_ci_*` (each job present, unconditional, required by `ci`, exact command; the task's and the eval's case lists equal); the strict eval gate under GitHub Actions; the reviewed baseline (`evals/baselines/main.json`, never rewritten by a run); mutation campaigns; the ADR history anchor | Hosted | Each new job, task and eval gets the same treatment (M5e.6). The negative controls run by hand for M5d.6 become committed tests. |
 | R18 | — | Deferred | `local` is M6's (ADR-0052 OD-7). The ROADMAP's M5 contract and M5e section say so, and M5's acceptance excludes it (OD-E5, decided). |
 
@@ -123,7 +124,8 @@ listed as verified on any other basis.
   npm lifecycle script, which the obligation does neutralise for npm. The owner
   decided (OD-E2): a sibling ADR, [ADR-0055](adr/0055-m5e-pip-hygiene-profile.md) (Proposed), gives pip a profile; until
   it is accepted, pip's behaviour does not change.
-- **G4 — Attribution is incomplete (R16).** See R16.
+- **G4 — Attribution is incomplete (R16).** See R16. Closed by M5e.1 once its hosted run
+  passes.
 - **G5 — Weakened-profile closure for `PROXY_ONLY` is not shown (R3).** See R3;
   plus `weakened-host-uts` (R2).
 - **G6 — Runtime restart is not evidenced (R11).**

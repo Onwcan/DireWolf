@@ -62,6 +62,7 @@ mod linux {
 
     use dwk_proto::brokerp::egress::EgressDisposition;
     use dwk_proto::brokerp::sandbox::{AssuranceLevel, NetworkTopology};
+    use dwk_proto::json::{Object, Value, to_canonical_string};
     use dwk_proto::wire::id::{EnvironmentId, RunId};
     use dwkd_authority::broker::{EffectBroker, UnixBroker};
     use dwkd_authority::sandbox::{EgressConfig, SandboxConfig, WorkspaceSetting};
@@ -79,11 +80,35 @@ mod linux {
     use super::transport_support::own_uid;
 
     const SUITE: &str = "sandbox-authority";
+    /// What every line of this file is (M5e.1): the real authority's own
+    /// environment API -- it has no DWKP route (ADR-0047 §3) -- over the
+    /// released broker and a real runtime.
+    const LEVEL: &str = "real-oci";
 
-    fn evidence(case: &str, outcome: &str) {
+    /// One line of `suite`'s evidence, printed only after the assertions
+    /// before it held: the case, how it ended, and what enforced or observed
+    /// it (M5e.1, OD-E1) -- canonical JSON, so no outcome can break the line.
+    fn evidence_line(suite: &str, case: &str, outcome: &str, enforcement: &str) {
+        let mut fields = Object::new();
+        for (key, value) in [
+            ("suite", suite),
+            ("case", case),
+            ("outcome", outcome),
+            ("level", LEVEL),
+            ("enforcement", enforcement),
+        ] {
+            fields
+                .insert(key.to_owned(), Value::String(value.to_owned()))
+                .unwrap();
+        }
         println!(
-            "SANDBOX-EVIDENCE {{\"suite\":\"{SUITE}\",\"case\":\"{case}\",\"outcome\":\"{outcome}\"}}"
+            "SANDBOX-EVIDENCE {}",
+            to_canonical_string(&Value::Object(fields))
         );
+    }
+
+    fn evidence(case: &str, outcome: &str, enforcement: &str) {
+        evidence_line(SUITE, case, outcome, enforcement);
     }
 
     fn var(name: &str) -> String {
@@ -476,18 +501,23 @@ mod linux {
         evidence(
             "prepare-intent-durable-before-broker",
             "preparing-row-no-container",
+            "authority-ledger-intent-first",
         );
         let report = lab.start(None);
         assert!(report.missing >= 1, "{report:?}");
         assert_eq!(lab.state_of(&intended), EnvironmentState::Lost);
-        evidence("crash-w2-after-intent-lost", "unknown-then-lost");
+        evidence(
+            "crash-w2-after-intent-lost",
+            "unknown-then-lost",
+            "authority-reconciliation",
+        );
 
         // The whole path: intent, broker, runtime, measurement, outcome.
         let run = lab.admit();
         let (environment, container) = lab.ready(&run);
         assert_eq!(lab.state_of(&environment), EnvironmentState::Ready);
         assert!(lab.runtime.exists(&container));
-        evidence("prepare-ready-recorded", "ready");
+        evidence("prepare-ready-recorded", "ready", "authority-ledger");
         let measured = lab.authority().environment_measure(&environment).unwrap();
         let EnvironmentReply::Clean(report) = measured else {
             panic!("not clean: {measured:?}")
@@ -507,13 +537,18 @@ mod linux {
         evidence(
             "effective-assurance-container-isolation",
             "declared-measured-effective",
+            "authority-environment-judgement",
         );
-        evidence("measure-clean", "clean");
+        evidence("measure-clean", "clean", "authority-environment-judgement");
         assert_eq!(
             lab.authority().environment_prepare(&run).unwrap(),
             EnvironmentReply::Refused("ENVIRONMENT_EXISTS")
         );
-        evidence("one-environment-per-run", "environment-exists");
+        evidence(
+            "one-environment-per-run",
+            "environment-exists",
+            "authority-environment-decision",
+        );
 
         // A restart reaps the run, and since the M5d closeout its READY
         // environment with it (ADR-0052 §8, amending ADR-0047 §12's W5, which
@@ -533,12 +568,17 @@ mod linux {
         evidence(
             "destroy-intent-durable-before-broker",
             "destroying-row-container-present",
+            "authority-ledger-intent-first",
         );
         let report = lab.start(None);
         assert!(report.pending_destroyed >= 1, "{report:?}");
         assert_eq!(lab.state_of(&environment), EnvironmentState::Destroyed);
         assert!(!lab.runtime.exists(&container));
-        evidence("crash-w6-destroy-intent-completed", "destroyed-on-restart");
+        evidence(
+            "crash-w6-destroy-intent-completed",
+            "destroyed-on-restart",
+            "authority-reconciliation",
+        );
 
         // An ordinary destruction, and a second one.
         let run = lab.admit();
@@ -556,12 +596,16 @@ mod linux {
         );
         assert_eq!(lab.state_of(&environment), EnvironmentState::Destroyed);
         assert!(!lab.runtime.exists(&container));
-        evidence("destroy-recorded", "destroyed");
+        evidence("destroy-recorded", "destroyed", "authority-ledger");
         assert_eq!(
             lab.authority().environment_destroy(&environment).unwrap(),
             EnvironmentReply::Refused("ENVIRONMENT_ENDED")
         );
-        evidence("destroy-idempotent", "ended-refused-nothing-sent");
+        evidence(
+            "destroy-idempotent",
+            "ended-refused-nothing-sent",
+            "authority-ledger",
+        );
 
         let events = audit_events(&lab.dir.state());
         for event in [
@@ -576,7 +620,7 @@ mod linux {
         ] {
             assert!(events.iter().any(|e| e == event), "{event} missing");
         }
-        evidence("audit-lifecycle", "8-events");
+        evidence("audit-lifecycle", "8-events", "authority-audit");
     }
 
     #[test]
@@ -652,22 +696,35 @@ mod linux {
             EnvironmentState::Destroyed
         );
         assert!(report.pending_destroyed >= 1, "{report:?}");
-        evidence("crash-w4-after-broker-reaped", "unknown-then-destroyed");
+        evidence(
+            "crash-w4-after-broker-reaped",
+            "unknown-then-destroyed",
+            "authority-reconciliation",
+        );
         assert!(rt.exists(&unrelated));
-        evidence("foreign-unrelated-survive", "present");
+        evidence(
+            "foreign-unrelated-survive",
+            "present",
+            "exact-label-ownership",
+        );
         assert!(rt.exists(&copied), "a copied label is never reaped");
         assert!(rt.exists(&copied_run), "a copied run label is never reaped");
         assert!(report.foreign >= 2, "{report:?}");
         evidence(
             "foreign-copied-labels-survive",
             "copied-env-and-copied-run-present",
+            "exact-label-ownership",
         );
         // Its run was reaped, so its destruction is recorded; the twin makes
         // it ambiguous, and nothing is removed under an ambiguity.
         assert!(rt.exists(&twin) && rt.exists(&ready_container));
         assert_eq!(lab.state_of(&ready), EnvironmentState::Destroying);
         assert!(report.ambiguous >= 1, "{report:?}");
-        evidence("ambiguous-twins-untouched", "both-present-record-untouched");
+        evidence(
+            "ambiguous-twins-untouched",
+            "both-present-record-untouched",
+            "authority-reconciliation",
+        );
         rt.remove(&twin);
 
         // An orphan: an environment the store recorded and ended, whose
@@ -688,7 +745,11 @@ mod linux {
         assert!(!rt.exists(&orphan), "{report:?}");
         assert_eq!(report.orphans_reaped, 1, "{report:?}");
         assert!(rt.exists(&unrelated) && rt.exists(&copied) && rt.exists(&copied_run));
-        evidence("orphan-ended-record-reaped", "removed-exactly");
+        evidence(
+            "orphan-ended-record-reaped",
+            "removed-exactly",
+            "authority-reconciliation",
+        );
         for id in [&unrelated, &copied, &copied_run] {
             rt.remove(id);
         }
@@ -720,17 +781,19 @@ mod linux {
         assert_eq!(report.judgement.effective.0, AssuranceLevel::None);
         assert_eq!(lab.state_of(&environment), EnvironmentState::Destroyed);
         assert!(!lab.runtime.exists(&container));
-        evidence("drift-destroyed", "resource-limit-failed-effective-none");
+        evidence(
+            "drift-destroyed",
+            "resource-limit-failed-effective-none",
+            "authority-environment-judgement",
+        );
     }
 
     // ---- M5b: PROXY_ONLY, granted from the run --------------------------
 
     const EGRESS_SUITE: &str = "sandbox-authority-egress";
 
-    fn egress_evidence(case: &str, outcome: &str) {
-        println!(
-            "SANDBOX-EVIDENCE {{\"suite\":\"{EGRESS_SUITE}\",\"case\":\"{case}\",\"outcome\":\"{outcome}\"}}"
-        );
+    fn egress_evidence(case: &str, outcome: &str, enforcement: &str) {
+        evidence_line(EGRESS_SUITE, case, outcome, enforcement);
     }
 
     /// A loopback origin: counts connections, answers five bytes.
@@ -822,9 +885,21 @@ mod linux {
         assert_eq!(text(&intent, "relay_sha256"), Some(relay.as_str()));
         assert_eq!(text(&intent, "network"), Some("PROXY_ONLY"));
         assert_eq!(int(&intent, "egress_max_tunnels"), Some(4));
-        egress_evidence("grant-from-run-exact-https", &targets.join("+"));
-        egress_evidence("grant-wildcard-and-plain-http-not-destinations", "absent");
-        egress_evidence("audit-intent-records-grant", "targets+relay+budgets");
+        egress_evidence(
+            "grant-from-run-exact-https",
+            &targets.join("+"),
+            "authority-grant-derivation",
+        );
+        egress_evidence(
+            "grant-wildcard-and-plain-http-not-destinations",
+            "absent",
+            "authority-grant-derivation",
+        );
+        egress_evidence(
+            "audit-intent-records-grant",
+            "targets+relay+budgets",
+            "authority-audit",
+        );
 
         // Through the real relay and proxy: the exact host is reached; a name
         // the wildcard covers, but no exact grant names, is not.
@@ -851,6 +926,7 @@ mod linux {
         egress_evidence(
             "tunnel-through-authority-prepared-environment",
             "200-and-reached",
+            "relay-and-connect-proxy-grant",
         );
         let line = exec(&[
             "egress-connect",
@@ -861,7 +937,11 @@ mod linux {
         ]);
         assert!(line.contains("TARGET_NOT_GRANTED"), "{line}");
         assert_eq!(accepted.load(Ordering::SeqCst), 1);
-        egress_evidence("wildcard-covered-name-not-granted", "target-not-granted");
+        egress_evidence(
+            "wildcard-covered-name-not-granted",
+            "target-not-granted",
+            "connect-proxy:grant",
+        );
 
         // Measured: clean, its counters audited.
         let measured = lab.authority().environment_measure(&environment).unwrap();
@@ -877,7 +957,11 @@ mod linux {
             int(&record, "egress_bytes_upstream").unwrap() > 0,
             "{record:?}"
         );
-        egress_evidence("audit-measured-counters", "dispositions+bytes");
+        egress_evidence(
+            "audit-measured-counters",
+            "dispositions+bytes",
+            "authority-audit",
+        );
 
         // Destroyed: every role gone, the counters audited.
         let destroyed = lab.authority().environment_destroy(&environment).unwrap();
@@ -900,7 +984,11 @@ mod linux {
             !format!("{record:?}").contains("origin.example.com"),
             "the destruction's record names a destination"
         );
-        egress_evidence("audit-destroyed-counters", &dispositions.join("+"));
+        egress_evidence(
+            "audit-destroyed-counters",
+            &dispositions.join("+"),
+            "authority-audit-at-destruction",
+        );
 
         // A relay left behind for an ended environment is an orphan: reaped
         // through the environment's destruction, exactly.
@@ -921,6 +1009,10 @@ mod linux {
         let report = lab.authority().environment_reconcile().unwrap();
         assert_eq!(report.orphans_reaped, 1, "{report:?}");
         assert!(!rt.exists(&relay_left));
-        egress_evidence("reconcile-helper-orphan-reaped", "removed-exactly");
+        egress_evidence(
+            "reconcile-helper-orphan-reaped",
+            "removed-exactly",
+            "authority-reconciliation",
+        );
     }
 }

@@ -92,10 +92,33 @@ mod linux {
     const SPARE: &str = "spare-key";
     const VARIABLE: &str = "GH_TOKEN";
     const PLACEHOLDER: &str = "[redacted:deploy-key]";
+    /// What a line is (M5e.1): a real DWKP client on the authority's socket,
+    /// the seam's or the released `serve`'s (`E2E`), or the authority's own
+    /// dispatch (`OCI`) -- each over the released broker and a real runtime.
+    const OCI: &str = "real-oci";
+    const E2E: &str = "dwkp-end-to-end";
 
-    fn evidence(case: &str, outcome: &str) {
+    /// One line of evidence, printed only after the assertions before it
+    /// held: the case, how it ended, its level and what enforced or observed
+    /// it (M5e.1, OD-E1) -- canonical JSON, so no outcome can break the line.
+    /// No line carries a value: outcomes name fingerprints and reasons.
+    fn evidence(case: &str, outcome: &str, level: &str, enforcement: &str) {
+        use dwk_proto::json::{Object, Value, to_canonical_string};
+        let mut fields = Object::new();
+        for (key, value) in [
+            ("suite", SUITE),
+            ("case", case),
+            ("outcome", outcome),
+            ("level", level),
+            ("enforcement", enforcement),
+        ] {
+            fields
+                .insert(key.to_owned(), Value::String(value.to_owned()))
+                .unwrap();
+        }
         println!(
-            "SANDBOX-EVIDENCE {{\"suite\":\"{SUITE}\",\"case\":\"{case}\",\"outcome\":\"{outcome}\"}}"
+            "SANDBOX-EVIDENCE {}",
+            to_canonical_string(&Value::Object(fields))
         );
     }
 
@@ -729,6 +752,8 @@ reason = "NO_MATCHING_RULE"
         evidence(
             "public-plan-states-both-actions",
             "workload+spawn_injection FD_AT_SPAWN",
+            E2E,
+            "authority-plan",
         );
         let out = stdout(&body);
         let container = lab.container_of(output(&body).environment_id.as_str());
@@ -744,6 +769,8 @@ reason = "NO_MATCHING_RULE"
         evidence(
             "public-fd-at-spawn-delivered",
             "fd3=pipe, fingerprint matches",
+            E2E,
+            "trusted-launcher",
         );
 
         // Mode B: the operator's variable.
@@ -764,6 +791,8 @@ reason = "NO_MATCHING_RULE"
         evidence(
             "public-env-at-spawn-delivered",
             "GH_TOKEN set, fingerprint matches",
+            E2E,
+            "trusted-launcher",
         );
 
         // The return path: the value never reaches the runtime, even echoed
@@ -786,6 +815,8 @@ reason = "NO_MATCHING_RULE"
         evidence(
             "public-echo-redacted",
             "4 placeholders, 0 bytes of the value",
+            E2E,
+            "output-redaction",
         );
 
         // Recorded, linked and counted; nothing durable holds a value.
@@ -808,16 +839,31 @@ reason = "NO_MATCHING_RULE"
                 "the broker logged a value"
             );
         }
-        evidence("public-no-plaintext-durable-or-logged", "absent");
+        evidence(
+            "public-no-plaintext-durable-or-logged",
+            "absent",
+            E2E,
+            "secret-not-persisted",
+        );
         assert_eq!(lab.broker.count("process_start"), 0, "a host launch");
-        evidence("public-never-on-the-host", "no host launch");
+        evidence(
+            "public-never-on-the-host",
+            "no host launch",
+            E2E,
+            "authority-environment-decision",
+        );
 
         // Never twice, by any tool.
         let uses = lab.rows("SELECT count(*) FROM secret_injection");
         let again = a.exec("p-fd", &launch(&["workload-secret-fd"], Some(DEPLOY)));
         assert_eq!(refusal(&again), "IDEMPOTENCY_KEY_REUSED");
         assert_eq!(lab.rows("SELECT count(*) FROM secret_injection"), uses);
-        evidence("public-replay-refused", "IDEMPOTENCY_KEY_REUSED");
+        evidence(
+            "public-replay-refused",
+            "IDEMPOTENCY_KEY_REUSED",
+            E2E,
+            "authority-idempotency",
+        );
 
         // A preview decides both actions and reads, records, runs nothing.
         let preview = a.preview(&launch(&["workload-secret-fd"], Some(DEPLOY)));
@@ -827,7 +873,12 @@ reason = "NO_MATCHING_RULE"
         );
         assert!(injection(plan(&preview)).is_some());
         assert_eq!(lab.rows("SELECT count(*) FROM secret_injection"), uses);
-        evidence("public-preview-reads-nothing", "no use recorded");
+        evidence(
+            "public-preview-reads-nothing",
+            "no use recorded",
+            E2E,
+            "authority-plan",
+        );
 
         // Not granted: denied by the capability gate, even though the run may
         // run the executable; nothing is read or recorded.
@@ -836,7 +887,12 @@ reason = "NO_MATCHING_RULE"
         let spawn = injection(plan(&body)).unwrap();
         assert_eq!(spawn.decision.reason, ProcessDecisionReason::NoCapability);
         assert_eq!(lab.rows("SELECT count(*) FROM secret_injection"), uses);
-        evidence("public-ungranted-handle-denied", "NO_CAPABILITY");
+        evidence(
+            "public-ungranted-handle-denied",
+            "NO_CAPABILITY",
+            E2E,
+            "authority-capability",
+        );
         // Not configured: refused before either gate.
         let body = a.exec(
             "p-none",
@@ -846,6 +902,8 @@ reason = "NO_MATCHING_RULE"
         evidence(
             "public-unconfigured-handle-refused",
             "CREDENTIAL_UNAVAILABLE",
+            E2E,
+            "secret-metadata",
         );
 
         // The ordinary launch: one action at version 6, unchanged at 5.
@@ -867,6 +925,8 @@ reason = "NO_MATCHING_RULE"
         evidence(
             "public-ordinary-launch-unchanged",
             "v6 one action; v5 result",
+            E2E,
+            "authority-route",
         );
 
         // What a runtime cannot say: a version-5 credential, a mode, a
@@ -909,6 +969,8 @@ reason = "NO_MATCHING_RULE"
         evidence(
             "public-hostile-credential-frames-refused",
             "SCHEMA_VIOLATION",
+            E2E,
+            "dwkp-schema",
         );
         served.stop();
     }
@@ -969,7 +1031,12 @@ reason = "NO_MATCHING_RULE"
                 "{case}: the restart destroyed it"
             );
             assert!(!durable_holds(&lab.dir.state(), &lab.values.deploy));
-            evidence(case, "unknown/unknown, environment destroyed");
+            evidence(
+                case,
+                "unknown/unknown, environment destroyed",
+                OCI,
+                "authority-reconciliation",
+            );
         }
     }
 
@@ -1036,6 +1103,8 @@ reason = "NO_MATCHING_RULE"
             evidence(
                 &format!("shipped-{pack}-denies-a-launch-credential"),
                 spawn.decision.reason.as_str(),
+                E2E,
+                "authority-policy",
             );
             served.stop();
         }
@@ -1127,6 +1196,8 @@ reason = "NO_MATCHING_RULE"
         evidence(
             "production-serve-delivers-from-the-operators-files",
             "fingerprint matches",
+            E2E,
+            "secret-backend",
         );
 
         // W9 through the released binary, a credential handed over.
@@ -1156,6 +1227,8 @@ reason = "NO_MATCHING_RULE"
         evidence(
             "production-crash-mid-workload-unknown-destroyed",
             "unknown/unknown",
+            E2E,
+            "authority-reconciliation",
         );
         let mut b = Peer::admit(&socket, 1, GRANTS, bind);
         let body = b.exec("s-2", &launch(&["workload-secret-fd"], Some(DEPLOY)));
@@ -1167,8 +1240,15 @@ reason = "NO_MATCHING_RULE"
         evidence(
             "production-replay-after-restart-refused",
             "IDEMPOTENCY_KEY_REUSED",
+            E2E,
+            "authority-idempotency",
         );
         assert!(!durable_holds(&lab.dir.state(), &lab.values.deploy));
-        evidence("production-no-plaintext-durable", "absent");
+        evidence(
+            "production-no-plaintext-durable",
+            "absent",
+            E2E,
+            "secret-not-persisted",
+        );
     }
 }

@@ -85,6 +85,7 @@ mod linux {
         RuntimeSpec,
     };
     use dwk_proto::frame::FrameDecoder;
+    use dwk_proto::json::{Object, Value, to_canonical_string};
     use dwk_proto::wire::id::{EnvironmentId, InvocationId, RunId};
     use dwk_proto::wire::scalar::{ContentDigest, HostPath};
     use dwk_sandbox_profile as profile;
@@ -95,6 +96,9 @@ mod linux {
     const PROMPT: Duration = Duration::from_secs(10);
     const PEER_WAIT: Duration = Duration::from_secs(150);
     const SUITE: &str = "sandbox-egress";
+    /// What every line of this suite is (M5e.1): the released broker on a
+    /// real runtime, this process playing the authority.
+    const LEVEL: &str = "real-oci";
     /// Where the evidence image carries the test-only workload fixture.
     const FIXTURE: &str = "/usr/libexec/direwolf/sandbox-fixture";
     /// The origin's name in every grant and in the resolver fixture.
@@ -102,11 +106,42 @@ mod linux {
 
     static UNIQUE: AtomicU64 = AtomicU64::new(0);
 
-    fn evidence(case: &str, outcome: &str) {
+    /// One line of evidence, printed only after the assertions before it
+    /// held: the case, how it ended, and what enforced or observed it (M5e.1,
+    /// OD-E1) -- canonical JSON, so no outcome can break the line. An
+    /// outcome's quotes are still spelt `'`, as they always were.
+    fn evidence(case: &str, outcome: &str, enforcement: &str) {
         let outcome = outcome.replace(['"', '\\'], "'");
+        let mut fields = Object::new();
+        for (key, value) in [
+            ("suite", SUITE),
+            ("case", case),
+            ("outcome", outcome.as_str()),
+            ("level", LEVEL),
+            ("enforcement", enforcement),
+        ] {
+            fields
+                .insert(key.to_owned(), Value::String(value.to_owned()))
+                .unwrap();
+        }
         println!(
-            "SANDBOX-EVIDENCE {{\"suite\":\"{SUITE}\",\"case\":\"{case}\",\"outcome\":\"{outcome}\"}}"
+            "SANDBOX-EVIDENCE {}",
+            to_canonical_string(&Value::Object(fields))
         );
+    }
+
+    /// The vantage that measured `invariants`: the host's (the runtime's
+    /// record and the broker's own), the probe's from inside, or both.
+    fn vantage(invariants: &[I]) -> &'static str {
+        let host = invariants.iter().any(|i| i.as_str().starts_with("HOST_"));
+        let inside = invariants
+            .iter()
+            .any(|i| i.as_str().starts_with("CONTAINER_"));
+        match (host, inside) {
+            (true, false) => "measured-host",
+            (false, true) => "measured-inside",
+            _ => "measured-both",
+        }
     }
 
     fn own_uid() -> u32 {
@@ -837,6 +872,7 @@ mod linux {
                 measurement.checks.len(),
                 since.elapsed().as_millis()
             ),
+            "measured-both",
         );
         for (case, invariant) in [
             ("proxy-only-host-network-isolated", I::HostNetworkIsolated),
@@ -873,7 +909,7 @@ mod linux {
             ),
         ] {
             assert_eq!(verdict(&measurement, invariant), Verdict::Pass, "{case}");
-            evidence(case, "pass");
+            evidence(case, "pass", vantage(&[invariant]));
         }
 
         // Exactly two containers live: the environment and its relay. The
@@ -888,6 +924,7 @@ mod linux {
         evidence(
             "proxy-only-environment-and-relay-only",
             "2-containers-no-setup",
+            "proxy-only-topology",
         );
         let relay_mode = ev.docker_ok(&[
             "container",
@@ -900,7 +937,11 @@ mod linux {
             relay_mode.trim(),
             format!("container:{} 10002:10002 null true", container.as_str())
         );
-        evidence("proxy-only-relay-shares-the-namespace-unprivileged", "pass");
+        evidence(
+            "proxy-only-relay-shares-the-namespace-unprivileged",
+            "pass",
+            "proxy-only-topology",
+        );
 
         // The broker's listener for it exists, its own, beneath a root only
         // the broker enters; the relay alone has it mounted.
@@ -912,7 +953,11 @@ mod linux {
             .permissions()
             .mode();
         assert_eq!(root_mode & 0o777, 0o700);
-        evidence("proxy-only-listener-open", "socket-present-root-0700");
+        evidence(
+            "proxy-only-listener-open",
+            "socket-present-root-0700",
+            "egress-socket-acl",
+        );
         let env_mounts = ev.docker_ok(&[
             "container",
             "inspect",
@@ -932,7 +977,11 @@ mod linux {
             relay_mounts.contains(profile::EGRESS_TARGET),
             "{relay_mounts}"
         );
-        evidence("proxy-only-socket-mounted-in-relay-only", "relay-only");
+        evidence(
+            "proxy-only-socket-mounted-in-relay-only",
+            "relay-only",
+            "proxy-only-topology",
+        );
 
         // Who reaches the socket is the kernel's check on the directory, by
         // uid, wherever the directory is exposed (Docker Desktop re-exposes
@@ -979,6 +1028,7 @@ mod linux {
         evidence(
             "proxy-only-socket-directory-relay-uid-only",
             "environment-uid-root-nobody-relay-gid-EACCES-relay-uid-connected",
+            "egress-socket-acl",
         );
 
         // Listed with roles, every label exact.
@@ -992,7 +1042,11 @@ mod linux {
         let mut roles: Vec<_> = mine.iter().map(|o| o.role.unwrap().label()).collect();
         roles.sort_unstable();
         assert_eq!(roles, ["environment", "relay"]);
-        evidence("proxy-only-listed-with-roles", "environment+relay");
+        evidence(
+            "proxy-only-listed-with-roles",
+            "environment+relay",
+            "exact-label-ownership",
+        );
 
         // Measured again: clean; the counters say what the probe asked.
         let (again, counters, state) = measure(&socket, &ev, &s, &container);
@@ -1000,7 +1054,7 @@ mod linux {
         assert!(not_passing(&again).is_empty(), "{:?}", not_passing(&again));
         let counters = counters.unwrap();
         assert!(count(&counters, D::TargetNotGranted) >= 2, "{counters:?}");
-        evidence("proxy-only-measure-clean-again", "pass");
+        evidence("proxy-only-measure-clean-again", "pass", "measured-both");
 
         // Destroyed: every role removed, the listener closed, the counters
         // returned.
@@ -1008,9 +1062,17 @@ mod linux {
         assert_eq!(destroyed.state, DestroyState::Removed);
         assert!(ev.labelled(&e, None).is_empty());
         assert!(!ev.exists(&relays[0]));
-        evidence("proxy-only-destroy-removes-every-role", "removed");
+        evidence(
+            "proxy-only-destroy-removes-every-role",
+            "removed",
+            "exact-label-cleanup",
+        );
         assert!(!edir.exists(), "the listener's directory is gone");
-        evidence("proxy-only-destroy-closes-listener", "closed");
+        evidence(
+            "proxy-only-destroy-closes-listener",
+            "closed",
+            "egress-listener-lifecycle",
+        );
         let counters = destroyed.egress.unwrap();
         assert_eq!(count(&counters, D::Closed), 0);
         assert!(count(&counters, D::TargetNotGranted) >= 2);
@@ -1021,11 +1083,16 @@ mod linux {
                 "target-not-granted-{}",
                 count(&counters, D::TargetNotGranted)
             ),
+            "egress-disposition-counters",
         );
         let again = destroy(&socket, &ev, (&e, &r), Some(&container));
         assert_eq!(again.state, DestroyState::AlreadyGone);
         assert!(again.egress.is_none());
-        evidence("proxy-only-destroy-idempotent", "already-gone");
+        evidence(
+            "proxy-only-destroy-idempotent",
+            "already-gone",
+            "exact-label-cleanup",
+        );
     }
 
     // ---- tunnels through the real topology -------------------------------
@@ -1083,13 +1150,21 @@ mod linux {
             std::thread::sleep(Duration::from_millis(20));
         }
         assert_eq!(origin.accepted(), 1);
-        evidence("tunnel-granted-carries-bytes", &line);
+        evidence(
+            "tunnel-granted-carries-bytes",
+            &line,
+            "relay-and-connect-proxy-grant",
+        );
 
         // The broker's own variable leads a tool that honours it there.
         let line = ev.workload(&container, &["egress-via-variable", ORIGIN, &p]);
         assert!(line.contains("HTTP/1.1 200"), "{line}");
         assert_eq!(origin.accepted(), 2);
-        evidence("tunnel-via-proxy-variable", &line);
+        evidence(
+            "tunnel-via-proxy-variable",
+            &line,
+            "relay-and-connect-proxy-grant",
+        );
 
         let refused = |args: &[&str], decision: D, status: &str| {
             let before = origin.accepted();
@@ -1150,7 +1225,16 @@ mod linux {
             ),
         ] {
             let line = refused(&args, decision, status);
-            evidence(case, &line);
+            // Which part of the proxy decided, by the decision it gave.
+            let enforcement = match decision {
+                D::TargetNotGranted => "connect-proxy:grant",
+                D::TargetNotCanonical => "connect-proxy:canonical-target",
+                D::AddressBlocked | D::AddressMixed => "connect-proxy:address-guard",
+                D::ResolutionFailed => "connect-proxy:resolver",
+                D::ResolutionTimeout => "connect-proxy:resolver-deadline",
+                other => panic!("{case}: {other:?} is no refusal"),
+            };
+            evidence(case, &line, enforcement);
         }
 
         // Rebinding: the first answer is pinned and used; the next tunnel
@@ -1165,7 +1249,11 @@ mod linux {
             D::AddressBlocked,
             "403",
         );
-        evidence("resolver-rebinding-pinned", &line);
+        evidence(
+            "resolver-rebinding-pinned",
+            &line,
+            "connect-proxy:address-guard",
+        );
 
         // The server name must be the CONNECT host before anything is dialled.
         for (case, args) in [
@@ -1191,7 +1279,9 @@ mod linux {
             assert!(line.contains("HTTP/1.1 200"), "{case}: {line}");
             assert_eq!(field(&line, "received"), Some("0"), "{case}: {line}");
             assert_eq!(origin.accepted(), before, "{case} reached the origin");
-            evidence(case, &line);
+            // Tunnelled, then closed before anything was dialled: the
+            // server-name check on the first bytes.
+            evidence(case, &line, "connect-proxy:server-name");
         }
 
         // Every ending counted by its disposition, never by its content.
@@ -1227,10 +1317,12 @@ mod linux {
                 counters.dispositions.len(),
                 counters.bytes_upstream.get()
             ),
+            "egress-disposition-counters",
         );
         evidence(
             "audit-observability-no-payload",
             "no-host-or-payload-in-counters-or-log",
+            "egress-disposition-counters",
         );
     }
 
@@ -1266,18 +1358,30 @@ mod linux {
             "{}",
             origin.received().len()
         );
-        evidence("budget-upload-exhausted", &line);
+        evidence(
+            "budget-upload-exhausted",
+            &line,
+            "connect-proxy:upload-budget",
+        );
         // Spent stays spent: the next tunnel is closed before it is dialled.
         let before = origin.accepted();
         let next = ev.workload(&container, &["egress-connect", ORIGIN, &p, ORIGIN, "10"]);
         assert_eq!(origin.accepted(), before, "{next}");
-        evidence("budget-upload-spent-stays-spent", &next);
+        evidence(
+            "budget-upload-spent-stays-spent",
+            &next,
+            "connect-proxy:upload-budget",
+        );
         let counters = destroy(&socket, &ev, (&e, &r), Some(&container))
             .egress
             .unwrap();
         assert!(count(&counters, D::UploadBudget) >= 2, "{counters:?}");
         assert_eq!(counters.bytes_upstream.get(), 8192);
-        evidence("budget-upload-exact-at-socket", "8192-of-8192");
+        evidence(
+            "budget-upload-exact-at-socket",
+            "8192-of-8192",
+            "connect-proxy:upload-budget",
+        );
 
         // Download: 4 KiB, against an origin that sends 64 KiB.
         let origin = Origin::start(65536, true);
@@ -1300,7 +1404,11 @@ mod linux {
             .unwrap();
         assert_eq!(count(&counters, D::DownloadBudget), 1, "{counters:?}");
         assert_eq!(counters.bytes_downstream.get(), 4096);
-        evidence("budget-download-exhausted", &line);
+        evidence(
+            "budget-download-exhausted",
+            &line,
+            "connect-proxy:download-budget",
+        );
 
         // Connections: one tunnel at a time.
         let origin = Origin::start(0, false);
@@ -1343,7 +1451,7 @@ mod linux {
         let line = ev.workload(&container, &["egress-connect", ORIGIN, &p, ORIGIN, "0"]);
         assert_eq!(field(&line, "decision"), Some("TUNNEL_LIMIT"), "{line}");
         assert_eq!(origin.accepted(), 1);
-        evidence("budget-tunnel-limit", &line);
+        evidence("budget-tunnel-limit", &line, "connect-proxy:tunnel-limit");
         let mut holder = holder;
         let _ = holder.kill();
         let _ = holder.wait();
@@ -1383,6 +1491,7 @@ mod linux {
         evidence(
             "fronting-residual-carried-and-bounded",
             &format!("carried-unseen-bounded-{}-of-4096", received.len()),
+            "connect-proxy:upload-budget",
         );
         drop(broker);
     }
@@ -1475,7 +1584,7 @@ mod linux {
                 !line.contains("connected") && !line.contains("sent"),
                 "{case}: {line}"
             );
-            evidence(case, &format!("{line} mechanism={mechanism}"));
+            evidence(case, &format!("{line} mechanism={mechanism}"), mechanism);
         }
         assert_eq!(
             origin.accepted(),
@@ -1491,6 +1600,7 @@ mod linux {
         evidence(
             "bypass-proxy-address-other-ports",
             "ECONNREFUSED-x4 mechanism=topology-nothing-listening",
+            "topology-nothing-listening",
         );
 
         // DNS, direct: no resolver answers, over UDP or TCP.
@@ -1504,14 +1614,18 @@ mod linux {
             let line = w(&["egress-dns", ip]);
             assert!(!line.contains("udp-answered"), "{case}: {line}");
             assert!(!line.contains("tcp-connected"), "{case}: {line}");
-            evidence(case, &line);
+            evidence(case, &line, "topology-no-resolver");
         }
         let line = w(&["egress-resolve", ORIGIN]);
         assert!(line.starts_with("unresolved"), "{line}");
-        evidence("bypass-library-resolver", &line);
+        evidence("bypass-library-resolver", &line, "topology-no-resolver");
         let line = w(&["egress-resolve", "example.com"]);
         assert!(line.starts_with("unresolved"), "{line}");
-        evidence("bypass-library-resolver-public-name", &line);
+        evidence(
+            "bypass-library-resolver-public-name",
+            &line,
+            "topology-no-resolver",
+        );
 
         // Raw, packet, ICMP and virtual sockets.
         let line = w(&["egress-raw"]);
@@ -1529,10 +1643,8 @@ mod linux {
         ] {
             let found = part(name);
             assert!(found.starts_with("errno="), "{case}: {found}");
-            evidence(
-                case,
-                &format!("{found} mechanism={}", mechanism(&found, kind)),
-            );
+            let mechanism = mechanism(&found, kind);
+            evidence(case, &format!("{found} mechanism={mechanism}"), mechanism);
         }
         let ping = part("ping");
         // Where the platform admits an ICMP socket at all, it reaches
@@ -1546,7 +1658,7 @@ mod linux {
         } else {
             "platform-or-capabilities"
         };
-        evidence("bypass-icmp", &format!("{ping} mechanism={how}"));
+        evidence("bypass-icmp", &format!("{ping} mechanism={how}"), how);
 
         // Proxy variables: unset, or pointed elsewhere by the process
         // itself — either way there is no other path.
@@ -1556,16 +1668,28 @@ mod linux {
             &["egress-via-variable", ORIGIN, &p],
         );
         assert!(line.contains("ENETUNREACH"), "{line}");
-        evidence("bypass-proxy-variable-redirected", &line);
+        evidence(
+            "bypass-proxy-variable-redirected",
+            &line,
+            "topology-no-route",
+        );
         let line = ev.workload_with(
             &container,
             &["HTTPS_PROXY=http://169.254.7.2:8080"],
             &["egress-via-variable", ORIGIN, &p],
         );
         assert!(line.contains("ENETUNREACH"), "{line}");
-        evidence("bypass-proxy-variable-other-peer", &line);
+        evidence(
+            "bypass-proxy-variable-other-peer",
+            &line,
+            "topology-no-route",
+        );
         assert_eq!(origin.accepted(), 0);
-        evidence("bypass-origin-never-reached", "0-connections");
+        evidence(
+            "bypass-origin-never-reached",
+            "0-connections",
+            "topology-no-route",
+        );
         destroy(&socket, &ev, (&e, &r), Some(&container));
     }
 
@@ -1627,9 +1751,21 @@ mod linux {
         expected.sort();
         assert_eq!(seen.lines().collect::<Vec<_>>(), expected, "{seen}");
         assert!(!seen.contains("corp.example") && !seen.contains("NO_PROXY=*"));
-        evidence("proxy-variables-broker-owned", "exactly-8-broker-values");
-        evidence("proxy-variables-ambient-ignored", "no-inherited-value");
-        evidence("runtime-client-config-proxies-ignored", "no-injected-value");
+        evidence(
+            "proxy-variables-broker-owned",
+            "exactly-8-broker-values",
+            "launch-environment",
+        );
+        evidence(
+            "proxy-variables-ambient-ignored",
+            "no-inherited-value",
+            "launch-environment",
+        );
+        evidence(
+            "runtime-client-config-proxies-ignored",
+            "no-injected-value",
+            "launch-environment",
+        );
         destroy(&socket, &ev, (&e, &r), Some(&container));
     }
 
@@ -1847,7 +1983,7 @@ mod linux {
             "weakened-bridge-network",
         );
         ev.remove(&id);
-        evidence("weakened-bridge-network", &outcome);
+        evidence("weakened-bridge-network", &outcome, "measured-both");
         detected += 1;
 
         // No relay: nothing answers at the proxy address.
@@ -1860,7 +1996,7 @@ mod linux {
             "weakened-missing-relay",
         );
         ev.remove(&id);
-        evidence("weakened-missing-relay", &outcome);
+        evidence("weakened-missing-relay", &outcome, "measured-both");
         detected += 1;
 
         // No proxy variables.
@@ -1873,7 +2009,11 @@ mod linux {
             "weakened-proxy-variables-removed",
         );
         ev.remove(&id);
-        evidence("weakened-proxy-variables-removed", &outcome);
+        evidence(
+            "weakened-proxy-variables-removed",
+            &outcome,
+            "measured-host",
+        );
         detected += 1;
 
         // Drift of a clean environment: each change below, made after the
@@ -1970,7 +2110,7 @@ mod linux {
             let outcome = failing(&m, &expected, case);
             let destroyed = destroy(&socket, &ev, (&e, &r), Some(&container));
             assert_eq!(destroyed.state, DestroyState::Removed, "{case}");
-            evidence(case, &outcome);
+            evidence(case, &outcome, vantage(&expected));
             detected += 1;
         }
 
@@ -1994,12 +2134,14 @@ mod linux {
         evidence(
             "weakened-relay-tampered",
             &format!("{outcome}+never-started+nothing-left"),
+            "relay-digest-pin",
         );
         detected += 1;
 
         evidence(
             "weakened-topology-count",
             &format!("detected-{detected}-of-{detected}"),
+            "measured-both",
         );
     }
 
@@ -2084,6 +2226,7 @@ mod linux {
             evidence(
                 &format!("crash-{}", point.replace('_', "-")),
                 &format!("stale-dir-removed+{expected}-found-by-label+reaped"),
+                "exact-label-cleanup",
             );
             drop(broker);
         }
@@ -2116,6 +2259,7 @@ mod linux {
         evidence(
             "restart-proxy-closed-fails-closed",
             &format!("{outcome}+destroyed"),
+            "measured-both",
         );
 
         // Foreign resources: containers that look like a relay or a setup
@@ -2191,6 +2335,7 @@ mod linux {
         evidence(
             "foreign-resources-untouched",
             "3-containers+1-network-survive",
+            "exact-label-ownership",
         );
         drop(broker);
     }
@@ -2228,7 +2373,7 @@ mod linux {
         );
         // PROXY_ONLY needs no evidence flag: it is the product's topology.
         let (container, _) = prepared_clean(&socket, &ev, &s, &broker);
-        evidence("production-proxy-only-prepared", "clean");
+        evidence("production-proxy-only-prepared", "clean", "measured-both");
         // The fixture's names do not exist for the host's resolver …
         let line = ev.workload(&container, &["egress-connect", ORIGIN, &p, ORIGIN, "0"]);
         assert_eq!(
@@ -2236,7 +2381,11 @@ mod linux {
             Some("RESOLUTION_FAILED"),
             "{line}"
         );
-        evidence("production-no-fixture-resolver", &line);
+        evidence(
+            "production-no-fixture-resolver",
+            &line,
+            "connect-proxy:resolver",
+        );
         // … and a granted name that resolves to loopback is blocked: there
         // is no exception mechanism at all.
         let line = ev.workload(
@@ -2245,7 +2394,11 @@ mod linux {
         );
         assert_eq!(field(&line, "decision"), Some("ADDRESS_BLOCKED"), "{line}");
         assert_eq!(origin.accepted(), 0);
-        evidence("production-loopback-blocked-no-exception", &line);
+        evidence(
+            "production-loopback-blocked-no-exception",
+            &line,
+            "connect-proxy:address-guard",
+        );
         // A preparation without its grant or relay digest is refused before
         // anything is made.
         let (e2, r2) = (environment(), run());
@@ -2268,6 +2421,7 @@ mod linux {
         evidence(
             "production-proxy-only-needs-its-grant",
             "proxy-unavailable+nothing-made",
+            "broker-admission",
         );
         destroy(&socket, &ev, (&e, &r), Some(&container));
     }

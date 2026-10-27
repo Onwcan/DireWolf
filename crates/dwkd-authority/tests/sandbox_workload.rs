@@ -85,6 +85,12 @@ mod linux {
     use super::transport_support::{Client, own_uid};
 
     const SUITE: &str = "sandbox-authority-workload";
+    /// What a line is (M5e.1): the real authority's own API over the
+    /// released broker and a real runtime (`OCI`), or a real DWKP client on
+    /// the authority's socket -- the seam's or the released `serve`'s --
+    /// over the same (`E2E`).
+    const OCI: &str = "real-oci";
+    const E2E: &str = "dwkp-end-to-end";
     const FIXTURE: &str = "/usr/libexec/direwolf/sandbox-fixture";
     const PROBE: &str = "/usr/libexec/direwolf/sandbox-probe";
     /// A manifest entry policy denies by default: it never reaches the broker.
@@ -92,10 +98,32 @@ mod linux {
     /// The fixture again, at a path the host has too (OD-9).
     const TRUE: &str = "/usr/bin/true";
 
-    fn evidence(case: &str, outcome: &str) {
+    /// One line of `suite`'s evidence, printed only after the assertions
+    /// before it held: the case, how it ended, its level and what enforced
+    /// or observed it (M5e.1, OD-E1) -- canonical JSON, so no outcome can
+    /// break the line.
+    fn evidence_line(suite: &str, case: &str, outcome: &str, level: &str, enforcement: &str) {
+        use dwk_proto::json::{Object, Value, to_canonical_string};
+        let mut fields = Object::new();
+        for (key, value) in [
+            ("suite", suite),
+            ("case", case),
+            ("outcome", outcome),
+            ("level", level),
+            ("enforcement", enforcement),
+        ] {
+            fields
+                .insert(key.to_owned(), Value::String(value.to_owned()))
+                .unwrap();
+        }
         println!(
-            "SANDBOX-EVIDENCE {{\"suite\":\"{SUITE}\",\"case\":\"{case}\",\"outcome\":\"{outcome}\"}}"
+            "SANDBOX-EVIDENCE {}",
+            to_canonical_string(&Value::Object(fields))
         );
+    }
+
+    fn evidence(case: &str, outcome: &str, level: &str, enforcement: &str) {
+        evidence_line(SUITE, case, outcome, level, enforcement);
     }
 
     fn var(name: &str) -> String {
@@ -650,7 +678,12 @@ reason = "NO_MATCHING_RULE"
         assert!(out.contains("uid=10001"), "{out}");
         assert_eq!(outcome.residue, Verdict::Pass);
         assert!(!outcome.environment_destroyed);
-        evidence("authority-workload-completed", "exited-0-as-10001");
+        evidence(
+            "authority-workload-completed",
+            "exited-0-as-10001",
+            OCI,
+            "authority-route",
+        );
         let record = lab
             .authority()
             .workload_record(&outcome.invocation)
@@ -664,9 +697,16 @@ reason = "NO_MATCHING_RULE"
         evidence(
             "authority-workload-ledger-completed",
             "completed-exited-pass",
+            OCI,
+            "authority-ledger",
         );
         assert_eq!(lab.state_of(&environment), EnvironmentState::Ready);
-        evidence("authority-workload-environment-kept-when-clean", "ready");
+        evidence(
+            "authority-workload-environment-kept-when-clean",
+            "ready",
+            OCI,
+            "authority-environment-judgement",
+        );
 
         // The intent is the authority's, durable before the broker heard: the
         // audit holds it, the decision and the outcome, never the output.
@@ -684,8 +724,18 @@ reason = "NO_MATCHING_RULE"
             "a sandbox action"
         );
         assert!(!log.contains("uid=10001"), "output reached the audit");
-        evidence("authority-workload-audited", "intent-outcome-no-output");
-        evidence("authority-workload-taint-raised", "local-unverified");
+        evidence(
+            "authority-workload-audited",
+            "intent-outcome-no-output",
+            OCI,
+            "authority-audit",
+        );
+        evidence(
+            "authority-workload-taint-raised",
+            "local-unverified",
+            OCI,
+            "authority-taint",
+        );
 
         // The policy's `max_output_bytes=65536` is kept: each stream holds
         // its first half, whatever the request asked, and the intent is
@@ -714,6 +764,8 @@ reason = "NO_MATCHING_RULE"
         evidence(
             "authority-workload-obligation-output-bound",
             "32768-per-stream",
+            OCI,
+            "authority-obligation",
         );
 
         // The same key: the record, never a second run.
@@ -737,6 +789,8 @@ reason = "NO_MATCHING_RULE"
         evidence(
             "authority-workload-replayed-never-rerun",
             "record-no-marker",
+            OCI,
+            "authority-idempotency",
         );
         // The same key for another workload: refused.
         let other = lab
@@ -748,6 +802,8 @@ reason = "NO_MATCHING_RULE"
         evidence(
             "authority-workload-key-reused-differently-refused",
             "refused",
+            OCI,
+            "authority-idempotency",
         );
         assert!(lab.runtime.exists(&container));
     }
@@ -770,10 +826,20 @@ reason = "NO_MATCHING_RULE"
             .workload_run(&bare, &fixture(&["mark", "/workspace/bare"], "g-1"))
             .unwrap();
         assert_eq!(reply, WorkloadReply::Refused("NO_ENVIRONMENT"));
-        evidence("authority-workload-no-environment-refused", "refused");
+        evidence(
+            "authority-workload-no-environment-refused",
+            "refused",
+            OCI,
+            "authority-environment-decision",
+        );
         assert!(!lab.workspace.join("bare").exists());
         assert_eq!(lab.broker.count("process_start"), 0);
-        evidence("authority-workload-never-on-the-host", "no-host-launch");
+        evidence(
+            "authority-workload-never-on-the-host",
+            "no-host-launch",
+            OCI,
+            "authority-environment-decision",
+        );
 
         let run = lab.operator_run();
         let (environment, container) = lab.ready(&run);
@@ -785,7 +851,12 @@ reason = "NO_MATCHING_RULE"
             refused(&mut lab, request("/usr/bin/sh", &[], "g-2")),
             WorkloadReply::Refused("EXECUTABLE_NOT_IN_MANIFEST")
         );
-        evidence("authority-workload-not-in-manifest-refused", "refused");
+        evidence(
+            "authority-workload-not-in-manifest-refused",
+            "refused",
+            OCI,
+            "authority-image-manifest",
+        );
         // Out of bounds.
         let mut too_long = fixture(&[], "g-3");
         too_long.wall_clock_seconds = 601;
@@ -793,13 +864,23 @@ reason = "NO_MATCHING_RULE"
             refused(&mut lab, too_long),
             WorkloadReply::Refused("WALL_CLOCK_INVALID")
         );
-        evidence("authority-workload-bounds-refused", "wall-clock-invalid");
+        evidence(
+            "authority-workload-bounds-refused",
+            "wall-clock-invalid",
+            OCI,
+            "authority-request-bounds",
+        );
         // Policy: a manifest entry no rule allows.
         assert_eq!(
             refused(&mut lab, request(DENIED, &[], "g-4")),
             WorkloadReply::Denied("DEFAULT_DENY")
         );
-        evidence("authority-workload-policy-denied", "default-deny");
+        evidence(
+            "authority-workload-policy-denied",
+            "default-deny",
+            OCI,
+            "authority-policy",
+        );
         // An obligation no workload can keep (`network_deny`).
         assert_eq!(
             refused(&mut lab, request(PROBE, &["hold"], "g-5")),
@@ -808,6 +889,8 @@ reason = "NO_MATCHING_RULE"
         evidence(
             "authority-workload-obligation-unenforceable-denied",
             "denied",
+            OCI,
+            "authority-obligation",
         );
         // No capability: a run without `process.exec`.
         let plain = lab.admit("researcher", &["fs.read:*"]);
@@ -818,7 +901,12 @@ reason = "NO_MATCHING_RULE"
             .unwrap();
         assert_eq!(reply, WorkloadReply::Denied("NO_CAPABILITY"));
         assert!(!lab.workspace.join("nocap").exists());
-        evidence("authority-workload-no-capability-denied", "denied");
+        evidence(
+            "authority-workload-no-capability-denied",
+            "denied",
+            OCI,
+            "authority-capability",
+        );
         assert_eq!(
             started(&lab),
             0,
@@ -828,6 +916,8 @@ reason = "NO_MATCHING_RULE"
         evidence(
             "authority-workload-refusals-record-no-intent",
             "0-rows-0-runs",
+            OCI,
+            "authority-gates",
         );
 
         // The environment drifted after it was measured: the broker refuses
@@ -854,6 +944,8 @@ reason = "NO_MATCHING_RULE"
         evidence(
             "authority-workload-drifted-environment-destroyed",
             "failed-destroyed",
+            OCI,
+            "authority-environment-judgement",
         );
         // And a lower level is never accepted: no workload without a READY
         // environment at CONTAINER_ISOLATION (the only level `oci` earns).
@@ -862,7 +954,12 @@ reason = "NO_MATCHING_RULE"
             .workload_run(&run, &fixture(&["mark", "/workspace/after"], "g-8"))
             .unwrap();
         assert_eq!(reply, WorkloadReply::Refused("NO_ENVIRONMENT"));
-        evidence("authority-workload-no-ready-environment-refused", "refused");
+        evidence(
+            "authority-workload-no-ready-environment-refused",
+            "refused",
+            OCI,
+            "authority-environment-decision",
+        );
     }
 
     #[test]
@@ -890,7 +987,12 @@ reason = "NO_MATCHING_RULE"
             lab.authority().workload_run(&run, &second).unwrap(),
             WorkloadReply::Refused("BUDGET_EXHAUSTED")
         );
-        evidence("authority-workload-budget-seconds-charged-whole", "refused");
+        evidence(
+            "authority-workload-budget-seconds-charged-whole",
+            "refused",
+            OCI,
+            "authority-run-budget",
+        );
         second.wall_clock_seconds = 30;
         assert!(matches!(
             lab.authority().workload_run(&run, &second).unwrap(),
@@ -903,7 +1005,12 @@ reason = "NO_MATCHING_RULE"
             lab.authority().workload_run(&run, &third).unwrap(),
             WorkloadReply::Refused("BUDGET_EXHAUSTED")
         );
-        evidence("authority-workload-budget-count-exhausted", "refused");
+        evidence(
+            "authority-workload-budget-count-exhausted",
+            "refused",
+            OCI,
+            "authority-run-budget",
+        );
     }
 
     #[test]
@@ -929,12 +1036,27 @@ reason = "NO_MATCHING_RULE"
             )
             .unwrap();
         assert_eq!(row, ("UNKNOWN".to_owned(), "INTERRUPTED".to_owned()));
-        evidence("crash-w8-unknown", "interrupted");
+        evidence(
+            "crash-w8-unknown",
+            "interrupted",
+            OCI,
+            "authority-reconciliation",
+        );
         assert_eq!(lab.state_of(&environment), EnvironmentState::Destroyed);
         assert!(!lab.runtime.exists(&container));
-        evidence("crash-w8-environment-destroyed", "destroyed-on-restart");
+        evidence(
+            "crash-w8-environment-destroyed",
+            "destroyed-on-restart",
+            OCI,
+            "authority-reconciliation",
+        );
         assert!(!lab.workspace.join("w8").exists());
-        evidence("crash-w8-never-ran", "no-marker");
+        evidence(
+            "crash-w8-never-ran",
+            "no-marker",
+            OCI,
+            "authority-reconciliation",
+        );
 
         // W9 (M5d.2): the broker started it and answered; the authority
         // died while it ran. Nothing proves how it ends: UNKNOWN, and the
@@ -953,7 +1075,12 @@ reason = "NO_MATCHING_RULE"
         let procs = lab.runtime.awaited(&container, &workload);
         assert_eq!(procs, [workload], "W9 is while it runs");
         assert_eq!(lab.runtime.others(&container), 1, "W9 is while it runs");
-        evidence("crash-w9-running-after-start", "target-as-workload");
+        evidence(
+            "crash-w9-running-after-start",
+            "target-as-workload",
+            OCI,
+            "runtime-process-list",
+        );
         let environments = rows(&lab, "SELECT count(*) FROM environment");
         lab.start(None);
         let state: String = super::state_support::raw(&lab.dir.state())
@@ -969,6 +1096,8 @@ reason = "NO_MATCHING_RULE"
         evidence(
             "crash-w9-unknown-environment-destroyed",
             "unknown-destroyed",
+            OCI,
+            "authority-reconciliation",
         );
         // The same key again: its record, or the run's end -- never a second
         // execution, environment or container.
@@ -991,7 +1120,12 @@ reason = "NO_MATCHING_RULE"
             1
         );
         assert_eq!(rows(&lab, "SELECT count(*) FROM environment"), environments);
-        evidence("crash-w9-never-run-again", "no-second-execution");
+        evidence(
+            "crash-w9-never-run-again",
+            "no-second-execution",
+            OCI,
+            "authority-reconciliation",
+        );
 
         // W10: the broker ran it and answered; the outcome is not durable.
         lab.start(Some(stop_at(CrashPoint::WorkloadAfterBroker)));
@@ -1018,9 +1152,16 @@ reason = "NO_MATCHING_RULE"
         evidence(
             "crash-w10-unknown-environment-destroyed",
             "unknown-destroyed",
+            OCI,
+            "authority-reconciliation",
         );
         assert!(!marker.exists(), "a restart ran it again");
-        evidence("crash-w10-never-rerun", "no-marker");
+        evidence(
+            "crash-w10-never-rerun",
+            "no-marker",
+            OCI,
+            "authority-reconciliation",
+        );
 
         // W11: the outcome is durable; it stays.
         lab.start(Some(stop_at(CrashPoint::WorkloadAfterOutcome)));
@@ -1043,7 +1184,12 @@ reason = "NO_MATCHING_RULE"
         // restart reaped the run, and since the M5d closeout its environment
         // with it (ADR-0052 §8) -- the outcome is kept all the same.
         assert_eq!(lab.state_of(&environment), EnvironmentState::Destroyed);
-        evidence("crash-w11-outcome-kept", "completed");
+        evidence(
+            "crash-w11-outcome-kept",
+            "completed",
+            OCI,
+            "authority-reconciliation",
+        );
     }
 
     #[test]
@@ -1073,7 +1219,7 @@ reason = "NO_MATCHING_RULE"
         let WorkloadReply::Unknown { reason, .. } = reply else {
             panic!("not unknown: {reply:?}")
         };
-        evidence("unknown-ending-recorded", reason);
+        evidence("unknown-ending-recorded", reason, OCI, "authority-ledger");
         // The workload outlived its broker; the destruction is durable and
         // completes once a broker answers.
         assert!(lab.runtime.exists(&container));
@@ -1083,7 +1229,12 @@ reason = "NO_MATCHING_RULE"
         assert!(report.pending_destroyed >= 1, "{report:?}");
         assert_eq!(lab.state_of(&environment), EnvironmentState::Destroyed);
         assert!(!lab.runtime.exists(&container));
-        evidence("unknown-ending-environment-destroyed", "destroyed");
+        evidence(
+            "unknown-ending-environment-destroyed",
+            "destroyed",
+            OCI,
+            "authority-reconciliation",
+        );
         let state: String = super::state_support::raw(&lab.dir.state())
             .query_row(
                 "SELECT state FROM workload WHERE idempotency_key = 'u-1'",
@@ -1092,7 +1243,12 @@ reason = "NO_MATCHING_RULE"
             )
             .unwrap();
         assert_eq!(state, "UNKNOWN");
-        evidence("unknown-ending-never-rerun", "unknown");
+        evidence(
+            "unknown-ending-never-rerun",
+            "unknown",
+            OCI,
+            "authority-idempotency",
+        );
     }
 
     // ---- M5d.2: the public route, over DWKP ---------------------------------
@@ -1283,6 +1439,8 @@ reason = "NO_MATCHING_RULE"
         evidence(
             "public-exec-environment-prepared-by-the-authority",
             &format!("ready-and-run-in-{}ms", prepared_and_run.as_millis()),
+            E2E,
+            "authority-environment-decision",
         );
         assert_eq!(
             out.assurance,
@@ -1302,11 +1460,18 @@ reason = "NO_MATCHING_RULE"
         evidence(
             "public-exec-result-names-environment-assurance-identity",
             "container-isolation",
+            E2E,
+            "authority-environment-judgement",
         );
         let text = String::from_utf8(out.stdout.content.to_bytes()).unwrap();
         assert!(text.contains("uid=10001"), "{text}");
         assert_eq!(out.exit_code.map(|c| c.get()), Some(0));
-        evidence("public-exec-runs-as-the-sandbox-user", "uid-10001");
+        evidence(
+            "public-exec-runs-as-the-sandbox-user",
+            "uid-10001",
+            E2E,
+            "oci-user",
+        );
         // Who asked is the kernel's word for the connection, in the intent.
         let intent =
             super::state_support::audit_records(&lab.dir.state(), "workload.intent_recorded");
@@ -1316,9 +1481,19 @@ reason = "NO_MATCHING_RULE"
             Some(format!("uid:{}", own_uid()).as_str())
         );
         assert_eq!(super::state_support::int(last, "protocol_version"), Some(5));
-        evidence("public-exec-caller-from-the-transport", "uid");
+        evidence(
+            "public-exec-caller-from-the-transport",
+            "uid",
+            E2E,
+            "kernel-process-credentials",
+        );
         assert_eq!(lab.broker.count("process_start"), 0, "a host launch");
-        evidence("public-exec-never-on-the-host", "no-host-launch");
+        evidence(
+            "public-exec-never-on-the-host",
+            "no-host-launch",
+            E2E,
+            "authority-environment-decision",
+        );
 
         // Output is bounded by the call's own narrowing; every byte counted.
         let body = a.exec(
@@ -1329,7 +1504,12 @@ reason = "NO_MATCHING_RULE"
         assert_eq!(out.stdout.content.to_bytes().len(), 1024);
         assert_eq!(out.stdout.observed.get(), 5000);
         assert!(out.stdout.truncated);
-        evidence("public-exec-output-bounded", "1024-of-5000");
+        evidence(
+            "public-exec-output-bounded",
+            "1024-of-5000",
+            E2E,
+            "output-bound",
+        );
         // A daemonised grandchild is ended by the environment's init.
         let body = a.exec("p-3", &call(FIXTURE, &["workload-daemon"]));
         let out = sandboxed(&body);
@@ -1339,7 +1519,12 @@ reason = "NO_MATCHING_RULE"
         );
         assert!(out.ended_processes.get() >= 1, "{out:?}");
         assert_eq!(lab.runtime.others(&container), 0);
-        evidence("public-exec-detached-child-reaped", "residue-pass");
+        evidence(
+            "public-exec-detached-child-reaped",
+            "residue-pass",
+            E2E,
+            "environment-init-reap",
+        );
 
         // While a long workload runs, the authority and the broker answer
         // everyone else: another runtime previews, stats a file and runs its
@@ -1378,7 +1563,12 @@ reason = "NO_MATCHING_RULE"
             "{:?}",
             since.elapsed()
         );
-        evidence("public-exec-authority-answers-during-a-workload", "preview");
+        evidence(
+            "public-exec-authority-answers-during-a-workload",
+            "preview",
+            E2E,
+            "authority-route",
+        );
         // A file beneath the workspace's root (`/workspace/...` in the
         // tools' grammar): the broker stats it.
         std::fs::write(lab.workspace.join("stat-me"), b"x").unwrap();
@@ -1396,13 +1586,20 @@ reason = "NO_MATCHING_RULE"
             "{:?}",
             since.elapsed()
         );
-        evidence("public-exec-broker-answers-during-a-workload", "fs-stat");
+        evidence(
+            "public-exec-broker-answers-during-a-workload",
+            "fs-stat",
+            E2E,
+            "broker-start-collect",
+        );
         let body = b.exec("b-1", &call(FIXTURE, &["workload-identity"]));
         let other = sandboxed(&body);
         assert_ne!(other.environment_id.as_str(), container.as_str());
         evidence(
             "public-exec-two-runs-at-once-in-two-environments",
             "completed",
+            E2E,
+            "authority-environment-decision",
         );
         // The first run's key from another connection: that holder does not
         // hold the session, and nothing is decided for it.
@@ -1418,7 +1615,12 @@ reason = "NO_MATCHING_RULE"
             ),
         );
         assert_eq!(refusal(&c.call(&stolen).body), "STALE_EPOCH");
-        evidence("public-exec-key-from-another-holder-fenced", "STALE_EPOCH");
+        evidence(
+            "public-exec-key-from-another-holder-fenced",
+            "STALE_EPOCH",
+            E2E,
+            "authority-lease-fence",
+        );
         let long = a.answer(Duration::from_secs(120));
         let ended = sandboxed(&long);
         assert_eq!(
@@ -1432,6 +1634,8 @@ reason = "NO_MATCHING_RULE"
         evidence(
             "public-exec-long-workload-timed-out-and-reaped",
             "timed-out",
+            E2E,
+            "broker-wall-clock",
         );
 
         // A key names one invocation, whatever tool asks and whenever.
@@ -1450,10 +1654,17 @@ reason = "NO_MATCHING_RULE"
         );
         assert_eq!(rows(&lab, "SELECT count(*) FROM workload"), before);
         assert!(!lab.workspace.join("again").exists());
-        evidence("public-exec-key-never-runs-twice", "IDEMPOTENCY_KEY_REUSED");
+        evidence(
+            "public-exec-key-never-runs-twice",
+            "IDEMPOTENCY_KEY_REUSED",
+            E2E,
+            "authority-idempotency",
+        );
         evidence(
             "public-exec-cross-tool-key-refused",
             "IDEMPOTENCY_KEY_REUSED",
+            E2E,
+            "authority-idempotency",
         );
 
         // Nothing a request can say moves it or reaches the lifecycle: a field
@@ -1494,8 +1705,15 @@ reason = "NO_MATCHING_RULE"
         evidence(
             "public-exec-smuggled-environment-refused",
             "SCHEMA_VIOLATION",
+            E2E,
+            "dwkp-schema",
         );
-        evidence("public-no-lifecycle-operation", "UNKNOWN_OPERATION");
+        evidence(
+            "public-no-lifecycle-operation",
+            "UNKNOWN_OPERATION",
+            E2E,
+            "dwkp-schema",
+        );
 
         // An environment whose destruction is still pending is destroyed
         // before the authority next prepares one (ADR-0052 §2a). Since the
@@ -1551,6 +1769,8 @@ reason = "NO_MATCHING_RULE"
         evidence(
             "public-exec-ended-runs-environment-reclaimed",
             "container-removed",
+            E2E,
+            "authority-reclamation",
         );
         served.stop();
     }
@@ -1586,7 +1806,12 @@ reason = "NO_MATCHING_RULE"
         assert_eq!(failure.reason.as_str(), "OUTCOME_UNKNOWN");
         assert_eq!(failure.environment_destroyed, Some(true));
         assert_eq!(failure.environment_id.as_ref(), Some(&environment));
-        evidence("public-exec-unknown-outcome-reported", "OUTCOME_UNKNOWN");
+        evidence(
+            "public-exec-unknown-outcome-reported",
+            "OUTCOME_UNKNOWN",
+            E2E,
+            "authority-ledger",
+        );
         // The workload outlived its broker; the destruction is durable and
         // completes when a broker answers again.
         assert!(lab.runtime.exists(&container));
@@ -1599,6 +1824,8 @@ reason = "NO_MATCHING_RULE"
         evidence(
             "public-exec-unknown-destroys-environment",
             "container-removed",
+            E2E,
+            "authority-reconciliation",
         );
         served.stop();
     }
@@ -1635,11 +1862,18 @@ reason = "NO_MATCHING_RULE"
         evidence(
             "od9-concrete-grant-runs-the-manifests-executable",
             "image-bytes",
+            E2E,
+            "authority-image-manifest",
         );
         // The grant covers that executable only.
         let body = a.exec("o-2", &call(FIXTURE, &["workload-identity"]));
         assert_eq!(plan_action(&body).decision.reason.as_str(), "NO_CAPABILITY");
-        evidence("od9-concrete-grant-covers-nothing-else", "NO_CAPABILITY");
+        evidence(
+            "od9-concrete-grant-covers-nothing-else",
+            "NO_CAPABILITY",
+            E2E,
+            "authority-capability",
+        );
         served.stop();
 
         // Admitted before any environment was configured: the same grant
@@ -1693,6 +1927,8 @@ reason = "NO_MATCHING_RULE"
         evidence(
             "od9-host-resolved-grant-covers-no-image-executable",
             "NO_CAPABILITY",
+            OCI,
+            "authority-capability",
         );
     }
 
@@ -1720,7 +1956,12 @@ reason = "NO_MATCHING_RULE"
         let body = a.exec("b-2", &call(FIXTURE, &["mark", "/workspace/over"]));
         assert_eq!(refusal(&body), "BUDGET_EXHAUSTED");
         assert!(!lab.workspace.join("over").exists());
-        evidence("public-exec-budget-exhausted-refused", "BUDGET_EXHAUSTED");
+        evidence(
+            "public-exec-budget-exhausted-refused",
+            "BUDGET_EXHAUSTED",
+            E2E,
+            "authority-run-budget",
+        );
         served.stop();
 
         // A manifest that pins other bytes than the image holds: the broker
@@ -1756,6 +1997,8 @@ reason = "NO_MATCHING_RULE"
         evidence(
             "public-exec-unpinned-image-bytes-refused",
             "EXECUTABLE_CHANGED",
+            E2E,
+            "executable-digest-pin",
         );
         served.stop();
     }
@@ -1808,7 +2051,12 @@ reason = "NO_MATCHING_RULE"
                 Some(0),
                 "{pack}"
             );
-            evidence(&format!("shipped-{pack}-git-runs-with-hygiene"), "HYGIENE");
+            evidence(
+                &format!("shipped-{pack}-git-runs-with-hygiene"),
+                "HYGIENE",
+                E2E,
+                "hygiene-launcher",
+            );
             let body = a.exec("g-3", &call("/usr/local/bin/pytest", &["--version"]));
             let out = sandboxed(&body);
             assert_eq!(out.exit_code.map(|c| c.get()), Some(0), "{pack}: {out:?}");
@@ -1820,6 +2068,8 @@ reason = "NO_MATCHING_RULE"
             evidence(
                 &format!("shipped-{pack}-pytest-runs-with-its-cache-off"),
                 "HYGIENE",
+                E2E,
+                "hygiene-launcher",
             );
             // Undone by its own arguments, or a tool with no evidence yet:
             // denied, and nothing runs.
@@ -1846,6 +2096,8 @@ reason = "NO_MATCHING_RULE"
             evidence(
                 &format!("shipped-{pack}-hygiene-undone-or-unevidenced-denied"),
                 "OBLIGATION_UNENFORCEABLE",
+                E2E,
+                "authority-obligation",
             );
             served.stop();
         }
@@ -1928,6 +2180,8 @@ reason = "NO_MATCHING_RULE"
         evidence(
             "production-serve-attaches-the-operators-environment",
             "attached",
+            E2E,
+            "authority-environment-decision",
         );
         let bind = |_: dwk_proto::wire::id::SessionId| {};
         let mut a = Peer::admit(&socket, 1, &["process.exec:*"], bind);
@@ -1944,7 +2198,12 @@ reason = "NO_MATCHING_RULE"
             )
             .unwrap();
         lab.reap_later(&container);
-        evidence("production-serve-prepares-and-runs", "completed-as-10001");
+        evidence(
+            "production-serve-prepares-and-runs",
+            "completed-as-10001",
+            E2E,
+            "authority-route",
+        );
 
         // W9 through the released binary: killed while the broker runs it.
         a.send_exec("s-2", &call(FIXTURE, &["workload-sleep", "300"]));
@@ -1976,6 +2235,8 @@ reason = "NO_MATCHING_RULE"
         evidence(
             "production-crash-mid-workload-unknown-destroyed",
             "unknown-destroyed",
+            E2E,
+            "authority-reconciliation",
         );
         let mut b = Peer::admit(&socket, 1, &["process.exec:*"], bind);
         let body = b.exec("s-2", &call(FIXTURE, &["mark", "/workspace/rerun"]));
@@ -1984,6 +2245,8 @@ reason = "NO_MATCHING_RULE"
         evidence(
             "production-replay-after-restart-refused",
             "IDEMPOTENCY_KEY_REUSED",
+            E2E,
+            "authority-idempotency",
         );
     }
 
@@ -2025,10 +2288,14 @@ reason = "NO_MATCHING_RULE"
         /// made -- accept.
         const FULL_WRITE_BYTES: usize = 65_536;
 
-        fn evidence(case: &str, outcome: &str) {
-            println!(
-                "SANDBOX-EVIDENCE {{\"suite\":\"{WORKSPACE_SUITE}\",\"case\":\"{case}\",\"outcome\":\"{outcome}\"}}"
-            );
+        /// What a line is (M5e.1): `OCI` and `E2E` as the workloads' are --
+        /// and, where it says `PRIV`, on a workspace only an
+        /// operator-provisioned host has, which only
+        /// `DW_WORKSPACE_PRIVILEGED=1` provisions.
+        const PRIV: &str = "privileged-oci";
+
+        fn evidence(case: &str, outcome: &str, level: &str, enforcement: &str) {
+            evidence_line(WORKSPACE_SUITE, case, outcome, level, enforcement);
         }
 
         /// The evidence policy, with the workspace's reads and brokered
@@ -2382,6 +2649,8 @@ reason = "NO_MATCHING_RULE"
             evidence(
                 "authority-unprovisioned-workspace-refused-before-the-broker",
                 reason,
+                OCI,
+                "authority-workspace-contract",
             );
             // Nothing can run where no environment could be prepared.
             let reply = lab
@@ -2393,6 +2662,8 @@ reason = "NO_MATCHING_RULE"
             evidence(
                 "authority-unprovisioned-workspace-runs-nothing",
                 "NO_ENVIRONMENT",
+                OCI,
+                "authority-environment-decision",
             );
         }
 
@@ -2445,6 +2716,8 @@ reason = "NO_MATCHING_RULE"
             evidence(
                 "production-serve-unprovisioned-workspace-refused",
                 "ENVIRONMENT_UNAVAILABLE",
+                E2E,
+                "authority-workspace-contract",
             );
             server.kill();
         }
@@ -2528,7 +2801,12 @@ reason = "NO_MATCHING_RULE"
                 (host.uid(), host.gid(), host.mode() & 0o7777),
                 (10_001, 10_001, 0o660)
             );
-            evidence("umask-0007-through-the-direct-launcher", "file-660-dir-770");
+            evidence(
+                "umask-0007-through-the-direct-launcher",
+                "file-660-dir-770",
+                OCI,
+                "direct-launcher",
+            );
             // /tmp and /var/tmp are the environment's own, never the
             // workspace: nothing leaves it by name, and / is read-only.
             let text = ran(&mut lab, &run, &["workload-mounts"], "m-2");
@@ -2541,7 +2819,12 @@ reason = "NO_MATCHING_RULE"
                 assert_eq!(field(&text, key), "18", "EXDEV {key}: {text}");
             }
             assert!(lab.workspace.join("made.file").exists());
-            evidence("workspace-tmp-var-tmp-distinct", "exdev-erofs");
+            evidence(
+                "workspace-tmp-var-tmp-distinct",
+                "exdev-erofs",
+                OCI,
+                "mount-namespace",
+            );
             let _ = container;
         }
 
@@ -2618,7 +2901,12 @@ reason = "NO_MATCHING_RULE"
                 .collect();
             assert_eq!(excluded.len(), 1, "{failed:?}");
             assert!(debris(&workspace).is_empty());
-            evidence("exclusion-while-a-workload-runs", "SHARED_DIRECTORY");
+            evidence(
+                "exclusion-while-a-workload-runs",
+                "SHARED_DIRECTORY",
+                E2E,
+                "authority-workspace-exclusion",
+            );
             // Ended, and proved quiet by `reap`: the change is made.
             let answer = a.answer(Duration::from_secs(120));
             assert!(matches!(answer, DwkpBody::ToolResultV5(_)), "{answer:?}");
@@ -2639,7 +2927,12 @@ reason = "NO_MATCHING_RULE"
                 states(&state, "SELECT run_id || ':' || state FROM environment"),
             );
             assert_eq!(std::fs::read(workspace.join("after")).unwrap(), b"y");
-            evidence("exclusion-lifted-when-the-workload-ended", "written");
+            evidence(
+                "exclusion-lifted-when-the-workload-ended",
+                "written",
+                E2E,
+                "authority-workspace-exclusion",
+            );
             served.stop();
         }
 
@@ -2672,8 +2965,18 @@ reason = "NO_MATCHING_RULE"
             ] {
                 assert_eq!(verdict(&report, invariant), Verdict::Pass, "{invariant:?}");
             }
-            evidence("bounded-tmpfs-accepted", "ready");
-            evidence("host-and-container-identity-agree", "pass");
+            evidence(
+                "bounded-tmpfs-accepted",
+                "ready",
+                PRIV,
+                "workspace-contract-measured",
+            );
+            evidence(
+                "host-and-container-identity-agree",
+                "pass",
+                PRIV,
+                "workspace-contract-measured",
+            );
             // The workload makes; the broker reads.
             let text = ran(&mut lab, &l.run, &["workload-make", "w"], "s-1");
             assert_eq!(field(&text, "file_mode"), "660", "{text}");
@@ -2689,7 +2992,12 @@ reason = "NO_MATCHING_RULE"
             assert_eq!(field(&text, "modified"), "17", "{text}");
             let reply = tool(&mut lab, &l, &read("/workspace/w.file"), "r-1");
             assert_eq!(read_back(&reply), b"from-the-workload");
-            evidence("workload-makes-broker-reads", "read");
+            evidence(
+                "workload-makes-broker-reads",
+                "read",
+                PRIV,
+                "workspace-group-10001",
+            );
             // The broker makes; the workload changes it in place.
             written(&tool(
                 &mut lab,
@@ -2708,7 +3016,12 @@ reason = "NO_MATCHING_RULE"
             assert_eq!(field(&text, "modified"), "8", "{text}");
             let reply = tool(&mut lab, &l, &read("/workspace/b.txt"), "r-2");
             assert_eq!(read_back(&reply), b"from-the-broker+changed");
-            evidence("broker-makes-workload-modifies", "modified");
+            evidence(
+                "broker-makes-workload-modifies",
+                "modified",
+                PRIV,
+                "workspace-group-10001",
+            );
             // The broker replaces what the workload made, keeping its mode
             // and group, and the workload reads the replacement.
             written(&tool(
@@ -2724,7 +3037,12 @@ reason = "NO_MATCHING_RULE"
                 "s-4",
             );
             assert_eq!(field(&text, "content"), hex(b"replaced"), "{text}");
-            evidence("broker-replaces-workload-reads", "replaced");
+            evidence(
+                "broker-replaces-workload-reads",
+                "replaced",
+                PRIV,
+                "workspace-group-10001",
+            );
             // Nobody outside the group: not to write, not to read.
             let denied = sudo(&[
                 "-u",
@@ -2742,7 +3060,12 @@ reason = "NO_MATCHING_RULE"
             ]);
             assert!(!denied.status.success());
             assert!(denied.stdout.is_empty());
-            evidence("another-identity-cannot-write-or-read", "denied");
+            evidence(
+                "another-identity-cannot-write-or-read",
+                "denied",
+                PRIV,
+                "workspace-root-2770",
+            );
         }
 
         #[test]
@@ -2813,7 +3136,9 @@ reason = "NO_MATCHING_RULE"
                     "{case}"
                 );
                 assert_eq!(containers(&lab.runtime), before, "{case}: no container");
-                evidence(case, expected);
+                // No container was made: the authority's own check of the
+                // root it pinned refused it.
+                evidence(case, expected, PRIV, "authority-workspace-contract");
                 restore();
             }
             // An authority bounded at twice the filesystem: refused too.
@@ -2832,7 +3157,12 @@ reason = "NO_MATCHING_RULE"
                 panic!("not refused: {reply:?}")
             };
             assert_eq!(reason, "WORKSPACE_QUOTA_MISMATCH");
-            evidence("quota-mismatch-refused", reason);
+            evidence(
+                "quota-mismatch-refused",
+                reason,
+                PRIV,
+                "authority-workspace-contract",
+            );
             // A root provisioned as the contract says, on the host's own
             // filesystem: bounded by nothing of its own.
             let mut lab = Lab::provisioned(
@@ -2851,7 +3181,12 @@ reason = "NO_MATCHING_RULE"
             };
             assert_eq!(reason, "WORKSPACE_UNBOUNDED");
             assert_eq!(containers(&lab.runtime), before);
-            evidence("unbounded-host-directory-refused", reason);
+            evidence(
+                "unbounded-host-directory-refused",
+                reason,
+                PRIV,
+                "authority-workspace-contract",
+            );
             // A directory inside a bounded filesystem, provisioned as a root
             // is: the authority's own count is the filesystem's and within
             // the quota, but the mount is not the filesystem's root -- two
@@ -2885,7 +3220,12 @@ reason = "NO_MATCHING_RULE"
                 before,
                 "its container was removed"
             );
-            evidence("subdirectory-of-a-bounded-filesystem-refused", reason);
+            evidence(
+                "subdirectory-of-a-bounded-filesystem-refused",
+                reason,
+                PRIV,
+                "workspace-contract-measured",
+            );
         }
 
         #[test]
@@ -2926,7 +3266,12 @@ reason = "NO_MATCHING_RULE"
             assert_eq!(lab.state_of(&environment), EnvironmentState::Destroyed);
             assert!(!lab.runtime.exists(&container));
             assert!(!p.tmpfs.join("grown").exists());
-            evidence("capacity-drift-destroys-before-the-workload", reason);
+            evidence(
+                "capacity-drift-destroys-before-the-workload",
+                reason,
+                PRIV,
+                "authority-workspace-contract",
+            );
             // Another filesystem mounted over the root: the path names
             // another directory.
             let run = lab.operator_run();
@@ -2959,7 +3304,12 @@ reason = "NO_MATCHING_RULE"
             assert_eq!(lab.state_of(&environment), EnvironmentState::Destroyed);
             assert!(!lab.runtime.exists(&container));
             assert!(!p.tmpfs.join("substituted").exists());
-            evidence("mount-substitution-destroys-before-the-workload", reason);
+            evidence(
+                "mount-substitution-destroys-before-the-workload",
+                reason,
+                PRIV,
+                "authority-workspace-contract",
+            );
         }
 
         #[test]
@@ -2983,7 +3333,12 @@ reason = "NO_MATCHING_RULE"
                 panic!("not ready: {reply:?}")
             };
             lab.reap_later(report.container.as_ref().unwrap().as_str());
-            evidence("bounded-ext4-accepted", "ready");
+            evidence(
+                "bounded-ext4-accepted",
+                "ready",
+                PRIV,
+                "workspace-contract-measured",
+            );
             let second_before = available(&p.second);
             // The workload writes until the filesystem says no -- and on,
             // until not one more block fits. Its first `ENOSPC` is not a full
@@ -3023,6 +3378,8 @@ reason = "NO_MATCHING_RULE"
             evidence(
                 "workload-fills-to-enospc",
                 &format!("ENOSPC-exhausted-{left}-bytes-available"),
+                PRIV,
+                "filesystem-quota",
             );
             // The broker's change fails for want of room, with nothing
             // changed and nothing left behind.
@@ -3054,7 +3411,12 @@ reason = "NO_MATCHING_RULE"
                     .collect();
             assert_eq!(refusals, ["NO_SPACE"]);
             assert_eq!(std::fs::metadata(p.ext4.join("big")).unwrap().len(), filled);
-            evidence("full-workspace-write-fails-unchanged", "NO_SPACE");
+            evidence(
+                "full-workspace-write-fails-unchanged",
+                "NO_SPACE",
+                PRIV,
+                "filesystem-quota",
+            );
             // Another workspace is its own filesystem: untouched, and usable.
             assert_eq!(available(&p.second), second_before, "no space was borrowed");
             written(&tool(
@@ -3067,7 +3429,12 @@ reason = "NO_MATCHING_RULE"
                 std::fs::read(p.second.join("elsewhere.txt")).unwrap(),
                 b"fine"
             );
-            evidence("other-workspace-unaffected", "written");
+            evidence(
+                "other-workspace-unaffected",
+                "written",
+                PRIV,
+                "filesystem-quota",
+            );
             // Room made, the change is made.
             let text = ran(
                 &mut lab,
@@ -3085,7 +3452,12 @@ reason = "NO_MATCHING_RULE"
                 "w-3",
             ));
             assert_eq!(std::fs::read(p.ext4.join("late.txt")).unwrap(), late);
-            evidence("space-recovered-after-removal", "written");
+            evidence(
+                "space-recovered-after-removal",
+                "written",
+                PRIV,
+                "filesystem-quota",
+            );
             // A new incarnation on the same files: the store and its audit
             // chain are whole.
             lab.start(None);
@@ -3093,7 +3465,12 @@ reason = "NO_MATCHING_RULE"
                 .query_row("PRAGMA integrity_check", [], |row| row.get(0))
                 .unwrap();
             assert_eq!(ok, "ok");
-            evidence("durability-valid-after-a-full-workspace", "integrity-ok");
+            evidence(
+                "durability-valid-after-a-full-workspace",
+                "integrity-ok",
+                PRIV,
+                "authority-ledger",
+            );
         }
 
         #[test]
@@ -3140,7 +3517,12 @@ reason = "NO_MATCHING_RULE"
                 .unwrap();
             lab.reap_later(&container);
             assert!(p.tmpfs.join("served.file").exists());
-            evidence("production-serve-bounded-workspace", "completed");
+            evidence(
+                "production-serve-bounded-workspace",
+                "completed",
+                PRIV,
+                "workspace-contract-measured",
+            );
             server.kill();
         }
     }
