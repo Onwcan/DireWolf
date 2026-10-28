@@ -450,12 +450,38 @@ mod linux {
         OwnedFd::from(reader)
     }
 
-    /// A loopback port nothing listens on: bound, read, released.
-    fn closed_port() -> u16 {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
-        drop(listener);
-        port
+    /// A loopback port nothing listens on for as long as this is held: a
+    /// socket bound to it that never listens, close-on-exec so the broker
+    /// does not inherit it. A connection to it is refused; no listener can
+    /// take the port, and no outgoing connection takes it as its own. A port
+    /// bound, read and released could be taken by any listener before the
+    /// broker dials it -- the exchange would then end at that listener's TLS,
+    /// not at the refused connection the evidence states (as the authority's
+    /// mode A evidence did in CI run 40583703968).
+    struct ClosedPort {
+        _held: OwnedFd,
+        port: u16,
+    }
+
+    fn closed_port() -> ClosedPort {
+        use rustix::net::{AddressFamily, SocketFlags, SocketType, bind, getsockname, socket_with};
+        let held = socket_with(
+            AddressFamily::INET,
+            SocketType::STREAM,
+            SocketFlags::CLOEXEC,
+            None,
+        )
+        .unwrap();
+        bind(
+            &held,
+            &std::net::SocketAddrV4::new(std::net::Ipv4Addr::LOCALHOST, 0),
+        )
+        .unwrap();
+        let bound = std::net::SocketAddrV4::try_from(getsockname(&held).unwrap()).unwrap();
+        ClosedPort {
+            _held: held,
+            port: bound.port(),
+        }
     }
 
     /// A broker whose guard lets loopback through — the `net.http`
@@ -611,7 +637,8 @@ mod linux {
         let scratch = Scratch::new("egress");
         let broker = credential_broker(&scratch, None);
         let socket = scratch.socket();
-        let port = closed_port();
+        let closed = closed_port();
+        let port = closed.port;
         let value = fresh_value();
         let baseline = broker.open_fds();
 
@@ -690,7 +717,8 @@ mod linux {
         let scratch = Scratch::new("egress-hostile");
         let broker = credential_broker(&scratch, None);
         let socket = scratch.socket();
-        let port = closed_port();
+        let closed = closed_port();
+        let port = closed.port;
         let value = fresh_value();
         let dir = OwnedFd::from(std::fs::File::open(&scratch.0).unwrap());
         let file_path = scratch.0.join("plain");
@@ -844,8 +872,9 @@ mod linux {
         let mut broker = credential_broker(&scratch, Some("http_credential_after_read"));
         let value = fresh_value();
         let secret = one_shot(&value);
+        let closed = closed_port();
         assert!(
-            render(&scratch.socket(), closed_port(), &[secret.as_fd()]).is_none(),
+            render(&scratch.socket(), closed.port, &[secret.as_fd()]).is_none(),
             "no outcome"
         );
         let deadline = Instant::now() + PROMPT;

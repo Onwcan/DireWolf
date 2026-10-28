@@ -898,10 +898,10 @@ M4E:DONE"
         let dir = super::state_support::TempDir::new("m4e-host");
         let pki = super::net_support::pki(dir.path());
         let origin = super::net_support::Origin::start(&pki, "origin");
-        let closed = {
-            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-            listener.local_addr().unwrap().port()
-        };
+        // Held for the whole test: a released port is anyone's to listen on
+        // before the second use reaches it.
+        let closed_port = super::net_support::ClosedPort::new();
+        let closed = closed_port.port;
         let fixture = super::net_support::fixture(
             dir.path(),
             "resolve origin.test 127.0.0.1\nresolve closed.test 127.0.0.1\nallow 127.0.0.1\n",
@@ -988,6 +988,43 @@ M4E:DONE"
         evidence("mode-a-durable-state-scan", "zero-matches");
     }
 
+    /// What mode A's `CONNECT_FAILED` stands on (CI run 40583703968): a port
+    /// held bound and never listening refuses every connection, and no
+    /// listener -- on its address or on the wildcard -- can take it. A port
+    /// bound, read and released, as the test above once used, is free for the
+    /// next listener that asks, and a connection then reaches that listener:
+    /// another test's origin, whose certificate the broker refuses as
+    /// `TLS_FAILED`.
+    #[test]
+    fn a_held_closed_port_is_refused_and_cannot_be_taken_a_released_one_can() {
+        use std::io::ErrorKind;
+        use std::net::{TcpListener, TcpStream};
+
+        let held = super::net_support::ClosedPort::new();
+        for address in ["127.0.0.1", "0.0.0.0"] {
+            let taken = TcpListener::bind((address, held.port));
+            assert_eq!(
+                taken.map(|_| ()).map_err(|e| e.kind()),
+                Err(ErrorKind::AddrInUse),
+                "a listener on {address} took the held port"
+            );
+        }
+        let reached = TcpStream::connect(("127.0.0.1", held.port));
+        assert_eq!(
+            reached.map(|_| ()).map_err(|e| e.kind()),
+            Err(ErrorKind::ConnectionRefused)
+        );
+        // The released port: taken by the next listener, and reached.
+        let released = {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.local_addr().unwrap().port()
+        };
+        let squatter = TcpListener::bind(("127.0.0.1", released)).unwrap();
+        let reached = TcpStream::connect(("127.0.0.1", released));
+        assert!(reached.is_ok(), "{reached:?}");
+        drop(squatter);
+    }
+
     /// The two evidence cases of one way an echo comes back, spelled whole so
     /// that `scripts/dw.py`'s case list is checked against this source: what
     /// DireWolf holds (asserted), and what the broker's libraries leave
@@ -1067,10 +1104,9 @@ M4E:DONE"
         let dir = super::state_support::TempDir::new("m4e-echo");
         let pki = super::net_support::pki(dir.path());
         let origin = super::net_support::Origin::start(&pki, "origin");
-        let closed = {
-            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-            listener.local_addr().unwrap().port()
-        };
+        // Held, as mode A's own test holds it: a released port is anyone's.
+        let closed_port = super::net_support::ClosedPort::new();
+        let closed = closed_port.port;
         // "Bearer " and 30 bytes of the value inside a 1 KiB bound, 10 past it.
         let paths: [(&str, &str, Option<u32>); 9] = [
             ("body", "/echo-auth?where=body", None),

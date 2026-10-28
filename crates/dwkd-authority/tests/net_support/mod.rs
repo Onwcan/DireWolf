@@ -201,3 +201,42 @@ pub(crate) fn fixture(dir: &Path, text: &str) -> PathBuf {
     std::fs::write(&path, text).unwrap();
     path
 }
+
+/// A loopback TCP port nothing listens on for as long as this is held: a
+/// socket bound to it that never listens, close-on-exec so no child -- the
+/// broker included -- inherits it. A connection to it is refused by the
+/// kernel; no other socket can bind the port, `bind(0)` never hands it out,
+/// and no outgoing connection takes it as its own, so none can connect to
+/// itself there either.
+///
+/// A port bound, read and released is none of that: until it is named,
+/// anything can listen on it -- another test's origin among them, whose
+/// certificate the broker then refuses, `TLS_FAILED` where the evidence
+/// says `CONNECT_FAILED` (CI run 40583703968).
+pub(crate) struct ClosedPort {
+    _held: std::os::fd::OwnedFd,
+    pub(crate) port: u16,
+}
+
+impl ClosedPort {
+    pub(crate) fn new() -> Self {
+        use rustix::net::{AddressFamily, SocketFlags, SocketType, bind, getsockname, socket_with};
+        let held = socket_with(
+            AddressFamily::INET,
+            SocketType::STREAM,
+            SocketFlags::CLOEXEC,
+            None,
+        )
+        .unwrap();
+        bind(
+            &held,
+            &std::net::SocketAddrV4::new(std::net::Ipv4Addr::LOCALHOST, 0),
+        )
+        .unwrap();
+        let bound = std::net::SocketAddrV4::try_from(getsockname(&held).unwrap()).unwrap();
+        Self {
+            _held: held,
+            port: bound.port(),
+        }
+    }
+}
