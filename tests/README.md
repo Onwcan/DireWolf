@@ -283,6 +283,27 @@ suites' sources, without a runtime, and shows the gate refusing each kind of
 misleading line with synthetic lines -- which test the gate only, never
 containment.
 
+**The closure (M5e.2)** ([the M5e plan](../docs/M5E_ASSURANCE_PLAN.md) §3).
+`sandbox-foundation-evidence` also runs one broker unit test,
+`sandbox::inspect::tests::every_hard_rule_is_refused_in_proxy_only_and_host_uts_in_both_topologies`:
+the broker's own host judgement and decision given a conforming runtime record
+for each topology, then one with a single hard rule weakened, each time --
+the 17 lines it prints are `ASSURANCE-EVIDENCE`, suite `broker-assurance`,
+level `in-process`, so none can stand in for an environment's measurement.
+`sandbox-workload-evidence` adds `mod closure` to the broker's workload suite:
+two environments side by side on the real runtime (suite `sandbox-closure`,
+level `real-oci`) -- a run sees none of the other's processes (`pid-namespace`),
+cannot name its environment, destroying it spares the other, and the next
+environment holds nothing of the last. The same module keeps R8's neighbour
+test, `a_neighbour_at_its_task_bound_leaves_another_environment_and_the_broker_serving`,
+which **fails today** (finding F-R8: every environment's uid 10001 shares one
+`RLIMIT_NPROC` count); it is required by no task and prints no evidence line,
+and `test_m5e_attribution.py` holds it so. `sandbox-fixture`'s
+`workload-hold-tasks <count> <seconds> <marker>` is its pressure: sleeping
+threads until the count or a refusal, the marker written, the bound held for
+the seconds it was given within the workload's wall clock -- never more than
+one uid's limit.
+
 **Sandbox agent tests (M5d.5)** are the evidence behind
 `make sandbox-agent-evidence` (ADR-0052 §§11, 13, 17;
 [the M5d.5 handoff](../docs/M5D5_IMPLEMENTATION_HANDOFF.md)):

@@ -100,13 +100,13 @@ process-broker-evidence: ## M4d process execution: re-proof, races, output, kill
 secret-broker-evidence: ## M4e secrets: backends, mode A, the injection primitive, redaction, residue, crashes; three identities need DW_BROKER_AS, DW_PEER_AS, core contract DW_M4E_CORE_EVIDENCE=1
 	@$(DW) secret-broker-evidence
 
-sandbox-foundation-evidence: ## M5a real OCI containers: strict profile measured, weakened profiles, probe tamper, lifecycle, foreign safety
+sandbox-foundation-evidence: ## M5a real OCI containers: strict profile measured, weakened profiles, probe tamper, lifecycle, foreign safety; M5e.2 every hard rule judged in process, PROXY_ONLY included
 	@$(DW) sandbox-foundation-evidence
 
 sandbox-egress-evidence: ## M5b PROXY_ONLY on real OCI containers: relay, CONNECT proxy, guard, pinning, SNI, budgets, bypasses, weakened topologies
 	@$(DW) sandbox-egress-evidence
 
-sandbox-workload-evidence: ## M5d.1-M5d.2 workloads in real OCI environments: identity, bounds, wall clock, process trees ended, digests, drift, escapes, an agent-shaped workload, the authority's gates, ledger and crash windows; the public process.exec over real DWKP, serve --sandbox-config, the hygiene launcher with real git/Python/pytest
+sandbox-workload-evidence: ## M5d.1-M5d.2 workloads in real OCI environments: identity, bounds, wall clock, process trees ended, digests, drift, escapes, an agent-shaped workload, the authority's gates, ledger and crash windows; the public process.exec over real DWKP, serve --sandbox-config, the hygiene launcher with real git/Python/pytest; M5e.2 cross-run isolation
 	@$(DW) sandbox-workload-evidence
 
 sandbox-workload-mutations: ## M5d.1-M5d.2 mutation review: each workload guard weakened in turn must fail a unit suite or sandbox-workload-evidence (slow)

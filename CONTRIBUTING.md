@@ -53,7 +53,7 @@ Windows does and does not give you.
 | | |
 |---|---|
 | `make dev` | Set up or verify a development checkout |
-| `make check` | Everything CI runs |
+| `make check` | The core gates CI runs on every platform: format, lint, types, boundaries, schemas, tests, evals and dependencies. Not the evidence campaigns below: CI runs every one but `capability-evidence` and `authority-state-evidence` as a Linux job of its own |
 | `make fmt` | Format Rust and Python in place |
 | `make lint` | `clippy -D warnings`, `ruff check` |
 | `make typecheck` | `mypy --strict` |
@@ -65,6 +65,7 @@ Windows does and does not give you.
 | `make capability-evidence` | The 10⁶ delegation-chain capability campaign ([CAPABILITIES.md](docs/CAPABILITIES.md) §3). Not part of `make check`: it is evidence, produced deliberately, and the fast suite runs a thousand chains to keep it working between runs. `DW_EVIDENCE_SEED` replays a run; `DW_EVIDENCE_CHAINS` shortens one while debugging |
 | `make broker-fs-read-evidence` | M4b's brokered `fs.read` evidence (Linux): the released authority and broker end to end, the crash-point sweep, hostile brokers and hostile authority-side peers on the real private channel, the cross-process TOCTOU campaign — and, with `DW_BROKER_AS` and `DW_PEER_AS`, three real identities ([ADR-0043](docs/adr/0043-m4b-private-broker-channel-and-brokered-fs-read.md)). NOT EXERCISED, and failing, without both |
 | `make filesystem-canonicalization-evidence` | M4a's real-filesystem resolver evidence (Linux): symlinks, magic links, mounts, hard links, Unicode twins, a replaced root and the TOCTOU race campaigns ([ADR-0042](docs/adr/0042-m4a-canonical-filesystem-resolution.md) §14). Fails on a missing category, an escape, or a case left unexercised that the machine could exercise |
+| `make sandbox-foundation-evidence` and the other `sandbox-*-evidence`, `net-http-evidence`, `d11-hardening-evidence` | M5's evidence campaigns (Linux; the sandbox ones need a Docker-compatible runtime): every line names its level and the mechanism that enforced it ([SANDBOX.md](docs/SANDBOX.md) §6a), and a task fails on a case missing, NOT EXERCISED or attributed otherwise. The root, dedicated-filesystem and three-identity halves run on the hosted runner; on a workstation they are NOT EXERCISED, and the task fails. `make help` lists each, with its `…-mutations` review |
 | `make schema` | Regenerate `schemas/`, `docs/DWKP_OPERATIONS.md` and the Python bindings from `dwk-proto` |
 | `make schema-check` | Fail if any of those is stale or hand-edited (part of `make check`) |
 | `make fuzz-smoke` | Type-check the cargo-fuzz targets; stable mutation fuzzing (`DWK_FUZZ_SECONDS`) |

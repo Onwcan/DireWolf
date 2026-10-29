@@ -542,6 +542,256 @@ fn proxy_variables_are_exactly_the_broker_s_or_none() {
     );
 }
 
+// ---- M5e.2: every hard rule refused in PROXY_ONLY too (R2, R3) -------------
+
+/// One line of M5e.2's in-process assurance evidence for `make
+/// sandbox-foundation-evidence`: the production host judgement and the
+/// production decision (`oci::clean`) in this process, never a container --
+/// `in-process`, so it is never offered as an environment's measurement.
+fn assurance_evidence(case: &str, outcome: &str, enforcement: &str) {
+    use dwk_proto::json::to_canonical_string;
+    let mut fields = Object::new();
+    for (key, value) in [
+        ("suite", "broker-assurance"),
+        ("case", case),
+        ("outcome", outcome),
+        ("level", "in-process"),
+        ("enforcement", enforcement),
+    ] {
+        fields
+            .insert(key.to_owned(), Value::String(value.to_owned()))
+            .unwrap();
+    }
+    println!(
+        "ASSURANCE-EVIDENCE {}",
+        to_canonical_string(&Value::Object(fields))
+    );
+}
+
+/// A conforming record for `network`: `PROXY_ONLY`'s carries exactly the
+/// broker's proxy variables, as the broker launches it.
+fn conforming_for(network: NetworkTopology) -> Object {
+    let object = record(&conforming());
+    if network != NetworkTopology::ProxyOnly {
+        return object;
+    }
+    let mut with: Vec<&str> = vec!["PATH=/usr/bin"];
+    with.extend(BROKER_VARIABLES);
+    replace(object, &["Config", "Env"], env_list(&with))
+}
+
+/// Every invariant `spec` requires, the host's as `object` is judged and
+/// every other one passing: what the broker's decision sees when the record
+/// is the only thing wrong.
+fn all_checks(object: &Object, spec: &EnvironmentSpec) -> super::super::Checks {
+    let judged = Record::new(object).judge(spec, PROFILE, SOCKET);
+    dwk_proto::brokerp::sandbox::required_invariants(
+        spec.network,
+        super::super::oci::contract(spec),
+    )
+    .into_iter()
+    .map(|invariant| {
+        let verdict = judged
+            .iter()
+            .find(|(i, _)| *i == invariant)
+            .map_or(Verdict::Pass, |(_, v)| *v);
+        (invariant, verdict)
+    })
+    .collect()
+}
+
+/// The host invariants whose verdict `weakened` changes from `base`.
+fn changed(base: &Object, weakened: &Object, spec: &EnvironmentSpec) -> Vec<SandboxInvariant> {
+    Record::new(weakened)
+        .judge(spec, PROFILE, SOCKET)
+        .into_iter()
+        .zip(Record::new(base).judge(spec, PROFILE, SOCKET))
+        .filter(|(after, before)| after != before)
+        .map(|(after, _)| after.0)
+        .collect()
+}
+
+/// One case: its name, the topology it is judged under, the record's field
+/// and the nonconforming value put there, and the invariants that must fail.
+type Nonconforming<'a> = (
+    &'a str,
+    NetworkTopology,
+    &'a [&'a str],
+    Value,
+    &'a [SandboxInvariant],
+);
+
+#[test]
+fn every_hard_rule_is_refused_in_proxy_only_and_host_uts_in_both_topologies() {
+    use SandboxInvariant as I;
+    // The conforming record, judged by the production decision: kept.
+    for (case, network) in [
+        ("no-network-conforming-kept", NetworkTopology::NoNetwork),
+        ("proxy-only-conforming-kept", NetworkTopology::ProxyOnly),
+    ] {
+        let spec = spec_with(network);
+        let base = conforming_for(network);
+        let checks = all_checks(&base, &spec);
+        assert!(
+            super::super::oci::clean(&checks, &spec),
+            "{case}: {:?}",
+            checks
+                .iter()
+                .filter(|(_, v)| *v != Verdict::Pass)
+                .collect::<Vec<_>>()
+        );
+        assurance_evidence(case, "every-required-invariant-pass-kept", "measured-host");
+    }
+    // One nonconforming observation at a time, against the topology it is
+    // judged under: exactly the invariants it states fail, and the
+    // production decision refuses the environment.
+    let device = dwk_proto::json::parse(
+        br#"[{"PathOnHost":"/dev/kmsg","PathInContainer":"/dev/kmsg","CgroupPermissions":"rwm"}]"#,
+        dwk_proto::json::ParseOptions::ijson(),
+    )
+    .unwrap();
+    let cases: Vec<Nonconforming<'_>> = vec![
+        (
+            "no-network-weakened-host-uts-refused",
+            NetworkTopology::NoNetwork,
+            &["HostConfig", "UTSMode"],
+            Value::String("host".to_owned()),
+            &[I::HostUtsNamespacePrivate],
+        ),
+        (
+            "proxy-only-weakened-host-uts-refused",
+            NetworkTopology::ProxyOnly,
+            &["HostConfig", "UTSMode"],
+            Value::String("host".to_owned()),
+            &[I::HostUtsNamespacePrivate],
+        ),
+        (
+            "proxy-only-weakened-writable-root-refused",
+            NetworkTopology::ProxyOnly,
+            &["HostConfig", "ReadonlyRootfs"],
+            Value::Bool(false),
+            &[I::HostRootReadOnly],
+        ),
+        (
+            "proxy-only-weakened-root-user-refused",
+            NetworkTopology::ProxyOnly,
+            &["Config", "User"],
+            Value::String("0:0".to_owned()),
+            &[I::HostUserNonRoot],
+        ),
+        (
+            "proxy-only-weakened-privileged-refused",
+            NetworkTopology::ProxyOnly,
+            &["HostConfig", "Privileged"],
+            Value::Bool(true),
+            &[I::HostNotPrivileged],
+        ),
+        (
+            "proxy-only-weakened-capability-added-refused",
+            NetworkTopology::ProxyOnly,
+            &["HostConfig", "CapAdd"],
+            strings(&["CAP_NET_RAW"]),
+            &[I::HostCapabilitiesDropped],
+        ),
+        (
+            "proxy-only-weakened-no-new-privileges-disabled-refused",
+            NetworkTopology::ProxyOnly,
+            &["HostConfig", "SecurityOpt"],
+            strings(&["no-new-privileges=false", &format!("seccomp={PROFILE}")]),
+            &[I::HostNoNewPrivileges],
+        ),
+        (
+            "proxy-only-weakened-seccomp-unconfined-refused",
+            NetworkTopology::ProxyOnly,
+            &["HostConfig", "SecurityOpt"],
+            strings(&["no-new-privileges=true", "seccomp=unconfined"]),
+            &[I::HostSeccompProfile],
+        ),
+        (
+            "proxy-only-weakened-host-pid-refused",
+            NetworkTopology::ProxyOnly,
+            &["HostConfig", "PidMode"],
+            Value::String("host".to_owned()),
+            &[I::HostPidNamespacePrivate],
+        ),
+        (
+            "proxy-only-weakened-host-ipc-refused",
+            NetworkTopology::ProxyOnly,
+            &["HostConfig", "IpcMode"],
+            Value::String("host".to_owned()),
+            &[I::HostIpcNamespacePrivate],
+        ),
+        (
+            "proxy-only-weakened-host-network-refused",
+            NetworkTopology::ProxyOnly,
+            &["HostConfig", "NetworkMode"],
+            Value::String("host".to_owned()),
+            &[I::HostNetworkIsolated],
+        ),
+        (
+            "proxy-only-weakened-mutable-image-tag-refused",
+            NetworkTopology::ProxyOnly,
+            &["Config", "Image"],
+            Value::String("alpine:3".to_owned()),
+            &[I::HostImagePinned],
+        ),
+        (
+            "proxy-only-weakened-runtime-socket-mounted-refused",
+            NetworkTopology::ProxyOnly,
+            &["HostConfig", "Binds"],
+            strings(&["/var/run/docker.sock:/var/run/docker.sock"]),
+            &[I::HostMountsExact, I::HostNoRuntimeSocket],
+        ),
+        (
+            "proxy-only-weakened-extra-device-refused",
+            NetworkTopology::ProxyOnly,
+            &["HostConfig", "Devices"],
+            device,
+            &[I::HostNoDevices],
+        ),
+        (
+            "proxy-only-weakened-resource-limits-dropped-refused",
+            NetworkTopology::ProxyOnly,
+            &["HostConfig", "PidsLimit"],
+            Value::Number(dwk_proto::json::Number::Int(4096)),
+            &[I::HostResourceLimits],
+        ),
+    ];
+    for (case, network, path, value, expected) in cases {
+        let spec = spec_with(network);
+        let base = conforming_for(network);
+        let weakened = replace(base.clone(), path, value);
+        let mut flipped = changed(&base, &weakened, &spec);
+        flipped.sort_by_key(|i| i.as_str());
+        let mut wanted = expected.to_vec();
+        wanted.sort_by_key(|i| i.as_str());
+        assert_eq!(flipped, wanted, "{case}: other invariants moved");
+        let checks = all_checks(&weakened, &spec);
+        for invariant in expected {
+            assert!(
+                checks.contains(&(*invariant, Verdict::Fail)),
+                "{case}: {invariant:?} did not fail"
+            );
+        }
+        assert!(
+            !super::super::oci::clean(&checks, &spec),
+            "{case}: a nonconforming record was kept"
+        );
+        assurance_evidence(
+            case,
+            &format!(
+                "refused:{}",
+                expected
+                    .iter()
+                    .map(|i| i.as_str())
+                    .collect::<Vec<_>>()
+                    .join("+")
+            ),
+            "measured-host",
+        );
+    }
+}
+
 const EGRESS_DIR: &str = "/run/dw/egress/env_01M24BB8G3E0A851TRWE3M8FZF";
 
 fn environment_container() -> ContainerRef {

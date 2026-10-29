@@ -83,6 +83,8 @@ userns:           remap           # Linux: user namespace remapping where availa
 
 **As built in M5a** ([ADR-0047](adr/0047-m5a-oci-execution-environment-and-measured-assurance.md) §5): every line above, with these differences stated rather than implied. `network` is `NO_NETWORK` (the evidence harness's topology, only with the broker's `--allow-evidence-topology`) or, since M5b, `PROXY_ONLY` ([ADR-0048](adr/0048-m5b-proxy-only-topology-and-connect-proxy.md): the same interface-free namespace, `169.254.7.1/32` added to its loopback by a one-shot setup container, and an unprivileged relay as its only peer; the environment's proxy variables are exactly the broker's). The device set also admits `/dev/full` and `/dev/ptmx` (the runtime's defaults), and nothing else. The workspace bind carries no `nosuid,nodev` as mount flags — the runtime has none for binds — and `no_new_privileges`, `cap_drop: ALL` (no `mknod`) and the device cgroup deliver what they would. `disk_quota`, the 600 s workload `timeout` and `userns: remap` concern workloads and are M5d's; AppArmor/SELinux labels are the runtime's default where it has them, not a required invariant.
 
+**Found in M5e.2 (finding F-R8, open):** `userns: remap` was not built — every environment's workload is host uid 10001 — and `nproc: 256` limits a count the kernel keeps **per uid**, so that count is shared by every environment while `pids_limit` bounds each one alone. A workload holding its own bound therefore stops every other environment from starting a process, the broker's probe included, until it ends; the other run's workload is refused `ENVIRONMENT_NOT_CLEAN` and its environment destroyed. It fails closed, but one run can deny the others. Nothing was changed to hide it; the remedy is the owner's ([M5E_ASSURANCE_PLAN.md](M5E_ASSURANCE_PLAN.md) §5a).
+
 ### Hard rules — no configuration option exists to violate these
 
 1. **The container socket is never mounted.** `/var/run/docker.sock` and equivalents are denied by policy and refused by the supervisor. Mounting it is equivalent to granting root on the host.
@@ -254,7 +256,7 @@ Every line of the foundation, egress, workload, secret and workspace evidence �
 
 | Level | What ran |
 |---|---|
-| `in-process` | the product's own code in the test process — the broker's exchange code on a real full tmpfs of its own; no broker serving an environment |
+| `in-process` | the product's own code in the test process — the broker's exchange code on a real full tmpfs of its own, or its host judgement and decision given one record at a time (M5e.2's `broker-assurance`); no broker serving an environment |
 | `fake-broker` | the real authority and store against the route tests' fake broker, which contains nothing: what the authority decides, records and refuses, never containment |
 | `real-oci` | the released broker on a real OCI runtime, the test playing the authority or calling the real authority's own API |
 | `dwkp-end-to-end` | a real DWKP client on the authority's socket — the seam's or the released `serve`'s — over the same |
@@ -269,6 +271,7 @@ Every line of the foundation, egress, workload, secret and workspace evidence �
 | `workspace-contract-measured` | the broker judging the probe's facts about the workspace against the bound the authority sent |
 | `capabilities-and-seccomp`, `capabilities`, `seccomp`, `no-new-privileges`, `oci-user` | the profile as the kernel holds it: dropped capabilities, the seccomp filter, no-new-privileges, the environment's user |
 | `read-only-root`, `container-tmpfs`, `mount-namespace`, `workspace-mount` | the environment's filesystem: a read-only root, a `/tmp` of its own, no runtime socket or host path, the workspace its one writable host path |
+| `pid-namespace` | the environment's own PID namespace: another environment's processes are not in it to see or to name (M5e.2) |
 | `cgroup-limit`, `rlimit`, `filesystem-quota` | resource bounds: the cgroup's (pids, memory), the resource limits (descriptors, file size), a filesystem's own size |
 | `topology-no-route`, `topology-nothing-listening`, `topology-no-resolver`, `platform`, `platform-or-capabilities` | the environment's network namespace, by the errno an attempt got — M5b's own words: no route, nothing listening, no resolver; or the platform refusing the socket |
 | `proxy-only-topology`, `egress-socket-acl`, `egress-listener-lifecycle`, `launch-environment` | the `PROXY_ONLY` topology the broker built: the unprivileged relay in the environment's namespace, a socket only the relay's uid reaches, the listener ended with its environment, exactly the broker's variables in a launch |

@@ -2209,4 +2209,264 @@ mod linux {
             }
         }
     }
+
+    /// M5e.2 ([the plan](../../../docs/M5E_ASSURANCE_PLAN.md) §§3, 6; R8, R9):
+    /// what one run's environment does to another's, on the real runtime --
+    /// a neighbour held at its own task bound while another environment is
+    /// served (R8), and runs that see none of each other's processes, cannot
+    /// name each other's environment and leave nothing to the next (R9).
+    /// Every pressure is the environment's own and bounded by it; nothing
+    /// here presses on the host. `make sandbox-workload-evidence` runs these
+    /// by name.
+    mod closure {
+        use dwk_proto::brokerp::ContainerState;
+        use dwk_proto::brokerp::sandbox::{WorkspaceContract, required_invariants};
+
+        use super::*;
+
+        const CLOSURE_SUITE: &str = "sandbox-closure";
+
+        fn evidence(case: &str, outcome: &str, enforcement: &str) {
+            evidence_line(CLOSURE_SUITE, case, outcome, LEVEL, enforcement);
+        }
+
+        /// Whether `container` is running and measures clean against every
+        /// invariant its topology requires, now.
+        fn measured_clean(
+            socket: &Path,
+            ev: &Evidence,
+            s: &EnvironmentSpec,
+            container: &ContainerRef,
+        ) -> bool {
+            let (runtime, exe, cwd) = runtime(ev);
+            let (spec, measured_container) = (s.clone(), container.clone());
+            let measured = done(exchange(
+                socket,
+                move |common| {
+                    Authorisation::EnvironmentMeasure(EnvironmentMeasureAuthorisation::new(
+                        common,
+                        spec,
+                        measured_container,
+                        runtime,
+                    ))
+                },
+                (exe, cwd),
+            ))
+            .environment_measure
+            .unwrap();
+            let required = required_invariants(s.network, WorkspaceContract::UnverifiedEvidence);
+            measured.state == ContainerState::Running
+                && measured.measurement.is_some_and(|m| {
+                    m.checks
+                        .iter()
+                        .all(|c| c.verdict == Verdict::Pass || !required.contains(&c.invariant))
+                })
+        }
+
+        /// What `container` sees of its own pid namespace, through the
+        /// runtime: the processes other than the one looking.
+        fn others(ev: &Evidence, container: &ContainerRef) -> u32 {
+            line(&ev.look(container.as_str(), &["workload-ps"]), "others")
+                .parse()
+                .unwrap()
+        }
+
+        /// Collections of `invocation` until it is no longer running.
+        fn collect_ended(
+            socket: &Path,
+            invocation: &InvocationId,
+            generation: &BrokerGeneration,
+        ) -> WorkloadRunDone {
+            let deadline = Instant::now() + PEER_WAIT;
+            loop {
+                let collected = try_collect(socket, invocation, generation).unwrap();
+                if !is_running(&collected) {
+                    return ended(collected);
+                }
+                assert!(Instant::now() < deadline, "the workload never ended");
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        }
+
+        /// R8's bounded neighbour, as M5e requires it. **It fails today**
+        /// (docs/M5E_ASSURANCE_PLAN.md, finding F-R8): every environment's
+        /// workload runs as host uid 10001, and `RLIMIT_NPROC` counts that
+        /// uid's tasks across all of them, so while A holds its bound B's
+        /// probe cannot start and B is refused `ENVIRONMENT_NOT_CLEAN`. Kept
+        /// as the finding's reproducer -- run by name, required by no task,
+        /// printing no evidence line -- until the owner decides the remedy.
+        #[test]
+        #[ignore = "M5e.2 finding F-R8: fails today, required by no task; run by name to reproduce"]
+        fn a_neighbour_at_its_task_bound_leaves_another_environment_and_the_broker_serving() {
+            let ev = Evidence::load();
+            let _reaper = Reaper(ev.clone());
+            let dir = Scratch::new("neighbour");
+            let socket = dir.socket();
+            let _broker = Broker::start(&socket, None);
+            let (wa, wb) = (dir.workspace("wa"), dir.workspace("wb"));
+            let (sa, ca) = prepared(&socket, &ev, &wa);
+            let (sb, cb) = prepared(&socket, &ev, &wb);
+            // A at its own task bound, held: threads until its environment
+            // refuses one, a marker once it does, and the bound held while
+            // B is served.
+            let pressing = invocation();
+            let generation = started(
+                &socket,
+                &ev,
+                (&sa, &ca),
+                pressing.clone(),
+                workload(
+                    (FIXTURE, &ev.fixture_sha256),
+                    &["workload-hold-tasks", "4096", "15", "/workspace/held"],
+                    65_536,
+                    60,
+                ),
+            );
+            let deadline = Instant::now() + PEER_WAIT;
+            while !wa.join("held").exists() {
+                assert!(Instant::now() < deadline, "A never reached its bound");
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            // While A holds it: B runs, as its user, and the broker answers.
+            let since = Instant::now();
+            let answer = run_workload(
+                &socket,
+                &ev,
+                (&sb, &cb),
+                workload(
+                    (FIXTURE, &ev.fixture_sha256),
+                    &["workload-identity"],
+                    65_536,
+                    60,
+                ),
+            );
+            assert!(
+                matches!(answer, OutcomeResult::Done(_)),
+                "B was refused while A held its task bound (finding F-R8): {answer:?}"
+            );
+            let b = ended(answer);
+            let served = since.elapsed();
+            assert_eq!(
+                b.ending,
+                WorkloadEnding::Exited,
+                "B did not run while A held its bound: {b:?}"
+            );
+            assert_eq!(b.exit_code.map(|c| c.get()), Some(0), "{b:?}");
+            assert!(
+                line(&text(&b), "uid").split(',').all(|u| u == "10001"),
+                "{b:?}"
+            );
+            assert!(served < Duration::from_secs(30), "{served:?}");
+            assert!(
+                try_collect(&socket, &pressing, &generation).is_some_and(|c| is_running(&c)),
+                "A stopped holding its bound before B was served"
+            );
+            // A's own bound held it: refused below the environment's limit.
+            let a = collect_ended(&socket, &pressing, &generation);
+            let out = text(&a);
+            let held: u64 = line(&out, "held").parse().unwrap();
+            assert!(held < dwk_sandbox_profile::PIDS_LIMIT, "{out}");
+            assert_ne!(line(&out, "refused"), "none", "{out}");
+            assert_eq!(a.residue, Verdict::Pass, "{a:?}");
+            // Both environments kept, and each measures clean afterwards.
+            assert!(ev.exists(ca.as_str()) && ev.exists(cb.as_str()));
+            assert!(measured_clean(&socket, &ev, &sa, &ca), "A");
+            assert!(measured_clean(&socket, &ev, &sb, &cb), "B");
+            destroy(&socket, &ev, &sa, &ca);
+            destroy(&socket, &ev, &sb, &cb);
+        }
+
+        #[test]
+        #[ignore = "needs a real OCI runtime: make sandbox-workload-evidence"]
+        fn runs_see_none_of_each_others_processes_and_leave_nothing_to_the_next() {
+            let ev = Evidence::load();
+            let _reaper = Reaper(ev.clone());
+            let dir = Scratch::new("cross-run");
+            let socket = dir.socket();
+            let _broker = Broker::start(&socket, None);
+            let wb = dir.workspace("wb");
+            let (sa, ca) = prepared(&socket, &ev, &dir.workspace("wa"));
+            let (sb, cb) = prepared(&socket, &ev, &wb);
+            assert_ne!(ca, cb);
+            // B: a workload running, seen in B's own namespace.
+            let sleeping = invocation();
+            let generation = started(
+                &socket,
+                &ev,
+                (&sb, &cb),
+                sleeping.clone(),
+                workload(
+                    (FIXTURE, &ev.fixture_sha256),
+                    &["workload-sleep", "20"],
+                    4096,
+                    60,
+                ),
+            );
+            let deadline = Instant::now() + PEER_WAIT;
+            while others(&ev, &cb) < 2 {
+                assert!(Instant::now() < deadline, "B's workload never ran");
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            // A, listing everything it can see while B's runs: its init alone.
+            let seen = text(&ran(&socket, &ev, (&sa, &ca), &["workload-ps"]));
+            assert_eq!(line(&seen, "others"), "1", "{seen}");
+            evidence(
+                "cross-run-processes-not-visible",
+                "a-sees-init-alone-while-b-runs",
+                "pid-namespace",
+            );
+            // A naming B's environment is refused, and nothing runs.
+            assert_eq!(
+                refusal(
+                    try_start(
+                        &socket,
+                        &ev,
+                        (&sa, &cb),
+                        invocation(),
+                        workload(
+                            (FIXTURE, &ev.fixture_sha256),
+                            &["mark", "/workspace/crossed"],
+                            4096,
+                            30
+                        ),
+                    )
+                    .unwrap()
+                ),
+                BrokerRefusal::ForeignEnvironment
+            );
+            assert!(!wb.join("crossed").exists());
+            evidence(
+                "cross-run-other-environment-refused",
+                "FOREIGN_ENVIRONMENT",
+                "exact-label-ownership",
+            );
+            // A ends; B's workload is still running, and ends as its own.
+            destroy(&socket, &ev, &sa, &ca);
+            assert!(!ev.exists(ca.as_str()));
+            assert!(
+                try_collect(&socket, &sleeping, &generation).is_some_and(|c| is_running(&c)),
+                "destroying A touched B's workload"
+            );
+            evidence(
+                "cross-run-destroy-spares-the-other",
+                "b-still-running",
+                "exact-label-cleanup",
+            );
+            let b = collect_ended(&socket, &sleeping, &generation);
+            assert_eq!(b.exit_code.map(|c| c.get()), Some(0), "{b:?}");
+            assert_eq!(b.residue, Verdict::Pass, "{b:?}");
+            // The next run's environment: a fresh container holding nothing of
+            // A's -- its init alone.
+            let (sc, cc) = prepared(&socket, &ev, &dir.workspace("wc"));
+            assert!(cc != ca && cc != cb);
+            assert_eq!(others(&ev, &cc), 1);
+            evidence(
+                "cross-run-next-environment-holds-nothing-of-the-last",
+                "fresh-container-init-alone",
+                "fresh-container-per-environment",
+            );
+            destroy(&socket, &ev, &sb, &cb);
+            destroy(&socket, &ev, &sc, &cc);
+        }
+    }
 }

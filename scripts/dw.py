@@ -2199,6 +2199,38 @@ def require_tests_ran(output: str) -> None:
 
 SANDBOX_EVIDENCE_PREFIX = "SANDBOX-EVIDENCE "
 
+# M5e.2 (R2, R3): the broker's own host judgement and decision, in process --
+# one nonconforming record at a time under each topology, each refused. Never
+# a container's measurement: the real weakened containers of M5a are
+# NO_NETWORK's, and no weakened PROXY_ONLY container is built here.
+ASSURANCE_EVIDENCE_PREFIX = "ASSURANCE-EVIDENCE "
+BROKER_ASSURANCE_TEST = (
+    "sandbox::inspect::tests::"
+    "every_hard_rule_is_refused_in_proxy_only_and_host_uts_in_both_topologies"
+)
+BROKER_ASSURANCE_CASES = tuple(
+    ("broker-assurance", case)
+    for case in (
+        "no-network-conforming-kept",
+        "proxy-only-conforming-kept",
+        "no-network-weakened-host-uts-refused",
+        "proxy-only-weakened-host-uts-refused",
+        "proxy-only-weakened-writable-root-refused",
+        "proxy-only-weakened-root-user-refused",
+        "proxy-only-weakened-privileged-refused",
+        "proxy-only-weakened-capability-added-refused",
+        "proxy-only-weakened-no-new-privileges-disabled-refused",
+        "proxy-only-weakened-seccomp-unconfined-refused",
+        "proxy-only-weakened-host-pid-refused",
+        "proxy-only-weakened-host-ipc-refused",
+        "proxy-only-weakened-host-network-refused",
+        "proxy-only-weakened-mutable-image-tag-refused",
+        "proxy-only-weakened-runtime-socket-mounted-refused",
+        "proxy-only-weakened-extra-device-refused",
+        "proxy-only-weakened-resource-limits-dropped-refused",
+    )
+)
+
 # A convenience alias for the evidence image, and nothing more: every decision
 # and every record binds the image's content identity, and the one test that
 # names this tag does so to show that a container created from a tag is caught.
@@ -2703,11 +2735,33 @@ def task_sandbox_foundation_evidence() -> None:
     no container the evidence made may remain, and every container that was
     there before must still be there.
 
+    First, in process (M5e.2, R2 and R3): the broker's own host judgement and
+    its own decision, given one nonconforming record at a time -- every hard
+    rule judged under `PROXY_ONLY` as under `NO_NETWORK`, host UTS under both
+    -- each refused, each line `in-process`, never offered as a container's
+    measurement.
+
     No reachable runtime, no container, no measurement: NOT EXERCISED, which
     fails. Linux only.
     """
     if not sys.platform.startswith("linux"):
         raise TaskError("NOT EXERCISED: the sandbox evidence needs Linux and an OCI runtime")
+    unit = run_captured(
+        "cargo",
+        "test",
+        "--locked",
+        "-p",
+        "dwkd-broker",
+        "--bin",
+        "dwkd-broker",
+        "--",
+        BROKER_ASSURANCE_TEST,
+        "--exact",
+        "--nocapture",
+        "--test-threads=1",
+    )
+    require_tests_ran(unit)
+    require_attributed_evidence(unit, BROKER_ASSURANCE_CASES, ASSURANCE_EVIDENCE_PREFIX)
     found = shutil.which("docker")
     if found is None:
         raise TaskError("NOT EXERCISED: no container runtime client (`docker`) on PATH")
@@ -3220,6 +3274,11 @@ WORKLOAD_BROKER_TESTS = (
     # trusted launcher with the real tools.
     "linux::a_running_workload_holds_no_connection_and_its_environment_takes_no_second",
     "linux::the_trusted_launcher_keeps_workspace_exec_hygiene_with_the_real_tools",
+    # M5e.2 (R9): runs that see and reach none of each other and leave
+    # nothing to the next. R8's neighbour test is not here: it fails today
+    # (docs/M5E_ASSURANCE_PLAN.md, finding F-R8), and a test no task runs is
+    # never evidence.
+    "linux::closure::runs_see_none_of_each_others_processes_and_leave_nothing_to_the_next",
 )
 WORKLOAD_AUTHORITY_TESTS = (
     "linux::a_workload_is_decided_recorded_run_in_its_environment_and_never_run_twice",
@@ -3331,6 +3390,18 @@ WORKLOAD_CASES = (
             "hygiene-pytest-cache-not-written",
             "hygiene-residual-repository-config-read",
             "hygiene-residual-conftest-runs",
+        )
+    ),
+    # M5e.2 (R9), on the same real runtime: runs that see none of each
+    # other's processes, cannot name each other's environment, and leave
+    # nothing to the next.
+    *(
+        ("sandbox-closure", case)
+        for case in (
+            "cross-run-processes-not-visible",
+            "cross-run-other-environment-refused",
+            "cross-run-destroy-spares-the-other",
+            "cross-run-next-environment-holds-nothing-of-the-last",
         )
     ),
     *(
@@ -5236,6 +5307,7 @@ ATTRIBUTION_MECHANISMS = frozenset(
         "read-only-root",
         "container-tmpfs",
         "mount-namespace",
+        "pid-namespace",
         "workspace-mount",
         "cgroup-limit",
         "rlimit",
@@ -5725,11 +5797,29 @@ ATTRIBUTION: dict[str, tuple[tuple[str, str, str | tuple[str, ...]], ...]] = {
         ("space-recovered-after-removal", _PRIV, "filesystem-quota"),
         ("durability-valid-after-a-full-workspace", _PRIV, "authority-ledger"),
     ),
+    # M5e.2 in process (R2, R3): the broker's host judgement and decision,
+    # one nonconforming record at a time -- never an environment's.
+    "broker-assurance": (
+        ("*-conforming-kept", _IN, "measured-host"),
+        ("*-weakened-*-refused", _IN, "measured-host"),
+    ),
+    # M5e.2 on a real runtime (R9): one run's environment beside another.
+    "sandbox-closure": (
+        ("cross-run-processes-not-visible", _OCI, "pid-namespace"),
+        ("cross-run-other-environment-refused", _OCI, "exact-label-ownership"),
+        ("cross-run-destroy-spares-the-other", _OCI, "exact-label-cleanup"),
+        (
+            "cross-run-next-environment-holds-nothing-of-the-last",
+            _OCI,
+            "fresh-container-per-environment",
+        ),
+    ),
 }
 # Every case any of the five tasks requires: a line naming another case of
 # their suites is a case the inventory lost, or one renamed.
 ATTRIBUTED_CASES = frozenset(
     (
+        *BROKER_ASSURANCE_CASES,
         *SANDBOX_CASES,
         *EGRESS_CASES,
         *WORKLOAD_CASES,

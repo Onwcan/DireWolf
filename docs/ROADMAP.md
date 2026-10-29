@@ -155,7 +155,7 @@ and serving on Linux only. **M5 is in progress: M5a, M5b and M5c are complete (s
 **Adversarial:** the full path-traversal set ([EVALS.md](EVALS.md) §3) including Unicode normalisation and TOCTOU swap races in a tight loop; secret-in-output detection; core-dump inspection for secret residue.
 **Deferred:** remote fs, Windows-native hardening beyond the fallback walker.
 
-### M5 · Sandbox — **IN PROGRESS** (M5a complete, hosted acceptance passed; M5b complete, hosted acceptance passed; M5c complete, ADR-0050 accepted, hosted acceptance passed; M5d complete, ADR-0052 accepted 2026-10-26, hosted acceptance passed; M5e in progress, M5e.1 built and pending hosted CI — M5 is complete only when M5e meets its own acceptance)
+### M5 · Sandbox — **IN PROGRESS** (M5a complete, hosted acceptance passed; M5b complete, hosted acceptance passed; M5c complete, ADR-0050 accepted, hosted acceptance passed; M5d complete, ADR-0052 accepted 2026-10-26, hosted acceptance passed; M5e in progress: M5e.1 complete, hosted run 40774766063; M5e.2 built in part, hosted verification pending — M5 is complete only when M5e meets its own acceptance)
 
 M5 is two products in one (a sandbox *and* an egress proxy), so it is decomposed like M4
 ([ADR-0047](adr/0047-m5a-oci-execution-environment-and-measured-assurance.md)). The
@@ -451,7 +451,7 @@ and package-manager acceptance are M5e's, and the `local` environment is M6's (O
 stays in progress until M5e meets its own acceptance. Passing CI is the evidence named
 here — not a deployment, and not a certification.
 
-#### M5e · The M5 adversarial gate and closeout — **IN PROGRESS** (M5e.1 built, pending hosted CI; M5e.2–M5e.6 not complete)
+#### M5e · The M5 adversarial gate and closeout — **IN PROGRESS** (M5e.1 complete; M5e.2 built in part, hosted verification pending; M5e.3–M5e.6 not started)
 
 **Planned 2026-10-26.** The gap analysis, the requirements-to-evidence matrix,
 the implementation sequence and the owner's decisions of 2026-10-26 on its open points are in
@@ -461,17 +461,36 @@ is accepted, npm stays refused as ADR-0052 §5a decided — and pip's is
 [ADR-0055](adr/0055-m5e-pip-hygiene-profile.md), **Proposed** (drafted 2026-10-27), pip's behaviour unchanged
 until it is accepted.
 
-**M5e.1, attribution — BUILT, pending a hosted CI run of the committed tree (2026-10-27).**
-Every line of the foundation, egress, workload, secret and workspace evidence, their
-in-process halves included, now says its level and the existing mechanism that enforced or
+**M5e.1, attribution — COMPLETE, HOSTED CI PASS** (run
+[40774766063](https://github.com/Onwcan/DireWolf/actions/runs/40774766063) at `6fd0bc7`, 27 of
+27 jobs). Every line of the foundation, egress, workload, secret and workspace evidence, their
+in-process halves included, says its level and the existing mechanism that enforced or
 observed it, and each of the five tasks refuses a line that is missing, unreadable,
 duplicated, NOT EXERCISED, at another level or attributed to anything the contract does not
 give its case ([SANDBOX.md](SANDBOX.md) §6a; the owner's OD-E1). No product code, CI job,
-eval or production control changed; every case required before is required still. It passed
-locally on a real runtime; it is complete only once a hosted run of the owner's commit passes.
-Still to do: M5e.2's closure (the profile weakenings on `PROXY_ONLY`, cross-run isolation, a
-bounded neighbour, a runtime restart under a running authority), M5e.3–M5e.5's registry
-fixtures and pip and npm evidence, and M5e.6's gate.
+eval or production control changed; every case required before is required still.
+
+**M5e.2, closure — BUILT IN PART, hosted verification pending (2026-10-29).** No product
+code, CI job or production control changed. *In process*, required by
+`sandbox-foundation-evidence`: the broker's own host judgement refuses every hard rule
+weakened one at a time under `PROXY_ONLY` — a writable root, root, privileged, an added
+capability, `no-new-privileges` off, seccomp unconfined, the host's PID, IPC, network or
+UTS namespace, a mutable image tag, the runtime socket, an extra device, the limits dropped
+— and the host's UTS namespace under `NO_NETWORK` too (R2, R3); those cases are the broker's
+decision, never an environment's measurement. *On a real runtime*, required by
+`sandbox-workload-evidence`: a run sees none of another's processes, cannot name its
+environment, destroying it spares the other, and the next environment holds nothing of the
+last (R9). **R8 fails — finding F-R8, open:** every environment runs as host uid 10001,
+whose `RLIMIT_NPROC` is counted across all of them, so while one workload holds its task
+bound another run's workload is refused and that run's environment destroyed — fail-closed,
+nothing crosses, but one run can deny the others. Each remedy changes an accepted profile
+or identity model and is the owner's ([M5E_ASSURANCE_PLAN.md](M5E_ASSURANCE_PLAN.md) §5a);
+the neighbour test stays, required by no task, as its reproducer. **Not built:** real
+`PROXY_ONLY` containers weakened one hard rule at a time, and the runtime restart under a
+running authority, hosted-only on a disposable runner (R11, OD-E8). M5e.2 is not complete.
+
+Still to do: the rest of M5e.2 (above), M5e.3–M5e.5's registry fixtures and pip and npm
+evidence, and M5e.6's gate.
 
 **Deps:** M5a–M5d. **Deliverables:** the complete escape, SSRF and persistence suites as
 merge gates; weakened-profile closure for `PROXY_ONLY`; package-manager acceptance

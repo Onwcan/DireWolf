@@ -836,6 +836,36 @@ mod workload {
         say(&format!("spawned={started}"))
     }
 
+    /// Sleeping threads up to `count` or until the environment refuses one,
+    /// whichever comes first; then `marker` written, so a test knows the
+    /// bound is held; then that bound held for `seconds` (M5e.2's neighbour,
+    /// R8, and its finding F-R8). Bounded three ways: the count, the
+    /// environment's task limits (its cgroup's and `RLIMIT_NPROC`) and the
+    /// workload's wall clock. Every thread ends with the process.
+    fn hold_tasks(count: &str, seconds: &str, marker: &str) -> ExitCode {
+        let count = count.parse::<u32>().unwrap_or(0);
+        let seconds = seconds.parse::<u64>().unwrap_or(0);
+        let mut held = 0u32;
+        let mut refused = String::from("none");
+        for _ in 0..count {
+            match std::thread::Builder::new()
+                .stack_size(64 * 1024)
+                .spawn(move || std::thread::sleep(Duration::from_secs(seconds)))
+            {
+                Ok(_) => held += 1,
+                Err(error) => {
+                    refused = format!("{:?}", error.raw_os_error());
+                    break;
+                }
+            }
+        }
+        if std::fs::write(marker, format!("held={held}\n")).is_err() {
+            return ExitCode::from(4);
+        }
+        std::thread::sleep(Duration::from_secs(seconds));
+        say(&format!("held={held}\nrefused={refused}"))
+    }
+
     /// A child that keeps this workload's standard output open, then exit:
     /// the runtime's client waits for the stream, so the wall clock ends it.
     fn hold_stdout() -> ExitCode {
@@ -1481,6 +1511,7 @@ mod workload {
             "workload-setsid-sleep" => setsid_sleep(arg(2)),
             "workload-daemon" => daemon(),
             "workload-fork-loop" => fork_loop(arg(2)),
+            "workload-hold-tasks" => hold_tasks(arg(2), arg(3), arg(4)),
             "workload-hold-stdout" => hold_stdout(),
             "workload-ps" => ps(),
             "workload-escape" => escape(args.get(2..).unwrap_or_default()),

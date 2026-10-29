@@ -44,7 +44,10 @@ import dw  # noqa: E402  - imported after the path is extended
 
 # Each task, the tables it requires and the prefix its lines carry.
 TASKS = {
-    "task_sandbox_foundation_evidence": ((dw.SANDBOX_CASES, dw.SANDBOX_EVIDENCE_PREFIX),),
+    "task_sandbox_foundation_evidence": (
+        (dw.BROKER_ASSURANCE_CASES, dw.ASSURANCE_EVIDENCE_PREFIX),
+        (dw.SANDBOX_CASES, dw.SANDBOX_EVIDENCE_PREFIX),
+    ),
     "task_sandbox_egress_evidence": ((dw.EGRESS_CASES, dw.SANDBOX_EVIDENCE_PREFIX),),
     "task_sandbox_workload_evidence": ((dw.WORKLOAD_CASES, dw.SANDBOX_EVIDENCE_PREFIX),),
     "task_sandbox_secret_evidence": (
@@ -77,6 +80,20 @@ EMITTERS = (
         "evidence",
         "sandbox-workspace",
         "    mod workspace {",
+        "    mod closure {",
+    ),
+    (
+        "crates/dwkd-broker/tests/sandbox_workload.rs",
+        "evidence",
+        "sandbox-closure",
+        "    mod closure {",
+        None,
+    ),
+    (
+        "crates/dwkd-broker/src/sandbox/inspect_tests.rs",
+        "assurance_evidence",
+        "broker-assurance",
+        None,
         None,
     ),
     ("crates/dwkd-broker/tests/sandbox_secret.rs", "evidence", "sandbox-secret", None, None),
@@ -217,6 +234,7 @@ def _complete(cases: tuple[tuple[str, str], ...]) -> list[dict[str, object]]:
 def test_every_required_case_is_attributed_and_every_rule_is_used() -> None:
     inventory = set(dw.ATTRIBUTED_CASES)
     tables = (
+        dw.BROKER_ASSURANCE_CASES,
         dw.SANDBOX_CASES,
         dw.EGRESS_CASES,
         dw.WORKLOAD_CASES,
@@ -242,8 +260,11 @@ def test_every_required_case_is_attributed_and_every_rule_is_used() -> None:
                 and not any(fnmatch.fnmatchcase(case, p) for p, _, _ in rules[:at])
             ]
             assert first, f"{suite}: the rule `{pattern}` attributes no required case"
-    # The inventory M5e.1 attributes, by count: a smaller one is a lost case.
-    assert len(inventory) == 497
+    # The inventory attributed, by count: M5e.1's 497 and M5e.2's 21 (17 in
+    # process, 4 on a real runtime). A smaller one is a lost case.
+    assert len(dw.BROKER_ASSURANCE_CASES) == 17
+    assert len([s for s, _ in dw.WORKLOAD_CASES if s == "sandbox-closure"]) == 4
+    assert len(inventory) == 518
 
 
 def test_the_vocabulary_is_closed_used_and_documented() -> None:
@@ -270,6 +291,8 @@ def test_each_suite_is_only_at_the_levels_it_can_reach() -> None:
     client; a case only a provisioned host runs is `privileged-oci`, and no
     other case is."""
     reachable = {
+        "broker-assurance": {"in-process"},
+        "sandbox-closure": {"real-oci"},
         "broker-exchange": {"in-process"},
         "authority-route": {"fake-broker"},
         "authority-workload-secret": {"fake-broker"},
@@ -355,6 +378,7 @@ def test_every_literal_case_prints_what_the_contract_says() -> None:
 @pytest.mark.parametrize(
     ("cases", "prefix"),
     [
+        (dw.BROKER_ASSURANCE_CASES, dw.ASSURANCE_EVIDENCE_PREFIX),
         (dw.SANDBOX_CASES, dw.SANDBOX_EVIDENCE_PREFIX),
         (dw.EGRESS_CASES, dw.SANDBOX_EVIDENCE_PREFIX),
         (dw.WORKLOAD_CASES, dw.SANDBOX_EVIDENCE_PREFIX),
@@ -518,6 +542,77 @@ def test_zero_cases_fail() -> None:
         dw.require_attributed_evidence("", ())
     with pytest.raises(dw.TaskError, match=f"NOT EXERCISED: {len(dw.WORKLOAD_CASES)} required"):
         dw.require_attributed_evidence("no evidence at all", dw.WORKLOAD_CASES)
+
+
+# --- M5e.2's inventories ---------------------------------------------------------
+
+
+def test_the_in_process_assurance_is_never_a_containers_and_never_partial() -> None:
+    """R2 and R3 are judged in process: a line offered as an environment's
+    measurement, a case missing or NOT EXERCISED, or one attributed to
+    anything but the host judgement fails the foundation task."""
+    cases = dw.BROKER_ASSURANCE_CASES
+    prefix = dw.ASSURANCE_EVIDENCE_PREFIX
+    complete = _complete(cases)
+    uts = cases.index(("broker-assurance", "proxy-only-weakened-host-uts-refused"))
+    named = re.escape("broker-assurance/proxy-only-weakened-host-uts-refused")
+    for change, match in (
+        ({"level": "real-oci"}, rf"{named}: at level 'real-oci'"),
+        ({"enforcement": "capabilities-and-seccomp"}, rf"{named}: enforcement"),
+        ({"outcome": "not-exercised: no broker"}, rf"NOT EXERCISED: 1 required case\(s\): {named}"),
+    ):
+        with pytest.raises(dw.TaskError, match=match):
+            dw.require_attributed_evidence(
+                _output(_with(complete, uts, **change), prefix), cases, prefix
+            )
+    with pytest.raises(dw.TaskError, match=rf"NOT EXERCISED: 1 required case\(s\): {named}"):
+        dw.require_attributed_evidence(
+            _output(complete[:uts] + complete[uts + 1 :], prefix), cases, prefix
+        )
+    # The same lines under the container evidence's prefix are not read.
+    with pytest.raises(dw.TaskError, match=f"NOT EXERCISED: {len(cases)} required"):
+        dw.require_attributed_evidence(_output(complete), cases, prefix)
+
+
+def test_the_closure_cases_are_a_real_runtimes_and_each_its_own() -> None:
+    """R9 runs on a real runtime: a line claiming less, or attributed to
+    another case's mechanism, fails the workload task."""
+    cases = dw.WORKLOAD_CASES
+    complete = _complete(cases)
+    at = cases.index(("sandbox-closure", "cross-run-processes-not-visible"))
+    named = re.escape("sandbox-closure/cross-run-processes-not-visible")
+    _refused(_with(complete, at, level="in-process"), rf"{named}: at level 'in-process'")
+    _refused(
+        _with(complete, at, enforcement="exact-label-ownership"),
+        rf"{named}: enforcement 'exact-label-ownership' is not what this case exercises",
+    )
+    _refused(complete[:at] + complete[at + 1 :], rf"NOT EXERCISED: 1 required case\(s\): {named}")
+    # Every M5e.2 case is one the plan's matrix cites, and so one a task
+    # requires by name.
+    plan = (REPO_ROOT / "docs" / "M5E_ASSURANCE_PLAN.md").read_text(encoding="utf-8")
+    uncited = sorted(
+        case
+        for suite, case in (*dw.BROKER_ASSURANCE_CASES, *cases)
+        if suite in ("broker-assurance", "sandbox-closure") and f"`{case}`" not in plan
+    )
+    assert not uncited, f"the plan's matrix does not cite: {uncited}"
+
+
+def test_the_failing_neighbour_test_is_never_evidence() -> None:
+    """R8's neighbour test fails today (the plan's finding F-R8). It stays as
+    the finding's reproducer: run by name only, selected by no task, and
+    printing no evidence line -- so nothing of it can be read as R8 met."""
+    name = "a_neighbour_at_its_task_bound_leaves_another_environment_and_the_broker_serving"
+    selected = (*dw.WORKLOAD_BROKER_TESTS, *dw.WORKLOAD_AUTHORITY_TESTS)
+    assert not [test for test in selected if test.endswith(name)]
+    text = (REPO_ROOT / "crates" / "dwkd-broker" / "tests" / "sandbox_workload.rs").read_text(
+        encoding="utf-8"
+    )
+    found = re.search(r'#\[ignore = "([^"]*)"\]\s*fn ' + name + r"\(\) \{", text)
+    assert found is not None and "F-R8" in found.group(1)
+    body = text[found.end() : text.index("\n        }\n", found.end())]
+    assert "evidence(" not in body
+    assert not [case for _, case in dw.WORKLOAD_CASES if case.startswith("neighbour-")]
 
 
 def test_the_agent_and_release_contracts_are_their_own_and_unchanged() -> None:
