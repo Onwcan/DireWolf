@@ -33,8 +33,12 @@ import dw  # noqa: E402  - imported after the path is extended
 
 JOB = "sandbox-agent"
 AGGREGATE_JOB = "ci"
+# Every value crosses the identity switch by name (CI #106: a bare
+# `--preserve-env` carried nothing under sudo-rs); test_ci_privileged_handoff.py
+# holds the handoff itself.
 COMMAND = (
-    'sudo --non-interactive --preserve-env --user "$USER" env "PATH=$PATH" '
+    "python3 scripts/ci_handoff.py --pass DW_AGENT_PRIVILEGED --pass DW_BROKER_AS "
+    "--pass DW_PEER_AS --pass DW_AGENT_OUTSIDER --group dwworkspace -- "
     "make sandbox-agent-evidence"
 )
 

@@ -489,6 +489,22 @@ the neighbour test stays, required by no task, as its reproducer. **Not built:**
 `PROXY_ONLY` containers weakened one hard rule at a time, and the runtime restart under a
 running authority, hosted-only on a disposable runner (R11, OD-E8). M5e.2 is not complete.
 
+**M5e.2 at CI #106 (2026-10-30).** The commit above (`3c16bfb`) ran as hosted run
+[40954372045](https://github.com/Onwcan/DireWolf/actions/runs/40954372045): **FAILURE**, 23
+of 27 jobs successful. The R2/R3 in-process cases and the R9 cross-run cases passed in their
+jobs, so they are hosted-verified. Three privileged jobs — filesystem operations, the
+sandbox workspace and the sandbox agent — reported their hosted-only halves NOT EXERCISED
+and failed, as they must: each ran its task through `sudo --user "$USER"` with a bare
+`--preserve-env`, which under the Ubuntu 26.04 image's sudo-rs (whose `env_reset` cannot be
+disabled) carried none of the step's `DW_*` configuration. Since then, unstaged for the
+owner and verified only locally: `scripts/ci_handoff.py` hands each value across the switch
+by name and proves the uid, the group and the values on the far side; R2's real-container
+`weakened-host-uts`; R11's runtime restart as the required `sandbox-restart` job, never yet
+executed (only a disposable hosted runner may run it); and
+[ADR-0056](adr/0056-m5e-cross-run-task-limit-isolation.md), **Proposed**, for F-R8, which
+stays open — R8 still fails — until the owner accepts a remedy and its evidence passes. M5e.2
+stays IN PROGRESS.
+
 Still to do: the rest of M5e.2 (above), M5e.3–M5e.5's registry fixtures and pip and npm
 evidence, and M5e.6's gate.
 

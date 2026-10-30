@@ -989,10 +989,15 @@ def test_the_filesystem_operations_job_has_three_identities_and_the_write_group(
     assert broker != peer, "the broker and the hostile runtime must be two identities"
     assert group, "no write group: the write permission model is proven nowhere"
     # The evidence runs as the runner, in a session that has the new group --
-    # never as root.
+    # never as root -- and every value crosses the switch by name: a bare
+    # `--preserve-env` carried nothing under sudo-rs (CI #106). The handoff
+    # itself is held in test_ci_privileged_handoff.py.
     command = _run(step) or ""
-    assert command.startswith('sudo --non-interactive --preserve-env --user "$USER" '), command
-    assert "root" not in command and "--user root" not in command
+    assert command == (
+        "python3 scripts/ci_handoff.py --pass DW_BROKER_AS --pass DW_PEER_AS "
+        f"--pass DW_WRITE_GROUP --group {group} -- {FSOPS_EVIDENCE}"
+    ), command
+    assert "root" not in command and "--preserve-env" not in command
     # The identities and the group are created in the job, before the evidence:
     # the broker's user and the runner in the group, the runtime's user not.
     steps = _steps(_jobs()[FSOPS_JOB])
