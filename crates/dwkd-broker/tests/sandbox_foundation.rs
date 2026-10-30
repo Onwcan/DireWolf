@@ -1016,6 +1016,14 @@ mod linux {
                 &[I::HostIpcNamespacePrivate],
             ),
             (
+                // The host's hostname namespace (M5e.2, R2): seen from the
+                // runtime's record. Without CAP_SYS_ADMIN the container
+                // cannot change the hostname it shares.
+                "weakened-host-uts",
+                Box::new(|a| add(a, &["--uts", "host"])),
+                &[I::HostUtsNamespacePrivate],
+            ),
+            (
                 // A namespace with real routes, where some destinations stay
                 // silent: the probe must still answer within its step, and
                 // see the paths from inside.

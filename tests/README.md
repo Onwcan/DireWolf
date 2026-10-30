@@ -302,7 +302,33 @@ and `test_m5e_attribution.py` holds it so. `sandbox-fixture`'s
 `workload-hold-tasks <count> <seconds> <marker>` is its pressure: sleeping
 threads until the count or a refusal, the marker written, the bound held for
 the seconds it was given within the workload's wall clock -- never more than
-one uid's limit.
+one uid's limit. When it fails it says what it measured first: how fast the
+broker refused B, A's own count and refusal, and whether B served again once
+A ended ([ADR-0056](../docs/adr/0056-m5e-cross-run-task-limit-isolation.md),
+Proposed, is the remedy's draft). Since 2026-10-30 the foundation's real
+weakened-profile suite also runs a container in the host's UTS namespace
+(`weakened-host-uts`).
+
+**The runtime restart (M5e.2, R11).** `make sandbox-restart-evidence` runs
+`mod restart` of `crates/dwkd-authority/tests/sandbox_workload.rs`: the
+runner's Docker Engine restarted under a running authority (suite
+`sandbox-restart`, level `privileged-oci`). The task and the test each refuse
+before anything unless `DW_RUNTIME_RESTART=1` on a GitHub-hosted runner whose
+engine is a local systemd unit -- never Docker Desktop, never a developer's
+daemon -- so locally it is NOT EXERCISED, which fails. The hosted
+`sandbox-restart` job is its only runner; `test_ci_runtime_restart.py` holds
+that job, its flag, the guard's order and the task's refusal.
+
+**Handing configuration across an identity switch (CI #106).** Three jobs run
+their task as a fresh session of the runner's user, so the groups the job
+created apply. `scripts/ci_handoff.py` makes that switch: before it, each named
+`DW_*` value is checked and a `*_PRIVILEGED` flag refused off a GitHub-hosted
+runner; across it, each value travels as an argument of `env`; after it, the
+same script proves the uid (never root), each group's gid and the values'
+digest, then becomes `make`. `test_ci_privileged_handoff.py` holds the
+workflow to that, runs each job's own command under a stub `sudo` that resets
+the environment as sudo-rs does, and shows CI #106's bare `--preserve-env`
+losing every value under it.
 
 **Sandbox agent tests (M5d.5)** are the evidence behind
 `make sandbox-agent-evidence` (ADR-0052 §§11, 13, 17;

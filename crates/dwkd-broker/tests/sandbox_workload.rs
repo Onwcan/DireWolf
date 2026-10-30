@@ -2340,10 +2340,44 @@ mod linux {
                     60,
                 ),
             );
-            assert!(
-                matches!(answer, OutcomeResult::Done(_)),
-                "B was refused while A held its task bound (finding F-R8): {answer:?}"
-            );
+            if !matches!(answer, OutcomeResult::Done(_)) {
+                // Finding F-R8. Before failing, measure what the coupling
+                // was -- how fast the broker answered, A's own count, and
+                // whether B serves again once A lets go -- and leave
+                // nothing behind.
+                let refused_in = since.elapsed();
+                let holding =
+                    try_collect(&socket, &pressing, &generation).is_some_and(|c| is_running(&c));
+                let a = collect_ended(&socket, &pressing, &generation);
+                let out = text(&a);
+                let b_clean = measured_clean(&socket, &ev, &sb, &cb);
+                let b_then = match run_workload(
+                    &socket,
+                    &ev,
+                    (&sb, &cb),
+                    workload(
+                        (FIXTURE, &ev.fixture_sha256),
+                        &["workload-identity"],
+                        65_536,
+                        60,
+                    ),
+                ) {
+                    OutcomeResult::Done(_) => "served".to_owned(),
+                    other => format!("{other:?}"),
+                };
+                destroy(&socket, &ev, &sa, &ca);
+                destroy(&socket, &ev, &sb, &cb);
+                panic!(
+                    "finding F-R8: B was refused {answer:?} in {refused_in:?} while A held its \
+                     task bound (A still holding: {holding}; A held={} of PIDS_LIMIT {}, \
+                     refused={}, residue {:?}); once A ended, B measured clean: {b_clean}, and \
+                     B's next workload was {b_then}",
+                    line(&out, "held"),
+                    dwk_sandbox_profile::PIDS_LIMIT,
+                    line(&out, "refused"),
+                    a.residue,
+                );
+            }
             let b = ended(answer);
             let served = since.elapsed();
             assert_eq!(

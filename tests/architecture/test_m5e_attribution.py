@@ -59,6 +59,7 @@ TASKS = {
         (dw.WORKSPACE_CASES, dw.SANDBOX_EVIDENCE_PREFIX),
         (dw.WORKSPACE_CASES + dw.WORKSPACE_PRIVILEGED_CASES, dw.SANDBOX_EVIDENCE_PREFIX),
     ),
+    "task_sandbox_restart_evidence": ((dw.RESTART_CASES, dw.SANDBOX_EVIDENCE_PREFIX),),
 }
 
 # Which suite each emitter prints, and whether a call names its level (an
@@ -109,6 +110,13 @@ EMITTERS = (
         "evidence",
         "sandbox-authority-workspace",
         "    mod workspace {",
+        "    mod restart {",
+    ),
+    (
+        "crates/dwkd-authority/tests/sandbox_workload.rs",
+        "evidence",
+        "sandbox-restart",
+        "    mod restart {",
         "    mod release {",
     ),
     (
@@ -243,6 +251,7 @@ def test_every_required_case_is_attributed_and_every_rule_is_used() -> None:
         dw.WORKSPACE_UNIT_CASES,
         dw.WORKSPACE_CASES,
         dw.WORKSPACE_PRIVILEGED_CASES,
+        dw.RESTART_CASES,
     )
     assert inventory == {key for table in tables for key in table}
     for table in tables:
@@ -260,11 +269,15 @@ def test_every_required_case_is_attributed_and_every_rule_is_used() -> None:
                 and not any(fnmatch.fnmatchcase(case, p) for p, _, _ in rules[:at])
             ]
             assert first, f"{suite}: the rule `{pattern}` attributes no required case"
-    # The inventory attributed, by count: M5e.1's 497 and M5e.2's 21 (17 in
-    # process, 4 on a real runtime). A smaller one is a lost case.
+    # The inventory attributed, by count: M5e.1's 497 and M5e.2's 29 (17 in
+    # process; on a real runtime, 4 cross-run and the host UTS namespace; on
+    # the hosted runner, 7 of the runtime's restart). A smaller one is a lost
+    # case.
     assert len(dw.BROKER_ASSURANCE_CASES) == 17
     assert len([s for s, _ in dw.WORKLOAD_CASES if s == "sandbox-closure"]) == 4
-    assert len(inventory) == 518
+    assert ("sandbox-broker", "weakened-host-uts") in dw.SANDBOX_CASES
+    assert len(dw.RESTART_CASES) == 7
+    assert len(inventory) == 526
 
 
 def test_the_vocabulary_is_closed_used_and_documented() -> None:
@@ -293,6 +306,7 @@ def test_each_suite_is_only_at_the_levels_it_can_reach() -> None:
     reachable = {
         "broker-assurance": {"in-process"},
         "sandbox-closure": {"real-oci"},
+        "sandbox-restart": {"privileged-oci"},
         "broker-exchange": {"in-process"},
         "authority-route": {"fake-broker"},
         "authority-workload-secret": {"fake-broker"},
@@ -308,7 +322,9 @@ def test_each_suite_is_only_at_the_levels_it_can_reach() -> None:
         "sandbox-authority-workspace": {"real-oci", "dwkp-end-to-end", "privileged-oci"},
     }
     assert set(reachable) == set(dw.ATTRIBUTION)
-    privileged = set(dw.WORKSPACE_PRIVILEGED_CASES)
+    # The provisioned workspace's cases, and the runtime's restart (which
+    # needs the hosted runner's root): privileged, and nothing else is.
+    privileged = set(dw.WORKSPACE_PRIVILEGED_CASES) | set(dw.RESTART_CASES)
     for suite, case in dw.ATTRIBUTED_CASES:
         level, _ = _contract(suite, case)
         assert level in reachable[suite], (suite, case, level)

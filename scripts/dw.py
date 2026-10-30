@@ -2320,6 +2320,7 @@ SANDBOX_CASES = (
             "weakened-seccomp-default-profile",
             "weakened-host-pid",
             "weakened-host-ipc",
+            "weakened-host-uts",
             "weakened-host-network",
             "weakened-mutable-image-tag",
             "weakened-extra-device",
@@ -3280,6 +3281,26 @@ WORKLOAD_BROKER_TESTS = (
     # never evidence.
     "linux::closure::runs_see_none_of_each_others_processes_and_leave_nothing_to_the_next",
 )
+# M5e.2 (R11; the owner's OD-E8): the container runtime restarted under a
+# running authority. The test restarts the runner's engine, so it is
+# selected by name by `sandbox-restart-evidence` alone, which refuses before
+# anything is built anywhere but a disposable GitHub-hosted runner.
+RESTART_TESTS = (
+    "linux::restart::"
+    "the_runtime_restarts_under_a_running_authority_and_nothing_is_believed_or_replayed",
+)
+RESTART_CASES = tuple(
+    ("sandbox-restart", case)
+    for case in (
+        "restart-in-flight-not-believed",
+        "restart-reconciled-within-bound",
+        "restart-interrupted-environment-not-believed",
+        "restart-idle-environment-reconciled",
+        "restart-in-flight-never-rerun",
+        "restart-foreign-untouched",
+        "restart-new-workload-served",
+    )
+)
 WORKLOAD_AUTHORITY_TESTS = (
     "linux::a_workload_is_decided_recorded_run_in_its_environment_and_never_run_twice",
     "linux::every_gate_refuses_before_anything_runs",
@@ -3651,6 +3672,92 @@ def task_sandbox_workload_evidence() -> None:
     print(f"{GREEN}cleanup: no evidence container remains; {len(before)} pre-existing kept{OFF}")
     require_attributed_evidence("\n".join(outputs), WORKLOAD_CASES)
     uvrun("dwcheck", "closure", "--report")
+
+
+def restart_refusal(environ: Mapping[str, str]) -> str | None:
+    """Why this host's runtime must not be restarted, or None. Never
+    inferred: `DW_RUNTIME_RESTART=1`, on a GitHub-hosted runner -- the test
+    checks again, and that the engine is the runner's own systemd unit and
+    not Docker Desktop, before it restarts anything."""
+    if environ.get("DW_RUNTIME_RESTART", "").strip() != "1":
+        return (
+            "DW_RUNTIME_RESTART=1 is not set: restarting the runtime is the hosted "
+            "`sandbox-restart` job's alone"
+        )
+    if (
+        environ.get("GITHUB_ACTIONS") != "true"
+        or environ.get("RUNNER_ENVIRONMENT") != "github-hosted"
+    ):
+        return (
+            "this is not a disposable GitHub-hosted runner: a developer's daemon is never restarted"
+        )
+    return None
+
+
+def task_sandbox_restart_evidence() -> None:
+    """M5e.2's runtime restart (R11; the owner's OD-E8), hosted only: the
+    runner's Docker Engine restarted under a running authority while one
+    run's workload is in flight and another run's environment is idle.
+
+    The interrupted workload is never believed finished and never run again;
+    reconciliation on the same incarnation destroys what stopped and measures
+    what still runs; a container that is not DireWolf's is untouched; a new
+    workload runs after; all within the environment deadline. Anywhere but a
+    disposable GitHub-hosted runner this refuses before anything is built:
+    NOT EXERCISED, which fails. Every case must report at `privileged-oci`
+    with what enforced it. No container the evidence made may remain, and
+    every container that predates it must. Linux only.
+    """
+    if not sys.platform.startswith("linux"):
+        raise TaskError("NOT EXERCISED: the runtime restart runs only on Linux")
+    refusal = restart_refusal(os.environ)
+    if refusal is not None:
+        raise TaskError(f"NOT EXERCISED: {refusal}")
+    client, socket, variables, before, images = _workload_setup()
+    os.environ.update(variables)
+    try:
+        system = _docker(client, socket, "info", "--format", "{{.OperatingSystem}}")
+        if "Docker Desktop" in system:
+            raise TaskError(f"NOT EXERCISED: the runtime is {system.strip()}, not a runner's")
+        run("cargo", "build", "--locked", "-p", "dwkd-broker")
+        output = run_captured(
+            "cargo",
+            "test",
+            "--locked",
+            "-p",
+            "dwkd-authority",
+            "--test",
+            "sandbox_workload",
+            "--",
+            "--ignored",
+            "--exact",
+            "--nocapture",
+            "--test-threads=1",
+            *RESTART_TESTS,
+        )
+        summaries = [line for line in output.splitlines() if line.startswith("test result: ")]
+        expected = f"test result: ok. {len(RESTART_TESTS)} passed; 0 failed; 0 ignored"
+        if len(summaries) != 1 or not summaries[0].startswith(expected):
+            raise TaskError(
+                f"the runtime restart did not run: expected `{expected}`, "
+                f"got {summaries or 'no summary'}"
+            )
+    finally:
+        after = set(
+            _docker(client, socket, "container", "ls", "--all", "--no-trunc", "--quiet").split()
+        )
+        for image in set(images.values()):
+            _docker(client, socket, "image", "rm", "--force", image, check=False)
+    left = sorted(after - before)
+    removed = sorted(before - after)
+    if left:
+        raise TaskError(f"the evidence left {len(left)} container(s) behind: {left}")
+    if removed:
+        raise TaskError(
+            f"{len(removed)} container(s) that predate the evidence are gone: {removed}"
+        )
+    print(f"{GREEN}cleanup: no evidence container remains; {len(before)} pre-existing kept{OFF}")
+    require_attributed_evidence(output, RESTART_CASES)
 
 
 # The mutation review (ADR-0052 §17): each line weakens one guard M5d.1's
@@ -5432,8 +5539,9 @@ ATTRIBUTION: dict[str, tuple[tuple[str, str, str | tuple[str, ...]], ...]] = {
         ("list-owned-exact-labels", _OCI, "exact-label-ownership"),
         ("destroy-*", _OCI, "exact-label-cleanup"),
         ("baseline-conforming", _OCI, "measured-both"),
-        # One vantage alone catches these two weakenings; both, the rest.
+        # One vantage alone catches these three weakenings; both, the rest.
         ("weakened-host-ipc", _OCI, "measured-host"),
+        ("weakened-host-uts", _OCI, "measured-host"),
         ("weakened-mutable-image-tag", _OCI, "measured-host"),
         ("weakened-*", _OCI, "measured-both"),
         ("tamper-changed-byte", _OCI, "probe-digest-pin"),
@@ -5814,8 +5922,19 @@ ATTRIBUTION: dict[str, tuple[tuple[str, str, str | tuple[str, ...]], ...]] = {
             "fresh-container-per-environment",
         ),
     ),
+    # M5e.2 hosted (R11, OD-E8): the runtime restarted under a running
+    # authority -- the runner's root restarts it, so every line is privileged.
+    "sandbox-restart": (
+        ("restart-in-flight-not-believed", _PRIV, "authority-ledger"),
+        ("restart-reconciled-within-bound", _PRIV, "authority-reconciliation"),
+        ("restart-interrupted-environment-not-believed", _PRIV, "authority-reconciliation"),
+        ("restart-idle-environment-reconciled", _PRIV, "authority-reconciliation"),
+        ("restart-in-flight-never-rerun", _PRIV, "authority-idempotency"),
+        ("restart-foreign-untouched", _PRIV, "exact-label-ownership"),
+        ("restart-new-workload-served", _PRIV, "authority-ledger"),
+    ),
 }
-# Every case any of the five tasks requires: a line naming another case of
+# Every case any of the six tasks requires: a line naming another case of
 # their suites is a case the inventory lost, or one renamed.
 ATTRIBUTED_CASES = frozenset(
     (
@@ -5828,6 +5947,7 @@ ATTRIBUTED_CASES = frozenset(
         *WORKSPACE_UNIT_CASES,
         *WORKSPACE_CASES,
         *WORKSPACE_PRIVILEGED_CASES,
+        *RESTART_CASES,
     )
 )
 # The foundation's latency: its numbers, not containment.
@@ -8474,6 +8594,7 @@ TASKS = {
     "sandbox-foundation-evidence": task_sandbox_foundation_evidence,
     "sandbox-egress-evidence": task_sandbox_egress_evidence,
     "sandbox-workload-evidence": task_sandbox_workload_evidence,
+    "sandbox-restart-evidence": task_sandbox_restart_evidence,
     "net-http-evidence": task_net_http_evidence,
     "net-http-mutations": task_net_http_mutations,
     "sandbox-workload-mutations": task_sandbox_workload_mutations,

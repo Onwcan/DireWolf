@@ -3527,6 +3527,326 @@ reason = "NO_MATCHING_RULE"
         }
     }
 
+    /// M5e.2 (R11; the owner's OD-E8): the container runtime restarts under a
+    /// **running** authority -- not the authority's restart, which M5a's
+    /// reconciliation already covers. Hosted only: the test restarts the
+    /// runner's Docker Engine, so it refuses, before anything, unless this is
+    /// a disposable GitHub-hosted runner whose engine is a local systemd unit
+    /// (never Docker Desktop, never a developer's daemon). What it holds is
+    /// the accepted contract, not re-attach: an environment's container is
+    /// `--restart no`; a workload the restart interrupts is never believed
+    /// finished and never run again; reconciliation on the same incarnation
+    /// destroys what stopped and measures what still runs; nothing foreign
+    /// is touched; and a new authorized workload runs after. Every line is
+    /// `privileged-oci`: it needs the runner's root.
+    mod restart {
+        use super::*;
+
+        const RESTART_SUITE: &str = "sandbox-restart";
+        /// Restarting the runtime takes privilege a workstation never grants
+        /// this evidence: the hosted runner's.
+        const PRIV: &str = "privileged-oci";
+        /// The runtime must answer again, and reconciliation settle, within
+        /// the environment deadline.
+        const RECOVERY_BOUND: Duration = Duration::from_secs(120);
+        const FOREIGN_LABEL: &str = "io.direwolf.test=foreign-restart";
+
+        fn evidence(case: &str, outcome: &str, level: &str, enforcement: &str) {
+            evidence_line(RESTART_SUITE, case, outcome, level, enforcement);
+        }
+
+        /// Whether this host's runtime may be restarted, and how it keeps
+        /// containers across a restart: `Err` names what is missing.
+        fn disposable_runner(runtime: &Runtime) -> Result<bool, String> {
+            let env = |name: &str| std::env::var(name).unwrap_or_default();
+            if env("DW_RUNTIME_RESTART") != "1" {
+                return Err("DW_RUNTIME_RESTART is not 1".to_owned());
+            }
+            if env("GITHUB_ACTIONS") != "true" || env("RUNNER_ENVIRONMENT") != "github-hosted" {
+                return Err("this is not a GitHub-hosted runner".to_owned());
+            }
+            let system = runtime.ok(&["info", "--format", "{{.OperatingSystem}}"]);
+            if system.contains("Docker Desktop") {
+                return Err(format!("the runtime is {}", system.trim()));
+            }
+            let unit = Command::new("systemctl")
+                .args(["is-active", "docker"])
+                .output()
+                .map_err(|e| format!("no systemctl: {e}"))?;
+            if String::from_utf8_lossy(&unit.stdout).trim() != "active" {
+                return Err("the runtime is not the local `docker` systemd unit".to_owned());
+            }
+            let sudo = Command::new("sudo")
+                .args(["-n", "true"])
+                .status()
+                .map_err(|e| format!("no sudo: {e}"))?;
+            if !sudo.success() {
+                return Err("sudo needs a password here".to_owned());
+            }
+            Ok(runtime
+                .ok(&["info", "--format", "{{.LiveRestoreEnabled}}"])
+                .trim()
+                == "true")
+        }
+
+        /// Restart the runner's engine; how long until it answered again.
+        fn restart_runtime(runtime: &Runtime) -> Duration {
+            let since = Instant::now();
+            let status = Command::new("sudo")
+                .args(["-n", "systemctl", "restart", "docker"])
+                .status()
+                .unwrap();
+            assert!(status.success(), "the runtime did not restart");
+            loop {
+                if runtime
+                    .docker(&["info", "--format", "{{.ServerVersion}}"])
+                    .status
+                    .success()
+                {
+                    return since.elapsed();
+                }
+                assert!(
+                    since.elapsed() < RECOVERY_BOUND,
+                    "the runtime did not answer within {RECOVERY_BOUND:?}"
+                );
+                std::thread::sleep(Duration::from_millis(250));
+            }
+        }
+
+        /// A container that is not DireWolf's: created, never started, and
+        /// removed by this test alone.
+        struct Foreign {
+            runtime: Runtime,
+            id: String,
+        }
+
+        impl Drop for Foreign {
+            fn drop(&mut self) {
+                let _ = self
+                    .runtime
+                    .docker(&["container", "rm", "--force", &self.id]);
+            }
+        }
+
+        fn store_containers(lab: &Lab) -> usize {
+            let store = lab.reaper.store.lock().unwrap().clone().unwrap();
+            lab.runtime
+                .ok(&[
+                    "container",
+                    "ls",
+                    "--all",
+                    "--quiet",
+                    "--filter",
+                    &format!("label=io.direwolf.store={store}"),
+                ])
+                .lines()
+                .count()
+        }
+
+        #[test]
+        #[ignore = "restarts the runtime: hosted only, make sandbox-restart-evidence"]
+        fn the_runtime_restarts_under_a_running_authority_and_nothing_is_believed_or_replayed() {
+            let runtime = Runtime::load();
+            let live_restore = disposable_runner(&runtime).unwrap_or_else(|why| {
+                panic!(
+                    "NOT EXERCISED: {why}; the runtime is restarted only on a disposable \
+                     hosted runner (make sandbox-restart-evidence, DW_RUNTIME_RESTART=1)"
+                )
+            });
+            println!("restart: a disposable hosted runner, live-restore={live_restore}");
+            let mut lab = Lab::new("m5e-restart", WorkloadBudget::default());
+            // Run A: a workload in flight when the runtime restarts. Run B:
+            // an environment ready and idle. And a container that is not
+            // DireWolf's.
+            let run_a = lab.operator_run();
+            let (env_a, container_a) = lab.ready(&run_a);
+            let run_b = lab.operator_run();
+            let (env_b, container_b) = lab.ready(&run_b);
+            let foreign = Foreign {
+                runtime: lab.runtime.clone(),
+                id: lab
+                    .runtime
+                    .ok(&[
+                        "container",
+                        "create",
+                        "--label",
+                        FOREIGN_LABEL,
+                        "--entrypoint",
+                        PROBE,
+                        &var("DW_SANDBOX_WORKLOAD_IMAGE"),
+                        "hold",
+                    ])
+                    .trim()
+                    .to_owned(),
+            };
+            let owned_before = store_containers(&lab);
+            let restarter = {
+                let runtime = lab.runtime.clone();
+                let watched = container_a.clone();
+                std::thread::spawn(move || {
+                    let deadline = Instant::now() + Duration::from_secs(60);
+                    while runtime.others(&watched) < 1 {
+                        assert!(Instant::now() < deadline, "the workload never started");
+                        std::thread::sleep(Duration::from_millis(100));
+                    }
+                    restart_runtime(&runtime)
+                })
+            };
+            let reply = lab
+                .authority()
+                .workload_run(&run_a, &fixture(&["workload-sleep", "50"], "r-1"))
+                .unwrap();
+            let recovered_in = restarter.join().unwrap();
+            // The interrupted workload is never believed finished: nothing
+            // proves a sleep of 50 s ended well a few seconds in.
+            let (settled, proved) = match &reply {
+                WorkloadReply::Unknown {
+                    reason,
+                    environment_destroyed,
+                    ..
+                } => {
+                    assert!(*environment_destroyed, "{reply:?}");
+                    (format!("unknown:{reason}"), false)
+                }
+                WorkloadReply::Failed { reason, .. } => (format!("failed:{reason}"), false),
+                WorkloadReply::Completed(outcome) => {
+                    assert!(
+                        !(outcome.ending == WorkloadEnding::Exited && outcome.exit_code == Some(0)),
+                        "a workload the restart interrupted is reported finished: {outcome:?}"
+                    );
+                    assert_eq!(
+                        outcome.environment_destroyed,
+                        outcome.residue != Verdict::Pass,
+                        "{outcome:?}"
+                    );
+                    (
+                        format!("ended:{:?}", outcome.ending).to_lowercase(),
+                        outcome.residue == Verdict::Pass,
+                    )
+                }
+                other => panic!("the interrupted workload: {other:?}"),
+            };
+            evidence(
+                "restart-in-flight-not-believed",
+                &settled,
+                PRIV,
+                "authority-ledger",
+            );
+            // Reconciliation, on the same incarnation of the authority.
+            let report = lab.authority().environment_reconcile().unwrap();
+            assert!(!report.unobservable, "{report:?}");
+            assert_eq!(report.incomplete, 0, "{report:?}");
+            assert_eq!(report.ambiguous, 0, "{report:?}");
+            assert!(recovered_in < RECOVERY_BOUND, "{recovered_in:?}");
+            evidence(
+                "restart-reconciled-within-bound",
+                &format!("runtime-back-in-{}ms", recovered_in.as_millis()),
+                PRIV,
+                "authority-reconciliation",
+            );
+            // A's environment: never believed still running unless its end
+            // was proved and its container measured clean again.
+            let a_state = lab.state_of(&env_a);
+            let a_outcome = match a_state {
+                EnvironmentState::Destroyed | EnvironmentState::Lost => {
+                    assert!(!lab.runtime.exists(&container_a), "{a_state:?}");
+                    a_state.as_str()
+                }
+                EnvironmentState::Ready if live_restore && proved => {
+                    assert!(lab.runtime.exists(&container_a));
+                    "ready-measured-again"
+                }
+                other => panic!("the interrupted run's environment is {other:?}"),
+            };
+            evidence(
+                "restart-interrupted-environment-not-believed",
+                &a_outcome.to_lowercase(),
+                PRIV,
+                "authority-reconciliation",
+            );
+            // B's idle environment, as the runtime kept it: stopped is
+            // destroyed by its labels; still running is measured again.
+            let b_state = lab.state_of(&env_b);
+            let b_outcome = if live_restore {
+                assert_eq!(b_state, EnvironmentState::Ready, "{report:?}");
+                assert!(report.still_running >= 1, "{report:?}");
+                "ready-measured-again"
+            } else {
+                assert!(
+                    matches!(
+                        b_state,
+                        EnvironmentState::Destroyed | EnvironmentState::Lost
+                    ),
+                    "{b_state:?}: {report:?}"
+                );
+                assert!(!lab.runtime.exists(&container_b), "{b_state:?}");
+                "stopped-destroyed"
+            };
+            evidence(
+                "restart-idle-environment-reconciled",
+                b_outcome,
+                PRIV,
+                "authority-reconciliation",
+            );
+            // The same key again: its record, never a second run.
+            let owned_after = store_containers(&lab);
+            let again = lab
+                .authority()
+                .workload_run(&run_a, &fixture(&["workload-sleep", "50"], "r-1"))
+                .unwrap();
+            let WorkloadReply::Replayed(record) = &again else {
+                panic!("the interrupted workload's key ran again: {again:?}")
+            };
+            assert_ne!(record.state, WorkloadState::Completed, "{record:?}");
+            assert_ne!(record.state, WorkloadState::Launching, "{record:?}");
+            assert_eq!(store_containers(&lab), owned_after);
+            assert!(owned_after <= owned_before);
+            evidence(
+                "restart-in-flight-never-rerun",
+                record.state.as_str(),
+                PRIV,
+                "authority-idempotency",
+            );
+            // The container that is not DireWolf's is still there, as made.
+            assert!(lab.runtime.exists(&foreign.id));
+            assert_eq!(
+                lab.runtime.label(&foreign.id, "io.direwolf.test"),
+                "foreign-restart"
+            );
+            evidence(
+                "restart-foreign-untouched",
+                "present",
+                PRIV,
+                "exact-label-ownership",
+            );
+            // A new authorized workload runs, in a new environment, as the
+            // environment's own user -- on the same incarnation.
+            let run_c = lab.operator_run();
+            let (_, container_c) = lab.ready(&run_c);
+            assert!(container_c != container_a && container_c != container_b);
+            let served = lab
+                .authority()
+                .workload_run(&run_c, &fixture(&["workload-identity"], "r-2"))
+                .unwrap();
+            let WorkloadReply::Completed(outcome) = &served else {
+                panic!("a new workload after the restart: {served:?}")
+            };
+            assert_eq!(outcome.ending, WorkloadEnding::Exited, "{outcome:?}");
+            assert_eq!(outcome.exit_code, Some(0), "{outcome:?}");
+            assert!(
+                String::from_utf8_lossy(&outcome.stdout).contains("uid=10001,"),
+                "{outcome:?}"
+            );
+            evidence(
+                "restart-new-workload-served",
+                "exited-0-as-10001",
+                PRIV,
+                "authority-ledger",
+            );
+            drop(foreign);
+        }
+    }
+
     /// M5d.6 (ADR-0052 §8): a run's release ends its environment -- in a
     /// **real** OCI runtime, through the released broker, the real authority
     /// and, where a runtime would ask, a **real** DWKP client. Every line says

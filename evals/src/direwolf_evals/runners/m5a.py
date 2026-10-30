@@ -77,6 +77,7 @@ M5A_CASES: Final = frozenset(
         ("sandbox-broker", "weakened-seccomp-default-profile"),
         ("sandbox-broker", "weakened-host-pid"),
         ("sandbox-broker", "weakened-host-ipc"),
+        ("sandbox-broker", "weakened-host-uts"),
         ("sandbox-broker", "weakened-host-network"),
         ("sandbox-broker", "weakened-mutable-image-tag"),
         ("sandbox-broker", "weakened-extra-device"),

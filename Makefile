@@ -22,7 +22,7 @@ DW := $(PY) scripts/dw.py
         net-http-evidence net-http-mutations sandbox-workload-mutations sandbox-secret-evidence \
         sandbox-secret-mutations sandbox-workspace-evidence sandbox-workspace-mutations \
         sandbox-agent-evidence sandbox-agent-mutations sandbox-release-evidence \
-        sandbox-release-mutations d11-hardening-evidence d11-hardening-mutations d11-posture fuzz-smoke fuzz security docs \
+        sandbox-release-mutations sandbox-restart-evidence d11-hardening-evidence d11-hardening-mutations d11-posture fuzz-smoke fuzz security docs \
         preflight tools hooks clean
 
 help:            ## List available commands
@@ -135,6 +135,9 @@ sandbox-release-evidence: ## M5d.6 a run's release ends its environment: durable
 
 sandbox-release-mutations: ## M5d.6 mutation review: each release guard weakened in turn must fail a unit suite or sandbox-release-evidence (slow)
 	@$(DW) sandbox-release-mutations
+
+sandbox-restart-evidence: ## M5e.2 R11, HOSTED ONLY: restarts the runner's Docker Engine under a running authority; refuses anywhere but a disposable GitHub-hosted runner (DW_RUNTIME_RESTART=1)
+	@$(DW) sandbox-restart-evidence
 
 d11-hardening-evidence: ## D11 hardening: the worker's syscall filter, vouching from the kernel, start-up window, swap posture; real workers, observers, cgroups; root-only cases need DW_D11_PRIVILEGED=1
 	@$(DW) d11-hardening-evidence
