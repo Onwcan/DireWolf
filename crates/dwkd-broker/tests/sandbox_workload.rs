@@ -2288,15 +2288,52 @@ mod linux {
             }
         }
 
-        /// R8's bounded neighbour, as M5e requires it. **It fails today**
-        /// (docs/M5E_ASSURANCE_PLAN.md, finding F-R8): every environment's
-        /// workload runs as host uid 10001, and `RLIMIT_NPROC` counts that
-        /// uid's tasks across all of them, so while A holds its bound B's
-        /// probe cannot start and B is refused `ENVIRONMENT_NOT_CLEAN`. Kept
-        /// as the finding's reproducer -- run by name, required by no task,
-        /// printing no evidence line -- until the owner decides the remedy.
+        /// How many tasks `container`'s own pids cgroup holds, as the runtime
+        /// counts them: every process and thread of the environment.
+        fn tasks(ev: &Evidence, container: &ContainerRef) -> u64 {
+            ev.docker_ok(&[
+                "container",
+                "stats",
+                "--no-stream",
+                "--format",
+                "{{.PIDs}}",
+                container.as_str(),
+            ])
+            .trim()
+            .parse()
+            .unwrap()
+        }
+
+        /// Until the marker `workload-hold-tasks` writes once its environment
+        /// refused it a task: the holder is at its bound. The marker is the
+        /// workload's, made under the workspace's umask, so this process --
+        /// not of the workspace group -- sees it exist and never reads it; the
+        /// holder's own count comes from its output once it ends.
+        fn wait_until_held(workspace: &Path) {
+            let deadline = Instant::now() + PEER_WAIT;
+            while !workspace.join("held").exists() {
+                assert!(
+                    Instant::now() < deadline,
+                    "the holder never reached its bound"
+                );
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        }
+
+        /// R8's bounded neighbour (M5e.2; ADR-0056, the owner's Option B):
+        /// environment A holds its own task bound while environment B, its
+        /// neighbour of the same host uid, is served. Before ADR-0056 this
+        /// failed -- finding F-R8: `RLIMIT_NPROC` counted uid 10001's tasks
+        /// across every environment at A's own bound, so B's probe could not
+        /// start and B was refused `ENVIRONMENT_NOT_CLEAN`. Should the
+        /// coupling return, the test still says so, measured, before it fails.
+        ///
+        /// The pressure is the fixture's own, never reduced to pass: threads
+        /// until A's environment refuses one, at least `PIDS_LIMIT - 8` of
+        /// them, and A's cgroup full by the runtime's count -- its own bound,
+        /// not the backstop, is what stopped it.
         #[test]
-        #[ignore = "M5e.2 finding F-R8: fails today, required by no task; run by name to reproduce"]
+        #[ignore = "needs a real OCI runtime: make sandbox-workload-evidence"]
         fn a_neighbour_at_its_task_bound_leaves_another_environment_and_the_broker_serving() {
             let ev = Evidence::load();
             let _reaper = Reaper(ev.clone());
@@ -2308,7 +2345,7 @@ mod linux {
             let (sb, cb) = prepared(&socket, &ev, &wb);
             // A at its own task bound, held: threads until its environment
             // refuses one, a marker once it does, and the bound held while
-            // B is served.
+            // B is measured and served.
             let pressing = invocation();
             let generation = started(
                 &socket,
@@ -2317,16 +2354,13 @@ mod linux {
                 pressing.clone(),
                 workload(
                     (FIXTURE, &ev.fixture_sha256),
-                    &["workload-hold-tasks", "4096", "15", "/workspace/held"],
+                    &["workload-hold-tasks", "4096", "45", "/workspace/held"],
                     65_536,
-                    60,
+                    90,
                 ),
             );
-            let deadline = Instant::now() + PEER_WAIT;
-            while !wa.join("held").exists() {
-                assert!(Instant::now() < deadline, "A never reached its bound");
-                std::thread::sleep(Duration::from_millis(50));
-            }
+            wait_until_held(&wa);
+            let a_tasks = tasks(&ev, &ca);
             // While A holds it: B runs, as its user, and the broker answers.
             let since = Instant::now();
             let answer = run_workload(
@@ -2369,11 +2403,11 @@ mod linux {
                 destroy(&socket, &ev, &sb, &cb);
                 panic!(
                     "finding F-R8: B was refused {answer:?} in {refused_in:?} while A held its \
-                     task bound (A still holding: {holding}; A held={} of PIDS_LIMIT {}, \
-                     refused={}, residue {:?}); once A ended, B measured clean: {b_clean}, and \
-                     B's next workload was {b_then}",
+                     task bound (A still holding: {holding}; A held={} of PIDS_LIMIT {}, the \
+                     runtime counting {a_tasks} tasks in A, refused={}, residue {:?}); once A \
+                     ended, B measured clean: {b_clean}, and B's next workload was {b_then}",
                     line(&out, "held"),
-                    dwk_sandbox_profile::PIDS_LIMIT,
+                    profile::PIDS_LIMIT,
                     line(&out, "refused"),
                     a.residue,
                 );
@@ -2391,23 +2425,233 @@ mod linux {
                 "{b:?}"
             );
             assert!(served < Duration::from_secs(30), "{served:?}");
-            assert!(
-                try_collect(&socket, &pressing, &generation).is_some_and(|c| is_running(&c)),
-                "A stopped holding its bound before B was served"
+            // B, measured again while A still holds: clean, never drifted.
+            let b_clean_under_pressure = measured_clean(&socket, &ev, &sb, &cb);
+            let since = Instant::now();
+            let a_running =
+                try_collect(&socket, &pressing, &generation).is_some_and(|c| is_running(&c));
+            let collected_in = since.elapsed();
+            assert!(a_running, "A stopped holding its bound before B was served");
+            assert!(b_clean_under_pressure, "B drifted beside A's bound");
+            assert!(collected_in < PROMPT, "{collected_in:?}");
+            evidence(
+                "neighbour-workload-served-beside-a-bound-environment",
+                &format!("exited-0-as-10001-in-{}ms", served.as_millis()),
+                "rlimit",
             );
-            // A's own bound held it: refused below the environment's limit.
+            evidence(
+                "neighbour-measured-clean-beside-a-bound-environment",
+                "every-required-invariant-pass",
+                "measured-both",
+            );
+            evidence(
+                "neighbour-broker-answers-beside-a-bound-environment",
+                &format!("collect-in-{}ms", collected_in.as_millis()),
+                "broker-start-collect",
+            );
+            // A's own bound held it: at least PIDS_LIMIT - 8 threads by its
+            // own count, refused the next, and its cgroup full by the
+            // runtime's count while it held -- the environment's bound, not
+            // the host-wide backstop, stopped it.
             let a = collect_ended(&socket, &pressing, &generation);
             let out = text(&a);
             let held: u64 = line(&out, "held").parse().unwrap();
-            assert!(held < dwk_sandbox_profile::PIDS_LIMIT, "{out}");
+            assert!(
+                held + 8 >= profile::PIDS_LIMIT && held < profile::PIDS_LIMIT,
+                "A's pressure: {out}"
+            );
             assert_ne!(line(&out, "refused"), "none", "{out}");
+            assert_eq!(a_tasks, profile::PIDS_LIMIT, "A's cgroup: {a_tasks} tasks");
             assert_eq!(a.residue, Verdict::Pass, "{a:?}");
-            // Both environments kept, and each measures clean afterwards.
+            evidence(
+                "neighbour-holds-its-own-task-bound",
+                &format!("held-{held}-cgroup-{a_tasks}-of-{}", profile::PIDS_LIMIT),
+                "cgroup-limit",
+            );
+            // Both environments kept, and each measures clean afterwards; then
+            // each destroyed by its own labels, and nothing of either left.
             assert!(ev.exists(ca.as_str()) && ev.exists(cb.as_str()));
             assert!(measured_clean(&socket, &ev, &sa, &ca), "A");
             assert!(measured_clean(&socket, &ev, &sb, &cb), "B");
             destroy(&socket, &ev, &sa, &ca);
+            assert!(!ev.exists(ca.as_str()) && ev.exists(cb.as_str()));
             destroy(&socket, &ev, &sb, &cb);
+            assert!(!ev.exists(cb.as_str()));
+            evidence(
+                "neighbour-both-kept-then-destroyed-exactly",
+                "a-residue-pass-both-clean-both-gone",
+                "exact-label-cleanup",
+            );
+        }
+
+        /// Whether this host may hold the authority's cap of environments at
+        /// their bound, and what it has: `Err` names what is missing. Never
+        /// inferred: `DW_CAPACITY_EVIDENCE=1` on a GitHub-hosted runner whose
+        /// runtime is its own (not Docker Desktop), with the memory, the
+        /// kernel's task tables and no process of the sandbox uid already
+        /// there (ADR-0056 §4's deployment contract, checked).
+        fn capacity_runner(ev: &Evidence) -> Result<String, String> {
+            let env = |name: &str| std::env::var(name).unwrap_or_default();
+            if env("DW_CAPACITY_EVIDENCE") != "1" {
+                return Err("DW_CAPACITY_EVIDENCE is not 1".to_owned());
+            }
+            if env("GITHUB_ACTIONS") != "true" || env("RUNNER_ENVIRONMENT") != "github-hosted" {
+                return Err("this is not a GitHub-hosted runner".to_owned());
+            }
+            let system = ev.docker_ok(&["info", "--format", "{{.OperatingSystem}}"]);
+            if system.contains("Docker Desktop") {
+                return Err(format!("the runtime is {}", system.trim()));
+            }
+            let read = |path: &str| std::fs::read_to_string(path).unwrap_or_default();
+            let number = |path: &str| read(path).trim().parse::<u64>().unwrap_or(0);
+            let available_kib = read("/proc/meminfo")
+                .lines()
+                .find_map(|l| l.strip_prefix("MemAvailable:"))
+                .and_then(|v| v.trim().trim_end_matches("kB").trim().parse::<u64>().ok())
+                .unwrap_or(0);
+            if available_kib < 4 << 20 {
+                return Err(format!("only {available_kib} KiB of memory available"));
+            }
+            let room = 2 * profile::RLIMIT_NPROC;
+            for table in ["/proc/sys/kernel/threads-max", "/proc/sys/kernel/pid_max"] {
+                if number(table) < room {
+                    return Err(format!("{table} is {} (< {room})", number(table)));
+                }
+            }
+            let sandbox_uid = profile::SANDBOX_UID.to_string();
+            let theirs = std::fs::read_dir("/proc")
+                .map_err(|e| format!("no /proc: {e}"))?
+                .flatten()
+                .filter(|entry| entry.file_name().to_string_lossy().parse::<u32>().is_ok())
+                .filter(|entry| {
+                    read(&format!("{}/status", entry.path().display()))
+                        .lines()
+                        .find_map(|l| l.strip_prefix("Uid:"))
+                        .and_then(|ids| ids.split_whitespace().next().map(str::to_owned))
+                        .is_some_and(|uid| uid == sandbox_uid)
+                })
+                .count();
+            if theirs != 0 {
+                return Err(format!(
+                    "{theirs} process(es) of uid {sandbox_uid} already run here"
+                ));
+            }
+            let cpus = std::thread::available_parallelism().map_or(0, std::num::NonZero::get);
+            Ok(format!(
+                "a disposable hosted runner: {} MiB available, {cpus} CPUs, threads-max {}, \
+                 pid_max {}, no process of uid {sandbox_uid}",
+                available_kib >> 10,
+                number("/proc/sys/kernel/threads-max"),
+                number("/proc/sys/kernel/pid_max"),
+            ))
+        }
+
+        /// R8 at the authority's cap (ADR-0056 §6): `MAX_LIVE_ENVIRONMENTS`
+        /// environments of uid 10001, all but one holding their own bound,
+        /// and the last prepared, measured and served beside them. Bounded:
+        /// sleeping threads, at most `MAX_LIVE_ENVIRONMENTS × PIDS_LIMIT`
+        /// tasks for at most their wall clock -- and only on a disposable
+        /// hosted runner whose capacity is checked first.
+        #[test]
+        #[ignore = "fills the live-environment cap: hosted only, make sandbox-capacity-evidence"]
+        fn at_the_live_environment_cap_the_last_environment_is_prepared_measured_and_served() {
+            let ev = Evidence::load();
+            let preflight = capacity_runner(&ev).unwrap_or_else(|why| {
+                panic!(
+                    "NOT EXERCISED: {why}; the cap is filled only on a disposable hosted runner \
+                     (make sandbox-capacity-evidence, DW_CAPACITY_EVIDENCE=1)"
+                )
+            });
+            println!("capacity: {preflight}");
+            let _reaper = Reaper(ev.clone());
+            let dir = Scratch::new("capacity");
+            let socket = dir.socket();
+            let _broker = Broker::start(&socket, None);
+            let cap = usize::try_from(profile::MAX_LIVE_ENVIRONMENTS).unwrap();
+            // All but one at their own bound, one after another, each held
+            // for longer than the rest take to start and the last to be
+            // served.
+            let mut holders = Vec::new();
+            for n in 0..cap - 1 {
+                let workspace = dir.workspace(&format!("w{n}"));
+                let (spec, container) = prepared(&socket, &ev, &workspace);
+                let holding = invocation();
+                let generation = started(
+                    &socket,
+                    &ev,
+                    (&spec, &container),
+                    holding.clone(),
+                    workload(
+                        (FIXTURE, &ev.fixture_sha256),
+                        &["workload-hold-tasks", "4096", "240", "/workspace/held"],
+                        65_536,
+                        300,
+                    ),
+                );
+                wait_until_held(&workspace);
+                holders.push((spec, container, holding, generation));
+            }
+            let mut total = 0;
+            for (_, container, _, _) in &holders {
+                let count = tasks(&ev, container);
+                assert_eq!(count, profile::PIDS_LIMIT, "{container:?}: {count} tasks");
+                total += count;
+            }
+            evidence(
+                "capacity-environments-at-their-own-bound",
+                &format!(
+                    "{}-at-{}-tasks-{total}-of-uid-10001",
+                    cap - 1,
+                    profile::PIDS_LIMIT
+                ),
+                "cgroup-limit",
+            );
+            // The last: prepared and measured beside them, then served.
+            let since = Instant::now();
+            let (spec, container) = prepared(&socket, &ev, &dir.workspace("last"));
+            assert!(measured_clean(&socket, &ev, &spec, &container));
+            evidence(
+                "capacity-last-environment-prepared-and-measured-clean",
+                &format!("ready-in-{}ms", since.elapsed().as_millis()),
+                "measured-both",
+            );
+            let served = ran(&socket, &ev, (&spec, &container), &["workload-identity"]);
+            assert_eq!(served.ending, WorkloadEnding::Exited, "{served:?}");
+            assert_eq!(served.exit_code.map(|c| c.get()), Some(0), "{served:?}");
+            assert!(
+                line(&text(&served), "uid").split(',').all(|u| u == "10001"),
+                "{served:?}"
+            );
+            for (_, container, holding, generation) in &holders {
+                assert!(
+                    try_collect(&socket, holding, generation).is_some_and(|c| is_running(&c)),
+                    "{container:?} stopped holding before the last was served"
+                );
+            }
+            evidence(
+                "capacity-last-workload-served",
+                &format!("exited-0-as-10001-in-{}ms", since.elapsed().as_millis()),
+                "rlimit",
+            );
+            // Every holder ends as its own bound left it, and everything is
+            // destroyed by its own labels.
+            for (spec, container, holding, generation) in &holders {
+                let ended = collect_ended(&socket, holding, generation);
+                let out = text(&ended);
+                let held: u64 = line(&out, "held").parse().unwrap();
+                assert!(held + 8 >= profile::PIDS_LIMIT, "{container:?}: {out}");
+                assert_ne!(line(&out, "refused"), "none", "{out}");
+                assert_eq!(ended.residue, Verdict::Pass, "{ended:?}");
+                destroy(&socket, &ev, spec, container);
+                assert!(!ev.exists(container.as_str()));
+            }
+            destroy(&socket, &ev, &spec, &container);
+            assert!(!ev.exists(container.as_str()));
+            evidence(
+                "capacity-all-destroyed-exactly",
+                &format!("{cap}-destroyed"),
+                "exact-label-cleanup",
+            );
         }
 
         #[test]

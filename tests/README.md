@@ -294,18 +294,33 @@ level `in-process`, so none can stand in for an environment's measurement.
 two environments side by side on the real runtime (suite `sandbox-closure`,
 level `real-oci`) -- a run sees none of the other's processes (`pid-namespace`),
 cannot name its environment, destroying it spares the other, and the next
-environment holds nothing of the last. The same module keeps R8's neighbour
-test, `a_neighbour_at_its_task_bound_leaves_another_environment_and_the_broker_serving`,
-which **fails today** (finding F-R8: every environment's uid 10001 shares one
-`RLIMIT_NPROC` count); it is required by no task and prints no evidence line,
-and `test_m5e_attribution.py` holds it so. `sandbox-fixture`'s
-`workload-hold-tasks <count> <seconds> <marker>` is its pressure: sleeping
+environment holds nothing of the last. The same module holds R8's neighbour
+test, `a_neighbour_at_its_task_bound_leaves_another_environment_and_the_broker_serving`
+-- finding F-R8's reproducer, **required again** since the owner selected
+[ADR-0056](../docs/adr/0056-m5e-cross-run-task-limit-isolation.md)'s Option B
+(still Proposed): environment A at its own task bound while environment B is
+served, measured clean and never drifted, the broker answering, both destroyed
+by their labels (`neighbour-*`, `real-oci`). The authority's suite repeats it
+through `process.exec`, a real DWKP client per run
+(`a_run_at_its_task_bound_leaves_another_runs_process_exec_served`, `neighbour-*`
+in `sandbox-authority-workload`, `dwkp-end-to-end`). `sandbox-fixture`'s
+`workload-hold-tasks <count> <seconds> <marker>` is the pressure: sleeping
 threads until the count or a refusal, the marker written, the bound held for
-the seconds it was given within the workload's wall clock -- never more than
-one uid's limit. When it fails it says what it measured first: how fast the
-broker refused B, A's own count and refusal, and whether B served again once
-A ended ([ADR-0056](../docs/adr/0056-m5e-cross-run-task-limit-isolation.md),
-Proposed, is the remedy's draft). Since 2026-10-30 the foundation's real
+the seconds it was given within the workload's wall clock. It is asserted,
+never reduced: at least `PIDS_LIMIT - 8` threads by the holder's own count
+(read from its output once it ends -- the marker is the workload's, made under
+the workspace's umask, so the test only sees it exist) and the holder's cgroup
+full by the runtime's (`docker stats`), so its own bound stopped it. Should
+the coupling return, the test still fails as F-R8 and says what it measured
+first. `make sandbox-neighbour-mutations` is the negative control (the
+backstop at 256 must fail both as F-R8); `make sandbox-capacity-evidence`, hosted
+only, fills the live-environment cap (`capacity-*`, held by
+`test_ci_capacity.py`); `test_task_limit_backstop.py` holds the backstop
+derived from the cap the authority enforces. The egress evidence also keeps
+the runtime's own record of a real `PROXY_ONLY` environment for
+`a_real_proxy_only_record_is_kept_and_each_hard_rule_broken_in_it_refused`,
+which judges each hard rule broken in that record (`captured-*`, still
+`in-process`: the runtime never runs a weakened record). Since 2026-10-30 the foundation's real
 weakened-profile suite also runs a container in the host's UTS namespace
 (`weakened-host-uts`).
 
@@ -316,8 +331,9 @@ runner's Docker Engine restarted under a running authority (suite
 before anything unless `DW_RUNTIME_RESTART=1` on a GitHub-hosted runner whose
 engine is a local systemd unit -- never Docker Desktop, never a developer's
 daemon -- so locally it is NOT EXERCISED, which fails. The hosted
-`sandbox-restart` job is its only runner; `test_ci_runtime_restart.py` holds
-that job, its flag, the guard's order and the task's refusal.
+`sandbox-restart` job is its only runner (first run and passed in hosted run
+41130431929); `test_ci_runtime_restart.py` holds that job, its flag, the
+guard's order and the task's refusal.
 
 **Handing configuration across an identity switch (CI #106).** Three jobs run
 their task as a fresh session of the runner's user, so the groups the job

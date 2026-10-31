@@ -840,8 +840,9 @@ mod workload {
     /// whichever comes first; then `marker` written, so a test knows the
     /// bound is held; then that bound held for `seconds` (M5e.2's neighbour,
     /// R8, and its finding F-R8). Bounded three ways: the count, the
-    /// environment's task limits (its cgroup's and `RLIMIT_NPROC`) and the
-    /// workload's wall clock. Every thread ends with the process.
+    /// environment's task limits (its own pids cgroup, and `RLIMIT_NPROC`,
+    /// the host-wide backstop above it since ADR-0056) and the workload's
+    /// wall clock. Every thread ends with the process.
     fn hold_tasks(count: &str, seconds: &str, marker: &str) -> ExitCode {
         let count = count.parse::<u32>().unwrap_or(0);
         let seconds = seconds.parse::<u64>().unwrap_or(0);

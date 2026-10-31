@@ -69,7 +69,8 @@ fn the_strict_plan_spells_every_hard_rule_and_no_weakening() {
         after(&argv, "--ulimit"),
         [
             "nofile=1024:1024",
-            "nproc=256:256",
+            // ADR-0056: the host-wide backstop, not the environment's bound.
+            "nproc=8192:8192",
             "fsize=1073741824:1073741824",
             "core=0:0"
         ]

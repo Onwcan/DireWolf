@@ -22,7 +22,8 @@ DW := $(PY) scripts/dw.py
         net-http-evidence net-http-mutations sandbox-workload-mutations sandbox-secret-evidence \
         sandbox-secret-mutations sandbox-workspace-evidence sandbox-workspace-mutations \
         sandbox-agent-evidence sandbox-agent-mutations sandbox-release-evidence \
-        sandbox-release-mutations sandbox-restart-evidence d11-hardening-evidence d11-hardening-mutations d11-posture fuzz-smoke fuzz security docs \
+        sandbox-release-mutations sandbox-restart-evidence sandbox-capacity-evidence \
+        sandbox-neighbour-mutations d11-hardening-evidence d11-hardening-mutations d11-posture fuzz-smoke fuzz security docs \
         preflight tools hooks clean
 
 help:            ## List available commands
@@ -138,6 +139,12 @@ sandbox-release-mutations: ## M5d.6 mutation review: each release guard weakened
 
 sandbox-restart-evidence: ## M5e.2 R11, HOSTED ONLY: restarts the runner's Docker Engine under a running authority; refuses anywhere but a disposable GitHub-hosted runner (DW_RUNTIME_RESTART=1)
 	@$(DW) sandbox-restart-evidence
+
+sandbox-capacity-evidence: ## M5e.2 R8 at the cap, HOSTED ONLY: every live environment the authority allows, all but one at their own task bound, the last prepared, measured and served (ADR-0056); refuses anywhere but a disposable GitHub-hosted runner (DW_CAPACITY_EVIDENCE=1)
+	@$(DW) sandbox-capacity-evidence
+
+sandbox-neighbour-mutations: ## M5e.2 R8 negative control (ADR-0056 §6): the task backstop put back at 256 must fail both neighbour tests as finding F-R8 (needs a runtime)
+	@$(DW) sandbox-neighbour-mutations
 
 d11-hardening-evidence: ## D11 hardening: the worker's syscall filter, vouching from the kernel, start-up window, swap posture; real workers, observers, cgroups; root-only cases need DW_D11_PRIVILEGED=1
 	@$(DW) d11-hardening-evidence

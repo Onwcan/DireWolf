@@ -451,7 +451,7 @@ and package-manager acceptance are M5e's, and the `local` environment is M6's (O
 stays in progress until M5e meets its own acceptance. Passing CI is the evidence named
 here — not a deployment, and not a certification.
 
-#### M5e · The M5 adversarial gate and closeout — **IN PROGRESS** (M5e.1 complete; M5e.2 built in part, hosted verification pending; M5e.3–M5e.6 not started)
+#### M5e · The M5 adversarial gate and closeout — **IN PROGRESS** (M5e.1 complete; M5e.2 in progress — partial, hosted verification of its F-R8 remedy pending; M5e.3–M5e.6 not started)
 
 **Planned 2026-10-26.** The gap analysis, the requirements-to-evidence matrix,
 the implementation sequence and the owner's decisions of 2026-10-26 on its open points are in
@@ -505,8 +505,30 @@ executed (only a disposable hosted runner may run it); and
 stays open — R8 still fails — until the owner accepts a remedy and its evidence passes. M5e.2
 stays IN PROGRESS.
 
-Still to do: the rest of M5e.2 (above), M5e.3–M5e.5's registry fixtures and pip and npm
-evidence, and M5e.6's gate.
+**M5e.2 after run 41130431929 (2026-10-31).** The owner committed that change as `e696c25`
+and `466b106`; hosted run
+[41130431929](https://github.com/Onwcan/DireWolf/actions/runs/41130431929) (run no. 113)
+passed, **28 of 28 jobs**. The CI #106 repair is hosted-verified — filesystem operations, the
+sandbox workspace and the sandbox agent ran their privileged and three-identity halves again —
+and so are R2's `weakened-host-uts` and R9's cross-run cases. **R11 passed hosted**: the
+`sandbox-restart` job ran for the first time, its seven cases restarting the runner's Docker
+Engine under a running authority. The owner then **selected ADR-0056's Option B and
+authorised its implementation** (not its acceptance). Built since, unstaged, pending the
+owner's hosted run: each environment's pids cgroup stays its task bound (256) and
+`RLIMIT_NPROC` becomes a host-wide backstop derived as `PIDS_LIMIT × MAX_LIVE_ENVIRONMENTS × 2`
+= 8 192, held by a compile-time assertion and an architecture test, and measured exactly from
+both vantages; R8's neighbour test is required again, at the broker and through the
+authority's `process.exec`, with its cap case — every live environment the authority allows,
+all but one at their bound — in a new required job (`sandbox-capacity`, hosted only), and a
+negative control that puts the backstop back at 256 and must fail both as F-R8; and R3 is
+judged over a real runtime's own `PROXY_ONLY` record, in process. Real weakened
+`PROXY_ONLY` containers stay NOT EXERCISED. ADR-0056 stays **Proposed** until its evidence
+passes hosted and the owner accepts it; M5e.2 stays IN PROGRESS.
+
+Still to do: the owner's hosted run of the F-R8 remedy and ADR-0056's acceptance; R3's
+real-container level (not built; the owner's decision); M5e.3–M5e.5's registry fixtures and
+pip and npm evidence — M5e.3's brief is ready ([M5E_ASSURANCE_PLAN.md](M5E_ASSURANCE_PLAN.md)
+§7a), not started — and M5e.6's gate.
 
 **Deps:** M5a–M5d. **Deliverables:** the complete escape, SSRF and persistence suites as
 merge gates; weakened-profile closure for `PROXY_ONLY`; package-manager acceptance

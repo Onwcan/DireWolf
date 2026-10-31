@@ -108,7 +108,7 @@ fn conforming() -> String {
     "PidsLimit": 256,
     "Ulimits": [
       {{"Name": "nofile", "Hard": 1024, "Soft": 1024}},
-      {{"Name": "nproc", "Hard": 256, "Soft": 256}},
+      {{"Name": "nproc", "Hard": 8192, "Soft": 8192}},
       {{"Name": "fsize", "Hard": 1073741824, "Soft": 1073741824}},
       {{"Name": "core", "Hard": 0, "Soft": 0}}
     ],
@@ -464,6 +464,102 @@ fn replace_changes_exactly_one_member() {
     assert_eq!(differing, [SandboxInvariant::HostResourceLimits]);
 }
 
+/// ADR-0056 §6, "the measurement still bites": the task backstop is measured
+/// exactly from the runtime's record, the old per-environment value and an
+/// unlimited one included, and a record without its pids limit is never
+/// used -- since the backstop no longer bounds one environment, that limit is
+/// the bound, and its absence must refuse.
+#[test]
+fn the_task_backstop_is_measured_exactly_and_the_pids_limit_is_required() {
+    let ulimits = |nproc: &str| {
+        dwk_proto::json::parse(
+            format!(
+                r#"[{{"Name": "nofile", "Hard": 1024, "Soft": 1024}}, {nproc}
+                   {{"Name": "fsize", "Hard": 1073741824, "Soft": 1073741824}},
+                   {{"Name": "core", "Hard": 0, "Soft": 0}}]"#
+            )
+            .as_bytes(),
+            dwk_proto::json::ParseOptions::ijson(),
+        )
+        .unwrap()
+    };
+    let base = record(&conforming());
+    let only_limits = |object: &Object| {
+        let moved: Vec<_> = verdicts(object)
+            .into_iter()
+            .zip(verdicts(&base))
+            .filter(|(after, before)| after != before)
+            .map(|(after, _)| after)
+            .collect();
+        assert_eq!(moved.len(), 1, "{moved:?}");
+        assert_eq!(moved[0].0, SandboxInvariant::HostResourceLimits);
+        assert_ne!(moved[0].1, Verdict::Pass);
+    };
+    // The value the profile applies passes; it is what the record says.
+    let kept = mutated(
+        &["HostConfig", "Ulimits"],
+        ulimits(r#"{"Name": "nproc", "Hard": 8192, "Soft": 8192},"#),
+    );
+    assert_eq!(failing(&kept), Vec::<SandboxInvariant>::new());
+    for (what, nproc) in [
+        (
+            "the old per-environment value",
+            r#"{"Name": "nproc", "Hard": 256, "Soft": 256},"#,
+        ),
+        ("unlimited", r#"{"Name": "nproc", "Hard": -1, "Soft": -1},"#),
+        (
+            "a raisable soft limit",
+            r#"{"Name": "nproc", "Hard": -1, "Soft": 8192},"#,
+        ),
+        (
+            "one above the backstop",
+            r#"{"Name": "nproc", "Hard": 8193, "Soft": 8193},"#,
+        ),
+        ("no nproc at all", ""),
+    ] {
+        let weakened = mutated(&["HostConfig", "Ulimits"], ulimits(nproc));
+        assert!(
+            failing(&weakened).contains(&SandboxInvariant::HostResourceLimits),
+            "{what} was not refused"
+        );
+        only_limits(&weakened);
+    }
+    // No pids limit, however the record says it: the environment is refused.
+    for (what, value) in [
+        ("null", Value::Null),
+        (
+            "0, unlimited",
+            Value::Number(dwk_proto::json::Number::Int(0)),
+        ),
+        (
+            "-1, unlimited",
+            Value::Number(dwk_proto::json::Number::Int(-1)),
+        ),
+        (
+            "the backstop instead",
+            Value::Number(dwk_proto::json::Number::Int(8192)),
+        ),
+    ] {
+        let weakened = mutated(&["HostConfig", "PidsLimit"], value);
+        assert!(
+            failing(&weakened).contains(&SandboxInvariant::HostResourceLimits),
+            "a pids limit of {what} was not refused"
+        );
+        only_limits(&weakened);
+    }
+    let Some(Value::Object(mut host)) = base.clone().remove("HostConfig") else {
+        panic!("no HostConfig")
+    };
+    host.remove("PidsLimit");
+    let mut absent = base.clone();
+    absent.remove("HostConfig");
+    absent
+        .insert("HostConfig".to_owned(), Value::Object(host))
+        .unwrap();
+    assert!(failing(&absent).contains(&SandboxInvariant::HostResourceLimits));
+    only_limits(&absent);
+}
+
 fn env_list(items: &[&str]) -> Value {
     strings(items)
 }
@@ -584,7 +680,16 @@ fn conforming_for(network: NetworkTopology) -> Object {
 /// every other one passing: what the broker's decision sees when the record
 /// is the only thing wrong.
 fn all_checks(object: &Object, spec: &EnvironmentSpec) -> super::super::Checks {
-    let judged = Record::new(object).judge(spec, PROFILE, SOCKET);
+    all_checks_against(object, spec, (PROFILE, SOCKET))
+}
+
+/// [`all_checks`], judged against `(seccomp profile, runtime socket)`.
+fn all_checks_against(
+    object: &Object,
+    spec: &EnvironmentSpec,
+    (profile, socket): (&str, &str),
+) -> super::super::Checks {
+    let judged = Record::new(object).judge(spec, profile, socket);
     dwk_proto::brokerp::sandbox::required_invariants(
         spec.network,
         super::super::oci::contract(spec),
@@ -600,12 +705,18 @@ fn all_checks(object: &Object, spec: &EnvironmentSpec) -> super::super::Checks {
     .collect()
 }
 
-/// The host invariants whose verdict `weakened` changes from `base`.
-fn changed(base: &Object, weakened: &Object, spec: &EnvironmentSpec) -> Vec<SandboxInvariant> {
+/// The host invariants whose verdict `weakened` changes from `base`, judged
+/// against `(seccomp profile, runtime socket)`.
+fn changed_against(
+    base: &Object,
+    weakened: &Object,
+    spec: &EnvironmentSpec,
+    (profile, socket): (&str, &str),
+) -> Vec<SandboxInvariant> {
     Record::new(weakened)
-        .judge(spec, PROFILE, SOCKET)
+        .judge(spec, profile, socket)
         .into_iter()
-        .zip(Record::new(base).judge(spec, PROFILE, SOCKET))
+        .zip(Record::new(base).judge(spec, profile, socket))
         .filter(|(after, before)| after != before)
         .map(|(after, _)| after.0)
         .collect()
@@ -623,7 +734,6 @@ type Nonconforming<'a> = (
 
 #[test]
 fn every_hard_rule_is_refused_in_proxy_only_and_host_uts_in_both_topologies() {
-    use SandboxInvariant as I;
     // The conforming record, judged by the production decision: kept.
     for (case, network) in [
         ("no-network-conforming-kept", NetworkTopology::NoNetwork),
@@ -645,12 +755,74 @@ fn every_hard_rule_is_refused_in_proxy_only_and_host_uts_in_both_topologies() {
     // One nonconforming observation at a time, against the topology it is
     // judged under: exactly the invariants it states fail, and the
     // production decision refuses the environment.
+    for (case, network, path, value, expected) in hard_rule_weakenings(PROFILE) {
+        let spec = spec_with(network);
+        let base = conforming_for(network);
+        refused(
+            case,
+            &base,
+            (path, value),
+            expected,
+            &spec,
+            (PROFILE, SOCKET),
+        );
+    }
+}
+
+/// `base` with `value` at `path`, judged under `spec` against `against`:
+/// exactly `expected` fail, the production decision refuses the
+/// environment, and the case's line says so.
+fn refused(
+    case: &str,
+    base: &Object,
+    (path, value): (&[&str], Value),
+    expected: &[SandboxInvariant],
+    spec: &EnvironmentSpec,
+    against: (&str, &str),
+) {
+    let weakened = replace(base.clone(), path, value);
+    let mut flipped = changed_against(base, &weakened, spec, against);
+    flipped.sort_by_key(|i| i.as_str());
+    let mut wanted = expected.to_vec();
+    wanted.sort_by_key(|i| i.as_str());
+    assert_eq!(flipped, wanted, "{case}: other invariants moved");
+    let checks = all_checks_against(&weakened, spec, against);
+    for invariant in expected {
+        assert!(
+            checks.contains(&(*invariant, Verdict::Fail)),
+            "{case}: {invariant:?} did not fail"
+        );
+    }
+    assert!(
+        !super::super::oci::clean(&checks, spec),
+        "{case}: a nonconforming record was kept"
+    );
+    assurance_evidence(
+        case,
+        &format!(
+            "refused:{}",
+            expected
+                .iter()
+                .map(|i| i.as_str())
+                .collect::<Vec<_>>()
+                .join("+")
+        ),
+        "measured-host",
+    );
+}
+
+/// Every hard rule broken one at a time (M5e.2, R2 and R3): its case, the
+/// topology it is judged under, the record's field, the nonconforming value
+/// and the invariants that must fail. `seccomp` is the profile the record
+/// carries, kept as it is where a case changes the security options.
+fn hard_rule_weakenings(seccomp: &str) -> Vec<Nonconforming<'static>> {
+    use SandboxInvariant as I;
     let device = dwk_proto::json::parse(
         br#"[{"PathOnHost":"/dev/kmsg","PathInContainer":"/dev/kmsg","CgroupPermissions":"rwm"}]"#,
         dwk_proto::json::ParseOptions::ijson(),
     )
     .unwrap();
-    let cases: Vec<Nonconforming<'_>> = vec![
+    vec![
         (
             "no-network-weakened-host-uts-refused",
             NetworkTopology::NoNetwork,
@@ -697,7 +869,7 @@ fn every_hard_rule_is_refused_in_proxy_only_and_host_uts_in_both_topologies() {
             "proxy-only-weakened-no-new-privileges-disabled-refused",
             NetworkTopology::ProxyOnly,
             &["HostConfig", "SecurityOpt"],
-            strings(&["no-new-privileges=false", &format!("seccomp={PROFILE}")]),
+            strings(&["no-new-privileges=false", &format!("seccomp={seccomp}")]),
             &[I::HostNoNewPrivileges],
         ),
         (
@@ -756,39 +928,108 @@ fn every_hard_rule_is_refused_in_proxy_only_and_host_uts_in_both_topologies() {
             Value::Number(dwk_proto::json::Number::Int(4096)),
             &[I::HostResourceLimits],
         ),
-    ];
-    for (case, network, path, value, expected) in cases {
-        let spec = spec_with(network);
-        let base = conforming_for(network);
-        let weakened = replace(base.clone(), path, value);
-        let mut flipped = changed(&base, &weakened, &spec);
-        flipped.sort_by_key(|i| i.as_str());
-        let mut wanted = expected.to_vec();
-        wanted.sort_by_key(|i| i.as_str());
-        assert_eq!(flipped, wanted, "{case}: other invariants moved");
-        let checks = all_checks(&weakened, &spec);
-        for invariant in expected {
-            assert!(
-                checks.contains(&(*invariant, Verdict::Fail)),
-                "{case}: {invariant:?} did not fail"
-            );
-        }
-        assert!(
-            !super::super::oci::clean(&checks, &spec),
-            "{case}: a nonconforming record was kept"
-        );
-        assurance_evidence(
-            case,
-            &format!(
-                "refused:{}",
-                expected
-                    .iter()
-                    .map(|i| i.as_str())
-                    .collect::<Vec<_>>()
-                    .join("+")
-            ),
-            "measured-host",
-        );
+    ]
+}
+
+/// Where `make sandbox-egress-evidence` leaves the runtime's own record of
+/// a real `PROXY_ONLY` environment that measured clean, and the facts of
+/// its specification the host judgement reads: one fixed directory beneath
+/// the repository's `target/`, which the task empties before and after. No
+/// variable names it -- the broker's source reads no environment (TX042).
+const CAPTURED: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../target/m5e-captured-proxy-only"
+);
+
+/// R3 against a real runtime's own record (M5e.2): the record the runtime
+/// keeps of a real `PROXY_ONLY` environment the broker prepared and
+/// measured clean -- captured by the egress evidence, never written here --
+/// kept by the production host judgement and decision; then each hard rule
+/// broken in that record, one at a time, in this process, and refused.
+///
+/// What this is not: a weakened container. The runtime never ran any of the
+/// weakened records, so every line is `in-process` -- the judgement over the
+/// runtime's real field names, defaults and ordering, which the hand-written
+/// record of [`every_hard_rule_is_refused_in_proxy_only_and_host_uts_in_both_topologies`]
+/// can only imitate. A real weakened `PROXY_ONLY` container is not built
+/// (`docs/M5E_ASSURANCE_PLAN.md`, R3).
+#[test]
+#[ignore = "needs a captured PROXY_ONLY record: make sandbox-egress-evidence"]
+fn a_real_proxy_only_record_is_kept_and_each_hard_rule_broken_in_it_refused() {
+    let dir = std::path::Path::new(CAPTURED);
+    let Ok(text) = std::fs::read_to_string(dir.join("proxy-only-spec.txt")) else {
+        panic!(
+            "NOT EXERCISED: nothing captured at {CAPTURED}; run `make sandbox-egress-evidence`, \
+             which captures a real PROXY_ONLY environment's record first"
+        )
+    };
+    let fact = |key: &str| {
+        text.lines()
+            .find_map(|l| l.strip_prefix(key)?.strip_prefix('='))
+            .unwrap_or_else(|| panic!("no {key} captured"))
+            .to_owned()
+    };
+    let spec = EnvironmentSpec {
+        environment_id: EnvironmentId::parse(&fact("environment_id")).unwrap(),
+        run_id: RunId::parse(&fact("run_id")).unwrap(),
+        store: StoreInstance::new(fact("store")).unwrap(),
+        profile: EnvironmentProfile::OciStrict,
+        network: NetworkTopology::ProxyOnly,
+        image: ImageId::new(fact("image")).unwrap(),
+        // Neither is judged from the record: the probe's digest and the
+        // workspace's identity are measured elsewhere.
+        probe_sha256: ContentDigest::new("b".repeat(64)).unwrap(),
+        workspace_path: HostPath::new(fact("workspace_path")).unwrap(),
+        workspace: (1, 2),
+        workspace_bound: None,
+        relay_sha256: None,
+        egress: None,
+    };
+    let seccomp = dwk_sandbox_profile::seccomp_profile_json();
+    let socket = fact("socket");
+    let against = (seccomp.as_str(), socket.as_str());
+    let mut records = parse(&std::fs::read(dir.join("proxy-only-record.json")).unwrap()).unwrap();
+    assert_eq!(records.len(), 1, "one record captured");
+    let base = records.remove(0);
+    // The runtime's own record, as captured: kept.
+    let checks = all_checks_against(&base, &spec, against);
+    assert!(
+        super::super::oci::clean(&checks, &spec),
+        "the captured record: {:?}",
+        checks
+            .iter()
+            .filter(|(_, v)| *v != Verdict::Pass)
+            .collect::<Vec<_>>()
+    );
+    assurance_evidence(
+        "captured-proxy-only-conforming-kept",
+        "every-required-invariant-pass-kept",
+        "measured-host",
+    );
+    // Each hard rule broken in it, alone: refused.
+    let mut cases = hard_rule_weakenings(&seccomp);
+    cases.retain(|(_, network, ..)| *network == NetworkTopology::ProxyOnly);
+    // ADR-0056: the task backstop measured exactly -- the per-environment
+    // value it replaced is refused too.
+    let old_backstop = dwk_proto::json::parse(
+        br#"[{"Name": "nofile", "Hard": 1024, "Soft": 1024},
+             {"Name": "nproc", "Hard": 256, "Soft": 256},
+             {"Name": "fsize", "Hard": 1073741824, "Soft": 1073741824},
+             {"Name": "core", "Hard": 0, "Soft": 0}]"#,
+        dwk_proto::json::ParseOptions::ijson(),
+    )
+    .unwrap();
+    cases.push((
+        "proxy-only-weakened-task-backstop-at-256-refused",
+        NetworkTopology::ProxyOnly,
+        &["HostConfig", "Ulimits"],
+        old_backstop,
+        &[SandboxInvariant::HostResourceLimits],
+    ));
+    assert_eq!(cases.len(), 15);
+    for (case, _, path, value, expected) in cases {
+        let case = format!("captured-{case}");
+        refused(&case, &base, (path, value), expected, &spec, against);
     }
 }
 

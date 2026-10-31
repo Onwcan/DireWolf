@@ -1,18 +1,22 @@
 # ADR-0056: M5e — cross-run task-limit isolation: each environment's tasks bounded by its own pids cgroup, `RLIMIT_NPROC` raised to a host-wide backstop no set of environments the authority allows can reach (finding F-R8)
 
-**Status:** Proposed · **Date:** 2026-10-30 · **Would amend (on acceptance):** [ADR-0047](0047-m5a-oci-execution-environment-and-measured-assurance.md) §5 (the `oci-strict` profile's `nproc`, and the value `HOST_RESOURCE_LIMITS` and `CONTAINER_RLIMITS` measure), [ADR-0052](0052-m5d-sandboxed-process-exec.md) §10 (the per-environment quotas) · **Refines:** [ADR-0048](0048-m5b-proxy-only-topology-and-connect-proxy.md) (its relays are already bounded by their cgroup alone) · **Addresses:** finding F-R8 and requirement R8 of [M5E_ASSURANCE_PLAN.md](../M5E_ASSURANCE_PLAN.md) (§3, §5a) · **Drafting authorised by:** the owner, 2026-10-30 — the drafting only, not a remedy
+**Status:** Proposed · **Date:** 2026-10-30 · **Would amend (on acceptance):** [ADR-0047](0047-m5a-oci-execution-environment-and-measured-assurance.md) §5 (the `oci-strict` profile's `nproc`, and the value `HOST_RESOURCE_LIMITS` and `CONTAINER_RLIMITS` measure), [ADR-0052](0052-m5d-sandboxed-process-exec.md) §10 (the per-environment quotas) · **Refines:** [ADR-0048](0048-m5b-proxy-only-topology-and-connect-proxy.md) (its relays are already bounded by their cgroup alone) · **Addresses:** finding F-R8 and requirement R8 of [M5E_ASSURANCE_PLAN.md](../M5E_ASSURANCE_PLAN.md) (§3, §5a) · **Drafting authorised by:** the owner, 2026-10-30 — the drafting only, not a remedy · **Implementation authorised by:** the owner, 2026-10-31 — Option B as proposed here (the factor 2, so 8 192; §4's deployment contract; §5's residuals), the implementation only, not acceptance
 
 > **One environment's tasks are bounded by its own pids cgroup and by
 > nothing it shares with another. `RLIMIT_NPROC`, which the kernel counts per
 > host uid across every environment, becomes a host-wide backstop set above
 > anything the authority's live-environment cap allows — so a workload at its
 > own bound can never stop another run's probe or workload from starting.
-> Nothing changes in production until §6's evidence has passed in hosted CI
-> and the owner accepts this ADR.**
+> The owner authorised Option B's implementation on 2026-10-31; this ADR stays
+> Proposed until §6's evidence has passed in hosted CI and the owner accepts
+> it.**
 
-This is a proposal. It accepts nothing, changes no limit, no measured
-invariant and no evidence requirement, and enables nothing. Until the owner
-accepts it, finding F-R8 stays open, R8 stays failed, and M5e.2 cannot close.
+This is a proposal. It accepts nothing. On 2026-10-31 the owner selected
+Option B and authorised its implementation, which is built (§7) and awaits its
+hosted run. Owner approval of the option, the implementation evidence, and
+formal acceptance are three separate steps: until §6's evidence passes in
+hosted CI and the owner accepts this ADR, it amends no accepted ADR, finding
+F-R8 stays open and M5e.2 cannot close.
 
 ## Context
 
@@ -102,11 +106,40 @@ coupling can return; beyond that it is a stated residual (§5). The value is
 the owner's to set at acceptance; the formula and its margin are what this
 ADR proposes.
 
-The constant is derived, not repeated: `MAX_LIVE_ENVIRONMENTS` moves from the
-authority's `state/workload.rs` to `dwk-sandbox-profile` beside `PIDS_LIMIT`
-(the authority uses it from there), and a compile-time assertion holds
+The constant is derived, not repeated: `RLIMIT_NPROC` is written as
+`PIDS_LIMIT * MAX_LIVE_ENVIRONMENTS * 2`, and a compile-time assertion holds
 `RLIMIT_NPROC >= 2 * MAX_LIVE_ENVIRONMENTS * PIDS_LIMIT`, so a later change to
 either cannot silently reopen F-R8.
+
+*As built (2026-10-31), one deviation from the draft.* The draft moved
+`MAX_LIVE_ENVIRONMENTS` out of the authority into `dwk-sandbox-profile`. That
+would make the authority link the profile's crate, which accepted ADR-0047 §5
+forbids ("not by the authority") — a change of accepted architecture that
+Option B's approval does not cover. So the cap stays the authority's
+(`state/workload.rs`, ADR-0052 §2a, unchanged); the profile carries its own
+`MAX_LIVE_ENVIRONMENTS`, used only to size the backstop; and the architecture
+gate (`tests/architecture/test_task_limit_backstop.py`) holds the two equal,
+the formula the source of truth and the assertion present — each way they
+could drift failing it. A cap raised in the authority alone fails that gate
+before any runtime.
+
+*The margin, accounted.* What the kernel counts against uid 10001 is every
+task of that uid on the host. Each environment's init (the probe, holding),
+its workload and everything that workload starts, and every `docker exec` the
+broker makes into it (the probe's measurement, `workspace`, `reap` — the
+runtime's `runc init` joins the environment's cgroup before it becomes uid
+10001) are tasks of that environment's cgroup, so at most `PIDS_LIMIT` each.
+The runtime's own processes (the daemon, `containerd`, the shim) are root's;
+the relay and setup containers are `RELAY_UID` 10002's, bounded by their own
+cgroups (ADR-0048); neither is counted. With *n* containers of uid 10001 the
+count is therefore at most *n* × 256. Every live environment the authority
+allows at its bound is 16 × 256 = 4 096, leaving 4 096 — sixteen more full
+environments — for those it does not count: an orphan awaiting
+reconciliation, or a second store. A neighbour needs only a few tasks of that
+margin to be measured and to start its workload. Past it the coupling returns:
+more than one full set of uncounted environments at their bound, or uid-10001
+processes DireWolf did not start that consume the margin. Option B does not
+claim to survive those (§5); the deployment contract (§4) excludes them.
 
 ### 3. What stays as it is
 
@@ -156,11 +189,44 @@ neighbour other than each environment's own cgroup (each already shown alone).
   other `nproc` (256, unlimited) is refused, and a record without its pids
   limit is refused, from both vantages.
 
+*As built (2026-10-31), each case required by name and attributed (M5e.1):*
+R8 at the broker — `neighbour-holds-its-own-task-bound`,
+`neighbour-workload-served-beside-a-bound-environment`,
+`neighbour-measured-clean-beside-a-bound-environment`,
+`neighbour-broker-answers-beside-a-bound-environment`,
+`neighbour-both-kept-then-destroyed-exactly` (`sandbox-workload-evidence`,
+`real-oci`); through the authority — `neighbour-run-holds-its-own-task-bound`,
+`neighbour-authority-answers-beside-a-bound-run`,
+`neighbour-environment-judged-clean-beside-a-bound-run`,
+`neighbour-process-exec-completed-beside-a-bound-run`,
+`neighbour-environments-kept-ready` (the same task, `dwkp-end-to-end`); at the
+cap — `capacity-environments-at-their-own-bound`,
+`capacity-last-environment-prepared-and-measured-clean`,
+`capacity-last-workload-served`, `capacity-all-destroyed-exactly`
+(`sandbox-capacity-evidence`, a required job of its own, `DW_CAPACITY_EVIDENCE=1`
+on a disposable GitHub-hosted runner whose memory, task tables and absence of
+uid-10001 processes are checked first); the negative control —
+`make sandbox-neighbour-mutations`, the backstop put back at 256, each
+neighbour test required to fail with F-R8's own signature; the measurement —
+the broker's and the probe's unit tests (`nproc` 256, unlimited, raisable,
+one above; a pids limit null, 0, −1, the backstop's value, absent; `pids.max`
+`max`) and a mutant of the broker's pids-limit judgement in the workload
+mutation review. R8's pressure is asserted, never reduced: A holds at least
+`PIDS_LIMIT − 8` threads by its own count and its cgroup is full by the
+runtime's, so its own bound — not the backstop — stopped it.
+
 ### 7. Before acceptance
 
-Nothing in production reads this ADR. The change it describes — two
-constants, one assertion, the plan's value and the two measurements — lands
-as one reviewed change behind §6's evidence, after the owner's decision.
+The change it describes — two constants, one assertion, the plan's value and
+the two measurements — lands as one reviewed change behind §6's evidence. Built
+on 2026-10-31 after the owner's implementation decision, and left unstaged for
+the owner's commit: `dwk-sandbox-profile` (`MAX_LIVE_ENVIRONMENTS`, `RLIMIT_NPROC`
+derived, the compile-time assertion), the plan's `--ulimit nproc=8192:8192`, the
+broker's `HOST_RESOURCE_LIMITS` and the probe's `CONTAINER_RLIMITS` measuring
+8 192 exactly — the same code, the value changed — and the evidence above. What
+remains before acceptance: the owner's hosted run with every §6 case passing,
+then the owner's formal acceptance, which alone updates this ADR's status and
+the accepted digest.
 
 ## Consequences
 
@@ -244,8 +310,16 @@ Rejected.
 
 Required before anything changes: accept B as proposed (and the backstop's
 factor), or choose A, or another remedy. Acceptance follows §6's evidence in
-hosted CI. Until then: F-R8 open, R8 failed, M5e.2 open; the neighbour test
-stays the finding's reproducer, required by no task.
+hosted CI.
+
+**2026-10-31: Option B selected, its implementation authorised** — the
+recommended remedy as proposed here: the per-environment pids cgroup as the
+bound, `RLIMIT_NPROC` at `PIDS_LIMIT × MAX_LIVE_ENVIRONMENTS × 2` = 8 192 as
+the host-wide backstop, under §4's deployment contract and with §5's
+residuals. This authorises the implementation (§7) only. It is not
+acceptance: this ADR stays **Proposed**, F-R8 stays open and M5e.2 cannot close
+until §6's evidence passes in the owner's hosted run and the owner accepts it.
+Option A and C1 were not selected; either would need the owner's own decision.
 
 ## Revisit if
 

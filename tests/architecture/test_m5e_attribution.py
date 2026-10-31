@@ -48,7 +48,10 @@ TASKS = {
         (dw.BROKER_ASSURANCE_CASES, dw.ASSURANCE_EVIDENCE_PREFIX),
         (dw.SANDBOX_CASES, dw.SANDBOX_EVIDENCE_PREFIX),
     ),
-    "task_sandbox_egress_evidence": ((dw.EGRESS_CASES, dw.SANDBOX_EVIDENCE_PREFIX),),
+    "task_sandbox_egress_evidence": (
+        (dw.EGRESS_CASES, dw.SANDBOX_EVIDENCE_PREFIX),
+        (dw.CAPTURED_ASSURANCE_CASES, dw.ASSURANCE_EVIDENCE_PREFIX),
+    ),
     "task_sandbox_workload_evidence": ((dw.WORKLOAD_CASES, dw.SANDBOX_EVIDENCE_PREFIX),),
     "task_sandbox_secret_evidence": (
         (dw.SECRET_SANDBOX_UNIT_CASES, dw.SECRET_EVIDENCE_PREFIX),
@@ -60,6 +63,7 @@ TASKS = {
         (dw.WORKSPACE_CASES + dw.WORKSPACE_PRIVILEGED_CASES, dw.SANDBOX_EVIDENCE_PREFIX),
     ),
     "task_sandbox_restart_evidence": ((dw.RESTART_CASES, dw.SANDBOX_EVIDENCE_PREFIX),),
+    "task_sandbox_capacity_evidence": ((dw.CAPACITY_CASES, dw.SANDBOX_EVIDENCE_PREFIX),),
 }
 
 # Which suite each emitter prints, and whether a call names its level (an
@@ -243,6 +247,7 @@ def test_every_required_case_is_attributed_and_every_rule_is_used() -> None:
     inventory = set(dw.ATTRIBUTED_CASES)
     tables = (
         dw.BROKER_ASSURANCE_CASES,
+        dw.CAPTURED_ASSURANCE_CASES,
         dw.SANDBOX_CASES,
         dw.EGRESS_CASES,
         dw.WORKLOAD_CASES,
@@ -252,6 +257,7 @@ def test_every_required_case_is_attributed_and_every_rule_is_used() -> None:
         dw.WORKSPACE_CASES,
         dw.WORKSPACE_PRIVILEGED_CASES,
         dw.RESTART_CASES,
+        dw.CAPACITY_CASES,
     )
     assert inventory == {key for table in tables for key in table}
     for table in tables:
@@ -269,15 +275,27 @@ def test_every_required_case_is_attributed_and_every_rule_is_used() -> None:
                 and not any(fnmatch.fnmatchcase(case, p) for p, _, _ in rules[:at])
             ]
             assert first, f"{suite}: the rule `{pattern}` attributes no required case"
-    # The inventory attributed, by count: M5e.1's 497 and M5e.2's 29 (17 in
-    # process; on a real runtime, 4 cross-run and the host UTS namespace; on
-    # the hosted runner, 7 of the runtime's restart). A smaller one is a lost
-    # case.
+    # The inventory attributed, by count: M5e.1's 497 and M5e.2's 59 (17 in
+    # process, and 16 in process over a real runtime's PROXY_ONLY record; on
+    # a real runtime, 4 cross-run, the host UTS namespace and R8's 10
+    # neighbour cases, 5 at the broker and 5 through the authority; on the
+    # hosted runner, 7 of the runtime's restart and 4 at the live-environment
+    # cap). A smaller one is a lost case.
     assert len(dw.BROKER_ASSURANCE_CASES) == 17
-    assert len([s for s, _ in dw.WORKLOAD_CASES if s == "sandbox-closure"]) == 4
+    assert len(dw.CAPTURED_ASSURANCE_CASES) == 16
+    closure = [c for s, c in dw.WORKLOAD_CASES if s == "sandbox-closure"]
+    assert len(closure) == 9
+    assert len([c for c in closure if c.startswith("neighbour-")]) == 5
+    authority_neighbour = [
+        c
+        for s, c in dw.WORKLOAD_CASES
+        if s == "sandbox-authority-workload" and c.startswith("neighbour-")
+    ]
+    assert len(authority_neighbour) == 5
     assert ("sandbox-broker", "weakened-host-uts") in dw.SANDBOX_CASES
     assert len(dw.RESTART_CASES) == 7
-    assert len(inventory) == 526
+    assert len(dw.CAPACITY_CASES) == 4
+    assert len(inventory) == 556
 
 
 def test_the_vocabulary_is_closed_used_and_documented() -> None:
@@ -403,6 +421,8 @@ def test_every_literal_case_prints_what_the_contract_says() -> None:
         (dw.WORKSPACE_UNIT_CASES, dw.WORKSPACE_EVIDENCE_PREFIX),
         (dw.WORKSPACE_CASES, dw.SANDBOX_EVIDENCE_PREFIX),
         (dw.WORKSPACE_CASES + dw.WORKSPACE_PRIVILEGED_CASES, dw.SANDBOX_EVIDENCE_PREFIX),
+        (dw.RESTART_CASES, dw.SANDBOX_EVIDENCE_PREFIX),
+        (dw.CAPACITY_CASES, dw.SANDBOX_EVIDENCE_PREFIX),
     ],
 )
 def test_a_complete_attributed_output_passes(
@@ -590,6 +610,48 @@ def test_the_in_process_assurance_is_never_a_containers_and_never_partial() -> N
         dw.require_attributed_evidence(_output(complete), cases, prefix)
 
 
+def test_the_captured_record_cases_stay_in_process_and_complete() -> None:
+    """R3 over a real runtime's own PROXY_ONLY record: the runtime never ran a
+    weakened record, so every line is `in-process` -- a line offered as a real
+    container's, a case missing or NOT EXERCISED fails the egress task -- and
+    every PROXY_ONLY hard rule of the in-process table is broken in it, with
+    the task backstop's old value besides."""
+    cases = dw.CAPTURED_ASSURANCE_CASES
+    prefix = dw.ASSURANCE_EVIDENCE_PREFIX
+    proxy_only = {c for _, c in dw.BROKER_ASSURANCE_CASES if c.startswith("proxy-only-")}
+    assert {c.removeprefix("captured-") for _, c in cases} == proxy_only | {
+        "proxy-only-weakened-task-backstop-at-256-refused"
+    }
+    complete = _complete(cases)
+    assert {r["level"] for r in complete} == {"in-process"}
+    at = cases.index(("broker-assurance", "captured-proxy-only-weakened-privileged-refused"))
+    named = re.escape("broker-assurance/captured-proxy-only-weakened-privileged-refused")
+    for change, match in (
+        ({"level": "real-oci"}, rf"{named}: at level 'real-oci'"),
+        ({"level": "privileged-oci"}, rf"{named}: at level 'privileged-oci'"),
+        ({"outcome": "not-exercised: nothing captured"}, "NOT EXERCISED: 1 required case"),
+    ):
+        with pytest.raises(dw.TaskError, match=match):
+            dw.require_attributed_evidence(
+                _output(_with(complete, at, **change), prefix), cases, prefix
+            )
+    with pytest.raises(dw.TaskError, match=rf"NOT EXERCISED: 1 required case\(s\): {named}"):
+        dw.require_attributed_evidence(
+            _output(complete[:at] + complete[at + 1 :], prefix), cases, prefix
+        )
+    egress = inspect.getsource(dw.task_sandbox_egress_evidence)
+    assert "DW_CAPTURED_RECORD_DIR" in egress
+    # One directory, the same for the task and the broker's test -- which
+    # names it from its own crate, never from a variable (TX042).
+    assert dw.CAPTURED_RECORD_DIR == REPO_ROOT / "target" / "m5e-captured-proxy-only"
+    judged = (REPO_ROOT / "crates/dwkd-broker/src/sandbox/inspect_tests.rs").read_text("utf-8")
+    assert '"/../../target/m5e-captured-proxy-only"' in judged
+    assert 'env!("CARGO_MANIFEST_DIR")' in judged
+    assert egress.index('require_attributed_evidence("\\n".join(outputs)') < egress.index(
+        "CAPTURED_ASSURANCE_TEST"
+    ), "the record is judged only after the real environment's own evidence passed"
+
+
 def test_the_closure_cases_are_a_real_runtimes_and_each_its_own() -> None:
     """R9 runs on a real runtime: a line claiming less, or attributed to
     another case's mechanism, fails the workload task."""
@@ -608,27 +670,96 @@ def test_the_closure_cases_are_a_real_runtimes_and_each_its_own() -> None:
     plan = (REPO_ROOT / "docs" / "M5E_ASSURANCE_PLAN.md").read_text(encoding="utf-8")
     uncited = sorted(
         case
-        for suite, case in (*dw.BROKER_ASSURANCE_CASES, *cases)
-        if suite in ("broker-assurance", "sandbox-closure") and f"`{case}`" not in plan
+        for suite, case in (
+            *dw.BROKER_ASSURANCE_CASES,
+            *dw.CAPTURED_ASSURANCE_CASES,
+            *cases,
+            *dw.CAPACITY_CASES,
+        )
+        if (suite in ("broker-assurance", "sandbox-closure") or case.startswith("neighbour-"))
+        and f"`{case}`" not in plan
     )
     assert not uncited, f"the plan's matrix does not cite: {uncited}"
 
 
-def test_the_failing_neighbour_test_is_never_evidence() -> None:
-    """R8's neighbour test fails today (the plan's finding F-R8). It stays as
-    the finding's reproducer: run by name only, selected by no task, and
-    printing no evidence line -- so nothing of it can be read as R8 met."""
-    name = "a_neighbour_at_its_task_bound_leaves_another_environment_and_the_broker_serving"
-    selected = (*dw.WORKLOAD_BROKER_TESTS, *dw.WORKLOAD_AUTHORITY_TESTS)
+BROKER_WORKLOAD = REPO_ROOT / "crates" / "dwkd-broker" / "tests" / "sandbox_workload.rs"
+AUTHORITY_WORKLOAD = REPO_ROOT / "crates" / "dwkd-authority" / "tests" / "sandbox_workload.rs"
+NEIGHBOUR = "a_neighbour_at_its_task_bound_leaves_another_environment_and_the_broker_serving"
+AUTHORITY_NEIGHBOUR = "a_run_at_its_task_bound_leaves_another_runs_process_exec_served"
+
+
+def _test_body(path: Path, name: str) -> tuple[str, str]:
+    """`name`'s `#[ignore]` reason and its body, from its file."""
+    text = path.read_text(encoding="utf-8")
+    found = re.search(r'#\[ignore = "([^"]*)"\]\n( *)fn ' + name + r"\(\) \{", text)
+    assert found is not None, f"{name} is not an #[ignore]d test in {path.name}"
+    end = text.index(f"\n{found.group(2)}}}\n", found.end())
+    return found.group(1), text[found.end() : end]
+
+
+def test_the_neighbour_tests_are_required_evidence_since_adr_0056() -> None:
+    """R8 restored (ADR-0056, the owner's Option B): finding F-R8's reproducer
+    is a required test of the workload evidence, at the broker and through
+    the authority, every case it prints required by name -- none can be
+    dropped, and a run that leaves one out is NOT EXERCISED, which fails."""
+    assert dw.WORKLOAD_BROKER_TESTS.count(f"linux::closure::{NEIGHBOUR}") == 1
+    assert dw.WORKLOAD_AUTHORITY_TESTS.count(f"linux::{AUTHORITY_NEIGHBOUR}") == 1
+    for path, name, suite in (
+        (BROKER_WORKLOAD, NEIGHBOUR, "sandbox-closure"),
+        (AUTHORITY_WORKLOAD, AUTHORITY_NEIGHBOUR, "sandbox-authority-workload"),
+    ):
+        reason, body = _test_body(path, name)
+        assert reason == "needs a real OCI runtime: make sandbox-workload-evidence", reason
+        printed = re.findall(r'evidence\(\s*"(neighbour-[a-z0-9-]+)"', body)
+        required = sorted(c for s, c in dw.WORKLOAD_CASES if s == suite and c.startswith("neigh"))
+        assert sorted(printed) == required, (name, printed)
+        # The pressure is asserted from the fixture's own count and the
+        # runtime's, never reduced: at least PIDS_LIMIT - 8, the cgroup full.
+        assert "workload-hold-tasks" in body and "4096" in body, name
+        assert "+ 8 >= " in body and "PIDS_LIMIT" in body, name
+        assert "finding F-R8" in body, f"{name} no longer says the coupling it finds"
+    complete = _complete(dw.WORKLOAD_CASES)
+    for at, (suite, case) in enumerate(dw.WORKLOAD_CASES):
+        if case.startswith("neighbour-"):
+            named = re.escape(f"{suite}/{case}")
+            _refused(
+                complete[:at] + complete[at + 1 :],
+                rf"NOT EXERCISED: 1 required case\(s\): {named}",
+            )
+            _refused(
+                _with(complete, at, outcome="not-exercised: no runtime"),
+                rf"NOT EXERCISED: 1 required case\(s\): {named}",
+            )
+
+
+def test_the_capacity_test_is_hosted_only_guarded_first_and_required() -> None:
+    """R8 at the cap fills every live environment the authority allows: it is
+    selected by name by the hosted capacity task alone, checks where it is
+    before it makes anything, and prints every case that task requires."""
+    assert len(dw.CAPACITY_TESTS) == 1
+    name = dw.CAPACITY_TESTS[0].rsplit("::", 1)[-1]
+    selected = (*dw.WORKLOAD_BROKER_TESTS, *dw.WORKLOAD_AUTHORITY_TESTS, *dw.RESTART_TESTS)
     assert not [test for test in selected if test.endswith(name)]
-    text = (REPO_ROOT / "crates" / "dwkd-broker" / "tests" / "sandbox_workload.rs").read_text(
-        encoding="utf-8"
+    reason, body = _test_body(BROKER_WORKLOAD, name)
+    assert "hosted only" in reason, reason
+    assert body.index("capacity_runner(") < body.index("Broker::start("), (
+        "the test checks where it is before it makes anything"
     )
-    found = re.search(r'#\[ignore = "([^"]*)"\]\s*fn ' + name + r"\(\) \{", text)
-    assert found is not None and "F-R8" in found.group(1)
-    body = text[found.end() : text.index("\n        }\n", found.end())]
-    assert "evidence(" not in body
-    assert not [case for _, case in dw.WORKLOAD_CASES if case.startswith("neighbour-")]
+    printed = re.findall(r'evidence\(\s*"(capacity-[a-z0-9-]+)"', body)
+    assert sorted(printed) == sorted(c for _, c in dw.CAPACITY_CASES)
+    text = BROKER_WORKLOAD.read_text(encoding="utf-8")
+    guard = text[text.index("fn capacity_runner(") : text.index(f"fn {name}(")]
+    for check in (
+        "DW_CAPACITY_EVIDENCE",
+        "GITHUB_ACTIONS",
+        "RUNNER_ENVIRONMENT",
+        "Docker Desktop",
+        "MemAvailable",
+        "threads-max",
+        "pid_max",
+        "SANDBOX_UID",
+    ):
+        assert check in guard, check
 
 
 def test_the_agent_and_release_contracts_are_their_own_and_unchanged() -> None:

@@ -97,6 +97,10 @@ mod linux {
     const DENIED: &str = "/usr/local/bin/denied-tool";
     /// The fixture again, at a path the host has too (OD-9).
     const TRUE: &str = "/usr/bin/true";
+    /// The most tasks an environment's own pids cgroup holds: the sandbox
+    /// profile's `PIDS_LIMIT`, which this crate does not link (ADR-0047 §5);
+    /// `tests/architecture/test_task_limit_backstop.py` holds the two equal.
+    const PIDS_LIMIT: u64 = 256;
 
     /// One line of `suite`'s evidence, printed only after the assertions
     /// before it held: the case, how it ended, its level and what enforced
@@ -242,6 +246,23 @@ reason = "NO_MATCHING_RULE"
             ])
             .trim()
             .to_owned()
+        }
+
+        /// How many tasks the container's own pids cgroup holds, as the
+        /// runtime counts them -- from outside, so a full environment can be
+        /// counted.
+        fn tasks(&self, container: &str) -> u64 {
+            self.ok(&[
+                "container",
+                "stats",
+                "--no-stream",
+                "--format",
+                "{{.PIDs}}",
+                container,
+            ])
+            .trim()
+            .parse()
+            .unwrap()
         }
 
         /// How many processes the container holds besides init, as the
@@ -2247,6 +2268,167 @@ reason = "NO_MATCHING_RULE"
             "IDEMPOTENCY_KEY_REUSED",
             E2E,
             "authority-idempotency",
+        );
+    }
+
+    /// R8 through the authority (M5e.2; ADR-0056 §6, the owner's Option B):
+    /// one run's workload holds its environment's task bound while another
+    /// run, over its own DWKP connection, has the authority prepare, measure
+    /// and judge an environment and run a workload in it -- every step a
+    /// task of uid 10001 started beside the bound one. Before ADR-0056 the
+    /// second run's environment could not be measured (finding F-R8), and
+    /// `process.exec` would have recorded its workload `FAILED` and destroyed
+    /// its environment as drifted.
+    #[test]
+    #[ignore = "needs a real OCI runtime: make sandbox-workload-evidence"]
+    fn a_run_at_its_task_bound_leaves_another_runs_process_exec_served() {
+        let mut lab = Lab::new("m5e-neighbour", WorkloadBudget::default());
+        let served = lab.serve();
+        let mut a = Peer::admit(served.path(), 1, &["process.exec:*"], binder(&served));
+        // A's environment, prepared by the authority with A's first launch.
+        let body = a.exec("n-1", &call(FIXTURE, &["workload-identity"]));
+        let env_a = sandboxed(&body).environment_id.as_str().to_owned();
+        let container_a: String = super::state_support::raw(&lab.dir.state())
+            .query_row(
+                "SELECT container FROM environment WHERE environment_id = ?1",
+                [env_a.as_str()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        lab.reap_later(&container_a);
+        // A at its own task bound, held: the fixture's own pressure, never
+        // reduced -- threads until its environment refuses one.
+        a.send_exec(
+            "n-hold",
+            &format!(
+                r#"{{"executable":"{FIXTURE}","args":["workload-hold-tasks","4096","45","/workspace/held-a"],"timeout_seconds":90}}"#
+            ),
+        );
+        // The marker is the workload's, made under the workspace's umask: this
+        // process sees it exist and never reads it; A's own count comes from
+        // its output once it ends.
+        let deadline = Instant::now() + Duration::from_secs(120);
+        while !lab.workspace.join("held-a").exists() {
+            assert!(Instant::now() < deadline, "A never reached its bound");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let a_tasks = lab.runtime.tasks(&container_a);
+        // B, while A holds: the authority answers at once, then prepares B's
+        // environment, judges it and runs B's workload.
+        let mut b = Peer::admit(served.path(), 2, &["process.exec:*"], binder(&served));
+        let since = Instant::now();
+        let preview = b.tool(
+            5,
+            "direwolf.tool.preview",
+            None,
+            &format!(
+                r#"{{"process_exec":{}}}"#,
+                call(FIXTURE, &["workload-identity"])
+            ),
+        );
+        assert!(matches!(
+            b.client.call(&preview).body,
+            DwkpBody::ToolPreviewedV5(_)
+        ));
+        let previewed_in = since.elapsed();
+        let since = Instant::now();
+        let body = b.exec("n-b", &call(FIXTURE, &["workload-identity"]));
+        let served_in = since.elapsed();
+        let ran = matches!(
+            &body,
+            DwkpBody::ToolResultV5(result) if result.output.process_exec_sandboxed.is_some()
+        );
+        if !ran {
+            panic!(
+                "finding F-R8 through the authority: B's process.exec while A held its bound \
+                 (the runtime counting {a_tasks} tasks in A): {body:?}"
+            )
+        }
+        let out = sandboxed(&body);
+        let env_b = out.environment_id.as_str().to_owned();
+        assert_ne!(env_b, env_a);
+        assert_eq!(out.exit_code.map(|c| c.get()), Some(0), "{out:?}");
+        let text = String::from_utf8(out.stdout.content.to_bytes()).unwrap();
+        assert!(text.contains("uid=10001"), "{text}");
+        assert_eq!(
+            out.residue,
+            dwk_proto::dwkp::sandboxops::ResidueVerdict::Pass
+        );
+        assert!(!out.environment_destroyed, "{out:?}");
+        // Still while A holds: A's environment full by the runtime's count,
+        // and B's environment ready -- never drifted, never destroyed.
+        assert_eq!(lab.runtime.tasks(&container_a), PIDS_LIMIT);
+        let ready = |environment: &str| {
+            rows(
+                &lab,
+                &format!(
+                    "SELECT count(*) FROM environment WHERE environment_id = '{environment}' \
+                     AND state = 'READY'"
+                ),
+            )
+        };
+        assert_eq!(ready(&env_b), 1, "B's environment is not READY");
+        assert!(previewed_in < Duration::from_secs(5), "{previewed_in:?}");
+        evidence(
+            "neighbour-authority-answers-beside-a-bound-run",
+            &format!("preview-in-{}ms", previewed_in.as_millis()),
+            E2E,
+            "authority-route",
+        );
+        evidence(
+            "neighbour-environment-judged-clean-beside-a-bound-run",
+            "ready",
+            E2E,
+            "authority-environment-judgement",
+        );
+        evidence(
+            "neighbour-process-exec-completed-beside-a-bound-run",
+            &format!("exited-0-as-10001-in-{}ms", served_in.as_millis()),
+            E2E,
+            "authority-ledger",
+        );
+        // A ends as its bound left it; both environments kept, both READY,
+        // and every workload of the two runs completed.
+        let long = a.answer(Duration::from_secs(120));
+        let ended = sandboxed(&long);
+        assert_eq!(ended.exit_code.map(|c| c.get()), Some(0), "{ended:?}");
+        let text = String::from_utf8(ended.stdout.content.to_bytes()).unwrap();
+        // A's own bound held it: at least PIDS_LIMIT - 8 threads by its own
+        // count, refused the next, its cgroup full by the runtime's count.
+        let held: u64 = text
+            .lines()
+            .find_map(|l| l.strip_prefix("held="))
+            .unwrap_or_else(|| panic!("no count in {text}"))
+            .parse()
+            .unwrap();
+        assert!(held + 8 >= PIDS_LIMIT && held < PIDS_LIMIT, "{text}");
+        assert!(!text.contains("refused=none"), "{text}");
+        assert_eq!(a_tasks, PIDS_LIMIT, "A's cgroup: {a_tasks} tasks");
+        assert_eq!(
+            ended.residue,
+            dwk_proto::dwkp::sandboxops::ResidueVerdict::Pass
+        );
+        assert!(!ended.environment_destroyed);
+        evidence(
+            "neighbour-run-holds-its-own-task-bound",
+            &format!("held-{held}-cgroup-{a_tasks}-of-{PIDS_LIMIT}"),
+            E2E,
+            "cgroup-limit",
+        );
+        assert_eq!(ready(&env_a), 1, "A's environment is not READY");
+        assert_eq!(ready(&env_b), 1, "B's environment is not READY");
+        assert_eq!(
+            rows(
+                &lab,
+                "SELECT count(*) FROM workload WHERE state != 'COMPLETED'"
+            ),
+            0
+        );
+        evidence(
+            "neighbour-environments-kept-ready",
+            "both-ready-every-workload-completed",
+            E2E,
+            "authority-environment-decision",
         );
     }
 

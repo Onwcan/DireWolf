@@ -2230,6 +2230,26 @@ BROKER_ASSURANCE_CASES = tuple(
         "proxy-only-weakened-resource-limits-dropped-refused",
     )
 )
+# M5e.2 (R3) against a real runtime's own record: the egress evidence keeps
+# the record the runtime holds of a real PROXY_ONLY environment the broker
+# prepared and measured clean (`DW_CAPTURED_RECORD_DIR`), then the broker's
+# production judgement keeps it and refuses each hard rule broken in it, in
+# process. Still `in-process`: the runtime never ran a weakened record, and
+# no weakened PROXY_ONLY container is built.
+CAPTURED_ASSURANCE_TEST = (
+    "sandbox::inspect::tests::"
+    "a_real_proxy_only_record_is_kept_and_each_hard_rule_broken_in_it_refused"
+)
+# The fixed directory the test reads, emptied before and after: the
+# broker's source reads no variable (TX042), so its path is the crate's own.
+CAPTURED_RECORD_DIR = ROOT / "target" / "m5e-captured-proxy-only"
+CAPTURED_ASSURANCE_CASES = tuple(
+    ("broker-assurance", f"captured-{case}")
+    for _, case in (
+        *(c for c in BROKER_ASSURANCE_CASES if c[1].startswith("proxy-only-")),
+        ("broker-assurance", "proxy-only-weakened-task-backstop-at-256-refused"),
+    )
+)
 
 # A convenience alias for the evidence image, and nothing more: every decision
 # and every record binds the image's content identity, and the one test that
@@ -3203,6 +3223,12 @@ def task_sandbox_egress_evidence() -> None:
             "DW_EGRESS_IMAGE_TAMPERED_RELAY": images["tampered-relay"],
         }
     )
+    # Where the PROXY_ONLY environment's own record is kept for R3: the fixed
+    # directory the broker's unit test reads (it reads no variable, TX042).
+    captured = CAPTURED_RECORD_DIR
+    shutil.rmtree(captured, ignore_errors=True)
+    captured.mkdir(mode=0o700, parents=True)
+    os.environ["DW_CAPTURED_RECORD_DIR"] = str(captured)
     outputs: list[str] = []
     try:
         run("cargo", "build", "--locked", "-p", "dwkd-broker")
@@ -3256,6 +3282,30 @@ def task_sandbox_egress_evidence() -> None:
         f"container(s) and {len(before_networks)} network(s) pre-existing kept{OFF}"
     )
     require_attributed_evidence("\n".join(outputs), EGRESS_CASES)
+    # R3 over the record the runtime kept of the real PROXY_ONLY environment
+    # above: the production judgement in process, each line `in-process`.
+    if not (captured / "proxy-only-record.json").is_file():
+        raise TaskError("NOT EXERCISED: no PROXY_ONLY environment's record was captured")
+    try:
+        unit = run_captured(
+            "cargo",
+            "test",
+            "--locked",
+            "-p",
+            "dwkd-broker",
+            "--bin",
+            "dwkd-broker",
+            "--",
+            "--ignored",
+            "--exact",
+            "--nocapture",
+            "--test-threads=1",
+            CAPTURED_ASSURANCE_TEST,
+        )
+    finally:
+        shutil.rmtree(captured, ignore_errors=True)
+    require_tests_ran(unit)
+    require_attributed_evidence(unit, CAPTURED_ASSURANCE_CASES, ASSURANCE_EVIDENCE_PREFIX)
     uvrun("dwcheck", "closure", "--report")
 
 
@@ -3276,10 +3326,30 @@ WORKLOAD_BROKER_TESTS = (
     "linux::a_running_workload_holds_no_connection_and_its_environment_takes_no_second",
     "linux::the_trusted_launcher_keeps_workspace_exec_hygiene_with_the_real_tools",
     # M5e.2 (R9): runs that see and reach none of each other and leave
-    # nothing to the next. R8's neighbour test is not here: it fails today
-    # (docs/M5E_ASSURANCE_PLAN.md, finding F-R8), and a test no task runs is
-    # never evidence.
+    # nothing to the next.
     "linux::closure::runs_see_none_of_each_others_processes_and_leave_nothing_to_the_next",
+    # M5e.2 (R8; ADR-0056, the owner's Option B): a neighbour at its own task
+    # bound leaves another environment measured and served -- finding F-R8's
+    # reproducer, required since the remedy.
+    "linux::closure::a_neighbour_at_its_task_bound_leaves_another_environment_and_the_broker_serving",
+)
+# M5e.2 (R8 at the cap, ADR-0056 §6): every live environment the authority
+# allows of uid 10001, all but one at their bound, the last served. It fills
+# the cap, so it is selected by name by `sandbox-capacity-evidence` alone,
+# which refuses before anything is built anywhere but a disposable
+# GitHub-hosted runner.
+CAPACITY_TESTS = (
+    "linux::closure::"
+    "at_the_live_environment_cap_the_last_environment_is_prepared_measured_and_served",
+)
+CAPACITY_CASES = tuple(
+    ("sandbox-closure", case)
+    for case in (
+        "capacity-environments-at-their-own-bound",
+        "capacity-last-environment-prepared-and-measured-clean",
+        "capacity-last-workload-served",
+        "capacity-all-destroyed-exactly",
+    )
 )
 # M5e.2 (R11; the owner's OD-E8): the container runtime restarted under a
 # running authority. The test restarts the runner's engine, so it is
@@ -3314,6 +3384,9 @@ WORKLOAD_AUTHORITY_TESTS = (
     "linux::a_public_launch_is_refused_by_its_budget_and_by_bytes_that_are_not_pinned",
     "linux::the_shipped_packs_run_git_and_pytest_with_hygiene_kept_by_the_launcher",
     "linux::production_serve_prepares_its_own_environment_and_survives_its_own_death",
+    # M5e.2 (R8; ADR-0056): the neighbour through the authority's
+    # `process.exec`, a real DWKP client for each run.
+    "linux::a_run_at_its_task_bound_leaves_another_runs_process_exec_served",
 )
 
 # Every (suite, case) the M5d.1 real-container suites must report, exercised.
@@ -3423,6 +3496,14 @@ WORKLOAD_CASES = (
             "cross-run-other-environment-refused",
             "cross-run-destroy-spares-the-other",
             "cross-run-next-environment-holds-nothing-of-the-last",
+            # R8 (ADR-0056): a neighbour held by its own bound, another
+            # environment measured and served beside it, the broker
+            # answering, both destroyed exactly.
+            "neighbour-holds-its-own-task-bound",
+            "neighbour-workload-served-beside-a-bound-environment",
+            "neighbour-measured-clean-beside-a-bound-environment",
+            "neighbour-broker-answers-beside-a-bound-environment",
+            "neighbour-both-kept-then-destroyed-exactly",
         )
     ),
     *(
@@ -3501,6 +3582,12 @@ WORKLOAD_CASES = (
             "production-serve-prepares-and-runs",
             "production-crash-mid-workload-unknown-destroyed",
             "production-replay-after-restart-refused",
+            # M5e.2 (R8; ADR-0056): through the authority's `process.exec`.
+            "neighbour-run-holds-its-own-task-bound",
+            "neighbour-authority-answers-beside-a-bound-run",
+            "neighbour-environment-judged-clean-beside-a-bound-run",
+            "neighbour-process-exec-completed-beside-a-bound-run",
+            "neighbour-environments-kept-ready",
         )
     ),
 )
@@ -3760,6 +3847,210 @@ def task_sandbox_restart_evidence() -> None:
     require_attributed_evidence(output, RESTART_CASES)
 
 
+def capacity_refusal(environ: Mapping[str, str]) -> str | None:
+    """Why this host must not fill the live-environment cap, or None. Never
+    inferred: `DW_CAPACITY_EVIDENCE=1`, on a GitHub-hosted runner -- the test
+    checks again, and the runner's memory, its kernel's task tables, that
+    its runtime is not Docker Desktop and that no process of the sandbox uid
+    runs there, before it prepares anything."""
+    if environ.get("DW_CAPACITY_EVIDENCE", "").strip() != "1":
+        return (
+            "DW_CAPACITY_EVIDENCE=1 is not set: filling the live-environment cap is the "
+            "hosted `sandbox-capacity` job's alone"
+        )
+    if (
+        environ.get("GITHUB_ACTIONS") != "true"
+        or environ.get("RUNNER_ENVIRONMENT") != "github-hosted"
+    ):
+        return "this is not a disposable GitHub-hosted runner: a developer's host is never filled"
+    return None
+
+
+def task_sandbox_capacity_evidence() -> None:
+    """M5e.2's R8 at the authority's cap (ADR-0056 §6), hosted only: every
+    live environment the authority allows, of the one sandbox uid, all but
+    one holding their own task bound, and the last prepared, measured clean
+    and served beside them -- sleeping threads, bounded by each environment's
+    own cgroup and the workload's wall clock.
+
+    Anywhere but a disposable GitHub-hosted runner this refuses before
+    anything is built: NOT EXERCISED, which fails. Every case must report at
+    `real-oci` with what enforced it. No container the evidence made may
+    remain, and every container that predates it must. Linux only.
+    """
+    if not sys.platform.startswith("linux"):
+        raise TaskError("NOT EXERCISED: the capacity evidence runs only on Linux")
+    refusal = capacity_refusal(os.environ)
+    if refusal is not None:
+        raise TaskError(f"NOT EXERCISED: {refusal}")
+    client, socket, variables, before, images = _workload_setup()
+    os.environ.update(variables)
+    try:
+        system = _docker(client, socket, "info", "--format", "{{.OperatingSystem}}")
+        if "Docker Desktop" in system:
+            raise TaskError(f"NOT EXERCISED: the runtime is {system.strip()}, not a runner's")
+        run("cargo", "build", "--locked", "-p", "dwkd-broker")
+        output = run_captured(
+            "cargo",
+            "test",
+            "--locked",
+            "-p",
+            "dwkd-broker",
+            "--test",
+            "sandbox_workload",
+            "--",
+            "--ignored",
+            "--exact",
+            "--nocapture",
+            "--test-threads=1",
+            *CAPACITY_TESTS,
+        )
+        summaries = [line for line in output.splitlines() if line.startswith("test result: ")]
+        expected = f"test result: ok. {len(CAPACITY_TESTS)} passed; 0 failed; 0 ignored"
+        if len(summaries) != 1 or not summaries[0].startswith(expected):
+            raise TaskError(
+                f"the capacity evidence did not run: expected `{expected}`, "
+                f"got {summaries or 'no summary'}"
+            )
+    finally:
+        after = set(
+            _docker(client, socket, "container", "ls", "--all", "--no-trunc", "--quiet").split()
+        )
+        for image in set(images.values()):
+            _docker(client, socket, "image", "rm", "--force", image, check=False)
+    left = sorted(after - before)
+    removed = sorted(before - after)
+    if left:
+        raise TaskError(f"the evidence left {len(left)} container(s) behind: {left}")
+    if removed:
+        raise TaskError(
+            f"{len(removed)} container(s) that predate the evidence are gone: {removed}"
+        )
+    print(f"{GREEN}cleanup: no evidence container remains; {len(before)} pre-existing kept{OFF}")
+    require_attributed_evidence(output, CAPACITY_CASES)
+
+
+# ADR-0056 §6's negative control: the task backstop put back at the
+# per-environment value it replaced. R8's two neighbour tests -- the
+# broker's and the authority's -- must then each fail with finding F-R8's
+# own signature, the coupling the remedy removed; a test that passes, or
+# fails any other way, or a mutant that does not compile, fails the control.
+# The file is restored and proved byte-identical whatever happens.
+NEIGHBOUR_MUTATIONS = (
+    (
+        "the task backstop is the per-environment 256 again (finding F-R8)",
+        "crates/dwk-sandbox-profile/src/lib.rs",
+        "pub const RLIMIT_NPROC: u64 = PIDS_LIMIT * MAX_LIVE_ENVIRONMENTS * 2;\n"
+        "const _: () = assert!(\n"
+        "    RLIMIT_NPROC >= 2 * MAX_LIVE_ENVIRONMENTS * PIDS_LIMIT,\n",
+        "pub const RLIMIT_NPROC: u64 = 256;\n"
+        "const _: () = assert!(\n"
+        "    RLIMIT_NPROC >= PIDS_LIMIT,\n",
+    ),
+)
+NEIGHBOUR_TESTS = (
+    ("dwkd-broker", WORKLOAD_BROKER_TESTS[-1]),
+    ("dwkd-authority", WORKLOAD_AUTHORITY_TESTS[-1]),
+)
+NEIGHBOUR_SIGNATURE = "finding F-R8"
+
+
+def _neighbour_outcomes() -> list[str]:
+    """R8's two neighbour tests against the source as it is now: for each,
+    `F-R8` when it failed with the finding's signature, else what it did."""
+    client, socket, variables, before, images = _workload_setup()
+    os.environ.update(variables)
+    outcomes: list[str] = []
+    try:
+        run("cargo", "build", "--locked", "-p", "dwkd-broker")
+        for package, name in NEIGHBOUR_TESTS:
+            command = (
+                "cargo",
+                "test",
+                "--locked",
+                "-p",
+                package,
+                "--test",
+                "sandbox_workload",
+                "--",
+                "--ignored",
+                "--exact",
+                "--nocapture",
+                "--test-threads=1",
+                name,
+            )
+            print(f"{DIM}$ {' '.join(command)}{OFF}", flush=True)
+            result = subprocess.run(
+                command,
+                cwd=str(ROOT),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                errors="replace",
+                check=False,
+            )
+            failed = "test result: FAILED. 0 passed; 1 failed" in result.stdout
+            if result.returncode != 0 and failed and NEIGHBOUR_SIGNATURE in result.stdout:
+                outcomes.append("F-R8")
+                # What it measured, as the test said it: the evidence of the kill.
+                for line in result.stdout.splitlines():
+                    if NEIGHBOUR_SIGNATURE in line:
+                        print(f"{DIM}  {name.rsplit('::', 1)[-1]}: {line.strip()[:600]}{OFF}")
+            elif result.returncode == 0:
+                outcomes.append(f"{name} passed")
+            else:
+                outcomes.append(f"{name} failed without the finding's signature")
+                print(result.stdout[-4000:])
+    finally:
+        after = set(
+            _docker(client, socket, "container", "ls", "--all", "--no-trunc", "--quiet").split()
+        )
+        for image in set(images.values()):
+            _docker(client, socket, "image", "rm", "--force", image, check=False)
+    if sorted(after - before) or sorted(before - after):
+        raise TaskError(
+            f"the control left {sorted(after - before)} and removed {sorted(before - after)}"
+        )
+    return outcomes
+
+
+def task_sandbox_neighbour_mutations() -> None:
+    """ADR-0056 §6's negative control for R8: with the task backstop put
+    back at 256, both neighbour tests must fail as finding F-R8 did -- the
+    neighbour refused while the other environment holds its bound -- so a
+    pass of theirs means the remedy, not a test that cannot see the
+    coupling. Needs a runtime; restores the file byte-identically and checks.
+    Linux only."""
+    if not sys.platform.startswith("linux"):
+        raise TaskError("NOT EXERCISED: the neighbour control needs Linux and an OCI runtime")
+    killed: list[str] = []
+    for what, rel, old, new in NEIGHBOUR_MUTATIONS:
+        path = ROOT / rel
+        original = path.read_bytes()
+        digest = hashlib.sha256(original).hexdigest()
+        text = original.decode("utf-8")
+        if text.count(old) != 1:
+            raise TaskError(f"mutation `{what}`: its target is not in {rel} exactly once")
+        print(f"{BOLD}mutant: {what}{OFF}")
+        try:
+            path.write_bytes(text.replace(old, new).encode("utf-8"))
+            outcomes = _neighbour_outcomes()
+        finally:
+            path.write_bytes(original)
+        if hashlib.sha256(path.read_bytes()).hexdigest() != digest:
+            raise TaskError(f"{rel} was not restored byte-identically")
+        print(f"{DIM}restored {rel} (sha256 {digest[:16]}...){OFF}")
+        if outcomes != ["F-R8"] * len(NEIGHBOUR_TESTS):
+            raise TaskError(
+                f"mutant `{what}` not caught as F-R8 by every neighbour test: {outcomes}"
+            )
+        killed.append(what)
+        print(f"{GREEN}mutant killed as F-R8 by {len(NEIGHBOUR_TESTS)} tests: {what}{OFF}")
+    print(
+        f"{GREEN}neighbour control: {len(killed)} of {len(NEIGHBOUR_MUTATIONS)} killed as F-R8{OFF}"
+    )
+
+
 # The mutation review (ADR-0052 §17): each line weakens one guard M5d.1's
 # evidence exists to prove, in the source, one at a time. Each mutant must
 # compile and must fail either the guards' unit suites or
@@ -3797,6 +4088,15 @@ WORKLOAD_MUTATIONS = (
         "crates/dwkd-broker/src/main.rs",
         "    if !posture.startup_window_closed() {",
         "    if false && !posture.startup_window_closed() {",
+    ),
+    # The environment's task bound (ADR-0056 §1): since `RLIMIT_NPROC` is a
+    # host-wide backstop, the pids limit is what bounds one environment, and
+    # a record without it must never be used.
+    (
+        "a record without its pids limit passes the resource judgement",
+        "crates/dwkd-broker/src/sandbox/inspect.rs",
+        '            number(&["HostConfig", "PidsLimit"], PIDS_LIMIT),\n',
+        "            Some(true),\n",
     ),
     # The broker's plan and its checks before anything runs (§5).
     (
@@ -5781,6 +6081,16 @@ ATTRIBUTION: dict[str, tuple[tuple[str, str, str | tuple[str, ...]], ...]] = {
         ("production-serve-prepares-and-runs", _DWKP, "authority-route"),
         ("production-crash-mid-workload-unknown-destroyed", _DWKP, "authority-reconciliation"),
         ("production-replay-after-restart-refused", _DWKP, "authority-idempotency"),
+        # M5e.2 (R8; ADR-0056): the neighbour through `process.exec`.
+        ("neighbour-run-holds-its-own-task-bound", _DWKP, "cgroup-limit"),
+        ("neighbour-authority-answers-beside-a-bound-run", _DWKP, "authority-route"),
+        (
+            "neighbour-environment-judged-clean-beside-a-bound-run",
+            _DWKP,
+            "authority-environment-judgement",
+        ),
+        ("neighbour-process-exec-completed-beside-a-bound-run", _DWKP, "authority-ledger"),
+        ("neighbour-environments-kept-ready", _DWKP, "authority-environment-decision"),
     ),
     # M5d.3: the authority's pipeline against the fake broker, real values in
     # the kernel keyring -- what it decides, records and refuses, never
@@ -5921,6 +6231,17 @@ ATTRIBUTION: dict[str, tuple[tuple[str, str, str | tuple[str, ...]], ...]] = {
             _OCI,
             "fresh-container-per-environment",
         ),
+        # R8 (ADR-0056): the neighbour's own cgroup bounds it; the backstop
+        # leaves another environment measured and served; the broker answers;
+        # each destroyed by its own labels -- beside one environment at its
+        # bound, and (hosted) beside every other the authority allows.
+        ("*-at-their-own-bound", _OCI, "cgroup-limit"),
+        ("neighbour-holds-its-own-task-bound", _OCI, "cgroup-limit"),
+        ("*-measured-clean*", _OCI, "measured-both"),
+        ("neighbour-workload-served-*", _OCI, "rlimit"),
+        ("capacity-last-workload-served", _OCI, "rlimit"),
+        ("neighbour-broker-answers-*", _OCI, "broker-start-collect"),
+        ("*-destroyed-exactly", _OCI, "exact-label-cleanup"),
     ),
     # M5e.2 hosted (R11, OD-E8): the runtime restarted under a running
     # authority -- the runner's root restarts it, so every line is privileged.
@@ -5939,6 +6260,7 @@ ATTRIBUTION: dict[str, tuple[tuple[str, str, str | tuple[str, ...]], ...]] = {
 ATTRIBUTED_CASES = frozenset(
     (
         *BROKER_ASSURANCE_CASES,
+        *CAPTURED_ASSURANCE_CASES,
         *SANDBOX_CASES,
         *EGRESS_CASES,
         *WORKLOAD_CASES,
@@ -5948,6 +6270,7 @@ ATTRIBUTED_CASES = frozenset(
         *WORKSPACE_CASES,
         *WORKSPACE_PRIVILEGED_CASES,
         *RESTART_CASES,
+        *CAPACITY_CASES,
     )
 )
 # The foundation's latency: its numbers, not containment.
@@ -8595,9 +8918,11 @@ TASKS = {
     "sandbox-egress-evidence": task_sandbox_egress_evidence,
     "sandbox-workload-evidence": task_sandbox_workload_evidence,
     "sandbox-restart-evidence": task_sandbox_restart_evidence,
+    "sandbox-capacity-evidence": task_sandbox_capacity_evidence,
     "net-http-evidence": task_net_http_evidence,
     "net-http-mutations": task_net_http_mutations,
     "sandbox-workload-mutations": task_sandbox_workload_mutations,
+    "sandbox-neighbour-mutations": task_sandbox_neighbour_mutations,
     "sandbox-secret-evidence": task_sandbox_secret_evidence,
     "sandbox-secret-mutations": task_sandbox_secret_mutations,
     "sandbox-workspace-evidence": task_sandbox_workspace_evidence,

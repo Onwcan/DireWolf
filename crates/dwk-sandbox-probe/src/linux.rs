@@ -450,6 +450,14 @@ fn rlimits() -> Verdict {
     let Ok(text) = fs::read_to_string("/proc/self/limits") else {
         return Verdict::Unobservable;
     };
+    rlimits_in(&text)
+}
+
+/// The judgement of [`rlimits`] over `/proc/self/limits`' text: every limit
+/// exactly the profile's, soft and hard -- the task backstop included
+/// (ADR-0056), so neither the old per-environment value nor `unlimited`
+/// passes.
+fn rlimits_in(text: &str) -> Verdict {
     let limit = |label: &str| -> Option<(String, String)> {
         let line = text.lines().find(|l| l.starts_with(label))?;
         let mut rest = line.get(label.len()..)?.split_whitespace();
@@ -468,11 +476,18 @@ fn rlimits() -> Verdict {
 }
 
 fn cgroup_limits() -> Verdict {
-    let read = |name: &str| {
+    cgroup_limits_in(|name: &str| {
         fs::read_to_string(Path::new("/sys/fs/cgroup").join(name))
             .ok()
             .map(|s| s.trim().to_owned())
-    };
+    })
+}
+
+/// The judgement of [`cgroup_limits`] over what `read` finds in the
+/// environment's own cgroup: each limit exactly the profile's. `pids.max`
+/// is the environment's task bound (ADR-0056 §1): `max`, or any other
+/// value, fails, and a file not there is unobservable, never a pass.
+fn cgroup_limits_in(read: impl Fn(&str) -> Option<String>) -> Verdict {
     let exact = |name: &str, wanted: String| match read(name) {
         Some(value) => pass_if(value == wanted),
         None => Verdict::Unobservable,
@@ -912,7 +927,74 @@ fn unshare_blocked() -> Verdict {
 
 #[cfg(test)]
 mod tests {
-    use super::{WorkspaceMount, mount_at};
+    use super::{Verdict, WorkspaceMount, cgroup_limits_in, mount_at, rlimits_in};
+    use dwk_sandbox_profile as profile;
+
+    /// `/proc/self/limits` as the kernel prints it, with `processes` for the
+    /// task limit's soft and hard values.
+    fn limits(processes: &str) -> String {
+        format!(
+            "Limit                     Soft Limit           Hard Limit           Units     \n\
+             Max cpu time              unlimited            unlimited            seconds   \n\
+             Max file size             1073741824           1073741824           bytes     \n\
+             Max core file size        0                    0                    bytes     \n\
+             {processes}\
+             Max open files            1024                 1024                 files     \n"
+        )
+    }
+
+    #[test]
+    fn the_task_backstop_is_read_exactly_from_inside() {
+        // ADR-0056 §6: the probe measures the backstop exactly, so neither the
+        // old per-environment value nor an unlimited one passes.
+        let line = |soft: &str, hard: &str| {
+            format!("Max processes             {soft:<21}{hard:<21}processes \n")
+        };
+        let wanted = profile::RLIMIT_NPROC.to_string();
+        assert_eq!(wanted, "8192");
+        assert_eq!(rlimits_in(&limits(&line(&wanted, &wanted))), Verdict::Pass);
+        for (soft, hard) in [
+            ("256", "256"),
+            ("unlimited", "unlimited"),
+            ("8192", "unlimited"),
+            ("8193", "8193"),
+        ] {
+            assert_eq!(
+                rlimits_in(&limits(&line(soft, hard))),
+                Verdict::Fail,
+                "{soft} {hard}"
+            );
+        }
+        assert_eq!(rlimits_in(&limits("")), Verdict::Unobservable);
+    }
+
+    #[test]
+    fn the_pids_limit_is_required_from_inside() {
+        let cgroup = |pids: Option<&str>| {
+            let pids = pids.map(str::to_owned);
+            move |name: &str| match name {
+                "memory.max" => Some(profile::MEMORY_BYTES.to_string()),
+                "memory.swap.max" => Some("0".to_owned()),
+                "cpu.max" => Some(format!(
+                    "{} {}",
+                    profile::CPU_QUOTA_MICROS,
+                    profile::CPU_PERIOD_MICROS
+                )),
+                "pids.max" => pids.clone(),
+                _ => None,
+            }
+        };
+        assert_eq!(cgroup_limits_in(cgroup(Some("256"))), Verdict::Pass);
+        // No limit (`max`), the backstop instead of the bound, another value.
+        for pids in ["max", "8192", "257"] {
+            assert_eq!(
+                cgroup_limits_in(cgroup(Some(pids))),
+                Verdict::Fail,
+                "{pids}"
+            );
+        }
+        assert_eq!(cgroup_limits_in(cgroup(None)), Verdict::Unobservable);
+    }
 
     #[test]
     fn the_workspace_mount_is_the_last_at_its_target_and_says_its_root() {

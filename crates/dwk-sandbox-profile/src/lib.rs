@@ -47,7 +47,9 @@ pub const TMPFS: &[(&str, &str)] = &[
         "rw,nosuid,nodev,noexec,size=134217728,mode=1777",
     ),
 ];
-/// The most tasks (processes and threads) the environment may hold.
+/// The most tasks (processes and threads) the environment may hold: its own
+/// pids cgroup, the one bound on its tasks that no other environment's tasks
+/// share (ADR-0056 §1).
 pub const PIDS_LIMIT: u64 = 256;
 /// The memory limit, in bytes (2 GiB).
 pub const MEMORY_BYTES: u64 = 2 << 30;
@@ -61,8 +63,26 @@ pub const CPU_PERIOD_MICROS: u64 = 100_000;
 pub const CPU_QUOTA_MICROS: u64 = 200_000;
 /// `RLIMIT_NOFILE`, soft and hard.
 pub const RLIMIT_NOFILE: u64 = 1024;
-/// `RLIMIT_NPROC`, soft and hard.
-pub const RLIMIT_NPROC: u64 = 256;
+/// The most environments the authority keeps live at once, across every run
+/// (ADR-0052 §2a). The cap is the authority's (`MAX_LIVE_ENVIRONMENTS` in its
+/// `state/workload.rs`); the authority does not link this crate (ADR-0047
+/// §5), so the value is repeated here only to size [`RLIMIT_NPROC`], and the
+/// architecture gate holds the two equal
+/// (`tests/architecture/test_task_limit_backstop.py`).
+pub const MAX_LIVE_ENVIRONMENTS: u64 = 16;
+/// `RLIMIT_NPROC`, soft and hard: a host-wide backstop, not an environment's
+/// bound (ADR-0056 §2, finding F-R8). The kernel counts it per host uid,
+/// across every environment, since every one runs as [`SANDBOX_UID`]; each
+/// environment is held to [`PIDS_LIMIT`] by its own cgroup, so the count
+/// stays below this while every environment the authority allows is at its
+/// bound, and one full set more it does not count (an orphan awaiting
+/// reconciliation, a second store). A workload at its own bound therefore
+/// never stops another environment's probe or workload from starting.
+pub const RLIMIT_NPROC: u64 = PIDS_LIMIT * MAX_LIVE_ENVIRONMENTS * 2;
+const _: () = assert!(
+    RLIMIT_NPROC >= 2 * MAX_LIVE_ENVIRONMENTS * PIDS_LIMIT,
+    "F-R8: RLIMIT_NPROC must exceed every environment the authority allows, twice over"
+);
 /// `RLIMIT_FSIZE`, soft and hard: the largest file one process may write.
 pub const RLIMIT_FSIZE: u64 = 1 << 30;
 /// `RLIMIT_CORE`: no core file, ever.
@@ -953,5 +973,19 @@ mod tests {
         for (name, _) in super::PROXY_VARIABLES {
             assert!(super::PROXY_VARIABLE_NAMES.contains(name), "{name}");
         }
+    }
+
+    #[test]
+    fn the_task_backstop_is_above_every_environment_the_authority_allows_twice_over() {
+        // ADR-0056 §2: the value the owner approved, and how it is derived.
+        assert_eq!(super::PIDS_LIMIT, 256);
+        assert_eq!(super::MAX_LIVE_ENVIRONMENTS, 16);
+        assert_eq!(super::RLIMIT_NPROC, 8192);
+        // Every allowed environment at its bound, and as many again it does
+        // not count, leave room for one more task: no neighbour is coupled.
+        const _: () =
+            assert!(2 * super::MAX_LIVE_ENVIRONMENTS * super::PIDS_LIMIT <= super::RLIMIT_NPROC);
+        // A backstop, never the bound: one environment alone never reaches it.
+        const _: () = assert!(super::RLIMIT_NPROC > super::PIDS_LIMIT);
     }
 }

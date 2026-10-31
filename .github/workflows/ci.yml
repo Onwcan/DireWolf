@@ -594,6 +594,34 @@ jobs:
         env:
           DW_RUNTIME_RESTART: "1"
 
+  # M5e.2 (R8 at the cap; ADR-0056 §6, the owner's Option B): every live
+  # environment the authority allows, all of the one sandbox uid -- all but
+  # one holding their own task bound with sleeping threads, the last
+  # prepared, measured clean and served beside them -- through the released
+  # broker on this runner's Docker Engine. The per-environment pids cgroup
+  # is what bounds each; RLIMIT_NPROC, the host-wide backstop, is never
+  # reached. It fills the cap, so it is a job of its own, on this disposable
+  # runner only: DW_CAPACITY_EVIDENCE=1 says so here and nowhere else, and
+  # the task and the test each refuse anywhere else -- the test after
+  # checking the runner's memory, its kernel's task tables and that no
+  # process of the sandbox uid runs here. A case not exercised fails. The
+  # `ci` job requires it.
+  sandbox-capacity:
+    name: sandbox live-environment capacity (make sandbox-capacity-evidence)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v5.0.1
+      - uses: ./.github/actions/setup
+      - name: Show the OCI runtime and the runner's capacity
+        run: |
+          docker version --format 'client {{.Client.Version}} server {{.Server.Version}} api {{.Server.APIVersion}} {{.Server.Os}}/{{.Server.Arch}}'
+          docker info --format '{{.OperatingSystem}} kernel {{.KernelVersion}} cgroup v{{.CgroupVersion}} cpus {{.NCPU}} memory {{.MemTotal}}'
+          grep MemAvailable /proc/meminfo
+          cat /proc/sys/kernel/threads-max /proc/sys/kernel/pid_max
+      - run: make sandbox-capacity-evidence
+        env:
+          DW_CAPACITY_EVIDENCE: "1"
+
   # D11 hardening (ADR-0053): the exchange worker's syscall filter, the
   # broker's vouching for each worker from the kernel, the start-up window
   # and the swap posture -- on the runner's own kernel, with the host each
@@ -691,7 +719,7 @@ jobs:
   ci:
     name: CI
     runs-on: ubuntu-latest
-    needs: [format, lint, typecheck, architecture, schema, evals, test, authority-transport, filesystem-canonicalization, broker-fs-read, filesystem-operations, process-broker, secret-broker, sandbox-foundation, sandbox-egress, sandbox-workload, sandbox-secret, sandbox-workspace, sandbox-agent, sandbox-release, sandbox-restart, d11-hardening, net-http, supply-chain, build]
+    needs: [format, lint, typecheck, architecture, schema, evals, test, authority-transport, filesystem-canonicalization, broker-fs-read, filesystem-operations, process-broker, secret-broker, sandbox-foundation, sandbox-egress, sandbox-workload, sandbox-secret, sandbox-workspace, sandbox-agent, sandbox-release, sandbox-restart, sandbox-capacity, d11-hardening, net-http, supply-chain, build]
     if: always()
     steps:
       - name: Fail unless every required job succeeded

@@ -874,6 +874,25 @@ mod linux {
             ),
             "measured-both",
         );
+        // The runtime's own record of this environment, measured clean, kept
+        // for the broker's in-process judgement of each hard rule broken in
+        // it (M5e.2, R3) -- only when the evidence task asks for it. The
+        // runtime never runs a weakened record.
+        if let Ok(captured) = std::env::var("DW_CAPTURED_RECORD_DIR") {
+            let captured = Path::new(&captured);
+            let record = ev.docker_ok(&["container", "inspect", container.as_str()]);
+            std::fs::write(captured.join("proxy-only-record.json"), record).unwrap();
+            let facts = format!(
+                "environment_id={}\nrun_id={}\nstore={}\nimage={}\nworkspace_path={}\nsocket={}\n",
+                s.environment_id.as_str(),
+                s.run_id.as_str(),
+                s.store.as_str(),
+                s.image.as_str(),
+                s.workspace_path.as_str(),
+                ev.socket,
+            );
+            std::fs::write(captured.join("proxy-only-spec.txt"), facts).unwrap();
+        }
         for (case, invariant) in [
             ("proxy-only-host-network-isolated", I::HostNetworkIsolated),
             ("proxy-only-host-proxy-environment", I::HostProxyEnvironment),

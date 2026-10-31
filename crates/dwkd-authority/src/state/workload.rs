@@ -948,6 +948,13 @@ pub(super) const MAX_ENVIRONMENTS_PER_RUN: i64 = 8;
 /// At most this many environments are live at once, across every run
 /// (M5d.2, ADR-0052 §2a): the broker supervises at most as many workloads,
 /// one per environment. A launch that would need another is refused.
+///
+/// The sandbox profile sizes its host-wide task backstop, `RLIMIT_NPROC`, on
+/// this cap (ADR-0056 §2, finding F-R8): raising it without raising that
+/// would let the environments it allows reach the backstop together and
+/// couple again. The profile's crate keeps its own copy (the authority does
+/// not link it, ADR-0047 §5), and the architecture gate holds the two equal
+/// (`tests/architecture/test_task_limit_backstop.py`).
 pub(super) const MAX_LIVE_ENVIRONMENTS: i64 = 16;
 
 /// How many environments are live -- preparing, ready, being destroyed or

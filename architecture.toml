@@ -781,6 +781,11 @@ exempt_paths = [
     # `/proc/<pid>/status` and the owner of `/proc/<pid>/mem` -- the
     # kernel's word that the worker is confined -- and nothing else.
     "crates/dwkd-broker/src/http/vouch.rs",
+    # M5e.2 (R3): the host judgement's unit tests, under `cfg(test)`, read the
+    # record the egress evidence captured of a real PROXY_ONLY environment
+    # from one fixed path beneath the repository's `target/` -- test data,
+    # nothing a workspace names, and never the broker's own reading.
+    "crates/dwkd-broker/src/sandbox/inspect_tests.rs",
 ]
 suffixes = [".rs"]
 patterns = [
