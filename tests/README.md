@@ -288,7 +288,7 @@ containment.
 `sandbox::inspect::tests::every_hard_rule_is_refused_in_proxy_only_and_host_uts_in_both_topologies`:
 the broker's own host judgement and decision given a conforming runtime record
 for each topology, then one with a single hard rule weakened, each time --
-the 17 lines it prints are `ASSURANCE-EVIDENCE`, suite `broker-assurance`,
+the 20 lines it prints are `ASSURANCE-EVIDENCE`, suite `broker-assurance`,
 level `in-process`, so none can stand in for an environment's measurement.
 `sandbox-workload-evidence` adds `mod closure` to the broker's workload suite:
 two environments side by side on the real runtime (suite `sandbox-closure`,
@@ -320,7 +320,9 @@ derived from the cap the authority enforces. The egress evidence also keeps
 the runtime's own record of a real `PROXY_ONLY` environment for
 `a_real_proxy_only_record_is_kept_and_each_hard_rule_broken_in_it_refused`,
 which judges each hard rule broken in that record (`captured-*`, still
-`in-process`: the runtime never runs a weakened record). Since 2026-10-30 the foundation's real
+`in-process`: the runtime never runs a weakened record); both judge, under
+`PROXY_ONLY`, the runtime's default seccomp profile and the swap limit too
+(ADR-0057's U4, 2026-11-01). Since 2026-10-30 the foundation's real
 weakened-profile suite also runs a container in the host's UTS namespace
 (`weakened-host-uts`).
 

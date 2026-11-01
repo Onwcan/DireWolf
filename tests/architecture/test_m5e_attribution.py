@@ -275,14 +275,14 @@ def test_every_required_case_is_attributed_and_every_rule_is_used() -> None:
                 and not any(fnmatch.fnmatchcase(case, p) for p, _, _ in rules[:at])
             ]
             assert first, f"{suite}: the rule `{pattern}` attributes no required case"
-    # The inventory attributed, by count: M5e.1's 497 and M5e.2's 59 (17 in
-    # process, and 16 in process over a real runtime's PROXY_ONLY record; on
+    # The inventory attributed, by count: M5e.1's 497 and M5e.2's 65 (20 in
+    # process, and 19 in process over a real runtime's PROXY_ONLY record; on
     # a real runtime, 4 cross-run, the host UTS namespace and R8's 10
     # neighbour cases, 5 at the broker and 5 through the authority; on the
     # hosted runner, 7 of the runtime's restart and 4 at the live-environment
     # cap). A smaller one is a lost case.
-    assert len(dw.BROKER_ASSURANCE_CASES) == 17
-    assert len(dw.CAPTURED_ASSURANCE_CASES) == 16
+    assert len(dw.BROKER_ASSURANCE_CASES) == 20
+    assert len(dw.CAPTURED_ASSURANCE_CASES) == 19
     closure = [c for s, c in dw.WORKLOAD_CASES if s == "sandbox-closure"]
     assert len(closure) == 9
     assert len([c for c in closure if c.startswith("neighbour-")]) == 5
@@ -295,7 +295,7 @@ def test_every_required_case_is_attributed_and_every_rule_is_used() -> None:
     assert ("sandbox-broker", "weakened-host-uts") in dw.SANDBOX_CASES
     assert len(dw.RESTART_CASES) == 7
     assert len(dw.CAPACITY_CASES) == 4
-    assert len(inventory) == 556
+    assert len(inventory) == 562
 
 
 def test_the_vocabulary_is_closed_used_and_documented() -> None:
@@ -650,6 +650,61 @@ def test_the_captured_record_cases_stay_in_process_and_complete() -> None:
     assert egress.index('require_attributed_evidence("\\n".join(outputs)') < egress.index(
         "CAPTURED_ASSURANCE_TEST"
     ), "the record is judged only after the real environment's own evidence passed"
+
+
+U4 = (
+    "proxy-only-weakened-seccomp-default-profile-refused",
+    "proxy-only-weakened-swap-limit-lifted-refused",
+    "proxy-only-weakened-pids-and-swap-limits-lifted-refused",
+)
+
+
+@pytest.mark.parametrize("case", U4)
+def test_u4_is_required_in_process_over_both_records_and_never_as_a_container(
+    case: str,
+) -> None:
+    """ADR-0057 §3, U4: the runtime's default seccomp profile and the swap
+    limit -- alone, and with the pids limit as the real NO_NETWORK case
+    lifts both -- are judged under PROXY_ONLY over the hand-written record
+    and over a real runtime's own, and required by name in both tasks. Each
+    is `in-process`: offered as a real container's, missing, NOT EXERCISED
+    or reported twice in place of another, it fails its task. The real
+    NO_NETWORK cases they mirror stay required at their own level."""
+    prefix = dw.ASSURANCE_EVIDENCE_PREFIX
+    source = (REPO_ROOT / "crates/dwkd-broker/src/sandbox/inspect_tests.rs").read_text("utf-8")
+    assert f'"{case}"' in source, "the broker's test emits it"
+    for cases, name in (
+        (dw.BROKER_ASSURANCE_CASES, case),
+        (dw.CAPTURED_ASSURANCE_CASES, f"captured-{case}"),
+    ):
+        at = cases.index(("broker-assurance", name))
+        named = re.escape(f"broker-assurance/{name}")
+        complete = _complete(cases)
+        assert complete[at]["level"] == "in-process"
+        for change, match in (
+            ({"level": "real-oci"}, rf"{named}: at level 'real-oci'"),
+            ({"level": "privileged-oci"}, rf"{named}: at level 'privileged-oci'"),
+            (
+                {"outcome": "not-exercised: no record"},
+                rf"NOT EXERCISED: 1 required case\(s\): {named}",
+            ),
+        ):
+            with pytest.raises(dw.TaskError, match=match):
+                dw.require_attributed_evidence(
+                    _output(_with(complete, at, **change), prefix), cases, prefix
+                )
+        missing = complete[:at] + complete[at + 1 :]
+        with pytest.raises(dw.TaskError, match=rf"NOT EXERCISED: 1 required case\(s\): {named}"):
+            dw.require_attributed_evidence(_output(missing, prefix), cases, prefix)
+        # Another case's line twice does not stand in for this one.
+        other = missing[0 if at else 1]
+        with pytest.raises(dw.TaskError, match="reported twice"):
+            dw.require_attributed_evidence(_output([*missing, other], prefix), cases, prefix)
+    for real in ("weakened-seccomp-default-profile", "weakened-resource-limits-dropped"):
+        assert ("sandbox-broker", real) in dw.SANDBOX_CASES
+        contract = dw.attribution("sandbox-broker", real)
+        assert contract is not None
+        assert contract[0] == "real-oci"
 
 
 def test_the_closure_cases_are_a_real_runtimes_and_each_its_own() -> None:

@@ -2221,6 +2221,10 @@ BROKER_ASSURANCE_CASES = tuple(
         "proxy-only-weakened-capability-added-refused",
         "proxy-only-weakened-no-new-privileges-disabled-refused",
         "proxy-only-weakened-seccomp-unconfined-refused",
+        # ADR-0057 §3, U4: the runtime's default profile, as the real
+        # NO_NETWORK case leaves it; and the swap limit, alone and with the
+        # pids limit as that case lifts both.
+        "proxy-only-weakened-seccomp-default-profile-refused",
         "proxy-only-weakened-host-pid-refused",
         "proxy-only-weakened-host-ipc-refused",
         "proxy-only-weakened-host-network-refused",
@@ -2228,6 +2232,8 @@ BROKER_ASSURANCE_CASES = tuple(
         "proxy-only-weakened-runtime-socket-mounted-refused",
         "proxy-only-weakened-extra-device-refused",
         "proxy-only-weakened-resource-limits-dropped-refused",
+        "proxy-only-weakened-swap-limit-lifted-refused",
+        "proxy-only-weakened-pids-and-swap-limits-lifted-refused",
     )
 )
 # M5e.2 (R3) against a real runtime's own record: the egress evidence keeps

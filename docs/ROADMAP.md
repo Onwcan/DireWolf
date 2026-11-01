@@ -155,7 +155,7 @@ and serving on Linux only. **M5 is in progress: M5a, M5b and M5c are complete (s
 **Adversarial:** the full path-traversal set ([EVALS.md](EVALS.md) §3) including Unicode normalisation and TOCTOU swap races in a tight loop; secret-in-output detection; core-dump inspection for secret residue.
 **Deferred:** remote fs, Windows-native hardening beyond the fallback walker.
 
-### M5 · Sandbox — **IN PROGRESS** (M5a complete, hosted acceptance passed; M5b complete, hosted acceptance passed; M5c complete, ADR-0050 accepted, hosted acceptance passed; M5d complete, ADR-0052 accepted 2026-10-26, hosted acceptance passed; M5e in progress: M5e.1 complete, hosted run 40774766063; M5e.2 in progress — R8, R9 and R11 hosted-verified, ADR-0056 accepted 2026-11-01, R3's real-container level open — M5 is complete only when M5e meets its own acceptance)
+### M5 · Sandbox — **IN PROGRESS** (M5a complete, hosted acceptance passed; M5b complete, hosted acceptance passed; M5c complete, ADR-0050 accepted, hosted acceptance passed; M5d complete, ADR-0052 accepted 2026-10-26, hosted acceptance passed; M5e in progress: M5e.1 complete, hosted run 40774766063; M5e.2 in progress — R8, R9 and R11 hosted-verified, ADR-0056 accepted 2026-11-01, R3's real-container level required by the owner (R-B on ADR-0057) and blocked — M5 is complete only when M5e meets its own acceptance)
 
 M5 is two products in one (a sandbox *and* an egress proxy), so it is decomposed like M4
 ([ADR-0047](adr/0047-m5a-oci-execution-environment-and-measured-assurance.md)). The
@@ -451,7 +451,7 @@ and package-manager acceptance are M5e's, and the `local` environment is M6's (O
 stays in progress until M5e meets its own acceptance. Passing CI is the evidence named
 here — not a deployment, and not a certification.
 
-#### M5e · The M5 adversarial gate and closeout — **IN PROGRESS** (M5e.1 complete; M5e.2 in progress — R8, R9 and R11 hosted-verified and ADR-0056 accepted, R3's real-container level open for the owner's decision, its residual proposed in ADR-0057; M5e.3–M5e.6 not started)
+#### M5e · The M5 adversarial gate and closeout — **IN PROGRESS** (M5e.1 complete; M5e.2 in progress — R8, R9 and R11 hosted-verified and ADR-0056 accepted, R3's real-container level required by the owner (R-B on ADR-0057, 2026-11-01) and blocked; M5e.3–M5e.6 not started)
 
 **Planned 2026-10-26.** The gap analysis, the requirements-to-evidence matrix,
 the implementation sequence and the owner's decisions of 2026-10-26 on its open points are in
@@ -553,7 +553,22 @@ unverified, and proposes accepting that residual with a limited claim. It accept
 this section's acceptance and the M5 contract below stand as written until the owner
 decides, and the limited claim would need the owner's separate approval.
 
-Still to do: R3's real-container level (not built; the owner's decision on ADR-0057);
+**R-B: the real-container level required (2026-11-01).** The owner committed ADR-0057 with
+ADR-0056's acceptance as `576b249`; hosted run
+[41304247232](https://github.com/Onwcan/DireWolf/actions/runs/41304247232) (run no. 115)
+passed, **29 of 29 jobs**. The owner then selected **R-B** on ADR-0057: R3's real-container
+requirement stays binding, the residual is not accepted, and this section's acceptance and the
+M5 contract below stand as written. ADR-0057's U4 is closed in process — the runtime's
+default seccomp profile and the swap limit, alone and with the pids limit as the real
+`NO_NETWORK` case lifts both, refused under `PROXY_ONLY` over the hand-written record and a
+real runtime's own, each `in-process` — built, hosted run pending. Real `PROXY_ONLY`
+containers weakened one hard rule at a time (E6) are **BLOCKED**: not built and not planned,
+the earlier safety control standing, and no in-process case stands in for them. **M5e.2 is IN
+PROGRESS, R3 E6 BLOCKED.**
+
+Still to do: R3's real-container level (E6: required by the owner's R-B, BLOCKED — not built
+and not planned while the safety control stands; U4's in-process cases await their hosted
+run);
 M5e.3–M5e.5's registry fixtures and pip and npm evidence — M5e.3's brief is ready
 ([M5E_ASSURANCE_PLAN.md](M5E_ASSURANCE_PLAN.md) §7a), not started — and M5e.6's gate.
 

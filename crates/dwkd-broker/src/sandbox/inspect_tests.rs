@@ -761,26 +761,41 @@ fn every_hard_rule_is_refused_in_proxy_only_and_host_uts_in_both_topologies() {
         refused(
             case,
             &base,
-            (path, value),
+            &[(path, value)],
             expected,
             &spec,
             (PROFILE, SOCKET),
         );
     }
+    // U4: the limits lifted as the real NO_NETWORK case lifts them.
+    let spec = spec_with(NetworkTopology::ProxyOnly);
+    refused(
+        LIMITS_LIFTED,
+        &conforming_for(NetworkTopology::ProxyOnly),
+        &limits_lifted(),
+        &[SandboxInvariant::HostResourceLimits],
+        &spec,
+        (PROFILE, SOCKET),
+    );
 }
 
-/// `base` with `value` at `path`, judged under `spec` against `against`:
-/// exactly `expected` fail, the production decision refuses the
+/// One nonconforming observation: the record's field and the value put there.
+type Edit<'a> = (&'a [&'a str], Value);
+
+/// `base` with every one of `edits` made, judged under `spec` against
+/// `against`: exactly `expected` fail, the production decision refuses the
 /// environment, and the case's line says so.
 fn refused(
     case: &str,
     base: &Object,
-    (path, value): (&[&str], Value),
+    edits: &[Edit<'_>],
     expected: &[SandboxInvariant],
     spec: &EnvironmentSpec,
     against: (&str, &str),
 ) {
-    let weakened = replace(base.clone(), path, value);
+    let weakened = edits.iter().fold(base.clone(), |object, (path, value)| {
+        replace(object, path, value.clone())
+    });
     let mut flipped = changed_against(base, &weakened, spec, against);
     flipped.sort_by_key(|i| i.as_str());
     let mut wanted = expected.to_vec();
@@ -880,6 +895,16 @@ fn hard_rule_weakenings(seccomp: &str) -> Vec<Nonconforming<'static>> {
             &[I::HostSeccompProfile],
         ),
         (
+            // ADR-0057 §3, U4: a filter is on -- the runtime's default, which
+            // it applies when no profile is named, as the real NO_NETWORK
+            // case leaves it -- but it is not DireWolf's.
+            "proxy-only-weakened-seccomp-default-profile-refused",
+            NetworkTopology::ProxyOnly,
+            &["HostConfig", "SecurityOpt"],
+            strings(&["no-new-privileges=true"]),
+            &[I::HostSeccompProfile],
+        ),
+        (
             "proxy-only-weakened-host-pid-refused",
             NetworkTopology::ProxyOnly,
             &["HostConfig", "PidMode"],
@@ -928,7 +953,144 @@ fn hard_rule_weakenings(seccomp: &str) -> Vec<Nonconforming<'static>> {
             Value::Number(dwk_proto::json::Number::Int(4096)),
             &[I::HostResourceLimits],
         ),
+        (
+            // U4: the swap limit lifted alone, the pids limit kept.
+            "proxy-only-weakened-swap-limit-lifted-refused",
+            NetworkTopology::ProxyOnly,
+            &["HostConfig", "MemorySwap"],
+            Value::Number(dwk_proto::json::Number::Int(-1)),
+            &[I::HostResourceLimits],
+        ),
     ]
+}
+
+/// ADR-0057 §3, U4: the limits lifted as the real `NO_NETWORK` case asks
+/// the runtime to lift them (`--pids-limit -1`, `--memory-swap -1`), both at
+/// once, judged under `PROXY_ONLY`.
+const LIMITS_LIFTED: &str = "proxy-only-weakened-pids-and-swap-limits-lifted-refused";
+
+fn limits_lifted() -> [Edit<'static>; 2] {
+    let unlimited = || Value::Number(dwk_proto::json::Number::Int(-1));
+    [
+        (&["HostConfig", "PidsLimit"], unlimited()),
+        (&["HostConfig", "MemorySwap"], unlimited()),
+    ]
+}
+
+/// U4's controls for the seccomp profile under `PROXY_ONLY`: the pinned
+/// profile, named once, is kept; the runtime's default (no profile named),
+/// another profile, or a second one beside the pinned one is refused by the
+/// production decision -- each by the profile invariant alone.
+#[test]
+fn only_the_pinned_seccomp_profile_is_kept_in_proxy_only() {
+    let spec = spec_with(NetworkTopology::ProxyOnly);
+    let base = conforming_for(NetworkTopology::ProxyOnly);
+    assert!(super::super::oci::clean(&all_checks(&base, &spec), &spec));
+    let pinned = format!("seccomp={PROFILE}");
+    let pinned = pinned.as_str();
+    for options in [
+        &["no-new-privileges=true"][..],
+        &["no-new-privileges=true", "seccomp=unconfined"],
+        &[
+            "no-new-privileges=true",
+            r#"seccomp={"defaultAction":"SCMP_ACT_ALLOW"}"#,
+        ],
+        &["no-new-privileges=true", pinned, "seccomp=unconfined"],
+        &["no-new-privileges=true", pinned, pinned],
+    ] {
+        let weakened = replace(
+            base.clone(),
+            &["HostConfig", "SecurityOpt"],
+            strings(options),
+        );
+        assert_eq!(
+            changed_against(&base, &weakened, &spec, (PROFILE, SOCKET)),
+            [SandboxInvariant::HostSeccompProfile],
+            "{options:?}"
+        );
+        assert!(
+            !super::super::oci::clean(&all_checks(&weakened, &spec), &spec),
+            "{options:?} was kept"
+        );
+    }
+}
+
+/// U4's controls for the resource limits under `PROXY_ONLY`: ADR-0056's
+/// accepted values are the profile's, and every field the resource-limit
+/// invariant reads, mismatched or missing, is refused by the production
+/// decision -- a missing one unobservable, never a pass -- with nothing else
+/// moving.
+#[test]
+fn every_resource_limit_is_required_in_proxy_only_missing_or_mismatched() {
+    use dwk_sandbox_profile::{
+        MAX_LIVE_ENVIRONMENTS, MEMORY_BYTES, MEMORY_SWAP_BYTES, PIDS_LIMIT, RLIMIT_NPROC,
+    };
+    // ADR-0056, accepted: the per-environment bound, the live-environment
+    // cap the backstop is derived from, and the backstop.
+    assert_eq!(
+        (PIDS_LIMIT, MAX_LIVE_ENVIRONMENTS, RLIMIT_NPROC),
+        (256, 16, 8192)
+    );
+    let spec = spec_with(NetworkTopology::ProxyOnly);
+    let base = conforming_for(NetworkTopology::ProxyOnly);
+    assert!(super::super::oci::clean(&all_checks(&base, &spec), &spec));
+    let int = |i: i64| Value::Number(dwk_proto::json::Number::Int(i));
+    let wide = |u: u64| int(i64::try_from(u).unwrap());
+    let refused_by_limits = |what: &str, weakened: &Object, want: Verdict| {
+        assert_eq!(
+            changed_against(&base, weakened, &spec, (PROFILE, SOCKET)),
+            [SandboxInvariant::HostResourceLimits],
+            "{what}: other invariants moved"
+        );
+        let checks = all_checks(weakened, &spec);
+        assert!(
+            checks.contains(&(SandboxInvariant::HostResourceLimits, want)),
+            "{what}: not {want:?}"
+        );
+        assert!(
+            !super::super::oci::clean(&checks, &spec),
+            "{what}: a nonconforming record was kept"
+        );
+    };
+    // Mismatched: each fails.
+    for (field, value) in [
+        ("PidsLimit", wide(PIDS_LIMIT + 1)),
+        ("PidsLimit", int(-1)),
+        ("Memory", wide(MEMORY_BYTES * 2)),
+        ("MemorySwap", int(-1)),
+        ("MemorySwap", wide(MEMORY_SWAP_BYTES * 2)),
+        ("NanoCpus", int(4_000_000_000)),
+        ("OomScoreAdj", int(-1000)),
+        ("OomKillDisable", Value::Bool(true)),
+        ("Ulimits", Value::Null),
+    ] {
+        let weakened = replace(base.clone(), &["HostConfig", field], value);
+        refused_by_limits(&format!("{field} mismatched"), &weakened, Verdict::Fail);
+    }
+    // Missing, or of another type: unobservable, never a pass. An absent
+    // `OomKillDisable` is the runtime's spelling of "not disabled", so it is
+    // not among these.
+    for field in [
+        "PidsLimit",
+        "Memory",
+        "MemorySwap",
+        "NanoCpus",
+        "OomScoreAdj",
+        "Ulimits",
+    ] {
+        let Some(Value::Object(mut host)) = base.clone().remove("HostConfig") else {
+            panic!("no HostConfig")
+        };
+        assert!(host.remove(field).is_some(), "{field} is in the record");
+        let missing = replace(base.clone(), &["HostConfig"], Value::Object(host));
+        refused_by_limits(&format!("{field} missing"), &missing, Verdict::Unobservable);
+        let typed = replace(
+            base.clone(),
+            &["HostConfig", field],
+            Value::String("256".to_owned()),
+        );
+        refused_by_limits(&format!("{field} a string"), &typed, Verdict::Unobservable);
+    }
 }
 
 /// Where `make sandbox-egress-evidence` leaves the runtime's own record of
@@ -1026,11 +1188,20 @@ fn a_real_proxy_only_record_is_kept_and_each_hard_rule_broken_in_it_refused() {
         old_backstop,
         &[SandboxInvariant::HostResourceLimits],
     ));
-    assert_eq!(cases.len(), 15);
+    assert_eq!(cases.len(), 17);
     for (case, _, path, value, expected) in cases {
         let case = format!("captured-{case}");
-        refused(&case, &base, (path, value), expected, &spec, against);
+        refused(&case, &base, &[(path, value)], expected, &spec, against);
     }
+    // U4: the limits lifted in it as the real NO_NETWORK case lifts them.
+    refused(
+        &format!("captured-{LIMITS_LIFTED}"),
+        &base,
+        &limits_lifted(),
+        &[SandboxInvariant::HostResourceLimits],
+        &spec,
+        against,
+    );
 }
 
 const EGRESS_DIR: &str = "/run/dw/egress/env_01M24BB8G3E0A851TRWE3M8FZF";
