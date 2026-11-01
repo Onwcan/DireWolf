@@ -6301,6 +6301,84 @@ def attribution(suite: str, case: str) -> tuple[str, frozenset[str]] | None:
     return None
 
 
+# What a line says it showed, held to the account its level and vantage give
+# (R17; ADR-0057, the owner's R-B): the production decision's refusal named by
+# the invariants that failed, and each detection by the invariants that were
+# measured -- so no line reports a weakening kept, a detection with nothing
+# named, or a vantage its invariants were not measured from.
+ASSURANCE_KEPT = "every-required-invariant-pass-kept"
+_INVARIANT = re.compile(r"(?:HOST|CONTAINER)_[A-Z0-9]+(?:_[A-Z0-9]+)*")
+# Which vantage measured a set of invariants: (any the host's, any inside).
+_VANTAGE = {
+    (True, False): "measured-host",
+    (False, True): "measured-inside",
+    (True, True): "measured-both",
+}
+# The real-runtime suites whose `weakened-*` cases each name what caught them.
+DETECTION_SUITES = frozenset(("sandbox-broker", "sandbox-egress"))
+
+
+def _named_invariants(text: str) -> list[str] | None:
+    """The `+`-joined invariants `text` names; `None` unless each is one."""
+    named = text.split("+")
+    return named if all(_INVARIANT.fullmatch(name) for name in named) else None
+
+
+def outcome_problem(suite: str, case: str, outcome: str, enforcement: object) -> str | None:
+    """Why `outcome` does not show what its line claims, or `None`.
+
+    The in-process judgement (`broker-assurance`, R2 and R3): a conforming
+    record says it was kept; every other says `refused:` and the invariants
+    that failed, each of them the host's -- a judgement of the runtime's
+    record never names what only the probe inside measures. A real runtime's
+    weakened profile or topology says `detected:` and what caught it; and a
+    detection's invariants are of the vantage its enforcement claims.
+    """
+    if suite == "broker-assurance":
+        if case.endswith("-kept"):
+            if outcome != ASSURANCE_KEPT:
+                return f"a conforming record's line must say {ASSURANCE_KEPT!r}, not {outcome!r}"
+            return None
+        named = (
+            _named_invariants(outcome.removeprefix("refused:"))
+            if outcome.startswith("refused:")
+            else None
+        )
+        if named is None:
+            return (
+                f"the production decision's refusal is not shown: {outcome!r} must be "
+                "`refused:` and the invariants that failed"
+            )
+        inside = [name for name in named if not name.startswith("HOST_")]
+        if inside:
+            return (
+                "a judgement of the runtime's record names the inside vantage, which it "
+                f"never measures: {'+'.join(inside)}"
+            )
+        return None
+    detection = outcome.startswith("detected:")
+    if (
+        suite in DETECTION_SUITES
+        and case.startswith("weakened-")
+        and not case.endswith("-count")
+        and not detection
+    ):
+        return f"a weakening's line must say `detected:` and what caught it, not {outcome!r}"
+    if detection and enforcement in _VANTAGE.values():
+        named = _named_invariants(outcome.removeprefix("detected:").split(";", 1)[0])
+        if named is None:
+            return f"a detection that names no invariant: {outcome!r}"
+        measured = _VANTAGE[
+            (
+                any(name.startswith("HOST_") for name in named),
+                any(name.startswith("CONTAINER_") for name in named),
+            )
+        ]
+        if measured != enforcement:
+            return f"its invariants were {measured}, not {enforcement}"
+    return None
+
+
 def require_attributed_evidence(
     output: str,
     cases: tuple[tuple[str, str], ...],
@@ -6316,9 +6394,12 @@ def require_attributed_evidence(
     enforcement is missing, outside the vocabulary or not the one
     `ATTRIBUTION` gives the case -- a fake broker's line offered as a
     container's, an unprivileged case's as a provisioned host's, a mechanism
-    the case does not exercise; or it is telemetry without its numbers. A
-    required case that says NOT EXERCISED, or never reports, fails as NOT
-    EXERCISED; and zero required cases fail too.
+    the case does not exercise; its outcome does not show what it claims
+    (`outcome_problem`: a weakening kept or never refused, a detection naming
+    no invariant, a vantage its invariants were not measured from); or it is
+    telemetry without its numbers. A required case that says NOT EXERCISED,
+    or never reports, fails as NOT EXERCISED; and zero required cases fail
+    too.
     """
     if not cases:
         raise TaskError("attributed evidence: zero cases required")
@@ -6376,6 +6457,9 @@ def require_attributed_evidence(
                 f"{named}: enforcement {enforcement!r} is not what this case exercises "
                 f"({', '.join(sorted(mechanisms))})"
             )
+        shown = outcome_problem(suite, case, outcome, enforcement)
+        if shown is not None:
+            problems.append(f"{named}: {shown}")
         numbers = [record.get(field) for field in TELEMETRY_FIELDS]
         if "telemetry" in mechanisms and (
             outcome != "measured"

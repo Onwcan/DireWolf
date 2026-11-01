@@ -85,9 +85,9 @@ carry ([SANDBOX.md](../SANDBOX.md) §6a); nothing is listed on any other basis.
 | E1 | Real `PROXY_ONLY` preparation and measurement | `proxy-only-prepare-clean`, `proxy-only-measure-clean-again` (both vantages); `proxy-only-host-*` (capabilities dropped, network isolated, proxy environment, proxy relay, relay digest); `proxy-only-container-*` (capabilities empty, network isolated, proxy reachable, direct egress and direct DNS refused, raw sockets refused); `proxy-only-relay-shares-the-namespace-unprivileged` | `real-oci` | `sandbox-egress`, since M5b; again in run 41242001763 |
 | E2 | Real topology and network isolation | `weakened-bridge-network`, `weakened-missing-relay`, `weakened-relay-tampered`, `weakened-proxy-variables-removed`, `drift-extra-peer-listening`, `drift-fake-resolver-in-namespace`, `drift-egress-directory-opened`, `drift-setup-left-running`, `drift-relay-stopped`, `weakened-topology-count`; every direct path out refused (`bypass-*`, R4) | `real-oci` | `sandbox-egress`, as E1 |
 | E3 | Real weakened hard rules, under `NO_NETWORK` | `weakened-writable-root`, `-root-user`, `-privileged`, `-runtime-socket-mounted`, `-capability-added`, `-no-new-privileges-disabled`, `-seccomp-unconfined`, `-seccomp-default-profile`, `-host-pid`, `-host-ipc`, `-host-uts`, `-host-network`, `-mutable-image-tag`, `-extra-device`, `-resource-limits-dropped`, `weakened-count`; `drift-pids-limit-raised` | `real-oci`; both vantages, except host IPC, host UTS and the image tag (host-side facts) | `sandbox-foundation`, since M5a; host UTS since run 41130431929 |
-| E4 | The production judgement over a real runtime's own `PROXY_ONLY` record | `captured-proxy-only-conforming-kept` and eighteen `captured-proxy-only-weakened-*-refused`: the `PROXY_ONLY` hard rules of E5 (U4's three among them since 2026-11-01) and the task backstop put back at 256 | `in-process` — the record is real; each weakening, and its judgement, are made in the test process | `sandbox-egress`, run 41242001763; U4's three built 2026-11-01, hosted run pending |
-| E5 | The production judgement over hand-written records | `proxy-only-conforming-kept`, `no-network-conforming-kept`; `proxy-only-weakened-*-refused` for host UTS, a writable root, root, privileged, an added capability, `no-new-privileges` off, seccomp unconfined, host PID, host IPC, host network, a mutable tag, the runtime socket, an extra device and the limits dropped; since 2026-11-01 (U4) the runtime's default seccomp profile, the swap limit lifted, and the pids and swap limits lifted together; `no-network-weakened-host-uts-refused` | `in-process` | `sandbox-foundation`, since run 40954372045; U4's three, hosted run pending |
-| E6 | **Real `PROXY_ONLY` containers, one hard rule weakened at a time, measured from both vantages** | none | — | **NOT EXERCISED — BLOCKED**: not built and not planned; required by the owner's R-B (§8) |
+| E4 | The production judgement over a real runtime's own `PROXY_ONLY` record | `captured-proxy-only-conforming-kept` and eighteen `captured-proxy-only-weakened-*-refused`: the `PROXY_ONLY` hard rules of E5 (U4's three among them since 2026-11-01) and the task backstop put back at 256 | `in-process` — the record is real; each weakening, and its judgement, are made in the test process | `sandbox-egress`, run 41242001763; U4's three since run 41323258812 |
+| E5 | The production judgement over hand-written records | `proxy-only-conforming-kept`, `no-network-conforming-kept`; `proxy-only-weakened-*-refused` for host UTS, a writable root, root, privileged, an added capability, `no-new-privileges` off, seccomp unconfined, host PID, host IPC, host network, a mutable tag, the runtime socket, an extra device and the limits dropped; since 2026-11-01 (U4) the runtime's default seccomp profile, the swap limit lifted, and the pids and swap limits lifted together; `no-network-weakened-host-uts-refused` | `in-process` | `sandbox-foundation`, since run 40954372045; U4's three since run 41323258812 |
+| E6 | **Real `PROXY_ONLY` containers, one hard rule weakened at a time, measured from both vantages** | none | — | **NOT EXERCISED — BLOCKED**: not built and not planned; required by the owner's R-B (§8); no existing source observes it (§9) |
 
 ### 1a. By hard rule
 
@@ -167,8 +167,10 @@ hard rules, and are weakened on real containers already (E2).
   (`--pids-limit -1`, `--memory-swap -1`) — over the hand-written record (E5)
   and over the real runtime's own (`captured-*`, E4), each `in-process` and
   required by name, with controls for every resource-limit field missing or
-  mismatched and for every other seccomp profile; their hosted run is
-  pending. That closes U4's judgement, not U1–U3: only E6 closes those.
+  mismatched and for every other seccomp profile; they passed hosted in run
+  [41323258812](https://github.com/Onwcan/DireWolf/actions/runs/41323258812)
+  (run no. 116, at `b25c3e6`, 29 of 29 jobs), still `in-process`. That
+  closes U4's judgement, not U1–U3: only E6 closes those.
 
 ### 4. Security implications
 
@@ -296,6 +298,34 @@ that evidence supersedes this one — "Superseded by", the one disposition
 besides Accepted that the [template](README.md) provides — and it moves to
 the index's superseded table as history. It is not withdrawn: its account of
 the gap is what that evidence answers.
+
+### 9. After U4's hosted run: E6 reviewed, still blocked (2026-11-01)
+
+Hosted run
+[41323258812](https://github.com/Onwcan/DireWolf/actions/runs/41323258812)
+(run no. 116, at `b25c3e6`, 29 of 29 jobs) passed U4 (§3) at its level,
+`in-process`. It carried no E6 case, so it shows nothing about E6.
+
+A defensive review then asked whether any existing, authorised source — M5a's
+real weakened profiles, M5b's real topologies, the judgement over either
+record, the broker's refusal and drift tests, the probe's reports, the
+runtime's inspection and reconciliation — observes what E6 asks, without the
+experiment the safety control stopped. None does: each either keeps every
+hard rule (E1, E2), runs `NO_NETWORK` (E3), or weakens a record rather than a
+container (E4, E5). By §1a's rows: **E6 implemented 0, exercised 0, passed 0,
+blocked 15.** The review, row by row and source by source, is the M5e plan's
+§3a; what genuine E6 evidence would have to carry before the owner could
+weigh it — provenance, authentic observations from both vantages, the
+production refusal, cleanup, completeness — is its §3b, a specification of
+acceptance, not a procedure, which approves and plans nothing.
+
+What could be done safely was done in the gate, not in containers: every R2
+and R3 line now has to show what it claims — a weakening refused by the
+invariants that failed, the in-process judgement naming the host's vantage
+alone, a real weakening naming what caught it from the vantage it says — and
+an architecture test fails this record accepted, its §5 claim adopted, or E6
+or M5e.2 claimed while it stands. None of that is E6. **R3 is not met; E6 is
+BLOCKED; M5e.2 stays IN PROGRESS;** this record stays Proposed.
 
 ## Consequences
 

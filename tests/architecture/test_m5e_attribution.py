@@ -19,7 +19,12 @@ So what is checked here is the contract and the gate, not containment:
   runtime;
 * the gate refuses each way a line can mislead: a missing, unexercised,
   duplicated or unknown case, a missing or wrong level, an empty, unknown or
-  wrong enforcement, unreadable JSON, telemetry offered as more.
+  wrong enforcement, unreadable JSON, telemetry offered as more;
+* and an outcome that does not show what its line claims (ADR-0057, the
+  owner's R-B): a weakening the production decision kept or never refused, an
+  in-process judgement naming the inside vantage, a real weakening that says
+  nothing caught it, or a detection whose invariants are of another vantage
+  than its enforcement says.
 
 The synthetic lines below test the gate only. They are never evidence of
 containment: only the real tasks, on a real runtime, are.
@@ -217,15 +222,37 @@ def _contract(suite: str, case: str) -> tuple[str, frozenset[str]]:
     return got
 
 
+# One real invariant of each vantage, for a synthetic line's outcome.
+HOST_INVARIANT, INSIDE_INVARIANT = "HOST_NOT_PRIVILEGED", "CONTAINER_CAPABILITIES_EMPTY"
+
+
+def _outcome(suite: str, case: str, enforcement: str) -> str:
+    """An outcome the gate accepts: kept, refused by a host invariant, or
+    detected by invariants of the enforcement's vantage; `ok` otherwise."""
+    if suite == "broker-assurance":
+        return dw.ASSURANCE_KEPT if case.endswith("-kept") else f"refused:{HOST_INVARIANT}"
+    if (
+        suite in dw.DETECTION_SUITES
+        and case.startswith("weakened-")
+        and not case.endswith("-count")
+    ):
+        named = {"measured-host": HOST_INVARIANT, "measured-inside": INSIDE_INVARIANT}.get(
+            enforcement, f"{HOST_INVARIANT}+{INSIDE_INVARIANT}"
+        )
+        return f"detected:{named};measured-in-7ms"
+    return "ok"
+
+
 def _record(suite: str, case: str) -> dict[str, object]:
     """A synthetic line the contract accepts for `(suite, case)`."""
     level, mechanisms = _contract(suite, case)
+    enforcement = sorted(mechanisms)[0]
     record: dict[str, object] = {
         "suite": suite,
         "case": case,
-        "outcome": "ok",
+        "outcome": _outcome(suite, case, enforcement),
         "level": level,
-        "enforcement": sorted(mechanisms)[0],
+        "enforcement": enforcement,
     }
     if "telemetry" in mechanisms:
         record.update(outcome="measured", **dict.fromkeys(dw.TELEMETRY_FIELDS, 7))
@@ -705,6 +732,188 @@ def test_u4_is_required_in_process_over_both_records_and_never_as_a_container(
         contract = dw.attribution("sandbox-broker", real)
         assert contract is not None
         assert contract[0] == "real-oci"
+
+
+# --- what a line says it showed (R17; ADR-0057, the owner's R-B) ----------------
+
+
+def _shown_refused(
+    cases: tuple[tuple[str, str], ...], case: str, outcome: str, match: str, prefix: str
+) -> None:
+    at = cases.index(next(key for key in cases if key[1] == case))
+    named = re.escape(f"{cases[at][0]}/{case}")
+    changed = _with(_complete(cases), at, outcome=outcome)
+    with pytest.raises(dw.TaskError, match=rf"{named}: {match}"):
+        dw.require_attributed_evidence(_output(changed, prefix), cases, prefix)
+
+
+@pytest.mark.parametrize(
+    ("cases", "prefix"),
+    [
+        (dw.BROKER_ASSURANCE_CASES, dw.ASSURANCE_EVIDENCE_PREFIX),
+        (dw.CAPTURED_ASSURANCE_CASES, dw.ASSURANCE_EVIDENCE_PREFIX),
+    ],
+)
+def test_a_weakening_the_production_decision_did_not_refuse_fails(
+    cases: tuple[tuple[str, str], ...], prefix: str
+) -> None:
+    """R3's judgement shows the production decision's refusal by the
+    invariants that failed: a weakened record whose line says it was kept,
+    passed, or refused by nothing that is an invariant fails its task -- and
+    so does a conforming record reported anything but kept."""
+    weakened = next(c for _, c in cases if c.endswith("-weakened-privileged-refused"))
+    for outcome in (
+        dw.ASSURANCE_KEPT,
+        "kept",
+        "pass",
+        "refused",
+        "refused:",
+        "refused:host_not_privileged",
+        f"refused:{HOST_INVARIANT}+",
+        f"detected:{HOST_INVARIANT}",
+    ):
+        _shown_refused(
+            cases, weakened, outcome, "the production decision's refusal is not shown", prefix
+        )
+    conforming = next(c for _, c in cases if c.endswith("-conforming-kept"))
+    for outcome in (f"refused:{HOST_INVARIANT}", "kept", "pass"):
+        _shown_refused(cases, conforming, outcome, "a conforming record's line must say", prefix)
+
+
+@pytest.mark.parametrize("cases", [dw.BROKER_ASSURANCE_CASES, dw.CAPTURED_ASSURANCE_CASES])
+def test_an_in_process_judgement_never_claims_the_inside_vantage(
+    cases: tuple[tuple[str, str], ...],
+) -> None:
+    """The judgement reads the runtime's record -- the host's vantage alone. A
+    line naming an invariant only the probe inside measures claims a
+    measurement no in-process case makes, the step E6 needs a real container
+    for (ADR-0057 §3, U2)."""
+    weakened = next(c for _, c in cases if c.endswith("-weakened-privileged-refused"))
+    for outcome in (
+        f"refused:{HOST_INVARIANT}+{INSIDE_INVARIANT}",
+        f"refused:{INSIDE_INVARIANT}",
+    ):
+        _shown_refused(
+            cases,
+            weakened,
+            outcome,
+            "a judgement of the runtime's record names the inside vantage",
+            dw.ASSURANCE_EVIDENCE_PREFIX,
+        )
+
+
+def test_a_real_weakening_names_what_caught_it_from_the_vantage_it_claims() -> None:
+    """E2 and E3 -- a real runtime's weakened topologies and `NO_NETWORK`
+    profiles -- each say what caught them: a weakening that names nothing
+    caught, a detection naming no invariant, or invariants of another vantage
+    than the line's enforcement claims, fails its task. So no line can say
+    `measured-both` for a weakening only one vantage saw."""
+    prefix = dw.SANDBOX_EVIDENCE_PREFIX
+    both = f"detected:{HOST_INVARIANT}+{INSIDE_INVARIANT};measured-in-7ms"
+    for cases, case, outcome, match in (
+        (dw.SANDBOX_CASES, "weakened-privileged", "clean", "a weakening's line must say"),
+        (dw.SANDBOX_CASES, "weakened-privileged", "pass", "a weakening's line must say"),
+        (dw.SANDBOX_CASES, "weakened-privileged", "detected:", "a detection that names no"),
+        (dw.SANDBOX_CASES, "weakened-privileged", "detected:yes", "a detection that names no"),
+        (
+            dw.SANDBOX_CASES,
+            "weakened-privileged",
+            f"detected:{HOST_INVARIANT};measured-in-7ms",
+            "its invariants were measured-host, not measured-both",
+        ),
+        (
+            dw.SANDBOX_CASES,
+            "weakened-privileged",
+            f"detected:{INSIDE_INVARIANT}",
+            "its invariants were measured-inside, not measured-both",
+        ),
+        (
+            dw.SANDBOX_CASES,
+            "weakened-host-ipc",
+            both,
+            "its invariants were measured-both, not measured-host",
+        ),
+        (dw.EGRESS_CASES, "weakened-bridge-network", "pass", "a weakening's line must say"),
+        (
+            dw.EGRESS_CASES,
+            "weakened-bridge-network",
+            f"detected:{HOST_INVARIANT}",
+            "its invariants were measured-host, not measured-both",
+        ),
+        (dw.EGRESS_CASES, "weakened-relay-tampered", "never-started", "a weakening's line"),
+        (
+            dw.EGRESS_CASES,
+            "drift-extra-peer-listening",
+            f"detected:{HOST_INVARIANT}",
+            "its invariants were measured-host, not measured-inside",
+        ),
+    ):
+        _shown_refused(cases, case, outcome, match, prefix)
+    # What the suites print is accepted: each weakening's own invariants, its
+    # measurement time after them, and the counts that name no invariant.
+    complete = _complete(dw.SANDBOX_CASES)
+    for case, outcome in (
+        (
+            "weakened-runtime-socket-mounted",
+            "detected:HOST_NO_RUNTIME_SOCKET+HOST_MOUNTS_EXACT+CONTAINER_NO_RUNTIME_SOCKET;"
+            "measured-in-412ms",
+        ),
+        ("weakened-host-uts", "detected:HOST_UTS_NAMESPACE_PRIVATE;measured-in-97ms"),
+        ("weakened-count", "detected-15-of-15"),
+        ("drift-pids-limit-raised", "detected-host-and-inside"),
+    ):
+        at = dw.SANDBOX_CASES.index(("sandbox-broker", case))
+        complete = _with(complete, at, outcome=outcome)
+    dw.require_attributed_evidence(_output(complete, prefix), dw.SANDBOX_CASES, prefix)
+
+
+def _invariant_lists(text: str, cases: list[str]) -> dict[str, list[str]]:
+    """Each case's expected invariants as its table spells them: the first
+    `&[I::…]` after the case's literal, as `HOST_…`/`CONTAINER_…` names."""
+    found = {}
+    for case in cases:
+        start = text.index(f'"{case}"')
+        listed = re.search(r"&\[\s*((?:(?:I|SandboxInvariant)::\w+,?\s*)+)\]", text[start:])
+        assert listed is not None, case
+        found[case] = [
+            re.sub(r"(?<!^)(?=[A-Z])", "_", name).upper()
+            for name in re.findall(r"::(\w+)", listed.group(1))
+        ]
+    return found
+
+
+def test_each_weakenings_invariants_are_of_the_vantage_its_contract_gives() -> None:
+    """The source and the contract agree on vantage before any runtime: each
+    real `NO_NETWORK` weakening's expected invariants (E3) are of the vantage
+    `ATTRIBUTION` gives its case, and every in-process judgement under either
+    topology (E4, E5) expects host invariants only."""
+    foundation = (REPO_ROOT / "crates/dwkd-broker/tests/sandbox_foundation.rs").read_text("utf-8")
+    body = foundation[foundation.index("fn every_weakened_profile_is_detected") :]
+    body = body[: body.index("\n    }\n")]
+    weakenings = [
+        c for _, c in dw.SANDBOX_CASES if c.startswith("weakened-") and not c.endswith("-count")
+    ]
+    assert len(weakenings) == 15, weakenings
+    for case, named in _invariant_lists(body, weakenings).items():
+        measured = dw._VANTAGE[
+            (
+                any(n.startswith("HOST_") for n in named),
+                any(n.startswith("CONTAINER_") for n in named),
+            )
+        ]
+        assert _contract("sandbox-broker", case)[1] == {measured}, (case, named, measured)
+    judged = (REPO_ROOT / "crates/dwkd-broker/src/sandbox/inspect_tests.rs").read_text("utf-8")
+    table = judged[judged.index("fn hard_rule_weakenings") :]
+    table = table[: table.index("\n}\n")]
+    refused = [
+        c for _, c in dw.BROKER_ASSURANCE_CASES if c.endswith("-refused") and f'"{c}"' in table
+    ]
+    assert len(refused) == len(dw.BROKER_ASSURANCE_CASES) - 3, refused
+    expected = _invariant_lists(table, refused)
+    assert all(n.startswith("HOST_") for named in expected.values() for n in named), expected
+    # The two the table does not hold -- U4's limits lifted, the backstop at
+    # 256 -- name the host's resource limits alone.
+    assert judged.count("&[SandboxInvariant::HostResourceLimits]") >= 3
 
 
 def test_the_closure_cases_are_a_real_runtimes_and_each_its_own() -> None:

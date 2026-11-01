@@ -277,11 +277,23 @@ got, the decision the proxy gave -- the line says that; otherwise the call
 names it. `scripts/dw.py`'s `ATTRIBUTION` gives each required case its level
 and mechanisms, and `require_attributed_evidence` fails a task, naming the
 suite and case, on any line that is unreadable, unknown, reported twice,
-NOT EXERCISED, at another level or attributed otherwise.
+NOT EXERCISED, at another level or attributed otherwise -- and, since
+2026-11-01 (ADR-0057, the owner's R-B), on one whose outcome does not show
+what it claims (`outcome_problem`): an in-process judgement that does not say
+`refused:` and the host invariants that failed (or, for a conforming record,
+that it was kept), or names an inside one; a real `weakened-*` profile or
+topology that does not say `detected:` and what caught it; or a detection
+whose invariants are of another vantage than its enforcement.
 `tests/architecture/test_m5e_attribution.py` holds that contract to the
-suites' sources, without a runtime, and shows the gate refusing each kind of
-misleading line with synthetic lines -- which test the gate only, never
-containment.
+suites' sources, without a runtime -- each real weakening's expected
+invariants of the vantage its case is attributed, every in-process
+judgement's of the host's -- and shows the gate refusing each kind of
+misleading line with synthetic lines, which test the gate only, never
+containment. `tests/architecture/test_m5e_r3_closure.py` holds the owner's
+R-B: ADR-0057 never accepted and outside the digest, its unapproved limited
+claim nowhere M5's, and, while it is Proposed, E6 said NOT EXERCISED or
+BLOCKED wherever R3 is stated and M5e.2 never said complete. It reads
+documents only and plans no container.
 
 **The closure (M5e.2)** ([the M5e plan](../docs/M5E_ASSURANCE_PLAN.md) §3).
 `sandbox-foundation-evidence` also runs one broker unit test,
@@ -322,7 +334,8 @@ the runtime's own record of a real `PROXY_ONLY` environment for
 which judges each hard rule broken in that record (`captured-*`, still
 `in-process`: the runtime never runs a weakened record); both judge, under
 `PROXY_ONLY`, the runtime's default seccomp profile and the swap limit too
-(ADR-0057's U4, 2026-11-01). Since 2026-10-30 the foundation's real
+(ADR-0057's U4, 2026-11-01; passed hosted in run 41323258812). Since
+2026-10-30 the foundation's real
 weakened-profile suite also runs a container in the host's UTS namespace
 (`weakened-host-uts`).
 

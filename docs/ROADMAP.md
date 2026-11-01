@@ -561,14 +561,27 @@ requirement stays binding, the residual is not accepted, and this section's acce
 M5 contract below stand as written. ADR-0057's U4 is closed in process — the runtime's
 default seccomp profile and the swap limit, alone and with the pids limit as the real
 `NO_NETWORK` case lifts both, refused under `PROXY_ONLY` over the hand-written record and a
-real runtime's own, each `in-process` — built, hosted run pending. Real `PROXY_ONLY`
+real runtime's own, each `in-process`. Real `PROXY_ONLY`
 containers weakened one hard rule at a time (E6) are **BLOCKED**: not built and not planned,
 the earlier safety control standing, and no in-process case stands in for them. **M5e.2 is IN
 PROGRESS, R3 E6 BLOCKED.**
 
+**U4 hosted; E6 reviewed, still blocked (2026-11-01).** The owner committed U4 and the R-B
+record as `b25c3e6`; hosted run
+[41323258812](https://github.com/Onwcan/DireWolf/actions/runs/41323258812) (run no. 116)
+passed, **29 of 29 jobs**, U4's three cases over both records among them, `in-process`. That
+run holds no E6 case and proves nothing about E6. A review of every existing source for E6
+([M5E_ASSURANCE_PLAN.md](M5E_ASSURANCE_PLAN.md) §3a; ADR-0057 §9) found none that observes a
+real `PROXY_ONLY` environment with a hard rule weakened: all 15 of ADR-0057's rows are
+BLOCKED, and the plan's §3b states, as acceptance criteria and not a procedure, what genuine E6
+evidence would have to carry. Built since, unstaged, hosted run pending: the evidence gate holds
+each R2/R3 line's outcome to what it claims, and an architecture test holds the owner's R-B
+(ADR-0057 never accepted; E6 and M5e.2 never claimed while it stands). **M5e.2 is IN
+PROGRESS, R3 E6 BLOCKED.**
+
 Still to do: R3's real-container level (E6: required by the owner's R-B, BLOCKED — not built
-and not planned while the safety control stands; U4's in-process cases await their hosted
-run);
+and not planned while the safety control stands; it needs a plan the owner approves within
+that control, or genuine independent evidence meeting the plan's §3b that the owner accepts);
 M5e.3–M5e.5's registry fixtures and pip and npm evidence — M5e.3's brief is ready
 ([M5E_ASSURANCE_PLAN.md](M5E_ASSURANCE_PLAN.md) §7a), not started — and M5e.6's gate.
 
