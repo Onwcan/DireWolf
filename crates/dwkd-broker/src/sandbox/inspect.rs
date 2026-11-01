@@ -372,9 +372,11 @@ impl<'a> Record<'a> {
     /// Whether this record is exactly the relay a `PROXY_ONLY` environment
     /// needs: running, the pinned image and its relay, unprivileged, a
     /// read-only root, no capability, the profile's seccomp filter, in
-    /// exactly `environment`'s network namespace, with exactly the broker's
-    /// directory for it mounted read-only, no proxy variable, the profile's
-    /// limits, and labelled as this environment's relay.
+    /// exactly `environment`'s network namespace, private PID, IPC, UTS and
+    /// cgroup namespaces and not the host's user namespace, with exactly the
+    /// broker's directory for it mounted read-only, no proxy variable, the
+    /// profile's limits — no swap beyond its memory — and labelled as this
+    /// environment's relay.
     pub(crate) fn relay_exact(
         &self,
         spec: &EnvironmentSpec,
@@ -439,6 +441,8 @@ impl<'a> Record<'a> {
                 .map(|m| m == format!("container:{}", environment.as_str())),
             text(o, &["HostConfig", "PidMode"]).map(str::is_empty),
             text(o, &["HostConfig", "IpcMode"]).map(|m| m == "private"),
+            text(o, &["HostConfig", "UTSMode"]).map(str::is_empty),
+            text(o, &["HostConfig", "CgroupnsMode"]).map(|m| m == "private"),
             text(o, &["HostConfig", "UsernsMode"]).map(|m| m != "host"),
             mounts,
             requested,
@@ -447,6 +451,7 @@ impl<'a> Record<'a> {
             self.no_devices(),
             number(&["HostConfig", "PidsLimit"], RELAY_PIDS_LIMIT),
             number(&["HostConfig", "Memory"], RELAY_MEMORY_BYTES),
+            number(&["HostConfig", "MemorySwap"], RELAY_MEMORY_BYTES),
             number(&["HostConfig", "NanoCpus"], RELAY_NANO_CPUS),
             command,
             no_proxy_variables,

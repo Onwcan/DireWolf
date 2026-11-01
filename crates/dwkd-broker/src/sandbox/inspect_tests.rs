@@ -1246,12 +1246,15 @@ fn relay_record() -> String {
     "CapAdd": null,
     "CapDrop": ["ALL"],
     "IpcMode": "private",
+    "CgroupnsMode": "private",
     "PidMode": "",
+    "UTSMode": "",
     "UsernsMode": "",
     "Privileged": false,
     "ReadonlyRootfs": true,
     "SecurityOpt": ["no-new-privileges=true", "seccomp={seccomp}"],
     "Memory": 67108864,
+    "MemorySwap": 67108864,
     "NanoCpus": 500000000,
     "PidsLimit": 144,
     "Devices": [],
@@ -1321,6 +1324,22 @@ fn the_relay_record_is_judged_exactly_and_every_weakening_is_caught() {
             strings(&["no-new-privileges=true", "seccomp=unconfined"]),
         ),
         (&["HostConfig", "PidMode"], Value::String("host".to_owned())),
+        // The plan's private cgroup namespace, the runtime's private UTS
+        // one, and no swap beyond the relay's memory: what the runtime was
+        // asked for, read back, or the relay is not the one planned.
+        (&["HostConfig", "UTSMode"], Value::String("host".to_owned())),
+        (
+            &["HostConfig", "CgroupnsMode"],
+            Value::String("host".to_owned()),
+        ),
+        (
+            &["HostConfig", "MemorySwap"],
+            Value::Number(dwk_proto::json::Number::Int(-1)),
+        ),
+        (
+            &["HostConfig", "MemorySwap"],
+            Value::Number(dwk_proto::json::Number::Int(2 * 67_108_864)),
+        ),
         (
             &["HostConfig", "Binds"],
             strings(&["/var/run/docker.sock:/var/run/docker.sock"]),
@@ -1366,6 +1385,13 @@ fn the_relay_record_is_judged_exactly_and_every_weakening_is_caught() {
         assert_eq!(relay_verdict(&object), Some(false), "{mounts}");
     }
     // Absent fields are unobservable, never a pass.
-    let object = relay_mutated(&["Config", "Entrypoint"], Value::Bool(false));
-    assert_eq!(relay_verdict(&object), None);
+    for path in [
+        &["Config", "Entrypoint"][..],
+        &["HostConfig", "UTSMode"],
+        &["HostConfig", "CgroupnsMode"],
+        &["HostConfig", "MemorySwap"],
+    ] {
+        let object = relay_mutated(path, Value::Bool(false));
+        assert_eq!(relay_verdict(&object), None, "{path:?}");
+    }
 }

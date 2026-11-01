@@ -366,6 +366,23 @@ DireWolf did not start, more than one full set of uncounted environments, and pr
 than tasks beside a neighbour — none narrowed. **F-R8 is closed and R8 is met.** The negative
 control has run by hand, locally, not hosted.
 
+**F-RELAY — the relay's record was not held to three settings its plan asks for (M5e.2,
+2026-11-02; fixed in process, hosted pending).** `HOST_PROXY_RELAY` judges the relay's record
+(`inspect.rs`, `Record::relay_exact`) against its plan (`relay_plan.rs`), but did not read the
+plan's `--cgroupns private`, its `--memory-swap` (the relay's 64 MiB, so no swap), or the
+runtime's private UTS namespace — read for the environment, and for the relay its PID, IPC and
+user namespaces were. A runtime that ran the relay in the host's cgroup or UTS namespace, or
+with its swap unbounded, would have had it judged exact. Found by reading the code against the
+plan; no container was run. These are the relay's settings — DireWolf's unprivileged forwarder
+in the environment's network namespace — not the environment's hard rules: no hard rule,
+profile constant, evidence case or level changes, and none of this is E6. *Built (unstaged for
+the owner's commit):* the three are read and required; the relay test's conforming record
+carries them as the runtime records them, and the test refuses each weakened (host UTS, the
+host's cgroup namespace, swap unlimited or doubled) and each unreadable — it failed before the
+change, and removing any one of the three checks fails it again. The conforming relay on a real
+runtime is `sandbox-egress`'s `proxy-only-host-proxy-relay`, in the owner's next hosted run; no
+weakened relay is run.
+
 ## 6. Safe implementation sequence
 
 Each step keeps every production control as it is; each lands with its own
