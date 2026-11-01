@@ -155,7 +155,7 @@ and serving on Linux only. **M5 is in progress: M5a, M5b and M5c are complete (s
 **Adversarial:** the full path-traversal set ([EVALS.md](EVALS.md) §3) including Unicode normalisation and TOCTOU swap races in a tight loop; secret-in-output detection; core-dump inspection for secret residue.
 **Deferred:** remote fs, Windows-native hardening beyond the fallback walker.
 
-### M5 · Sandbox — **IN PROGRESS** (M5a complete, hosted acceptance passed; M5b complete, hosted acceptance passed; M5c complete, ADR-0050 accepted, hosted acceptance passed; M5d complete, ADR-0052 accepted 2026-10-26, hosted acceptance passed; M5e in progress: M5e.1 complete, hosted run 40774766063; M5e.2 built in part, hosted verification pending — M5 is complete only when M5e meets its own acceptance)
+### M5 · Sandbox — **IN PROGRESS** (M5a complete, hosted acceptance passed; M5b complete, hosted acceptance passed; M5c complete, ADR-0050 accepted, hosted acceptance passed; M5d complete, ADR-0052 accepted 2026-10-26, hosted acceptance passed; M5e in progress: M5e.1 complete, hosted run 40774766063; M5e.2 in progress — R8, R9 and R11 hosted-verified, ADR-0056 accepted 2026-11-01, R3's real-container level open — M5 is complete only when M5e meets its own acceptance)
 
 M5 is two products in one (a sandbox *and* an egress proxy), so it is decomposed like M4
 ([ADR-0047](adr/0047-m5a-oci-execution-environment-and-measured-assurance.md)). The
@@ -451,7 +451,7 @@ and package-manager acceptance are M5e's, and the `local` environment is M6's (O
 stays in progress until M5e meets its own acceptance. Passing CI is the evidence named
 here — not a deployment, and not a certification.
 
-#### M5e · The M5 adversarial gate and closeout — **IN PROGRESS** (M5e.1 complete; M5e.2 in progress — partial, hosted verification of its F-R8 remedy pending; M5e.3–M5e.6 not started)
+#### M5e · The M5 adversarial gate and closeout — **IN PROGRESS** (M5e.1 complete; M5e.2 in progress — R8, R9 and R11 hosted-verified and ADR-0056 accepted, R3's real-container level open for the owner's decision, its residual proposed in ADR-0057; M5e.3–M5e.6 not started)
 
 **Planned 2026-10-26.** The gap analysis, the requirements-to-evidence matrix,
 the implementation sequence and the owner's decisions of 2026-10-26 on its open points are in
@@ -525,10 +525,37 @@ judged over a real runtime's own `PROXY_ONLY` record, in process. Real weakened
 `PROXY_ONLY` containers stay NOT EXERCISED. ADR-0056 stays **Proposed** until its evidence
 passes hosted and the owner accepts it; M5e.2 stays IN PROGRESS.
 
-Still to do: the owner's hosted run of the F-R8 remedy and ADR-0056's acceptance; R3's
-real-container level (not built; the owner's decision); M5e.3–M5e.5's registry fixtures and
-pip and npm evidence — M5e.3's brief is ready ([M5E_ASSURANCE_PLAN.md](M5E_ASSURANCE_PLAN.md)
-§7a), not started — and M5e.6's gate.
+**M5e.2 after run 41242001763 (2026-11-01).** The owner committed the F-R8 remedy as
+`615e77e`; hosted run
+[41242001763](https://github.com/Onwcan/DireWolf/actions/runs/41242001763) (run no. 114)
+passed, **29 of 29 jobs**, the new required `sandbox-capacity` among them. **R8 passed
+hosted**: the ten neighbour cases at the broker and through the authority's `process.exec`,
+and the cap — by the job's log as the owner read it, 15 environments each at its own 256-task
+bound, 3 840 tasks of uid 10001, the 16th prepared, measured clean and served, all 16
+destroyed by their labels; `nproc` was measured at 8 192 from both vantages; R11's restart
+passed again. On that record the owner **formally accepted
+[ADR-0056](adr/0056-m5e-cross-run-task-limit-isolation.md)** on 2026-11-01 — Option B, each
+environment's pids cgroup (256) its task bound and `RLIMIT_NPROC` a host-wide backstop of
+8 192, with its deployment contract and its residuals (one host uid for every environment,
+processes of uid 10001 DireWolf did not start, more than one full set of uncounted
+environments) stated, not narrowed. **F-R8 is closed.** R3's captured-record cases passed
+hosted too, at their level, `in-process`; real weakened `PROXY_ONLY` containers stay NOT
+EXERCISED, and whether R3 needs them or its residual is accepted is a separate decision of
+the owner's, which ADR-0056's acceptance does not make. M5e.2 stays IN PROGRESS until it is
+made.
+
+**R3's residual, recorded (2026-11-01).** For that decision the owner chose to record the gap
+as a residual: [ADR-0057](adr/0057-m5e-proxy-only-real-container-evidence-residual.md),
+**Proposed**, separates what R3's evidence shows — real `PROXY_ONLY` environments measured
+clean, real weakened topologies, each hard rule weakened in a real `NO_NETWORK` container,
+the production judgement over a real runtime's own `PROXY_ONLY` record — from what it leaves
+unverified, and proposes accepting that residual with a limited claim. It accepts nothing:
+this section's acceptance and the M5 contract below stand as written until the owner
+decides, and the limited claim would need the owner's separate approval.
+
+Still to do: R3's real-container level (not built; the owner's decision on ADR-0057);
+M5e.3–M5e.5's registry fixtures and pip and npm evidence — M5e.3's brief is ready
+([M5E_ASSURANCE_PLAN.md](M5E_ASSURANCE_PLAN.md) §7a), not started — and M5e.6's gate.
 
 **Deps:** M5a–M5d. **Deliverables:** the complete escape, SSRF and persistence suites as
 merge gates; weakened-profile closure for `PROXY_ONLY`; package-manager acceptance

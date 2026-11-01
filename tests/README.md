@@ -298,7 +298,7 @@ environment holds nothing of the last. The same module holds R8's neighbour
 test, `a_neighbour_at_its_task_bound_leaves_another_environment_and_the_broker_serving`
 -- finding F-R8's reproducer, **required again** since the owner selected
 [ADR-0056](../docs/adr/0056-m5e-cross-run-task-limit-isolation.md)'s Option B
-(still Proposed): environment A at its own task bound while environment B is
+(accepted 2026-11-01): environment A at its own task bound while environment B is
 served, measured clean and never drifted, the broker answering, both destroyed
 by their labels (`neighbour-*`, `real-oci`). The authority's suite repeats it
 through `process.exec`, a real DWKP client per run

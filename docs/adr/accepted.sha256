@@ -61,3 +61,4 @@ e55b98a363fbbe4e52c84a6d55eb4b5706101ce26b107007dc103af3327b0c29  0047-m5a-oci-e
 e43d57fa9e76969355e2871f7b788dcffd0e690543ff2969fc523201c0f34bbb  0050-m5c-kernel-performed-net-http-ssrf-redirects-and-credential-egress.md
 daa15b7e48be1955b7638fa878e3d42aa52c7183c57866a323e9258f7db29171  0052-m5d-sandboxed-process-exec.md
 486fa7c1a8dbdec7cae6b6186d5f856ff099669f37495744cfe8cb9a54f15c0c  0053-d11-exchange-worker-confinement-and-secret-memory.md
+a5dcf7c529379c8bd60e033884c50f1a40d60c949123896f69f3362925d786f4  0056-m5e-cross-run-task-limit-isolation.md
