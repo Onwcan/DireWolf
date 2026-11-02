@@ -14,6 +14,7 @@
 **Status (2026-11-01, later):** for that decision the owner chose to record the gap as a residual: [ADR-0057](adr/0057-m5e-proxy-only-real-container-evidence-residual.md), **Proposed**, states what R3's evidence shows at each level, what stays unverified without real weakened `PROXY_ONLY` containers, and the owner's choice — accept the residual with a limited claim, require the real-container level, or defer it. It accepts nothing, adds no evidence and changes no acceptance wording; M5e.2 stays IN PROGRESS.\
 **Status (2026-11-01, R-B):** the owner committed that record and ADR-0056's acceptance as `576b249`; hosted [run 41304247232](https://github.com/Onwcan/DireWolf/actions/runs/41304247232) (run no. 115, `576b249`): **SUCCESS**, 29 of 29 jobs. The owner then **selected R-B** on ADR-0057: R3's real-container level stays required, the residual is not accepted, its limited claim is not approved, and M5's contract stands as written. Built since, unstaged, hosted run pending: ADR-0057's U4 closed in process — the runtime's default seccomp profile and the swap limit, alone and with the pids limit as the real `NO_NETWORK` case lifts both, refused under `PROXY_ONLY` over the hand-written record and the real runtime's own, each `in-process` and required by name (§3, R3). Real `PROXY_ONLY` containers weakened one hard rule at a time — ADR-0057's E6 — are **BLOCKED**: not built and not planned, the earlier safety control standing. **M5e.2 is IN PROGRESS, R3 E6 BLOCKED**; M5e.3 is NOT STARTED.\
 **Status (2026-11-01, U4 hosted):** the owner committed U4 and the R-B record as `b25c3e6`; hosted [run 41323258812](https://github.com/Onwcan/DireWolf/actions/runs/41323258812) (run no. 116, `b25c3e6`): **SUCCESS**, 29 of 29 jobs. So **U4 is hosted-verified, at its level, `in-process`**: `sandbox-foundation` required the three hand-written-record cases among its 20 `broker-assurance` lines and `sandbox-egress` the three captured-record ones among its 19 (beside the egress suite's 104 `real-oci` cases), every line at its level. That run carries **no E6 case**, so it proves nothing about E6, which stays **BLOCKED**. Reviewed since, against every existing source, for whether E6 can be met without the blocked experiment (§3a): it cannot — no authorised test observes a real `PROXY_ONLY` environment with a hard rule weakened, so all 15 rows are BLOCKED; §3b specifies, without any procedure, what genuine E6 evidence would have to carry. Built, unstaged, hosted run pending: the evidence gate now also holds what each R2/R3 line says it showed — a weakening refused by the invariants that failed, the in-process judgement naming the host's vantage only, a real weakening naming what caught it from the vantage it claims — and an architecture test holds the owner's R-B (ADR-0057 never accepted; no document claiming E6 or M5e.2 complete while it stands). **M5e.2 is IN PROGRESS, R3 E6 BLOCKED**; M5e.3 is NOT STARTED.\
+**Status (2026-11-02):** the owner committed that gate and guard as `e746aee`, F-RELAY's fix as `f3ae200`, and F-EVICT's and F-TEARDOWN's as `df4fa24`; hosted runs [41349869654](https://github.com/Onwcan/DireWolf/actions/runs/41349869654) (run no. 117, `e746aee`), [41358634372](https://github.com/Onwcan/DireWolf/actions/runs/41358634372) (no. 118, `f3ae200`) and [41430527997](https://github.com/Onwcan/DireWolf/actions/runs/41430527997) (no. 119, `df4fa24`): **SUCCESS**, 29 of 29 jobs each, by their conclusions. So the outcome checks and the R-B guard are hosted-verified (R17), and so are the three findings' fixes (§5a), each at the level its tests have: unit tests in `make test`, beside the real-runtime suites that already ran; none of it is E6. Found since, built, unstaged, hosted run pending: F-ABSENT (§5a), a runtime the client could not ask read as a container gone. **M5e.2 is IN PROGRESS, R3 E6 BLOCKED**; M5e.3 is NOT STARTED.\
 **Authority of this document:** a technical plan, not an ADR. It approves nothing itself; the owner's decisions are recorded in §10 as given. [ADR-0054](adr/0054-m5e-npm-hygiene-profile.md) stays **Proposed**.
 
 ## 1. Scope, sources and the owner's directions
@@ -96,14 +97,14 @@ listed as verified on any other basis.
 | R7 | Kernel path, `net-http-evidence`: `ssrf-*` (IP literals, `ssrf-ipv4-mapped`, `ssrf-6to4`, `ssrf-mixed-answer`, …), `dns-rebinding-pinned-within-request`, `dns-rebinding-next-request`, `redirect-*` (`-blocked-address`, `-metadata-name`, `-mixed-address`, `-ungranted-host`, `-sixth-hop`, `-downgrade`, …), `credential-cross-origin-redirect`, `origin-confusion-idna-label`, and the authority's own pipeline: `guard-loopback-answer`, `guard-metadata-ip-answer`, `guard-mixed-answer`, `metadata-name-before-resolution`. Proxy path, `sandbox-egress-evidence`: `resolver-metadata-blocked`, `resolver-rebinding-pinned`, `resolver-mixed-refused-outright`, `bypass-tcp-cloud-metadata`, `bypass-tcp-nat64-metadata`, `bypass-tcp-ipv4-mapped` | Hosted | The suite is spread over two tasks and has no single gate. M5e.6's gate requires both, by name. Out of M5's scope and stated so: link-preview and markdown-image exfiltration (channels, M10+) and a `LOCAL_ONLY` model call (M7). |
 | R8 | `sandbox-foundation-evidence`: `resource-pids-bounded`, `resource-memory-oom-killed`, `resource-file-size-bounded`; `sandbox-workload-evidence`: `workload-fork-loop-reaped`, `workload-daemon-reaped`, `workload-wall-clock-timed-out`; `sandbox-workspace-evidence`: `workload-fills-to-enospc`; the 16-environment and workload budgets (`public-exec-budget-exhausted-refused`). Since 2026-10-31 (ADR-0056, Option B), the neighbour at the broker — `neighbour-holds-its-own-task-bound`, `neighbour-workload-served-beside-a-bound-environment`, `neighbour-measured-clean-beside-a-bound-environment`, `neighbour-broker-answers-beside-a-bound-environment`, `neighbour-both-kept-then-destroyed-exactly` — and through the authority's `process.exec`, a real DWKP client per run — `neighbour-run-holds-its-own-task-bound`, `neighbour-authority-answers-beside-a-bound-run`, `neighbour-environment-judged-clean-beside-a-bound-run`, `neighbour-process-exec-completed-beside-a-bound-run`, `neighbour-environments-kept-ready`; at the live-environment cap, hosted only (`sandbox-capacity-evidence`) — `capacity-environments-at-their-own-bound`, `capacity-last-environment-prepared-and-measured-clean`, `capacity-last-workload-served`, `capacity-all-destroyed-exactly` | Hosted, each limit alone. The neighbour, at the broker and through the authority, and the cap: **Hosted — PASS** (run 41242001763's `sandbox-workload` and `sandbox-capacity`) | Each limit holds for the environment it bounds. F-R8 (§5a) is remedied by ADR-0056's Option B (owner-approved for implementation, 2026-10-31; **accepted** 2026-11-01): the neighbour test — once the finding's reproducer, required by no task — is required again, and still says F-R8 by name, measured, if the coupling returns. A holds at least `PIDS_LIMIT − 8` threads by its own count, its cgroup full by the runtime's (`docker stats`), so A's own bound stopped it; B is then served, measured clean, never drifted; both are destroyed by their exact labels. The negative control, `make sandbox-neighbour-mutations`, puts the backstop back at 256 and requires both neighbour tests to fail as F-R8 (run by hand, locally; not hosted). Hosted (run 41242001763): the ten `neighbour-*` and the four `capacity-*` cases passed — at the cap, by the job's log as the owner read it, 15 environments each at its own 256-task bound, 3 840 tasks of uid 10001, the 16th prepared, measured clean and served as uid 10001, all 16 destroyed by their labels. **Not shown:** memory or disk pressure beside a neighbour — each limit is shown alone (`resource-memory-oom-killed`, `workload-fills-to-enospc`); and isolation from uid-10001 processes DireWolf did not start, or from more than one full set of uncounted environments (ADR-0056 §5). |
 | R9 | `persistence-tmp-marker-not-inherited`, `workload-nothing-persists`, `release-spares-another-runs-environment`, `release-other-run-still-runs`, `release-spares-another-runs-proxy-only-environment`, one environment per run (schema, ADR-0052 §4). Since M5e.2, on a real runtime: `cross-run-processes-not-visible`, `cross-run-other-environment-refused`, `cross-run-destroy-spares-the-other`, `cross-run-next-environment-holds-nothing-of-the-last` | Hosted (the cross-run cases passed in runs 40954372045 and 41130431929) | Run A sees none of run B's processes (process isolation), cannot name B's environment (environment ownership: `FOREIGN_ENVIRONMENT`), and destroying it leaves B's workload running (persistence and cleanup); the next environment is a fresh container holding nothing of A's. Run-scoped authority — a capability, a grant or a lease of one run never acting for another — is the authority's and its existing evidence's (M3, M5d.6's `release-*` cases), not these four; network-grant isolation between runs is per-environment by construction (each relay serves its own environment's grants) and **not separately attacked**. **Not shown:** A reaching B's relay (each relay listens in its own environment's namespace — `proxy-only-relay-shares-the-namespace-unprivileged` — but no cross-relay attempt is made). **By design and stated:** runs bound to one workspace directory share it (ADR-0052 §6) — a documented residual, not a gap. |
-| R10 | `orphan-ended-record-reaped`, `reconcile-helper-orphan-reaped`, `broker-restart-orphans`, `foreign-*`; the release and lease teardown (`sandbox-release-evidence`, 62 + 45 cases) | Hosted | None. |
+| R10 | `orphan-ended-record-reaped`, `reconcile-helper-orphan-reaped`, `broker-restart-orphans`, `foreign-*`; the release and lease teardown (`sandbox-release-evidence`, 62 + 45 cases) | Hosted | None for the cases. F-ABSENT (§5a, 2026-11-02): a removal, and a reconciliation's listing, are believed only from an answer the runtime gave — fixed in process, unstaged, hosted run pending. |
 | R11 | Reconciliation at an **authority** start: stopped environments destroyed, missing ones `LOST`, twins untouched. What a runtime restart leaves, each shown alone on a real runtime: a stopped environment refused before any workload (`workload-stopped-environment-refused`), a removed one never reported clean (`workload-environment-removed-mid-run-not-clean`), an unreachable runtime refused (`exit-runtime-unavailable`), an uncertain ending settled `UNKNOWN` and its environment destroyed (`unknown-ending-environment-destroyed`) | **Hosted — PASS** (run 41130431929's `sandbox-restart`, its first execution: all seven cases; passed again in run 41242001763) | Exercised hosted on 2026-10-30 (run no. 113): the interrupted workload was not believed, reconciliation settled within the bound (about 10.5 s, as the owner read the job's log; this checkout cannot read hosted logs, only the job's success), the stopped environments were reconciled, nothing was rerun, the foreign container was kept, and a new workload was served. It is never run locally: no developer's daemon is restarted. Since 2026-10-30, `sandbox-restart-evidence` in a required job of its own (`sandbox-restart`): the runner's Docker Engine restarted (`systemctl restart docker`) while run A's workload is in flight and run B's environment is idle, on the **same** authority incarnation — `restart-in-flight-not-believed`, `restart-reconciled-within-bound` (the engine answering again and reconciliation settling within the 120 s environment deadline), `restart-interrupted-environment-not-believed`, `restart-idle-environment-reconciled` (stopped: destroyed by its labels; still running under `live-restore`: measured again), `restart-in-flight-never-rerun`, `restart-foreign-untouched`, `restart-new-workload-served`, all `privileged-oci`. The task and the test each refuse before anything unless `DW_RUNTIME_RESTART=1` on a GitHub-hosted runner whose engine is a local systemd unit — never Docker Desktop, never a developer's daemon. What it holds is the accepted contract (no re-attach: `--restart no`, `UNKNOWN` never rerun, reconciliation by exact label), not a new one. |
 | R12 | `tamper-substituted-probe`, `tamper-changed-byte`, `tamper-extra-field`, `tamper-truncated-output`, `tamper-malformed-output`, `tamper-flood-output`, `tamper-hang-timeout`; `drift-*`; `mount-substitution-destroys-before-the-workload` (the workspace's privileged half) | Hosted | None. |
 | R13 | `fronting-residual-carried-and-bounded`, `budget-*`, `a08-tunnel-limit`, `a08-download-budget`, `a08-upload-budget` | Hosted | None; the residual stays stated (NETWORK_SECURITY.md). |
 | R14 | — | **Missing** | No pip in any evidence image (the tools image copies the standard library only, `ensurepip` excluded), no registry fixture, no case. `pip` falls under the obligation's "anything else" row and is kept with **no** pip-specific neutralisation — reachable only under an operator policy without `argv_safe`, since the shipped packs deny `pip install` (R3) (§4, G3). [ADR-0055](adr/0055-m5e-pip-hygiene-profile.md) proposes the profile. M5e.3–M5e.5. |
 | R15 | — | **Missing, and refused by design** | npm is `HYGIENE_NOT_EVIDENCED` (ADR-0052 §5a), although `npm_config_ignore_scripts=true` is already among the launcher's variables. ADR-0054 (Proposed) defines the profile and the evidence it needs. M5e.3–M5e.5. |
 | R16 | `sandbox-agent-evidence` and `sandbox-release-evidence` lines carry `level` and `enforcement`; `environment.refused` and `environment.drifted` records; the broker's egress counted by disposition; since M5e.1 (complete: hosted run 40774766063 on `6fd0bc7`), every line of `sandbox-foundation-evidence`, `sandbox-egress-evidence`, `sandbox-workload-evidence`, `sandbox-secret-evidence` and `sandbox-workspace-evidence` too, each case held to its level and mechanisms (`scripts/dw.py`, `ATTRIBUTION`; SANDBOX.md §6a); M5e.2's in-process and real-runtime cases join the same contract | Hosted (M5e.1 complete) | Was: M5a, M5b and M5d.1–M5d.4 lines carried only `suite`, `case`, `outcome`. M5e.1 added attribution to every line, from existing events and measurements only (owner direction 4), and §6 says so (OD-E1, decided). No per-attempt audit event was added. |
-| R17 | `tests/architecture/test_ci_*` (each job present, unconditional, required by `ci`, exact command; the task's and the eval's case lists equal); the strict eval gate under GitHub Actions; the reviewed baseline (`evals/baselines/main.json`, never rewritten by a run); mutation campaigns; the ADR history anchor | Hosted | Each new job, task and eval gets the same treatment (M5e.6). The negative controls run by hand for M5d.6 become committed tests. Built 2026-11-01, hosted run pending (ADR-0057, R-B): the attributed gate also holds each line's outcome to what it claims (`outcome_problem` in `scripts/dw.py`) — an R2/R3 judgement shows the production decision's refusal by the host invariants that failed and a conforming record kept; a real weakened profile or topology says what caught it, its invariants of the vantage its enforcement claims — with a committed negative control for each (`tests/architecture/test_m5e_attribution.py`), and `tests/architecture/test_m5e_r3_closure.py` fails ADR-0057 accepted, or E6 or M5e.2 claimed, while R-B stands. |
+| R17 | `tests/architecture/test_ci_*` (each job present, unconditional, required by `ci`, exact command; the task's and the eval's case lists equal); the strict eval gate under GitHub Actions; the reviewed baseline (`evals/baselines/main.json`, never rewritten by a run); mutation campaigns; the ADR history anchor | Hosted | Each new job, task and eval gets the same treatment (M5e.6). The negative controls run by hand for M5d.6 become committed tests. Built 2026-11-01 (ADR-0057, R-B), hosted-verified by run 41349869654 (no. 117, `e746aee`): the attributed gate also holds each line's outcome to what it claims (`outcome_problem` in `scripts/dw.py`) — an R2/R3 judgement shows the production decision's refusal by the host invariants that failed and a conforming record kept; a real weakened profile or topology says what caught it, its invariants of the vantage its enforcement claims — with a committed negative control for each (`tests/architecture/test_m5e_attribution.py`), and `tests/architecture/test_m5e_r3_closure.py` fails ADR-0057 accepted, or E6 or M5e.2 claimed, while R-B stands. |
 | R18 | — | Deferred | `local` is M6's (ADR-0052 OD-7). The ROADMAP's M5 contract and M5e section say so, and M5's acceptance excludes it (OD-E5, decided). |
 
 ## 3a. R3's E6: coverage and feasibility (reviewed 2026-11-01, after run 41323258812)
@@ -377,16 +378,19 @@ user namespaces were. A runtime that ran the relay in the host's cgroup or UTS n
 with its swap unbounded, would have had it judged exact. Found by reading the code against the
 plan; no container was run. These are the relay's settings — DireWolf's unprivileged forwarder
 in the environment's network namespace — not the environment's hard rules: no hard rule,
-profile constant, evidence case or level changes, and none of this is E6. *Built (unstaged for
-the owner's commit):* the three are read and required; the relay test's conforming record
+profile constant, evidence case or level changes, and none of this is E6. *Built (committed as
+`f3ae200`):* the three are read and required; the relay test's conforming record
 carries them as the runtime records them, and the test refuses each weakened (host UTS, the
 host's cgroup namespace, swap unlimited or doubled) and each unreadable — it failed before the
 change, and removing any one of the three checks fails it again. The conforming relay on a real
-runtime is `sandbox-egress`'s `proxy-only-host-proxy-relay`, in the owner's next hosted run; no
-weakened relay is run.
+runtime is `sandbox-egress`'s `proxy-only-host-proxy-relay`, which run 41358634372's
+`sandbox-egress` job required and passed with the three checks in force; no weakened relay is
+run.
 
 **F-EVICT — a full workload table could forget an ending its authority had not collected
-(M5e.2, 2026-11-02; fixed in process, hosted pending).** ADR-0052 §8 keeps a workload's ending
+(M5e.2, 2026-11-02; fixed in process as `df4fa24`, whose hosted run
+[41430527997](https://github.com/Onwcan/DireWolf/actions/runs/41430527997) — run no. 119 —
+passed 29 of 29 jobs by their conclusions, its tests in `make test`).** ADR-0052 §8 keeps a workload's ending
 "until it is collected", but the broker's supervisor (`sandbox/supervisor.rs`) evicted the
 oldest *ended* workload from a full table, collected or not. The table is full in steady state
 — an ended workload leaves it only by eviction, so after 16 workloads every start evicts one —
@@ -396,8 +400,8 @@ workload ended and before that ending was collected evicted it: the collection f
 and the authority recorded the finished workload `UNKNOWN` (`WORKLOAD_UNCONFIRMED`) and destroyed
 its environment. It fails closed — nothing ran unjudged, nothing crossed an environment — but one
 run could cost another its result and its environment. Found by reading the supervisor against
-ADR-0052 §8 and the worker; reproduced in process, not on a runtime. *Built (unstaged for the
-owner's commit):* an ending is marked once a collection answers it; a full table evicts its
+ADR-0052 §8 and the worker; reproduced in process, not on a runtime. *Built (committed as
+`df4fa24`):* an ending is marked once a collection answers it; a full table evicts its
 oldest collected ending, or one nobody collected for `WORKLOAD_SUPERVISION_SECONDS` — an
 authority that stopped, or recorded its workload `UNKNOWN`, never collects it, and such endings
 would otherwise fill the table for good — and otherwise refuses `WORKLOAD_TABLE_FULL`, nothing
@@ -405,7 +409,7 @@ run. Two supervisor tests failed before the change (an uncollected ending evicte
 uncollected endings admitting a start), a third holds the horizon; 4 of 4 mutants killed.
 
 **F-TEARDOWN — a preparation whose teardown failed could be answered as a refusal (M5e.2,
-2026-11-02; fixed in process, hosted pending).** The broker's `prepare` (`sandbox/oci.rs`)
+2026-11-02; fixed in process as `df4fa24`, hosted with F-EVICT in run 41430527997).** The broker's `prepare` (`sandbox/oci.rs`)
 takes an environment that did not measure clean down whole — helpers, environment, proxy — but
 answered with the teardown's own refusal when one of its steps refused. A refusal tells the
 authority that provably nothing remains: it records the environment `REFUSED` — final, not
@@ -413,11 +417,52 @@ counted live, never destroyed — while the refused step (a listing the runtime 
 file changed since it was proved, a malformed record) may have left the environment that did
 not measure clean, or its relay, running until the authority's next start reconciles by label.
 `prepare`'s two other teardowns, after a failed start or measurement, already answered
-`Unconfirmed`. Found by reading; not run on a runtime. *Built (unstaged):* an environment not
-kept is answered `Unconfirmed` whenever its teardown did not finish, so the authority records
-it `UNKNOWN` — counted live, and destroyed by its labels. The test failed before the change
-(`Refused(RUNTIME_UNAVAILABLE)` answered); 2 of 2 mutants killed. Neither finding changes a
-hard rule, profile constant, invariant, evidence case or level, and neither is E6.
+`Unconfirmed`. Found by reading; not run on a runtime. *Built (committed as `df4fa24`):* an
+environment not kept is answered `Unconfirmed` whenever its teardown did not finish, so the
+authority records it `UNKNOWN` — counted live, and destroyed by its labels. The test failed
+before the change (`Refused(RUNTIME_UNAVAILABLE)` answered); 2 of 2 mutants killed. Neither
+finding changes a hard rule, profile constant, invariant, evidence case or level, and neither is
+E6.
+
+**F-ABSENT — a runtime the client could not ask was read as a container gone (M5e.2,
+2026-11-02; fixed in process, unstaged, hosted run pending).** The broker proves a container gone
+from the runtime's record (`sandbox/oci.rs`, `record`): its client's `container inspect`
+answering an empty array — after a removal (`remove`, and so every teardown and destruction),
+before one (`destroy`, `AlreadyGone`), for a helper, and for how a workload's environment ended.
+A reconciliation's listing (`list`) read the same answer the same way: a container missing from
+an inspection that failed was one removed since the listing. But the client answers that way
+whenever it could not ask: against a runtime it cannot reach — its socket gone, its engine
+restarting — Docker's CLI 29.9.2 prints exactly `[]` and exits 1, the reason on stderr only,
+byte for byte what it prints for a container the runtime does not hold (observed against a
+socket path that does not exist; nothing was created). So a runtime that stopped answering
+between two of the broker's steps proved a container gone: a removal whose own command failed
+answered `Removed`, and the authority recorded the environment `DESTROYED`; a not-clean
+environment's teardown, or a failed start's, answered as complete, and the authority recorded
+`REFUSED` — each final and not counted live, while the container stood — still running whatever
+ran in it, its workspace mounted, unless a restart of the runtime without `live-restore` stopped
+it — until the authority's next start reaped it as an orphan. And a reconciliation whose inspection failed after its listing answered a
+complete listing of no environment: every live record went `LOST`, or `DESTROYED`, every
+container still standing — where its own contract says a runtime that cannot be listed
+completely changes nothing. It fails open in the authority's accounting, never across an
+environment: each one keeps its own profile, but drops out of the live count that the cap of 16
+and ADR-0056's backstop (twice the cap's tasks) are sized against, and out of reach of every
+destruction but the next start's. Found by reading `record` against the client's error path; the
+client's answers were observed, no environment was run for it. *Built (unstaged for the owner's
+commit):* absence is believed only from a listing the runtime answered — an empty inspection is
+checked by the client's `container ls --all --filter id=<id>`, which fails when the runtime did
+not answer, and a container it still holds, or a listing that failed, is `RUNTIME_UNAVAILABLE`,
+so a removal is `Unconfirmed`; and a reconciliation's listing is complete only when each
+container it named was inspected, or a second complete listing the runtime answered no longer
+holds it. Two tests failed before the change (an empty inspection taken as absence; a failed
+inspection taken as a store without environments) and pass after it; 7 of 7 mutants killed.
+Locally on Docker 29.9.2 (Docker Desktop on WSL2; hosted run pending), the real-runtime suites
+that remove, destroy and reconcile passed with the change: `sandbox-foundation` (109 `real-oci`
+and 20 `in-process` lines), `sandbox-release` (19 `real-oci`, 26 `dwkp-end-to-end`, 62
+`fake-broker`), `sandbox-workload` (112 `real-oci`, 38 `dwkp-end-to-end`) and `sandbox-egress`
+(104 `real-oci`, 19 `in-process`), the four containers that predated them kept and none left
+behind. The failure itself — a runtime that stops answering between two steps — is not
+reproduced on a runtime: no engine is stopped for it. No hard rule, profile constant, invariant,
+evidence case or level changes, and none of this is E6.
 
 ## 6. Safe implementation sequence
 
@@ -445,6 +490,8 @@ Where each step stands (2026-11-01): hosted run 41242001763 (`615e77e`, 29 of 29
 Where each step stands (2026-11-01, R-B): hosted run 41304247232 (`576b249`, 29 of 29 jobs) passed with ADR-0057 committed. The owner selected **R-B**: R3 needs E6, real `PROXY_ONLY` containers weakened one hard rule at a time, which is **BLOCKED** — not built and not planned while the earlier safety control stands — and no other evidence stands in for it. ADR-0057's U4 is closed in process (built, hosted run pending). **M5e.2 is IN PROGRESS, R3 E6 BLOCKED**: it closes only once E6 exists under a plan the owner approves within that control, passes hosted at `real-oci`, and the owner closes the milestone. M5e.3 is NOT STARTED.
 
 Where each step stands (2026-11-01, U4 hosted): hosted run 41323258812 (`b25c3e6`, run no. 116, 29 of 29 jobs) passed U4's three cases over both records, `in-process`, with every other required case of the 29 jobs. R2, R8, R9 and R11 stay hosted-verified; of R3, E1–E5 are evidenced at their levels and **E6 is BLOCKED** — reviewed against every existing source (§3a), none observes it, and §3b states what genuine E6 evidence must carry. Built since, unstaged, hosted run pending: the gate's outcome checks and the R-B guard (§3, R17). None of it is E6, and none closes R3. **M5e.2 is IN PROGRESS, R3 E6 BLOCKED**; M5e.3 is NOT STARTED.
+
+Where each step stands (2026-11-02): hosted runs 41349869654, 41358634372 and 41430527997 (`e746aee`, `f3ae200`, `df4fa24`; run nos. 117–119, 29 of 29 jobs each) passed the gate's outcome checks and the R-B guard (R17) and the fixes of F-RELAY, F-EVICT and F-TEARDOWN (§5a). R2, R8, R9, R10 and R11 stay hosted-verified; of R3, E1–E5 are evidenced at their levels and **E6 is BLOCKED**, unchanged. Built since, unstaged, hosted run pending: F-ABSENT's fix (§5a). None of it is E6, and none closes R3. **M5e.2 is IN PROGRESS, R3 E6 BLOCKED**; M5e.3 is NOT STARTED.
 
 ## 7. Hermetic fixtures
 
@@ -530,7 +577,9 @@ a wrong level, a missing attribution and a weakened workflow each fail.
 | M5e.2 the hard rules over a real `PROXY_ONLY` record (R3, in process) | runs | required (`sandbox-egress`) — passed (run 41242001763), `in-process` |
 | M5e.2 U4 under `PROXY_ONLY`, in process (R3): the runtime's default seccomp profile, the swap limit | runs | required (`sandbox-foundation`; over the real record, `sandbox-egress`) — passed (run 41323258812), `in-process` |
 | M5e.2 real `PROXY_ONLY` containers weakened one hard rule at a time (R3, E6) | not built | **BLOCKED** — required by the owner's R-B (ADR-0057, 2026-11-01); not built and not planned while the safety control stands; no existing source observes it (§3a) |
-| M5e.2 each R2/R3 line's outcome held to what it claims; the R-B guard (R17) | runs | required (`sandbox-foundation`, `sandbox-egress`; their controls and the guard in `make test`) — built 2026-11-01, hosted run pending |
+| M5e.2 each R2/R3 line's outcome held to what it claims; the R-B guard (R17) | runs | required (`sandbox-foundation`, `sandbox-egress`; their controls and the guard in `make test`) — passed (run 41349869654) |
+| M5e.2 findings F-RELAY, F-EVICT, F-TEARDOWN (§5a): unit tests | runs | required (`make test`) — passed (runs 41358634372, 41430527997) |
+| M5e.2 finding F-ABSENT (§5a): unit tests; the real-runtime suites over the changed removal and listing | runs | required (`make test`; the existing `sandbox-*` jobs) — hosted run pending |
 | M5e.2 neighbour (R8), at the broker and through the authority | runs (since ADR-0056's Option B) | required (`sandbox-workload`) — passed (run 41242001763) |
 | M5e.2 neighbour at the live-environment cap (R8) | NOT EXERCISED, never local: the task and the test refuse | required (`sandbox-capacity`, disposable runner) — passed (run 41242001763) |
 | M5e.2 neighbour negative control (R8) | runs (`make sandbox-neighbour-mutations`) | by hand, like every mutation review |

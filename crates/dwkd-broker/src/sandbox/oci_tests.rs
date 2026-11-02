@@ -1,7 +1,8 @@
 //! `oci.rs`'s own tests (M5d.4): the workspace's three host-judged
 //! invariants from the probe's facts against the authority's bound, and what
-//! a clean measurement requires of each workspace contract -- and what a
-//! preparation answers for an environment it did not keep.
+//! a clean measurement requires of each workspace contract -- what a
+//! preparation answers for an environment it did not keep, and what proves a
+//! container gone.
 
 #![allow(clippy::unwrap_used, reason = "test assertions")]
 
@@ -10,12 +11,16 @@ use dwk_proto::brokerp::sandbox::{
     SandboxInvariant as I, StoreInstance, Verdict, WORKSPACE_ROOT_MODE, WorkspaceBound,
     WorkspaceContract, WorkspaceFacts, WorkspaceQuota, required_invariants,
 };
-use dwk_proto::brokerp::{BrokerRefusal, ContainerState, EnvironmentSpec, KernelNumber};
+use dwk_proto::brokerp::{
+    BrokerRefusal, ContainerState, EnvironmentSpec, KernelNumber, OwnedEnvironment,
+};
 use dwk_proto::wire::id::{EnvironmentId, RunId};
 use dwk_proto::wire::scalar::{ContentDigest, HostPath};
 
+use crate::process::run::{self, Completed, Ended};
+
 use super::super::environment::{EnvFailure, EnvHandle, Measured, Prepared};
-use super::{clean, contract, kept_or_taken_down, workspace_checks};
+use super::{accounted, clean, contract, kept_or_taken_down, recorded_or_gone, workspace_checks};
 
 const MIB: u64 = 1 << 20;
 
@@ -247,4 +252,109 @@ fn an_environment_not_kept_is_refused_only_once_its_teardown_proved_it_gone() {
             "{failed:?}: {answer:?}"
         );
     }
+}
+
+/// The runtime's client, having run to `ended` and printed `stdout`.
+fn completed(ended: Ended, stdout: &[u8]) -> Completed {
+    Completed {
+        ended,
+        stdout: stdout.to_vec(),
+        stdout_cut: false,
+        stdout_observed: u64::try_from(stdout.len()).unwrap(),
+        stderr: Vec::new(),
+        stderr_observed: 0,
+        redactions: 0,
+    }
+}
+
+#[test]
+fn a_container_is_gone_only_when_a_listing_the_runtime_answered_says_so() {
+    let container = ContainerRef::new("e".repeat(64)).unwrap();
+    let unavailable = EnvFailure::Refused(BrokerRefusal::RuntimeUnavailable);
+    let malformed = EnvFailure::Refused(BrokerRefusal::RuntimeOutputMalformed);
+    // What the runtime's client answers an inspection of a container the
+    // runtime does not hold -- and, byte for byte and exit status alike, of
+    // any container when it could not reach the runtime (Docker's CLI
+    // 29.9.2: `[]`, exit 1, the reason on stderr only).
+    let empty = || Ok(completed(Ended::Exited(1), b"[]\n"));
+    let gone = |listing: Result<bool, EnvFailure>| {
+        recorded_or_gone(&container, empty(), || listing).map(|record| record.is_some())
+    };
+    // The runtime's own listing does not hold it: gone.
+    assert_eq!(gone(Ok(false)), Ok(false));
+    // The listing still holds it, or could not be had: nothing is gone, and
+    // nothing says so.
+    assert_eq!(gone(Ok(true)), Err(unavailable));
+    assert_eq!(gone(Err(unavailable)), Err(unavailable));
+    assert_eq!(gone(Err(malformed)), Err(malformed));
+    assert_eq!(
+        gone(Err(EnvFailure::Unconfirmed)),
+        Err(EnvFailure::Unconfirmed)
+    );
+    // A record is the runtime's own word: no listing is asked for.
+    let one = format!(r#"[{{"Id":"{}"}}]"#, container.as_str());
+    let found = recorded_or_gone(
+        &container,
+        Ok(completed(Ended::Exited(0), one.as_bytes())),
+        || unreachable!("a record needs no listing"),
+    );
+    assert_eq!(found.map(|record| record.is_some()), Ok(true));
+    // Any other answer proves nothing either way, and asks nothing more.
+    let other = format!(r#"[{{"Id":"{}"}}]"#, "f".repeat(64));
+    for (inspected, refused) in [
+        (Ok(completed(Ended::Exited(0), b"[]\n")), malformed),
+        (Ok(completed(Ended::Exited(0), other.as_bytes())), malformed),
+        (Ok(completed(Ended::Exited(1), b"")), unavailable),
+        (Ok(completed(Ended::Signaled(9), b"")), unavailable),
+        (Err(run::Failure::Unconfirmed), unavailable),
+        (
+            Err(run::Failure::Refused(BrokerRefusal::DigestMismatch)),
+            EnvFailure::Refused(BrokerRefusal::DigestMismatch),
+        ),
+    ] {
+        let answer = recorded_or_gone(&container, inspected, || unreachable!("no listing"));
+        assert_eq!(answer.map(|record| record.is_some()), Err(refused));
+    }
+}
+
+#[test]
+fn a_listing_is_complete_only_when_each_container_it_named_was_inspected_or_proved_gone() {
+    let (a, b) = (
+        ContainerRef::new("a".repeat(64)).unwrap(),
+        ContainerRef::new("b".repeat(64)).unwrap(),
+    );
+    let ids = [a.clone(), b.clone()];
+    let owned = |container: &ContainerRef| OwnedEnvironment {
+        container: container.clone(),
+        state: ContainerState::Running,
+        image: None,
+        environment_id: None,
+        run_id: None,
+        labels_exact: false,
+        role: None,
+    };
+    let none = || -> Option<Vec<ContainerRef>> { unreachable!("nothing to account for") };
+    // Each inspected: complete, however the client ended, and nothing more
+    // is asked.
+    for ended in [Ended::Exited(0), Ended::Exited(1)] {
+        assert!(accounted(&ids, &[owned(&a), owned(&b)], ended, none));
+    }
+    // What the client answers when it could not reach the runtime: nothing
+    // inspected, and a failure. Never a store with no environment in it.
+    assert!(!accounted(&ids, &[], Ended::Exited(1), || None));
+    // Short and failed, as for a container removed since the listing: gone
+    // only when the runtime's own second listing no longer holds it.
+    assert!(accounted(&ids, &[owned(&a)], Ended::Exited(1), || Some(
+        vec![a.clone()]
+    )));
+    assert!(accounted(&ids, &[], Ended::Exited(1), || Some(Vec::new())));
+    assert!(!accounted(&ids, &[], Ended::Exited(1), || Some(vec![
+        b.clone()
+    ])));
+    assert!(!accounted(&ids, &[owned(&a)], Ended::Exited(1), || {
+        Some(vec![a.clone(), b.clone()])
+    }));
+    assert!(!accounted(&ids, &[owned(&a)], Ended::Exited(1), || None));
+    // Short, yet answered as whole: nothing explains it.
+    assert!(!accounted(&ids, &[owned(&a)], Ended::Exited(0), none));
 }

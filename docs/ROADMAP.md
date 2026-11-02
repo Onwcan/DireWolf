@@ -579,6 +579,22 @@ each R2/R3 line's outcome to what it claims, and an architecture test holds the 
 (ADR-0057 never accepted; E6 and M5e.2 never claimed while it stands). **M5e.2 is IN
 PROGRESS, R3 E6 BLOCKED.**
 
+**Three findings fixed, hosted (2026-11-02).** The owner committed that gate and guard as
+`e746aee`, then the fixes of three broker findings found by reviewing the lifecycle against the
+accepted ADRs — F-RELAY (`f3ae200`: the relay's record held to its plan's cgroup and UTS
+namespaces and swap limit), F-EVICT and F-TEARDOWN (`df4fa24`: a workload's ending kept until
+it is collected; a preparation whose teardown did not finish never answered as a refusal);
+hosted runs [41349869654](https://github.com/Onwcan/DireWolf/actions/runs/41349869654) (run
+no. 117), [41358634372](https://github.com/Onwcan/DireWolf/actions/runs/41358634372) (no. 118)
+and [41430527997](https://github.com/Onwcan/DireWolf/actions/runs/41430527997) (no. 119) each
+passed **29 of 29 jobs**. Each fix is verified at its tests' level — unit tests, beside the
+real-runtime suites that already ran — and none changes a hard rule, invariant, evidence case
+or level, or is E6 ([M5E_ASSURANCE_PLAN.md](M5E_ASSURANCE_PLAN.md) §5a). Found and fixed since,
+unstaged, hosted run pending: F-ABSENT — the runtime's client answers a runtime it could not ask
+exactly as it answers a container the runtime does not hold, and the broker read that answer as
+the container gone; a removal and a reconciliation's listing are now believed only from an
+answer the runtime gave. **M5e.2 is IN PROGRESS, R3 E6 BLOCKED.**
+
 Still to do: R3's real-container level (E6: required by the owner's R-B, BLOCKED — not built
 and not planned while the safety control stands; it needs a plan the owner approves within
 that control, or genuine independent evidence meeting the plan's §3b that the owner accepts);

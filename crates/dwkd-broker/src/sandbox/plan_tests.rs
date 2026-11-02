@@ -16,7 +16,7 @@ use dwk_proto::wire::id::{EnvironmentId, RunId};
 use dwk_proto::wire::scalar::{ContentDigest, HostPath};
 
 use super::super::relay_plan;
-use super::{container_name, copy_relay, create, mountable, owned, remove};
+use super::{container_name, copy_relay, create, held, mountable, owned, remove};
 
 pub(crate) fn spec(workspace: &str, network: NetworkTopology) -> EnvironmentSpec {
     EnvironmentSpec {
@@ -198,6 +198,20 @@ fn names_and_filters_are_exact() {
     assert_eq!(
         remove(&container),
         ["container", "rm", "--force", "--volumes", &"c".repeat(64)]
+    );
+    // Whether the runtime still holds it: a listing of exactly its id, which
+    // the client fails when the runtime did not answer.
+    assert_eq!(
+        held(&container),
+        [
+            "container",
+            "ls",
+            "--all",
+            "--no-trunc",
+            "--quiet",
+            "--filter",
+            &format!("id={}", "c".repeat(64))
+        ]
     );
     // M5d.4: the workspace read before a workload is the trusted probe's
     // closed word, as the container's own user, and nothing else.

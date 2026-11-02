@@ -290,6 +290,18 @@ pub(crate) fn remove(container: &ContainerRef) -> Vec<String> {
     argv
 }
 
+/// Whether the runtime holds `container`: a listing of exactly its id. The
+/// client succeeds at a listing only when the runtime answered it -- unlike
+/// an inspection, which it fails alike for a container the runtime does not
+/// hold and for a runtime it could not ask.
+#[must_use]
+pub(crate) fn held(container: &ContainerRef) -> Vec<String> {
+    let mut argv = words(&["container", "ls", "--all", "--no-trunc", "--quiet"]);
+    argv.push("--filter".to_owned());
+    argv.push(format!("id={}", container.as_str()));
+    argv
+}
+
 /// Every container carrying this store's labels — and, given one, this
 /// environment's, and given one, this role's — by full id.
 #[must_use]

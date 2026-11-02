@@ -50,7 +50,9 @@ use dwk_proto::brokerp::sandbox::{
     WorkspaceFacts, WorkspaceReport, workspace_capacity, workspace_ownership,
 };
 use dwk_proto::brokerp::workload::{MAX_REAPED_PROCESSES, WorkloadSpec};
-use dwk_proto::brokerp::{BrokerRefusal, ContainerState, EnvironmentSpec, RuntimeSpec};
+use dwk_proto::brokerp::{
+    BrokerRefusal, ContainerState, EnvironmentSpec, OwnedEnvironment, RuntimeSpec,
+};
 use dwk_proto::wire::id::{EnvironmentId, RunId};
 use rustix::fs::Stat;
 
@@ -361,33 +363,30 @@ impl<'a> Oci<'a> {
         }
     }
 
-    /// The runtime's record of `container`, or `None` when it has none.
+    /// The runtime's record of `container`, or `None` when it has none -- as
+    /// a listing the runtime answered says ([`recorded_or_gone`]).
     fn record(
         &self,
         container: &ContainerRef,
     ) -> Result<Option<dwk_proto::json::Object>, EnvFailure> {
-        let malformed = EnvFailure::Refused(BrokerRefusal::RuntimeOutputMalformed);
-        match self
+        let inspected = self
             .runtime
-            .call(plan::inspect(&[container]), inspect::MAX_INSPECT_BYTES)
-        {
-            Ok(done) if succeeded(&done) => {
-                let mut records = inspect::parse(&done.stdout).map_err(|()| malformed)?;
-                if records.len() != 1 {
-                    return Err(malformed);
-                }
-                let object = records.remove(0);
-                if inspect::Record::new(&object).id().as_ref() != Some(container) {
-                    return Err(malformed);
-                }
-                Ok(Some(object))
-            }
-            // The runtime answers an unknown container with an empty array.
-            Ok(done)
-                if !done.stdout_cut && inspect::parse(&done.stdout).is_ok_and(|r| r.is_empty()) =>
-            {
-                Ok(None)
-            }
+            .call(plan::inspect(&[container]), inspect::MAX_INSPECT_BYTES);
+        recorded_or_gone(container, inspected, || self.held(container))
+    }
+
+    /// Whether the runtime holds `container`, by a listing it answered.
+    fn held(&self, container: &ContainerRef) -> Result<bool, EnvFailure> {
+        match self.runtime.call(plan::held(container), LINE) {
+            Ok(done) if succeeded(&done) => lines(&done.stdout)
+                .and_then(|lines| {
+                    lines
+                        .into_iter()
+                        .map(|l| ContainerRef::new(l.to_owned()))
+                        .collect::<Option<Vec<_>>>()
+                })
+                .map(|found| found.contains(container))
+                .ok_or(EnvFailure::Refused(BrokerRefusal::RuntimeOutputMalformed)),
             Ok(_) | Err(run::Failure::Unconfirmed) => {
                 Err(EnvFailure::Refused(BrokerRefusal::RuntimeUnavailable))
             }
@@ -922,6 +921,73 @@ fn order(checks: &[(SandboxInvariant, Verdict)]) -> Checks {
         .collect()
 }
 
+/// The runtime's record of `container`, from its client's inspection: the
+/// one record, of exactly it -- or `None`, which only a listing the runtime
+/// answered (`held`) can say. The client answers a container the runtime
+/// does not hold with an empty array and a failure, and a runtime it could
+/// not reach, or that failed the request, with that very answer: alone, it
+/// proves nothing gone.
+fn recorded_or_gone(
+    container: &ContainerRef,
+    inspected: Result<Completed, run::Failure>,
+    held: impl FnOnce() -> Result<bool, EnvFailure>,
+) -> Result<Option<dwk_proto::json::Object>, EnvFailure> {
+    let malformed = EnvFailure::Refused(BrokerRefusal::RuntimeOutputMalformed);
+    match inspected {
+        Ok(done) if succeeded(&done) => {
+            let mut records = inspect::parse(&done.stdout).map_err(|()| malformed)?;
+            if records.len() != 1 {
+                return Err(malformed);
+            }
+            let object = records.remove(0);
+            if inspect::Record::new(&object).id().as_ref() != Some(container) {
+                return Err(malformed);
+            }
+            Ok(Some(object))
+        }
+        Ok(done)
+            if !done.stdout_cut && inspect::parse(&done.stdout).is_ok_and(|r| r.is_empty()) =>
+        {
+            if held()? {
+                // Held, and not inspected: the inspection failed.
+                Err(EnvFailure::Refused(BrokerRefusal::RuntimeUnavailable))
+            } else {
+                Ok(None)
+            }
+        }
+        Ok(_) | Err(run::Failure::Unconfirmed) => {
+            Err(EnvFailure::Refused(BrokerRefusal::RuntimeUnavailable))
+        }
+        Err(run::Failure::Refused(why)) => Err(EnvFailure::Refused(why)),
+    }
+}
+
+/// Whether an inspection of the listed `ids` accounts for each of them:
+/// inspected (`found`), or -- the inspection having failed (`ended`) -- gone
+/// from a second complete listing the runtime answered (`again`). A
+/// container removed since the listing is missing from a failed inspection;
+/// so is every container of a runtime the client could not reach, or that
+/// failed the request. Only the runtime's own listing tells them apart.
+fn accounted(
+    ids: &[ContainerRef],
+    found: &[OwnedEnvironment],
+    ended: Ended,
+    again: impl FnOnce() -> Option<Vec<ContainerRef>>,
+) -> bool {
+    let missing: Vec<&ContainerRef> = ids
+        .iter()
+        .filter(|id| !found.iter().any(|owned| &owned.container == *id))
+        .collect();
+    if missing.is_empty() {
+        return true;
+    }
+    // Inspected in full, yet short: nothing explains it.
+    if ended == Ended::Exited(0) {
+        return false;
+    }
+    again().is_some_and(|again| missing.iter().all(|id| !again.contains(id)))
+}
+
 /// A started environment's answer once it was measured: kept only when it
 /// measured clean; otherwise taken down whole -- helpers, environment and
 /// listener alike -- by `teardown`. A teardown that did not finish proves
@@ -1292,15 +1358,19 @@ impl ExecutionEnvironment for Oci<'_> {
         if done.stdout_cut {
             return Err(malformed);
         }
-        // A container removed between the listing and the inspection is
-        // simply absent: the runtime reports the rest and exits non-zero.
         let records = inspect::parse(&done.stdout).map_err(|()| malformed)?;
         let mut environments = Vec::new();
         for object in &records {
             let owned = inspect::Record::new(object).owned(store).ok_or(malformed)?;
             environments.push(owned);
         }
-        let complete = complete && (records.len() == ids.len() || done.ended != Ended::Exited(0));
+        let complete = complete
+            && accounted(&ids, &environments, done.ended, || {
+                match self.owned_ids(store, None, None) {
+                    Ok((again, true)) => Some(again),
+                    _ => None,
+                }
+            });
         Ok(Listed {
             environments,
             complete,
