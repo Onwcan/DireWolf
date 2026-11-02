@@ -1,19 +1,21 @@
 //! `oci.rs`'s own tests (M5d.4): the workspace's three host-judged
 //! invariants from the probe's facts against the authority's bound, and what
-//! a clean measurement requires of each workspace contract.
+//! a clean measurement requires of each workspace contract -- and what a
+//! preparation answers for an environment it did not keep.
 
 #![allow(clippy::unwrap_used, reason = "test assertions")]
 
 use dwk_proto::brokerp::sandbox::{
-    EnvironmentProfile, ImageId, NetworkTopology, SandboxInvariant as I, StoreInstance, Verdict,
-    WORKSPACE_ROOT_MODE, WorkspaceBound, WorkspaceContract, WorkspaceFacts, WorkspaceQuota,
-    required_invariants,
+    ContainerRef, EnvironmentProfile, ImageId, Milliseconds, NetworkTopology,
+    SandboxInvariant as I, StoreInstance, Verdict, WORKSPACE_ROOT_MODE, WorkspaceBound,
+    WorkspaceContract, WorkspaceFacts, WorkspaceQuota, required_invariants,
 };
-use dwk_proto::brokerp::{EnvironmentSpec, KernelNumber};
+use dwk_proto::brokerp::{BrokerRefusal, ContainerState, EnvironmentSpec, KernelNumber};
 use dwk_proto::wire::id::{EnvironmentId, RunId};
 use dwk_proto::wire::scalar::{ContentDigest, HostPath};
 
-use super::{clean, contract, workspace_checks};
+use super::super::environment::{EnvFailure, EnvHandle, Measured, Prepared};
+use super::{clean, contract, kept_or_taken_down, workspace_checks};
 
 const MIB: u64 = 1 << 20;
 
@@ -181,4 +183,68 @@ fn a_clean_measurement_is_every_invariant_its_contract_requires() {
         .len()
             + 3
     );
+}
+
+#[test]
+fn an_environment_not_kept_is_refused_only_once_its_teardown_proved_it_gone() {
+    let spec = spec(true);
+    let handle = || EnvHandle {
+        environment: spec.environment_id.clone(),
+        container: ContainerRef::new("e".repeat(64)).unwrap(),
+    };
+    let measured = |verdict: Verdict| Measured {
+        state: ContainerState::Running,
+        checks: Some(
+            I::ALL
+                .iter()
+                .map(|i| {
+                    let failed = *i == I::HostProbeDigest;
+                    (*i, if failed { verdict } else { Verdict::Pass })
+                })
+                .collect(),
+        ),
+        runtime_version: None,
+        measure_ms: Milliseconds::of(std::time::Duration::ZERO),
+    };
+    // Clean: kept, and nothing is taken down.
+    let kept = kept_or_taken_down(handle(), measured(Verdict::Pass), &spec, || {
+        unreachable!("a clean environment is kept")
+    });
+    assert!(
+        matches!(kept, Ok(Prepared { retained: true, .. })),
+        "{kept:?}"
+    );
+    // Not clean, and proved gone: not kept, with what was found.
+    for verdict in [Verdict::Fail, Verdict::Unobservable] {
+        let gone = kept_or_taken_down(handle(), measured(verdict), &spec, || Ok(()));
+        assert!(
+            matches!(
+                gone,
+                Ok(Prepared {
+                    retained: false,
+                    measured: Some(_),
+                    ..
+                })
+            ),
+            "{verdict:?}: {gone:?}"
+        );
+    }
+    // Not clean, and its teardown did not finish: one of its steps refused
+    // -- it may have run after others acted, or left the rest standing -- or
+    // acted unconfirmed. Nothing proves it gone, so nothing may say so: a
+    // refusal would tell the authority none of it remains (`REFUSED`).
+    for failed in [
+        EnvFailure::Refused(BrokerRefusal::RuntimeUnavailable),
+        EnvFailure::Refused(BrokerRefusal::RuntimeOutputMalformed),
+        EnvFailure::Refused(BrokerRefusal::EnvironmentAmbiguous),
+        EnvFailure::Refused(BrokerRefusal::ForeignEnvironment),
+        EnvFailure::Refused(BrokerRefusal::DigestMismatch),
+        EnvFailure::Unconfirmed,
+    ] {
+        let answer = kept_or_taken_down(handle(), measured(Verdict::Fail), &spec, || Err(failed));
+        assert!(
+            matches!(answer, Err(EnvFailure::Unconfirmed)),
+            "{failed:?}: {answer:?}"
+        );
+    }
 }

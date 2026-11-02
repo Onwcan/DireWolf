@@ -367,7 +367,9 @@ than tasks beside a neighbour — none narrowed. **F-R8 is closed and R8 is met.
 control has run by hand, locally, not hosted.
 
 **F-RELAY — the relay's record was not held to three settings its plan asks for (M5e.2,
-2026-11-02; fixed in process, hosted pending).** `HOST_PROXY_RELAY` judges the relay's record
+2026-11-02; fixed in process as `f3ae200`, whose hosted run
+[41358634372](https://github.com/Onwcan/DireWolf/actions/runs/41358634372) — run no. 118 —
+passed 29 of 29 jobs by their conclusions).** `HOST_PROXY_RELAY` judges the relay's record
 (`inspect.rs`, `Record::relay_exact`) against its plan (`relay_plan.rs`), but did not read the
 plan's `--cgroupns private`, its `--memory-swap` (the relay's 64 MiB, so no swap), or the
 runtime's private UTS namespace — read for the environment, and for the relay its PID, IPC and
@@ -382,6 +384,40 @@ host's cgroup namespace, swap unlimited or doubled) and each unreadable — it f
 change, and removing any one of the three checks fails it again. The conforming relay on a real
 runtime is `sandbox-egress`'s `proxy-only-host-proxy-relay`, in the owner's next hosted run; no
 weakened relay is run.
+
+**F-EVICT — a full workload table could forget an ending its authority had not collected
+(M5e.2, 2026-11-02; fixed in process, hosted pending).** ADR-0052 §8 keeps a workload's ending
+"until it is collected", but the broker's supervisor (`sandbox/supervisor.rs`) evicted the
+oldest *ended* workload from a full table, collected or not. The table is full in steady state
+— an ended workload leaves it only by eviction, so after 16 workloads every start evicts one —
+and the authority collects a parked launch only between its worker's other requests
+(`server/worker.rs`). So a start, of any run, that reached the broker after another run's long
+workload ended and before that ending was collected evicted it: the collection found nothing,
+and the authority recorded the finished workload `UNKNOWN` (`WORKLOAD_UNCONFIRMED`) and destroyed
+its environment. It fails closed — nothing ran unjudged, nothing crossed an environment — but one
+run could cost another its result and its environment. Found by reading the supervisor against
+ADR-0052 §8 and the worker; reproduced in process, not on a runtime. *Built (unstaged for the
+owner's commit):* an ending is marked once a collection answers it; a full table evicts its
+oldest collected ending, or one nobody collected for `WORKLOAD_SUPERVISION_SECONDS` — an
+authority that stopped, or recorded its workload `UNKNOWN`, never collects it, and such endings
+would otherwise fill the table for good — and otherwise refuses `WORKLOAD_TABLE_FULL`, nothing
+run. Two supervisor tests failed before the change (an uncollected ending evicted; a table of
+uncollected endings admitting a start), a third holds the horizon; 4 of 4 mutants killed.
+
+**F-TEARDOWN — a preparation whose teardown failed could be answered as a refusal (M5e.2,
+2026-11-02; fixed in process, hosted pending).** The broker's `prepare` (`sandbox/oci.rs`)
+takes an environment that did not measure clean down whole — helpers, environment, proxy — but
+answered with the teardown's own refusal when one of its steps refused. A refusal tells the
+authority that provably nothing remains: it records the environment `REFUSED` — final, not
+counted live, never destroyed — while the refused step (a listing the runtime failed, a client
+file changed since it was proved, a malformed record) may have left the environment that did
+not measure clean, or its relay, running until the authority's next start reconciles by label.
+`prepare`'s two other teardowns, after a failed start or measurement, already answered
+`Unconfirmed`. Found by reading; not run on a runtime. *Built (unstaged):* an environment not
+kept is answered `Unconfirmed` whenever its teardown did not finish, so the authority records
+it `UNKNOWN` — counted live, and destroyed by its labels. The test failed before the change
+(`Refused(RUNTIME_UNAVAILABLE)` answered); 2 of 2 mutants killed. Neither finding changes a
+hard rule, profile constant, invariant, evidence case or level, and neither is E6.
 
 ## 6. Safe implementation sequence
 

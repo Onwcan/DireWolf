@@ -22,12 +22,14 @@
 //! way is, to the authority, an indeterminate start: it records the workload
 //! `UNKNOWN` and destroys the environment, which ends it (ADR-0052 §9).
 //!
-//! **Bounded.** At most [`MAX_SUPERVISED_WORKLOADS`] are held. A full table
-//! evicts its oldest ended workload, and refuses a start when none has
-//! ended. A workload's thread ends by [`WORKLOAD_SUPERVISION_SECONDS`] after
-//! its start, its descriptors with it. One unended workload per environment:
-//! `reap` ends every other process of an environment, a concurrent
-//! workload's among them (OD-5).
+//! **Bounded.** At most [`MAX_SUPERVISED_WORKLOADS`] are held. An ending is
+//! kept until it is collected (ADR-0052 §8): a full table evicts its oldest
+//! ended workload that was collected -- or that nobody collected for
+//! [`WORKLOAD_SUPERVISION_SECONDS`], an ending its authority gave up -- and
+//! refuses a start when there is none. A workload's thread ends by
+//! [`WORKLOAD_SUPERVISION_SECONDS`] after its start, its descriptors with it.
+//! One unended workload per environment: `reap` ends every other process of
+//! an environment, a concurrent workload's among them (OD-5).
 //!
 //! **One generation.** The table is in memory. A restarted broker holds
 //! nothing of the previous one's: a collection naming another generation, or
@@ -45,7 +47,7 @@
 
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use dwk_proto::brokerp::workload::{
     MAX_SUPERVISED_WORKLOADS, WorkloadCollectAuthorisation, WorkloadCollectDone, WorkloadProgress,
@@ -56,6 +58,14 @@ use dwk_proto::brokerp::{
 };
 use dwk_proto::wire::id::{EnvironmentId, InvocationId};
 
+/// How long an ending nobody collected is kept for its collection. An
+/// authority collects a workload it started until it ends, between its other
+/// requests, each bounded far below this; an ending nobody asked for in a
+/// whole supervision is one its authority gave up -- it stopped, or recorded
+/// the workload `UNKNOWN` -- and may be forgotten to make room.
+const UNCOLLECTED: Duration =
+    Duration::from_secs(dwk_proto::brokerp::workload::WORKLOAD_SUPERVISION_SECONDS);
+
 /// Where one held workload is.
 #[derive(Debug, Clone)]
 enum State {
@@ -65,7 +75,26 @@ enum State {
     /// proved ended.
     Running,
     /// It ended, and this is what every collection answers.
-    Ended(OutcomeResult),
+    Ended {
+        /// The ending.
+        result: OutcomeResult,
+        /// When it was kept.
+        since: Instant,
+        /// Whether a collection has answered it.
+        collected: bool,
+    },
+}
+
+/// Whether a workload in `state` may be forgotten, at `now`, to make room:
+/// only an ending, and only once it was collected or nobody collected it for
+/// [`UNCOLLECTED`].
+fn forgettable(state: &State, now: Instant) -> bool {
+    match state {
+        State::Ended {
+            since, collected, ..
+        } => *collected || now.saturating_duration_since(*since) >= UNCOLLECTED,
+        State::Judging | State::Running => false,
+    }
 }
 
 /// One held workload.
@@ -82,7 +111,7 @@ impl Slot {
     }
 
     fn ended(&self) -> bool {
-        matches!(*self.state(), State::Ended(_))
+        matches!(*self.state(), State::Ended { .. })
     }
 }
 
@@ -103,7 +132,11 @@ struct Held {
 
 impl Held {
     fn end(self, result: OutcomeResult) {
-        *self.slot.state() = State::Ended(result);
+        *self.slot.state() = State::Ended {
+            result,
+            since: Instant::now(),
+            collected: false,
+        };
     }
 }
 
@@ -172,7 +205,14 @@ impl Workloads {
             return Err(BrokerRefusal::WorkloadInUse);
         }
         if table.len() >= MAX_SUPERVISED_WORKLOADS {
-            let Some(oldest) = table.iter().position(|slot| slot.ended()) else {
+            // Never an ending its authority is still to collect: that would
+            // make another run's finished workload `UNKNOWN`, and cost it
+            // its environment.
+            let now = Instant::now();
+            let Some(oldest) = table
+                .iter()
+                .position(|slot| forgettable(&slot.state(), now))
+            else {
                 return Err(BrokerRefusal::WorkloadTableFull);
             };
             let _ = table.remove(oldest);
@@ -265,7 +305,15 @@ impl Workloads {
         else {
             return unknown;
         };
-        let state = slot.state().clone();
+        let state = {
+            let mut state = slot.state();
+            // Once collected, an ending may be forgotten to make room; while
+            // it is held, every collection repeats it.
+            if let State::Ended { collected, .. } = &mut *state {
+                *collected = true;
+            }
+            state.clone()
+        };
         match state {
             // A start not answered for has no workload to collect.
             State::Judging => unknown,
@@ -276,7 +324,7 @@ impl Workloads {
                     never_ran: None,
                 }))
             }
-            State::Ended(result) => result,
+            State::Ended { result, .. } => result,
         }
     }
 
@@ -284,6 +332,15 @@ impl Workloads {
     #[cfg(test)]
     pub(crate) fn held(&self) -> usize {
         lock(&self.table).len()
+    }
+
+    /// Whether `invocation`'s workload is held and has ended -- asked without
+    /// collecting it. Unit tests only.
+    #[cfg(test)]
+    pub(crate) fn ended(&self, invocation: &InvocationId) -> bool {
+        lock(&self.table)
+            .iter()
+            .any(|slot| &slot.invocation == invocation && slot.ended())
     }
 }
 

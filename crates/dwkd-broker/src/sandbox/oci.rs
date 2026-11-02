@@ -922,6 +922,35 @@ fn order(checks: &[(SandboxInvariant, Verdict)]) -> Checks {
         .collect()
 }
 
+/// A started environment's answer once it was measured: kept only when it
+/// measured clean; otherwise taken down whole -- helpers, environment and
+/// listener alike -- by `teardown`. A teardown that did not finish proves
+/// nothing gone, however it failed: a step refused may have left any part
+/// standing, or come after another acted. The answer is then `Unconfirmed`,
+/// as when the start or the measurement failed: a refusal would tell the
+/// authority that none of it remains (`REFUSED`, final), where an
+/// unconfirmed one is `UNKNOWN` -- counted live, and destroyed by its labels.
+fn kept_or_taken_down(
+    handle: EnvHandle,
+    measured: Measured,
+    spec: &EnvironmentSpec,
+    teardown: impl FnOnce() -> Result<(), EnvFailure>,
+) -> Result<Prepared, EnvFailure> {
+    let keep = measured
+        .checks
+        .as_ref()
+        .is_some_and(|checks| clean(checks, spec));
+    // Never left running unless it measured clean.
+    if !keep && teardown().is_err() {
+        return Err(EnvFailure::Unconfirmed);
+    }
+    Ok(Prepared {
+        handle: Some(handle),
+        measured: Some(measured),
+        retained: keep,
+    })
+}
+
 /// Whether every invariant `spec` requires passed.
 pub(crate) fn clean(checks: &Checks, spec: &EnvironmentSpec) -> bool {
     dwk_proto::brokerp::sandbox::required_invariants(spec.network, contract(spec))
@@ -1050,20 +1079,8 @@ impl ExecutionEnvironment for Oci<'_> {
             };
         };
         crate::crash::point("environment_measured");
-        let keep = measured
-            .checks
-            .as_ref()
-            .is_some_and(|checks| clean(checks, spec));
-        if !keep {
-            // Never left running unless it measured clean: helpers,
-            // environment and listener alike.
-            self.teardown(spec, &handle.container)?;
-        }
-        Ok(Prepared {
-            handle: Some(handle),
-            measured: Some(measured),
-            retained: keep,
-        })
+        let container = handle.container.clone();
+        kept_or_taken_down(handle, measured, spec, || self.teardown(spec, &container))
     }
 
     fn measure(&self, handle: &EnvHandle, spec: &EnvironmentSpec) -> Result<Measured, EnvFailure> {

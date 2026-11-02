@@ -18,7 +18,7 @@ use dwk_proto::brokerp::{
 };
 use dwk_proto::wire::id::{EnvironmentId, InvocationId};
 
-use super::{Gate, Workloads};
+use super::{Gate, State, UNCOLLECTED, Workloads, forgettable};
 
 const BODY: &str = "01M24BB8G3E0A851TRWE3M8FZ";
 
@@ -280,6 +280,121 @@ fn a_full_table_evicts_its_oldest_ended_workload_and_otherwise_refuses() {
         let _ = release.send(());
     }
     last.send(()).unwrap();
+}
+
+/// Wait, within ten seconds, until `n` has ended -- without collecting it.
+fn ended_uncollected(workloads: &Workloads, n: u8) {
+    let until = soon();
+    while !workloads.ended(&invocation(n)) {
+        assert!(Instant::now() < until, "{n} did not end");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// A full table: one held workload in each of environments `0..16`, each
+/// waiting for its release.
+fn full_table(workloads: &Workloads) -> Vec<mpsc::Sender<()>> {
+    let count = u8::try_from(MAX_SUPERVISED_WORKLOADS).unwrap();
+    let mut releases = Vec::new();
+    for n in 0..count {
+        let (release, wait) = mpsc::channel();
+        let answer = workloads.start(
+            &invocation(n),
+            &environment(n),
+            soon(),
+            held_workload(wait, Arc::new(AtomicBool::new(false))),
+        );
+        assert!(matches!(answer, OutcomeResult::Done(_)), "{n}: {answer:?}");
+        releases.push(release);
+    }
+    releases
+}
+
+#[test]
+fn an_ending_is_kept_until_it_is_collected_however_full_the_table() {
+    let workloads = Workloads::new(generation('a'));
+    let releases = full_table(&workloads);
+    let count = u8::try_from(MAX_SUPERVISED_WORKLOADS).unwrap();
+    // The oldest ends, and its authority has not collected it yet; a younger
+    // one ends and is collected.
+    releases.first().unwrap().send(()).unwrap();
+    ended_uncollected(&workloads, 0);
+    releases.get(1).unwrap().send(()).unwrap();
+    assert_eq!(settled(&workloads, 1, &generation('a')), ending());
+    // Another run's start needs room: the collected ending makes it -- never
+    // the one its authority has yet to collect (ADR-0052 §8).
+    let (last, last_wait) = mpsc::channel();
+    let answer = workloads.start(
+        &invocation(count),
+        &environment(count),
+        soon(),
+        held_workload(last_wait, Arc::new(AtomicBool::new(false))),
+    );
+    assert!(matches!(answer, OutcomeResult::Done(_)), "{answer:?}");
+    assert_eq!(collect(&workloads, 0, generation('a')), ending());
+    assert_eq!(collect(&workloads, 1, generation('a')), unknown());
+    for release in releases {
+        let _ = release.send(());
+    }
+    last.send(()).unwrap();
+}
+
+#[test]
+fn a_table_of_uncollected_endings_refuses_a_start_until_one_is_collected() {
+    let workloads = Workloads::new(generation('a'));
+    let releases = full_table(&workloads);
+    let count = u8::try_from(MAX_SUPERVISED_WORKLOADS).unwrap();
+    for (n, release) in (0..count).zip(&releases) {
+        release.send(()).unwrap();
+        ended_uncollected(&workloads, n);
+    }
+    let never =
+        |_: Gate| -> Option<OutcomeResult> { unreachable!("a refused start spawns nothing") };
+    // Every ending is still owed to its collection: nothing makes room.
+    assert_eq!(
+        workloads.start(&invocation(count), &environment(count), soon(), never),
+        OutcomeResult::Refused(BrokerRefusal::WorkloadTableFull)
+    );
+    // Collected, the fifth -- and only it -- may now be forgotten.
+    assert_eq!(collect(&workloads, 5, generation('a')), ending());
+    let (last, last_wait) = mpsc::channel();
+    let answer = workloads.start(
+        &invocation(count),
+        &environment(count),
+        soon(),
+        held_workload(last_wait, Arc::new(AtomicBool::new(false))),
+    );
+    assert!(matches!(answer, OutcomeResult::Done(_)), "{answer:?}");
+    assert_eq!(collect(&workloads, 5, generation('a')), unknown());
+    // The older endings, still uncollected, were kept.
+    assert_eq!(collect(&workloads, 0, generation('a')), ending());
+    assert_eq!(collect(&workloads, 6, generation('a')), ending());
+    last.send(()).unwrap();
+}
+
+#[test]
+fn an_ending_nobody_collected_for_a_whole_supervision_may_be_forgotten() {
+    let since = Instant::now();
+    let ended = |collected| State::Ended {
+        result: ending(),
+        since,
+        collected,
+    };
+    // Collected: it may go at once.
+    assert!(forgettable(&ended(true), since));
+    // Not collected: kept for its collection while one may still come.
+    assert!(!forgettable(&ended(false), since));
+    assert!(!forgettable(
+        &ended(false),
+        since + UNCOLLECTED.saturating_sub(Duration::from_millis(1))
+    ));
+    // Nobody asked for it in a whole supervision: its authority gave it up,
+    // and a table full of such endings is not full for ever.
+    assert!(forgettable(&ended(false), since + UNCOLLECTED));
+    // A workload not yet ended is never forgotten to make room.
+    for state in [State::Judging, State::Running] {
+        assert!(!forgettable(&state, since + UNCOLLECTED * 2), "{state:?}");
+    }
 }
 
 #[test]
