@@ -786,6 +786,10 @@ exempt_paths = [
     # from one fixed path beneath the repository's `target/` -- test data,
     # nothing a workspace names, and never the broker's own reading.
     "crates/dwkd-broker/src/sandbox/inspect_tests.rs",
+    # M5e.2: destruction's unit tests, compiled only under cfg(test), create
+    # their own runtime-descriptor fixtures and proxy directories. They open
+    # no workspace path and launch no OCI client or container.
+    "crates/dwkd-broker/src/sandbox/destroy_tests.rs",
 ]
 suffixes = [".rs"]
 patterns = [

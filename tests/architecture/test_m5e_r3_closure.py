@@ -53,6 +53,7 @@ STATUS_DOCUMENTS = (
     REPO_ROOT / "docs" / "SANDBOX.md",
     REPO_ROOT / "docs" / "SECURITY.md",
     REPO_ROOT / "docs" / "EVALS.md",
+    REPO_ROOT / "docs" / "M5E2_FINAL_CLOSURE_REVIEW.md",
     ADR_DIR / "README.md",
     REPO_ROOT / "tests" / "README.md",
 )

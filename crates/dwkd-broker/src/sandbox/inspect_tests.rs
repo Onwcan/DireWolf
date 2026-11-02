@@ -1367,15 +1367,16 @@ fn the_relay_record_is_judged_exactly_and_every_weakening_is_caught() {
         let object = relay_mutated(path, value);
         assert_eq!(relay_verdict(&object), Some(false), "{path:?}");
     }
-    // A second mount, a writable one, another source.
+    // A second mount, a writable one, another source -- each with the
+    // plan's propagation, so that check cannot be what refuses it.
     for mounts in [
         format!(
-            r#"[{{"Type":"bind","Source":"{EGRESS_DIR}","Destination":"/run/direwolf-egress","RW":true}}]"#
+            r#"[{{"Type":"bind","Source":"{EGRESS_DIR}","Destination":"/run/direwolf-egress","RW":true,"Propagation":"rprivate"}}]"#
         ),
-        r#"[{"Type":"bind","Source":"/run/dw/egress/other","Destination":"/run/direwolf-egress","RW":false}]"#
+        r#"[{"Type":"bind","Source":"/run/dw/egress/other","Destination":"/run/direwolf-egress","RW":false,"Propagation":"rprivate"}]"#
             .to_owned(),
         format!(
-            r#"[{{"Type":"bind","Source":"{EGRESS_DIR}","Destination":"/run/direwolf-egress","RW":false}},{{"Type":"bind","Source":"/srv/ws","Destination":"/workspace","RW":true}}]"#
+            r#"[{{"Type":"bind","Source":"{EGRESS_DIR}","Destination":"/run/direwolf-egress","RW":false,"Propagation":"rprivate"}},{{"Type":"bind","Source":"/srv/ws","Destination":"/workspace","RW":true,"Propagation":"rprivate"}}]"#
         ),
     ] {
         let value =
@@ -1394,4 +1395,113 @@ fn the_relay_record_is_judged_exactly_and_every_weakening_is_caught() {
         let object = relay_mutated(path, Value::Bool(false));
         assert_eq!(relay_verdict(&object), None, "{path:?}");
     }
+}
+
+#[test]
+fn the_relays_requested_and_effective_mount_propagation_must_be_recursive_private() {
+    // The relay plan requests rprivate: neither an applied propagation nor
+    // a requested one that differs may pass HOST_PROXY_RELAY. Keep the
+    // other record unchanged so each side must detect its own mismatch.
+    let mut missed = Vec::new();
+    for (propagation, expected) in [
+        (r#""Propagation":"rprivate""#, Some(true)),
+        (r#""Propagation":"private""#, Some(false)),
+        (r#""Propagation":"shared""#, Some(false)),
+        (r#""Propagation":"rshared""#, Some(false)),
+        (r#""Propagation":"slave""#, Some(false)),
+        (r#""Propagation":"rslave""#, Some(false)),
+        (r#""Propagation":"""#, Some(false)),
+        (r#""Propagation":null"#, Some(false)),
+        (r#""Propagation":false"#, Some(false)),
+        (r#""Propagation":[]"#, Some(false)),
+        (r#""other":"rprivate""#, Some(false)),
+    ] {
+        for (path, mounts) in [
+            (
+                &["Mounts"][..],
+                format!(
+                    r#"[{{"Type":"bind","Source":"{EGRESS_DIR}","Destination":"/run/direwolf-egress","RW":false,{propagation}}}]"#
+                ),
+            ),
+            (
+                &["HostConfig", "Mounts"][..],
+                format!(
+                    r#"[{{"Type":"bind","Source":"{EGRESS_DIR}","Target":"/run/direwolf-egress","ReadOnly":true,"BindOptions":{{{propagation}}}}}]"#
+                ),
+            ),
+        ] {
+            let value =
+                dwk_proto::json::parse(mounts.as_bytes(), dwk_proto::json::ParseOptions::ijson())
+                    .unwrap();
+            let found = relay_verdict(&relay_mutated(path, value));
+            if found != expected {
+                missed.push(format!(
+                    "{path:?}: {propagation}: {found:?} != {expected:?}"
+                ));
+            }
+        }
+    }
+    assert!(missed.is_empty(), "{}", missed.join("\n"));
+}
+
+#[test]
+fn every_field_of_the_relays_one_mount_is_judged_on_both_records() {
+    // The conforming mount, requested and as applied; then each field
+    // changed alone, and the mount given twice. Every other field -- the
+    // propagation too -- stays the plan's, so only that field's check can
+    // refuse it; both conforming records pass, so the shapes are sound.
+    let effective = format!(
+        r#"{{"Type":"bind","Source":"{EGRESS_DIR}","Destination":"/run/direwolf-egress","RW":false,"Propagation":"rprivate"}}"#
+    );
+    let requested = format!(
+        r#"{{"Type":"bind","Source":"{EGRESS_DIR}","Target":"/run/direwolf-egress","ReadOnly":true,"BindOptions":{{"Propagation":"rprivate"}}}}"#
+    );
+    let mut missed = Vec::new();
+    for (path, mount, changes) in [
+        (
+            &["Mounts"][..],
+            &effective,
+            [
+                (r#""Type":"bind""#, r#""Type":"volume""#),
+                (EGRESS_DIR, "/run/dw/egress/other"),
+                (
+                    r#""Destination":"/run/direwolf-egress""#,
+                    r#""Destination":"/run/other""#,
+                ),
+                (r#""RW":false"#, r#""RW":true"#),
+            ],
+        ),
+        (
+            &["HostConfig", "Mounts"],
+            &requested,
+            [
+                (r#""Type":"bind""#, r#""Type":"volume""#),
+                (EGRESS_DIR, "/run/dw/egress/other"),
+                (
+                    r#""Target":"/run/direwolf-egress""#,
+                    r#""Target":"/run/other""#,
+                ),
+                (r#""ReadOnly":true"#, r#""ReadOnly":false"#),
+            ],
+        ),
+    ] {
+        let mut records = vec![
+            (format!("[{mount}]"), Some(true)),
+            (format!("[{mount},{mount}]"), Some(false)),
+        ];
+        for (from, to) in changes {
+            assert_eq!(mount.matches(from).count(), 1, "{from}");
+            records.push((format!("[{}]", mount.replace(from, to)), Some(false)));
+        }
+        for (mounts, expected) in records {
+            let value =
+                dwk_proto::json::parse(mounts.as_bytes(), dwk_proto::json::ParseOptions::ijson())
+                    .unwrap();
+            let found = relay_verdict(&relay_mutated(path, value));
+            if found != expected {
+                missed.push(format!("{path:?}: {mounts}: {found:?} != {expected:?}"));
+            }
+        }
+    }
+    assert!(missed.is_empty(), "{}", missed.join("\n"));
 }

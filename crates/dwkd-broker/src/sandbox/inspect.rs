@@ -404,6 +404,7 @@ impl<'a> Record<'a> {
                         && text(m, &["Source"]) == Some(egress_dir)
                         && text(m, &["Destination"]) == Some(EGRESS_TARGET)
                         && boolean(m, &["RW"]) == Some(false)
+                        && text(m, &["Propagation"]) == Some("rprivate")
                 })
         });
         let requested = objects(o, &["HostConfig", "Mounts"]).map(|mounts| {
@@ -413,6 +414,7 @@ impl<'a> Record<'a> {
                         && text(m, &["Source"]) == Some(egress_dir)
                         && text(m, &["Target"]) == Some(EGRESS_TARGET)
                         && boolean(m, &["ReadOnly"]) == Some(true)
+                        && text(m, &["BindOptions", "Propagation"]) == Some("rprivate")
                 })
         });
         let number = |path: &[&str], want: u64| {

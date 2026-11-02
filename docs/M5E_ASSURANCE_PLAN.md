@@ -500,6 +500,33 @@ mandatory and checked. Hosted, run 41471750928 ran those unit tests and that arc
 `make test`, and every required real-runtime job with the new `exists`, and passed — the
 assertions' logic and wiring, at their levels; it stops no runtime either.
 
+**Additional review, 2026-11-02, after baseline run #122:** two new, independently
+reproduced defects are fixed; hosted verification of the commit that carries the
+fixes is pending. **F-RELPROP:** `inspect::relay_exact` omitted requested and effective
+bind propagation even though `relay_plan` requests `rprivate`; both now must match,
+with 20 negative record mutations and two conforming controls. **F-PROXY-CLOSE:**
+runtime re-proof could refuse before `Sandbox::destroy` entered its callback and
+closed the proxy; closing now occurs outside that callback, preserving the refusal
+and the neighbour's proxy. Both regressions fail against the original behavior
+and pass with the fixes, **in process**; those regressions create no OCI container.
+The [closure assessment and review handoff](M5E2_FINAL_CLOSURE_REVIEW.md) records
+evidence qualification, alternative paths, validation and limitations, including the
+overbroad execution of the existing E2 topology-mutation target during validation.
+Neither fix is E6: all 15 rows remain **BLOCKED**, ADR-0057 **Proposed** under R-B,
+M5e.2 **IN PROGRESS** and M5e.3–M5e.6 **NOT STARTED**.
+
+**Independent review, 2026-11-03:** both reproductions hold — each regression fails
+on the code before its fix, and each `rprivate` comparison, removed alone, fails its
+test. The review found that the new comparison masked three existing relay-mount
+negative controls: their mutated records carried no propagation, so removing the
+relay's `RW` or `Source` check passed every test. Those records now carry the plan's
+propagation, and a new test changes each field of the relay's one mount alone, on the
+requested and the effective record, and gives the mount twice; each of the relay
+mount's twelve comparisons, removed alone, now fails a test. Test-only: no production
+line changed. The destruction's accounting limit stands as the closure assessment
+states it: a refused or indeterminate destruction answers no counters, and a later
+retry finds the proxy closed — as a runtime failure inside the callback already did.
+
 ## 6. Safe implementation sequence
 
 Each step keeps every production control as it is; each lands with its own

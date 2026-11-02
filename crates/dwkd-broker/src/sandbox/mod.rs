@@ -472,43 +472,51 @@ impl Sandbox {
         until: Instant,
     ) -> OutcomeResult {
         let since = Instant::now();
-        self.with_oci(descriptors, &authorisation.runtime(), until, |env| {
-            let destroyed = env.destroy(
-                &authorisation.store,
-                (&authorisation.environment_id, &authorisation.run_id),
-                authorisation.container.as_ref(),
-            );
-            // Whatever the runtime managed, the environment's proxy is
-            // closed: a destruction never leaves its egress open.
-            let egress = self
-                .parts
-                .proxies
-                .close(authorisation.environment_id.as_str());
-            match destroyed {
-                Ok(destroyed) => {
-                    let (state, container): (DestroyState, Option<ContainerRef>) = match destroyed {
-                        Destroyed::Removed(container) => (DestroyState::Removed, Some(container)),
-                        Destroyed::AlreadyGone => (DestroyState::AlreadyGone, None),
-                    };
-                    if let Some(counters) = &egress {
-                        crate::event(&format!(
-                            "egress_closed upstream={} downstream={}",
-                            counters.bytes_upstream.get(),
-                            counters.bytes_downstream.get()
-                        ));
-                    }
-                    OutcomeResult::Done(Box::new(BrokerDone::environment_destroy(
-                        EnvironmentDestroyDone {
-                            state,
-                            container,
-                            destroy_ms: Milliseconds::of(since.elapsed()),
-                            egress,
-                        },
-                    )))
+        let destroyed = with_oci(
+            &self.parts,
+            descriptors,
+            &authorisation.runtime(),
+            until,
+            |env| {
+                env.destroy(
+                    &authorisation.store,
+                    (&authorisation.environment_id, &authorisation.run_id),
+                    authorisation.container.as_ref(),
+                )
+            },
+        )
+        .unwrap_or_else(|why| Err(EnvFailure::Refused(why)));
+        // Close even when runtime re-proof refused before entering `env`:
+        // no destruction leaves the authorised environment's egress open
+        // (ADR-0048 §10), whatever the runtime managed.
+        let egress = self
+            .parts
+            .proxies
+            .close(authorisation.environment_id.as_str());
+        match destroyed {
+            Ok(destroyed) => {
+                let (state, container): (DestroyState, Option<ContainerRef>) = match destroyed {
+                    Destroyed::Removed(container) => (DestroyState::Removed, Some(container)),
+                    Destroyed::AlreadyGone => (DestroyState::AlreadyGone, None),
+                };
+                if let Some(counters) = &egress {
+                    crate::event(&format!(
+                        "egress_closed upstream={} downstream={}",
+                        counters.bytes_upstream.get(),
+                        counters.bytes_downstream.get()
+                    ));
                 }
-                Err(why) => failure(why),
+                OutcomeResult::Done(Box::new(BrokerDone::environment_destroy(
+                    EnvironmentDestroyDone {
+                        state,
+                        container,
+                        destroy_ms: Milliseconds::of(since.elapsed()),
+                        egress,
+                    },
+                )))
             }
-        })
+            Err(why) => failure(why),
+        }
     }
 
     /// `broker.workload_start` (M5d.2, ADR-0052 §§5, 8): one workload, in
@@ -623,3 +631,7 @@ impl Sandbox {
 #[cfg(test)]
 #[path = "admission_tests.rs"]
 mod admission_tests;
+
+#[cfg(test)]
+#[path = "destroy_tests.rs"]
+mod destroy_tests;
