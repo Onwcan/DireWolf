@@ -20,11 +20,15 @@ So what is checked here is the contract and the gate, not containment:
 * the gate refuses each way a line can mislead: a missing, unexercised,
   duplicated or unknown case, a missing or wrong level, an empty, unknown or
   wrong enforcement, unreadable JSON, telemetry offered as more;
-* and an outcome that does not show what its line claims (ADR-0057, the
+* an outcome that does not show what its line claims (ADR-0057, the
   owner's R-B): a weakening the production decision kept or never refused, an
   in-process judgement naming the inside vantage, a real weakening that says
   nothing caught it, or a detection whose invariants are of another vantage
-  than its enforcement says.
+  than its enforcement says;
+* and a real-runtime suite that reads an inspection's failure -- which a
+  runtime the client could not ask also answers -- as a container gone: every
+  suite's `exists` asks one shared listing (`runtime_support`), the
+  evidence's side of finding F-ABSENT.
 
 The synthetic lines below test the gate only. They are never evidence of
 containment: only the real tasks, on a real runtime, are.
@@ -1044,3 +1048,40 @@ def test_the_agent_and_release_contracts_are_their_own_and_unchanged() -> None:
     } == dw.RELEASE_LEVELS
     assert not set(dw.ATTRIBUTION) & {"sandbox-agent", "sandbox-agent-identity"}
     assert not set(dw.ATTRIBUTION) & set(dw.RELEASE_LEVELS)
+
+
+SUPPORT = tuple(
+    REPO_ROOT / "crates" / crate / "tests" / "runtime_support" / "mod.rs"
+    for crate in ("dwkd-broker", "dwkd-authority")
+)
+
+
+def test_a_suite_believes_a_container_gone_only_from_a_listing_the_runtime_answered() -> None:
+    """The evidence's side of F-ABSENT: the runtime's client fails an
+    inspection alike for a container the runtime does not hold and for a
+    runtime it could not ask, so no suite reads an inspection's failure as an
+    absence. Every real-runtime suite's `exists` asks the one shared listing,
+    which fails its test when the client failed -- its own unit tests hold
+    that, the negative control among them -- and both crates hold that
+    listing byte for byte."""
+    broker, authority = (path.read_bytes() for path in SUPPORT)
+    assert broker == authority, "the crates' runtime_support copies differ"
+    shared = broker.decode("utf-8")
+    assert re.search(
+        r'"container",\s*"ls",\s*"--all",\s*"--no-trunc",\s*"--quiet",\s*"--filter"', shared
+    )
+    assert "out.status.success()" in shared
+    delegates = 0
+    for path in sorted((REPO_ROOT / "crates").glob("*/tests/*.rs")):
+        source = path.read_text(encoding="utf-8")
+        name = path.relative_to(REPO_ROOT)
+        # Existence by an inspection's exit status, however the call is laid out.
+        assert not re.search(r'"inspect",\s*"--format",\s*"\{\{\.Id\}\}"', source), name
+        for found in re.finditer(
+            r"fn exists\(&self, (\w+): &str\) -> bool \{\n(.*?)\n\s*\}\n", source, re.S
+        ):
+            wanted = f"super::runtime_support::exists(|args| self.docker(args), {found.group(1)})"
+            assert found.group(2).strip() == wanted, name
+            delegates += 1
+    # A pattern that matches nothing would pass vacuously.
+    assert delegates == 7, delegates

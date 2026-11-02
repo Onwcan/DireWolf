@@ -51,6 +51,9 @@ mod state_support;
 mod transport_support;
 
 #[cfg(target_os = "linux")]
+mod runtime_support;
+
+#[cfg(target_os = "linux")]
 mod linux {
     use std::io::Read as _;
     use std::os::unix::fs::PermissionsExt as _;
@@ -326,10 +329,10 @@ reason = "NO_MATCHING_RULE"
                 .unwrap()
         }
 
+        /// Whether the runtime holds `id`: a listing of exactly its id,
+        /// never an inspection's failure (`runtime_support`).
         fn exists(&self, id: &str) -> bool {
-            self.docker(&["container", "inspect", "--format", "{{.Id}}", id])
-                .status
-                .success()
+            super::runtime_support::exists(|args| self.docker(args), id)
         }
 
         fn label(&self, id: &str, key: &str) -> String {

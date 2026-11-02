@@ -289,7 +289,12 @@ suites' sources, without a runtime -- each real weakening's expected
 invariants of the vantage its case is attributed, every in-process
 judgement's of the host's -- and shows the gate refusing each kind of
 misleading line with synthetic lines, which test the gate only, never
-containment. `tests/architecture/test_m5e_r3_closure.py` holds the owner's
+containment. It also holds every real-runtime suite's `exists` to one shared
+listing (`crates/*/tests/runtime_support`): the runtime's client fails an
+inspection alike for a container the runtime does not hold and for a runtime
+it could not ask, so a suite believes a container gone only from a listing of
+exactly its id that the client answered, and fails its test otherwise (the
+evidence's side of F-ABSENT). `tests/architecture/test_m5e_r3_closure.py` holds the owner's
 R-B: ADR-0057 never accepted and outside the digest, its unapproved limited
 claim nowhere M5's, and, while it is Proposed, E6 said NOT EXERCISED or
 BLOCKED wherever R3 is stated and M5e.2 never said complete. It reads

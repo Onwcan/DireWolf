@@ -595,6 +595,15 @@ exactly as it answers a container the runtime does not hold, and the broker read
 the container gone; a removal and a reconciliation's listing are now believed only from an
 answer the runtime gave. **M5e.2 is IN PROGRESS, R3 E6 BLOCKED.**
 
+**F-ABSENT hosted (2026-11-02).** The owner committed F-ABSENT's fix as `f0f237f`; hosted run
+[41446389484](https://github.com/Onwcan/DireWolf/actions/runs/41446389484) (run no. 120) passed
+**29 of 29 jobs**: the fix is verified at its tests' levels — its unit tests, and every required
+real-runtime case over the changed removal, destruction and listing — while a runtime that stops
+answering mid-operation is reproduced by no job. Built since, unstaged, hosted run pending: the
+evidence's side of the same weakness — each real-runtime suite's own assertion that a container
+is gone now asks a listing the runtime answered, and fails its test otherwise. Neither is E6.
+**M5e.2 is IN PROGRESS, R3 E6 BLOCKED.**
+
 Still to do: R3's real-container level (E6: required by the owner's R-B, BLOCKED — not built
 and not planned while the safety control stands; it needs a plan the owner approves within
 that control, or genuine independent evidence meeting the plan's §3b that the owner accepts);

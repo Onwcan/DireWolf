@@ -44,6 +44,9 @@ use libc as _;
 use seccompiler as _;
 
 #[cfg(target_os = "linux")]
+mod runtime_support;
+
+#[cfg(target_os = "linux")]
 mod linux {
     use std::io::{BufRead as _, BufReader, IoSlice, Read as _, Write as _};
     use std::mem::MaybeUninit;
@@ -208,10 +211,10 @@ mod linux {
             String::from_utf8(out.stdout).unwrap()
         }
 
+        /// Whether the runtime holds `container`: a listing of exactly its id,
+        /// never an inspection's failure (`runtime_support`).
         fn exists(&self, container: &str) -> bool {
-            self.docker(&["container", "inspect", "--format", "{{.Id}}", container])
-                .status
-                .success()
+            super::runtime_support::exists(|args| self.docker(args), container)
         }
 
         fn remove(&self, container: &str) {
