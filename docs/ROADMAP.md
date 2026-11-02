@@ -604,9 +604,20 @@ evidence's side of the same weakness — each real-runtime suite's own assertion
 is gone now asks a listing the runtime answered, and fails its test otherwise. Neither is E6.
 **M5e.2 is IN PROGRESS, R3 E6 BLOCKED.**
 
+**Hardening hosted; acceptance not met (2026-11-02).** The owner committed that evidence side as
+`b6a8a1e`; hosted run [41471750928](https://github.com/Onwcan/DireWolf/actions/runs/41471750928)
+(run no. 121) passed **29 of 29 jobs**. So the engineering hardening M5e.2's reviews found —
+F-RELAY, F-EVICT, F-TEARDOWN, F-ABSENT and its evidence side — is fixed and hosted-verified, each
+at its tests' levels, and a runtime that stops answering between two of the broker's steps is
+still reproduced by no job. M5e.2's acceptance is not met: R3's E6 has no qualifying evidence,
+all 15 of its rows are BLOCKED, and [issue #19](https://github.com/Onwcan/DireWolf/issues/19)
+tracks it; ADR-0057 stays Proposed, the owner's R-B binding. **M5e.2 is IN PROGRESS, R3 E6
+BLOCKED**; M5e.3–M5e.6 are not started.
+
 Still to do: R3's real-container level (E6: required by the owner's R-B, BLOCKED — not built
 and not planned while the safety control stands; it needs a plan the owner approves within
-that control, or genuine independent evidence meeting the plan's §3b that the owner accepts);
+that control, or genuine independent evidence meeting the plan's §3b that the owner accepts;
+tracked in [issue #19](https://github.com/Onwcan/DireWolf/issues/19));
 M5e.3–M5e.5's registry fixtures and pip and npm evidence — M5e.3's brief is ready
 ([M5E_ASSURANCE_PLAN.md](M5E_ASSURANCE_PLAN.md) §7a), not started — and M5e.6's gate.
 
