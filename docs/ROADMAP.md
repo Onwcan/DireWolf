@@ -451,7 +451,7 @@ and package-manager acceptance are M5e's, and the `local` environment is M6's (O
 stays in progress until M5e meets its own acceptance. Passing CI is the evidence named
 here — not a deployment, and not a certification.
 
-#### M5e · The M5 adversarial gate and closeout — **IN PROGRESS** (M5e.1 complete; M5e.2 in progress — R8, R9 and R11 hosted-verified and ADR-0056 accepted, R3's real-container level required by the owner (R-B on ADR-0057, 2026-11-01) and blocked; M5e.3–M5e.6 not started)
+#### M5e · The M5 adversarial gate and closeout — **IN PROGRESS** (M5e.1 complete; M5e.2 in progress — R8, R9 and R11 hosted-verified and ADR-0056 accepted, R3's real-container level required by the owner (R-B on ADR-0057, 2026-11-01) and blocked; M5e.3 in progress ahead of M5e.2's close, by the owner's exception (2026-11-03) — its offline fixtures built, hosted run pending; M5e.4–M5e.6 not started)
 
 **Planned 2026-10-26.** The gap analysis, the requirements-to-evidence matrix,
 the implementation sequence and the owner's decisions of 2026-10-26 on its open points are in
@@ -614,12 +614,34 @@ all 15 of its rows are BLOCKED, and [issue #19](https://github.com/Onwcan/DireWo
 tracks it; ADR-0057 stays Proposed, the owner's R-B binding. **M5e.2 is IN PROGRESS, R3 E6
 BLOCKED**; M5e.3–M5e.6 are not started.
 
+**M5e.3 sequenced ahead of M5e.2's close (2026-11-03).** The owner committed the fixes of
+F-RELPROP and F-PROXY-CLOSE as `396d87b`; hosted run
+[41535101815](https://github.com/Onwcan/DireWolf/actions/runs/41535101815) (run no. 123) passed
+**29 of 29 jobs** — both fixes at their tests' levels, neither E6. The owner then made one
+narrow exception to M5e's order ([M5E_ASSURANCE_PLAN.md](M5E_ASSURANCE_PLAN.md) §10): M5e.3's
+registry fixtures may be built while M5e.2 is open, the offline generators first (§7a). It
+changes nothing else: R-B and E6's requirement stand, all 15 rows BLOCKED; ADR-0057 stays
+Proposed; [issue #19](https://github.com/Onwcan/DireWolf/issues/19) stays open; M5e.4–M5e.6
+still follow M5e.2; and this section's acceptance and the M5 contract below wait for E6 as
+before. **M5e.2 is IN PROGRESS, R3 E6 BLOCKED**; M5e.3 is not started.
+
+**M5e.3's offline fixtures built (2026-11-03).** Under that exception M5e.3 started, in the
+plan's order (§7a): a standard-library generator, `tests/sandbox/registry_fixtures.py`, makes
+a PEP 503 index and an npm registry, a granted origin's and an ungranted one's, every byte from
+a seed. Its content is the pure wheels, the marking source distribution, `.pth` and lifecycle
+scripts, the files, tarballs and redirects on the ungranted host, the git dependency, the
+tampered tarball, the lockfile, the image `pip.conf` and the hostile `.npmrc`. Its unit tests
+and the plan's guard run in `make test`. Unstaged, hosted run pending; the per-run CA and the
+origins are not built. Nothing of it is evidence, changes a production line or bears on R3.
+**M5e.2 is IN PROGRESS, R3 E6 BLOCKED**; M5e.3 is in progress; M5e.4–M5e.6 are not started.
+
 Still to do: R3's real-container level (E6: required by the owner's R-B, BLOCKED — not built
 and not planned while the safety control stands; it needs a plan the owner approves within
 that control, or genuine independent evidence meeting the plan's §3b that the owner accepts;
 tracked in [issue #19](https://github.com/Onwcan/DireWolf/issues/19));
-M5e.3–M5e.5's registry fixtures and pip and npm evidence — M5e.3's brief is ready
-([M5E_ASSURANCE_PLAN.md](M5E_ASSURANCE_PLAN.md) §7a), not started — and M5e.6's gate.
+M5e.3–M5e.5's registry fixtures and pip and npm evidence — M5e.3 in progress ahead of
+M5e.2's close (2026-11-03; [M5E_ASSURANCE_PLAN.md](M5E_ASSURANCE_PLAN.md) §7a): its offline
+fixtures built, the per-run CA and the origins to do — and M5e.6's gate.
 
 **Deps:** M5a–M5d. **Deliverables:** the complete escape, SSRF and persistence suites as
 merge gates; weakened-profile closure for `PROXY_ONLY`; package-manager acceptance

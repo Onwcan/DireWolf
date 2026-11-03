@@ -1014,12 +1014,27 @@ M4E:DONE"
             reached.map(|_| ()).map_err(|e| e.kind()),
             Err(ErrorKind::ConnectionRefused)
         );
-        // The released port: taken by the next listener, and reached.
-        let released = {
-            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-            listener.local_addr().unwrap().port()
-        };
-        let squatter = TcpListener::bind(("127.0.0.1", released)).unwrap();
+        // The released port: taken by the next listener, and reached. This
+        // binary's other tests bind ports while this one runs, so the next
+        // listener to ask may be one of theirs -- the very hazard above --
+        // and the squatter then finds the port in use. That port proves
+        // nothing either way, so a fresh one is released and asked for
+        // again, a bounded number of times; any other error, or no port
+        // taken in all of them, fails.
+        const ATTEMPTS: usize = 16;
+        let (released, squatter) = (0..ATTEMPTS)
+            .find_map(|_| {
+                let released = {
+                    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+                    listener.local_addr().unwrap().port()
+                };
+                match TcpListener::bind(("127.0.0.1", released)) {
+                    Ok(squatter) => Some((released, squatter)),
+                    Err(e) if e.kind() == ErrorKind::AddrInUse => None,
+                    Err(e) => panic!("binding the released port {released}: {e}"),
+                }
+            })
+            .unwrap_or_else(|| panic!("no released port was free in {ATTEMPTS} attempts"));
         let reached = TcpStream::connect(("127.0.0.1", released));
         assert!(reached.is_ok(), "{reached:?}");
         drop(squatter);

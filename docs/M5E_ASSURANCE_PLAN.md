@@ -17,6 +17,8 @@
 **Status (2026-11-02):** the owner committed that gate and guard as `e746aee`, F-RELAY's fix as `f3ae200`, and F-EVICT's and F-TEARDOWN's as `df4fa24`; hosted runs [41349869654](https://github.com/Onwcan/DireWolf/actions/runs/41349869654) (run no. 117, `e746aee`), [41358634372](https://github.com/Onwcan/DireWolf/actions/runs/41358634372) (no. 118, `f3ae200`) and [41430527997](https://github.com/Onwcan/DireWolf/actions/runs/41430527997) (no. 119, `df4fa24`): **SUCCESS**, 29 of 29 jobs each, by their conclusions. So the outcome checks and the R-B guard are hosted-verified (R17), and so are the three findings' fixes (§5a), each at the level its tests have: unit tests in `make test`, beside the real-runtime suites that already ran; none of it is E6. Found since, built, unstaged, hosted run pending: F-ABSENT (§5a), a runtime the client could not ask read as a container gone. **M5e.2 is IN PROGRESS, R3 E6 BLOCKED**; M5e.3 is NOT STARTED.\
 **Status (2026-11-02, F-ABSENT hosted):** the owner committed F-ABSENT's fix as `f0f237f`; hosted [run 41446389484](https://github.com/Onwcan/DireWolf/actions/runs/41446389484) (run no. 120, `f0f237f`): **SUCCESS**, 29 of 29 jobs, by their conclusions. So F-ABSENT's fix is hosted-verified at its tests' levels — its unit tests, and every required real-runtime case over the changed removal, destruction and listing — while the interruption itself, a runtime that stops answering between two of the broker's steps, is reproduced by no local or hosted job (§5a). Built since, unstaged, hosted run pending: the evidence's side of the same weakness — every real-runtime suite's `exists` believes a container gone only from a listing the runtime answered (§5a). None of it is E6. **M5e.2 is IN PROGRESS, R3 E6 BLOCKED**; M5e.3 is NOT STARTED.\
 **Status (2026-11-02, evidence side hosted):** the owner committed F-ABSENT's evidence side as `b6a8a1e`; hosted [run 41471750928](https://github.com/Onwcan/DireWolf/actions/runs/41471750928) (run no. 121, `b6a8a1e`): **SUCCESS**, 29 of 29 jobs, by their conclusions. So the engineering hardening M5e.2's reviews found — F-RELAY, F-EVICT, F-TEARDOWN, F-ABSENT and F-ABSENT's evidence side (§5a) — is fixed and hosted-verified, each at its tests' levels; a runtime that stops answering between two of the broker's steps is still reproduced by no job. That is not M5e.2's acceptance: R3's E6 has no qualifying evidence, all 15 of its rows are **BLOCKED** (§3a), and [issue #19](https://github.com/Onwcan/DireWolf/issues/19) is the tracker for it; ADR-0057 stays **Proposed**, the owner's R-B binding. **M5e.2 is IN PROGRESS, R3 E6 BLOCKED**; M5e.3–M5e.6 are NOT STARTED.\
+**Status (2026-11-03, M5e.3 sequencing):** the owner committed F-RELPROP's and F-PROXY-CLOSE's fixes (§5a) as `396d87b`; hosted [run 41535101815](https://github.com/Onwcan/DireWolf/actions/runs/41535101815) (run no. 123, `396d87b`): **SUCCESS**, 29 of 29 jobs, by their conclusions — both fixes hosted-verified at their tests' levels, unit tests in `make test`; neither is E6. The owner then made one narrow exception to §6's order (§10, "M5e.3's sequencing"): M5e.3's fixture work may proceed while M5e.2 stays open. It changes when M5e.3 may start and nothing else — the owner's R-B, E6's 15 rows and §3b's criteria, every evidence level, production control, architecture guard and CI requirement, and M5's acceptance stand as written. **M5e.2 is IN PROGRESS, R3 E6 BLOCKED** (required 15, passed 0, blocked 15), and [issue #19](https://github.com/Onwcan/DireWolf/issues/19) stays OPEN; M5e.3 is NOT STARTED, its start authorised ahead of M5e.2's close; M5e.4–M5e.6 are NOT STARTED and still follow M5e.2.\
+**Status (2026-11-03, M5e.3's offline fixtures):** under that exception M5e.3 started, in §7a's order. Built, unstaged, hosted run pending: §7a's generator, PEP 503 index and npm registry — `tests/sandbox/registry_fixtures.py`, standard library only, every byte from a seed, a fixed seed's bytes pinned by a recorded digest — with their unit tests (`tests/sandbox/test_registry_fixtures.py`) and §7a's guard (`tests/architecture/test_m5e_registry_fixtures.py`), all in `make test`. Not built: the per-run CA and the origins (§7a). No production line, evidence case or level, CI job or eval changes; none of it is evidence, and none bears on R3 or E6. **M5e.2 is IN PROGRESS, R3 E6 BLOCKED** (required 15, passed 0, blocked 15), and [issue #19](https://github.com/Onwcan/DireWolf/issues/19) stays OPEN; M5e.3 is IN PROGRESS, out of sequence; M5e.4–M5e.6 are NOT STARTED and still follow M5e.2.\
 **Authority of this document:** a technical plan, not an ADR. It approves nothing itself; the owner's decisions are recorded in §10 as given. [ADR-0054](adr/0054-m5e-npm-hygiene-profile.md) stays **Proposed**.
 
 ## 1. Scope, sources and the owner's directions
@@ -501,8 +503,7 @@ mandatory and checked. Hosted, run 41471750928 ran those unit tests and that arc
 assertions' logic and wiring, at their levels; it stops no runtime either.
 
 **Additional review, 2026-11-02, after baseline run #122:** two new, independently
-reproduced defects are fixed; hosted verification of the commit that carries the
-fixes is pending. **F-RELPROP:** `inspect::relay_exact` omitted requested and effective
+reproduced defects are fixed, hosted-verified since by run 41535101815 (below). **F-RELPROP:** `inspect::relay_exact` omitted requested and effective
 bind propagation even though `relay_plan` requests `rprivate`; both now must match,
 with 20 negative record mutations and two conforming controls. **F-PROXY-CLOSE:**
 runtime re-proof could refuse before `Sandbox::destroy` entered its callback and
@@ -526,12 +527,15 @@ mount's twelve comparisons, removed alone, now fails a test. Test-only: no produ
 line changed. The destruction's accounting limit stands as the closure assessment
 states it: a refused or indeterminate destruction answers no counters, and a later
 retry finds the proxy closed — as a runtime failure inside the callback already did.
+Committed as `396d87b`; hosted, run 41535101815 (no. 123) ran both regressions and the
+relay-mount tests in `make test` and passed — at their levels, in process; neither is E6.
 
 ## 6. Safe implementation sequence
 
 Each step keeps every production control as it is; each lands with its own
-local gates, then the owner's commit and a hosted run, before the next. No step
-enables npm in production.
+local gates, then the owner's commit and a hosted run, before the next — with one
+exception, the owner's (§10, "M5e.3's sequencing"): M5e.3 may proceed while M5e.2 is
+open. No step enables npm in production.
 
 | Step | Delivers | Product change | Exit |
 |---|---|---|---|
@@ -559,6 +563,10 @@ Where each step stands (2026-11-02): hosted runs 41349869654, 41358634372 and 41
 Where each step stands (2026-11-02, F-ABSENT hosted): hosted run 41446389484 (`f0f237f`, run no. 120, 29 of 29 jobs) passed F-ABSENT's fix at its tests' levels; a runtime that stops answering mid-operation is reproduced by no job. R2, R8, R9, R10, R11 and R17 stay hosted-verified; of R3, E1–E5 are evidenced at their levels, E6 has no qualifying exercised case and all 15 of its rows are **BLOCKED** (§3a), unchanged. Built since, unstaged, hosted run pending: the evidence's side of F-ABSENT, each real-runtime suite's `exists` (§5a). None of it is E6, and none closes R3. **M5e.2 is IN PROGRESS, R3 E6 BLOCKED**; M5e.3 is NOT STARTED, and does not start before M5e.2 closes (§7a).
 
 Where each step stands (2026-11-02, evidence side hosted): hosted run 41471750928 (`b6a8a1e`, run no. 121, 29 of 29 jobs) passed F-ABSENT's evidence side. Done, and hosted-verified at its tests' levels: the engineering hardening M5e.2's reviews found (§5a). Not met: M5e.2's acceptance — R3 needs E6, which has no qualifying evidence; all 15 of its rows are **BLOCKED** (§3a) and [issue #19](https://github.com/Onwcan/DireWolf/issues/19) tracks it. ADR-0057 stays **Proposed**, the owner's R-B binding; a runtime that stops answering between two of the broker's steps is still reproduced by no job. **M5e.2 is IN PROGRESS, R3 E6 BLOCKED**; M5e.3–M5e.6 are NOT STARTED.
+
+Where each step stands (2026-11-03, M5e.3 sequencing): hosted run 41535101815 (`396d87b`, run no. 123, 29 of 29 jobs) passed F-RELPROP's and F-PROXY-CLOSE's fixes at their tests' levels (§5a). M5e.2's acceptance is still not met: R3 needs E6, all 15 of its rows are **BLOCKED** (§3a), [issue #19](https://github.com/Onwcan/DireWolf/issues/19) tracks it, and ADR-0057 stays **Proposed** under R-B. By the owner's sequencing exception (§10), M5e.3 may start ahead of M5e.2's close, as §7a orders it — the deterministic, offline generators and fixtures first; it is NOT STARTED. M5e.4–M5e.6 still follow M5e.2's close, and M5e.6's gate and M5's acceptance wait for E6. **M5e.2 is IN PROGRESS, R3 E6 BLOCKED**; M5e.3–M5e.6 are NOT STARTED.
+
+Where each step stands (2026-11-03, M5e.3's offline fixtures): M5e.3 is **IN PROGRESS**, out of sequence: its generator, PEP 503 index and npm registry are built with their unit tests and §7a's guard (§7a), unstaged, hosted run pending; the per-run CA and the origins are not. Nothing of it is evidence or touches R3: E6 stays **BLOCKED**, all 15 rows, [issue #19](https://github.com/Onwcan/DireWolf/issues/19) OPEN, ADR-0057 **Proposed** under R-B. **M5e.2 is IN PROGRESS, R3 E6 BLOCKED**; M5e.3 is IN PROGRESS; M5e.4–M5e.6 are NOT STARTED.
 
 ## 7. Hermetic fixtures
 
@@ -594,12 +602,19 @@ fetched:
   (`--allow-evidence-egress`, logged as such), as M5b and M5d.5 do: the
   production IP guard is unchanged and still refuses loopback.
 
-## 7a. M5e.3 handoff (prepared 2026-10-31; M5e.3 NOT STARTED)
+## 7a. M5e.3 handoff (prepared 2026-10-31; M5e.3 IN PROGRESS since 2026-11-03, out of sequence)
 
-M5e.3 starts only once M5e.2 has closed — its hosted run (passed, run
+M5e.3 was to start only once M5e.2 had closed — its hosted run (passed, run
 41242001763), ADR-0056's acceptance (2026-11-01), and R3's real-container level, which the owner required on 2026-11-01
-(R-B on [ADR-0057](adr/0057-m5e-proxy-only-real-container-evidence-residual.md)) and which is BLOCKED (E6, not built). Nothing below has run; it is the
-brief for that step, not evidence.
+(R-B on [ADR-0057](adr/0057-m5e-proxy-only-real-container-evidence-residual.md)) and which is BLOCKED (E6, not built).
+On 2026-11-03 the owner made one narrow exception to that order (§10, "M5e.3's
+sequencing"): M5e.3 may proceed while M5e.2 stays open. It changes when this step may
+start, not what it is or what any other step requires. The order within it: the
+generator, the index and the registry first — deterministic, offline, standard
+library only, no socket — then the per-run CA, which cannot come from a seed (it
+is made afresh for every run, as `tests/net_http/make-pki.sh` makes the
+net.http evidence's), and the origins. The table is the brief, not evidence;
+what is built of it is recorded below it.
 
 | Piece | Build | Done when |
 |---|---|---|
@@ -610,10 +625,56 @@ brief for that step, not evidence.
 | Per-run CA | generated per run, never committed and never in a workspace; M5e.4 bakes it into the registry tools image at npm's one trust file (`/etc/direwolf/npm-ca.pem`, OD-E6: image CA only) and pip's (`/etc/direwolf/pip-ca.pem`, ADR-0055 §5) | — |
 | Guards | the production IP guard unchanged — loopback refused outside the evidence-only resolver; no fixture fetched from, or naming, a public host; no real third-party package at any time | an architecture test holds the generator to the standard library, no network module, no public host name |
 
+**Built (2026-11-03), unstaged, hosted run pending: the generator, the index and
+the registry.**
+
+- **The generator.** `tests/sandbox/registry_fixtures.py`, `generate(seed, out)`:
+  - standard library only, and nothing but bytes;
+  - every name, version and module value from the seed (`dwfx-<tag>-<role>`);
+  - archives sorted and stored, not compressed: ZIP entries of 1980-01-01, tar
+    members 0644 of owner 0 modified at 0, gzip modified at 0 around stored
+    blocks — so no compressor's version changes a byte.
+- **Its output.** What each origin serves, by route (a file, or a 302 to the
+  ungranted host); the image `pip.conf`; the npm project with its lockfile; the
+  hostile `.npmrc`; and a manifest of the seed, the two hosts (RFC 6761's
+  `granted-registry.test` and `ungranted-registry.test`), every package by
+  role, every marker and every file's SHA-256.
+- **Markers.** Empty files in the workspace (`/workspace`, the profile's
+  `WORKSPACE_TARGET`).
+- **Beyond the table's rows,** for ADR-0055 §9's cases:
+  - a granted page whose file is on the ungranted host;
+  - a page redirected to that host;
+  - the ungranted index and registry each serving a package, so pointing at
+    either finds what it asked for and a refusal can only be the proxy's.
+- **The git dependency's tree** is emitted but routed by no origin: none speaks
+  git, and its URL names the ungranted host.
+- **The unit tests** (`tests/sandbox/test_registry_fixtures.py`, in `make
+  test`) hold the generator's, the index's and the registry's "done when":
+  - same seed same bytes, another seed different, a fixed seed's bytes
+    recorded by digest, no output naming where it was written;
+  - fixed archive metadata, every RECORD, every page and link hash;
+  - every integrity, the tampered tarball, the lockfile;
+  - that each marker is written when its code runs: the `.pth` under
+    `site.addsitedir`, each build-backend hook in process, and every npm
+    script by the one command template (no `node` runs here: package-manager
+    tools are hosted-only, the owner's direction 3, §1). A missing marker
+    therefore cannot mean broken code.
+- **The guard** (`tests/architecture/test_m5e_registry_fixtures.py`) is the
+  Guards row's architecture test. It holds the generator to:
+  - the standard library, with no network, process, dynamic-import or C module
+    and no code-running builtin;
+  - no literal URL host in its source;
+  - only its two `.test` hosts in everything it generates;
+  - only its own packages and dependencies;
+  - markers in the profile's workspace.
+- **Not built:** the per-run CA and the origins.
+
 Not M5e.3's: the registry tools image (M5e.4, built on the hosted runner from
 pinned Node.js/npm and pip versions checked against recorded checksums,
 OD-E4), any pip or npm run, and any change to `hygiene.rs`. ADR-0054 and
-ADR-0055 stay **Proposed**; npm stays `HYGIENE_NOT_EVIDENCED`.
+ADR-0055 stay **Proposed**; npm stays `HYGIENE_NOT_EVIDENCED`. Nor anything of E6:
+no M5e.3 fixture, case or line weakens a hard rule or a topology, stands for E6 or
+counts toward R3, and M5e.3's completion claims nothing for M5e.2.
 
 ## 8. CI jobs and tasks
 
@@ -653,7 +714,7 @@ a wrong level, a missing attribution and a weakened workflow each fail.
 | M5e.2 neighbour negative control (R8) | runs (`make sandbox-neighbour-mutations`) | by hand, like every mutation review |
 | M5e.2 runtime restart (R11) | NOT EXERCISED, never local: the task and the test refuse | required (`sandbox-restart`, disposable runner) — passed (run 41130431929) |
 | The privileged jobs' handoff (CI #106) | its contract and a stub-`sudo` execution run | passed (run 41130431929) |
-| M5e.3 fixture generators | runs | required |
+| M5e.3 fixture generators, their unit tests and guard (§7a) | runs | required (`make test`) — built 2026-11-03, hosted run pending |
 | M5e.4–M5e.5 pip and npm against the fixtures | NOT EXERCISED (no pip or npm installed on the host, by decision) | required |
 | M5e.6 gate | the local parts | required |
 
@@ -693,6 +754,42 @@ contract states; E1–E5 stay supporting evidence at their levels, and M5's
 acceptance wording is unchanged. E6 is BLOCKED: the earlier safety control
 stands, and producing E6 needs a plan the owner approves within it
 (ADR-0057 §8).
+
+**M5e.3's sequencing (2026-11-03).** E6 is BLOCKED, so M5e.2 cannot close, and §6
+and §7a started M5e.3 only after M5e.2 closed. E6 is an unresolved gap in the
+assurance evidence, not a vulnerability found. The owner made one narrow
+exception to that order: **M5e.3's fixture work may proceed while M5e.2 stays
+IN PROGRESS.** What it decides, and what it does not:
+
+- **It moves when M5e.3 may start, and nothing else.** M5e.3's scope is §7a's
+  brief, in §7a's order — the deterministic, offline generators and fixtures
+  first. M5e.3 closes on its own exit (§6) and its hosted run, and its closing
+  claims nothing for M5e.2. M5e.4–M5e.6 still follow M5e.2's close; taking any
+  other step out of order needs a decision of its own.
+- **R-B stands, and E6 with it.** ADR-0057 stays **Proposed** and outside the
+  accepted digest, its residual not accepted; E6 stays required, its 15 rows
+  **BLOCKED** (required 15, passed 0), §3b's criteria unchanged. No M5e.3
+  fixture, case or line weakens a hard rule or a topology, stands for E6 or
+  counts toward R3.
+- **M5e.2 stays open, and in view.** M5e.2 stays **IN PROGRESS** and
+  [issue #19](https://github.com/Onwcan/DireWolf/issues/19) stays OPEN, cited
+  by each status that follows.
+- **Nothing accepted, required or measured changes.** No accepted ADR or its
+  digest, production control, hard rule, invariant, evidence level,
+  architecture guard, CI job or requirement, eval or baseline changes; M5e.3
+  adds tests and guards (§7a) and removes none.
+- **M5's acceptance waits for E6.** M5e.6's gate and M5's acceptance stay where
+  R-B put them: after genuine E6 evidence closes R3 and the owner closes M5e.2.
+  Neither `M5e` nor `M5` joins the available milestones before then.
+- **It does not authorise producing E6.** That still needs a plan the owner
+  approves within the safety control, or genuine independent evidence meeting
+  §3b that the owner accepts (ADR-0057 §8); this decision is neither.
+
+`tests/architecture/test_m5e_r3_closure.py` holds the exception to that while
+ADR-0057 stands: this is the plan's one record of it; no status document claims
+M5e.4–M5e.6, M5e or M5 complete; the ROADMAP's M5e heading keeps M5e.4–M5e.6
+not started; the plan's current status and the ROADMAP's "Still to do" cite
+issue #19; and neither `M5e` nor `M5` is an available milestone.
 
 ## 11. What this plan does not do or claim
 

@@ -432,6 +432,20 @@ W13, W6 and W7; with real containers, `a_lease_end_over_dwkp_destroys_its_runs_e
 and `a_takeover_a_restart_or_a_crash_ends_a_reaped_runs_environment` in
 `sandbox_workload.rs`, and a `ReleaseLease` in the `PROXY_ONLY` test.
 
+**Registry fixtures (M5e.3)** are test data, generated, not evidence
+([the M5e plan](../docs/M5E_ASSURANCE_PLAN.md) §7a).
+`tests/sandbox/registry_fixtures.py`, standard library only, writes a PEP 503
+index and an npm registry for a granted and an ungranted origin from a seed,
+with every byte fixed by it. `tests/sandbox/test_registry_fixtures.py` holds
+them to what M5e.4's evidence will rely on: the same seed gives the same bytes,
+and a fixed seed's are recorded by digest; every archive's metadata is fixed;
+every RECORD, page hash, integrity and lockfile entry agrees with what it
+names; and each marker a negative case looks for is written when its code
+runs. The plan's guard, `tests/architecture/test_m5e_registry_fixtures.py`,
+holds the generator to the standard library, no network or process module,
+and only its own two `.test` hosts and its own packages. Both run in
+`make test`; neither serves, installs or runs a package manager.
+
 **Brokered `fs.read` tests (M4b)** are real-process evidence for the private
 channel ([ADR-0043](../docs/adr/0043-m4b-private-broker-channel-and-brokered-fs-read.md)):
 `crates/dwkd-authority/tests/broker_fs_read.rs` drives the released authority and

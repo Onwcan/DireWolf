@@ -14,6 +14,10 @@ and nothing else stands in for it. So:
   status document says M5e.2 is COMPLETE, and its limited claim (§5, not
   approved) is not M5's;
 * ADR-0056, accepted, stays in the digest at its accepted bytes;
+* the owner's one exception to M5e's order (2026-11-03, the plan's §10) moves
+  M5e.3 alone: while ADR-0057 stands, no status document claims a later step,
+  M5e or M5 complete, the ROADMAP keeps M5e.4-M5e.6 not started, issue #19
+  stays cited, and neither `M5e` nor `M5` is an available milestone;
 * the two tasks that carry R3's supporting evidence keep their cleanup and
   ownership census -- nothing the evidence made left behind, nothing that
   predates it gone -- and check it before they count a line.
@@ -60,6 +64,14 @@ STATUS_DOCUMENTS = (
 # "M5e.2 COMPLETE", "**M5e.2 is COMPLETE**", "M5e.2 — COMPLETE": the
 # documents' own way of saying a step closed.
 _COMPLETE = re.compile(r"M5e\.2\W{0,4}(?:is\W{1,4})?COMPLETE\b")
+# The owner's one exception to M5e's order, as the plan's §10 records it.
+_SEQUENCING = "**M5e.3's sequencing (2026-11-03).**"
+ISSUE_19 = "https://github.com/Onwcan/DireWolf/issues/19"
+# A step after M5e.3, M5e itself or M5 said to be closed: "M5e.6 COMPLETE",
+# "**M5e — COMPLETE**", "M5 · Sandbox — **COMPLETE**", "**M5 is COMPLETE**".
+_GATE_COMPLETE = re.compile(
+    r"\bM5(?:e(?:\.[4-6])?)?(?:\W{1,6}Sandbox)?\W{1,6}(?:is\W{1,4})?COMPLETE\b"
+)
 
 
 def _text(path: Path) -> str:
@@ -140,6 +152,50 @@ def test_the_residuals_limited_claim_is_not_m5s() -> None:
     assert _COMPLETE.search("**M5e.2 is COMPLETE**")
     assert _COMPLETE.search("M5e.2 — COMPLETE")
     assert not _COMPLETE.search("M5e.2 IN PROGRESS, R3 E6 BLOCKED")
+
+
+def test_the_m5e3_sequencing_exception_moves_m5e3_alone() -> None:
+    """The owner's exception of 2026-11-03 lets M5e.3's fixture work proceed
+    while M5e.2 is open, and changes nothing else. While ADR-0057 stands: the
+    plan records it once, among the owner's decisions; no status document
+    claims a later step, M5e or M5 complete; the ROADMAP's M5e heading keeps
+    M5e.4-M5e.6 not started; the plan's current status line and the ROADMAP's
+    "Still to do" cite issue #19; and neither `M5e` nor `M5` is an available
+    milestone, so no eval that waits for M5's gate turns on."""
+    from direwolf_evals.runner import AVAILABLE_MILESTONES
+
+    if _status(_text(RESIDUAL)).startswith("superseded"):
+        return
+    plan = _text(PLAN)
+    decisions = plan[plan.index("## 10. ") : plan.index("## 11. ")]
+    assert plan.count(_SEQUENCING) == 1, "the exception has one record"
+    assert _SEQUENCING in decisions, "the exception is recorded among the owner's decisions"
+    claimed = [
+        f"{path.relative_to(REPO_ROOT)}: {found.group(0)!r}"
+        for path in STATUS_DOCUMENTS
+        for found in _GATE_COMPLETE.finditer(_text(path))
+    ]
+    assert not claimed, f"a later step, M5e or M5 claimed complete while E6 is blocked: {claimed}"
+    roadmap = _text(ROADMAP)
+    section = roadmap[roadmap.index("#### M5e ") : roadmap.index("#### The M5 contract")]
+    heading = section.splitlines()[0]
+    assert "M5e.4\N{EN DASH}M5e.6 not started" in heading, heading
+    todo = section[section.index("\nStill to do: ") :]
+    assert ISSUE_19 in todo[: todo.index("\n\n")], "the ROADMAP's 'Still to do' cites issue #19"
+    current = [line for line in plan.splitlines() if line.startswith("**Status (")][-1]
+    assert ISSUE_19 in current, "the plan's current status line cites issue #19"
+    assert not {"M5e", "M5"} & AVAILABLE_MILESTONES, sorted(AVAILABLE_MILESTONES)
+    # The test of the pattern itself: it finds the claims it exists to refuse,
+    # and none of the steps that may close.
+    for claim in (
+        "M5e.6 COMPLETE",
+        "**M5e — COMPLETE**",
+        "M5 \N{MIDDLE DOT} Sandbox — **COMPLETE**",
+        "**M5 is COMPLETE**",
+    ):
+        assert _GATE_COMPLETE.search(claim), claim
+    for allowed in ("M5e.1 COMPLETE", "M5e.3 COMPLETE", "M5a — COMPLETE", "M5 is complete only"):
+        assert not _GATE_COMPLETE.search(allowed), allowed
 
 
 def test_the_r3_tasks_check_their_census_before_they_count_a_line() -> None:
