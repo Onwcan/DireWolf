@@ -33,9 +33,9 @@ dev = [
     "direwolf",
     "dwcheck",
     "direwolf-evals",
-    "ruff>=0.17.2",
-    "mypy>=2.4.0",
-    "pytest>=8.4",
+    "ruff>=0.17.3",
+    "mypy>=2.4.1",
+    "pytest>=9.2.0",
     "pip-audit>=2.9",
 ]
 
