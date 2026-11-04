@@ -444,7 +444,29 @@ names; and each marker a negative case looks for is written when its code
 runs. The plan's guard, `tests/architecture/test_m5e_registry_fixtures.py`,
 holds the generator to the standard library, no network or process module,
 and only its own two `.test` hosts and its own packages. Both run in
-`make test`; neither serves, installs or runs a package manager.
+`make test`, on every platform CI tests; neither serves, installs or runs a
+package manager.
+
+**The registry origins (M5e.3)** serve that data, and are also not evidence.
+
+What builds and serves them:
+- `tests/net_http/make-pki.sh`, the net.http evidence's per-run PKI, also makes
+  each registry origin's certificate under the same anchor, plus the rogue and
+  `system`-signed ones a registry tool must refuse.
+- `tests/net_http/origin.py --routes <manifest> --side granted|ungranted`
+  serves exactly one side's routes on loopback.
+
+What tests them:
+- `tests/sandbox/test_registry_origins.py` (Linux only, where the PKI script
+  runs) reaches every route with the standard library's verifying client,
+  trusting the per-run anchor alone. It shows the ungranted origin is as valid
+  as the granted one, so a refusal of it is never TLS's. It also holds what a
+  TLS failure is apart from that refusal.
+- The proxy's side is in `crates/dwkd-broker/src/egress/tests.rs`: the real
+  proxy and evidence-only resolver over the generator's two names. It tunnels
+  the granted origin, refuses the ungranted one as `TARGET_NOT_GRANTED` before
+  any byte reaches it, and refuses the granted one on loopback without the
+  fixture's exception.
 
 **Brokered `fs.read` tests (M4b)** are real-process evidence for the private
 channel ([ADR-0043](../docs/adr/0043-m4b-private-broker-channel-and-brokered-fs-read.md)):

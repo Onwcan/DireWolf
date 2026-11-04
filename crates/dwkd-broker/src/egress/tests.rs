@@ -753,3 +753,117 @@ fn a_restarted_broker_removes_only_its_own_stale_directories() {
 fn the_production_resolver_has_no_exceptions() {
     assert!(super::resolve::SystemResolver.exceptions().is_empty());
 }
+
+/// The two names of M5e.3's registry origins, as the fixture generator spells
+/// them (`tests/sandbox/registry_fixtures.py`), so this test and the fixtures
+/// cannot name different hosts.
+fn registry_hosts() -> (String, String) {
+    let source = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/sandbox/registry_fixtures.py"),
+    )
+    .unwrap();
+    let constant = |name: &str| -> String {
+        let prefix = format!("{name} = \"");
+        source
+            .lines()
+            .find_map(|line| line.strip_prefix(prefix.as_str())?.strip_suffix('"'))
+            .unwrap_or_else(|| panic!("{name} is not in the generator"))
+            .to_owned()
+    };
+    (constant("GRANTED_HOST"), constant("UNGRANTED_HOST"))
+}
+
+fn registry_grant(host: &str, port: u16) -> EgressGrant {
+    EgressGrant {
+        targets: EgressTargets::new(vec![EgressTarget {
+            host: EgressHost::new(host.to_owned()).unwrap(),
+            port: EgressPort::new(port).unwrap(),
+        }])
+        .unwrap(),
+        ..grant(port, 4, 1 << 20, 1 << 20)
+    }
+}
+
+fn connect_to(stream: &mut UnixStream, host: &str, port: u16) -> String {
+    ask(
+        stream,
+        &format!("CONNECT {host}:{port} HTTP/1.1\r\nHost: {host}:{port}\r\n\r\n"),
+    )
+}
+
+/// M5e.3's two registry origins as the proxy meets them
+/// (`M5E_ASSURANCE_PLAN.md` §7a): the generator's own names, which only the evidence's fixture
+/// resolver maps to loopback, and a run granted the granted origin alone. A
+/// tunnel to it carries a client hello naming it. A CONNECT to the ungranted
+/// origin -- or to the granted name at the ungranted origin's port -- is the
+/// proxy's `TARGET_NOT_GRANTED`, decided before its name is resolved and
+/// before a byte reaches that origin. Nothing of TLS has begun, so it is never
+/// a TLS failure; that the ungranted origin's TLS is as valid as the granted
+/// one's is `tests/sandbox/test_registry_origins.py`'s.
+#[test]
+fn a_registry_tunnel_reaches_the_granted_origin_and_never_the_ungranted_one() {
+    let (granted_host, ungranted_host) = registry_hosts();
+    // RFC 6761's reserved top-level name: nothing public answers for either.
+    for host in [&granted_host, &ungranted_host] {
+        assert_eq!(
+            host.rsplit_once('.').map(|(_, top)| top),
+            Some("test"),
+            "{host}"
+        );
+    }
+    assert_ne!(granted_host, ungranted_host);
+    let granted = origin(0);
+    let ungranted = origin(0);
+    let fixture = format!(
+        "resolve {granted_host} 127.0.0.1\nresolve {ungranted_host} 127.0.0.1\nallow 127.0.0.1\n"
+    );
+    let env = env(&fixture, registry_grant(&granted_host, granted.port));
+    let mut client = dial(&env.dir);
+    assert_eq!(
+        connect_to(&mut client, &granted_host, granted.port),
+        "HTTP/1.1 200 Connection Established\r\n\r\n"
+    );
+    let hello = build::hello(&granted_host);
+    client.write_all(&hello).unwrap();
+    client.shutdown(std::net::Shutdown::Write).unwrap();
+    counted(&env, D::Closed, 1);
+    assert_eq!(*granted.received.lock().unwrap(), hello);
+    for (host, port) in [
+        (ungranted_host.as_str(), ungranted.port),
+        (granted_host.as_str(), ungranted.port),
+    ] {
+        let mut refused = dial(&env.dir);
+        refused_with(
+            &connect_to(&mut refused, host, port),
+            "403 Forbidden",
+            D::TargetNotGranted,
+        );
+    }
+    counted(&env, D::TargetNotGranted, 2);
+    assert_eq!(env.resolver.queries(&ungranted_host), 0);
+    assert_eq!(env.resolver.queries(&granted_host), 1);
+    assert_eq!(ungranted.accepted.load(Ordering::SeqCst), 0);
+    assert_eq!(granted.accepted.load(Ordering::SeqCst), 1);
+}
+
+/// Without the evidence fixture's loopback exception the production guard
+/// stands as it always does: the granted registry, resolved to loopback, is
+/// refused as a blocked address and never dialled. The registry origins are
+/// reachable only through the evidence-only resolver.
+#[test]
+fn a_registry_origin_on_loopback_is_refused_without_the_evidence_exception() {
+    let (granted_host, _) = registry_hosts();
+    let granted = origin(0);
+    let env = env(
+        &format!("resolve {granted_host} 127.0.0.1\n"),
+        registry_grant(&granted_host, granted.port),
+    );
+    let mut client = dial(&env.dir);
+    refused_with(
+        &connect_to(&mut client, &granted_host, granted.port),
+        "403 Forbidden",
+        D::AddressBlocked,
+    );
+    counted(&env, D::AddressBlocked, 1);
+    assert_eq!(granted.accepted.load(Ordering::SeqCst), 0);
+}

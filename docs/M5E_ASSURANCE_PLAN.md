@@ -19,6 +19,7 @@
 **Status (2026-11-02, evidence side hosted):** the owner committed F-ABSENT's evidence side as `b6a8a1e`; hosted [run 41471750928](https://github.com/Onwcan/DireWolf/actions/runs/41471750928) (run no. 121, `b6a8a1e`): **SUCCESS**, 29 of 29 jobs, by their conclusions. So the engineering hardening M5e.2's reviews found — F-RELAY, F-EVICT, F-TEARDOWN, F-ABSENT and F-ABSENT's evidence side (§5a) — is fixed and hosted-verified, each at its tests' levels; a runtime that stops answering between two of the broker's steps is still reproduced by no job. That is not M5e.2's acceptance: R3's E6 has no qualifying evidence, all 15 of its rows are **BLOCKED** (§3a), and [issue #19](https://github.com/Onwcan/DireWolf/issues/19) is the tracker for it; ADR-0057 stays **Proposed**, the owner's R-B binding. **M5e.2 is IN PROGRESS, R3 E6 BLOCKED**; M5e.3–M5e.6 are NOT STARTED.\
 **Status (2026-11-03, M5e.3 sequencing):** the owner committed F-RELPROP's and F-PROXY-CLOSE's fixes (§5a) as `396d87b`; hosted [run 41535101815](https://github.com/Onwcan/DireWolf/actions/runs/41535101815) (run no. 123, `396d87b`): **SUCCESS**, 29 of 29 jobs, by their conclusions — both fixes hosted-verified at their tests' levels, unit tests in `make test`; neither is E6. The owner then made one narrow exception to §6's order (§10, "M5e.3's sequencing"): M5e.3's fixture work may proceed while M5e.2 stays open. It changes when M5e.3 may start and nothing else — the owner's R-B, E6's 15 rows and §3b's criteria, every evidence level, production control, architecture guard and CI requirement, and M5's acceptance stand as written. **M5e.2 is IN PROGRESS, R3 E6 BLOCKED** (required 15, passed 0, blocked 15), and [issue #19](https://github.com/Onwcan/DireWolf/issues/19) stays OPEN; M5e.3 is NOT STARTED, its start authorised ahead of M5e.2's close; M5e.4–M5e.6 are NOT STARTED and still follow M5e.2.\
 **Status (2026-11-03, M5e.3's offline fixtures):** under that exception M5e.3 started, in §7a's order. Built, unstaged, hosted run pending: §7a's generator, PEP 503 index and npm registry — `tests/sandbox/registry_fixtures.py`, standard library only, every byte from a seed, a fixed seed's bytes pinned by a recorded digest — with their unit tests (`tests/sandbox/test_registry_fixtures.py`) and §7a's guard (`tests/architecture/test_m5e_registry_fixtures.py`), all in `make test`. Not built: the per-run CA and the origins (§7a). No production line, evidence case or level, CI job or eval changes; none of it is evidence, and none bears on R3 or E6. **M5e.2 is IN PROGRESS, R3 E6 BLOCKED** (required 15, passed 0, blocked 15), and [issue #19](https://github.com/Onwcan/DireWolf/issues/19) stays OPEN; M5e.3 is IN PROGRESS, out of sequence; M5e.4–M5e.6 are NOT STARTED and still follow M5e.2.\
+**Status (2026-11-04, M5e.3 built; M5e.2 partially implemented):** the owner committed the sequencing exception, M5e.3's offline fixtures and the closed-port fix as `6be8c41`; hosted [run 41720068934](https://github.com/Onwcan/DireWolf/actions/runs/41720068934) (run no. 126, `6be8c41`): **FAILURE**, 27 of 29 jobs. `make test` on windows-latest failed, and the `ci` aggregate with it: two fixture tests gave pytest's Windows `tmp_path` as a marker directory, which the generator refused. On Linux and macOS every fixture test passed, the recorded digest included, as did the sequencing guard and the closed-port fix. Fixed since, unstaged, hosted run pending: a marker directory is an absolute POSIX or Windows path of plain segments, in one canonical form, the default's bytes unchanged (§7a). Built since, unstaged, hosted run pending: the rest of M5e.3 — the per-run CA's registry certificates and the two registry origins, with the proxy's side shown in process (§7a). **M5e.2 — PARTIALLY IMPLEMENTED / ASSURANCE BLOCKED (R3/E6, [issue #19](https://github.com/Onwcan/DireWolf/issues/19))**: its engineering hardening is hosted-verified; R3's real-container E6, required by the owner's R-B, is BLOCKED (required 15, passed 0, blocked 15); M5e.2 stays IN PROGRESS. M5e.3's implementation is complete under the owner's sequencing exception (§10), its hosted validation pending; M5e.4–M5e.6 are NOT STARTED and still follow M5e.2, and M5's acceptance waits for E6.\
 **Authority of this document:** a technical plan, not an ADR. It approves nothing itself; the owner's decisions are recorded in §10 as given. [ADR-0054](adr/0054-m5e-npm-hygiene-profile.md) stays **Proposed**.
 
 ## 1. Scope, sources and the owner's directions
@@ -568,6 +569,8 @@ Where each step stands (2026-11-03, M5e.3 sequencing): hosted run 41535101815 (`
 
 Where each step stands (2026-11-03, M5e.3's offline fixtures): M5e.3 is **IN PROGRESS**, out of sequence: its generator, PEP 503 index and npm registry are built with their unit tests and §7a's guard (§7a), unstaged, hosted run pending; the per-run CA and the origins are not. Nothing of it is evidence or touches R3: E6 stays **BLOCKED**, all 15 rows, [issue #19](https://github.com/Onwcan/DireWolf/issues/19) OPEN, ADR-0057 **Proposed** under R-B. **M5e.2 is IN PROGRESS, R3 E6 BLOCKED**; M5e.3 is IN PROGRESS; M5e.4–M5e.6 are NOT STARTED.
 
+Where each step stands (2026-11-04, M5e.3 built): hosted run 41720068934 (`6be8c41`, run no. 126, 27 of 29 jobs) failed only Windows' `make test`: two fixture tests whose marker directory was pytest's Windows `tmp_path`. Fixed since (§7a), unstaged, hosted run pending. Built since, unstaged, hosted run pending: M5e.3's per-run CA and its two origins, with the proxy's side shown in process (§7a). So M5e.3's implementation is complete under the owner's exception; it closes on its hosted run. M5e.2 is **PARTIALLY IMPLEMENTED / ASSURANCE BLOCKED**: its engineering is hosted-verified; E6 is required and **BLOCKED**, all 15 rows, [issue #19](https://github.com/Onwcan/DireWolf/issues/19) OPEN, and ADR-0057 **Proposed** under R-B. **M5e.2 is IN PROGRESS, R3 E6 BLOCKED**; M5e.3's implementation is complete, hosted validation pending; M5e.4–M5e.6 are NOT STARTED.
+
 ## 7. Hermetic fixtures
 
 All synthetic, generated at test time from a seed, served on loopback, never
@@ -602,7 +605,7 @@ fetched:
   (`--allow-evidence-egress`, logged as such), as M5b and M5d.5 do: the
   production IP guard is unchanged and still refuses loopback.
 
-## 7a. M5e.3 handoff (prepared 2026-10-31; M5e.3 IN PROGRESS since 2026-11-03, out of sequence)
+## 7a. M5e.3 handoff (prepared 2026-10-31; M5e.3 out of sequence since 2026-11-03, built 2026-11-04, hosted validation pending)
 
 M5e.3 was to start only once M5e.2 had closed — its hosted run (passed, run
 41242001763), ADR-0056's acceptance (2026-11-01), and R3's real-container level, which the owner required on 2026-11-01
@@ -667,7 +670,83 @@ the registry.**
   - only its two `.test` hosts in everything it generates;
   - only its own packages and dependencies;
   - markers in the profile's workspace.
-- **Not built:** the per-run CA and the origins.
+- **Not built on 2026-11-03:** the per-run CA and the origins (below).
+
+**Fixed and built (2026-11-04), unstaged, hosted run pending: Windows, the per-run CA
+and the origins.**
+
+- **The Windows marker directory.** Hosted run 41720068934, `make test` on
+  windows-latest: `generate()` took only a POSIX marker directory, so pytest's
+  `tmp_path` (`C:\Users\runneradmin\...`) was refused and two tests failed.
+  - **Now:** a marker directory is an absolute POSIX or Windows path of plain
+    segments (`[A-Za-z0-9._~-]`), with no `.` or `..`, in one canonical form:
+    forward slashes, no trailing one. Python and Node accept that form on both
+    platforms. One function, `marker_path`, builds every marker.
+  - **What reaches generated code:** only `[A-Za-z0-9._~/:-]` reaches the
+    generated Python, JavaScript and shell text, so no quoting can change what
+    it runs.
+  - **Determinism:** the default `/workspace` writes the same bytes as before,
+    so the recorded digest is unchanged.
+  - **Tests:**
+    - each accepted spelling, POSIX and Windows, and its canonical form;
+    - the refused ones: relative, drive-relative, UNC, `.` and `..`, quotes, a
+      backslash in a POSIX path, `$`, backtick, `%`, space, control and
+      non-ASCII characters;
+    - the npm command split as a POSIX shell splits it, and the `.pth`'s and
+      the backend's paths parsed back;
+    - the same fixtures, byte for byte, for every spelling of one directory;
+    - markers written where this host's own spelling, with a trailing
+      separator, names.
+  - **Run locally:** on native Windows Python 3.12 with the test files
+    unchanged; hosted Windows pending.
+- **The per-run CA.** `tests/net_http/make-pki.sh`, the net.http evidence's
+  per-run PKI, now also makes, afresh every run in a temporary directory and
+  never committed:
+  - `registry-granted` and `registry-ungranted`: each origin its own name,
+    under the same anchor;
+  - `registry-rogue`: the granted name under the rogue authority;
+  - a third authority, `system`, and `registry-system`, the granted name under
+    it: what an image's system store may trust and a registry tool's pinned
+    trust file must not (ADR-0055 §9).
+- **The origins.** `tests/net_http/origin.py --routes manifest.json --side
+  granted|ungranted` is the existing per-run-PKI HTTPS origin on 127.0.0.1,
+  answering exactly that side's routes in the generated manifest:
+  - each file with its content type, read once at start from the manifest's
+    own directory, or its redirect;
+  - 404 for any other path, 405 for any method but GET, and `Connection: close`
+    on every response;
+  - it refuses to start on a route naming a file outside that directory, or on
+    a side the manifest lacks;
+  - its net.http paths are unchanged.
+- **Their tests** (`tests/sandbox/test_registry_origins.py`, in `make test`;
+  Linux only, where the PKI script and the evidence run). A standard-library
+  client that verifies the certificate and its name, trusting the per-run
+  anchor alone, shows:
+  - every route of both origins answers exactly the manifest's bytes, content
+    type and redirect;
+  - each origin answers nothing of the other's and no other path;
+  - both certificates verify, each for its own name only, under the one anchor;
+  - the wrong name, the rogue issuer and the `system`-only certificate each
+    fail verification, the last accepted only under `system`;
+  - the PKI differs every run;
+  - a stopped origin's port is closed;
+  - an origin given an escaping route or a missing side refuses to start.
+- **The proxy's side, in process** (`crates/dwkd-broker/src/egress/tests.rs`,
+  in `make test`). These use the real `Proxies`, guard and evidence-only
+  fixture resolver, over the generator's two names as its source spells them:
+  - a tunnel to the granted origin carries a client hello naming it;
+  - a `CONNECT` to the ungranted origin, or to the granted name at its port,
+    is `TARGET_NOT_GRANTED`, decided before any resolution and before a byte
+    reaches it;
+  - without the fixture's loopback exception, the production guard refuses
+    the granted origin as a blocked address.
+- **What this shows.** "A refusal of the ungranted one is the proxy's decision,
+  never a TLS failure" is shown in two halves, each in process, at its level:
+  - the proxy refuses the ungranted origin before any TLS begins;
+  - the ungranted origin's TLS is as valid as the granted one's.
+- **What it doesn't.** No real client through a real environment's relay and
+  proxy reaches these origins here: that needs a measured `PROXY_ONLY`
+  environment, and is M5e.4's hosted evidence, not M5e.3's.
 
 Not M5e.3's: the registry tools image (M5e.4, built on the hosted runner from
 pinned Node.js/npm and pip versions checked against recorded checksums,
@@ -714,7 +793,8 @@ a wrong level, a missing attribution and a weakened workflow each fail.
 | M5e.2 neighbour negative control (R8) | runs (`make sandbox-neighbour-mutations`) | by hand, like every mutation review |
 | M5e.2 runtime restart (R11) | NOT EXERCISED, never local: the task and the test refuse | required (`sandbox-restart`, disposable runner) — passed (run 41130431929) |
 | The privileged jobs' handoff (CI #106) | its contract and a stub-`sudo` execution run | passed (run 41130431929) |
-| M5e.3 fixture generators, their unit tests and guard (§7a) | runs | required (`make test`) — built 2026-11-03, hosted run pending |
+| M5e.3 fixture generators, their unit tests and guard (§7a) | runs | required (`make test`) — passed on ubuntu-latest and macos-latest (run 41720068934); failed on windows-latest there, fixed 2026-11-04, hosted run pending |
+| M5e.3 registry origins, their per-run CA, and the proxy's side in process (§7a) | runs (Linux) | required (`make test`, ubuntu-latest) — built 2026-11-04, hosted run pending; macOS and Windows: NOT EXERCISED, by design |
 | M5e.4–M5e.5 pip and npm against the fixtures | NOT EXERCISED (no pip or npm installed on the host, by decision) | required |
 | M5e.6 gate | the local parts | required |
 

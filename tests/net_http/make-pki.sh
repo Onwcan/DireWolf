@@ -12,6 +12,17 @@
 #   rogue-origin.{pem,key}   origin.test, signed by the rogue authority
 #   selfsigned.{pem,key}     origin.test, signed by itself
 #
+# M5e.3's registry origins (M5E_ASSURANCE_PLAN.md §7a) share the same anchor:
+#
+#   system.pem / system.key        a third authority: what an image's system
+#                                  store may trust, never a registry tool's
+#                                  pinned trust file (ADR-0055 §9)
+#   registry-granted.{pem,key}     granted-registry.test, signed by the anchor
+#   registry-ungranted.{pem,key}   ungranted-registry.test, signed by the anchor:
+#                                  a valid origin, so a refusal of it is never TLS's
+#   registry-rogue.{pem,key}       granted-registry.test, signed by the rogue authority
+#   registry-system.{pem,key}      granted-registry.test, signed by `system`
+#
 # `openssl ca` rather than `openssl x509 -not_after`: dates in the past need
 # OpenSSL 3.4's x509 options otherwise, and CI's runners have 3.0.
 set -euo pipefail
@@ -21,7 +32,7 @@ cd "$out"
 
 key() { openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out "$1" 2>/dev/null; }
 
-for ca in ca rogue; do
+for ca in ca rogue system; do
   key "$ca.key"
   openssl req -x509 -new -key "$ca.key" -sha256 -days 3650 \
     -subj "/CN=DireWolf net.http evidence $ca" \
@@ -65,6 +76,13 @@ leaf other ca other.test 20250101000000Z 20991231000000Z
 leaf alt ca alt.origin.test 20250101000000Z 20991231000000Z
 leaf expired ca origin.test 20200101000000Z 20200102000000Z
 leaf rogue-origin rogue origin.test 20250101000000Z 20991231000000Z
+
+# The registry origins: one name each, both under the anchor; and the granted
+# name under the two authorities a registry tool's trust file must not accept.
+leaf registry-granted ca granted-registry.test 20250101000000Z 20991231000000Z
+leaf registry-ungranted ca ungranted-registry.test 20250101000000Z 20991231000000Z
+leaf registry-rogue rogue granted-registry.test 20250101000000Z 20991231000000Z
+leaf registry-system system granted-registry.test 20250101000000Z 20991231000000Z
 
 key selfsigned.key
 openssl req -x509 -new -key selfsigned.key -sha256 -days 3650 -subj "/CN=origin.test" \

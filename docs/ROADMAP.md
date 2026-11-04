@@ -451,7 +451,7 @@ and package-manager acceptance are M5e's, and the `local` environment is M6's (O
 stays in progress until M5e meets its own acceptance. Passing CI is the evidence named
 here — not a deployment, and not a certification.
 
-#### M5e · The M5 adversarial gate and closeout — **IN PROGRESS** (M5e.1 complete; M5e.2 in progress — R8, R9 and R11 hosted-verified and ADR-0056 accepted, R3's real-container level required by the owner (R-B on ADR-0057, 2026-11-01) and blocked; M5e.3 in progress ahead of M5e.2's close, by the owner's exception (2026-11-03) — its offline fixtures built, hosted run pending; M5e.4–M5e.6 not started)
+#### M5e · The M5 adversarial gate and closeout — **IN PROGRESS** (M5e.1 complete; M5e.2 partially implemented / assurance blocked — its engineering hosted-verified, R8, R9 and R11 included, ADR-0056 accepted, R3's real-container E6 required by the owner (R-B on ADR-0057, 2026-11-01) and blocked, issue #19; M5e.3 implementation complete ahead of M5e.2's close, by the owner's exception (2026-11-03), hosted validation pending; M5e.4–M5e.6 not started)
 
 **Planned 2026-10-26.** The gap analysis, the requirements-to-evidence matrix,
 the implementation sequence and the owner's decisions of 2026-10-26 on its open points are in
@@ -635,13 +635,43 @@ and the plan's guard run in `make test`. Unstaged, hosted run pending; the per-r
 origins are not built. Nothing of it is evidence, changes a production line or bears on R3.
 **M5e.2 is IN PROGRESS, R3 E6 BLOCKED**; M5e.3 is in progress; M5e.4–M5e.6 are not started.
 
+**Windows repaired; M5e.3 built (2026-11-04).** The owner committed the exception, the
+offline fixtures and the closed-port fix as `6be8c41`. Hosted run
+[41720068934](https://github.com/Onwcan/DireWolf/actions/runs/41720068934) (run no. 126)
+passed 27 of 29 jobs. Windows' `make test` failed, and the aggregate with it: two fixture tests
+gave pytest's Windows temporary directory as a marker directory, and the generator took only
+POSIX paths. Every fixture test passed on Linux and macOS, the recorded digest included.
+
+Fixed and built since, unstaged, hosted run pending
+([M5E_ASSURANCE_PLAN.md](M5E_ASSURANCE_PLAN.md) §7a):
+- **Marker directories:** a marker directory is an absolute POSIX or Windows path in one
+  canonical form, and nothing a quoting rule acts on reaches generated code. The default's
+  bytes are unchanged.
+- **The per-run CA:** `tests/net_http/make-pki.sh` makes the per-run CA's registry
+  certificates.
+- **The two origins:** `tests/net_http/origin.py --routes` serves exactly each side's routes
+  over TLS that a client trusting only the per-run anchor verifies.
+- **The proxy's side, in process:** through the broker's real proxy and evidence-only
+  resolver, the granted origin is tunnelled and the ungranted one is the proxy's
+  `TARGET_NOT_GRANTED`, never a TLS failure.
+
+So M5e.3's implementation is complete, its hosted validation pending. A real client through
+a measured `PROXY_ONLY` environment to these origins is M5e.4's evidence.
+
+**M5e.2 stays partially implemented / assurance blocked:** its engineering is
+hosted-verified; R3's E6 is required and BLOCKED (15 required, 0 passed, 15 blocked); ADR-0057
+stays Proposed under R-B, and [issue #19](https://github.com/Onwcan/DireWolf/issues/19) stays
+open. M5e.4–M5e.6 still follow M5e.2, and this section's acceptance and the M5 contract below
+wait for E6. **M5e.2 is IN PROGRESS, R3 E6 BLOCKED**; M5e.4–M5e.6 are not started.
+
 Still to do: R3's real-container level (E6: required by the owner's R-B, BLOCKED — not built
 and not planned while the safety control stands; it needs a plan the owner approves within
 that control, or genuine independent evidence meeting the plan's §3b that the owner accepts;
 tracked in [issue #19](https://github.com/Onwcan/DireWolf/issues/19));
-M5e.3–M5e.5's registry fixtures and pip and npm evidence — M5e.3 in progress ahead of
-M5e.2's close (2026-11-03; [M5E_ASSURANCE_PLAN.md](M5E_ASSURANCE_PLAN.md) §7a): its offline
-fixtures built, the per-run CA and the origins to do — and M5e.6's gate.
+M5e.3's hosted validation (implementation complete ahead of M5e.2's close, 2026-11-04;
+[M5E_ASSURANCE_PLAN.md](M5E_ASSURANCE_PLAN.md) §7a); M5e.4–M5e.5's pip and npm evidence,
+prepared in [M5E4_IMPLEMENTATION_HANDOFF.md](M5E4_IMPLEMENTATION_HANDOFF.md) and not started;
+and M5e.6's gate.
 
 **Deps:** M5a–M5d. **Deliverables:** the complete escape, SSRF and persistence suites as
 merge gates; weakened-profile closure for `PROXY_ONLY`; package-manager acceptance

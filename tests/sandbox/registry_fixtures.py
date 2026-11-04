@@ -34,13 +34,15 @@ would each write one; a file and a tarball on the ungranted host; a page and a
 packument redirected to it; a git dependency whose `prepare` would write a
 marker; a tarball tampered against its integrity; and a lockfile naming
 exactly the packuments' integrity. A marker is an empty file in `marker_dir`
-(the workspace by default), so a marker's absence is evidence only because its
-code is shown to write it when run (`tests/sandbox/test_registry_fixtures.py`).
+(the workspace by default; any absolute POSIX or Windows path of plain
+segments, written with forward slashes), so a marker's absence is evidence
+only because its code is shown to write it when run, on every platform the
+tests run on (`tests/sandbox/test_registry_fixtures.py`).
 
-Not here, and not M5e.3's generator: the per-run CA, which is made afresh for
-every run and never committed (`tests/net_http/make-pki.sh`); the origins that
-serve `routes`; and any pip or npm run (M5e.4). Nothing here is evidence, and
-nothing here bears on R3 or E6.
+Not here: the per-run CA, made afresh for every run and never committed
+(`tests/net_http/make-pki.sh`); the origins that serve `routes`
+(`tests/net_http/origin.py --routes`); and any pip or npm run (M5e.4). Nothing
+here is evidence, and nothing here bears on R3 or E6.
 """
 
 from __future__ import annotations
@@ -70,7 +72,19 @@ ZIP_EPOCH = (1980, 1, 1, 0, 0, 0)
 FORMAT = 1
 
 _SEED = re.compile(r"[A-Za-z0-9._-]{1,64}")
-_MARKER_PATH = re.compile(r"/[A-Za-z0-9._/-]*")
+# A marker's path is written into generated Python, JavaScript and shell text.
+# Its directory is an absolute path of plain segments: POSIX (the
+# environment's `/workspace`) or Windows (a test's directory on a Windows
+# host), written with forward slashes, which Python and Node accept on both.
+# So only these characters ever reach that text -- no quote, backslash, `$`,
+# backtick, `%`, `^`, `&`, `|`, `<`, `>`, `!`, space or control character --
+# and no quoting, the shell's, cmd's, Python's or JavaScript's, can change
+# what it runs.
+_SEGMENT = r"[A-Za-z0-9._~-]+"
+_POSIX_DIRECTORY = re.compile(rf"/(?:{_SEGMENT}(?:/{_SEGMENT})*/?)?")
+_WINDOWS_DIRECTORY = re.compile(rf"[A-Za-z]:[\\/](?:{_SEGMENT}(?:[\\/]{_SEGMENT})*[\\/]?)?")
+_MARKER_NAME = re.compile(r"[A-Za-z0-9._-]+")
+_MARKER_PATH = re.compile(rf"(?:[A-Za-z]:)?/(?:{_SEGMENT}/)*{_SEGMENT}")
 _HTML = "text/html; charset=utf-8"
 _JSON = "application/json"
 _BINARY = "application/octet-stream"
@@ -152,27 +166,55 @@ def stored_gzip(data: bytes) -> bytes:
     return bytes(out)
 
 
+def marker_directory(path: str) -> str:
+    """`path` in the one form every marker is written with: forward slashes,
+    and no trailing one but a root's. Refused unless it is an absolute POSIX
+    or Windows path of plain segments, none of them `.` or `..`."""
+    if _POSIX_DIRECTORY.fullmatch(path):
+        canonical, root = path, "/"
+    elif _WINDOWS_DIRECTORY.fullmatch(path):
+        canonical = path.replace("\\", "/")
+        root = canonical[:3]
+    else:
+        raise ValueError(f"the marker directory is an absolute plain path, not {path!r}")
+    if {".", ".."} & set(canonical.split("/")):
+        raise ValueError(f"the marker directory has no `.` or `..` segment, not {path!r}")
+    return canonical if canonical == root else canonical.rstrip("/")
+
+
+def marker_path(marker_dir: str, marker: str) -> str:
+    """The marker's absolute path: its canonical directory, `/`, its name."""
+    directory = marker_directory(marker_dir)
+    if not _MARKER_NAME.fullmatch(marker) or marker in (".", ".."):
+        raise ValueError(f"a marker is a plain file name, not {marker!r}")
+    path = f"{directory}{marker}" if directory.endswith("/") else f"{directory}/{marker}"
+    assert _MARKER_PATH.fullmatch(path), path
+    return path
+
+
 def npm_marker_script(marker_dir: str, marker: str) -> str:
     """The one command every fixture lifecycle script runs: write its marker.
     `node` is the only program an npm run is sure to have; the path holds
     only `_MARKER_PATH`'s characters, so no quoting can change the command."""
-    path = f"{marker_dir.rstrip('/')}/{marker}"
-    assert _MARKER_PATH.fullmatch(path), path
-    return f"node -e \"require('fs').writeFileSync('{path}', '')\""
+    return f"node -e \"require('fs').writeFileSync('{marker_path(marker_dir, marker)}', '')\""
 
 
 def pth_line(marker_dir: str, marker: str) -> str:
     """A `.pth` line `site` executes at every interpreter start: write a marker."""
-    return f'import os; open(os.path.join({marker_dir!r}, {marker!r}), "w").close()\n'
+    marker_path(marker_dir, marker)
+    directory = marker_directory(marker_dir)
+    return f'import os; open(os.path.join({directory!r}, {marker!r}), "w").close()\n'
 
 
 def _backend(marker_dir: str, marker: str) -> bytes:
     """A PEP 517 backend each of whose hooks writes its marker, then builds nothing."""
+    marker_path(marker_dir, marker)
+    directory = marker_directory(marker_dir)
     return (
         '"""A DireWolf registry fixture: a build backend that marks it ran."""\n'
         "import os\n\n\n"
         "def _mark():\n"
-        f'    open(os.path.join({marker_dir!r}, {marker!r}), "w").close()\n\n\n'
+        f'    open(os.path.join({directory!r}, {marker!r}), "w").close()\n\n\n'
         "def get_requires_for_build_wheel(config_settings=None):\n"
         "    _mark()\n"
         "    return []\n\n\n"
@@ -587,11 +629,12 @@ class _Fixtures:
 
 def generate(seed: str, out: Path, *, marker_dir: str = MARKER_DIR) -> dict[str, object]:
     """Write the fixture set for `seed` under `out` and return its manifest
-    (also written as `out/manifest.json`). `out` must be absent or empty."""
+    (also written as `out/manifest.json`). `out` must be absent or empty, and
+    `marker_dir` an absolute POSIX or Windows path (`marker_directory`): the
+    manifest, and every marker, name it in its canonical form."""
     if not _SEED.fullmatch(seed):
         raise ValueError(f"a seed is 1 to 64 of [A-Za-z0-9._-], not {seed!r}")
-    if not _MARKER_PATH.fullmatch(marker_dir):
-        raise ValueError(f"the marker directory is an absolute plain path, not {marker_dir!r}")
+    marker_dir = marker_directory(marker_dir)
     if out.exists() and any(out.iterdir()):
         raise ValueError(f"{out} is not empty")
     fixtures = _Fixtures(seed, marker_dir)

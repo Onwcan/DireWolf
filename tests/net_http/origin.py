@@ -39,6 +39,16 @@ body's length. Paths:
 
 Everything else is 404. The evidence that drives it is
 ``crates/dwkd-authority/tests/net_http_evidence.rs``.
+
+    origin.py --cert C --key K --routes manifest.json --side granted|ungranted
+
+is instead one of M5e.3's two registry origins (M5E_ASSURANCE_PLAN.md §7a):
+it answers exactly ``side``'s routes in a fixture manifest
+(``tests/sandbox/registry_fixtures.py``) -- each a file, served with its
+content type, or a redirect -- read once at start from the manifest's own
+directory, and 404 for every other path, 405 for any method but GET. Every
+response says ``Connection: close``. A route naming a file outside that
+directory, or a side the manifest does not have, refuses to start.
 """
 
 from __future__ import annotations
@@ -53,8 +63,13 @@ import sys
 import threading
 import time
 import urllib.parse
+from collections.abc import Callable
+from pathlib import Path
 
 MAX_HEAD = 64 * 1024
+# A request's method, target and headers to the bytes that answer it; None to
+# answer nothing.
+Answer = Callable[[str, str, list[tuple[str, str]]], bytes | None]
 
 
 def read_request(conn: ssl.SSLSocket) -> tuple[str, str, list[tuple[str, str]], bytes] | None:
@@ -186,7 +201,47 @@ def answer(target: str, headers: list[tuple[str, str]]) -> bytes | None:
     return plain("404 Not Found", b"")
 
 
-def serve_one(conn: ssl.SSLSocket, lock: threading.Lock) -> None:
+def routed(manifest: Path, side: str) -> Answer:
+    """`side`'s routes in the fixture manifest, each response rendered once:
+    a file with its content type, or a redirect; 404 for any other path, 405
+    for any method but GET."""
+    root = manifest.resolve().parent
+    routes = json.loads(manifest.read_text(encoding="utf-8"))["routes"]
+    if side not in routes:
+        raise SystemExit(f"the manifest has no side {side!r}")
+    close = ("Connection", "close")
+    table: dict[str, bytes] = {}
+    for path, route in routes[side].items():
+        if "redirect" in route:
+            table[path] = respond(
+                f"{int(route['status'])} Found",
+                [("Location", str(route["redirect"])), ("Content-Length", "0"), close],
+                b"",
+            )
+            continue
+        file = (root / str(route["file"])).resolve()
+        if root not in file.parents:
+            raise SystemExit(f"route {path!r} names a file outside {root}")
+        body = file.read_bytes()
+        table[path] = respond(
+            "200 OK",
+            [("Content-Type", str(route["type"])), ("Content-Length", str(len(body))), close],
+            body,
+        )
+    missing = respond("404 Not Found", [("Content-Length", "0"), close], b"")
+    refused = respond(
+        "405 Method Not Allowed", [("Allow", "GET"), ("Content-Length", "0"), close], b""
+    )
+
+    def answer_route(method: str, target: str, _headers: list[tuple[str, str]]) -> bytes:
+        if method != "GET":
+            return refused
+        return table.get(target.partition("?")[0], missing)
+
+    return answer_route
+
+
+def serve_one(conn: ssl.SSLSocket, lock: threading.Lock, reply_for: Answer) -> None:
     try:
         # The handshake here, not in the accept loop: a client that refuses
         # the certificate, or never finishes, holds only its own thread.
@@ -209,7 +264,7 @@ def serve_one(conn: ssl.SSLSocket, lock: threading.Lock) -> None:
         }
         with lock:
             print("ORIGIN-REQUEST " + json.dumps(record, sort_keys=True), flush=True)
-        reply = answer(target, headers)
+        reply = reply_for(method, target, headers)
         if reply is None:
             time.sleep(60)
             return
@@ -225,7 +280,16 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--cert", required=True)
     parser.add_argument("--key", required=True)
+    parser.add_argument("--routes", type=Path, help="a registry fixture manifest")
+    parser.add_argument("--side", choices=("granted", "ungranted"))
     args = parser.parse_args()
+    if (args.routes is None) != (args.side is None):
+        parser.error("--routes and --side go together")
+    reply_for: Answer = (
+        routed(args.routes, args.side)
+        if args.routes is not None
+        else lambda _method, target, headers: answer(target, headers)
+    )
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     context.minimum_version = ssl.TLSVersion.TLSv1_2
     context.load_cert_chain(args.cert, args.key)
@@ -244,7 +308,7 @@ def main() -> int:
         except (OSError, ssl.SSLError):
             raw.close()
             continue
-        threading.Thread(target=serve_one, args=(conn, lock), daemon=True).start()
+        threading.Thread(target=serve_one, args=(conn, lock, reply_for), daemon=True).start()
 
 
 if __name__ == "__main__":
