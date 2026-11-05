@@ -1,0 +1,38 @@
+# M5e.4's registry tools (M5E_ASSURANCE_PLAN.md §§6, 8; OD-E4): the exact
+# versions the hosted `sandbox-registry` job builds its registry tools image
+# from, each archive's upstream URL and its SHA-256. `scripts/dw.py` downloads
+# each one on the disposable runner only, checks its SHA-256 before it reads a
+# byte of it, checks the version the tool itself reports after it is placed,
+# and fails closed on any mismatch. A version change is a reviewed diff of this
+# file, never a download that floats.
+#
+# Each release was at least two weeks old when it was pinned (2026-11-05), and
+# each checksum agrees with its publisher's own list: the CPython build's with
+# the release's SHA256SUMS and GitHub's asset digest, Node.js's with its
+# SHASUMS256.txt, pip's with PyPI's file digest.
+
+format = 1
+
+# The interpreter pip runs on: a standalone, relocatable CPython build, so the
+# image does not depend on the runner's distribution Python and its patch
+# level. The repository's own Python is 3.12 (.python-version).
+[python]
+version = "3.12.15"
+url = "https://github.com/astral-sh/python-build-standalone/releases/download/20261013/cpython-3.12.15%2B20261013-x86_64-unknown-linux-gnu-install_only.tar.gz"
+sha256 = "5d546fc004fc2435fa142eb8f42ed8de5eb4725963dc22f7e6671014a80eb560"
+
+# pip as it is today: the wheel, installed into that interpreter's
+# site-packages in place of whatever pip the build carries.
+[pip]
+version = "26.2.2"
+url = "https://files.pythonhosted.org/packages/3f/06/3e4420302363fbb71be3c7f35ce042f54bfca330e3e66b3a2e3c4cca579f/pip-26.2.2-py3-none-any.whl"
+sha256 = "fd7f4dfa8190e014013b9f08f3e973f4e4c26ffd179a204895533a7254813a70"
+
+# Node.js LTS and the npm it bundles. M5e.4 runs neither: npm is refused before
+# anything is prepared (HYGIENE_NOT_EVIDENCED), and the operator's policy pins
+# it by the digest of the bytes this image holds -- the npm M5e.5 would evidence.
+[node]
+version = "24.22.1"
+npm_version = "11.19.1"
+url = "https://nodejs.org/dist/v24.22.1/node-v24.22.1-linux-x64.tar.xz"
+sha256 = "6c172a9ab6718f7b801fb5a7bd486af2ee5e32758086a04b84fcce2aa77095e6"

@@ -3,8 +3,12 @@
 **Project:** [DireWolf](https://github.com/Onwcan/DireWolf)\
 **Prepared:** 2026-11-04, on `main` at `6be8c414e42d09d90c817d217a6c22a01e4cb68e` plus M5e.3's
 completion (unstaged at the time of writing)\
-**Status:** **NOT STARTED.** This is preparation only. No M5e.4 code, image, task, job or
-evidence exists, and none has run.\
+**Status (as prepared, 2026-11-04):** **NOT STARTED.** This was preparation only.\
+**Status (2026-11-05):** **IN PROGRESS — implementation complete, hosted verification
+pending.** The owner authorised M5e.4 ahead of M5e.2's close
+([M5E_ASSURANCE_PLAN.md](M5E_ASSURANCE_PLAN.md) §10, "M5e.4's sequencing"); M5e.5 and M5e.6
+are not authorised. What was built, and how §4's decisions were made, is §10 below. Nothing
+has run hosted yet, and locally the evidence is NOT EXERCISED by design.\
 **Authority of this document:** a technical handoff, not an ADR. It approves nothing.
 [ADR-0054](adr/0054-m5e-npm-hygiene-profile.md) and
 [ADR-0055](adr/0055-m5e-pip-hygiene-profile.md) stay **Proposed**, and npm stays
@@ -151,3 +155,88 @@ level and its enforcement, under the existing attribution contract (`require_att
    docs.
 7. **Exit:** hosted green, and the owner's acceptance of M5e.4. That accepts no ADR and no
    profile.
+
+## 10. As built (2026-11-05; hosted verification pending)
+
+§1's preconditions are met: the owner's sequencing decision is recorded in the plan's §10 and
+held by `tests/architecture/test_m5e_r3_closure.py`, and M5e.3 passed hosted (runs
+[41916040076](https://github.com/Onwcan/DireWolf/actions/runs/41916040076) and
+[41920008027](https://github.com/Onwcan/DireWolf/actions/runs/41920008027), 29 of 29 jobs each).
+
+**The implementation's choices** — §4's four decisions, and the tools' provenance (for the
+owner's review; none is an owner decision):
+
+1. **Ports: fixed unprivileged ports, named in the URLs.** The origins listen on loopback at
+   18443 (granted), 18444 (ungranted) and 18445 (the granted name under the rogue issuer).
+   `generate()` takes `granted_port` and `ungranted_port`, and `origin.py` takes `--port`.
+   This is §4's option (b) with fixed ports rather than per-run ones. Why: nothing binds 443,
+   needs a second loopback address, sudo or a sysctl, or changes the runner. The fixtures stay
+   deterministic per seed and ports, and the default's bytes and recorded digest are
+   unchanged. The cost: a port already taken on the runner fails the run, closed, before the
+   origin is ready.
+2. **pip's trust: the workload's own `--cert`.** The run's anchor sits in the workspace, as
+   the agent evidence's does, and every pip command names it. There is no image `pip.conf`,
+   no `/etc/direwolf/pip-ca.pem` and no launcher variable, so nothing exists for ADR-0055's
+   pinned `PIP_CERT`/`PIP_CONFIG_FILE` to replace or undo. pip keeps its bundled roots, as
+   pip does today, and no fixture name reaches them. This differs from §5's "baked at both
+   trust paths": the image is built once by the task, before the per-run PKI exists, and
+   carries no trust store at all.
+3. **Case names:** `registry-pip-*`, `registry-npm-*` and `registry-*`, apart from ADR-0054
+   §8's and ADR-0055 §9's proposed names.
+4. **Policy:** the evidence's own operator policy. It allows the image's Python and npm, by
+   path and digest, in a sandbox, under the shipped packs' `workspace_exec_hygiene` obligation
+   and without their `argv_safe`. It is never shipped.
+5. **Provenance (OD-E4): the publishers' own archives.** OD-E4's follow-up (the plan's §10)
+   names the source as "a SHA-pinned setup action or the runner's tool cache". The
+   implementation instead fetches each publisher's own archive — the python-build-standalone
+   GitHub release, nodejs.org, PyPI — and checks it against the SHA-256 recorded in the
+   repository before use. What OD-E4 decided holds: exact versions, checksum-verified, a
+   version change a reviewed diff. The mechanism differs, and needs the owner's acceptance as
+   such. Why: no third-party action's code runs in the job, and nothing depends on what a
+   runner image happens to cache.
+
+**What was built:**
+
+- **Pins:** `tests/sandbox/registry_tools.toml` holds CPython 3.12.15
+  (python-build-standalone 20261013), pip 26.2.2, and Node.js 24.22.1 with npm 11.19.1. Each
+  entry has its upstream URL and SHA-256, cross-checked against the publisher's own list when
+  pinned, and again on 2026-11-05: python-build-standalone's `SHA256SUMS`, Node.js's
+  `SHASUMS256.txt` (which also names npm 11.19.1 as the npm it bundles), PyPI's file digest.
+  Node.js and pip were released on 2026-10-20 and the CPython build on 2026-10-13, each at
+  least two weeks before it was pinned. Their source is decision 5's.
+- **Tools image** (`scripts/dw.py`, `_registry_tools_image`), built on the runner only:
+  - each archive is fetched over https from its own host only and checked before use;
+  - archives are extracted through tarfile's `data` filter;
+  - pip's wheel replaces the build's bundled pip;
+  - `bin/npm` is one launcher started by the pinned Node.js;
+  - the image is built `FROM scratch` with `--network none`;
+  - every version is read back from inside the image, and any mismatch fails closed.
+- **Task:** `make sandbox-registry-evidence` refuses before anything unless
+  `DW_REGISTRY_EVIDENCE=1` on a GitHub-hosted runner. It takes a census of containers and
+  networks before and after, removes its images, and gates the suite's lines through
+  `require_attributed_evidence` (19 cases, `dwkp-end-to-end`, each outcome held by
+  `REGISTRY_OUTCOMES`).
+- **Suite:** `crates/dwkd-authority/tests/sandbox_registry.rs` runs two hosted-only tests.
+  The suite checks again where it is before anything starts. It uses a real DWKP client on
+  the released `serve --sandbox-config` and broker, with a fresh measured `PROXY_ONLY`
+  environment per pip case. pip runs with no cache, no compiled files and no retry, in an
+  empty target each time. `tests/sandbox/registry_inspect.py` reads the results inside the
+  environment and holds them to the fixture's wheels on the host.
+- **Job:** `sandbox-registry` in `.github/workflows/ci.yml` is required once by `ci` and held
+  by `tests/architecture/test_ci_sandbox_registry.py`. That test carries negative controls
+  for a dropped case, a wrong level, a missing or wrong attribution, a hidden gap, a weakened
+  workflow, a floating pin, a digest or version mismatch, and the task starting work before
+  its check.
+
+**Not built:** `make sandbox-registry-mutations` and its manual workflow (§7, OD-E7). No kill
+is claimed. **Not yet run:** the evidence itself, which only the hosted job runs.
+
+**Risks the hosted run will settle first:**
+
+- whether the standalone CPython and the official Node.js run in a `FROM scratch` image with
+  the runner's shared objects (the task's in-image version checks fail closed if they do not);
+- how pip 26 reports each refusal, which the suite reads from its own output: a proxy's
+  `403`, `Errno 101`, a resolver failure, `CERTIFICATE_VERIFY_FAILED`;
+- whether pip's truststore-backed context honours `--cert` beside its bundled roots.
+
+Each fails the job, closed, rather than passing it.

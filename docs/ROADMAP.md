@@ -451,7 +451,7 @@ and package-manager acceptance are M5e's, and the `local` environment is M6's (O
 stays in progress until M5e meets its own acceptance. Passing CI is the evidence named
 here — not a deployment, and not a certification.
 
-#### M5e · The M5 adversarial gate and closeout — **IN PROGRESS** (M5e.1 complete; M5e.2 partially implemented / assurance blocked — its engineering hosted-verified, R8, R9 and R11 included, ADR-0056 accepted, R3's real-container E6 required by the owner (R-B on ADR-0057, 2026-11-01) and blocked, issue #19; M5e.3 implementation complete ahead of M5e.2's close, by the owner's exception (2026-11-03), hosted validation pending; M5e.4–M5e.6 not started)
+#### M5e · The M5 adversarial gate and closeout — **IN PROGRESS** (M5e.1 complete; M5e.2 partially implemented / assurance blocked — its engineering hosted-verified, R8, R9 and R11 included, ADR-0056 accepted, R3's real-container E6 required by the owner (R-B on ADR-0057, 2026-11-01) and blocked, issue #19; M5e.3 complete ahead of M5e.2's close, by the owner's exception (2026-11-03), hosted-verified; M5e.4 in progress ahead of M5e.2's close, by the owner's exception (2026-11-05) — built, hosted verification pending; M5e.5–M5e.6 not started)
 
 **Planned 2026-10-26.** The gap analysis, the requirements-to-evidence matrix,
 the implementation sequence and the owner's decisions of 2026-10-26 on its open points are in
@@ -664,14 +664,50 @@ stays Proposed under R-B, and [issue #19](https://github.com/Onwcan/DireWolf/iss
 open. M5e.4–M5e.6 still follow M5e.2, and this section's acceptance and the M5 contract below
 wait for E6. **M5e.2 is IN PROGRESS, R3 E6 BLOCKED**; M5e.4–M5e.6 are not started.
 
+**M5e.3 hosted; M5e.4 sequenced and built (2026-11-05).** The owner committed M5e.3's
+completion and the Windows repair as `2b015dc`; hosted run
+[41916040076](https://github.com/Onwcan/DireWolf/actions/runs/41916040076) (run no. 127) and,
+after PR #20's dependency update,
+[41920008027](https://github.com/Onwcan/DireWolf/actions/runs/41920008027) (no. 129, `d9effc2`)
+each passed **29 of 29 jobs**, Windows' `make test` among them. So M5e.3 is complete: its
+fixtures, per-run CA and origins are hosted-verified. The owner then made a second narrow
+exception to M5e's order ([M5E_ASSURANCE_PLAN.md](M5E_ASSURANCE_PLAN.md) §10, "M5e.4's
+sequencing"): M5e.4 may be implemented and evidenced while M5e.2 is open. M5e.5 and M5e.6 are
+not authorised.
+
+Built since, unstaged, hosted run pending ([M5E_ASSURANCE_PLAN.md](M5E_ASSURANCE_PLAN.md)
+§§6, 8; [M5E4_IMPLEMENTATION_HANDOFF.md](M5E4_IMPLEMENTATION_HANDOFF.md)):
+- **The registry tools image**, built on the runner only: exact CPython, pip, Node.js and npm
+  versions, each archive checked against its recorded SHA-256 before use, the image built
+  offline `FROM scratch`, every version read back from inside it, any mismatch failing closed.
+- **pip as it is today**, through a real DWKP client and the authority's `process.exec`, in a
+  fresh measured `PROXY_ONLY` environment per case: installed from the granted fixture index
+  byte for byte, its dependency too; refused by the proxy's grant for an ungranted index, a
+  file on the ungranted host and a redirect to it, nothing installed and nothing reached; no
+  route and no resolver without the proxy; pip's own TLS refusing an untrusted issuer. What it
+  does not neutralise is stated: a source distribution's build backend runs at install today,
+  and a `.pth` it installs runs at a later interpreter start, each contained by the
+  environment.
+- **npm refused**: `npm install` and `npm ci`, pinned and allowed by the operator's rule,
+  refused by that rule's own hygiene obligation before any environment is prepared — npm stays
+  `HYGIENE_NOT_EVIDENCED` in production, today's fail-closed behaviour, evidenced.
+- **The gate**: `make sandbox-registry-evidence` in a new required `sandbox-registry` job,
+  hosted only — locally NOT EXERCISED, never a pass — its 19 cases attributed at
+  `dwkp-end-to-end`, each weakening of the job, the pins or the contract a committed negative
+  control.
+
+No production line, shipped pack or ADR changes, and none of it is E6. **M5e.2 is IN
+PROGRESS, R3 E6 BLOCKED**; M5e.4 is in progress, its hosted verification pending; M5e.5–M5e.6
+are not started.
+
 Still to do: R3's real-container level (E6: required by the owner's R-B, BLOCKED — not built
 and not planned while the safety control stands; it needs a plan the owner approves within
 that control, or genuine independent evidence meeting the plan's §3b that the owner accepts;
 tracked in [issue #19](https://github.com/Onwcan/DireWolf/issues/19));
-M5e.3's hosted validation (implementation complete ahead of M5e.2's close, 2026-11-04;
-[M5E_ASSURANCE_PLAN.md](M5E_ASSURANCE_PLAN.md) §7a); M5e.4–M5e.5's pip and npm evidence,
-prepared in [M5E4_IMPLEMENTATION_HANDOFF.md](M5E4_IMPLEMENTATION_HANDOFF.md) and not started;
-and M5e.6's gate.
+M5e.4's hosted verification (`make sandbox-registry-evidence` in the required
+`sandbox-registry` job) and the owner's acceptance of M5e.4; M5e.5's npm and pip profiles
+([ADR-0054](adr/0054-m5e-npm-hygiene-profile.md), [ADR-0055](adr/0055-m5e-pip-hygiene-profile.md),
+both Proposed), not authorised; and M5e.6's gate, not authorised.
 
 **Deps:** M5a–M5d. **Deliverables:** the complete escape, SSRF and persistence suites as
 merge gates; weakened-profile closure for `PROXY_ONLY`; package-manager acceptance

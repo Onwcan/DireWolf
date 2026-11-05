@@ -65,7 +65,9 @@ class Origin:
         self.process.wait(timeout=10)
 
 
-def _start(pki: Path, leaf: str, manifest: Path, side: str) -> Origin:
+def _start(
+    pki: Path, leaf: str, manifest: Path, side: str, extra: tuple[str, ...] | list[str] = ()
+) -> Origin:
     process = subprocess.Popen(
         [
             sys.executable,
@@ -78,6 +80,7 @@ def _start(pki: Path, leaf: str, manifest: Path, side: str) -> Origin:
             str(manifest),
             "--side",
             side,
+            *extra,
         ],
         stdout=subprocess.PIPE,
         text=True,
@@ -283,3 +286,56 @@ def test_an_origin_refuses_a_side_or_file_its_manifest_does_not_hold(tmp_path: P
             check=False,
         )
         assert done.returncode != 0 and "ORIGIN-READY" not in done.stdout, (name, done)
+
+
+def test_an_origin_listens_on_the_port_its_urls_name_and_refuses_a_taken_one(
+    tmp_path: Path,
+) -> None:
+    """M5e.4's fixtures name fixed ports, so each origin listens on the one
+    its URLs name (`--port`); one already taken refuses before it says it is
+    ready, never on another port."""
+    pki = _make_pki(tmp_path / "pki")
+    with socket.socket() as free:
+        free.bind(("127.0.0.1", 0))
+        port = free.getsockname()[1]
+    out = tmp_path / "fixtures"
+    fx.generate("direwolf-m5e4-port", out, granted_port=port)
+    origin = _start(
+        pki, "registry-granted", out / "manifest.json", "granted", ["--port", str(port)]
+    )
+    try:
+        assert origin.port == port
+        status, _headers, page = _get(port, fx.GRANTED_HOST, "/simple/", pki / "ca.pem")
+        assert status == 200 and f"https://{fx.GRANTED_HOST}:{port}/simple/".encode() in page
+        taken = subprocess.run(
+            [
+                sys.executable,
+                str(ORIGIN),
+                "--cert",
+                str(pki / "registry-granted.pem"),
+                "--key",
+                str(pki / "registry-granted.key"),
+                "--routes",
+                str(out / "manifest.json"),
+                "--side",
+                "granted",
+                "--port",
+                str(port),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        assert taken.returncode != 0 and "ORIGIN-READY" not in taken.stdout, taken
+    finally:
+        origin.stop()
+    for bad in ("-1", "65536"):
+        refused = subprocess.run(
+            [sys.executable, str(ORIGIN), "--cert", "c", "--key", "k", "--port", bad],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        assert refused.returncode != 0 and "ORIGIN-READY" not in refused.stdout, refused

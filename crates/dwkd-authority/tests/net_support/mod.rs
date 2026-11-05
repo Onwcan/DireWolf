@@ -99,6 +99,34 @@ pub(crate) struct Origin {
 impl Origin {
     /// Start one, presenting `<pki>/<cert>.pem`, and wait until it listens.
     pub(crate) fn start(pki: &Path, cert: &str) -> Self {
+        Self::launch(pki, cert, &[])
+    }
+
+    /// One of M5e.3's registry origins (`origin.py --routes`): `side`'s
+    /// routes of the fixture `manifest`, presenting `<pki>/<cert>.pem`, on
+    /// the fixed loopback `port` the fixtures' URLs name (M5e.4).
+    pub(crate) fn registry(pki: &Path, cert: &str, manifest: &Path, side: &str, port: u16) -> Self {
+        let port_text = port.to_string();
+        let origin = Self::launch(
+            pki,
+            cert,
+            &[
+                OsStr::new("--routes"),
+                manifest.as_os_str(),
+                OsStr::new("--side"),
+                OsStr::new(side),
+                OsStr::new("--port"),
+                OsStr::new(&port_text),
+            ],
+        );
+        assert_eq!(
+            origin.port, port,
+            "the {side} origin listens where its URLs say"
+        );
+        origin
+    }
+
+    fn launch(pki: &Path, cert: &str, extra: &[&OsStr]) -> Self {
         let mut child = super::state_support::spawn(
             Command::new("python3")
                 .arg(root().join("tests/net_http/origin.py"))
@@ -106,6 +134,7 @@ impl Origin {
                 .arg(pki.join(format!("{cert}.pem")))
                 .arg("--key")
                 .arg(pki.join(format!("{cert}.key")))
+                .args(extra)
                 .env_clear()
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())

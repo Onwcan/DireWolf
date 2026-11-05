@@ -30,6 +30,7 @@ import re
 import shutil
 import subprocess
 import sys
+import urllib.parse
 from collections.abc import Callable, Mapping
 from pathlib import Path
 
@@ -3936,6 +3937,649 @@ def task_sandbox_capacity_evidence() -> None:
     require_attributed_evidence(output, CAPACITY_CASES)
 
 
+# --- M5e.4: pip as it is today, and npm refused (M5E_ASSURANCE_PLAN.md §§6, 8) ---
+
+# The registry tools' pins (OD-E4): each tool's exact version, its upstream
+# archive and that archive's SHA-256. A version change is a reviewed diff of
+# that file, never a download that floats.
+REGISTRY_PINS = ROOT / "tests" / "sandbox" / "registry_tools.toml"
+# Where each pinned archive may come from, https only: its URL's host first,
+# then the hosts a redirect may name -- for a GitHub release asset, the
+# storage GitHub answers with. Nothing else is ever fetched.
+REGISTRY_TOOL_HOSTS: dict[str, tuple[str, ...]] = {
+    "python": (
+        "github.com",
+        "release-assets.githubusercontent.com",
+        "objects.githubusercontent.com",
+    ),
+    "pip": ("files.pythonhosted.org",),
+    "node": ("nodejs.org",),
+}
+REGISTRY_ARCHIVE_LIMIT = 256 * 1024 * 1024
+# Where the registry tools image holds each tool.
+REGISTRY_PYTHON_HOME = "/opt/direwolf/python"
+REGISTRY_NODE_HOME = "/opt/direwolf/node"
+REGISTRY_NPM_PATH = f"{REGISTRY_NODE_HOME}/bin/npm"
+# The one `npm` the image holds: npm's own CLI, started by the pinned Node.js
+# by absolute path (a `FROM scratch` image has no `/usr/bin/env`). M5e.4 never
+# runs it -- the authority refuses it first -- but the operator's policy and
+# the image manifest pin these bytes, so the refusal is of a real, pinned npm.
+REGISTRY_NPM_LAUNCHER = (
+    f"#!{REGISTRY_NODE_HOME}/bin/node\n"
+    f"require('{REGISTRY_NODE_HOME}/lib/node_modules/npm/lib/cli.js')(process)\n"
+)
+REGISTRY_SUITE = "sandbox-registry"
+_EXACT_VERSION = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+")
+_SHA256_HEX = re.compile(r"[0-9a-f]{64}")
+
+
+def load_registry_pins(path: Path = REGISTRY_PINS) -> dict[str, dict[str, str]]:
+    """The registry tools' pins, each checked, or TaskError: format 1;
+    exactly `python`, `pip` and `node`; each an exact `N.N.N` version, a
+    lowercase SHA-256, and an https URL on its own host -- no port, query,
+    fragment or credentials -- whose path names that version; `node` also
+    npm's exact version. A pin is never guessed and never defaulted."""
+    import tomllib  # Python 3.11+: only the registry evidence reads it
+
+    try:
+        data = tomllib.loads(path.read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        raise TaskError(f"{path}: unreadable registry pins: {exc}") from exc
+    if data.get("format") != 1:
+        raise TaskError(f"{path}: `format` must be 1, not {data.get('format')!r}")
+    tools = sorted(key for key in data if key != "format")
+    if tools != sorted(REGISTRY_TOOL_HOSTS):
+        raise TaskError(f"{path}: the pins are exactly {sorted(REGISTRY_TOOL_HOSTS)}, not {tools}")
+    pins: dict[str, dict[str, str]] = {}
+    for tool, hosts in REGISTRY_TOOL_HOSTS.items():
+        entry = data[tool]
+        keys = {"version", "url", "sha256"} | ({"npm_version"} if tool == "node" else set())
+        if (
+            not isinstance(entry, dict)
+            or set(entry) != keys
+            or not all(isinstance(value, str) for value in entry.values())
+        ):
+            raise TaskError(f"{path}: [{tool}] holds exactly {sorted(keys)}, each a string")
+        for key in sorted(keys - {"url", "sha256"}):
+            if not _EXACT_VERSION.fullmatch(entry[key]):
+                raise TaskError(f"{path}: [{tool}] {key} is an exact N.N.N, not {entry[key]!r}")
+        if not _SHA256_HEX.fullmatch(entry["sha256"]):
+            raise TaskError(f"{path}: [{tool}] sha256 is 64 lowercase hex digits")
+        url = urllib.parse.urlsplit(entry["url"])
+        if (
+            url.scheme != "https"
+            or url.hostname != hosts[0]
+            or url.netloc != hosts[0]
+            or url.query
+            or url.fragment
+        ):
+            raise TaskError(f"{path}: [{tool}] url is https://{hosts[0]}/..., not {entry['url']!r}")
+        if entry["version"] not in Path(urllib.parse.unquote(url.path)).name:
+            raise TaskError(f"{path}: [{tool}] url's file does not name version {entry['version']}")
+        pins[tool] = dict(entry)
+    return pins
+
+
+def _registry_redirects(tool: str) -> type:
+    """A redirect handler that follows only https to the tool's own hosts."""
+    import urllib.request
+
+    allowed = REGISTRY_TOOL_HOSTS[tool]
+
+    class Redirects(urllib.request.HTTPRedirectHandler):
+        def redirect_request(
+            self,
+            req: urllib.request.Request,
+            fp: object,
+            code: int,
+            msg: str,
+            headers: object,
+            newurl: str,
+        ) -> urllib.request.Request | None:
+            target = urllib.parse.urlsplit(newurl)
+            if target.scheme != "https" or target.hostname not in allowed:
+                raise TaskError(
+                    f"{tool}: a redirect to {target.scheme}://{target.hostname} is refused "
+                    f"(only https to {', '.join(allowed)})"
+                )
+            return super().redirect_request(req, fp, code, msg, headers, newurl)  # type: ignore[arg-type]
+
+    return Redirects
+
+
+def _fetch_verified(
+    tool: str, url: str, sha256: str, into: Path, *, opener: object | None = None
+) -> Path:
+    """`url`'s bytes as a new file in `into`, once their SHA-256 is `sha256`.
+
+    https only, from the tool's hosts only, redirects included; at most
+    REGISTRY_ARCHIVE_LIMIT bytes. Any other answer, or a byte that differs,
+    raises TaskError and leaves no file behind: a mismatch fails closed, and
+    nothing reads an archive before its digest is checked. The disposable
+    runner's only download (`opener` is the tests')."""
+    import urllib.request
+
+    asked = urllib.parse.urlsplit(url)
+    if asked.scheme != "https" or asked.hostname != REGISTRY_TOOL_HOSTS[tool][0]:
+        raise TaskError(f"{tool}: {url} is not https on {REGISTRY_TOOL_HOSTS[tool][0]}")
+    name = Path(urllib.parse.unquote(urllib.parse.urlsplit(url).path)).name
+    if not name or name.startswith("."):
+        raise TaskError(f"{tool}: {url} names no file")
+    target = into / name
+    partial = into / f"{name}.partial"
+    hasher = hashlib.sha256()
+    size = 0
+    fetch = opener or urllib.request.build_opener(_registry_redirects(tool))
+    # https on the tool's own host, checked above; every redirect and the
+    # final answer are checked again.
+    request = urllib.request.Request(  # noqa: S310
+        url, headers={"User-Agent": "direwolf-registry-evidence"}
+    )
+    try:
+        with fetch.open(request, timeout=120) as response, partial.open("xb") as out:  # type: ignore[attr-defined]
+            final = urllib.parse.urlsplit(response.geturl())
+            if final.scheme != "https" or final.hostname not in REGISTRY_TOOL_HOSTS[tool]:
+                raise TaskError(f"{tool}: answered from {final.scheme}://{final.hostname}")
+            while chunk := response.read(1 << 20):
+                size += len(chunk)
+                if size > REGISTRY_ARCHIVE_LIMIT:
+                    raise TaskError(f"{tool}: {name} is over {REGISTRY_ARCHIVE_LIMIT} bytes")
+                hasher.update(chunk)
+                out.write(chunk)
+    except TaskError:
+        partial.unlink(missing_ok=True)
+        raise
+    except OSError as exc:
+        partial.unlink(missing_ok=True)
+        raise TaskError(f"{tool}: {url} could not be fetched: {exc}") from exc
+    got = hasher.hexdigest()
+    if got != sha256:
+        partial.unlink(missing_ok=True)
+        raise TaskError(f"{tool}: {name} is sha256 {got}, not the pinned {sha256}: refused")
+    partial.rename(target)
+    return target
+
+
+def _extract_tar(archive: Path, into: Path, top: str) -> Path:
+    """`archive`'s one top-level directory `top`, extracted under `into`
+    through tarfile's `data` filter -- no absolute name, no `..`, no link
+    leaving it, no device, no set-id bit. A member outside `top` refuses."""
+    import tarfile
+
+    with tarfile.open(archive) as tar:
+        members = tar.getmembers()
+        for member in members:
+            if member.name != top and not member.name.startswith(f"{top}/"):
+                raise TaskError(f"{archive.name}: {member.name!r} is outside {top}/")
+        try:
+            tar.extractall(into, members=members, filter="data")
+        except tarfile.FilterError as exc:
+            raise TaskError(f"{archive.name}: refused by the data filter: {exc}") from exc
+    return into / top
+
+
+def _unzip_wheel(wheel: Path, into: Path) -> int:
+    """`wheel`'s members under `into`: each a relative name of plain segments,
+    no `..`, no backslash, no link. Returns how many."""
+    import zipfile
+
+    with zipfile.ZipFile(wheel) as archive:
+        members = archive.infolist()
+        for info in members:
+            parts = info.filename.split("/")
+            if (
+                info.filename.startswith("/")
+                or "\\" in info.filename
+                or ".." in parts
+                or (info.external_attr >> 16) & 0o170000 == 0o120000
+            ):
+                raise TaskError(f"{wheel.name}: refused member {info.filename!r}")
+        archive.extractall(into)  # noqa: S202 - every member's name is checked above
+    return len(members)
+
+
+def _registry_tools_image(
+    client: Path,
+    socket: str,
+    context: Path,
+    binaries: tuple[Path, Path],
+    platform_: str,
+    pins: dict[str, dict[str, str]],
+) -> tuple[str, dict[str, str]]:
+    """M5e.4's registry tools image, built on the disposable runner only.
+
+    Each pinned archive is fetched and checked against its recorded SHA-256
+    before a byte of it is read (`_fetch_verified`): a standalone CPython at
+    REGISTRY_PYTHON_HOME, its bundled pip replaced by the pinned pip wheel;
+    Node.js at REGISTRY_NODE_HOME with the npm it bundles, `bin/npm` the one
+    launcher REGISTRY_NPM_LAUNCHER; the probe and the relay at their paths;
+    every shared object they load. Built offline `FROM scratch` with
+    `--network none` and named by content; then each tool's version is read
+    from inside the image -- no network, uid 10001, read-only, no capability
+    -- and must be its pin's, or this raises, the image removed first. No
+    trust store and no pip or npm configuration is baked in: pip trusts what
+    its caller names (`--cert`), as pip does today. The archives are kept
+    beside the build context, never in it: only `rootfs/` reaches the
+    runtime. Returns the image and the variables the suite reads."""
+    probe, relay = binaries
+    downloads = context.parent / f"{context.name}-downloads"
+    shutil.rmtree(context, ignore_errors=True)
+    shutil.rmtree(downloads, ignore_errors=True)
+    downloads.mkdir(parents=True)
+    rootfs = context / "rootfs"
+    opt = rootfs / "opt" / "direwolf"
+    opt.mkdir(parents=True)
+    _place(rootfs, probe, "/usr/libexec/direwolf/sandbox-probe", 0o755)
+    _place(rootfs, relay, SANDBOX_RELAY_PATH, 0o755)
+    archives = {
+        tool: _fetch_verified(tool, pin["url"], pin["sha256"], downloads)
+        for tool, pin in pins.items()
+    }
+
+    minor = ".".join(pins["python"]["version"].split(".")[:2])
+    python_home = _extract_tar(archives["python"], opt, Path(REGISTRY_PYTHON_HOME).name)
+    python = python_home / "bin" / f"python{minor}"
+    if python.is_symlink() or not python.is_file():
+        raise TaskError(f"the CPython build has no interpreter at bin/python{minor}")
+    site = python_home / "lib" / f"python{minor}" / "site-packages"
+    if not site.is_dir():
+        raise TaskError(f"the CPython build has no {site.relative_to(python_home)}")
+    for bundled in [*site.glob("pip"), *site.glob("pip-*.dist-info")]:
+        shutil.rmtree(bundled)
+    members = _unzip_wheel(archives["pip"], site)
+
+    node_top = f"node-v{pins['node']['version']}-linux-x64"
+    node_home = _extract_tar(archives["node"], opt, node_top).rename(opt / "node")
+    node = node_home / "bin" / "node"
+    package = node_home / "lib" / "node_modules" / "npm" / "package.json"
+    if node.is_symlink() or not node.is_file() or not package.is_file():
+        raise TaskError(f"{archives['node'].name} has no bin/node or bundled npm")
+    npm = node_home / "bin" / "npm"
+    npm.unlink(missing_ok=True)
+    npm.write_bytes(REGISTRY_NPM_LAUNCHER.encode("utf-8"))  # its bytes, never a newline's
+    npm.chmod(0o755)
+
+    loaded = [
+        python,
+        node,
+        *sorted(python_home.glob("lib/libpython*.so*")),
+        *sorted((python_home / "lib" / f"python{minor}" / "lib-dynload").glob("*.so")),
+    ]
+    for library in sorted(_ldd_closure([p for p in loaded if not p.is_symlink()])):
+        if not library.is_relative_to(rootfs):
+            _place(rootfs, library, str(library))
+    (context / "Dockerfile").write_text("FROM scratch\nCOPY rootfs/ /\n", encoding="utf-8")
+    iid = context / "iid"
+    _docker(
+        client,
+        socket,
+        "build",
+        "--quiet",
+        "--pull=false",
+        "--network",
+        "none",
+        "--platform",
+        platform_,
+        "--iidfile",
+        str(iid),
+        str(context),
+    )
+    image = iid.read_text(encoding="utf-8").strip()
+    if not re.fullmatch(r"sha256:[0-9a-f]{64}", image):
+        raise TaskError(f"the built image has no content identity: {image!r}")
+
+    def inside(*argv: str) -> str:
+        return _docker(
+            client,
+            socket,
+            "run",
+            "--rm",
+            "--network",
+            "none",
+            "--read-only",
+            "--user",
+            "10001:10001",
+            "--cap-drop",
+            "ALL",
+            "--security-opt",
+            "no-new-privileges",
+            "--platform",
+            platform_,
+            image,
+            *argv,
+        ).strip()
+
+    image_python = f"{REGISTRY_PYTHON_HOME}/bin/python{minor}"
+    wanted = {
+        "python": pins["python"]["version"],
+        "pip": pins["pip"]["version"],
+        "node": pins["node"]["version"],
+        "npm": pins["node"]["npm_version"],
+    }
+    try:
+        found = {
+            "python": inside(image_python, "-I", "-c", "import sys; print(sys.version.split()[0])"),
+            "pip": inside(image_python, "-I", "-c", "import pip; print(pip.__version__)"),
+            "node": inside(f"{REGISTRY_NODE_HOME}/bin/node", "--version").removeprefix("v"),
+            "npm": inside(
+                f"{REGISTRY_NODE_HOME}/bin/node",
+                "-p",
+                f"require('{REGISTRY_NODE_HOME}/lib/node_modules/npm/package.json').version",
+            ),
+        }
+        for tool, version in wanted.items():
+            if found[tool] != version:
+                raise TaskError(
+                    f"the image's {tool} reports {found[tool]!r}, not the pinned {version}: refused"
+                )
+    except BaseException:
+        # An image that fails its checks is never left behind: the task's
+        # own cleanup begins only once setup has returned.
+        _docker(client, socket, "image", "rm", "--force", image, check=False)
+        raise
+
+    def digest(path: Path) -> str:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+
+    python_sha, npm_sha, node_sha = digest(python), digest(npm), digest(node)
+    print(f"{BOLD}registry tools image{OFF} (built on this runner, offline, FROM scratch)")
+    for tool in ("python", "pip", "node"):
+        print(
+            f"  {tool:<8} {pins[tool]['version']:<9} archive sha256 {pins[tool]['sha256']} "
+            f"(checked before use)\n           {pins[tool]['url']}"
+        )
+    print(f"  pip      {found['pip']:<9} {members} members, in {site.relative_to(rootfs)}")
+    print(f"  npm      {found['npm']:<9} bundled with Node.js {found['node']}")
+    print(f"  {image_python} sha256 {python_sha}")
+    print(f"  {REGISTRY_NODE_HOME}/bin/node sha256 {node_sha}")
+    print(f"  {REGISTRY_NPM_PATH} sha256 {npm_sha}")
+    print(f"  image              {image}")
+    print(
+        "  versions read inside the image: "
+        + ", ".join(f"{tool} {found[tool]}" for tool in ("python", "pip", "node", "npm"))
+    )
+    variables = {
+        "DW_REGISTRY_IMAGE": image,
+        "DW_REGISTRY_PYTHON": image_python,
+        "DW_REGISTRY_PYTHON_SHA256": python_sha,
+        "DW_REGISTRY_PYTHON_VERSION": found["python"],
+        "DW_REGISTRY_PIP_VERSION": found["pip"],
+        "DW_REGISTRY_NPM": REGISTRY_NPM_PATH,
+        "DW_REGISTRY_NPM_SHA256": npm_sha,
+    }
+    return image, variables
+
+
+def _registry_setup(
+    pins: dict[str, dict[str, str]],
+) -> tuple[Path, str, dict[str, str], set[str], set[str], list[str]]:
+    """M5e.4's setup, separate from the evidence: a trusted runtime client;
+    the probe and the relay built statically and proved static from their
+    ELF headers, their digests pinned; the registry tools image. Returns the
+    client, the socket, the variables the suite reads, the containers and
+    the networks that predate the evidence, and the images to remove."""
+    found = shutil.which("docker")
+    if found is None:
+        raise TaskError("NOT EXERCISED: no container runtime client (`docker`) on PATH")
+    socket = os.environ.get("DW_SANDBOX_SOCKET", "/var/run/docker.sock")
+    target_root = Path(os.environ.get("CARGO_TARGET_DIR", str(ROOT / "target")))
+    work = Path(os.environ.get("DW_REGISTRY_WORK", str(Path.home() / ".cache" / "dw-m5e4")))
+    shutil.rmtree(work, ignore_errors=True)
+    work.mkdir(mode=0o700, parents=True)
+    client, chosen = _trusted_client(Path(found), work / "client")
+    try:
+        server = json.loads(
+            _docker(client, socket, "version", "--format", "{{json .Server}}").strip()
+        )
+    except (TaskError, json.JSONDecodeError) as exc:
+        raise TaskError(f"NOT EXERCISED: the runtime at {socket} does not answer: {exc}") from exc
+    if server.get("Os") != "linux" or server.get("Arch") != "amd64":
+        # The pins are x86_64 Linux archives (registry_tools.toml).
+        raise TaskError(
+            f"NOT EXERCISED: the registry tools are pinned for linux/amd64, not "
+            f"{server.get('Os')}/{server.get('Arch')}"
+        )
+    triple = "x86_64-unknown-linux-gnu"
+    platform_ = "linux/amd64"
+    before = set(
+        _docker(client, socket, "container", "ls", "--all", "--no-trunc", "--quiet").split()
+    )
+    networks = set(_docker(client, socket, "network", "ls", "--no-trunc", "--quiet").split())
+    static = target_root / "sandbox-static"
+    env = dict(os.environ, RUSTFLAGS="-C target-feature=+crt-static")
+    command = [
+        "cargo",
+        "build",
+        "--locked",
+        "--release",
+        "-p",
+        "dwk-sandbox-probe",
+        "--bin",
+        "dwk-sandbox-probe",
+        "-p",
+        "dwk-sandbox-relay",
+        "--bin",
+        "dwk-sandbox-relay",
+        "--target",
+        triple,
+        "--target-dir",
+        str(static),
+    ]
+    print(f"{DIM}$ RUSTFLAGS='-C target-feature=+crt-static' {' '.join(command)}{OFF}", flush=True)
+    if subprocess.run(command, cwd=str(ROOT), env=env, check=False).returncode != 0:
+        raise TaskError("the static probe and relay did not build")
+    release = static / triple / "release"
+    probe = release / "dwk-sandbox-probe"
+    relay = release / "dwk-sandbox-relay"
+    linking = {name: _static_elf(path) for name, path in (("probe", probe), ("relay", relay))}
+    digests = {
+        name: hashlib.sha256(path.read_bytes()).hexdigest()
+        for name, path in (("probe", probe), ("relay", relay))
+    }
+    print(f"{BOLD}registry evidence setup{OFF}")
+    print(
+        f"  runtime            {server.get('Version')} (api {server.get('ApiVersion')}), "
+        f"{platform_}"
+    )
+    print(f"  runtime client     {chosen}")
+    for name in ("probe", "relay"):
+        print(f"  {name:<18} {linking[name]}, sha256 {digests[name]}")
+    image, tools = _registry_tools_image(
+        client, socket, work / "images" / "registry", (probe, relay), platform_, pins
+    )
+    variables = {
+        "DW_SANDBOX_RUNTIME": str(client),
+        "DW_SANDBOX_SOCKET": socket,
+        "DW_SANDBOX_PROBE_SHA256": digests["probe"],
+        "DW_EGRESS_RELAY_SHA256": digests["relay"],
+        **tools,
+    }
+    return client, socket, variables, before, networks, [image]
+
+
+# The registry suite: pip as it is today, and npm refused. Both download
+# nothing -- the image is built first, by the task -- and reach only the
+# fixture origins on this runner's loopback.
+REGISTRY_TESTS = (
+    "linux::pip_as_it_is_today_reaches_only_the_granted_fixture_registry",
+    "linux::npm_is_refused_before_anything_is_prepared",
+)
+# Every case the registry suite must report, at `dwkp-end-to-end`: a real
+# DWKP client on the released `serve --sandbox-config`, the released broker,
+# the runner's Docker Engine, a measured `PROXY_ONLY` environment per case.
+# Named `registry-*`, apart from the cases ADR-0054 §8 and ADR-0055 §9
+# propose for the profiles (M5e.5).
+REGISTRY_CASES = tuple(
+    (REGISTRY_SUITE, case)
+    for case in (
+        "registry-tools-pinned-in-the-environment",
+        "registry-pip-granted-index-installs",
+        "registry-pip-dependency-from-granted-index",
+        "registry-pip-ungranted-index-refused",
+        "registry-pip-ungranted-index-installs-when-granted",
+        "registry-pip-file-on-ungranted-host-refused",
+        "registry-pip-redirect-to-ungranted-host-refused",
+        "registry-pip-direct-route-refused",
+        "registry-pip-direct-by-name-unresolved",
+        "registry-pip-untrusted-issuer-refused",
+        "registry-pip-sdist-built-today",
+        "registry-pip-pth-not-run-by-install",
+        "registry-pip-pth-runs-at-a-later-start",
+        "registry-intent-names-only-the-granted-registry",
+        "registry-egress-counted-at-destruction",
+        "registry-census-clean",
+        "registry-npm-install-refused-before-preparation",
+        "registry-npm-ci-refused-before-preparation",
+        "registry-npm-nothing-prepared-or-reached",
+    )
+)
+# What each registry line's outcome must begin with (`outcome_problem`): an
+# install that shows what it installed; a refusal that shows nothing was
+# installed; the gap a source distribution's build is today, shown, never
+# hidden; npm's refusal by the obligation.
+REGISTRY_OUTCOMES = {
+    "registry-tools-pinned-in-the-environment": "pinned:",
+    "registry-pip-granted-index-installs": "installed:",
+    "registry-pip-dependency-from-granted-index": "installed:",
+    "registry-pip-ungranted-index-refused": "refused:nothing-installed",
+    "registry-pip-ungranted-index-installs-when-granted": "installed:",
+    "registry-pip-file-on-ungranted-host-refused": "refused:nothing-installed",
+    "registry-pip-redirect-to-ungranted-host-refused": "refused:nothing-installed",
+    "registry-pip-direct-route-refused": "refused:nothing-installed",
+    "registry-pip-direct-by-name-unresolved": "refused:nothing-installed",
+    "registry-pip-untrusted-issuer-refused": "refused:nothing-installed",
+    "registry-pip-sdist-built-today": "built-today:backend-marker-present",
+    "registry-pip-pth-not-run-by-install": "not-run:pth-marker-absent",
+    "registry-pip-pth-runs-at-a-later-start": "runs-later:pth-marker-present",
+    "registry-intent-names-only-the-granted-registry": "granted:",
+    "registry-egress-counted-at-destruction": "counted:",
+    "registry-census-clean": "clean:",
+    "registry-npm-install-refused-before-preparation": "refused:OBLIGATION_UNENFORCEABLE",
+    "registry-npm-ci-refused-before-preparation": "refused:OBLIGATION_UNENFORCEABLE",
+    "registry-npm-nothing-prepared-or-reached": "nothing:",
+}
+
+
+def registry_refusal(environ: Mapping[str, str]) -> str | None:
+    """Why this host must not run the registry evidence, or None. Never
+    inferred: `DW_REGISTRY_EVIDENCE=1`, on a GitHub-hosted runner -- the
+    package-manager tools are downloaded and run on a disposable runner only
+    (owner direction 3), never installed on a developer's host. The suite
+    checks again before it starts anything."""
+    if environ.get("DW_REGISTRY_EVIDENCE", "").strip() != "1":
+        return (
+            "DW_REGISTRY_EVIDENCE=1 is not set: the registry tools are downloaded and run "
+            "only by the hosted `sandbox-registry` job"
+        )
+    if (
+        environ.get("GITHUB_ACTIONS") != "true"
+        or environ.get("RUNNER_ENVIRONMENT") != "github-hosted"
+    ):
+        return (
+            "this is not a disposable GitHub-hosted runner: registry tools are never "
+            "installed on a developer's host"
+        )
+    return None
+
+
+def registry_census_problems(
+    before: set[str], after: set[str], networks: set[str], networks_after: set[str]
+) -> list[str]:
+    """What the registry evidence's census finds wrong, as text: a container
+    it left, a container that predates it gone, or the runtime's networks
+    changed. Nothing found is the empty list."""
+    problems: list[str] = []
+    if after - before:
+        problems.append(
+            f"the evidence left {len(after - before)} container(s): {sorted(after - before)}"
+        )
+    if before - after:
+        problems.append(
+            f"{len(before - after)} container(s) that predate the evidence are gone: "
+            f"{sorted(before - after)}"
+        )
+    if networks_after != networks:
+        problems.append(
+            f"the runtime's networks changed: made {sorted(networks_after - networks)}, "
+            f"lost {sorted(networks - networks_after)}"
+        )
+    return problems
+
+
+def task_sandbox_registry_evidence() -> None:
+    """M5e.4's evidence (M5E_ASSURANCE_PLAN.md §§6, 8), hosted only: pip as
+    it is today against M5e.3's fixture registries, and npm refused before
+    anything is prepared.
+
+    Anywhere but a disposable GitHub-hosted runner this refuses before
+    anything is fetched or built: NOT EXERCISED, which fails. There, the
+    registry tools image is built from its pins, each archive checked before
+    use; then a real DWKP client on the released `serve --sandbox-config`,
+    with the released broker and the runner's Docker Engine, runs pip in a
+    fresh measured `PROXY_ONLY` environment per case -- installing from the
+    granted fixture index, refused by the proxy's grant, by the namespace's
+    topology and by its own TLS verification -- and asks for `npm install`
+    and `npm ci`, which the authority refuses before any environment.
+
+    Every case must report at `dwkp-end-to-end` with what enforced or
+    observed it, its outcome showing what it claims (`outcome_problem`). No
+    container or network the evidence made may remain, and every one that
+    predates it must. The images are removed. Linux only.
+    """
+    if not sys.platform.startswith("linux"):
+        raise TaskError("NOT EXERCISED: the registry evidence runs only on Linux")
+    refusal = registry_refusal(os.environ)
+    if refusal is not None:
+        raise TaskError(f"NOT EXERCISED: {refusal}")
+    pins = load_registry_pins()
+    client, socket, variables, before, networks, images = _registry_setup(pins)
+    os.environ.update(variables)
+    try:
+        system = _docker(client, socket, "info", "--format", "{{.OperatingSystem}}")
+        if "Docker Desktop" in system:
+            raise TaskError(f"NOT EXERCISED: the runtime is {system.strip()}, not a runner's")
+        run("cargo", "build", "--locked", "-p", "dwkd-broker")
+        output = run_captured(
+            "cargo",
+            "test",
+            "--locked",
+            "-p",
+            "dwkd-authority",
+            "--test",
+            "sandbox_registry",
+            "--",
+            "--ignored",
+            "--exact",
+            "--nocapture",
+            "--test-threads=1",
+            *REGISTRY_TESTS,
+        )
+        summaries = [line for line in output.splitlines() if line.startswith("test result: ")]
+        expected = f"test result: ok. {len(REGISTRY_TESTS)} passed; 0 failed; 0 ignored"
+        if len(summaries) != 1 or not summaries[0].startswith(expected):
+            raise TaskError(
+                f"the registry suite did not run all of its tests: expected `{expected}`, "
+                f"got {summaries or 'no summary'}"
+            )
+    finally:
+        after = set(
+            _docker(client, socket, "container", "ls", "--all", "--no-trunc", "--quiet").split()
+        )
+        networks_after = set(
+            _docker(client, socket, "network", "ls", "--no-trunc", "--quiet").split()
+        )
+        for image in images:
+            _docker(client, socket, "image", "rm", "--force", image, check=False)
+    problems = registry_census_problems(before, after, networks, networks_after)
+    if problems:
+        raise TaskError("cleanup failed: " + "; ".join(problems))
+    print(
+        f"{GREEN}cleanup: no evidence container or network remains; {len(before)} pre-existing "
+        f"container(s) and {len(networks)} network(s) kept; the images removed{OFF}"
+    )
+    require_attributed_evidence(output, REGISTRY_CASES)
+
+
 # ADR-0056 §6's negative control: the task backstop put back at the
 # per-environment value it replaced. R8's two neighbour tests -- the
 # broker's and the authority's -- must then each fail with finding F-R8's
@@ -5813,6 +6457,11 @@ ATTRIBUTION_MECHANISMS = frozenset(
         "runtime-process-list",
         "residual-contained-by-the-environment",
         "residual-inherited-by-descendants",
+        # M5e.4: what the workload's own tool did, which is not DireWolf's --
+        # its TLS verification refusing an issuer, and what it left in the
+        # workspace, measured.
+        "workload-tls-verification",
+        "workload-effects-measured",
         "telemetry",
     )
 )
@@ -6260,6 +6909,33 @@ ATTRIBUTION: dict[str, tuple[tuple[str, str, str | tuple[str, ...]], ...]] = {
         ("restart-foreign-untouched", _PRIV, "exact-label-ownership"),
         ("restart-new-workload-served", _PRIV, "authority-ledger"),
     ),
+    # M5e.4 (plan §6): pip as it is today against the fixture registries, and
+    # npm refused before anything is prepared -- a real DWKP client on the
+    # released `serve`, the released broker, the runner's runtime; hosted only.
+    "sandbox-registry": (
+        ("registry-tools-pinned-in-the-environment", _DWKP, "executable-digest-pin"),
+        ("registry-pip-granted-index-installs", _DWKP, "relay-and-connect-proxy-grant"),
+        ("registry-pip-dependency-from-granted-index", _DWKP, "relay-and-connect-proxy-grant"),
+        ("registry-pip-ungranted-index-refused", _DWKP, "connect-proxy:grant"),
+        (
+            "registry-pip-ungranted-index-installs-when-granted",
+            _DWKP,
+            "relay-and-connect-proxy-grant",
+        ),
+        ("registry-pip-file-on-ungranted-host-refused", _DWKP, "connect-proxy:grant"),
+        ("registry-pip-redirect-to-ungranted-host-refused", _DWKP, "connect-proxy:grant"),
+        ("registry-pip-direct-route-refused", _DWKP, "topology-no-route"),
+        ("registry-pip-direct-by-name-unresolved", _DWKP, "topology-no-resolver"),
+        ("registry-pip-untrusted-issuer-refused", _DWKP, "workload-tls-verification"),
+        ("registry-pip-sdist-built-today", _DWKP, "residual-contained-by-the-environment"),
+        ("registry-pip-pth-not-run-by-install", _DWKP, "workload-effects-measured"),
+        ("registry-pip-pth-runs-at-a-later-start", _DWKP, "residual-contained-by-the-environment"),
+        ("registry-intent-names-only-the-granted-registry", _DWKP, "authority-audit"),
+        ("registry-egress-counted-at-destruction", _DWKP, "authority-audit-at-destruction"),
+        ("registry-census-clean", _DWKP, "exact-label-cleanup"),
+        ("registry-npm-*-refused-before-preparation", _DWKP, "authority-obligation"),
+        ("registry-npm-nothing-prepared-or-reached", _DWKP, "authority-environment-decision"),
+    ),
 }
 # Every case any of the six tasks requires: a line naming another case of
 # their suites is a case the inventory lost, or one renamed.
@@ -6277,6 +6953,7 @@ ATTRIBUTED_CASES = frozenset(
         *WORKSPACE_PRIVILEGED_CASES,
         *RESTART_CASES,
         *CAPACITY_CASES,
+        *REGISTRY_CASES,
     )
 )
 # The foundation's latency: its numbers, not containment.
@@ -6332,8 +7009,18 @@ def outcome_problem(suite: str, case: str, outcome: str, enforcement: object) ->
     that failed, each of them the host's -- a judgement of the runtime's
     record never names what only the probe inside measures. A real runtime's
     weakened profile or topology says `detected:` and what caught it; and a
-    detection's invariants are of the vantage its enforcement claims.
+    detection's invariants are of the vantage its enforcement claims. A
+    registry line (M5e.4) begins with what its case must show
+    (`REGISTRY_OUTCOMES`): an install, what it installed; a refusal, that
+    nothing was installed; a source distribution's build, that it ran today.
     """
+    if suite == REGISTRY_SUITE:
+        shows = REGISTRY_OUTCOMES.get(case)
+        if shows is None:
+            return "a registry case with no outcome it must show"
+        if not outcome.startswith(shows):
+            return f"its outcome must begin {shows!r}, not {outcome!r}"
+        return None
     if suite == "broker-assurance":
         if case.endswith("-kept"):
             if outcome != ASSURANCE_KEPT:
@@ -9009,6 +9696,7 @@ TASKS = {
     "sandbox-workload-evidence": task_sandbox_workload_evidence,
     "sandbox-restart-evidence": task_sandbox_restart_evidence,
     "sandbox-capacity-evidence": task_sandbox_capacity_evidence,
+    "sandbox-registry-evidence": task_sandbox_registry_evidence,
     "net-http-evidence": task_net_http_evidence,
     "net-http-mutations": task_net_http_mutations,
     "sandbox-workload-mutations": task_sandbox_workload_mutations,

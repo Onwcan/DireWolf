@@ -627,3 +627,65 @@ def test_a_marker_lands_in_its_directory_however_this_host_spells_it(tmp_path: P
     assert sorted(p.name for p in marks.iterdir()) == sorted(
         [manifest["markers"]["pip-pth"], manifest["markers"]["pip-build-backend"]]
     )
+
+
+# --- M5e.4: the origins' fixed ports in every URL -----------------------------
+
+PORTS = {"granted": 18443, "ungranted": 18444}
+_URL = re.compile(rb"https://[A-Za-z0-9.:-]+[^\"'\s<>]*")
+
+
+def _urls(out: Path) -> list[str]:
+    """Every https URL any file of the set names, the manifest included."""
+    return [url.decode() for data in _files(out).values() for url in _URL.findall(data)]
+
+
+def test_a_run_with_fixed_ports_names_them_in_every_url_and_stays_deterministic(
+    tmp_path: Path,
+) -> None:
+    out = tmp_path / "ported"
+    fx.generate(SEED, out, granted_port=18443, ungranted_port=18444)
+    manifest: dict[str, Any] = json.loads((out / "manifest.json").read_bytes())
+    assert manifest["ports"] == PORTS
+    urls = _urls(out)
+    assert len(urls) > 20
+    for url in urls:
+        parts = urlsplit(url)
+        side = {fx.GRANTED_HOST: "granted", fx.UNGRANTED_HOST: "ungranted"}[str(parts.hostname)]
+        assert parts.port == PORTS[side], url
+    name = manifest["pip"]["projects"]["redirected"]["name"]
+    redirect = manifest["routes"]["granted"][f"/simple/{name}/"]["redirect"]
+    assert redirect == f"https://{fx.UNGRANTED_HOST}:18444/simple/{name}/"
+    # The same seed and ports give the same bytes; the default names no port
+    # and keeps its recorded digest (`GOLDEN`); another port is other bytes.
+    again = tmp_path / "again"
+    fx.generate(SEED, again, granted_port=18443, ungranted_port=18444)
+    assert _files(out) == _files(again)
+    plain, plain_manifest = _generate(tmp_path, name="plain")
+    assert "ports" not in plain_manifest
+    assert all(urlsplit(url).port is None for url in _urls(plain))
+    assert hashlib.sha256((plain / "manifest.json").read_bytes()).hexdigest() == GOLDEN
+    other = tmp_path / "other"
+    fx.generate(SEED, other, granted_port=18443, ungranted_port=18445)
+    assert _files(other)["manifest.json"] != _files(out)["manifest.json"]
+    # Only the URLs differ: the packages, markers and routes are the seed's.
+    assert manifest["markers"] == plain_manifest["markers"]
+    assert manifest["routes"]["granted"].keys() == plain_manifest["routes"]["granted"].keys()
+
+
+def test_a_port_out_of_range_is_refused(tmp_path: Path) -> None:
+    for at, port in enumerate((0, -1, 65536, True)):
+        with pytest.raises(ValueError, match="port"):
+            fx.generate(SEED, tmp_path / f"granted-{at}", granted_port=port)
+        with pytest.raises(ValueError, match="port"):
+            fx.generate(SEED, tmp_path / f"ungranted-{at}", ungranted_port=port)
+    assert not any(tmp_path.iterdir()), "a refused run wrote something"
+
+
+def test_the_command_line_takes_the_ports(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    out = tmp_path / "cli"
+    assert fx.main([SEED, str(out), "--granted-port", "18443", "--ungranted-port", "18444"]) == 0
+    assert json.loads((out / "manifest.json").read_bytes())["ports"] == PORTS
+    assert json.loads(capsys.readouterr().out) == {"manifest": str(out / "manifest.json")}

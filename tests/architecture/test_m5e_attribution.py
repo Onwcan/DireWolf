@@ -73,6 +73,7 @@ TASKS = {
     ),
     "task_sandbox_restart_evidence": ((dw.RESTART_CASES, dw.SANDBOX_EVIDENCE_PREFIX),),
     "task_sandbox_capacity_evidence": ((dw.CAPACITY_CASES, dw.SANDBOX_EVIDENCE_PREFIX),),
+    "task_sandbox_registry_evidence": ((dw.REGISTRY_CASES, dw.SANDBOX_EVIDENCE_PREFIX),),
 }
 
 # Which suite each emitter prints, and whether a call names its level (an
@@ -174,6 +175,13 @@ EMITTERS = (
         None,
         None,
     ),
+    (
+        "crates/dwkd-authority/tests/sandbox_registry.rs",
+        "evidence",
+        "sandbox-registry",
+        None,
+        None,
+    ),
 )
 _STRING = re.compile(r'"((?:[^"\\]|\\.)*)"')
 _ARGUMENT = re.compile(r'\s*(?:"([^"]*)"|([A-Z][A-Z0-9_]*)|(.+?))\s*$', re.DOTALL)
@@ -244,6 +252,8 @@ def _outcome(suite: str, case: str, enforcement: str) -> str:
             enforcement, f"{HOST_INVARIANT}+{INSIDE_INVARIANT}"
         )
         return f"detected:{named};measured-in-7ms"
+    if suite == dw.REGISTRY_SUITE:
+        return f"{dw.REGISTRY_OUTCOMES[case]};synthetic"
     return "ok"
 
 
@@ -289,6 +299,7 @@ def test_every_required_case_is_attributed_and_every_rule_is_used() -> None:
         dw.WORKSPACE_PRIVILEGED_CASES,
         dw.RESTART_CASES,
         dw.CAPACITY_CASES,
+        dw.REGISTRY_CASES,
     )
     assert inventory == {key for table in tables for key in table}
     for table in tables:
@@ -311,7 +322,8 @@ def test_every_required_case_is_attributed_and_every_rule_is_used() -> None:
     # a real runtime, 4 cross-run, the host UTS namespace and R8's 10
     # neighbour cases, 5 at the broker and 5 through the authority; on the
     # hosted runner, 7 of the runtime's restart and 4 at the live-environment
-    # cap). A smaller one is a lost case.
+    # cap); and M5e.4's 19 registry cases, hosted only. A smaller one is a
+    # lost case.
     assert len(dw.BROKER_ASSURANCE_CASES) == 20
     assert len(dw.CAPTURED_ASSURANCE_CASES) == 19
     closure = [c for s, c in dw.WORKLOAD_CASES if s == "sandbox-closure"]
@@ -326,7 +338,8 @@ def test_every_required_case_is_attributed_and_every_rule_is_used() -> None:
     assert ("sandbox-broker", "weakened-host-uts") in dw.SANDBOX_CASES
     assert len(dw.RESTART_CASES) == 7
     assert len(dw.CAPACITY_CASES) == 4
-    assert len(inventory) == 562
+    assert len(dw.REGISTRY_CASES) == 19
+    assert len(inventory) == 581
 
 
 def test_the_vocabulary_is_closed_used_and_documented() -> None:
@@ -369,6 +382,7 @@ def test_each_suite_is_only_at_the_levels_it_can_reach() -> None:
         "sandbox-authority-workload": {"real-oci", "dwkp-end-to-end"},
         "sandbox-authority-secret": {"real-oci", "dwkp-end-to-end"},
         "sandbox-authority-workspace": {"real-oci", "dwkp-end-to-end", "privileged-oci"},
+        "sandbox-registry": {"dwkp-end-to-end"},
     }
     assert set(reachable) == set(dw.ATTRIBUTION)
     # The provisioned workspace's cases, and the runtime's restart (which
@@ -454,6 +468,7 @@ def test_every_literal_case_prints_what_the_contract_says() -> None:
         (dw.WORKSPACE_CASES + dw.WORKSPACE_PRIVILEGED_CASES, dw.SANDBOX_EVIDENCE_PREFIX),
         (dw.RESTART_CASES, dw.SANDBOX_EVIDENCE_PREFIX),
         (dw.CAPACITY_CASES, dw.SANDBOX_EVIDENCE_PREFIX),
+        (dw.REGISTRY_CASES, dw.SANDBOX_EVIDENCE_PREFIX),
     ],
 )
 def test_a_complete_attributed_output_passes(
@@ -1084,4 +1099,4 @@ def test_a_suite_believes_a_container_gone_only_from_a_listing_the_runtime_answe
             assert found.group(2).strip() == wanted, name
             delegates += 1
     # A pattern that matches nothing would pass vacuously.
-    assert delegates == 7, delegates
+    assert delegates == 8, delegates

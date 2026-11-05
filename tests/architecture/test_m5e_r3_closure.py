@@ -14,10 +14,13 @@ and nothing else stands in for it. So:
   status document says M5e.2 is COMPLETE, and its limited claim (§5, not
   approved) is not M5's;
 * ADR-0056, accepted, stays in the digest at its accepted bytes;
-* the owner's one exception to M5e's order (2026-11-03, the plan's §10) moves
-  M5e.3 alone: while ADR-0057 stands, no status document claims a later step,
-  M5e or M5 complete, the ROADMAP keeps M5e.4-M5e.6 not started, issue #19
-  stays cited, and neither `M5e` nor `M5` is an available milestone;
+* the owner's two exceptions to M5e's order (the plan's §10) move M5e.3
+  (2026-11-03) and M5e.4 (2026-11-05) alone: while ADR-0057 stands, each is
+  recorded once among the owner's decisions, M5e.4's saying M5e.5 and M5e.6
+  are not authorised; no status document claims M5e.4, M5e.5, M5e.6, M5e or
+  M5 complete, or M5e.5 or M5e.6 begun; the ROADMAP keeps M5e.5-M5e.6 not
+  started; issue #19 stays cited; and neither `M5e` nor `M5` is an available
+  milestone -- each held with a negative control;
 * the two tasks that carry R3's supporting evidence keep their cleanup and
   ownership census -- nothing the evidence made left behind, nothing that
   predates it gone -- and check it before they count a line.
@@ -34,6 +37,8 @@ import inspect
 import re
 import sys
 from pathlib import Path
+
+import pytest
 
 from dwcheck.checks_adr import _digest, _load_manifest, _status
 
@@ -64,13 +69,19 @@ STATUS_DOCUMENTS = (
 # "M5e.2 COMPLETE", "**M5e.2 is COMPLETE**", "M5e.2 — COMPLETE": the
 # documents' own way of saying a step closed.
 _COMPLETE = re.compile(r"M5e\.2\W{0,4}(?:is\W{1,4})?COMPLETE\b")
-# The owner's one exception to M5e's order, as the plan's §10 records it.
+# The owner's exceptions to M5e's order, as the plan's §10 records them.
 _SEQUENCING = "**M5e.3's sequencing (2026-11-03).**"
+_SEQUENCING_M5E4 = "**M5e.4's sequencing (2026-11-05).**"
 ISSUE_19 = "https://github.com/Onwcan/DireWolf/issues/19"
 # A step after M5e.3, M5e itself or M5 said to be closed: "M5e.6 COMPLETE",
 # "**M5e — COMPLETE**", "M5 · Sandbox — **COMPLETE**", "**M5 is COMPLETE**".
 _GATE_COMPLETE = re.compile(
     r"\bM5(?:e(?:\.[4-6])?)?(?:\W{1,6}Sandbox)?\W{1,6}(?:is\W{1,4})?COMPLETE\b"
+)
+# A step M5e.4's exception does not cover said to have begun: "M5e.5 is IN
+# PROGRESS", "**M5e.6 — STARTED**", "M5e.5 AUTHORISED".
+_LATER_STARTED = re.compile(
+    r"\bM5e\.[56]\W{1,6}(?:is\W{1,4})?(?:IN PROGRESS|STARTED|BUILT|AUTHORI[SZ]ED)\b"
 )
 
 
@@ -154,48 +165,162 @@ def test_the_residuals_limited_claim_is_not_m5s() -> None:
     assert not _COMPLETE.search("M5e.2 IN PROGRESS, R3 E6 BLOCKED")
 
 
-def test_the_m5e3_sequencing_exception_moves_m5e3_alone() -> None:
-    """The owner's exception of 2026-11-03 lets M5e.3's fixture work proceed
-    while M5e.2 is open, and changes nothing else. While ADR-0057 stands: the
-    plan records it once, among the owner's decisions; no status document
-    claims a later step, M5e or M5 complete; the ROADMAP's M5e heading keeps
-    M5e.4-M5e.6 not started; the plan's current status line and the ROADMAP's
+def _record(decisions: str, marker: str) -> str:
+    """The record of the plan's §10 that `marker` opens, its bullets
+    included: up to the next paragraph that is not a bullet."""
+    start = decisions.index(marker)
+    ends = [
+        at
+        for opener in ("\n\n**", "\n\n`", "\n\n## ")
+        if (at := decisions.find(opener, start + len(marker))) >= 0
+    ]
+    return decisions[start : min(ends, default=len(decisions))]
+
+
+def _sequencing_problems(
+    plan: str, roadmap: str, documents: dict[str, str], available: frozenset[str] | set[str]
+) -> list[str]:
+    """Every way the owner's two sequencing exceptions would be overstated.
+
+    M5e.3's (2026-11-03) let its fixtures proceed while M5e.2 is open; M5e.4's
+    (2026-11-05) lets M5e.4 be implemented and evidenced while M5e.2 is open,
+    and authorises nothing after it. While ADR-0057 stands, then: each is
+    recorded once, among the owner's decisions; M5e.4's says M5e.5 and M5e.6
+    are not authorised; no status document claims M5e.4, M5e.5, M5e.6, M5e or
+    M5 complete, or M5e.5 or M5e.6 begun; the ROADMAP's M5e heading keeps
+    M5e.5-M5e.6 not started; the plan's current status line and the ROADMAP's
     "Still to do" cite issue #19; and neither `M5e` nor `M5` is an available
     milestone, so no eval that waits for M5's gate turns on."""
+    problems: list[str] = []
+    if "## 10. " not in plan or "## 11. " not in plan:
+        return ["the plan has no owner's decisions (§10)"]
+    decisions = plan[plan.index("## 10. ") : plan.index("## 11. ")]
+    for marker in (_SEQUENCING, _SEQUENCING_M5E4):
+        if plan.count(marker) != 1:
+            problems.append(f"{marker} is recorded {plan.count(marker)} times, not once")
+        elif marker not in decisions:
+            problems.append(f"{marker} is not among the owner's decisions")
+    if decisions.count(_SEQUENCING_M5E4) == 1:
+        record = " ".join(_record(decisions, _SEQUENCING_M5E4).split())
+        for needed in ("M5e.5 and M5e.6 are not authorised", ISSUE_19, "R-B"):
+            if needed not in record:
+                problems.append(f"M5e.4's record does not say {needed!r}")
+    for name, text in documents.items():
+        for found in _GATE_COMPLETE.finditer(text):
+            problems.append(f"{name}: a later step, M5e or M5 claimed complete: {found.group(0)!r}")
+        for found in _LATER_STARTED.finditer(text):
+            problems.append(f"{name}: a step M5e.4's exception does not cover: {found.group(0)!r}")
+    if "#### M5e " not in roadmap or "#### The M5 contract" not in roadmap:
+        return [*problems, "the ROADMAP has no M5e section"]
+    section = roadmap[roadmap.index("#### M5e ") : roadmap.index("#### The M5 contract")]
+    heading = section.splitlines()[0]
+    if "M5e.5\N{EN DASH}M5e.6 not started" not in heading:
+        problems.append(
+            f"the ROADMAP's M5e heading does not keep M5e.5-M5e.6 not started: {heading}"
+        )
+    if "\nStill to do: " not in section:
+        problems.append("the ROADMAP's M5e section has no 'Still to do'")
+    else:
+        todo = section[section.index("\nStill to do: ") :]
+        if ISSUE_19 not in todo[: todo.find("\n\n") if "\n\n" in todo else len(todo)]:
+            problems.append("the ROADMAP's 'Still to do' does not cite issue #19")
+    statuses = [line for line in plan.splitlines() if line.startswith("**Status (")]
+    if not statuses or ISSUE_19 not in statuses[-1]:
+        problems.append("the plan's current status line does not cite issue #19")
+    if {"M5e", "M5"} & set(available):
+        problems.append(f"M5e or M5 is an available milestone: {sorted(available)}")
+    return problems
+
+
+def _documents() -> dict[str, str]:
+    return {str(path.relative_to(REPO_ROOT).as_posix()): _text(path) for path in STATUS_DOCUMENTS}
+
+
+def test_the_sequencing_exceptions_move_m5e3_and_m5e4_alone() -> None:
+    """The owner's two exceptions to M5e's order -- M5e.3's fixtures
+    (2026-11-03) and M5e.4's implementation (2026-11-05) -- each move one step
+    ahead of M5e.2's close and change nothing else (`_sequencing_problems`)."""
     from direwolf_evals.runner import AVAILABLE_MILESTONES
 
     if _status(_text(RESIDUAL)).startswith("superseded"):
         return
-    plan = _text(PLAN)
-    decisions = plan[plan.index("## 10. ") : plan.index("## 11. ")]
-    assert plan.count(_SEQUENCING) == 1, "the exception has one record"
-    assert _SEQUENCING in decisions, "the exception is recorded among the owner's decisions"
-    claimed = [
-        f"{path.relative_to(REPO_ROOT)}: {found.group(0)!r}"
-        for path in STATUS_DOCUMENTS
-        for found in _GATE_COMPLETE.finditer(_text(path))
-    ]
-    assert not claimed, f"a later step, M5e or M5 claimed complete while E6 is blocked: {claimed}"
-    roadmap = _text(ROADMAP)
-    section = roadmap[roadmap.index("#### M5e ") : roadmap.index("#### The M5 contract")]
-    heading = section.splitlines()[0]
-    assert "M5e.4\N{EN DASH}M5e.6 not started" in heading, heading
-    todo = section[section.index("\nStill to do: ") :]
-    assert ISSUE_19 in todo[: todo.index("\n\n")], "the ROADMAP's 'Still to do' cites issue #19"
-    current = [line for line in plan.splitlines() if line.startswith("**Status (")][-1]
-    assert ISSUE_19 in current, "the plan's current status line cites issue #19"
-    assert not {"M5e", "M5"} & AVAILABLE_MILESTONES, sorted(AVAILABLE_MILESTONES)
-    # The test of the pattern itself: it finds the claims it exists to refuse,
-    # and none of the steps that may close.
+    problems = _sequencing_problems(_text(PLAN), _text(ROADMAP), _documents(), AVAILABLE_MILESTONES)
+    assert not problems, problems
+    # The test of the patterns themselves: they find the claims they exist to
+    # refuse, and none of what may be said.
     for claim in (
+        "M5e.4 COMPLETE",
+        "**M5e.4 is COMPLETE**",
         "M5e.6 COMPLETE",
         "**M5e — COMPLETE**",
         "M5 \N{MIDDLE DOT} Sandbox — **COMPLETE**",
         "**M5 is COMPLETE**",
     ):
         assert _GATE_COMPLETE.search(claim), claim
-    for allowed in ("M5e.1 COMPLETE", "M5e.3 COMPLETE", "M5a — COMPLETE", "M5 is complete only"):
+    for allowed in (
+        "M5e.1 COMPLETE",
+        "M5e.3 COMPLETE",
+        "M5a — COMPLETE",
+        "M5 is complete only",
+        "M5e.4 is IN PROGRESS",
+        "M5e.4's implementation is complete, its hosted verification pending",
+    ):
         assert not _GATE_COMPLETE.search(allowed), allowed
+    for started in ("M5e.5 is IN PROGRESS", "**M5e.6 — STARTED**", "M5e.5 AUTHORISED"):
+        assert _LATER_STARTED.search(started), started
+    for allowed in ("M5e.5\N{EN DASH}M5e.6 NOT STARTED", "M5e.5 and M5e.6 are not authorised"):
+        assert not _LATER_STARTED.search(allowed), allowed
+
+
+def _weakened(change: str) -> list[str]:
+    """`_sequencing_problems` over the real documents, with `change` made."""
+    plan, roadmap, documents = _text(PLAN), _text(ROADMAP), _documents()
+    available: set[str] = set()
+    m5e4 = _record(plan[plan.index("## 10. ") :], _SEQUENCING_M5E4)
+    if change == "m5e4-record-missing":
+        plan = plan.replace(_SEQUENCING_M5E4, "**A decision.**")
+    elif change == "m5e4-record-twice":
+        plan = plan.replace("## 11. ", f"{_SEQUENCING_M5E4}\n\n## 11. ", 1)
+    elif change == "m5e4-record-outside-the-decisions":
+        plan = plan.replace(m5e4, "").replace("## 6. ", f"{m5e4}\n\n## 6. ", 1)
+    elif change == "m5e5-authorised-silently":
+        silent = re.sub(r"M5e\.5 and M5e\.6 are not\s+authorised", "M5e.5 may follow", m5e4)
+        assert silent != m5e4, "the negative control changed nothing"
+        plan = plan.replace(m5e4, silent)
+    elif change == "m5e5-started":
+        documents["docs/ROADMAP.md"] += "\n**M5e.5 is IN PROGRESS.**\n"
+    elif change == "m5e4-claimed-complete":
+        documents["README.md"] += "\n**M5e.4 is COMPLETE**\n"
+    elif change == "heading-drops-m5e5":
+        roadmap = roadmap.replace("M5e.5\N{EN DASH}M5e.6 not started", "M5e.6 not started", 1)
+    elif change == "issue-19-dropped":
+        roadmap = roadmap.replace(ISSUE_19, "https://example.invalid/elsewhere")
+    elif change == "milestone-available":
+        available = {"M5e"}
+    else:
+        raise AssertionError(change)
+    return _sequencing_problems(plan, roadmap, documents, available)
+
+
+@pytest.mark.parametrize(
+    ("change", "said"),
+    [
+        ("m5e4-record-missing", "recorded 0 times"),
+        ("m5e4-record-twice", "recorded 2 times"),
+        ("m5e4-record-outside-the-decisions", "not among the owner's decisions"),
+        ("m5e5-authorised-silently", "M5e.5 and M5e.6 are not authorised"),
+        ("m5e5-started", "a step M5e.4's exception does not cover"),
+        ("m5e4-claimed-complete", "claimed complete"),
+        ("heading-drops-m5e5", "M5e.5-M5e.6 not started"),
+        ("issue-19-dropped", "issue #19"),
+        ("milestone-available", "available milestone"),
+    ],
+)
+def test_an_overstated_sequencing_fails(change: str, said: str) -> None:
+    if _status(_text(RESIDUAL)).startswith("superseded"):
+        pytest.skip("ADR-0057 superseded: the exceptions no longer bind")
+    problems = _weakened(change)
+    assert any(said in problem for problem in problems), (change, problems)
 
 
 def test_the_r3_tasks_check_their_census_before_they_count_a_line() -> None:

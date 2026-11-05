@@ -250,10 +250,14 @@ class _Origin:
     """One origin's routes: a path served from a file, or redirected."""
 
     host: str
+    # The port the origin serves on, when a run names one: every URL then
+    # carries it. Without one, URLs name the host alone (port 443).
+    port: int | None = None
     routes: dict[str, dict[str, object]] = field(default_factory=dict)
 
     def url(self, path: str) -> str:
-        return f"https://{self.host}{path}"
+        authority = self.host if self.port is None else f"{self.host}:{self.port}"
+        return f"https://{authority}{path}"
 
     def serve(self, path: str, file: str, content_type: str) -> None:
         assert path not in self.routes, path
@@ -265,13 +269,15 @@ class _Origin:
 
 
 class _Fixtures:
-    def __init__(self, seed: str, marker_dir: str) -> None:
+    def __init__(
+        self, seed: str, marker_dir: str, ports: tuple[int | None, int | None] = (None, None)
+    ) -> None:
         self.seed = seed
         self.marker_dir = marker_dir
         self.tag = _digest(seed, "tag").hex()[:8]
         self.tree = _Tree()
-        self.granted = _Origin(GRANTED_HOST)
-        self.ungranted = _Origin(UNGRANTED_HOST)
+        self.granted = _Origin(GRANTED_HOST, ports[0])
+        self.ungranted = _Origin(UNGRANTED_HOST, ports[1])
         self.markers: dict[str, str] = {}
 
     def name(self, role: str) -> str:
@@ -627,17 +633,36 @@ class _Fixtures:
         return "workspace/npm"
 
 
-def generate(seed: str, out: Path, *, marker_dir: str = MARKER_DIR) -> dict[str, object]:
+def _port(name: str, port: int | None) -> int | None:
+    if port is not None and (isinstance(port, bool) or not 1 <= port <= 65535):
+        raise ValueError(f"the {name} origin's port is 1 to 65535, not {port!r}")
+    return port
+
+
+def generate(
+    seed: str,
+    out: Path,
+    *,
+    marker_dir: str = MARKER_DIR,
+    granted_port: int | None = None,
+    ungranted_port: int | None = None,
+) -> dict[str, object]:
     """Write the fixture set for `seed` under `out` and return its manifest
     (also written as `out/manifest.json`). `out` must be absent or empty, and
     `marker_dir` an absolute POSIX or Windows path (`marker_directory`): the
-    manifest, and every marker, name it in its canonical form."""
+    manifest, and every marker, name it in its canonical form.
+
+    With a port for an origin, every URL naming it carries that port, and the
+    manifest says so (`ports`): what a run whose origins listen on fixed
+    unprivileged ports serves (M5e.4). Without, nothing changes: the default
+    fixtures are byte for byte those of M5e.3, recorded digest included."""
     if not _SEED.fullmatch(seed):
         raise ValueError(f"a seed is 1 to 64 of [A-Za-z0-9._-], not {seed!r}")
     marker_dir = marker_directory(marker_dir)
+    ports = (_port("granted", granted_port), _port("ungranted", ungranted_port))
     if out.exists() and any(out.iterdir()):
         raise ValueError(f"{out} is not empty")
-    fixtures = _Fixtures(seed, marker_dir)
+    fixtures = _Fixtures(seed, marker_dir, ports)
     pip = fixtures.pip()
     npm = fixtures.npm()
     files = fixtures.tree.files
@@ -646,6 +671,10 @@ def generate(seed: str, out: Path, *, marker_dir: str = MARKER_DIR) -> dict[str,
         "seed": seed,
         "tag": fixtures.tag,
         "hosts": {"granted": GRANTED_HOST, "ungranted": UNGRANTED_HOST},
+    }
+    if ports != (None, None):
+        manifest["ports"] = {"granted": ports[0], "ungranted": ports[1]}
+    manifest |= {
         "marker_dir": marker_dir,
         "markers": dict(sorted(fixtures.markers.items())),
         "pip": pip,
@@ -668,8 +697,17 @@ def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0] if __doc__ else None)
     parser.add_argument("seed")
     parser.add_argument("out", type=Path)
+    parser.add_argument("--marker-dir", default=MARKER_DIR)
+    parser.add_argument("--granted-port", type=int)
+    parser.add_argument("--ungranted-port", type=int)
     args = parser.parse_args(argv)
-    generate(args.seed, args.out)
+    generate(
+        args.seed,
+        args.out,
+        marker_dir=args.marker_dir,
+        granted_port=args.granted_port,
+        ungranted_port=args.ungranted_port,
+    )
     print(json.dumps({"manifest": str(args.out / "manifest.json")}))
     return 0
 

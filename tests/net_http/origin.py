@@ -49,6 +49,10 @@ content type, or a redirect -- read once at start from the manifest's own
 directory, and 404 for every other path, 405 for any method but GET. Every
 response says ``Connection: close``. A route naming a file outside that
 directory, or a side the manifest does not have, refuses to start.
+
+``--port N`` listens on that loopback port instead of one the kernel picks:
+M5e.4's registry evidence serves fixtures whose URLs name fixed unprivileged
+ports. A port already taken refuses to start, before ``ORIGIN-READY``.
 """
 
 from __future__ import annotations
@@ -282,9 +286,12 @@ def main() -> int:
     parser.add_argument("--key", required=True)
     parser.add_argument("--routes", type=Path, help="a registry fixture manifest")
     parser.add_argument("--side", choices=("granted", "ungranted"))
+    parser.add_argument("--port", type=int, default=0, help="a loopback port; 0: the kernel's")
     args = parser.parse_args()
     if (args.routes is None) != (args.side is None):
         parser.error("--routes and --side go together")
+    if not 0 <= args.port <= 65535:
+        parser.error(f"--port is 0 to 65535, not {args.port}")
     reply_for: Answer = (
         routed(args.routes, args.side)
         if args.routes is not None
@@ -296,7 +303,7 @@ def main() -> int:
     context.set_alpn_protocols(["http/1.1"])
     listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    listener.bind(("127.0.0.1", 0))
+    listener.bind(("127.0.0.1", args.port))
     listener.listen(64)
     print("ORIGIN-READY " + json.dumps({"port": listener.getsockname()[1]}), flush=True)
     lock = threading.Lock()

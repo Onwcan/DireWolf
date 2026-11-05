@@ -23,6 +23,7 @@ DW := $(PY) scripts/dw.py
         sandbox-secret-mutations sandbox-workspace-evidence sandbox-workspace-mutations \
         sandbox-agent-evidence sandbox-agent-mutations sandbox-release-evidence \
         sandbox-release-mutations sandbox-restart-evidence sandbox-capacity-evidence \
+        sandbox-registry-evidence \
         sandbox-neighbour-mutations d11-hardening-evidence d11-hardening-mutations d11-posture fuzz-smoke fuzz security docs \
         preflight tools hooks clean
 
@@ -142,6 +143,9 @@ sandbox-restart-evidence: ## M5e.2 R11, HOSTED ONLY: restarts the runner's Docke
 
 sandbox-capacity-evidence: ## M5e.2 R8 at the cap, HOSTED ONLY: every live environment the authority allows, all but one at their own task bound, the last prepared, measured and served (ADR-0056); refuses anywhere but a disposable GitHub-hosted runner (DW_CAPACITY_EVIDENCE=1)
 	@$(DW) sandbox-capacity-evidence
+
+sandbox-registry-evidence: ## M5e.4, HOSTED ONLY: pip as it is today against the fixture registries, npm refused before anything is prepared; builds the registry tools image from its checksum-verified pins; refuses anywhere but a disposable GitHub-hosted runner (DW_REGISTRY_EVIDENCE=1)
+	@$(DW) sandbox-registry-evidence
 
 sandbox-neighbour-mutations: ## M5e.2 R8 negative control (ADR-0056 §6): the task backstop put back at 256 must fail both neighbour tests as finding F-R8 (needs a runtime)
 	@$(DW) sandbox-neighbour-mutations

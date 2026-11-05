@@ -468,6 +468,34 @@ What tests them:
   any byte reaches it, and refuses the granted one on loopback without the
   fixture's exception.
 
+**The registry evidence (M5e.4)** is evidence, and hosted only
+([the M5e plan](../docs/M5E_ASSURANCE_PLAN.md) §§6, 8). `make sandbox-registry-evidence`
+refuses before anything unless `DW_REGISTRY_EVIDENCE=1` on a disposable GitHub-hosted
+runner — the required `sandbox-registry` job — so it is NOT EXERCISED locally, never a pass.
+
+What it runs there:
+- The registry tools image, built from `tests/sandbox/registry_tools.toml`'s pins: each
+  archive checked against its SHA-256 before use, the image built offline `FROM scratch`,
+  every version read back from inside it, any mismatch failing closed.
+- `crates/dwkd-authority/tests/sandbox_registry.rs`: a real DWKP client on the released
+  `serve --sandbox-config` runs pip, as it is today, in a fresh measured `PROXY_ONLY`
+  environment per case against the fixtures (generated with the origins' fixed ports,
+  `--granted-port` and `--ungranted-port`, served by `origin.py --routes --port`), and asks
+  for `npm install` and `npm ci`, which the authority refuses before any environment.
+  Every line is attributed at `dwkp-end-to-end`.
+- `tests/sandbox/registry_inspect.py` reads what pip left inside the environment and
+  holds it, on the host, to the fixture's wheels byte for byte.
+
+What holds it, in `make test` on every platform:
+- `tests/sandbox/test_registry_inspect.py`: each way an install can differ from the
+  fixture fails the check, and the `.pth` residual the evidence states is real.
+- `tests/architecture/test_ci_sandbox_registry.py`: the job, required once and alone with
+  its flag; the task's refusal before any work, and its census; the suite's hosted-only
+  guard and every case it prints; the pins, the verified download and the image's version
+  checks failing closed; and the contract refusing a dropped case, a wrong level, a missing
+  or wrong attribution, and an outcome that hides what it shows — each with its negative
+  control.
+
 **Brokered `fs.read` tests (M4b)** are real-process evidence for the private
 channel ([ADR-0043](../docs/adr/0043-m4b-private-broker-channel-and-brokered-fs-read.md)):
 `crates/dwkd-authority/tests/broker_fs_read.rs` drives the released authority and

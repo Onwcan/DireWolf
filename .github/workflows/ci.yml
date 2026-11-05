@@ -622,6 +622,34 @@ jobs:
         env:
           DW_CAPACITY_EVIDENCE: "1"
 
+  # M5e.4 (M5E_ASSURANCE_PLAN.md §§6, 8): pip as it is today against M5e.3's
+  # fixture registries, and npm refused before anything is prepared -- a real
+  # DWKP client on the released `serve --sandbox-config`, the released broker
+  # and this runner's Docker Engine, a fresh measured PROXY_ONLY environment
+  # per pip case. The task downloads the pinned registry tools
+  # (tests/sandbox/registry_tools.toml), checks each archive's SHA-256 before
+  # it reads a byte of it, builds them into an image offline FROM scratch and
+  # reads every version back from inside it, failing closed on any mismatch.
+  # Package-manager tools run on this disposable runner only:
+  # DW_REGISTRY_EVIDENCE=1 says so here and nowhere else, and the task and the
+  # suite each refuse anywhere else. No secret is used. Beyond what every job
+  # fetches to build, the task's only downloads are the pinned archives, and
+  # the evidence itself reaches nothing public. A case not exercised fails.
+  # The `ci` job requires it.
+  sandbox-registry:
+    name: sandbox registry evidence (make sandbox-registry-evidence)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v5.0.1
+      - uses: ./.github/actions/setup
+      - name: Show the OCI runtime
+        run: |
+          docker version --format 'client {{.Client.Version}} server {{.Server.Version}} api {{.Server.APIVersion}} {{.Server.Os}}/{{.Server.Arch}}'
+          docker info --format '{{.OperatingSystem}} kernel {{.KernelVersion}} cgroup v{{.CgroupVersion}}'
+      - run: make sandbox-registry-evidence
+        env:
+          DW_REGISTRY_EVIDENCE: "1"
+
   # D11 hardening (ADR-0053): the exchange worker's syscall filter, the
   # broker's vouching for each worker from the kernel, the start-up window
   # and the swap posture -- on the runner's own kernel, with the host each
@@ -719,7 +747,7 @@ jobs:
   ci:
     name: CI
     runs-on: ubuntu-latest
-    needs: [format, lint, typecheck, architecture, schema, evals, test, authority-transport, filesystem-canonicalization, broker-fs-read, filesystem-operations, process-broker, secret-broker, sandbox-foundation, sandbox-egress, sandbox-workload, sandbox-secret, sandbox-workspace, sandbox-agent, sandbox-release, sandbox-restart, sandbox-capacity, d11-hardening, net-http, supply-chain, build]
+    needs: [format, lint, typecheck, architecture, schema, evals, test, authority-transport, filesystem-canonicalization, broker-fs-read, filesystem-operations, process-broker, secret-broker, sandbox-foundation, sandbox-egress, sandbox-workload, sandbox-secret, sandbox-workspace, sandbox-agent, sandbox-release, sandbox-restart, sandbox-capacity, sandbox-registry, d11-hardening, net-http, supply-chain, build]
     if: always()
     steps:
       - name: Fail unless every required job succeeded
