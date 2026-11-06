@@ -2,7 +2,8 @@
 
 **Research date:** 2026-09-28 (verification pass completed 2026-09-29). **Provider-coverage
 pass:** 2026-10-07, at the same snapshot commits (§7a); the one vendor document it also
-consults is dated where it is used.
+consults is dated where it is used. **Qoder pass:** 2026-11-06 (§7c), with its date and
+sources kept apart from that snapshot.
 **Replaces:** the 2026-09-11 analysis, which compared a specification against two projects.
 **Method:** each project's own documentation, source files read one at a time at a pinned
 commit, its licence file, and advisories in the GitHub advisory database. No repository was
@@ -111,6 +112,7 @@ The projects below are not one category, and comparing across categories needs c
 | **Coding agents with local sandboxes** | A developer tool that runs commands in an OS sandbox on the developer's machine | Claude Code, OpenAI Codex |
 | **Execution infrastructure** | Sandboxes as a service; whoever runs inside decides the agent | Daytona |
 | **Agent control centres** | A self-hosted surface that runs and schedules other agents | OpenHands (Agent Canvas) |
+| **Hosted agentic coding platforms** | An IDE, a CLI, an SDK and managed cloud agents from one vendor, with the vendor's account and model service in the default path | Qoder (read 2026-11-06, §7c) |
 | **DireWolf** | An authority plane (implemented through M4) under a first-party agent runtime (planned, M7–M17) | — |
 
 DireWolf's target overlaps the first two categories; what exists today overlaps the
@@ -141,12 +143,15 @@ point at those commits, so they keep saying what we read even after the projects
 | OpenAI Codex | [openai/codex @ c248f6d](https://github.com/openai/codex/tree/c248f6d48b97eb4a2aa56147a0b11b7d763278b9) | Apache-2.0 | Rust | Active |
 | Daytona | [daytonaio/daytona](https://github.com/daytonaio/daytona) and the official documentation | Public repository frozen at v0.190.0 (AGPL-3.0); the project states that core development moved to a private codebase in June 2026 | — | Commercial service; public clients and SDKs |
 | OpenHands | [OpenHands/OpenHands @ b9d174c](https://github.com/OpenHands/OpenHands/tree/b9d174c9ca36c27cd0b657779936ea2df29280e9) | MIT | Python / TypeScript | "Agent Canvas", beta |
+| Qoder (read 2026-11-06, not at the snapshot) | No product source: [QoderAI](https://github.com/QoderAI)'s 50 public repositories hold changelogs, SDK clients, samples and tooling. Official [documentation](https://docs.qoder.com/) | **Proprietary**: the [Terms](https://qoder.com/product-service) grant a limited, revocable right to use. The Cloud Agents SDK repositories are MIT | — | Commercial service; CLI 1.1.84 on 2026-11-06 |
 
 **Adoption snapshot — GitHub stars, 2026-09-28, from the GitHub API.** Stars measure
 attention, not quality or security, and they change daily. OpenClaw 390,756 · Hermes Agent
 249,930 · Claude Code 148,535 · Codex 127,062 · OpenHands 89,472 · Daytona 71,693 · OpenFang
 18,210 · NEAR AI/IronClaw 12,634 · OpenLegion 123 · IronSecCo/IronClaw 19 · Capgate 5 ·
-DireWolf: not published.
+DireWolf: not published. Qoder has no product repository to count; on 2026-11-06 its
+most-starred public repository was [better-harness](https://github.com/QoderAI/better-harness/tree/b605532fcf1014bcb48d3e6940a5bc64e80cddd5)
+at 2,441, an MIT tool that reviews the workflow around a coding agent, not the product.
 
 Licences matter for one rule of this project: DireWolf does not reuse competitor code, so
 no licence above grants DireWolf anything it uses. They are recorded because a reader
@@ -532,6 +537,113 @@ or the integration is labelled advisory; its approvals are never DireWolf's; its
 are DireWolf secrets injected into its environment, never runtime memory; a `LOCAL_ONLY` run
 never starts an agent whose declared model origins are remote.
 
+**Added 2026-11-06.** Qoder CLI was read after this pass and is recorded in §7c in the same
+terms. It also serves ACP as the agent. The counts above stay as read on 2026-10-10, and
+ADR-0051 is unchanged.
+
+### 7c. Qoder (2026-11-06)
+
+The project owner asked for Qoder to be added. It is a commercial agentic coding platform:
+a desktop app, an IDE, a JetBrains plugin, a CLI, an Agent SDK, managed Cloud Agents, mobile
+and web control surfaces, and two adjacent products, QoderWork and QoderWake.
+
+**Method.** The vendor's documentation, privacy policy, terms and CLI changelog were read on
+2026-11-06, with individual files from its public repositories at the commits linked here.
+**Documentation is not source.** The CLI, IDE and service are closed, so every label below
+reports what the vendor documents, not what we inspected or measured. Nothing was installed,
+run, signed in to or reverse engineered, and no Qoder content was copied. Because this pass
+is dated apart from the 2026-09 snapshot, §6, §7 and §8 keep their columns and Qoder is
+labelled here with §2's labels. A dimension not listed is **UNVERIFIED**.
+
+**Publisher.** The [Terms](https://qoder.com/product-service) (2026-04-29) and
+[privacy policy](https://qoder.com/privacy-policy) (2026-05-12) name Bright Zenith Private
+Limited, a Singapore company, under Singapore law. The privacy policy names Alibaba's Qwen
+and Moonshot's Kimi among its model providers; the documentation shows an Alibaba Cloud
+manager answering for the product's security and offers purchase through Alibaba Cloud
+Marketplace. The ownership structure itself is UNVERIFIED.
+
+**Security architecture, against §6's rows.**
+
+| # | Dimension | CLI | Desktop and IDE | Cloud Agents |
+|---|---|---|---|---|
+| S1 | Authorization outside the untrusted-input process | NOT FOUND | NOT FOUND | PARTIAL (the platform applies each tool's policy; the boundary is not described) |
+| S2 | No long-lived credential in the reasoning process | NOT FOUND (`QODER_PERSONAL_ACCESS_TOKEN` in the CLI's environment) | UNVERIFIED | UNVERIFIED |
+| S3 | Deterministic authorization by default | PARTIAL (rules and prompts; `auto` uses a classifier) | PARTIAL (**Auto approve** asks only on detected risk; how it detects is not documented) | IMPLEMENTED (`always_allow`, `always_ask`, `always_deny`; the default is not stated) |
+| S4 | Delegation only attenuates | NOT FOUND (a user or project subagent may declare its own `permissionMode`, bypass included, unless policy disables it; a plugin's may not) | UNVERIFIED | UNVERIFIED |
+| S6 | Bound, single-use, expiring approvals | UNVERIFIED | UNVERIFIED | NOT FOUND (a pending `ask` never times out) |
+| S7 | Sandbox on by default | NOT FOUND (no OS sandbox in its documentation) | PARTIAL (IDE Experts Mode only; not in the desktop app's permission pages) | IMPLEMENTED (a container per session; technology not stated) |
+| S10 | Destination-allowlisted egress | NOT FOUND | NOT FOUND | NOT FOUND (the container reference's summary mentions network policies; its body has none) |
+| S11 | Credential injected at egress | NOT FOUND | NOT FOUND | UNVERIFIED (injected for tool calls; where is not stated) |
+| S12 | Credential bound to endpoint | UNVERIFIED | UNVERIFIED | IMPLEMENTED (each vault credential is bound to one MCP server URL) |
+| S13 | Return-path redaction | OPTIONAL (`security.environmentVariableRedaction.enabled`, off by default) | UNVERIFIED | UNVERIFIED |
+| S16 | Race-resistant host-path containment | PARTIAL (path-shape handling documented; a symlink bypass fixed in 0.2.9; race resistance not documented) | UNVERIFIED | N/A (container) |
+| S18 | Tamper-evident audit | NOT FOUND | NOT FOUND | NOT FOUND (the Enterprise audit log covers administrative operations only) |
+| S21 | Memory writes gated by provenance | NOT FOUND (Auto-Memory has no approval step; it is off by default and runs in interactive sessions only) | UNVERIFIED | UNVERIFIED |
+| S24 | MCP tool-set change invalidates approvals | NOT FOUND (project servers need individual approval; no hash-bound invalidation found) | UNVERIFIED | UNVERIFIED |
+| S25 | Hierarchical budgets | PARTIAL (`--max-turns`, subagent `maxTurns` and `timeoutMins`; no subtractive hierarchy found) | UNVERIFIED | UNVERIFIED |
+| S26 | Unattended runs deny | IMPLEMENTED (in plain headless mode what would ask is denied) | N/A | PARTIAL (an `ask` waits for the client) |
+| S28 | Authorization and execution split | NOT FOUND | NOT FOUND | UNVERIFIED |
+
+In §5's terms the IDE's Experts Mode and Cloud Agents are the second treatment, a boundary
+around what runs. The CLI and the desktop app, as documented, rest on permission modes in
+the agent's own product, with prompts on by default and no OS boundary described.
+
+**Capability, against §7's rows.** IMPLEMENTED: P1, P2, P4, P5, P6, P10, P11, P12 (scheduled
+tasks and `/loop`), P13, P14, P15 (desktop, mobile and web) and P18 (the CLI on Windows
+amd64; arm64 is not supported). OPTIONAL: P9 (`autoMemoryEnabled`, default `false`). NOT
+FOUND: P3 and P16. P7, P8 and P17 are UNVERIFIED; its security scan reviews code, not the
+agent's own configuration, so it does not meet P17.
+
+**Models, against §7a.** Built-in tiers are billed in the vendor's credits; the models it names
+are Qwen, Kimi, GLM, DeepSeek and MiniMax. The desktop app takes the user's own keys for
+Alibaba Cloud Model Studio, DeepSeek, Z.ai, Kimi, MiniMax, Xiaomi MIMO, OpenAI, Google and
+OpenRouter, and custom OpenAI-compatible and Anthropic-compatible endpoints; the CLI page
+lists the first six. Ollama and LM Studio were not found.
+
+**Integration surface, in §7b's terms.**
+
+| Product | Headless, machine-readable stream | Sessions, cancellation | ACP | MCP | SDK, RPC or server | Its own approvals and sandbox |
+|---|---|---|---|---|---|---|
+| Qoder CLI | `qoder -p`; `-o text\|json\|stream-json`; `--input-format stream-json`; `--max-turns` | `--resume`, `--continue`, `--session-id`, `--fork-session`; SDK interruption | **agent** (`qoder --acp`, stdio; modes default and bypass) | client (stdio, SSE, HTTP, WebSocket); CLI server NOT FOUND | Agent SDK (TypeScript, Python, Java) with `canUseTool`; a request with no callback is an error, so nothing is allowed | modes `default`, `accept_edits`, `auto` (classifier), `dont_ask`, `bypass_permissions` (`--yolo`); hooks that outrank modes; **no OS sandbox documented** |
+
+| Product | A | B | C | D | New DireWolf capability needed | Expected security limitation | Owner | Status |
+|---|---|---|---|---|---|---|---|---|
+| Qoder CLI | ACP client | contained only; advisory outside | N/A | MCP; `AGENTS.md` as untrusted context | ACP client | closed binary that updates itself by default, which a digest-pinned profile must turn off; its login token is a credential inside the environment; code goes to the vendor's model path; the Terms need reading first (below) | M29b | VERIFIED INTERFACE (documentation) · CANDIDATE |
+
+**Terms.** The Terms bar reverse engineering, scraping or distilling content from the
+service, and using the service or its outputs to build competing products. This pass read
+public pages only. Whether running Qoder CLI as a contained DireWolf workload is acceptable
+under those Terms is the owner's question to settle before M29b ever admits it.
+
+**Evidence.** CLI: [permissions](https://docs.qoder.com/cli/permissions),
+[CLI reference](https://docs.qoder.com/cli/cli-reference),
+[headless](https://docs.qoder.com/cli/run-in-scripts), [ACP](https://docs.qoder.com/cli/acp),
+[MCP](https://docs.qoder.com/cli/mcp-servers), [hooks](https://docs.qoder.com/cli/hooks),
+[subagents](https://docs.qoder.com/cli/subagent), [memory](https://docs.qoder.com/cli/memory),
+[settings](https://docs.qoder.com/cli/settings), [models](https://docs.qoder.com/cli/model),
+[installation](https://docs.qoder.com/cli/installation),
+[changelog](https://changelog.qoder.com/cli). SDK:
+[overview](https://docs.qoder.com/cli/sdk/overview),
+[permissions](https://docs.qoder.com/cli/sdk/permissions). Desktop and IDE:
+[access permissions](https://docs.qoder.com/qoder/approval-and-sandbox),
+[terminal](https://docs.qoder.com/qoder/terminal-and-sandbox),
+[execution environments](https://docs.qoder.com/qoder/execution-environments),
+[custom models](https://docs.qoder.com/qoder/custom-models),
+[IDE terminal and sandbox](https://docs.qoder.com/user-guide/editor/terminal). Cloud Agents:
+[overview](https://docs.qoder.com/cloud-agents/overview),
+[permission policies](https://docs.qoder.com/cloud-agents/permission-policies),
+[vaults](https://docs.qoder.com/cloud-agents/vaults),
+[container reference](https://docs.qoder.com/cloud-agents/container-reference). Enterprise:
+[audit log](https://docs.qoder.com/account/enterprise/audit-log),
+[get started](https://docs.qoder.com/account/teams/get-started). Repository:
+[`action.yml`](https://github.com/QoderAI/qoder-action/blob/0881d27d15a7a93778ebc5c942d11da313ee8b7e/action.yml).
+
+**DireWolf's planning conclusion.** No roadmap change. M29b's one ACP client reaches Qoder
+CLI as it reaches the other ACP agents, so Qoder is a candidate there and not a new
+deliverable; M7's compatible adapter reaches its model vendors through reviewed profiles, so
+it adds no provider target; and nothing here is newly adopted (§15, §17). §14 is unchanged:
+Qoder runs tasks today and DireWolf does not.
+
 ---
 
 ## 8. Comparison C — security evidence and maturity
@@ -594,6 +706,7 @@ CI can fill.
 | Codex | Sandboxed modes with network off; `OnRequest` approvals, where the model decides when to ask | Untrusted-project approval mode; network proxy allowlists | Model-initiated escalation out of the sandbox is the default path to approval |
 | Daytona | Containers; network restricted on tiers 1–2, "full internet access … by default" on tiers 3–4 | `networkBlockAll`; CIDR or domain allowlists; VM sandboxes | Credentials in `outboundProxyUrl` are exposed inside the sandbox as `HTTP_PROXY` |
 | OpenHands | Quick-start without a sandbox: "the agent will have full access to your filesystem" | Docker or VM backends; firewall; session API key | "Treat the VM as you would any machine that holds production credentials" |
+| Qoder (read 2026-11-06) | CLI: `default` mode, prompts for sensitive actions, headless denies what would ask, project configuration only in a trusted directory, no OS sandbox documented. Desktop: **Ask every time** | CLI `dont_ask`; organisation policy `security.disableYoloMode` and `allowManagedPermissionRulesOnly`; external isolation for the SDK's bypass modes. Cloud Agents: `always_ask` or `always_deny` per tool | Bypass and **Full access** skip approval prompts: the CLI keeps only a few `rm` and path-shape checks and denying hooks, and it does not say that protected paths hold. The IDE's Windows sandbox is user-mode and, by its own page, cannot fully stop adversarial attacks |
 
 ---
 
@@ -809,6 +922,64 @@ snapshot commit.
   agent server "runs directly on the host with full access to the machine's filesystem,
   environment, and network"; Docker and VM backends are available.
 
+### 10.12 Qoder
+
+Read 2026-11-06, from documentation only; no product source exists to read (§7c).
+
+- **Decision order** ([CLI](https://docs.qoder.com/cli/permissions)): deny rules, then each
+  tool's own safety checks, then ask rules, then allow rules and the mode. Broad allow rules
+  do not override the safety checks. Bash deny and ask rules see through wrappers and
+  environment prefixes, and a prefix allow covers a compound command only if every segment
+  is allowed. A leftover ask resolves by surface: a prompt in the terminal, denial in plain
+  headless mode, a callback under the SDK, a request to the editor under ACP.
+- **`auto` mode:** read-only tools are approved by name and writes in working directories
+  directly; everything else goes to a two-stage model classifier. The first stage can only
+  approve, the second alone can block, and an unreachable classifier means denial, not a
+  prompt. The failure direction is sound; a model still decides (§16).
+- **Bypass keeps a few checks, and they are not a boundary.** An `rm` of the working
+  directory, home or the filesystem root still asks, path-shape checks stay, and a denying
+  `PreToolUse` hook still blocks. Protected paths such as `.git`, `.mcp.json` and shell
+  startup files are described only for normal interactive modes.
+- **Trust:** project-level configuration applies only in a trusted directory
+  (`security.folderTrust.enabled`, on by default), and project MCP servers need individual
+  approval. `mcp.enableAllProjectMcpServers` turns that second check off.
+- **Sandbox, product by product.** The CLI's documentation names no OS sandbox: a full-text
+  search of the published documentation found no `--sandbox` flag, sandbox setting or
+  backend. The desktop app's current permission and terminal pages describe approvals and
+  workspaces, and a documentation page says a worktree is not a security sandbox. The IDE's
+  Experts Mode does have one: Seatbelt on macOS, bubblewrap on Linux and a proprietary
+  user-mode engine on Windows. On Linux, skipping the `bwrap` install runs commands
+  unsandboxed with a warning, and the model may request escalation out of the sandbox, which
+  the user approves.
+- **Cloud Agents:** one container per session, destroyed with its data. Vault credentials
+  are write-only through the API, encrypted at rest and bound to an MCP server URL. The
+  isolation technology, execution user and default egress are not stated. A pending `ask`
+  has no timeout.
+- **Audit:** the [Enterprise audit log](https://docs.qoder.com/account/enterprise/audit-log)
+  records administrative operations, and says it does not record prompts, terminal commands,
+  agent execution or MCP tool parameters. It is not a record of what an agent did.
+- **A claim that differs from the rest of the documentation.** A
+  [customer case](https://docs.qoder.com/customer-cases/qoder-case-eccang) has an Alibaba
+  Cloud manager saying Qoder and QoderWork run in a local sandbox and "data never leaves the
+  machine". The current product pages describe no such sandbox, and the
+  [privacy policy](https://qoder.com/privacy-policy) has user content processed by the
+  service and its model providers. The case does not say which deployment it means, so this
+  is recorded as a disagreement between the vendor's own pages, not as a finding about any
+  one deployment.
+- **Data:** de-identified user content may be used to improve the service unless the
+  Share & Improve setting is off, where the plan offers it, and is kept for up to five
+  years. Data is processed and stored in the United States, Singapore and Japan.
+- **Security record.** On 2026-11-06 the GitHub advisory database listed nothing for
+  `@qoder-ai/qodercli` and an NVD keyword search for Qoder returned no entry; both are
+  absence from those sources, not proof of absence. No vulnerability-reporting process was
+  found in the documentation. Fixes appear as ordinary changelog lines: CLI 0.2.9
+  (2026-05-08) fixed symlink reads bypassing permission boundary checks. `qoder-action`
+  at the commit read still defaults to CLI 0.1.18, which predates that fix.
+- **Assurance it states:** ISO/IEC 27001:2022 certification and a SOC 2 Type II audit, on
+  its [Enterprise page](https://docs.qoder.com/account/teams/get-started); neither report was
+  read. Its security scans review code for vulnerabilities, a product feature separate from
+  containing the agent, and the documentation says so itself.
+
 ---
 
 ## 11. The security record, re-verified
@@ -992,6 +1163,18 @@ Each has a ledger entry in §17 and a roadmap item.
 |---|---|---|---|
 | G18 | Interoperate through the Agent Client Protocol first — one reviewed client for the agents that serve it, one agent role for DireWolf — with contained, mediated and advisory kept apart in every claim (§7b, ADR-0051) | OpenClaw, Hermes Agent, Cline, Oh My Pi, Qwen Code, OpenCode, Copilot CLI, DeepSeek Harness (each serves ACP); OpenClaw (ACP client role) | M29 |
 
+### Studied by the Qoder pass (2026-11-06)
+
+Nothing is newly adopted. Three of its documented behaviours match what DireWolf already
+has or plans, and they are recorded as confirmation, with the §7c limit: documented, not
+measured.
+
+| Idea | Source | Where it lives in DireWolf |
+|---|---|---|
+| What would need approval is denied when no one can answer | Qoder CLI headless mode; Agent SDK with no callback | Deny by default; approvals M6 |
+| Durable memory writes kept out of unattended sessions | Qoder CLI Auto-Memory, interactive sessions only | G6, M13 |
+| Windows path spellings treated as attacks, not paths | Qoder CLI path shapes | G19 (§17) |
+
 ### Studied and rejected
 
 See §16.
@@ -1002,7 +1185,7 @@ See §16.
 
 | Pattern | Seen in | Why DireWolf does not do it |
 |---|---|---|
-| A model deciding an approval | Hermes Agent `smart` mode; Codex `OnRequest` (the model decides when to ask) | An authorization decision made by a component that reads attacker-controlled text is advisory. A model may summarise a request for a human; it never decides |
+| A model deciding an approval | Hermes Agent `smart` mode; Codex `OnRequest` (the model decides when to ask); Qoder CLI `auto` mode | An authorization decision made by a component that reads attacker-controlled text is advisory. A model may summarise a request for a human; it never decides |
 | Choosing a sandbox switches authorization checks off | Hermes Agent container backends | Isolation bounds the damage of an allowed action; it does not decide whether the action is allowed. Both apply, always |
 | A weighted containment score | IronSecCo/IronClaw `ironctl scan` | A weighted sum lets a failed invariant be averaged away: a writable root at a small weight still earns a passing grade. DireWolf reports each invariant PASS/FAIL, and one FAIL refuses the environment (§17 G2) |
 | Pattern-derived taint presented as information flow | OpenFang | Labels from substrings of a command are a filter a rephrasing defeats. DireWolf derives taint from where content came from, in the authority, never from what the content looks like |
@@ -1131,6 +1314,13 @@ Every candidate idea from the research, with its decision. Fields: **SOURCE** ·
 | G14 | Claude Code | The sandbox cannot write the agent's own settings, hooks or skills | The allowlisted-interpreter problem and protected paths | ALREADY PLANNED ([SANDBOX.md](SANDBOX.md) §4a; EVALS "allowlisted interpreter"; M5, M10) |
 | G15 | OpenFang, NEAR AI/IronClaw | WASM tool sandbox with fuel and epoch metering | No plugin surface in V1 | DEFER (M26 candidate for out-of-process plugins) |
 | G16 | IronSecCo/IronClaw, OpenFang | Pre-main daemon hardening | Core dumps off, non-dumpable | ALREADY IMPLEMENTED (M4e; convergent with Codex) |
+
+**G19–G20 — candidates from the Qoder pass** (2026-11-06; no roadmap change)
+
+| # | Source | Idea | DireWolf state | Decision |
+|---|---|---|---|---|
+| G19 | Qoder CLI | Never persist a rule for a network path; confirm alternate data streams, 8.3 names, device paths, trailing dots and reserved names | Listed as attacks with defences in [SANDBOX.md](SANDBOX.md); native Windows serving refuses | ALREADY PLANNED (the own ADR for other platforms; the persistent-rule point is an input to it) |
+| G20 | Qoder Mobile & Web | Approve an agent's actions from a phone | Remote approval designed, off by default, with high-risk classes keepable local ([APPROVALS.md](APPROVALS.md)) | ALREADY PLANNED (M6 and later surfaces) |
 
 ---
 
