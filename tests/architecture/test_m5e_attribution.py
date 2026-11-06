@@ -322,8 +322,8 @@ def test_every_required_case_is_attributed_and_every_rule_is_used() -> None:
     # a real runtime, 4 cross-run, the host UTS namespace and R8's 10
     # neighbour cases, 5 at the broker and 5 through the authority; on the
     # hosted runner, 7 of the runtime's restart and 4 at the live-environment
-    # cap); and M5e.4's 19 registry cases, hosted only. A smaller one is a
-    # lost case.
+    # cap); and M5e.4's 19 registry cases, hosted only, and 2 at the broker's
+    # executable-copy bound on a real runtime. A smaller one is a lost case.
     assert len(dw.BROKER_ASSURANCE_CASES) == 20
     assert len(dw.CAPTURED_ASSURANCE_CASES) == 19
     closure = [c for s, c in dw.WORKLOAD_CASES if s == "sandbox-closure"]
@@ -339,7 +339,7 @@ def test_every_required_case_is_attributed_and_every_rule_is_used() -> None:
     assert len(dw.RESTART_CASES) == 7
     assert len(dw.CAPACITY_CASES) == 4
     assert len(dw.REGISTRY_CASES) == 19
-    assert len(inventory) == 581
+    assert len(inventory) == 583
 
 
 def test_the_vocabulary_is_closed_used_and_documented() -> None:

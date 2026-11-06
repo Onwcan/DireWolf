@@ -475,7 +475,8 @@ runner — the required `sandbox-registry` job — so it is NOT EXERCISED locall
 
 What it runs there:
 - The registry tools image, built from `tests/sandbox/registry_tools.toml`'s pins: each
-  archive checked against its SHA-256 before use, the image built offline `FROM scratch`,
+  archive checked against its SHA-256 before use, the interpreter held to its pinned size
+  and digest within the broker's 64 MiB copy bound, the image built offline `FROM scratch`,
   every version read back from inside it, any mismatch failing closed.
 - `crates/dwkd-authority/tests/sandbox_registry.rs`: a real DWKP client on the released
   `serve --sandbox-config` runs pip, as it is today, in a fresh measured `PROXY_ONLY`

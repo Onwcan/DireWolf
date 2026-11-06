@@ -93,6 +93,10 @@ mod linux {
     const LEVEL: &str = "real-oci";
     /// Where the evidence image carries the workload fixture.
     const FIXTURE: &str = "/usr/libexec/direwolf/sandbox-fixture";
+    /// The fixture padded to exactly the largest file the broker hashes, and
+    /// to the size of the interpreter hosted run 42112947252 had refused.
+    const FIXTURE_AT_BOUND: &str = "/usr/libexec/direwolf/sandbox-fixture-at-bound";
+    const FIXTURE_PAST_BOUND: &str = "/usr/libexec/direwolf/sandbox-fixture-past-bound";
 
     static UNIQUE: AtomicU64 = AtomicU64::new(0);
 
@@ -1461,13 +1465,21 @@ mod linux {
         let _reaper = Reaper(ev.clone());
         let dir = Scratch::new("digest");
         let socket = dir.socket();
-        let _broker = Broker::start(&socket, None);
+        let broker = Broker::start(&socket, None);
         let workspace = dir.workspace("ws");
         let (s, container) = prepared(&socket, &ev, &workspace);
         let env = (&s, &container);
         fn marker(name: &str) -> Vec<&str> {
             vec!["mark", name]
         }
+        // What the broker's log says of a refusal, once its line has arrived.
+        let logged = |event: &str| {
+            let deadline = Instant::now() + PROMPT;
+            while !broker.stderr().contains(event) && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            assert!(broker.stderr().contains(event), "{}", broker.stderr());
+        };
 
         // Other bytes than the pinned ones: nothing runs.
         let other = "0".repeat(64);
@@ -1480,6 +1492,7 @@ mod linux {
             )),
             BrokerRefusal::DigestMismatch
         );
+        logged("workload_executable_refused verdict=FAIL cause=not-the-pinned-file");
         evidence(
             "workload-executable-substituted-refused",
             "digest-mismatch",
@@ -1500,6 +1513,7 @@ mod linux {
             )),
             BrokerRefusal::DigestMismatch
         );
+        logged("workload_executable_refused verdict=UNOBSERVABLE cause=copy-failed");
         evidence(
             "workload-executable-missing-refused",
             "digest-mismatch",
@@ -1525,7 +1539,57 @@ mod linux {
             "digest-mismatch",
             "executable-digest-pin",
         );
-        assert!(!workspace.join("sub").exists() && !workspace.join("other").exists());
+        // The largest file the broker hashes, through the runtime's own tar
+        // stream: proved, and run.
+        let at_the_bound = ended(run_workload(
+            &socket,
+            &ev,
+            env,
+            workload(
+                (FIXTURE_AT_BOUND, &var("DW_SANDBOX_FIXTURE_AT_BOUND_SHA256")),
+                &marker("/workspace/at-the-bound"),
+                4096,
+                60,
+            ),
+        ));
+        assert_eq!(at_the_bound.exit_code.map(|c| c.get()), Some(0));
+        assert!(workspace.join("at-the-bound").exists());
+        evidence(
+            "workload-executable-at-the-copy-bound-runs",
+            "exited-0",
+            "executable-digest-pin",
+        );
+        // Hosted run 42112947252's failure, on any runtime: an executable of
+        // the size that run measured, pinned correctly and unchanged, past
+        // the bound. Refused, nothing run, and the log says why.
+        assert_eq!(
+            refusal(run_workload(
+                &socket,
+                &ev,
+                env,
+                workload(
+                    (
+                        FIXTURE_PAST_BOUND,
+                        &var("DW_SANDBOX_FIXTURE_PAST_BOUND_SHA256")
+                    ),
+                    &marker("/workspace/past-the-bound"),
+                    4096,
+                    60
+                )
+            )),
+            BrokerRefusal::DigestMismatch
+        );
+        logged("workload_executable_refused verdict=FAIL cause=past-the-copy-bound");
+        evidence(
+            "workload-executable-past-the-copy-bound-refused",
+            "digest-mismatch",
+            "executable-digest-pin",
+        );
+        assert!(
+            !workspace.join("sub").exists()
+                && !workspace.join("other").exists()
+                && !workspace.join("past-the-bound").exists()
+        );
         evidence(
             "workload-refused-ran-nothing",
             "no-marker",

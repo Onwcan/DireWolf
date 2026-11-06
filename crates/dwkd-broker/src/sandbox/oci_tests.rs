@@ -19,8 +19,12 @@ use dwk_proto::wire::scalar::{ContentDigest, HostPath};
 
 use crate::process::run::{self, Completed, Ended};
 
+use super::super::digest;
 use super::super::environment::{EnvFailure, EnvHandle, Measured, Prepared};
-use super::{accounted, clean, contract, kept_or_taken_down, recorded_or_gone, workspace_checks};
+use super::{
+    accounted, clean, contract, executable_verdict, kept_or_taken_down, recorded_or_gone,
+    workspace_checks,
+};
 
 const MIB: u64 = 1 << 20;
 
@@ -357,4 +361,61 @@ fn a_listing_is_complete_only_when_each_container_it_named_was_inspected_or_prov
     assert!(!accounted(&ids, &[owned(&a)], Ended::Exited(1), || None));
     // Short, yet answered as whole: nothing explains it.
     assert!(!accounted(&ids, &[owned(&a)], Ended::Exited(0), none));
+}
+
+#[test]
+fn only_a_whole_copy_of_the_pinned_bytes_passes_and_each_refusal_says_why() {
+    // Hosted run 42112947252: the runtime's client cut at the bound, while
+    // the file was the pinned one. A cut copy is never judged by what was
+    // kept, and it is `FAIL`, as a file too long to vouch for.
+    let name = "python3.12";
+    let bytes = b"\x7fELF the pinned interpreter";
+    let want = digest::hex(bytes);
+    let tar = digest::tar_of(name, bytes);
+    let verdict = |copied: Option<&Completed>| executable_verdict(copied, name, &want);
+
+    let whole = completed(Ended::Exited(0), &tar);
+    assert_eq!(verdict(Some(&whole)), (Verdict::Pass, "pinned"));
+
+    // The very stream that passes, marked cut: past the bound, not the file.
+    let mut cut = completed(Ended::Exited(0), &tar);
+    cut.stdout_cut = true;
+    assert_eq!(verdict(Some(&cut)), (Verdict::Fail, "past-the-copy-bound"));
+    // Killed at the bound, as the runner's client was.
+    let mut killed = completed(Ended::Signaled(9), &tar);
+    killed.stdout_cut = true;
+    assert_eq!(
+        verdict(Some(&killed)),
+        (Verdict::Fail, "past-the-copy-bound")
+    );
+
+    // Other bytes, under the digest pinned, and the pinned bytes elsewhere.
+    let other = completed(Ended::Exited(0), &digest::tar_of(name, b"other"));
+    assert_eq!(
+        verdict(Some(&other)),
+        (Verdict::Fail, "not-the-pinned-file")
+    );
+    let renamed = completed(Ended::Exited(0), &digest::tar_of("python3", bytes));
+    assert_eq!(
+        verdict(Some(&renamed)),
+        (Verdict::Fail, "not-the-pinned-file")
+    );
+    // Output that is no archive.
+    let garbage = completed(Ended::Exited(0), b"not tar");
+    assert_eq!(
+        verdict(Some(&garbage)),
+        (Verdict::Unobservable, "malformed-archive")
+    );
+    // The client failed -- as it does for a path the image does not hold --
+    // or was killed, even with the whole stream printed; or gave no answer.
+    for ended in [Ended::Exited(1), Ended::Signaled(9), Ended::TimedOut] {
+        assert_eq!(
+            verdict(Some(&completed(ended, &tar))),
+            (Verdict::Unobservable, "copy-failed")
+        );
+    }
+    assert_eq!(
+        verdict(None),
+        (Verdict::Unobservable, "runtime-unavailable")
+    );
 }

@@ -6,20 +6,31 @@
 # and fails closed on any mismatch. A version change is a reviewed diff of this
 # file, never a download that floats.
 #
-# Each release was at least two weeks old when it was pinned (2026-11-05), and
-# each checksum agrees with its publisher's own list: the CPython build's with
-# the release's SHA256SUMS and GitHub's asset digest, Node.js's with its
-# SHASUMS256.txt, pip's with PyPI's file digest.
+# Each release was at least two weeks old when it was pinned, and each checksum
+# agrees with its publisher's own list: the CPython build's with the release's
+# SHA256SUMS, Node.js's with its SHASUMS256.txt, pip's with PyPI's file digest.
 
 format = 1
 
 # The interpreter pip runs on: a standalone, relocatable CPython build, so the
 # image does not depend on the runner's distribution Python and its patch
 # level. The repository's own Python is 3.12 (.python-version).
+#
+# The stripped build, because of the broker's bound. Before every launch the
+# broker copies a workload's executable out of the container and hashes it,
+# and that copy is bounded at 64 MiB (`crates/dwkd-broker/src/sandbox/digest.rs`,
+# MAX_PROBE_BYTES). The same release's unstripped interpreter is 68 023 040
+# bytes: it was refused EXECUTABLE_CHANGED, its bytes unchanged (hosted run
+# 42112947252). `executable_bytes` and `executable_sha256` are this archive's
+# own `python/bin/python3.12`: `scripts/dw.py` holds the pin to that bound and
+# the extracted file to these values, so a build past the bound fails here, by
+# name, and never reaches the broker. They change only with the archive.
 [python]
 version = "3.12.15"
-url = "https://github.com/astral-sh/python-build-standalone/releases/download/20261013/cpython-3.12.15%2B20261013-x86_64-unknown-linux-gnu-install_only.tar.gz"
-sha256 = "5d546fc004fc2435fa142eb8f42ed8de5eb4725963dc22f7e6671014a80eb560"
+url = "https://github.com/astral-sh/python-build-standalone/releases/download/20261013/cpython-3.12.15%2B20261013-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz"
+sha256 = "178d3d83b6e8e99285a65d3fce9c16b87952cc5efdb4d1a0e3ff3be18ff0fc9c"
+executable_bytes = 31009064
+executable_sha256 = "eaaa308032c4aa063df5880c4c293cd458b4629d503fbc2c03ec163d71f7f790"
 
 # pip as it is today: the wheel, installed into that interpreter's
 # site-packages in place of whatever pip the build carries.

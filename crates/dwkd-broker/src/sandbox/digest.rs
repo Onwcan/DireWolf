@@ -13,10 +13,14 @@
 use dwk_proto::brokerp::sandbox::Verdict;
 use sha2::{Digest as _, Sha256};
 
-/// The largest probe hashed. The real one is a little over a megabyte.
+/// The largest file hashed: the probe, the relay, and a workload's executable
+/// (ADR-0052 §5). The probe is a little over a megabyte. Every byte of the
+/// copy is held in the broker while it is hashed, so this is a bound on the
+/// broker as much as on the file: an executable past it is refused, whatever
+/// its bytes, and an operator pins a smaller one.
 pub(crate) const MAX_PROBE_BYTES: usize = 64 << 20;
 
-/// The most tar bytes read: the probe, its headers and padding.
+/// The most tar bytes read: the file, its headers and padding.
 pub(crate) const MAX_ARCHIVE_BYTES: usize = MAX_PROBE_BYTES + (64 << 10);
 
 const BLOCK: usize = 512;
@@ -131,7 +135,7 @@ fn one_file<'a>(archive: &'a [u8], expected_name: &str) -> Result<&'a [u8], Verd
 }
 
 /// Lowercase hex SHA-256.
-fn hex(bytes: &[u8]) -> String {
+pub(super) fn hex(bytes: &[u8]) -> String {
     use core::fmt::Write as _;
     let digest = Sha256::digest(bytes);
     let mut text = String::with_capacity(64);
@@ -172,6 +176,12 @@ fn named(archive: &[u8], name: &str, expected: &str) -> Verdict {
     }
 }
 
+/// `content` as the one file of a tar stream, for `oci.rs`'s tests.
+#[cfg(test)]
+pub(crate) fn tar_of(name: &str, content: &[u8]) -> Vec<u8> {
+    tests::archive(&[tests::entry(name, b'0', content)])
+}
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,
@@ -181,32 +191,42 @@ fn named(archive: &[u8], name: &str, expected: &str) -> Verdict {
 mod tests {
     use dwk_proto::brokerp::sandbox::Verdict;
 
-    use super::{BLOCK, executable, hex, probe, relay};
+    use super::{BLOCK, MAX_ARCHIVE_BYTES, MAX_PROBE_BYTES, executable, hex, probe, relay};
 
-    /// One ustar entry.
-    fn entry(name: &str, kind: u8, content: &[u8]) -> Vec<u8> {
+    /// `header` with its checksum recomputed.
+    fn sealed(mut header: Vec<u8>) -> Vec<u8> {
+        header[148..156].copy_from_slice(b"        ");
+        let sum: usize = header.iter().map(|b| usize::from(*b)).sum();
+        let sum = format!("{sum:06o}\0 ");
+        header[148..156].copy_from_slice(sum.as_bytes());
+        header
+    }
+
+    /// One ustar header, for `size` bytes that may or may not follow it.
+    fn header(name: &str, kind: u8, size: usize) -> Vec<u8> {
         let mut header = vec![0u8; BLOCK];
         header[..name.len()].copy_from_slice(name.as_bytes());
         header[100..107].copy_from_slice(b"0000755");
         header[108..115].copy_from_slice(b"0000000");
         header[116..123].copy_from_slice(b"0000000");
-        let size = format!("{:011o}", content.len());
+        let size = format!("{size:011o}");
         header[124..135].copy_from_slice(size.as_bytes());
         header[136..147].copy_from_slice(b"00000000000");
         header[156] = kind;
         header[257..263].copy_from_slice(b"ustar\0");
         header[263..265].copy_from_slice(b"00");
-        header[148..156].copy_from_slice(b"        ");
-        let sum: usize = header.iter().map(|b| usize::from(*b)).sum();
-        let sum = format!("{sum:06o}\0 ");
-        header[148..156].copy_from_slice(sum.as_bytes());
-        let mut out = header;
+        sealed(header)
+    }
+
+    /// One ustar entry.
+    pub(super) fn entry(name: &str, kind: u8, content: &[u8]) -> Vec<u8> {
+        let mut out = header(name, kind, content.len());
         out.extend_from_slice(content);
         out.resize(out.len().div_ceil(BLOCK) * BLOCK, 0);
         out
     }
 
-    fn archive(entries: &[Vec<u8>]) -> Vec<u8> {
+    pub(super) fn archive(entries: &[Vec<u8>]) -> Vec<u8> {
         let mut out: Vec<u8> = entries.concat();
         out.extend_from_slice(&[0u8; 2 * BLOCK]);
         out
@@ -322,5 +342,89 @@ mod tests {
         assert_eq!(probe(&[], &want), Verdict::Fail);
         let good = archive(&[entry("sandbox-probe", b'0', &bytes)]);
         assert_eq!(probe(&good[..BLOCK + 2], &want), Verdict::Unobservable);
+    }
+
+    /// The interpreter hosted run 42112947252 measured and the broker
+    /// refused: 1.4 % past the bound, its bytes unchanged.
+    const REFUSED_INTERPRETER_BYTES: usize = 68_023_040;
+
+    #[test]
+    fn a_file_at_the_bound_is_hashed_and_a_larger_one_is_refused_from_its_header() {
+        let name = "python3.12";
+        let mut largest = vec![0u8; MAX_PROBE_BYTES];
+        largest[0] = 0x7f;
+        let want = hex(&largest);
+        let whole = archive(&[entry(name, b'0', &largest)]);
+        assert!(whole.len() <= MAX_ARCHIVE_BYTES, "{}", whole.len());
+        assert_eq!(executable(&whole, name, &want), Verdict::Pass);
+        // Its bytes still decide, at this size as at any other.
+        let mut changed = whole.clone();
+        changed[MAX_PROBE_BYTES] ^= 1;
+        assert_eq!(executable(&changed, name, &want), Verdict::Fail);
+        assert_eq!(executable(&whole, name, &"0".repeat(64)), Verdict::Fail);
+        // A byte past it, and the file the hosted run measured: refused from
+        // the header, before a byte of the content is read.
+        for size in [MAX_PROBE_BYTES + 1, REFUSED_INTERPRETER_BYTES] {
+            let oversized = header(name, b'0', size);
+            assert_eq!(executable(&oversized, name, &want), Verdict::Fail, "{size}");
+        }
+        // An extended header is held to the same bound.
+        let extended = header("PaxHeaders/x", b'x', MAX_PROBE_BYTES + 1);
+        assert_eq!(executable(&extended, name, &want), Verdict::Fail);
+    }
+
+    #[test]
+    fn an_executable_cut_short_or_malformed_is_never_a_pass() {
+        let name = "python3.12";
+        let bytes = vec![7u8; 3 * BLOCK + 17];
+        let want = hex(&bytes);
+        let good = archive(&[entry(name, b'0', &bytes)]);
+        assert_eq!(executable(&good, name, &want), Verdict::Pass);
+        // Cut inside a header, and inside the content.
+        for end in [100, BLOCK + 100, BLOCK + bytes.len() - 1] {
+            assert_eq!(
+                executable(&good[..end], name, &want),
+                Verdict::Unobservable,
+                "{end}"
+            );
+        }
+        // A header whose checksum is wrong, or whose size is not an octal one.
+        let mut corrupt = good.clone();
+        corrupt[0] ^= 1;
+        assert_eq!(executable(&corrupt, name, &want), Verdict::Unobservable);
+        let mut base_256 = header(name, b'0', bytes.len());
+        base_256[124] = 0x80;
+        assert_eq!(
+            executable(&sealed(base_256), name, &want),
+            Verdict::Unobservable
+        );
+        let mut not_octal = header(name, b'0', bytes.len());
+        not_octal[124..135].copy_from_slice(b"00000000009");
+        assert_eq!(
+            executable(&sealed(not_octal), name, &want),
+            Verdict::Unobservable
+        );
+    }
+
+    #[test]
+    fn a_missing_duplicated_or_linked_executable_fails_closed() {
+        let name = "python3.12";
+        let bytes = b"\x7fELF a workload".to_vec();
+        let want = hex(&bytes);
+        // Nothing at all, and an archive of nothing.
+        assert_eq!(executable(&[], name, &want), Verdict::Fail);
+        assert_eq!(executable(&archive(&[]), name, &want), Verdict::Fail);
+        let file = entry(name, b'0', &bytes);
+        for bad in [
+            // The pinned bytes twice, and a link or a long name after them:
+            // the right bytes first prove nothing about what follows.
+            archive(&[file.clone(), file.clone()]),
+            archive(&[file.clone(), entry(name, b'2', b"")]),
+            archive(&[file, entry(name, b'L', b"long")]),
+            // A link alone, naming a file it would be the digest of.
+            archive(&[entry(name, b'2', &bytes)]),
+        ] {
+            assert_eq!(executable(&bad, name, &want), Verdict::Fail);
+        }
     }
 }

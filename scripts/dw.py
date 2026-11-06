@@ -2954,6 +2954,17 @@ def task_sandbox_foundation_evidence() -> None:
 
 SANDBOX_RELAY_PATH = "/usr/libexec/direwolf/sandbox-relay"
 SANDBOX_FIXTURE_PATH = "/usr/libexec/direwolf/sandbox-fixture"
+# The largest file the broker hashes (`MAX_PROBE_BYTES` in
+# crates/dwkd-broker/src/sandbox/digest.rs, which an architecture test holds
+# this equal to): it reads a workload's executable out of the container before
+# every launch, and a larger one is refused EXECUTABLE_CHANGED whatever its
+# bytes. Two padded copies of the fixture stand at that line on a real runtime:
+# one exactly at it, which runs; and one the size of the interpreter hosted run
+# 42112947252 had refused, which does not.
+EXECUTABLE_COPY_BOUND = 64 << 20
+SANDBOX_FIXTURE_AT_BOUND_PATH = "/usr/libexec/direwolf/sandbox-fixture-at-bound"
+SANDBOX_FIXTURE_PAST_BOUND_PATH = "/usr/libexec/direwolf/sandbox-fixture-past-bound"
+SANDBOX_FIXTURE_PAST_BOUND_BYTES = 68_023_040
 
 EGRESS_BROKER_TESTS = (
     "linux::a_proxy_only_environment_measures_clean_and_reaches_only_its_proxy",
@@ -3445,6 +3456,8 @@ WORKLOAD_CASES = (
             "workload-executable-substituted-refused",
             "workload-executable-missing-refused",
             "workload-executable-other-file-refused",
+            "workload-executable-at-the-copy-bound-runs",
+            "workload-executable-past-the-copy-bound-refused",
             "workload-refused-ran-nothing",
             "workload-drifted-environment-refused",
             "workload-stopped-environment-refused",
@@ -3600,6 +3613,19 @@ WORKLOAD_CASES = (
 )
 
 
+def _padded(source: Path, target: Path, size: int) -> str:
+    """`source`'s bytes at `target`, zero-padded to exactly `size`: bytes the
+    loader never reads past the file's end of sections, so the copy still runs,
+    as another file of that size. Returns its SHA-256."""
+    data = source.read_bytes()
+    if len(data) > size:
+        raise TaskError(f"{source}: {len(data)} bytes do not fit in {size}")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(data + bytes(size - len(data)))
+    target.chmod(0o755)
+    return hashlib.sha256(target.read_bytes()).hexdigest()
+
+
 def _workload_setup() -> tuple[Path, str, dict[str, str], set[str], dict[str, str]]:
     """The M5d.1 evidence's setup, separate from the evidence: a trusted
     runtime client; the probe and the fixture built statically and proved
@@ -3661,6 +3687,10 @@ def _workload_setup() -> tuple[Path, str, dict[str, str], set[str], dict[str, st
     linking = {name: _static_elf(path) for name, path in (("probe", probe), ("fixture", fixture))}
     probe_sha = hashlib.sha256(probe.read_bytes()).hexdigest()
     fixture_sha = hashlib.sha256(fixture.read_bytes()).hexdigest()
+    at_bound = work / "padded" / Path(SANDBOX_FIXTURE_AT_BOUND_PATH).name
+    past_bound = work / "padded" / Path(SANDBOX_FIXTURE_PAST_BOUND_PATH).name
+    at_bound_sha = _padded(fixture, at_bound, EXECUTABLE_COPY_BOUND)
+    past_bound_sha = _padded(fixture, past_bound, SANDBOX_FIXTURE_PAST_BOUND_BYTES)
     images = {
         "workload": _build_image(
             client,
@@ -3671,7 +3701,12 @@ def _workload_setup() -> tuple[Path, str, dict[str, str], set[str], dict[str, st
             None,
             # M5d.2 (OD-9): the fixture again at a path the host also has, so
             # a grant resolved on the host is shown to cover nothing in it.
-            {SANDBOX_FIXTURE_PATH: fixture, "/usr/bin/true": fixture},
+            {
+                SANDBOX_FIXTURE_PATH: fixture,
+                "/usr/bin/true": fixture,
+                SANDBOX_FIXTURE_AT_BOUND_PATH: at_bound,
+                SANDBOX_FIXTURE_PAST_BOUND_PATH: past_bound,
+            },
         )
     }
     tools, tool_variables = _tools_image(
@@ -3685,6 +3720,8 @@ def _workload_setup() -> tuple[Path, str, dict[str, str], set[str], dict[str, st
     print(f"  runtime client     {chosen}")
     print(f"  probe              {linking['probe']}, sha256 {probe_sha}")
     print(f"  fixture            {linking['fixture']}, sha256 {fixture_sha} (the workload)")
+    print(f"  at the copy bound  {EXECUTABLE_COPY_BOUND} bytes, sha256 {at_bound_sha}")
+    print(f"  past the bound     {SANDBOX_FIXTURE_PAST_BOUND_BYTES} bytes, sha256 {past_bound_sha}")
     print(f"  image (content id) {images['workload']}")
     print(
         f"  tools image        {images['tools']} "
@@ -3700,6 +3737,8 @@ def _workload_setup() -> tuple[Path, str, dict[str, str], set[str], dict[str, st
         "DW_SANDBOX_WORKLOAD_IMAGE": images["workload"],
         "DW_SANDBOX_PROBE_SHA256": probe_sha,
         "DW_SANDBOX_FIXTURE_SHA256": fixture_sha,
+        "DW_SANDBOX_FIXTURE_AT_BOUND_SHA256": at_bound_sha,
+        "DW_SANDBOX_FIXTURE_PAST_BOUND_SHA256": past_bound_sha,
         **tool_variables,
     }
     return client, socket, variables, before, images
@@ -3973,12 +4012,31 @@ _EXACT_VERSION = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+")
 _SHA256_HEX = re.compile(r"[0-9a-f]{64}")
 
 
+def _pinned_interpreter(path: Path, entry: dict[str, object]) -> dict[str, str]:
+    """`[python]`'s two facts about the interpreter its archive holds, taken
+    out of `entry` and checked: a size the broker can hash (a larger one would
+    be refused EXECUTABLE_CHANGED at every launch) and a lowercase SHA-256."""
+    size = entry.pop("executable_bytes", None)
+    digest = entry.pop("executable_sha256", None)
+    if not isinstance(size, int) or isinstance(size, bool) or size < 1:
+        raise TaskError(f"{path}: [python] executable_bytes is a byte count, not {size!r}")
+    if size > EXECUTABLE_COPY_BOUND:
+        raise TaskError(
+            f"{path}: [python] executable_bytes {size} is past the broker's bound of "
+            f"{EXECUTABLE_COPY_BOUND}: every launch would be refused EXECUTABLE_CHANGED"
+        )
+    if not isinstance(digest, str) or not _SHA256_HEX.fullmatch(digest):
+        raise TaskError(f"{path}: [python] executable_sha256 is 64 lowercase hex digits")
+    return {"executable_bytes": str(size), "executable_sha256": digest}
+
+
 def load_registry_pins(path: Path = REGISTRY_PINS) -> dict[str, dict[str, str]]:
     """The registry tools' pins, each checked, or TaskError: format 1;
     exactly `python`, `pip` and `node`; each an exact `N.N.N` version, a
     lowercase SHA-256, and an https URL on its own host -- no port, query,
     fragment or credentials -- whose path names that version; `node` also
-    npm's exact version. A pin is never guessed and never defaulted."""
+    npm's exact version; `python` also its interpreter's size, within the
+    broker's bound, and SHA-256. A pin is never guessed and never defaulted."""
     import tomllib  # Python 3.11+: only the registry evidence reads it
 
     try:
@@ -3992,13 +4050,10 @@ def load_registry_pins(path: Path = REGISTRY_PINS) -> dict[str, dict[str, str]]:
         raise TaskError(f"{path}: the pins are exactly {sorted(REGISTRY_TOOL_HOSTS)}, not {tools}")
     pins: dict[str, dict[str, str]] = {}
     for tool, hosts in REGISTRY_TOOL_HOSTS.items():
-        entry = data[tool]
+        entry = dict(data[tool]) if isinstance(data[tool], dict) else {}
+        interpreter = _pinned_interpreter(path, entry) if tool == "python" else {}
         keys = {"version", "url", "sha256"} | ({"npm_version"} if tool == "node" else set())
-        if (
-            not isinstance(entry, dict)
-            or set(entry) != keys
-            or not all(isinstance(value, str) for value in entry.values())
-        ):
+        if set(entry) != keys or not all(isinstance(value, str) for value in entry.values()):
             raise TaskError(f"{path}: [{tool}] holds exactly {sorted(keys)}, each a string")
         for key in sorted(keys - {"url", "sha256"}):
             if not _EXACT_VERSION.fullmatch(entry[key]):
@@ -4016,7 +4071,7 @@ def load_registry_pins(path: Path = REGISTRY_PINS) -> dict[str, dict[str, str]]:
             raise TaskError(f"{path}: [{tool}] url is https://{hosts[0]}/..., not {entry['url']!r}")
         if entry["version"] not in Path(urllib.parse.unquote(url.path)).name:
             raise TaskError(f"{path}: [{tool}] url's file does not name version {entry['version']}")
-        pins[tool] = dict(entry)
+        pins[tool] = {**entry, **interpreter}
     return pins
 
 
@@ -4181,6 +4236,16 @@ def _registry_tools_image(
     python = python_home / "bin" / f"python{minor}"
     if python.is_symlink() or not python.is_file():
         raise TaskError(f"the CPython build has no interpreter at bin/python{minor}")
+    # The bytes the broker hashes before every launch: the archive's own
+    # interpreter, at the size the pin holds within the broker's bound.
+    python_size = python.stat().st_size
+    python_sha = hashlib.sha256(python.read_bytes()).hexdigest()
+    pinned_interpreter = (pins["python"]["executable_bytes"], pins["python"]["executable_sha256"])
+    if (str(python_size), python_sha) != pinned_interpreter:
+        raise TaskError(
+            f"the interpreter is {python_size} bytes, sha256 {python_sha}, not the pinned "
+            f"{pinned_interpreter[0]} bytes, sha256 {pinned_interpreter[1]}: refused"
+        )
     site = python_home / "lib" / f"python{minor}" / "site-packages"
     if not site.is_dir():
         raise TaskError(f"the CPython build has no {site.relative_to(python_home)}")
@@ -4281,7 +4346,7 @@ def _registry_tools_image(
     def digest(path: Path) -> str:
         return hashlib.sha256(path.read_bytes()).hexdigest()
 
-    python_sha, npm_sha, node_sha = digest(python), digest(npm), digest(node)
+    npm_sha, node_sha = digest(npm), digest(node)
     print(f"{BOLD}registry tools image{OFF} (built on this runner, offline, FROM scratch)")
     for tool in ("python", "pip", "node"):
         print(
@@ -4290,7 +4355,10 @@ def _registry_tools_image(
         )
     print(f"  pip      {found['pip']:<9} {members} members, in {site.relative_to(rootfs)}")
     print(f"  npm      {found['npm']:<9} bundled with Node.js {found['node']}")
-    print(f"  {image_python} sha256 {python_sha}")
+    print(
+        f"  {image_python} {python_size} bytes, sha256 {python_sha} "
+        f"(the broker hashes at most {EXECUTABLE_COPY_BOUND})"
+    )
     print(f"  {REGISTRY_NODE_HOME}/bin/node sha256 {node_sha}")
     print(f"  {REGISTRY_NPM_PATH} sha256 {npm_sha}")
     print(f"  image              {image}")

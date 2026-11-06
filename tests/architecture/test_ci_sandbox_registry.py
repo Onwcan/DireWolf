@@ -42,6 +42,8 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CI = REPO_ROOT / ".github" / "workflows" / "ci.yml"
 SUITE_SOURCE = REPO_ROOT / "crates" / "dwkd-authority" / "tests" / "sandbox_registry.rs"
+WORKLOAD_SOURCE = REPO_ROOT / "crates" / "dwkd-broker" / "tests" / "sandbox_workload.rs"
+DIGEST_SOURCE = REPO_ROOT / "crates" / "dwkd-broker" / "src" / "sandbox" / "digest.rs"
 
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
 import dw  # noqa: E402  - imported after the path is extended
@@ -514,6 +516,9 @@ def test_a_line_that_says_more_than_it_shows_fails(
 
 
 PINS_TEXT = (REPO_ROOT / "tests" / "sandbox" / "registry_tools.toml").read_text(encoding="utf-8")
+INTERPRETER_DIGEST_LINE = next(
+    line + "\n" for line in PINS_TEXT.splitlines() if line.startswith("executable_sha256 = ")
+)
 
 
 def test_the_committed_pins_are_exact_and_checked() -> None:
@@ -526,9 +531,86 @@ def test_the_committed_pins_are_exact_and_checked() -> None:
     assert re.fullmatch(r"\d+\.\d+\.\d+", pins["node"]["npm_version"])
 
 
+def test_the_pinned_interpreter_fits_the_bound_the_broker_really_has() -> None:
+    """Hosted run 42112947252: the interpreter of the build first pinned was
+    68 023 040 bytes, past the 64 MiB the broker copies out of a container
+    and hashes, so every launch was refused EXECUTABLE_CHANGED, its bytes
+    unchanged. The bound stands: the pin is held below it, against the
+    broker's own constant, here and in `make test`, not on the next run."""
+    source = DIGEST_SOURCE.read_text(encoding="utf-8")
+    found = re.search(r"const MAX_PROBE_BYTES: usize = (\d+) << (\d+);", source)
+    assert found is not None, "the broker's bound is not where this test reads it"
+    bound = int(found.group(1)) << int(found.group(2))
+    assert bound == dw.EXECUTABLE_COPY_BOUND == 64 << 20
+    overhead = re.search(
+        r"const MAX_ARCHIVE_BYTES: usize = MAX_PROBE_BYTES \+ \((\d+) << (\d+)\);", source
+    )
+    assert overhead is not None
+    archive_bound = bound + (int(overhead.group(1)) << int(overhead.group(2)))
+    pins = dw.load_registry_pins()
+    assert int(pins["python"]["executable_bytes"]) <= bound
+    # Never the unstripped build again.
+    assert "install_only_stripped" in pins["python"]["url"]
+    # The real-runtime fixture past the bound is past the whole copy too, and
+    # is the size that run measured: it reproduces the cut, not a header's.
+    assert dw.SANDBOX_FIXTURE_PAST_BOUND_BYTES == 68_023_040 > archive_bound
+
+
+def test_a_padded_copy_is_the_exact_size_and_the_same_program(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.write_bytes(b"\x7fELF the fixture")
+    target = tmp_path / "padded" / "copy"
+    digest = dw._padded(source, target, 4096)
+    data = target.read_bytes()
+    assert len(data) == 4096 and data.startswith(source.read_bytes())
+    assert not data[len(source.read_bytes()) :].strip(b"\0")
+    assert digest == hashlib.sha256(data).hexdigest()
+    with pytest.raises(dw.TaskError, match="do not fit"):
+        dw._padded(source, target, 4)
+
+
+def test_the_broker_evidence_stands_on_both_sides_of_the_bound() -> None:
+    """The bound is shown on a real runtime, through its own tar stream, in
+    the evidence every commit runs: a file exactly at it runs, and a correctly
+    pinned file past it is refused, runs nothing, and says why."""
+    text = WORKLOAD_SOURCE.read_text(encoding="utf-8")
+    start = text.index("fn only_the_pinned_bytes_run()")
+    body = text[start : text.index("// ---- where it runs", start)]
+    for needed in (
+        "FIXTURE_AT_BOUND",
+        "FIXTURE_PAST_BOUND",
+        "DW_SANDBOX_FIXTURE_AT_BOUND_SHA256",
+        "DW_SANDBOX_FIXTURE_PAST_BOUND_SHA256",
+        "verdict=FAIL cause=past-the-copy-bound",
+        "verdict=FAIL cause=not-the-pinned-file",
+        "verdict=UNOBSERVABLE cause=copy-failed",
+    ):
+        assert needed in body, needed
+    required = {case for suite, case in dw.WORKLOAD_CASES if suite == "sandbox-workload"}
+    for case in (
+        "workload-executable-at-the-copy-bound-runs",
+        "workload-executable-past-the-copy-bound-refused",
+    ):
+        assert case in required and f'"{case}"' in body, case
+        assert dw.attribution("sandbox-workload", case) == (
+            "real-oci",
+            frozenset({"executable-digest-pin"}),
+        )
+    setup = inspect.getsource(dw._workload_setup)
+    for needed in ("EXECUTABLE_COPY_BOUND", "SANDBOX_FIXTURE_PAST_BOUND_BYTES", "_padded("):
+        assert needed in setup, needed
+
+
 @pytest.mark.parametrize(
     ("before", "after", "said"),
     [
+        ("executable_bytes = 31009064", "executable_bytes = 68023040", "past the broker's bound"),
+        ("executable_bytes = 31009064", "executable_bytes = 67108865", "past the broker's bound"),
+        ("executable_bytes = 31009064", "executable_bytes = true", "is a byte count"),
+        ("executable_bytes = 31009064", 'executable_bytes = "31009064"', "is a byte count"),
+        ("executable_bytes = 31009064\n", "", "is a byte count"),
+        ('executable_sha256 = "eaaa', 'executable_sha256 = "EAAA', "64 lowercase hex"),
+        (INTERPRETER_DIGEST_LINE, "", "64 lowercase hex"),
         ("format = 1", "format = 2", "`format` must be 1"),
         ('version = "3.12.15"', 'version = "3.12"', "exact N.N.N"),
         ('version = "26.2.2"', 'version = "latest"', "exact N.N.N"),
@@ -543,6 +625,13 @@ def test_the_committed_pins_are_exact_and_checked() -> None:
         ('version = "26.2.2"\n', 'version = "26.2.2"\nextra = "x"\n', "holds exactly"),
     ],
     ids=[
+        "interpreter-of-the-failed-run",
+        "interpreter-a-byte-past-the-bound",
+        "interpreter-size-a-boolean",
+        "interpreter-size-a-string",
+        "interpreter-size-unpinned",
+        "interpreter-digest-uppercase",
+        "interpreter-digest-unpinned",
         "format",
         "inexact-python",
         "floating-pip",
@@ -674,11 +763,14 @@ def test_an_archive_member_outside_its_top_or_escaping_is_refused(tmp_path: Path
 # --- the image: built from the pins, each version read back, fail closed -----------
 
 
+FAKE_INTERPRETER = b"\x7fELF python"
+
+
 def _fake_tools(tmp_path: Path, pins: dict[str, dict[str, str]]) -> dict[str, Path]:
     minor = ".".join(pins["python"]["version"].split(".")[:2])
     python = _tar(
         {
-            f"python/bin/python{minor}": b"\x7fELF python",
+            f"python/bin/python{minor}": FAKE_INTERPRETER,
             f"python/lib/python{minor}/site-packages/pip/__init__.py": b"bundled",
             f"python/lib/python{minor}/site-packages/pip-0.1.dist-info/METADATA": b"old",
         }
@@ -710,8 +802,13 @@ def _build(
     monkeypatch: pytest.MonkeyPatch,
     reported: dict[str, str],
     calls: list[list[str]] | None = None,
+    interpreter: dict[str, str] | None = None,
 ) -> tuple[str, dict[str, str], Path, list[list[str]]]:
     pins = dw.load_registry_pins()
+    # The fake archive's own interpreter, unless a test pins another.
+    pins["python"]["executable_bytes"] = str(len(FAKE_INTERPRETER))
+    pins["python"]["executable_sha256"] = hashlib.sha256(FAKE_INTERPRETER).hexdigest()
+    pins["python"].update(interpreter or {})
     (tmp_path / "archives").mkdir()
     archives = _fake_tools(tmp_path / "archives", pins)
     fetched: list[Path] = []
@@ -791,7 +888,27 @@ def test_the_image_holds_the_pinned_tools_and_reads_each_version_back(
     assert variables["DW_REGISTRY_NPM_SHA256"] == hashlib.sha256(npm.read_bytes()).hexdigest()
     assert variables["DW_REGISTRY_NPM"] == dw.REGISTRY_NPM_PATH
     assert variables["DW_REGISTRY_PYTHON"].startswith(dw.REGISTRY_PYTHON_HOME + "/bin/python3.")
+    # What the broker is told to expect is the bytes the image holds.
+    python = next(rootfs.glob("opt/direwolf/python/bin/python3.*"))
+    assert variables["DW_REGISTRY_PYTHON_SHA256"] == hashlib.sha256(python.read_bytes()).hexdigest()
     assert not (rootfs / "etc").exists(), "the image carries a configuration or a trust store"
+
+
+@pytest.mark.parametrize(
+    "interpreter",
+    [
+        {"executable_bytes": "68023040"},
+        {"executable_sha256": "0" * 64},
+    ],
+    ids=["another-size", "other-bytes"],
+)
+def test_an_interpreter_that_is_not_the_pinned_one_is_refused_before_the_build(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, interpreter: dict[str, str]
+) -> None:
+    calls: list[list[str]] = []
+    with pytest.raises(dw.TaskError, match=r"the interpreter is .* not the pinned"):
+        _build(tmp_path, monkeypatch, _pinned(), calls, interpreter)
+    assert calls == [], "nothing is built from an interpreter that is not the pinned one"
 
 
 @pytest.mark.parametrize("tool", ["python", "pip", "node", "npm"])

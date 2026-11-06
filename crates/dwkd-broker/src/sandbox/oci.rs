@@ -296,6 +296,29 @@ fn succeeded(done: &Completed) -> bool {
     done.ended == Ended::Exited(0) && !done.stdout_cut
 }
 
+/// What a copy of a workload's executable shows, and why: `copied` is the
+/// runtime client's answer, `None` when it gave none. A copy past the bound
+/// is `FAIL` -- a file that long is not one the broker will vouch for -- and
+/// only the whole of an exited client's output is judged at all.
+fn executable_verdict(
+    copied: Option<&Completed>,
+    name: &str,
+    expected: &str,
+) -> (Verdict, &'static str) {
+    match copied {
+        None => (Verdict::Unobservable, "runtime-unavailable"),
+        Some(done) if done.stdout_cut => (Verdict::Fail, "past-the-copy-bound"),
+        Some(done) if succeeded(done) => match digest::executable(&done.stdout, name, expected) {
+            Verdict::Pass => (Verdict::Pass, "pinned"),
+            Verdict::Fail => (Verdict::Fail, "not-the-pinned-file"),
+            Verdict::Unobservable => (Verdict::Unobservable, "malformed-archive"),
+        },
+        // The client ended otherwise: a path the image does not hold, among
+        // other things it cannot tell apart from here.
+        Some(_) => (Verdict::Unobservable, "copy-failed"),
+    }
+}
+
 /// Exactly one line of UTF-8, newline-terminated.
 fn one_line(stdout: &[u8]) -> Option<&str> {
     let text = core::str::from_utf8(stdout).ok()?;
@@ -814,20 +837,27 @@ impl Oci<'_> {
     }
 
     /// The executable's bytes, copied out of the container's own root,
-    /// against the digest the operator's manifest pins.
+    /// against the digest the operator's manifest pins. Anything but `PASS`
+    /// refuses the workload, whatever the cause; the event says which cause,
+    /// so an operator can tell a file past the copy's bound or a copy that
+    /// failed from bytes that differ. It names no path and no digest.
     fn executable_digest(&self, container: &ContainerRef, workload: &WorkloadSpec) -> Verdict {
-        match self.runtime.call(
+        let copied = self.runtime.call(
             plan::copy_out(container, workload.executable.as_str()),
             digest::MAX_ARCHIVE_BYTES,
-        ) {
-            Ok(done) if done.stdout_cut => Verdict::Fail,
-            Ok(done) if succeeded(&done) => digest::executable(
-                &done.stdout,
-                workload.executable.file_name(),
-                workload.executable_sha256.as_str(),
-            ),
-            _ => Verdict::Unobservable,
+        );
+        let (verdict, cause) = executable_verdict(
+            copied.as_ref().ok(),
+            workload.executable.file_name(),
+            workload.executable_sha256.as_str(),
+        );
+        if verdict != Verdict::Pass {
+            crate::event(&format!(
+                "workload_executable_refused verdict={} cause={cause}",
+                verdict.as_str()
+            ));
         }
+        verdict
     }
 
     /// `reap`: every other process of the environment ended, and what was

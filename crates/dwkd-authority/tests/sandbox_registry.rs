@@ -964,9 +964,24 @@ reason = "NO_MATCHING_RULE"
                 .unwrap()
         }
 
+        /// The broker's last events, for a failure's report: the hosted run
+        /// is the only place this suite runs, and the wire's one refusal
+        /// reason does not say which of its causes it was.
+        fn last_events(&self) -> String {
+            let events = self.broker.as_ref().map_or_else(Vec::new, Broker::events);
+            let from = events.len().saturating_sub(24);
+            events[from..].join("\n")
+        }
+
         /// A workload of the image's Python.
         fn python(&self, peer: &mut Peer, args: &[&str]) -> Ran {
-            let ran = Ran::of(&peer.exec(&self.pins.python, args));
+            let body = peer.exec(&self.pins.python, args);
+            assert!(
+                matches!(body, DwkpBody::ToolResultV5(_)),
+                "the workload did not run: {body:?}\nthe broker's last events:\n{}",
+                self.last_events()
+            );
+            let ran = Ran::of(&body);
             assert_eq!(ran.image, self.pins.image);
             assert_eq!(ran.sha256, self.pins.python_sha);
             ran

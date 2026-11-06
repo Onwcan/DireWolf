@@ -7,8 +7,11 @@ completion (unstaged at the time of writing)\
 **Status (2026-11-05):** **IN PROGRESS — implementation complete, hosted verification
 pending.** The owner authorised M5e.4 ahead of M5e.2's close
 ([M5E_ASSURANCE_PLAN.md](M5E_ASSURANCE_PLAN.md) §10, "M5e.4's sequencing"); M5e.5 and M5e.6
-are not authorised. What was built, and how §4's decisions were made, is §10 below. Nothing
-has run hosted yet, and locally the evidence is NOT EXERCISED by design.\
+are not authorised. What was built, and how §4's decisions were made, is §10 below. Locally the
+evidence is NOT EXERCISED by design.\
+**Status (2026-11-06):** **IMPLEMENTATION REPAIRED / HOSTED REVERIFICATION PENDING.** The first
+hosted run failed at the first Python workload (§11). It is repaired, unstaged, and M5e.4 is not
+complete until the hosted job passes and the owner accepts it.\
 **Authority of this document:** a technical handoff, not an ADR. It approves nothing.
 [ADR-0054](adr/0054-m5e-npm-hygiene-profile.md) and
 [ADR-0055](adr/0055-m5e-pip-hygiene-profile.md) stay **Proposed**, and npm stays
@@ -203,7 +206,8 @@ owner's review; none is an owner decision):
   pinned, and again on 2026-11-05: python-build-standalone's `SHA256SUMS`, Node.js's
   `SHASUMS256.txt` (which also names npm 11.19.1 as the npm it bundles), PyPI's file digest.
   Node.js and pip were released on 2026-10-20 and the CPython build on 2026-10-13, each at
-  least two weeks before it was pinned. Their source is decision 5's.
+  least two weeks before it was pinned. Their source is decision 5's. The CPython pin is the
+  release's stripped build since 2026-11-06 (§11).
 - **Tools image** (`scripts/dw.py`, `_registry_tools_image`), built on the runner only:
   - each archive is fetched over https from its own host only and checked before use;
   - archives are extracted through tarfile's `data` filter;
@@ -240,3 +244,55 @@ is claimed. **Not yet run:** the evidence itself, which only the hosted job runs
 - whether pip's truststore-backed context honours `--cert` beside its bundled roots.
 
 Each fails the job, closed, rather than passing it.
+
+## 11. The first hosted run, and its repair (2026-11-06)
+
+**What happened.** Hosted run
+[42112947252](https://github.com/Onwcan/DireWolf/actions/runs/42112947252) (run no. 130,
+`3e322ad`) passed 28 of 30 jobs. In `sandbox-registry`, the image built, every pinned version
+read back correctly and npm's three refusal cases passed. The pip test stopped at its first
+workload with `ToolFailedV5 { reason: ExecutableChanged, environment_destroyed: Some(false) }`.
+
+**The cause, traced end to end.** The name misleads: nothing changed.
+
+| Step | What it showed |
+|---|---|
+| The archive | SHA-256 `5d546fc0…`, as pinned |
+| `python/bin/python3.12` in it | 68 023 040 bytes, SHA-256 `b61d8a15…` |
+| `dw.py`, `DW_REGISTRY_PYTHON_SHA256`, policy, manifest | that same digest, printed by the run |
+| `docker container cp` | a tar stream longer than the broker reads |
+| `process/run.rs`, `oci.rs` | cut at 67 174 400 bytes (`MAX_ARCHIVE_BYTES`): `stdout_cut`, `Verdict::Fail` |
+| `ready_workload` | `BrokerRefusal::DigestMismatch`, for any verdict but `PASS` |
+| `workload_ops.rs`, `workload_route.rs` | `EXECUTABLE_DIGEST_MISMATCH`, then `ExecutableChanged` |
+
+So the broker refused an executable it could not wholly read. That is the behaviour wanted: the
+bound was the probe's, and it had never met an executable this large. The interpreter is 848 640
+bytes past the copy's limit.
+
+**The repair, and why not the bound.** The bound is what the broker holds in memory for each
+launch, and a fixture's debug symbols are no reason to raise it for production. The pin is now
+the same release's `install_only_stripped` build: archive SHA-256 `178d3d83…`, in the release's
+own `SHA256SUMS`; interpreter 31 009 064 bytes, SHA-256 `eaaa3080…`, measured from the archive.
+That hash is a real change of the expected digest, derived from the new pin, never chosen.
+
+**What keeps it from recurring.**
+
+- `registry_tools.toml` records the interpreter's size and SHA-256. `load_registry_pins` refuses
+  a size past the broker's bound, in `make test`, and an architecture test holds the constant in
+  `dw.py` to the one in `digest.rs`.
+- `_registry_tools_image` holds the extracted file to both, before anything is built.
+- `sandbox-workload-evidence` stands on both sides of the bound on a real runtime:
+  `workload-executable-at-the-copy-bound-runs` and
+  `workload-executable-past-the-copy-bound-refused`, the second at the size the run measured.
+- The broker logs `workload_executable_refused verdict=… cause=…`, with `past-the-copy-bound`,
+  `not-the-pinned-file`, `malformed-archive`, `copy-failed` or `runtime-unavailable`. It names
+  no path and no digest, and the refusal on the wire is unchanged. The registry suite prints the
+  broker's last events when a workload does not run.
+
+**Not relaxed:** the bound, the digest comparison, tar parsing, any refusal, `REGISTRY_CASES`,
+`REGISTRY_OUTCOMES`, the job or the hosted-only gate.
+
+**A limit operators should know.** An executable past 64 MiB cannot run in an environment, and
+the wire says `EXECUTABLE_CHANGED`; the log says why. The official Node.js binary is past it.
+M5e.4 is unaffected, since `npm`'s launcher is the file pinned and hashed, and M5e.5 must keep
+that in view.
