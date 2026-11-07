@@ -16,6 +16,7 @@ complete until the hosted job passes and the owner accepts it.\
 run got past the interpreter and installed from the granted index. It failed on the suite's own
 count of the proxy's refusals, which included the environment's probe (§12). The test's
 accounting is repaired, unstaged; nothing in production changed.\
+**Status (2026-11-07, later):** **HOSTED VERIFIED / OWNER ACCEPTANCE PENDING.** The owner committed the repair as `7aa784a`. Hosted runs 42390237238, 42392419869, 42394667883 and 42397671369 (run nos. 134–137) passed 30 of 30 jobs each, `sandbox-registry` and the `ci` aggregate among them. The closeout record and the decision it asks of the owner are §13.\
 **Authority of this document:** a technical handoff, not an ADR. It approves nothing.
 [ADR-0054](adr/0054-m5e-npm-hygiene-profile.md) and
 [ADR-0055](adr/0055-m5e-pip-hygiene-profile.md) stay **Proposed**, and npm stays
@@ -381,3 +382,66 @@ on any host: the dependency, the refused and direct cases, pip's error texts (`4
 `[Errno 101]`, `[Errno -N]`, `CERTIFICATE_VERIFY_FAILED`), the source distribution's backend
 and the `.pth` cases. If one fails, its report now says why. M5e.4 stays **IN PROGRESS** until
 that run passes and the owner accepts it, the OD-E4 provenance deviation included.
+
+## 13. Closeout record (2026-11-07)
+
+**What ran.** Four pushes to `main`, each a hosted run of the `CI` workflow with 30 of 30 jobs
+successful, `sandbox registry evidence (make sandbox-registry-evidence)` and the `ci` aggregate
+among them:
+
+| Run | No. | Commit | What the commit changed |
+|---|---|---|---|
+| [42390237238](https://github.com/Onwcan/DireWolf/actions/runs/42390237238) | 134 | `7aa784a` | this repair (§12): the suite's accounting, its diagnostics and their guard |
+| [42392419869](https://github.com/Onwcan/DireWolf/actions/runs/42392419869) | 135 | `bbe3561` | M5e.5's sequencing record and its evidence-only option, inert without it |
+| [42394667883](https://github.com/Onwcan/DireWolf/actions/runs/42394667883) | 136 | `7df0840` | M5e.5's profiles, reached only through that option |
+| [42397671369](https://github.com/Onwcan/DireWolf/actions/runs/42397671369) | 137 | `6a702d7` | M5e.5's evidence, manual job and mutation review, required by nothing |
+
+The runs, their jobs and their conclusions were read from GitHub's public Actions API on
+2026-11-07. The job's log needs a GitHub sign-in, so this record does not quote its lines. The
+owner read run 137's log, which ends `attributed evidence: 19 cases reported`.
+
+**What a green `sandbox-registry` job shows.** A green exit means every one of the following
+held, because the task fails on any one of them:
+
+- **Where it ran.** The task and the suite refuse unless `DW_REGISTRY_EVIDENCE=1` on a
+  GitHub-hosted runner (`registry_refusal`; the suite's own `hosted()`), and refuse Docker
+  Desktop. The workloads ran in measured `PROXY_ONLY` environments on the runner's Docker
+  Engine, through the released `serve --sandbox-config`, the released broker and a real DWKP
+  client: `dwkp-end-to-end`, not an in-process simulation.
+- **What it ran.** The suite's two tests both passed (`test result: ok. 2 passed`), and
+  `require_attributed_evidence` accepted the output. That means all 19 of `REGISTRY_CASES`
+  reported, none twice and none NOT EXERCISED. Each was at `dwkp-end-to-end` and attributed to
+  a mechanism its `ATTRIBUTION` rule allows, and each outcome began with what
+  `REGISTRY_OUTCOMES` requires. An install shows what it installed; a refusal shows nothing was
+  installed; the source distribution's build is shown as today's gap; npm is refused
+  `OBLIGATION_UNENFORCEABLE` before anything is prepared.
+- **What it counted.** The proxy's refusals are each case's own beyond the probe's questions
+  (§12): six cases had none, and each refused case had at least one of its own.
+- **Provenance and cleanup.** Each pinned archive matched its recorded SHA-256 before a byte
+  was read. The interpreter matched its pinned size and digest, below the broker's copy bound.
+  Every tool's version was read back from inside the image. Afterwards no container or network
+  the evidence made remained, every one that predated it was kept, and the images were removed.
+
+**Nothing was weakened to get there.** Between the failed run 133 and run 134, the only change
+was §12's accounting in the suite, its diagnostics and its guard. No production line, pin,
+case, outcome, level, attribution, job or gate changed. Runs 135–137 add M5e.5's code, which
+production reaches only through the evidence-only option the plan's §10 fences.
+
+**The OD-E4 deviation, for the owner's review.** OD-E4 decided pinned versions verified by
+checksum, and its follow-up named "a SHA-pinned setup action or the runner's tool cache" as the
+mechanism. As built, the task fetches each publisher's own archive over https and checks it
+against the SHA-256 recorded in `tests/sandbox/registry_tools.toml` before use (§10; the plan's
+§8 and §10). OD-E4's substance holds: exact versions, checksum-verified, a version change a
+reviewed diff. The mechanism differs: no third-party action's code runs, and nothing depends on
+what a runner image caches.
+
+**Decision requested (the owner's; nothing here records it):**
+
+1. Accept M5e.4 as complete on runs 134–137.
+2. Accept the OD-E4 mechanism as built, or name the one to use instead.
+
+**When the owner accepts,** a separate change records it. It adds an acceptance record to the
+plan's §10, changes this document's, the plan's and the ROADMAP's status to say M5e.4 closed,
+and changes `tests/architecture/test_m5e_r3_closure.py`, which today refuses any status document
+that calls M5e.4 complete, to allow that one step. Nothing else changes. M5e.2 stays PARTIALLY
+IMPLEMENTED / ASSURANCE BLOCKED ([issue #19](https://github.com/Onwcan/DireWolf/issues/19)), and M5's acceptance waits for E6.
