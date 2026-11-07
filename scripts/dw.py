@@ -4648,6 +4648,537 @@ def task_sandbox_registry_evidence() -> None:
     require_attributed_evidence(output, REGISTRY_CASES)
 
 
+# ---- M5e.5: the npm and pip profiles, evidenced (hosted only) ----------------
+#
+# ADR-0054 §8's and ADR-0055 §9's cases, by name, against the profiles the
+# authority keeps only under its evidence-only start-up option (TX060)
+# (plan §10, "M5e.5's sequencing"). Nothing here is required by `ci`: the
+# owner runs it by hand (`.github/workflows/m5e5-evidence.yml`) until M5e.4's
+# repair has passed hosted and the owner adds it.
+HYGIENE_SUITE = "sandbox-hygiene"
+HYGIENE_FLAG = "DW_HYGIENE_EVIDENCE"
+# The image's trust files (ADR-0054 §4, ADR-0055 §5; the preparation
+# handoff's D3), the system store a third authority sits in, and the image's
+# own pip configuration (ADR-0055 §9's `pip-image-configuration-not-read`).
+HYGIENE_NPM_TRUST = "/etc/direwolf/npm-ca.pem"
+HYGIENE_PIP_TRUST = "/etc/direwolf/pip-ca.pem"
+HYGIENE_SYSTEM_STORES = ("/etc/ssl/certs/ca-certificates.crt", "/etc/ssl/cert.pem")
+HYGIENE_PIP_CONF = (
+    "[global]\nindex-url = https://ungranted-registry.test:18444/simple/\nno-binary = :all:\n"
+)
+HYGIENE_PIP_PATH = f"{REGISTRY_PYTHON_HOME}/bin/pip"
+HYGIENE_NPX_PATH = f"{REGISTRY_NODE_HOME}/bin/npx"
+# `npx`, pinned beside npm so its refusal is of a real, pinned npx.
+HYGIENE_NPX_LAUNCHER = (
+    f"#!{REGISTRY_NODE_HOME}/bin/node\n"
+    f"require('{REGISTRY_NODE_HOME}/lib/node_modules/npm/bin/npx-cli.js')\n"
+)
+
+
+def hygiene_pip_launcher(minor: str) -> str:
+    """pip, started by the pinned interpreter by absolute path: the CPython
+    build's own `bin/pip` needs `/bin/sh`, which a `FROM scratch` image lacks
+    (the preparation handoff §7). Its last component is `pip`, the profile's
+    identity (ADR-0055 §1)."""
+    return (
+        f"#!{REGISTRY_PYTHON_HOME}/bin/python{minor} -I\n"
+        "import sys\n"
+        "from pip._internal.cli.main import main\n"
+        "sys.exit(main())\n"
+    )
+
+
+HYGIENE_TESTS = (
+    "linux::npm_under_its_proposed_profile",
+    "linux::pip_under_its_proposed_profile",
+    "linux::without_a_trust_file_both_fail_closed",
+    "linux::without_the_option_nothing_changes",
+    "linux::the_shipped_packs_decide",
+)
+# ADR-0054 §8's 22 and ADR-0055 §9's 21, by their exact names; and the
+# preparation handoff's D4, the interpreter's way around pip's profile.
+HYGIENE_NPM_CASES = (
+    "npm-ci-granted-registry-installs",
+    "npm-install-granted-registry-installs",
+    "npm-ungranted-registry-refused",
+    "npm-tarball-on-ungranted-host-refused",
+    "npm-redirect-to-ungranted-host-refused",
+    "npm-direct-route-refused",
+    "npm-lifecycle-scripts-not-run",
+    "npm-project-npmrc-cannot-reenable-scripts",
+    "npm-project-npmrc-cannot-disable-tls",
+    "npm-project-npmrc-cannot-replace-ca",
+    "npm-missing-trust-file-fails-closed",
+    "npm-git-dependency-not-prepared",
+    "npm-untrusted-issuer-refused",
+    "npm-tampered-tarball-refused",
+    "npm-writes-only-workspace-and-tmp",
+    "npm-undoing-arguments-refused",
+    "npm-other-subcommands-refused",
+    "npm-non-registry-specs-refused",
+    "npx-still-refused",
+    "npm-refused-without-the-evidence-option",
+    "npm-shipped-packs-behaviour",
+    "npm-plan-records-prefix-and-profile",
+)
+HYGIENE_PIP_CASES = (
+    "pip-install-granted-index-installs",
+    "pip-install-dependency-resolved-from-granted-index",
+    "pip-ungranted-index-refused",
+    "pip-file-on-ungranted-host-refused",
+    "pip-redirect-to-ungranted-host-refused",
+    "pip-direct-route-refused",
+    "pip-sdist-never-built",
+    "pip-only-binary-cannot-be-undone-by-variable-or-file",
+    "pip-image-configuration-not-read",
+    "pip-untrusted-issuer-refused",
+    "pip-os-trust-store-not-used",
+    "pip-missing-trust-file-fails-closed",
+    "pip-undoing-arguments-refused",
+    "pip-other-subcommands-refused",
+    "pip-non-name-specs-refused",
+    "pip-no-cache-reused",
+    "pip-writes-only-workspace-and-tmp",
+    "pip-installed-pth-not-executed-by-install",
+    "pip-refused-without-the-evidence-option",
+    "pip-shipped-packs-behaviour",
+    "pip-plan-records-prefix-and-profile",
+)
+HYGIENE_EXTRA_CASES = ("pip-interpreter-module-refused",)
+HYGIENE_CASES = tuple(
+    (HYGIENE_SUITE, case) for case in (*HYGIENE_NPM_CASES, *HYGIENE_PIP_CASES, *HYGIENE_EXTRA_CASES)
+)
+# What each line's outcome must begin with (`outcome_problem`).
+HYGIENE_OUTCOMES = {
+    "npm-ci-granted-registry-installs": "installed:",
+    "npm-install-granted-registry-installs": "installed:",
+    "npm-ungranted-registry-refused": "refused:nothing-installed",
+    "npm-tarball-on-ungranted-host-refused": "refused:nothing-installed",
+    "npm-redirect-to-ungranted-host-refused": "refused:nothing-installed",
+    "npm-direct-route-refused": "refused:nothing-installed;ENETUNREACH",
+    "npm-lifecycle-scripts-not-run": "not-run:",
+    "npm-project-npmrc-cannot-reenable-scripts": "not-run:",
+    "npm-project-npmrc-cannot-disable-tls": "refused:nothing-installed",
+    "npm-project-npmrc-cannot-replace-ca": "installed:image-trust-file-in-force",
+    "npm-missing-trust-file-fails-closed": "refused:nothing-installed",
+    "npm-git-dependency-not-prepared": "not-prepared:no-prepare-marker",
+    "npm-untrusted-issuer-refused": "refused:nothing-installed",
+    "npm-tampered-tarball-refused": "refused:EINTEGRITY",
+    "npm-writes-only-workspace-and-tmp": "contained:",
+    "npm-undoing-arguments-refused": "refused:OBLIGATION_UNENFORCEABLE",
+    "npm-other-subcommands-refused": "refused:OBLIGATION_UNENFORCEABLE",
+    "npm-non-registry-specs-refused": "refused:OBLIGATION_UNENFORCEABLE",
+    "npx-still-refused": "refused:OBLIGATION_UNENFORCEABLE",
+    "npm-refused-without-the-evidence-option": "refused:OBLIGATION_UNENFORCEABLE",
+    "npm-shipped-packs-behaviour": "decided:",
+    "npm-plan-records-prefix-and-profile": "recorded:launch-HYGIENE_NPM",
+    "pip-install-granted-index-installs": "installed:",
+    "pip-install-dependency-resolved-from-granted-index": "installed:",
+    "pip-ungranted-index-refused": "refused:nothing-installed",
+    "pip-file-on-ungranted-host-refused": "refused:nothing-installed",
+    "pip-redirect-to-ungranted-host-refused": "refused:nothing-installed",
+    "pip-direct-route-refused": "refused:nothing-installed;ENETUNREACH",
+    "pip-sdist-never-built": "not-built:backend-marker-absent",
+    "pip-only-binary-cannot-be-undone-by-variable-or-file": "not-built:",
+    "pip-image-configuration-not-read": "not-read:",
+    "pip-untrusted-issuer-refused": "refused:nothing-installed",
+    "pip-os-trust-store-not-used": "refused:nothing-installed",
+    "pip-missing-trust-file-fails-closed": "refused:nothing-installed",
+    "pip-undoing-arguments-refused": "refused:OBLIGATION_UNENFORCEABLE",
+    "pip-other-subcommands-refused": "refused:OBLIGATION_UNENFORCEABLE",
+    "pip-non-name-specs-refused": "refused:OBLIGATION_UNENFORCEABLE",
+    "pip-no-cache-reused": "refetched:",
+    "pip-writes-only-workspace-and-tmp": "contained:",
+    "pip-installed-pth-not-executed-by-install": "not-run:pth-marker-absent",
+    "pip-refused-without-the-evidence-option": "today:launch-HYGIENE",
+    "pip-shipped-packs-behaviour": "denied:",
+    "pip-plan-records-prefix-and-profile": "recorded:launch-HYGIENE_PIP",
+    "pip-interpreter-module-refused": "refused:OBLIGATION_UNENFORCEABLE",
+}
+
+
+def hygiene_refusal(environ: Mapping[str, str]) -> str | None:
+    """Why this host must not run the hygiene evidence, or None: the same
+    rule as the registry's (owner direction 3), with its own flag."""
+    if environ.get(HYGIENE_FLAG, "").strip() != "1":
+        return (
+            f"{HYGIENE_FLAG}=1 is not set: the npm and pip profiles' evidence runs only in the "
+            "manual `sandbox-hygiene` job, on a disposable GitHub-hosted runner"
+        )
+    return registry_refusal({**environ, "DW_REGISTRY_EVIDENCE": "1"})
+
+
+def _hygiene_images(
+    client: Path,
+    socket: str,
+    base: Path,
+    pki: Path,
+    platform_: str,
+    minor: str,
+) -> tuple[list[str], dict[str, str]]:
+    """The two images M5e.5's evidence runs in, built from the registry tools
+    image's checked rootfs (`base`), offline `FROM scratch`: one with the
+    run's anchor at both trust paths, the third authority in the system
+    store, the image `pip.conf`, `pip` and `npx`; one the same without the
+    trust files. Returns the images and the variables the suite reads."""
+    if not (base / "rootfs").is_dir():
+        raise TaskError(f"no registry tools rootfs at {base}")
+    images: list[str] = []
+    variables: dict[str, str] = {}
+    for name, trusted in (("hygiene", True), ("hygiene-no-trust", False)):
+        context = base.parent / name
+        shutil.rmtree(context, ignore_errors=True)
+        shutil.copytree(base / "rootfs", context / "rootfs", symlinks=True)
+        rootfs = context / "rootfs"
+        pip = rootfs / HYGIENE_PIP_PATH.lstrip("/")
+        pip.unlink(missing_ok=True)
+        pip.write_bytes(hygiene_pip_launcher(minor).encode("utf-8"))
+        pip.chmod(0o755)
+        npx = rootfs / HYGIENE_NPX_PATH.lstrip("/")
+        npx.unlink(missing_ok=True)
+        npx.write_bytes(HYGIENE_NPX_LAUNCHER.encode("utf-8"))
+        npx.chmod(0o755)
+        etc = rootfs / "etc"
+        (etc / "direwolf").mkdir(parents=True, exist_ok=True)
+        if trusted:
+            for path in (HYGIENE_NPM_TRUST, HYGIENE_PIP_TRUST):
+                _place(rootfs, pki / "ca.pem", path, 0o644)
+        for path in HYGIENE_SYSTEM_STORES:
+            _place(rootfs, pki / "system.pem", path, 0o644)
+        (etc / "pip.conf").write_text(HYGIENE_PIP_CONF, encoding="utf-8")
+        (context / "Dockerfile").write_text("FROM scratch\nCOPY rootfs/ /\n", encoding="utf-8")
+        iid = context / "iid"
+        _docker(
+            client,
+            socket,
+            "build",
+            "--quiet",
+            "--pull=false",
+            "--network",
+            "none",
+            "--platform",
+            platform_,
+            "--iidfile",
+            str(iid),
+            str(context),
+        )
+        image = iid.read_text(encoding="utf-8").strip()
+        if not re.fullmatch(r"sha256:[0-9a-f]{64}", image):
+            raise TaskError(f"the {name} image has no content identity: {image!r}")
+        images.append(image)
+        present = (rootfs / HYGIENE_PIP_TRUST.lstrip("/")).is_file()
+        if present != trusted:
+            raise TaskError(f"the {name} image's trust files are not as built")
+        variables["DW_HYGIENE_IMAGE" if trusted else "DW_HYGIENE_IMAGE_NO_TRUST"] = image
+        if trusted:
+            variables["DW_HYGIENE_PIP"] = HYGIENE_PIP_PATH
+            variables["DW_HYGIENE_PIP_SHA256"] = hashlib.sha256(pip.read_bytes()).hexdigest()
+            variables["DW_HYGIENE_NPX"] = HYGIENE_NPX_PATH
+            variables["DW_HYGIENE_NPX_SHA256"] = hashlib.sha256(npx.read_bytes()).hexdigest()
+        print(f"  {name:<18} {image} (trust files: {'yes' if trusted else 'no'})")
+    print(f"  {HYGIENE_PIP_PATH} sha256 {variables['DW_HYGIENE_PIP_SHA256']}")
+    print(f"  {HYGIENE_NPX_PATH} sha256 {variables['DW_HYGIENE_NPX_SHA256']}")
+    return images, variables
+
+
+def task_sandbox_hygiene_evidence() -> None:
+    """M5e.5's evidence (ADR-0054 §8, ADR-0055 §9), hosted only: npm and pip
+    under their proposed profiles, through the released authority started
+    with its evidence-only start-up option for both, the released broker
+    and the runner's Docker Engine, against M5e.3's fixture registries.
+
+    Anywhere but a disposable GitHub-hosted runner with DW_HYGIENE_EVIDENCE=1
+    it refuses before anything is fetched or built: NOT EXERCISED, which
+    fails. Every case must report at `dwkp-end-to-end`, attributed, its
+    outcome showing what it claims; no container or network the evidence made
+    may remain; the images are removed. Required by no `ci` job until the
+    owner adds it after M5e.4's repair passes hosted."""
+    if not sys.platform.startswith("linux"):
+        raise TaskError("NOT EXERCISED: the hygiene evidence runs only on Linux")
+    refusal = hygiene_refusal(os.environ)
+    if refusal is not None:
+        raise TaskError(f"NOT EXERCISED: {refusal}")
+    pins = load_registry_pins()
+    client, socket, variables, before, networks, images = _registry_setup(pins)
+    work = Path(os.environ.get("DW_REGISTRY_WORK", str(Path.home() / ".cache" / "dw-m5e4")))
+    pki = work / "hygiene-pki"
+    shutil.rmtree(pki, ignore_errors=True)
+    run("bash", "tests/net_http/make-pki.sh", str(pki))
+    minor = ".".join(pins["python"]["version"].split(".")[:2])
+    try:
+        made, hygiene = _hygiene_images(
+            client, socket, work / "images" / "registry", pki, "linux/amd64", minor
+        )
+        images += made
+        os.environ.update({**variables, **hygiene, "DW_HYGIENE_PKI": str(pki), HYGIENE_FLAG: "1"})
+        system = _docker(client, socket, "info", "--format", "{{.OperatingSystem}}")
+        if "Docker Desktop" in system:
+            raise TaskError(f"NOT EXERCISED: the runtime is {system.strip()}, not a runner's")
+        run("cargo", "build", "--locked", "-p", "dwkd-broker")
+        output = run_captured(
+            "cargo",
+            "test",
+            "--locked",
+            "-p",
+            "dwkd-authority",
+            "--test",
+            "sandbox_hygiene",
+            "--",
+            "--ignored",
+            "--exact",
+            "--nocapture",
+            "--test-threads=1",
+            *HYGIENE_TESTS,
+        )
+        summaries = [line for line in output.splitlines() if line.startswith("test result: ")]
+        expected = f"test result: ok. {len(HYGIENE_TESTS)} passed; 0 failed; 0 ignored"
+        if len(summaries) != 1 or not summaries[0].startswith(expected):
+            raise TaskError(
+                f"the hygiene suite did not run all of its tests: expected `{expected}`, "
+                f"got {summaries or 'no summary'}"
+            )
+    finally:
+        after = set(
+            _docker(client, socket, "container", "ls", "--all", "--no-trunc", "--quiet").split()
+        )
+        networks_after = set(
+            _docker(client, socket, "network", "ls", "--no-trunc", "--quiet").split()
+        )
+        for image in images:
+            _docker(client, socket, "image", "rm", "--force", image, check=False)
+    problems = registry_census_problems(before, after, networks, networks_after)
+    if problems:
+        raise TaskError("cleanup failed: " + "; ".join(problems))
+    print(
+        f"{GREEN}cleanup: no evidence container or network remains; {len(before)} pre-existing "
+        f"container(s) and {len(networks)} network(s) kept; the images removed{OFF}"
+    )
+    require_attributed_evidence(output, HYGIENE_CASES)
+
+
+# ADR-0054 §9's and ADR-0055 §10's mutation review (the preparation handoff
+# §9, the owner's OD-E7): each guard weakened in turn. A `unit` mutant must
+# fail the obligation's or the launcher's unit tests -- anywhere; a `hosted`
+# one only the hosted evidence can kill, and is reported NOT EXERCISED off a
+# disposable GitHub-hosted runner, never as killed. Every file is restored
+# and proved byte-identical, whatever happens.
+_HYGIENE_RS = "crates/dwkd-authority/src/resource/exec/hygiene.rs"
+_PROFILE_RS = "crates/dwk-sandbox-profile/src/lib.rs"
+_SANDBOX_RS = "crates/dwkd-authority/src/sandbox.rs"
+HYGIENE_MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
+    (
+        "default: a profile on with no flag",
+        _HYGIENE_RS,
+        "    pub const NONE: Self = Self {\n        npm: false,\n        pip: false,\n    };",
+        "    pub const NONE: Self = Self {\n        npm: true,\n        pip: true,\n    };",
+        "unit",
+    ),
+    (
+        "fence: the option kept outside the evidence's workspace",
+        _SANDBOX_RS,
+        "        if !profiles.is_none() && !matches!(self.workspace, "
+        "WorkspaceSetting::UnverifiedEvidence) {\n",
+        "        if false && !matches!(self.workspace, WorkspaceSetting::UnverifiedEvidence) {\n",
+        "unit",
+    ),
+    (
+        "npm subcommands: run allowed",
+        _HYGIENE_RS,
+        'const NPM_SUBCOMMANDS: &[&str] = &["ci", "install"];',
+        'const NPM_SUBCOMMANDS: &[&str] = &["ci", "install", "run"];',
+        "unit",
+    ),
+    (
+        "npm specs: a git URL allowed",
+        _HYGIENE_RS,
+        "        _ => specs.iter().all(|spec| npm_registry_spec(spec)),",
+        "        _ => true,",
+        "unit",
+    ),
+    *(
+        (
+            f"npm refusals: {option} removed",
+            _HYGIENE_RS,
+            f'    "{option}",\n',
+            "",
+            "unit",
+        )
+        for option in (
+            "userconfig",
+            "globalconfig",
+            "location",
+            "script-shell",
+            "node-options",
+            "foreground-scripts",
+            "cafile",
+        )
+    ),
+    (
+        "npm refusals: the pinned booleans unpinned",
+        _HYGIENE_RS,
+        'const NPM_PINNED_TRUE: &[&str] = &["ignore-scripts", "strict-ssl"];',
+        "const NPM_PINNED_TRUE: &[&str] = &[];",
+        "unit",
+    ),
+    (
+        "npm prefix: --ignore-scripts dropped",
+        _HYGIENE_RS,
+        'const NPM_PREFIX: &[&str] = &[\n    "--ignore-scripts",\n',
+        "const NPM_PREFIX: &[&str] = &[\n",
+        "unit",
+    ),
+    (
+        "npx: moved out of UNEVIDENCED",
+        _HYGIENE_RS,
+        'const UNEVIDENCED: &[&str] = &["npm", "npx", "pnpm", "yarn", "bun", "cargo"];',
+        'const UNEVIDENCED: &[&str] = &["npm", "pnpm", "yarn", "bun", "cargo"];',
+        "unit",
+    ),
+    (
+        "pip subcommands: download allowed",
+        _HYGIENE_RS,
+        '    if *subcommand != "install" ',
+        '    if *subcommand != "install" && *subcommand != "download" ',
+        "unit",
+    ),
+    (
+        "pip specs: a URL allowed",
+        _HYGIENE_RS,
+        "                '.' | '-' | '_' | '*' | '+' | '!' | '=' | '<' | '>' | '~' | ',' | ' '\n",
+        "                '.' | '-' | '_' | '*' | '+' | '!' | '=' | '<' | '>' | '~' | ','"
+        " | ' ' | ':' | '/' | '@'\n",
+        "unit",
+    ),
+    *(
+        (
+            f"pip refusals: {option} removed",
+            _HYGIENE_RS,
+            f'    "{option}",\n',
+            "",
+            "unit",
+        )
+        for option in (
+            "no-binary",
+            "editable",
+            "isolated",
+            "trusted-host",
+            "client-cert",
+            "requirement",
+            "find-links",
+            "user",
+            "src",
+            "cache-dir",
+        )
+    ),
+    (
+        "pip binary-only: --only-binary dropped from the prefix",
+        _HYGIENE_RS,
+        'const PIP_PREFIX: &[&str] = &[\n    "--only-binary=:all:",\n',
+        "const PIP_PREFIX: &[&str] = &[\n",
+        "unit",
+    ),
+    (
+        "pip interpreter: -m pip allowed (D4)",
+        _HYGIENE_RS,
+        'matches!(module.split(\'.\').next(), Some("pip" | "ensurepip"))',
+        "module.is_empty()",
+        "unit",
+    ),
+    (
+        "npm variables: npm_config_cafile dropped",
+        _PROFILE_RS,
+        '    ("npm_config_cafile", NPM_TRUST_FILE),\n',
+        "",
+        "hosted",
+    ),
+    (
+        "npm variables: npm_config_userconfig dropped",
+        _PROFILE_RS,
+        '    ("npm_config_userconfig", "/dev/null"),\n',
+        "",
+        "hosted",
+    ),
+    (
+        "pip variables: PIP_CONFIG_FILE dropped",
+        _PROFILE_RS,
+        '    ("PIP_CONFIG_FILE", "/dev/null"),\n',
+        "",
+        "hosted",
+    ),
+    (
+        "pip binary-only: PIP_ONLY_BINARY dropped",
+        _PROFILE_RS,
+        '    ("PIP_ONLY_BINARY", ":all:"),\n',
+        "",
+        "hosted",
+    ),
+)
+HYGIENE_UNIT_TESTS = (
+    ("dwkd-authority", "--lib", "resource::exec::hygiene"),
+    ("dwkd-authority", "--lib", "sandbox::tests"),
+    ("dwk-sandbox-probe", "--bin", "dwk-sandbox-probe"),
+)
+
+
+def _mutant_outcome(rel: str, old: str, new: str, command: list[list[str]]) -> str:
+    """Apply one mutation, run `command`'s steps, restore the file: `killed`
+    when a step failed, `survived` when every step passed, `not-applied`
+    when the target is not in the file exactly once."""
+    path = ROOT / rel
+    original = path.read_bytes()
+    digest = hashlib.sha256(original).hexdigest()
+    text = original.decode("utf-8")
+    if text.count(old) != 1:
+        return "not-applied"
+    try:
+        path.write_bytes(text.replace(old, new).encode("utf-8"))
+        killed = any(
+            subprocess.run(step, cwd=str(ROOT), check=False).returncode != 0 for step in command
+        )
+    finally:
+        path.write_bytes(original)
+    if hashlib.sha256(path.read_bytes()).hexdigest() != digest:
+        raise TaskError(f"{rel} was not restored byte-identical")
+    return "killed" if killed else "survived"
+
+
+def task_sandbox_registry_mutations() -> None:
+    """The profiles' mutation review (ADR-0054 §9, ADR-0055 §10): every
+    `unit` mutant must be killed by the unit tests, here or hosted; every
+    `hosted` one by the hosted evidence, only in the manual job -- anywhere
+    else it is reported NOT EXERCISED and fails the task, never counted."""
+    unit = [
+        ["cargo", "test", "--locked", "-q", "-p", crate, kind, "--", filter]
+        if kind == "--lib"
+        else ["cargo", "test", "--locked", "-q", "-p", crate, kind, crate]
+        for crate, kind, filter in HYGIENE_UNIT_TESTS
+    ]
+    hosted = hygiene_refusal(os.environ) is None and sys.platform.startswith("linux")
+    results: list[tuple[str, str, str]] = []
+    for name, rel, old, new, kind in HYGIENE_MUTATIONS:
+        if kind == "hosted" and not hosted:
+            results.append((name, kind, "not-exercised"))
+            continue
+        command = (
+            unit
+            if kind == "unit"
+            else [[sys.executable, str(ROOT / "scripts" / "dw.py"), "sandbox-hygiene-evidence"]]
+        )
+        outcome = _mutant_outcome(rel, old, new, command)
+        print(f"  {outcome:<14} {kind:<6} {name}", flush=True)
+        results.append((name, kind, outcome))
+    bad = [r for r in results if r[2] not in ("killed",)]
+    for name, kind, outcome in bad:
+        print(f"{RED}  {outcome}: {name} ({kind}){OFF}")
+    killed = sum(1 for r in results if r[2] == "killed")
+    print(f"{BOLD}{killed}/{len(results)} mutants killed{OFF}")
+    if bad:
+        raise TaskError(
+            f"{len(bad)} mutant(s) not killed: "
+            + ", ".join(f"{name} [{outcome}]" for name, _, outcome in bad)
+        )
+
+
 # ADR-0056 §6's negative control: the task backstop put back at the
 # per-environment value it replaced. R8's two neighbour tests -- the
 # broker's and the authority's -- must then each fail with finding F-R8's
@@ -6530,6 +7061,9 @@ ATTRIBUTION_MECHANISMS = frozenset(
         # workspace, measured.
         "workload-tls-verification",
         "workload-effects-measured",
+        # M5e.5: npm's own integrity check refusing a tarball its packument
+        # does not describe -- the workload's tool's, not DireWolf's.
+        "workload-integrity-verification",
         "telemetry",
     )
 )
@@ -7004,6 +7538,42 @@ ATTRIBUTION: dict[str, tuple[tuple[str, str, str | tuple[str, ...]], ...]] = {
         ("registry-npm-*-refused-before-preparation", _DWKP, "authority-obligation"),
         ("registry-npm-nothing-prepared-or-reached", _DWKP, "authority-environment-decision"),
     ),
+    # M5e.5 (ADR-0054 §8, ADR-0055 §9): npm and pip under their proposed
+    # profiles, kept only under the evidence-only option; hosted only.
+    "sandbox-hygiene": (
+        ("*-granted-registry-installs", _DWKP, "relay-and-connect-proxy-grant"),
+        ("pip-install-*-installs", _DWKP, "relay-and-connect-proxy-grant"),
+        (
+            "pip-install-dependency-resolved-from-granted-index",
+            _DWKP,
+            "relay-and-connect-proxy-grant",
+        ),
+        ("*-ungranted-*-refused", _DWKP, "connect-proxy:grant"),
+        ("*-direct-route-refused", _DWKP, "topology-no-route"),
+        ("npm-lifecycle-scripts-not-run", _DWKP, "hygiene-launcher"),
+        ("npm-project-npmrc-cannot-reenable-scripts", _DWKP, "hygiene-launcher"),
+        ("npm-project-npmrc-cannot-replace-ca", _DWKP, "hygiene-launcher"),
+        ("npm-project-npmrc-cannot-disable-tls", _DWKP, "workload-tls-verification"),
+        ("*-missing-trust-file-fails-closed", _DWKP, "workload-tls-verification"),
+        ("*-untrusted-issuer-refused", _DWKP, "workload-tls-verification"),
+        ("pip-os-trust-store-not-used", _DWKP, "workload-tls-verification"),
+        ("npm-git-dependency-not-prepared", _DWKP, "workload-effects-measured"),
+        ("npm-tampered-tarball-refused", _DWKP, "workload-integrity-verification"),
+        ("*-writes-only-workspace-and-tmp", _DWKP, "read-only-root"),
+        ("*-undoing-arguments-refused", _DWKP, "authority-obligation"),
+        ("*-other-subcommands-refused", _DWKP, "authority-obligation"),
+        ("*-non-*-specs-refused", _DWKP, "authority-obligation"),
+        ("npx-still-refused", _DWKP, "authority-obligation"),
+        ("*-refused-without-the-evidence-option", _DWKP, "authority-obligation"),
+        ("pip-interpreter-module-refused", _DWKP, "authority-obligation"),
+        ("*-shipped-packs-behaviour", _DWKP, "authority-policy"),
+        ("*-plan-records-prefix-and-profile", _DWKP, "authority-ledger"),
+        ("pip-sdist-never-built", _DWKP, "hygiene-launcher"),
+        ("pip-only-binary-cannot-be-undone-by-variable-or-file", _DWKP, "hygiene-launcher"),
+        ("pip-image-configuration-not-read", _DWKP, "hygiene-launcher"),
+        ("pip-no-cache-reused", _DWKP, "hygiene-launcher"),
+        ("pip-installed-pth-not-executed-by-install", _DWKP, "workload-effects-measured"),
+    ),
 }
 # Every case any of the six tasks requires: a line naming another case of
 # their suites is a case the inventory lost, or one renamed.
@@ -7022,6 +7592,7 @@ ATTRIBUTED_CASES = frozenset(
         *RESTART_CASES,
         *CAPACITY_CASES,
         *REGISTRY_CASES,
+        *HYGIENE_CASES,
     )
 )
 # The foundation's latency: its numbers, not containment.
@@ -7082,6 +7653,13 @@ def outcome_problem(suite: str, case: str, outcome: str, enforcement: object) ->
     (`REGISTRY_OUTCOMES`): an install, what it installed; a refusal, that
     nothing was installed; a source distribution's build, that it ran today.
     """
+    if suite == HYGIENE_SUITE:
+        shows = HYGIENE_OUTCOMES.get(case)
+        if shows is None:
+            return "a hygiene case with no outcome it must show"
+        if not outcome.startswith(shows):
+            return f"its outcome must begin {shows!r}, not {outcome!r}"
+        return None
     if suite == REGISTRY_SUITE:
         shows = REGISTRY_OUTCOMES.get(case)
         if shows is None:
@@ -9765,6 +10343,8 @@ TASKS = {
     "sandbox-restart-evidence": task_sandbox_restart_evidence,
     "sandbox-capacity-evidence": task_sandbox_capacity_evidence,
     "sandbox-registry-evidence": task_sandbox_registry_evidence,
+    "sandbox-hygiene-evidence": task_sandbox_hygiene_evidence,
+    "sandbox-registry-mutations": task_sandbox_registry_mutations,
     "net-http-evidence": task_net_http_evidence,
     "net-http-mutations": task_net_http_mutations,
     "sandbox-workload-mutations": task_sandbox_workload_mutations,

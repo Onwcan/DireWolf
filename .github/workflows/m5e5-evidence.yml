@@ -1,0 +1,64 @@
+name: M5e.5 evidence (manual)
+
+# M5e.5's evidence and mutation review, run by hand by the owner (OD-E7):
+# npm and pip under the profiles ADR-0054 and ADR-0055 propose, which the
+# authority keeps only under its evidence-only start-up option, against
+# M5e.3's fixture registries on a disposable GitHub-hosted runner.
+#
+# Required by nothing: no `ci` job needs it, and it runs on no push or pull
+# request. The plan's §10 ("M5e.5's sequencing") keeps M5e.5's evidence out of
+# required CI until M5e.4's repair has passed hosted; adding it then is the
+# owner's change. A green run here accepts nothing: ADR-0054 and ADR-0055 stay
+# Proposed until the owner accepts them.
+#
+# SECURITY POSTURE: read-only token; no secrets; actions pinned by commit SHA;
+# the only downloads are the registry tools' pinned archives, each checked
+# against its recorded SHA-256 before use; the evidence reaches nothing public.
+
+on:
+  workflow_dispatch:
+    inputs:
+      what:
+        description: "evidence, mutations, or both"
+        required: true
+        default: "evidence"
+        type: choice
+        options: ["evidence", "mutations", "both"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: m5e5-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  sandbox-hygiene:
+    name: sandbox hygiene evidence (make sandbox-hygiene-evidence)
+    if: inputs.what == 'evidence' || inputs.what == 'both'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v5.0.1
+      - uses: ./.github/actions/setup
+      - name: Show the OCI runtime
+        run: |
+          docker version --format 'client {{.Client.Version}} server {{.Server.Version}} api {{.Server.APIVersion}} {{.Server.Os}}/{{.Server.Arch}}'
+          docker info --format '{{.OperatingSystem}} kernel {{.KernelVersion}} cgroup v{{.CgroupVersion}}'
+      - run: make sandbox-hygiene-evidence
+        env:
+          DW_HYGIENE_EVIDENCE: "1"
+
+  sandbox-registry-mutations:
+    name: profile mutation review (make sandbox-registry-mutations)
+    if: inputs.what == 'mutations' || inputs.what == 'both'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v5.0.1
+      - uses: ./.github/actions/setup
+      - run: make sandbox-registry-mutations
+        env:
+          DW_HYGIENE_EVIDENCE: "1"

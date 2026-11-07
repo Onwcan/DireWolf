@@ -74,6 +74,7 @@ TASKS = {
     "task_sandbox_restart_evidence": ((dw.RESTART_CASES, dw.SANDBOX_EVIDENCE_PREFIX),),
     "task_sandbox_capacity_evidence": ((dw.CAPACITY_CASES, dw.SANDBOX_EVIDENCE_PREFIX),),
     "task_sandbox_registry_evidence": ((dw.REGISTRY_CASES, dw.SANDBOX_EVIDENCE_PREFIX),),
+    "task_sandbox_hygiene_evidence": ((dw.HYGIENE_CASES, dw.SANDBOX_EVIDENCE_PREFIX),),
 }
 
 # Which suite each emitter prints, and whether a call names its level (an
@@ -179,6 +180,13 @@ EMITTERS = (
         "crates/dwkd-authority/tests/sandbox_registry.rs",
         "evidence",
         "sandbox-registry",
+        None,
+        None,
+    ),
+    (
+        "crates/dwkd-authority/tests/sandbox_hygiene.rs",
+        "evidence",
+        "sandbox-hygiene",
         None,
         None,
     ),
@@ -300,6 +308,7 @@ def test_every_required_case_is_attributed_and_every_rule_is_used() -> None:
         dw.RESTART_CASES,
         dw.CAPACITY_CASES,
         dw.REGISTRY_CASES,
+        dw.HYGIENE_CASES,
     )
     assert inventory == {key for table in tables for key in table}
     for table in tables:
@@ -323,7 +332,9 @@ def test_every_required_case_is_attributed_and_every_rule_is_used() -> None:
     # neighbour cases, 5 at the broker and 5 through the authority; on the
     # hosted runner, 7 of the runtime's restart and 4 at the live-environment
     # cap); and M5e.4's 19 registry cases, hosted only, and 2 at the broker's
-    # executable-copy bound on a real runtime. A smaller one is a lost case.
+    # executable-copy bound on a real runtime; and M5e.5's 44, hosted only and
+    # manual: ADR-0054 §8's 22, ADR-0055 §9's 21, and the interpreter's way
+    # around pip's profile (D4). A smaller one is a lost case.
     assert len(dw.BROKER_ASSURANCE_CASES) == 20
     assert len(dw.CAPTURED_ASSURANCE_CASES) == 19
     closure = [c for s, c in dw.WORKLOAD_CASES if s == "sandbox-closure"]
@@ -339,7 +350,10 @@ def test_every_required_case_is_attributed_and_every_rule_is_used() -> None:
     assert len(dw.RESTART_CASES) == 7
     assert len(dw.CAPACITY_CASES) == 4
     assert len(dw.REGISTRY_CASES) == 19
-    assert len(inventory) == 583
+    assert len(dw.HYGIENE_NPM_CASES) == 22
+    assert len(dw.HYGIENE_PIP_CASES) == 21
+    assert len(dw.HYGIENE_CASES) == 44
+    assert len(inventory) == 627
 
 
 def test_the_vocabulary_is_closed_used_and_documented() -> None:
@@ -383,6 +397,7 @@ def test_each_suite_is_only_at_the_levels_it_can_reach() -> None:
         "sandbox-authority-secret": {"real-oci", "dwkp-end-to-end"},
         "sandbox-authority-workspace": {"real-oci", "dwkp-end-to-end", "privileged-oci"},
         "sandbox-registry": {"dwkp-end-to-end"},
+        "sandbox-hygiene": {"dwkp-end-to-end"},
     }
     assert set(reachable) == set(dw.ATTRIBUTION)
     # The provisioned workspace's cases, and the runtime's restart (which

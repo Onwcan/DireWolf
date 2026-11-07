@@ -115,8 +115,13 @@ def test_the_proposed_registry_cases_are_well_formed_unique_and_new() -> None:
     assert len(pip) >= 20, pip
     proposed = npm + pip
     assert len(proposed) == len(set(proposed)), "a proposed case is named twice"
-    taken = sorted(set(proposed) & _required_cases())
+    # M5e.5's task requires them, by these exact names (the plan's §10,
+    # "M5e.5's sequencing"); no other task may name one of them.
+    hygiene = {case for _, case in dw.HYGIENE_CASES}
+    taken = sorted(set(proposed) & (_required_cases() - hygiene))
     assert not taken, f"proposed cases that already name another task's case: {taken}"
+    missing = sorted(set(proposed) - hygiene)
+    assert not missing, f"proposed cases M5e.5's task does not require: {missing}"
 
 
 def test_both_package_manager_adrs_are_still_proposed() -> None:
