@@ -847,6 +847,19 @@ def test_the_m5d4_boundaries_each_catch_their_violation(violation_rules: list[st
     }
 
 
+def test_an_unaccepted_hygiene_profile_is_switched_on_in_one_place(
+    violation_rules: list[str],
+) -> None:
+    """M5e.5 (ADR-0054 §7, ADR-0055 §8): a profile whose ADR is not accepted
+    is turned on by the server's start-up option alone -- the fixture's
+    setter call, its parse of a variable and its spelling of the option are
+    each caught, and the comment naming them is not."""
+    rule = "TX060-an-unaccepted-hygiene-profile-is-switched-on-in-one-place"
+    assert rule in violation_rules
+    assert _paths(rule) == {"crates/dwkd-authority/src/server/profile_switch.rs"}
+    assert {line for _, line, _ in _findings(rule)} == {3, 7, 10}
+
+
 def test_the_server_seam_is_named_only_by_the_server(violation_rules: list[str]) -> None:
     """M5d.2 (ADR-0052 §17): `serve_authority` and `Served::operate` -- the
     evidence's door -- are named by the server module alone; the CLI fixture
@@ -1094,6 +1107,7 @@ def test_the_required_boundary_rules_are_all_declared() -> None:
         "TX057-the-workspace-contract-repairs-nothing",
         "TX058-the-workspace-modes-are-spelled-once",
         "TX059-the-unverified-workspace-is-acknowledged-in-one-place",
+        "TX060-an-unaccepted-hygiene-profile-is-switched-on-in-one-place",
         "DEP001-no-agent-framework-dependency",
         "DEP002-runtime-has-no-transport-dependency",
         "RS001-authority-depends-on-nothing-in-tree",

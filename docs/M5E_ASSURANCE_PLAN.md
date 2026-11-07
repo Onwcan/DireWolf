@@ -22,6 +22,7 @@
 **Status (2026-11-04, M5e.3 built; M5e.2 partially implemented):** the owner committed the sequencing exception, M5e.3's offline fixtures and the closed-port fix as `6be8c41`; hosted [run 41720068934](https://github.com/Onwcan/DireWolf/actions/runs/41720068934) (run no. 126, `6be8c41`): **FAILURE**, 27 of 29 jobs. `make test` on windows-latest failed, and the `ci` aggregate with it: two fixture tests gave pytest's Windows `tmp_path` as a marker directory, which the generator refused. On Linux and macOS every fixture test passed, the recorded digest included, as did the sequencing guard and the closed-port fix. Fixed since, unstaged, hosted run pending: a marker directory is an absolute POSIX or Windows path of plain segments, in one canonical form, the default's bytes unchanged (§7a). Built since, unstaged, hosted run pending: the rest of M5e.3 — the per-run CA's registry certificates and the two registry origins, with the proxy's side shown in process (§7a). **M5e.2 — PARTIALLY IMPLEMENTED / ASSURANCE BLOCKED (R3/E6, [issue #19](https://github.com/Onwcan/DireWolf/issues/19))**: its engineering hardening is hosted-verified; R3's real-container E6, required by the owner's R-B, is BLOCKED (required 15, passed 0, blocked 15); M5e.2 stays IN PROGRESS. M5e.3's implementation is complete under the owner's sequencing exception (§10), its hosted validation pending; M5e.4–M5e.6 are NOT STARTED and still follow M5e.2, and M5's acceptance waits for E6.\
 **Status (2026-11-05, M5e.4 sequenced and built):** the owner committed M5e.3's completion and the Windows repair as `2b015dc`; hosted [run 41916040076](https://github.com/Onwcan/DireWolf/actions/runs/41916040076) (run no. 127, `2b015dc`) and, after PR #20's dependency update, [run 41920008027](https://github.com/Onwcan/DireWolf/actions/runs/41920008027) (run no. 129, `d9effc2`): **SUCCESS**, 29 of 29 jobs each, Windows' `make test` among them. So M5e.3's fixtures, per-run CA and origins are hosted-verified, and **M5e.3 is COMPLETE** on its exit (§6). The owner then made a second narrow exception to §6's order (§10, "M5e.4's sequencing"): M5e.4 may be implemented and evidenced while M5e.2 stays open; M5e.5 and M5e.6 are not authorised. Built since, unstaged, hosted run pending (§§6, 8): the registry tools image, built on the runner from checksum-verified pins; pip as it is today against M5e.3's fixture registries, a fresh measured `PROXY_ONLY` environment per case; and npm refused before anything is prepared — `make sandbox-registry-evidence` in the new required `sandbox-registry` job, its 19 cases attributed at `dwkp-end-to-end`. No production line, shipped pack or ADR changes, and none of it is E6. **M5e.2 — PARTIALLY IMPLEMENTED / ASSURANCE BLOCKED (R3/E6, [issue #19](https://github.com/Onwcan/DireWolf/issues/19))**: E6 is required and BLOCKED (required 15, passed 0, blocked 15), and M5e.2 stays IN PROGRESS. M5e.4 is IN PROGRESS — its implementation complete, its hosted verification pending; M5e.5–M5e.6 are NOT STARTED and not authorised; M5's acceptance waits for E6.\
 **Status (2026-11-06, M5e.4's first hosted run failed; repaired):** the owner committed M5e.4 as `3e322ad`; hosted [run 42112947252](https://github.com/Onwcan/DireWolf/actions/runs/42112947252) (run no. 130, `3e322ad`): **FAILURE**, 28 of 30 jobs. `sandbox-registry` failed, and the `ci` aggregate with it, at the suite's first Python workload, which the authority refused `EXECUTABLE_CHANGED` (npm's three refusal cases had passed). No byte had changed: the interpreter's SHA-256 matched end to end. The pinned CPython build's `python3.12` is 68 023 040 bytes, past the 64 MiB the broker copies out of a container and hashes before every launch (`MAX_PROBE_BYTES`, `crates/dwkd-broker/src/sandbox/digest.rs`), so the copy was cut at its bound, the verdict was `FAIL` and the workload was refused, as it must be. Repaired, unstaged, hosted run pending (§8): the pin is now the same release's stripped build, whose interpreter is 31 009 064 bytes; the pin records that size and digest, held below the broker's own bound in `make test` and against the extracted file on the runner; the broker's log now says which cause refused an executable; and two new real-runtime cases stand on either side of the bound. No bound, digest check, refusal, required case or outcome is relaxed, and none of it is E6. **M5e.4 — IMPLEMENTATION REPAIRED / HOSTED REVERIFICATION PENDING.** **M5e.2 — PARTIALLY IMPLEMENTED / ASSURANCE BLOCKED (R3/E6, [issue #19](https://github.com/Onwcan/DireWolf/issues/19))**: E6 is required and BLOCKED (required 15, passed 0, blocked 15), and M5e.2 stays IN PROGRESS. M5e.5–M5e.6 are NOT STARTED and not authorised; M5's acceptance waits for E6.\
+**Status (2026-11-07, M5e.4's second hosted run; M5e.5 authorised):** the owner committed the stripped-interpreter repair, the M5e.5 preparation handoff and a documentation change as `16d2b6d`, `14a6594` and `cb76b67`; hosted [run 42296614431](https://github.com/Onwcan/DireWolf/actions/runs/42296614431) (run no. 133, `cb76b67`): **FAILURE**, 28 of 30 jobs. The stripped interpreter ran, `registry-tools-pinned-in-the-environment` passed and the granted install succeeded; the suite then stopped on its own count of the proxy's refusals, which included the question every measurement's probe asks the proxy (`CONTAINER_PROXY_REACHABLE`) -- a defect of the evidence's accounting, in its test, not of any boundary ([M5E4_IMPLEMENTATION_HANDOFF.md](M5E4_IMPLEMENTATION_HANDOFF.md) §12). Repaired, unstaged, hosted run pending; no production line, pin, case or outcome changed. **M5e.4 — REPAIR COMMIT-READY / HOSTED VERIFICATION PENDING.** The owner then authorised M5e.5's implementation (§10, "M5e.5's sequencing"): ADR-0054's and ADR-0055's profiles may be built and evidenced behind the evidence-only start-up option both propose, and neither is accepted; production stays fail-closed, and M5e.5's evidence joins no job `ci` requires before M5e.4's repair passes hosted. **M5e.2 — PARTIALLY IMPLEMENTED / ASSURANCE BLOCKED (R3/E6, [issue #19](https://github.com/Onwcan/DireWolf/issues/19))**: E6 is required and BLOCKED (required 15, passed 0, blocked 15), and M5e.2 stays IN PROGRESS. M5e.5 is IN PROGRESS, its ADRs Proposed; M5e.6 is NOT STARTED and not authorised; M5's acceptance waits for E6.\
 **Authority of this document:** a technical plan, not an ADR. It approves nothing itself; the owner's decisions are recorded in §10 as given. [ADR-0054](adr/0054-m5e-npm-hygiene-profile.md) stays **Proposed**.
 
 ## 1. Scope, sources and the owner's directions
@@ -577,6 +578,8 @@ Where each step stands (2026-11-05, M5e.4 built): hosted runs 41916040076 (`2b01
 
 Where each step stands (2026-11-06, M5e.4 repaired): hosted run 42112947252 (`3e322ad`, run no. 130, 28 of 30 jobs) built the registry tools image and read every pinned version back, and npm's three refusal cases passed; the pip test stopped at its first workload, the pinned interpreter being past the broker's executable-copy bound. Repaired by the pin, not the bound (§8), unstaged, hosted run pending. **M5e.4 — IMPLEMENTATION REPAIRED / HOSTED REVERIFICATION PENDING**: it closes when the `sandbox-registry` job and the `ci` aggregate pass hosted, every required case and attribution verified, and the owner records its acceptance. **M5e.2 is IN PROGRESS, R3 E6 BLOCKED**; M5e.3 is COMPLETE; M5e.4 is IN PROGRESS; M5e.5–M5e.6 are NOT STARTED and not authorised.
 
+Where each step stands (2026-11-07, M5e.4's accounting repaired; M5e.5 authorised): hosted run 42296614431 (`cb76b67`, run no. 133, 28 of 30 jobs) ran the stripped interpreter and the first pip install from the granted index; its next assertion counted the environment's own probe question as a refusal of the workload's. Repaired in the test, unstaged, hosted run pending; every later pip case runs for the first time on that run. **M5e.4 — REPAIR COMMIT-READY / HOSTED VERIFICATION PENDING.** M5e.5's implementation is authorised, not its acceptance (§10); it is built behind the evidence-only option, in no required job before M5e.4 passes hosted. **M5e.2 is IN PROGRESS, R3 E6 BLOCKED**; M5e.3 is COMPLETE; M5e.4 is IN PROGRESS; M5e.5 is IN PROGRESS; M5e.6 is NOT STARTED and not authorised.
+
 ## 7. Hermetic fixtures
 
 All synthetic, generated at test time from a seed, served on loopback, never
@@ -927,11 +930,50 @@ it does not:
   third-party action's code runs, and nothing depends on what a runner image
   caches.
 
-`tests/architecture/test_m5e_r3_closure.py` holds both exceptions to that while
-ADR-0057 stands: this is the plan's one record of each; M5e.4's says M5e.5 and
-M5e.6 are not authorised; no status document claims M5e.4–M5e.6, M5e or M5
-complete, or M5e.5 or M5e.6 begun; the ROADMAP's M5e heading keeps M5e.5–M5e.6
-not started; the plan's current status and the ROADMAP's "Still to do" cite
+**M5e.5's sequencing (2026-11-07).** M5e.4's repair of its second hosted run
+(run 42296614431, §8) is commit-ready, its hosted run pending, and M5e.2 still
+cannot close: E6 is BLOCKED. The owner made a third narrow exception to §6's
+order: **M5e.5 may be implemented while M5e.2 stays IN PROGRESS and M5e.4 awaits
+its hosted verification.** It authorises building and evidencing ADR-0054's and
+ADR-0055's proposed profiles; it accepts neither. What it decides, and what it
+does not:
+
+- **Implementation, not acceptance.** The npm and pip profiles may be built
+  behind the evidence-only start-up option both ADRs propose, `dwkd-authority
+  serve --allow-unaccepted-hygiene-profile npm|pip`: refused outside the
+  evidence harness's own execution environment (`[workspace]
+  unverified_evidence`), logged `REDUCED ASSURANCE`, fenced by an architecture
+  rule. ADR-0054 and ADR-0055 stay Proposed. Without the option every decision is
+  today's: npm stays `HYGIENE_NOT_EVIDENCED`, pip keeps today's treatment, and
+  no shipped policy pack, default or production configuration changes.
+  Acceptance is a later decision of the owner's, on hosted evidence, and the
+  change that implements it removes the option.
+- **M5e.4 first, in CI.** M5e.5's evidence joins no job `ci` requires before
+  M5e.4's repair passes hosted. Until then it is built, checked locally where it
+  can be, and NOT EXERCISED where it cannot; a case is never a pass before it
+  ran on a disposable GitHub-hosted runner.
+- **The preparation's decisions are the implementation's, for review.** D1-D4 of
+  [the preparation handoff](M5E5_PREPARATION_HANDOFF.md) §6 are implemented as
+  recommended there and listed for the owner's acceptance; none is a decision of
+  the owner's. D1 adds launch values to the private broker protocol and none to
+  DWKP or its schemas; both ADRs say no schema is added, which the owner is asked
+  to confirm for that private enum.
+- **M5e.6 is not authorised.** It needs a decision of its own.
+- **R-B stands, and E6 with it.** ADR-0057 stays **Proposed** and outside the
+  accepted digest, its residual not accepted; E6 stays required, its 15 rows
+  **BLOCKED** (required 15, passed 0), §3b's criteria unchanged. No M5e.5 case
+  weakens a hard rule or a topology, stands for E6 or counts toward R3.
+- **M5e.2 stays open, and in view.** M5e.2 stays **IN PROGRESS** and
+  [issue #19](https://github.com/Onwcan/DireWolf/issues/19) stays OPEN, cited by each status that follows.
+- **M5's acceptance waits for E6.** Neither `M5e` nor `M5` joins the available
+  milestones before genuine E6 evidence closes R3 and the owner closes M5e.2.
+
+`tests/architecture/test_m5e_r3_closure.py` holds the three exceptions to that
+while ADR-0057 stands: this is the plan's one record of each; M5e.4's says M5e.5
+and M5e.6 are not authorised, as they were not then; M5e.5's says neither ADR is
+accepted, its evidence waits for M5e.4 in CI and M5e.6 is not authorised; no
+status document claims M5e.4–M5e.6, M5e or M5 complete, or M5e.6 begun; the
+ROADMAP's M5e heading keeps M5e.6 not started; the plan's current status and the ROADMAP's "Still to do" cite
 issue #19; and neither `M5e` nor `M5` is an available milestone — each with a
 negative control.
 

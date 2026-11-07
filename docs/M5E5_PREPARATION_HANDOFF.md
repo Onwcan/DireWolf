@@ -5,6 +5,11 @@
 M5e.4 repair (unstaged at the time of writing)\
 **Status:** **PREPARATION ONLY.** No M5e.5 code, image, task, case or job exists, and none has
 run. This document changes no behaviour.\
+**Status (2026-11-07):** **IMPLEMENTATION AUTHORISED, NOT ACCEPTED.** The owner authorised
+implementing M5e.5 ([the plan's §10](M5E_ASSURANCE_PLAN.md), "M5e.5's sequencing"). §6's D1–D4 are
+implemented as recommended and listed for the owner's review; §10's steps are under way behind
+the evidence-only option; nothing joins a required job before M5e.4's repair passes hosted. This
+document stays the record of the preparation.\
 **Authority of this document:** a technical handoff, not an ADR. It approves nothing.
 [ADR-0054](adr/0054-m5e-npm-hygiene-profile.md) and
 [ADR-0055](adr/0055-m5e-pip-hygiene-profile.md) stay **Proposed**, and npm stays

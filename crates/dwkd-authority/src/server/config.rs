@@ -18,6 +18,8 @@ use core::fmt;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
+use crate::sandbox::profiles::{HygieneProfiles, UnacceptedProfile};
+
 use crate::state::{
     ConfigFlags, DEFAULT_LEASE_TTL_MS, MAX_CEILING_CAPABILITIES, MAX_LEASE_TTL_MS,
     MAX_POLICY_SOURCES, MIN_LEASE_TTL_MS, Mode,
@@ -142,6 +144,12 @@ pub struct ServeConfig {
     /// assurance, stated at start-up; never implied. `RLIMIT_CORE` is 0
     /// either way.
     pub dumpable_permitted: bool,
+    /// The hygiene profiles whose ADRs are not accepted that the evidence
+    /// harness switched on (M5e.5): none unless
+    /// `--allow-unaccepted-hygiene-profile` names one, and refused at
+    /// attachment unless the execution environment is the evidence's own.
+    /// Reduced assurance, stated at start-up; never implied.
+    pub hygiene_profiles: HygieneProfiles,
 }
 
 /// A command line that does not describe a configuration.
@@ -181,6 +189,8 @@ pub const SERVE_USAGE: &str = "\
     --secrets-file <PATH>      the operator's secret metadata (absolute; handles, never values)
     --sandbox-config <PATH>    the operator's execution environment (absolute; needs a broker)
     --allow-dumpable           leave the process dumpable, its memory readable by its uid (development only)
+    --allow-unaccepted-hygiene-profile <npm|pip>
+                               keep a Proposed hygiene profile; evidence harness only, REDUCED ASSURANCE
 ";
 
 /// Parse the arguments after `serve`.
@@ -217,6 +227,7 @@ struct Parsed {
     secrets_file: Option<PathBuf>,
     sandbox_config: Option<PathBuf>,
     dumpable: bool,
+    hygiene_profiles: HygieneProfiles,
 }
 
 impl Parsed {
@@ -275,11 +286,28 @@ impl Parsed {
             "--secrets-file" => once(&mut self.secrets_file, flag, PathBuf::from(value()?)),
             "--sandbox-config" => once(&mut self.sandbox_config, flag, PathBuf::from(value()?)),
             "--allow-dumpable" => switch(&mut self.dumpable, flag),
+            "--allow-unaccepted-hygiene-profile" => self.hygiene_profile(flag, value()?),
             other => Err(UsageError::new(format!(
                 "unknown serve argument {}",
                 bounded(other)
             ))),
         }
+    }
+
+    /// `--allow-unaccepted-hygiene-profile <npm|pip>`: one profile, by its
+    /// exact name, once.
+    fn hygiene_profile(&mut self, flag: &str, named: &str) -> Result<(), UsageError> {
+        let profile = UnacceptedProfile::parse(named).ok_or_else(|| {
+            UsageError::new(format!("{flag} takes npm or pip, not {}", bounded(named)))
+        })?;
+        if self.hygiene_profiles.keeps(profile) {
+            return Err(UsageError::new(format!(
+                "{flag} {} is repeated",
+                profile.as_str()
+            )));
+        }
+        self.hygiene_profiles = self.hygiene_profiles.with(profile);
+        Ok(())
     }
 
     /// Check what is required and consistent, and build the configuration.
@@ -365,7 +393,9 @@ impl Parsed {
             return Err(UsageError::new("--secrets-file must be an absolute path"));
         }
         sandbox_config_fits(self.sandbox_config.as_deref(), broker.is_some())?;
+        hygiene_profiles_fit(self.hygiene_profiles, self.sandbox_config.is_some())?;
         Ok(ServeConfig {
+            hygiene_profiles: self.hygiene_profiles,
             secrets_file: self.secrets_file,
             sandbox_config: self.sandbox_config,
             dumpable_permitted: self.dumpable,
@@ -398,6 +428,19 @@ fn sandbox_config_fits(path: Option<&Path>, broker: bool) -> Result<(), UsageErr
         ));
     }
     Ok(())
+}
+
+/// `--allow-unaccepted-hygiene-profile`, if given: beside an execution
+/// environment, the only place a profile could be kept -- and the attachment
+/// refuses it unless that environment is the evidence harness's own.
+fn hygiene_profiles_fit(profiles: HygieneProfiles, sandbox: bool) -> Result<(), UsageError> {
+    if profiles.is_none() || sandbox {
+        return Ok(());
+    }
+    Err(UsageError::new(
+        "--allow-unaccepted-hygiene-profile needs --sandbox-config: a profile is kept only in \
+         the evidence harness's execution environment",
+    ))
 }
 
 fn switch(slot: &mut bool, flag: &str) -> Result<(), UsageError> {
@@ -674,5 +717,78 @@ mod tests {
         let mut words = base();
         words.push("--evil\nline");
         assert!(!error(&words).contains('\n'));
+    }
+
+    /// The base command line with an execution environment and its broker.
+    fn attached() -> Vec<&'static str> {
+        #[cfg(windows)]
+        let (sandbox, broker) = (r"C:\etc\dw\sandbox.toml", r"C:\run\dw\broker.sock");
+        #[cfg(not(windows))]
+        let (sandbox, broker) = ("/etc/dw/sandbox.toml", "/run/dw/broker.sock");
+        let mut words = base();
+        words.extend([
+            "--sandbox-config",
+            sandbox,
+            "--broker-socket",
+            broker,
+            "--broker-uid",
+            "1002",
+        ]);
+        words
+    }
+
+    #[test]
+    fn no_unaccepted_profile_is_kept_unless_the_option_names_one() {
+        use crate::sandbox::profiles::{HygieneProfiles, UnacceptedProfile};
+        for words in [base(), attached()] {
+            let Ok(config) = parse_serve_args(&args(&words)) else {
+                unreachable!("the command line parses")
+            };
+            assert_eq!(config.hygiene_profiles, HygieneProfiles::NONE);
+        }
+        for (named, expected) in [
+            (&["npm"][..], &[UnacceptedProfile::Npm][..]),
+            (&["pip"], &[UnacceptedProfile::Pip]),
+            (
+                &["pip", "npm"],
+                &[UnacceptedProfile::Npm, UnacceptedProfile::Pip],
+            ),
+        ] {
+            let mut words = attached();
+            for name in named {
+                words.extend(["--allow-unaccepted-hygiene-profile", name]);
+            }
+            let Ok(config) = parse_serve_args(&args(&words)) else {
+                unreachable!("{named:?} parses")
+            };
+            let want = expected
+                .iter()
+                .fold(HygieneProfiles::NONE, |kept, p| kept.with(*p));
+            assert_eq!(config.hygiene_profiles, want, "{named:?}");
+        }
+    }
+
+    #[test]
+    fn an_unknown_repeated_or_unattached_profile_is_a_usage_error() {
+        for name in ["npx", "NPM", "pip3", "", "all", "yarn"] {
+            let mut words = attached();
+            words.extend(["--allow-unaccepted-hygiene-profile", name]);
+            assert!(error(&words).contains("takes npm or pip"), "{name:?}");
+        }
+        let mut words = attached();
+        words.extend([
+            "--allow-unaccepted-hygiene-profile",
+            "npm",
+            "--allow-unaccepted-hygiene-profile",
+            "npm",
+        ]);
+        assert!(error(&words).contains("is repeated"));
+        let mut words = attached();
+        words.push("--allow-unaccepted-hygiene-profile");
+        assert!(error(&words).contains("needs a value"));
+        // Without an execution environment there is nothing to keep it in.
+        let mut words = base();
+        words.extend(["--allow-unaccepted-hygiene-profile", "pip"]);
+        assert!(error(&words).contains("needs --sandbox-config"));
     }
 }

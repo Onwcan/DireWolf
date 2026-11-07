@@ -2343,6 +2343,48 @@ unless its operator acknowledged it (`WORKSPACE_UNVERIFIED`), and the
 evidence shows it.
 """
 
+[[text_rules]]
+id = "TX060-an-unaccepted-hygiene-profile-is-switched-on-in-one-place"
+paths = [
+    "crates/dwkd-authority/src",
+    "crates/dwkd-broker/src",
+    "crates/dwk-proto/src",
+    "crates/dwk-sandbox-probe/src",
+    "crates/dwk-sandbox-profile/src",
+    "crates/direwolf-cli/src",
+]
+exempt_paths = [
+    # The server's command line, and its tests.
+    "crates/dwkd-authority/src/server/config.rs",
+    # The one attachment, after the evidence harness's workspace is checked.
+    "crates/dwkd-authority/src/server/sandbox.rs",
+    # The setter's definition, and the configuration's tests.
+    "crates/dwkd-authority/src/sandbox.rs",
+    # The profiles' own type, and its tests.
+    "crates/dwkd-authority/src/sandbox/profiles.rs",
+]
+suffixes = [".rs"]
+patterns = [
+    '^(?!\s*//).*"--allow-unaccepted-hygiene-profile"',
+    '^(?!\s*//).*\.with_hygiene_profiles\(',
+    '^(?!\s*//).*UnacceptedProfile::parse\(',
+]
+reason = """
+A hygiene profile whose ADR is Proposed (npm's, ADR-0054 §7; pip's,
+ADR-0055 §8) exists in a build only so the evidence can exercise it through
+the real authority, broker and launcher before the owner decides on it. It is
+switched on in one place: `dwkd-authority serve
+--allow-unaccepted-hygiene-profile`, parsed in `server/config.rs`, attached in
+`server/sandbox.rs` only to the evidence harness's own execution environment
+(`[workspace] unverified_evidence`, which every broker refuses unless its
+operator acknowledged it), and logged `REDUCED ASSURANCE`. A second spelling --
+a request, a variable, a policy key, a default -- would be a second way to
+turn on a profile nobody accepted.
+
+The change that implements an ADR's acceptance removes the option, its parse
+and this rule's patterns for that profile.
+"""
+
 # ===========================================================================
 # Documentation
 # ===========================================================================
