@@ -23,6 +23,7 @@
 //! | `hygiene` | `workspace_exec_hygiene`'s variables | 0 `/dev/null`, 1, 2 |
 //! | `secret-fd`, `secret-fd-hygiene` | (and the hygiene variables) | 0 `/dev/null`, 1, 2, and 3: a fresh pipe holding exactly the value |
 //! | `secret-env`, `secret-env-hygiene` | `NAME=value` (and the hygiene variables) | 0 `/dev/null`, 1, 2 |
+//! | `hygiene-npm`, `hygiene-pip` | the hygiene variables and npm's or pip's (M5e.5, unaccepted profiles; never with a secret) | 0 `/dev/null`, 1, 2 |
 //!
 //! **A secret arrives on standard input, framed** (M5d.3): the broker filled
 //! a pipe with the value's length ([`profile::SECRET_FRAME_PREFIX_BYTES`],
@@ -67,15 +68,46 @@ enum Delivery {
     Env,
 }
 
-/// The profile's delivery, and whether it sets the hygiene variables.
-fn profile_of(name: &str) -> Option<(Delivery, bool)> {
+/// Which fixed variables a profile sets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Variables {
+    /// None.
+    None,
+    /// `workspace_exec_hygiene`'s.
+    Hygiene,
+    /// The hygiene variables and npm's (M5e.5, ADR-0054 §2).
+    Npm,
+    /// The hygiene variables and pip's (M5e.5, ADR-0055 §2).
+    Pip,
+}
+
+impl Variables {
+    /// Every variable it sets, in order.
+    fn set(self) -> Vec<(&'static str, &'static str)> {
+        let extra: &[(&str, &str)] = match self {
+            Self::None | Self::Hygiene => &[],
+            Self::Npm => profile::HYGIENE_NPM_ENVIRONMENT,
+            Self::Pip => profile::HYGIENE_PIP_ENVIRONMENT,
+        };
+        let base: &[(&str, &str)] = match self {
+            Self::None => &[],
+            Self::Hygiene | Self::Npm | Self::Pip => profile::HYGIENE_ENVIRONMENT,
+        };
+        base.iter().chain(extra).copied().collect()
+    }
+}
+
+/// The profile's delivery, and the variables it sets.
+fn profile_of(name: &str) -> Option<(Delivery, Variables)> {
     Some(match name {
-        profile::LAUNCH_DIRECT => (Delivery::None, false),
-        profile::LAUNCH_HYGIENE => (Delivery::None, true),
-        profile::LAUNCH_SECRET_FD => (Delivery::Fd, false),
-        profile::LAUNCH_SECRET_FD_HYGIENE => (Delivery::Fd, true),
-        profile::LAUNCH_SECRET_ENV => (Delivery::Env, false),
-        profile::LAUNCH_SECRET_ENV_HYGIENE => (Delivery::Env, true),
+        profile::LAUNCH_DIRECT => (Delivery::None, Variables::None),
+        profile::LAUNCH_HYGIENE => (Delivery::None, Variables::Hygiene),
+        profile::LAUNCH_HYGIENE_NPM => (Delivery::None, Variables::Npm),
+        profile::LAUNCH_HYGIENE_PIP => (Delivery::None, Variables::Pip),
+        profile::LAUNCH_SECRET_FD => (Delivery::Fd, Variables::None),
+        profile::LAUNCH_SECRET_FD_HYGIENE => (Delivery::Fd, Variables::Hygiene),
+        profile::LAUNCH_SECRET_ENV => (Delivery::Env, Variables::None),
+        profile::LAUNCH_SECRET_ENV_HYGIENE => (Delivery::Env, Variables::Hygiene),
         _ => return None,
     })
 }
@@ -196,7 +228,7 @@ pub(crate) fn run(args: &[String]) -> ExitCode {
     let Some((name, rest)) = args.split_first() else {
         return failed;
     };
-    let Some((delivery, hygiene)) = profile_of(name) else {
+    let Some((delivery, variables)) = profile_of(name) else {
         return failed;
     };
     let (variable, rest) = match delivery {
@@ -214,10 +246,8 @@ pub(crate) fn run(args: &[String]) -> ExitCode {
     }
     let mut command = Command::new(path);
     command.arg0(path).args(rest);
-    if hygiene {
-        for (variable, value) in profile::HYGIENE_ENVIRONMENT {
-            command.env(variable, value);
-        }
+    for (variable, value) in variables.set() {
+        command.env(variable, value);
     }
     // Descriptor 3 is taken first, before anything else can be, and held
     // until the exec: mode C moves its pipe onto it.
@@ -261,35 +291,38 @@ pub(crate) fn run(args: &[String]) -> ExitCode {
 
 #[cfg(test)]
 mod tests {
-    use super::{Delivery, name_allowed, profile_of};
+    use super::{Delivery, Variables, name_allowed, profile_of};
     use dwk_sandbox_profile as profile;
 
     #[test]
     fn every_profile_is_one_closed_word_and_nothing_else_launches() {
-        assert_eq!(
-            profile_of(profile::LAUNCH_DIRECT),
-            Some((Delivery::None, false))
-        );
-        assert_eq!(
-            profile_of(profile::LAUNCH_HYGIENE),
-            Some((Delivery::None, true))
-        );
-        assert_eq!(
-            profile_of(profile::LAUNCH_SECRET_FD),
-            Some((Delivery::Fd, false))
-        );
-        assert_eq!(
-            profile_of(profile::LAUNCH_SECRET_FD_HYGIENE),
-            Some((Delivery::Fd, true))
-        );
-        assert_eq!(
-            profile_of(profile::LAUNCH_SECRET_ENV),
-            Some((Delivery::Env, false))
-        );
-        assert_eq!(
-            profile_of(profile::LAUNCH_SECRET_ENV_HYGIENE),
-            Some((Delivery::Env, true))
-        );
+        for (name, expected) in [
+            (profile::LAUNCH_DIRECT, (Delivery::None, Variables::None)),
+            (
+                profile::LAUNCH_HYGIENE,
+                (Delivery::None, Variables::Hygiene),
+            ),
+            (
+                profile::LAUNCH_HYGIENE_NPM,
+                (Delivery::None, Variables::Npm),
+            ),
+            (
+                profile::LAUNCH_HYGIENE_PIP,
+                (Delivery::None, Variables::Pip),
+            ),
+            (profile::LAUNCH_SECRET_FD, (Delivery::Fd, Variables::None)),
+            (
+                profile::LAUNCH_SECRET_FD_HYGIENE,
+                (Delivery::Fd, Variables::Hygiene),
+            ),
+            (profile::LAUNCH_SECRET_ENV, (Delivery::Env, Variables::None)),
+            (
+                profile::LAUNCH_SECRET_ENV_HYGIENE,
+                (Delivery::Env, Variables::Hygiene),
+            ),
+        ] {
+            assert_eq!(profile_of(name), Some(expected), "{name}");
+        }
         for other in [
             "",
             "secret",
@@ -297,8 +330,40 @@ mod tests {
             "SECRET-FD",
             "hygiene-secret-fd",
             "env",
+            "hygiene-npx",
+            "hygiene-npm-secret",
+            "secret-fd-hygiene-npm",
+            "HYGIENE-NPM",
+            "npm",
+            "pip",
         ] {
             assert_eq!(profile_of(other), None, "{other:?}");
+        }
+    }
+
+    #[test]
+    fn each_profile_sets_exactly_its_variables_the_hygiene_ones_unchanged() {
+        assert!(Variables::None.set().is_empty());
+        assert_eq!(
+            Variables::Hygiene.set(),
+            profile::HYGIENE_ENVIRONMENT.to_vec()
+        );
+        for (variables, extra) in [
+            (Variables::Npm, profile::HYGIENE_NPM_ENVIRONMENT),
+            (Variables::Pip, profile::HYGIENE_PIP_ENVIRONMENT),
+        ] {
+            let mut expected = profile::HYGIENE_ENVIRONMENT.to_vec();
+            expected.extend_from_slice(extra);
+            assert_eq!(variables.set(), expected, "{variables:?}");
+        }
+        // ADR-0054 §2's eight and ADR-0055 §2's six, each named once.
+        assert_eq!(profile::HYGIENE_NPM_ENVIRONMENT.len(), 8);
+        assert_eq!(profile::HYGIENE_PIP_ENVIRONMENT.len(), 6);
+        for (name, value) in profile::HYGIENE_NPM_ENVIRONMENT {
+            assert!(name.starts_with("npm_config_"), "{name}={value}");
+        }
+        for (name, value) in profile::HYGIENE_PIP_ENVIRONMENT {
+            assert!(name.starts_with("PIP_"), "{name}={value}");
         }
     }
 

@@ -571,7 +571,11 @@ fn plan(
         assurance: environment.map(|e| assurance(e.level)),
         launch: match decided.launch {
             dwk_proto::brokerp::workload::WorkloadLaunch::Direct => ExecLaunch::Direct,
-            dwk_proto::brokerp::workload::WorkloadLaunch::Hygiene => ExecLaunch::Hygiene,
+            // DWKP names the obligation, not the profile: the recorded plan
+            // and its audit carry which (`launch`, `hygiene_args`).
+            dwk_proto::brokerp::workload::WorkloadLaunch::Hygiene
+            | dwk_proto::brokerp::workload::WorkloadLaunch::HygieneNpm
+            | dwk_proto::brokerp::workload::WorkloadLaunch::HygienePip => ExecLaunch::Hygiene,
         },
         arg_count: u16::try_from(executed.len())
             .ok()

@@ -56,7 +56,8 @@ use crate::capability::{
 use crate::policy::{ArgvSafety, CanonicalAction, Effect, Environment, Obligation, TaintLevel};
 use crate::resource::ExecutableIdentity;
 use crate::resource::exec::argv::{self, ArgvClass};
-use crate::resource::exec::hygiene::{self, Hygiene};
+use crate::resource::exec::hygiene::{self, Hygiene, Profile, Profiles};
+use crate::sandbox::profiles::{HygieneProfiles, UnacceptedProfile};
 use crate::sandbox::{SandboxConfig, WorkloadBudget};
 use crate::secret::metadata::InjectionMode;
 
@@ -141,6 +142,17 @@ pub(super) struct Checked {
     /// The credential handle a public launch named (M5d.3): part of what its
     /// key is bound to. The in-process API names none.
     pub(super) credential: Option<String>,
+    /// The unaccepted hygiene profiles the operator's evidence-only option
+    /// named (M5e.5): [`Profiles::NONE`] in every production configuration.
+    pub(super) profiles: Profiles,
+}
+
+/// The obligation's copy of the operator's unaccepted profiles.
+fn profiles_of(kept: HygieneProfiles) -> Profiles {
+    Profiles {
+        npm: kept.keeps(UnacceptedProfile::Npm),
+        pip: kept.keeps(UnacceptedProfile::Pip),
+    }
 }
 
 /// The longest idempotency key, in bytes.
@@ -290,6 +302,7 @@ pub(super) fn check(
         wall_clock,
         key: key.clone(),
         credential: None,
+        profiles: profiles_of(config.hygiene_profiles()),
     })
 }
 
@@ -379,22 +392,34 @@ pub(super) struct WorkloadPlan {
     /// How the broker starts it: through the trusted launcher when
     /// `workspace_exec_hygiene` is kept.
     pub(super) launch: WorkloadLaunch,
-    /// The arguments the kept obligation puts before the invocation's own.
+    /// The arguments the kept obligation adds to the invocation's own.
     pub(super) prefix: &'static [&'static str],
+    /// Where they go: after this many of the invocation's own (0: before
+    /// them all; pip's profile puts its prefix after its subcommand).
+    pub(super) prefix_at: usize,
     /// The spawn injection, when the launch names a credential (M5d.3).
     pub(super) injection: Option<SpawnGate>,
 }
 
 impl WorkloadPlan {
-    /// The arguments the broker is told: the obligation's, then the
-    /// invocation's own.
+    /// The arguments the broker is told: the invocation's own, with the
+    /// obligation's inserted at their place (`spliced`).
     pub(super) fn executed(&self, checked: &Checked) -> Vec<String> {
-        self.prefix
-            .iter()
-            .map(|a| (*a).to_owned())
-            .chain(checked.args.iter().cloned())
-            .collect()
+        spliced(self.prefix, self.prefix_at, &checked.args)
     }
+}
+
+/// `args` with `prefix` inserted after its first `at` (all of them, if it
+/// has fewer).
+fn spliced(prefix: &[&str], at: usize, args: &[String]) -> Vec<String> {
+    let at = at.min(args.len());
+    let (before, after) = args.split_at(at);
+    before
+        .iter()
+        .cloned()
+        .chain(prefix.iter().map(|a| (*a).to_owned()))
+        .chain(after.iter().cloned())
+        .collect()
 }
 
 impl WorkloadPlan {
@@ -452,6 +477,7 @@ struct Kept {
     stream_limit: u32,
     launch: WorkloadLaunch,
     prefix: &'static [&'static str],
+    prefix_at: usize,
 }
 
 /// Whether the authority keeps every obligation, for a workload in an
@@ -469,6 +495,7 @@ fn obligations(record: &DecisionRecord, checked: &Checked) -> Kept {
         stream_limit: checked.stream_limit.get(),
         launch: WorkloadLaunch::Direct,
         prefix: &[],
+        prefix_at: 0,
     };
     let (mut stream_limit, mut enforced) = (kept.stream_limit, true);
     for obligation in record.policy().obligations().as_slice() {
@@ -485,11 +512,26 @@ fn obligations(record: &DecisionRecord, checked: &Checked) -> Kept {
             Obligation::AuditLevel(_) => true,
             Obligation::WorkspaceExecHygiene => {
                 let args: Vec<&str> = checked.args.iter().map(String::as_str).collect();
-                match hygiene::hygiene(&checked.identity, &args) {
+                match hygiene::hygiene_with(&checked.identity, &args, checked.profiles) {
                     Hygiene::Kept { prefix } => {
                         kept.launch = WorkloadLaunch::Hygiene;
                         kept.prefix = prefix;
                         true
+                    }
+                    // An unaccepted profile (M5e.5) is evidenced without a
+                    // credential: a launch naming one is not kept under it.
+                    Hygiene::Profiled {
+                        profile,
+                        prefix,
+                        at,
+                    } => {
+                        kept.launch = match profile {
+                            Profile::Npm => WorkloadLaunch::HygieneNpm,
+                            Profile::Pip => WorkloadLaunch::HygienePip,
+                        };
+                        kept.prefix = prefix;
+                        kept.prefix_at = at;
+                        checked.credential.is_none()
                     }
                     Hygiene::Unenforceable(_) => false,
                 }
@@ -547,6 +589,7 @@ fn decide_plan(
         stream_limit: kept.stream_limit,
         launch: kept.launch,
         prefix: kept.prefix,
+        prefix_at: kept.prefix_at,
         injection,
     })
 }
@@ -1580,7 +1623,7 @@ pub(super) fn reconcile_open(work: &mut Work<'_>) -> Result<u64, AuthorityError>
 #[cfg(test)]
 mod tests {
     use super::{
-        Ending, WorkloadRequest, WorkloadState, check, destroy_reason, readiness,
+        Ending, WorkloadRequest, WorkloadState, check, destroy_reason, readiness, spliced,
         workload_may_run_at,
     };
     use crate::sandbox::{SandboxConfig, WorkloadBudget, WorkspaceSetting};
@@ -1615,6 +1658,32 @@ mod tests {
             wall_clock_seconds: 30,
             key: "w-1".to_owned(),
         }
+    }
+
+    #[test]
+    fn no_unaccepted_profile_reaches_a_workload_by_default() {
+        let Ok(checked) = check(&request(), &config()) else {
+            unreachable!("the request is valid")
+        };
+        assert_eq!(
+            checked.profiles,
+            crate::resource::exec::hygiene::Profiles::NONE
+        );
+    }
+
+    #[test]
+    fn the_prefix_goes_where_its_profile_puts_it() {
+        let args: Vec<String> = ["-v", "install", "x"]
+            .iter()
+            .map(|s| (*s).to_owned())
+            .collect();
+        assert_eq!(
+            spliced(&["p", "q"], 0, &args),
+            ["p", "q", "-v", "install", "x"]
+        );
+        assert_eq!(spliced(&["p"], 2, &args), ["-v", "install", "p", "x"]);
+        assert_eq!(spliced(&["p"], 9, &args), ["-v", "install", "x", "p"]);
+        assert_eq!(spliced(&[], 1, &args), args);
     }
 
     #[test]

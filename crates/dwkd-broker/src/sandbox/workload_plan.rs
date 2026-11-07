@@ -21,8 +21,8 @@
 use dwk_proto::brokerp::sandbox::ContainerRef;
 use dwk_proto::brokerp::workload::{WorkloadLaunch, WorkloadSpec};
 use dwk_sandbox_profile::{
-    LAUNCH_DIRECT, LAUNCH_HYGIENE, PROBE_LAUNCH, PROBE_PATH, PROBE_REAP, SANDBOX_GID, SANDBOX_UID,
-    WORKSPACE_TARGET,
+    LAUNCH_DIRECT, LAUNCH_HYGIENE, LAUNCH_HYGIENE_NPM, LAUNCH_HYGIENE_PIP, PROBE_LAUNCH,
+    PROBE_PATH, PROBE_REAP, SANDBOX_GID, SANDBOX_UID, WORKSPACE_TARGET,
 };
 
 use super::plan::words;
@@ -34,13 +34,15 @@ fn user() -> String {
 
 /// Run the workload: `container exec`, as the environment's user, in the
 /// workspace, with exactly its arguments, through the trusted launcher --
-/// its `hygiene` profile for a `HYGIENE` launch, its `direct` one otherwise.
+/// the profile its launch names: `hygiene` for `HYGIENE`, `hygiene-npm` and
+/// `hygiene-pip` for M5e.5's unaccepted profiles, `direct` otherwise.
 #[must_use]
 pub(crate) fn run(container: &ContainerRef, workload: &WorkloadSpec) -> Vec<String> {
-    let profile = if workload.launch == WorkloadLaunch::Hygiene {
-        LAUNCH_HYGIENE
-    } else {
-        LAUNCH_DIRECT
+    let profile = match workload.launch {
+        WorkloadLaunch::Direct => LAUNCH_DIRECT,
+        WorkloadLaunch::Hygiene => LAUNCH_HYGIENE,
+        WorkloadLaunch::HygieneNpm => LAUNCH_HYGIENE_NPM,
+        WorkloadLaunch::HygienePip => LAUNCH_HYGIENE_PIP,
     };
     run_with(
         container,

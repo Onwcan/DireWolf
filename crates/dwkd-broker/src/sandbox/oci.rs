@@ -1260,6 +1260,18 @@ impl ExecutionEnvironment for Oci<'_> {
                 .as_ref()
                 .map_or("none", |s| s.secret.delivery.as_str())
         ));
+        // An unaccepted profile's launch (M5e.5) is evidenced without a
+        // secret, and has no secret-bearing launcher profile: refused, never
+        // run without its variables.
+        if secret.is_some()
+            && matches!(
+                workload.launch,
+                dwk_proto::brokerp::workload::WorkloadLaunch::HygieneNpm
+                    | dwk_proto::brokerp::workload::WorkloadLaunch::HygienePip
+            )
+        {
+            return Err(EnvFailure::Refused(BrokerRefusal::Unsupported));
+        }
         // A secret-bearing workload's plan is the one that attaches the
         // client's standard input, which carries the framed value to the
         // launcher; every other workload's has none (ADR-0052 §§5, 7).

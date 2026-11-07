@@ -161,6 +161,16 @@ wire_enum! {
         /// workspace's umask and executes the executable with exactly its
         /// arguments.
         Hygiene = "HYGIENE",
+        /// ADR-0054's proposed npm profile (M5e.5): the launcher's
+        /// `hygiene-npm` profile -- the hygiene variables and npm's own over
+        /// them. Only for a workload the authority kept under the unaccepted
+        /// profile its operator's evidence-only start-up option named; never
+        /// with a secret. Private to the broker protocol: DWKP names it
+        /// `HYGIENE` (the handoff's D1).
+        HygieneNpm = "HYGIENE_NPM",
+        /// ADR-0055's proposed pip profile (M5e.5): the launcher's
+        /// `hygiene-pip` profile, as [`Self::HygieneNpm`] is npm's.
+        HygienePip = "HYGIENE_PIP",
     }
 }
 

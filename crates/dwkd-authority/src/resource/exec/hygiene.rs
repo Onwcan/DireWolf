@@ -28,6 +28,14 @@
 //! | a runner (`env`, `time`, `xargs`, …) or `uv` | the variables | an argument naming one of the tools above to run |
 //! | anything else | the variables (it reads none of them) | — |
 //!
+//! **M5e.5's unaccepted profiles** ([`hygiene_with`]): only when the
+//! operator's evidence-only start-up option names one, `npm` is ADR-0054's
+//! (`ci` and `install` of registry names; its launcher variables and prefix)
+//! and `pip`, `pip3`, `pip3.N` ADR-0055's (`install` of named wheels; its
+//! launcher variables and prefix after the subcommand), with the interpreter
+//! refused `-m pip` and `-m ensurepip` under pip's (the handoff's D4). Without
+//! it -- every production configuration -- [`hygiene_with`] is [`hygiene`].
+//!
 //! **What it never claims.** A repository's own `.git/config` and hooks, a
 //! `conftest.py`, a `build.rs`, a `package.json` script the invocation runs,
 //! a script named as an argument: these are workspace content, executed by
@@ -51,6 +59,17 @@ pub enum Hygiene {
     },
     /// Not kept, and why: the invocation is `OBLIGATION_UNENFORCEABLE`.
     Unenforceable(&'static str),
+    /// Kept under an unaccepted profile (M5e.5): started by the trusted
+    /// launcher's profile for it, with `prefix` inserted at `at` among the
+    /// invocation's own arguments (0: before them all).
+    Profiled {
+        /// Which profile.
+        profile: Profile,
+        /// The profile's neutralising arguments.
+        prefix: &'static [&'static str],
+        /// Where they go: after this many of the invocation's arguments.
+        at: usize,
+    },
 }
 
 /// pytest's one neutralising argument pair: no cache written into the
@@ -229,6 +248,510 @@ pub fn hygiene(executable: &ExecutableIdentity, args: &[&str]) -> Hygiene {
     Hygiene::Kept { prefix: &[] }
 }
 
+// ---- M5e.5: the unaccepted profiles (ADR-0054, ADR-0055) -------------------
+
+/// Which unaccepted profiles the obligation keeps: the state layer's copy of
+/// the operator's evidence-only start-up option (`sandbox::profiles`).
+/// [`Profiles::NONE`] in every production configuration, and then every
+/// decision is today's.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Profiles {
+    /// ADR-0054's npm profile.
+    pub npm: bool,
+    /// ADR-0055's pip profile.
+    pub pip: bool,
+}
+
+impl Profiles {
+    /// None: production's, and today's decisions.
+    pub const NONE: Self = Self {
+        npm: false,
+        pip: false,
+    };
+}
+
+/// An unaccepted profile a kept invocation was decided under.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Profile {
+    /// ADR-0054: the launcher's npm variables, npm's prefix.
+    Npm,
+    /// ADR-0055: the launcher's pip variables, pip's prefix after its
+    /// subcommand.
+    Pip,
+}
+
+/// The arguments ADR-0054 §2 puts before npm's own: each pins a setting the
+/// workspace's `.npmrc` could otherwise make. npm reads them anywhere.
+const NPM_PREFIX: &[&str] = &[
+    "--ignore-scripts",
+    "--strict-ssl",
+    "--no-audit",
+    "--no-fund",
+    "--no-update-notifier",
+];
+
+/// The two subcommands ADR-0054 §1 keeps, by their canonical words.
+const NPM_SUBCOMMANDS: &[&str] = &["ci", "install"];
+
+/// npm's long options ADR-0054 §3 refuses, in any spelling: each sets
+/// something the profile pins, writes outside the workspace and `/tmp`, or
+/// chooses whom npm trusts. npm expands an unambiguous abbreviation of a
+/// long option (nopt), so a prefix of one of these is refused too.
+const NPM_REFUSED: &[&str] = &[
+    "userconfig",
+    "globalconfig",
+    "global",
+    "location",
+    "prefix",
+    "script-shell",
+    "node-options",
+    "foreground-scripts",
+    "cafile",
+    "ca",
+];
+
+/// npm's booleans the profile pins `true`: refused negated (`--no-…`) or set
+/// to anything else (ADR-0054 §3's `--ignore-scripts=false`,
+/// `--strict-ssl=false`).
+const NPM_PINNED_TRUE: &[&str] = &["ignore-scripts", "strict-ssl"];
+
+/// npm's shorthands for a refused option: `-g` is `--global`, `-C` is
+/// `--prefix`. A cluster naming either is refused.
+const NPM_REFUSED_SHORT: &[char] = &['g', 'C'];
+
+/// npm's long options whose value may be the next argument, so that value
+/// is not read as the subcommand or a package (`--registry` is allowed,
+/// ADR-0054 §3).
+const NPM_VALUED: &[&str] = &[
+    "registry",
+    "loglevel",
+    "tag",
+    "omit",
+    "include",
+    "workspace",
+    "cache",
+];
+
+/// The suffixes npm reads as a tarball on disk rather than a registry name.
+const NPM_TARBALL: &[&str] = &[".tgz", ".tar.gz", ".tar"];
+
+/// One long option, as `--name` or `--name=value`: its name and its value.
+fn long_option(arg: &str) -> Option<(&str, Option<&str>)> {
+    let rest = arg.strip_prefix("--").filter(|r| !r.is_empty())?;
+    Some(match rest.split_once('=') {
+        Some((name, value)) => (name, Some(value)),
+        None => (rest, None),
+    })
+}
+
+/// Whether `typed` names `option`: exactly, or as an abbreviation the tool
+/// would expand to it (fail-closed: any prefix of it).
+fn abbreviates(typed: &str, option: &str) -> bool {
+    !typed.is_empty() && option.starts_with(typed)
+}
+
+/// Whether one npm argument undoes or widens what ADR-0054 §§2-3 pin.
+fn npm_undoes(arg: &str) -> bool {
+    if let Some(cluster) = arg.strip_prefix('-').filter(|c| !c.starts_with('-')) {
+        return cluster.chars().any(|c| NPM_REFUSED_SHORT.contains(&c));
+    }
+    let Some((name, value)) = long_option(arg) else {
+        return false;
+    };
+    let (negated, base) = name
+        .strip_prefix("no-")
+        .map_or((false, name), |base| (true, base));
+    NPM_REFUSED.iter().any(|option| abbreviates(base, option))
+        || NPM_PINNED_TRUE.iter().any(|option| {
+            abbreviates(base, option) && (negated || value.is_some_and(|v| v != "true"))
+        })
+}
+
+/// Whether an npm long option takes the next argument as its value: one
+/// of [`NPM_VALUED`], or a scope's own registry (`--@scope:registry`).
+fn npm_takes_value(arg: &str) -> bool {
+    long_option(arg).is_some_and(|(name, value)| {
+        value.is_none()
+            && (NPM_VALUED.contains(&name)
+                || (name.starts_with('@') && name.ends_with(":registry")))
+    })
+}
+
+/// One part of an npm package name: lowercase URL-safe characters, not
+/// starting with `.` or `_`.
+fn npm_name_part(part: &str) -> bool {
+    !part.is_empty()
+        && part.len() <= 214
+        && !part.starts_with(['.', '_'])
+        && part.bytes().all(|b| {
+            b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'-' | b'.' | b'_' | b'~')
+        })
+}
+
+/// An exact version, a range or a dist-tag: nothing that names a place.
+fn npm_version_part(part: &str) -> bool {
+    !part.is_empty()
+        && part.bytes().all(|b| {
+            b.is_ascii_alphanumeric()
+                || matches!(
+                    b,
+                    b'.' | b'-'
+                        | b'+'
+                        | b'^'
+                        | b'~'
+                        | b'<'
+                        | b'>'
+                        | b'='
+                        | b'|'
+                        | b' '
+                        | b'*'
+                        | b'_'
+                )
+        })
+}
+
+/// ADR-0054 §1's registry names: `name` or `@scope/name`, each optionally
+/// `@` a version, range or dist-tag. Never a URL, a path, a tarball, a git or
+/// hosting shorthand, `file:`, `link:` or an alias (`npm:`).
+fn npm_registry_spec(spec: &str) -> bool {
+    let (scope, rest) = match spec.strip_prefix('@') {
+        Some(scoped) => match scoped.split_once('/') {
+            Some((scope, rest)) => (Some(scope), rest),
+            None => return false,
+        },
+        None => (None, spec),
+    };
+    let (name, version) = match rest.split_once('@') {
+        Some((name, version)) => (name, Some(version)),
+        None => (rest, None),
+    };
+    scope.is_none_or(npm_name_part)
+        && npm_name_part(name)
+        && !NPM_TARBALL.iter().any(|suffix| name.ends_with(suffix))
+        && version.is_none_or(npm_version_part)
+}
+
+/// ADR-0054: `npm ci` and `npm install` of registry names, the prefix first,
+/// everything else refused before an intent.
+fn npm(args: &[&str]) -> Hygiene {
+    if args.iter().any(|arg| npm_undoes(arg)) {
+        return Hygiene::Unenforceable("HYGIENE_OVERRIDDEN_BY_ARGV");
+    }
+    if args.contains(&"--") {
+        return Hygiene::Unenforceable("HYGIENE_NOT_EVIDENCED");
+    }
+    let mut positional: Vec<&str> = Vec::new();
+    let mut rest = args.iter();
+    while let Some(arg) = rest.next() {
+        if arg.starts_with('-') {
+            if npm_takes_value(arg) {
+                let _ = rest.next();
+            }
+            continue;
+        }
+        positional.push(arg);
+    }
+    let Some((subcommand, specs)) = positional.split_first() else {
+        return Hygiene::Unenforceable("HYGIENE_NOT_EVIDENCED");
+    };
+    if !NPM_SUBCOMMANDS.contains(subcommand) {
+        return Hygiene::Unenforceable("HYGIENE_NOT_EVIDENCED");
+    }
+    let kept = match *subcommand {
+        "ci" => specs.is_empty(),
+        _ => specs.iter().all(|spec| npm_registry_spec(spec)),
+    };
+    if !kept {
+        return Hygiene::Unenforceable("HYGIENE_NOT_EVIDENCED");
+    }
+    Hygiene::Profiled {
+        profile: Profile::Npm,
+        prefix: NPM_PREFIX,
+        at: 0,
+    }
+}
+
+/// pip's one trust file in the image (ADR-0055 §5; proposed path). The
+/// authority does not link the profile crate, so it is spelled here and
+/// held equal to `dwk_sandbox_profile::PIP_TRUST_FILE` by an architecture
+/// test.
+pub const PIP_TRUST_FILE: &str = "/etc/direwolf/pip-ca.pem";
+
+/// The arguments ADR-0055 §2 adds to pip's own, after its subcommand --
+/// `--only-binary` is `install`'s option, which pip refuses before it.
+const PIP_PREFIX: &[&str] = &[
+    "--only-binary=:all:",
+    "--no-cache-dir",
+    "--no-input",
+    "--disable-pip-version-check",
+    "--cert",
+    PIP_TRUST_FILE,
+];
+
+/// pip's long options ADR-0055 §3 refuses, in any spelling pip expands
+/// (optparse takes an unambiguous abbreviation of a long option). With
+/// `cache-dir` beside them: an invocation's cache would undo the profile's
+/// `--no-cache-dir` exactly as `--no-binary` would undo `--only-binary`.
+const PIP_REFUSED: &[&str] = &[
+    "no-binary",
+    "editable",
+    "config-settings",
+    "global-option",
+    "build-option",
+    "no-build-isolation",
+    "use-pep517",
+    "no-use-pep517",
+    "isolated",
+    "proxy",
+    "trusted-host",
+    "cert",
+    "client-cert",
+    "requirement",
+    "constraint",
+    "find-links",
+    "user",
+    "root",
+    "prefix",
+    "src",
+    "cache-dir",
+];
+
+/// pip's exact long options that are also prefixes of a refused one: taken
+/// as themselves, as pip takes an exact name before an abbreviation.
+const PIP_EXACT: &[&str] = &["pre"];
+
+/// pip's short options ADR-0055 §3 refuses: `-r`, `-c`, `-e`, `-f` and
+/// `-C` (`--config-settings`), anywhere in a cluster.
+const PIP_REFUSED_SHORT: &[char] = &['r', 'c', 'e', 'f', 'C'];
+
+/// pip's short options whose value follows (in the cluster, or as the next
+/// argument): `-i` an index, `-t` a target.
+const PIP_VALUED_SHORT: &[char] = &['i', 't'];
+
+/// pip's long options whose value may be the next argument.
+const PIP_VALUED: &[&str] = &[
+    "index-url",
+    "extra-index-url",
+    "only-binary",
+    "target",
+    "log",
+    "timeout",
+    "retries",
+    "exists-action",
+    "python",
+    "keyring-provider",
+    "progress-bar",
+    "root-user-action",
+    "platform",
+    "python-version",
+    "implementation",
+    "abi",
+    "upgrade-strategy",
+    "report",
+    "use-feature",
+    "use-deprecated",
+];
+
+/// What pip reads as an archive on disk rather than a project's name.
+const PIP_ARCHIVE: &[&str] = &[
+    ".whl", ".zip", ".tar.gz", ".tgz", ".tar.bz2", ".tbz", ".tar.xz", ".txz", ".tar", ".tar.lz",
+    ".tlz",
+];
+
+/// One pip long option's verdict, given its value (`=…`, or the next
+/// argument's): whether it undoes or widens ADR-0055 §§2-3.
+fn pip_long_undoes(name: &str, value: Option<&str>) -> bool {
+    if PIP_EXACT.contains(&name) {
+        return false;
+    }
+    if PIP_REFUSED.iter().any(|option| abbreviates(name, option)) {
+        return true;
+    }
+    if abbreviates(name, "only-binary") {
+        return value != Some(":all:");
+    }
+    if abbreviates(name, "index-url") || abbreviates(name, "extra-index-url") {
+        return !value.is_some_and(|url| url.starts_with("https://"));
+    }
+    false
+}
+
+/// Whether pip's arguments undo or widen what ADR-0055 pins, and where its
+/// subcommand is: `(undone, positional)`, each positional with its index.
+fn pip_read<'a>(args: &[&'a str]) -> (bool, Vec<(usize, &'a str)>) {
+    let mut positional = Vec::new();
+    let mut index = 0;
+    while let Some(arg) = args.get(index) {
+        let next = args.get(index + 1).copied();
+        if let Some((name, value)) = long_option(arg) {
+            let takes = value.is_none() && PIP_VALUED.iter().any(|o| abbreviates(name, o));
+            if pip_long_undoes(name, value.or(if takes { next } else { None })) {
+                return (true, positional);
+            }
+            index += if takes { 2 } else { 1 };
+            continue;
+        }
+        if let Some(cluster) = arg.strip_prefix('-').filter(|c| !c.is_empty()) {
+            for (at, letter) in cluster.char_indices() {
+                if PIP_REFUSED_SHORT.contains(&letter) {
+                    return (true, positional);
+                }
+                if PIP_VALUED_SHORT.contains(&letter) {
+                    let joined = cluster
+                        .get(at + letter.len_utf8()..)
+                        .filter(|v| !v.is_empty());
+                    let value = joined.or(next);
+                    if letter == 'i' && !value.is_some_and(|url| url.starts_with("https://")) {
+                        return (true, positional);
+                    }
+                    if joined.is_none() {
+                        index += 1;
+                    }
+                    break;
+                }
+            }
+            index += 1;
+            continue;
+        }
+        positional.push((index, *arg));
+        index += 1;
+    }
+    (false, positional)
+}
+
+/// ADR-0055 §1's names: a project, optional extras, optional version
+/// specifiers. Never a path, a URL, an archive, a VCS reference, a direct
+/// reference (`name @ url`) or `.`.
+fn pip_name_spec(spec: &str) -> bool {
+    let end = spec
+        .find(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_')))
+        .unwrap_or(spec.len());
+    let (name, rest) = spec.split_at(end);
+    let lower = name.to_ascii_lowercase();
+    if !name.starts_with(|c: char| c.is_ascii_alphanumeric())
+        || !name.ends_with(|c: char| c.is_ascii_alphanumeric())
+        || PIP_ARCHIVE.iter().any(|suffix| lower.ends_with(suffix))
+    {
+        return false;
+    }
+    let rest = match rest.strip_prefix('[') {
+        Some(extras) => {
+            let Some((inside, after)) = extras.split_once(']') else {
+                return false;
+            };
+            let named = inside.split(',').all(|extra| {
+                let extra = extra.trim();
+                !extra.is_empty()
+                    && extra
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+            });
+            if !named {
+                return false;
+            }
+            after
+        }
+        None => rest,
+    };
+    rest.chars().all(|c| {
+        c.is_ascii_alphanumeric()
+            || matches!(
+                c,
+                '.' | '-' | '_' | '*' | '+' | '!' | '=' | '<' | '>' | '~' | ',' | ' '
+            )
+    })
+}
+
+/// `pip`, `pip3`, `pip3.N`: ADR-0055 §1's identities.
+fn is_pip(name: &str) -> bool {
+    matches!(name, "pip" | "pip3")
+        || name
+            .strip_prefix("pip3.")
+            .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// ADR-0055: `pip install` of names, wheels only, its prefix after the
+/// subcommand, everything else refused before an intent.
+fn pip(args: &[&str]) -> Hygiene {
+    if args.contains(&"--") {
+        return Hygiene::Unenforceable("HYGIENE_NOT_EVIDENCED");
+    }
+    let (undone, positional) = pip_read(args);
+    if undone {
+        return Hygiene::Unenforceable("HYGIENE_OVERRIDDEN_BY_ARGV");
+    }
+    let Some(((at, subcommand), specs)) = positional.split_first() else {
+        return Hygiene::Unenforceable("HYGIENE_NOT_EVIDENCED");
+    };
+    if *subcommand != "install" || specs.is_empty() || !specs.iter().all(|(_, s)| pip_name_spec(s))
+    {
+        return Hygiene::Unenforceable("HYGIENE_NOT_EVIDENCED");
+    }
+    Hygiene::Profiled {
+        profile: Profile::Pip,
+        prefix: PIP_PREFIX,
+        at: at + 1,
+    }
+}
+
+/// Whether Python's own options run pip's module or ensurepip (`-m pip`,
+/// `-mpip`, `-Im ensurepip`, a submodule of either): the interpreter's way
+/// around the pip profile (ADR-0055 P3; the handoff's D4).
+fn python_runs_pip(args: &[&str]) -> bool {
+    let module_is_pip =
+        |module: &str| matches!(module.split('.').next(), Some("pip" | "ensurepip"));
+    let mut rest = args.iter();
+    while let Some(arg) = rest.next() {
+        if *arg == "--" || !arg.starts_with('-') || *arg == "-" {
+            return false;
+        }
+        if let Some(long) = arg.strip_prefix("--") {
+            if long == "check-hash-based-pycs" {
+                let _ = rest.next();
+            }
+            continue;
+        }
+        for (at, letter) in arg.char_indices().skip(1) {
+            match letter {
+                'c' => return false,
+                'm' => {
+                    let joined = arg.get(at + 1..).filter(|m| !m.is_empty());
+                    return module_is_pip(joined.or_else(|| rest.next().copied()).unwrap_or(""));
+                }
+                'W' | 'X' => {
+                    if at + 1 == arg.len() {
+                        let _ = rest.next();
+                    }
+                    break;
+                }
+                _ => {}
+            }
+        }
+    }
+    false
+}
+
+/// [`hygiene`], with the unaccepted profiles the operator's evidence-only
+/// option named (M5e.5). With [`Profiles::NONE`] it is [`hygiene`], for every
+/// input. With npm's, `npm` is ADR-0054's; with pip's, `pip` is ADR-0055's and
+/// the interpreter may not run pip's module (D4). Nothing else changes: `npx`,
+/// `pnpm`, `yarn`, `bun`, `cargo`, the wrappers and a runner naming any of them
+/// -- `npm` included -- stay refused.
+#[must_use]
+pub fn hygiene_with(executable: &ExecutableIdentity, args: &[&str], profiles: Profiles) -> Hygiene {
+    let name = program(executable);
+    if profiles.npm && name == "npm" {
+        return npm(args);
+    }
+    if profiles.pip && is_pip(name) {
+        return pip(args);
+    }
+    if profiles.pip && is_python(name) && python_runs_pip(args) {
+        return Hygiene::Unenforceable("HYGIENE_NOT_EVIDENCED");
+    }
+    hygiene(executable, args)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{Hygiene, hygiene};
@@ -243,7 +766,7 @@ mod tests {
     fn kept(path: &str, args: &[&str]) -> Option<&'static [&'static str]> {
         match hygiene(&at(path), args) {
             Hygiene::Kept { prefix } => Some(prefix),
-            Hygiene::Unenforceable(_) => None,
+            Hygiene::Unenforceable(_) | Hygiene::Profiled { .. } => None,
         }
     }
 
@@ -373,5 +896,646 @@ mod tests {
     fn anything_else_reads_none_of_the_settings_and_is_kept() {
         assert_eq!(kept("/usr/bin/rg", &["-n", "x"]), Some(&[][..]));
         assert_eq!(kept("/opt/tools/fixture", &["-c", "-E"]), Some(&[][..]));
+    }
+
+    // ---- M5e.5's profiles ---------------------------------------------------
+
+    use super::{Profile, Profiles, hygiene_with};
+
+    const NPM: Profiles = Profiles {
+        npm: true,
+        pip: false,
+    };
+    const PIP: Profiles = Profiles {
+        npm: false,
+        pip: true,
+    };
+    const BOTH: Profiles = Profiles {
+        npm: true,
+        pip: true,
+    };
+
+    /// Every input the tests above use: today's decisions, which no profile
+    /// may change for any tool but its own.
+    fn today() -> Vec<(&'static str, Vec<&'static str>)> {
+        let mut table: Vec<(&'static str, Vec<&'static str>)> = Vec::new();
+        for args in [
+            &["status"][..],
+            &["log", "--oneline", "-5"],
+            &["grep", "-c", "needle"],
+            &["-c", "core.pager=less", "log"],
+            &["clone", "-c", "core.hooksPath=/x", "u"],
+            &["--exec-path=/tmp", "status"],
+        ] {
+            table.push(("/usr/bin/git", args.to_vec()));
+        }
+        for args in [
+            &["script.py"][..],
+            &["-m", "pytest", "-E"],
+            &["-I", "script.py"],
+            &["-E", "script.py"],
+            &["-sE", "script.py"],
+            &["-c", "import pip"],
+        ] {
+            table.push(("/usr/bin/python3", args.to_vec()));
+        }
+        for args in [&["-q", "tests"][..], &["-p", "cacheprovider"]] {
+            table.push(("/usr/local/bin/pytest", args.to_vec()));
+        }
+        for tool in [
+            "npx",
+            "pnpm",
+            "yarn",
+            "bun",
+            "cargo",
+            "rustup",
+            "corepack",
+            "cargo-clippy",
+        ] {
+            table.push((
+                Box::leak(format!("/usr/bin/{tool}").into_boxed_str()),
+                vec!["install"],
+            ));
+        }
+        for (path, args) in [
+            ("/usr/bin/env", &["npm", "ci"][..]),
+            ("/usr/bin/env", &["/opt/node/bin/npm", "install", "x"]),
+            ("/usr/bin/time", &["npm", "install"]),
+            ("/usr/bin/xargs", &["-0", "yarn"]),
+            ("/usr/bin/uv", &["run", "npm", "ci"]),
+            ("/usr/bin/uv", &["sync"]),
+            ("/usr/bin/env", &["rg", "-n", "x"]),
+            ("/usr/bin/rg", &["-n", "x"]),
+            ("/opt/tools/fixture", &["-c", "-E"]),
+        ] {
+            table.push((path, args.to_vec()));
+        }
+        table
+    }
+
+    #[test]
+    fn with_no_profile_every_decision_is_todays() {
+        let mut every = today();
+        for (path, args) in [
+            ("/opt/node/bin/npm", &["ci"][..]),
+            ("/opt/node/bin/npm", &["install", "left-pad"]),
+            ("/usr/bin/pip", &["install", "x"]),
+            ("/usr/bin/pip3", &["download", "x"]),
+            ("/usr/bin/pip3.12", &["install", "-r", "req.txt"]),
+            ("/usr/bin/python3", &["-m", "pip", "install", "x"]),
+            ("/usr/bin/python3", &["-m", "ensurepip"]),
+        ] {
+            every.push((path, args.to_vec()));
+        }
+        for (path, args) in every {
+            assert_eq!(
+                hygiene_with(&at(path), &args, Profiles::NONE),
+                hygiene(&at(path), &args),
+                "{path} {args:?}"
+            );
+        }
+        // Today's, named: npm refused, pip kept with nothing pip-specific.
+        assert_eq!(
+            hygiene_with(&at("/opt/node/bin/npm"), &["ci"], Profiles::NONE),
+            Hygiene::Unenforceable("HYGIENE_NOT_EVIDENCED")
+        );
+        assert_eq!(
+            hygiene_with(&at("/usr/bin/pip"), &["install", "x"], Profiles::NONE),
+            Hygiene::Kept { prefix: &[] }
+        );
+        assert_eq!(
+            hygiene_with(
+                &at("/usr/bin/python3"),
+                &["-m", "pip", "install"],
+                Profiles::NONE
+            ),
+            Hygiene::Kept { prefix: &[] }
+        );
+        assert_eq!(Profiles::default(), Profiles::NONE);
+    }
+
+    #[test]
+    fn a_profile_changes_no_tool_but_its_own() {
+        for profiles in [NPM, PIP, BOTH] {
+            for (path, args) in today() {
+                assert_eq!(
+                    hygiene_with(&at(path), &args, profiles),
+                    hygiene(&at(path), &args),
+                    "{profiles:?} {path} {args:?}"
+                );
+            }
+        }
+        // Each profile leaves the other's tool as it is today.
+        assert_eq!(
+            hygiene_with(&at("/usr/bin/pip"), &["download", "x"], NPM),
+            Hygiene::Kept { prefix: &[] }
+        );
+        assert_eq!(
+            hygiene_with(&at("/opt/node/bin/npm"), &["ci"], PIP),
+            Hygiene::Unenforceable("HYGIENE_NOT_EVIDENCED")
+        );
+    }
+
+    fn npm(args: &[&str]) -> Hygiene {
+        hygiene_with(&at("/opt/node/bin/npm"), args, NPM)
+    }
+
+    fn refused(decided: &Hygiene) -> Option<&'static str> {
+        match decided {
+            Hygiene::Unenforceable(reason) => Some(reason),
+            Hygiene::Kept { .. } | Hygiene::Profiled { .. } => None,
+        }
+    }
+
+    #[test]
+    fn npm_keeps_ci_and_install_of_registry_names_with_its_prefix() {
+        assert_eq!(
+            npm(&["ci"]),
+            Hygiene::Profiled {
+                profile: Profile::Npm,
+                prefix: &[
+                    "--ignore-scripts",
+                    "--strict-ssl",
+                    "--no-audit",
+                    "--no-fund",
+                    "--no-update-notifier"
+                ],
+                at: 0,
+            }
+        );
+        for ok in [
+            &["ci", "--registry", "https://r.test:18443/"][..],
+            &["--registry=https://r.test/", "ci"],
+            &["install"],
+            &["install", "left-pad"],
+            &["install", "@scope/pkg@^1.2.0"],
+            &["install", "pkg@latest", "other@1.0.0"],
+            &["install", "pkg@>=1 <2"],
+            &[
+                "install",
+                "--@scope:registry",
+                "https://r.test/",
+                "@scope/x",
+            ],
+            &[
+                "install",
+                "--ignore-scripts",
+                "--ignore-scripts=true",
+                "--strict-ssl",
+                "x",
+            ],
+            &["install", "--no-audit", "--no-fund", "--no-save", "x"],
+            &["install", "--cache", "/tmp/c", "--loglevel", "silly", "x"],
+        ] {
+            assert!(
+                matches!(
+                    npm(ok),
+                    Hygiene::Profiled {
+                        profile: Profile::Npm,
+                        at: 0,
+                        ..
+                    }
+                ),
+                "{ok:?}: {:?}",
+                npm(ok)
+            );
+        }
+    }
+
+    #[test]
+    fn npm_refuses_every_other_subcommand_alias_and_separator() {
+        for sub in [
+            "run",
+            "test",
+            "start",
+            "stop",
+            "restart",
+            "exec",
+            "x",
+            "dlx",
+            "rebuild",
+            "publish",
+            "config",
+            "explore",
+            "pack",
+            "link",
+            "uninstall",
+            "update",
+            "i",
+            "isntall",
+            "add",
+        ] {
+            assert_eq!(
+                refused(&npm(&[sub])),
+                Some("HYGIENE_NOT_EVIDENCED"),
+                "{sub}"
+            );
+        }
+        for args in [
+            &[][..],
+            &["--version"],
+            &["ci", "extra"],
+            &["install", "--", "x"],
+            &["--", "ci"],
+        ] {
+            assert_eq!(
+                refused(&npm(args)),
+                Some("HYGIENE_NOT_EVIDENCED"),
+                "{args:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn npm_refuses_every_spec_that_is_not_a_registry_name() {
+        for spec in [
+            "https://r.test/x.tgz",
+            "http://r.test/x",
+            "./local",
+            "../up",
+            "/abs/path",
+            "~/home",
+            "x.tgz",
+            "pkg.tar.gz",
+            "x.tar",
+            "git+https://h/x.git",
+            "git://h/x",
+            "github:user/repo",
+            "gitlab:u/r",
+            "user/repo",
+            "file:../x",
+            "link:../x",
+            "alias@npm:real",
+            "pkg@file:x",
+            "pkg@https://x",
+            "Pkg",
+            "_private",
+            ".hidden",
+            "@scope",
+            "@scope/",
+            "@Scope/x",
+            "pkg#tag",
+            "",
+        ] {
+            assert_eq!(
+                refused(&npm(&["install", spec])),
+                Some("HYGIENE_NOT_EVIDENCED"),
+                "{spec:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn npm_refuses_each_argument_that_would_undo_it_in_every_spelling() {
+        for undo in [
+            "--ignore-scripts=false",
+            "--ignore-scripts=0",
+            "--no-ignore-scripts",
+            "--ignore-s=false",
+            "--no-ignore",
+            "--userconfig",
+            "--userconfig=/workspace/.npmrc",
+            "--userc=/x",
+            "--globalconfig",
+            "--globalconfig=/x",
+            "--strict-ssl=false",
+            "--no-strict-ssl",
+            "--strict=false",
+            "-g",
+            "-gS",
+            "--global",
+            "--global=true",
+            "--glob",
+            "--location",
+            "--location=global",
+            "--loc=user",
+            "--prefix",
+            "--prefix=/x",
+            "--pre=/x",
+            "-C",
+            "--script-shell",
+            "--script-shell=/bin/sh",
+            "--node-options",
+            "--node-options=--require=x",
+            "--foreground-scripts",
+            "--foreground-scripts=true",
+            "--cafile",
+            "--cafile=/workspace/ca.pem",
+            "--ca",
+            "--ca=PEM",
+        ] {
+            assert_eq!(
+                refused(&npm(&["install", undo, "x"])),
+                Some("HYGIENE_OVERRIDDEN_BY_ARGV"),
+                "{undo}"
+            );
+            assert_eq!(
+                refused(&npm(&[undo, "ci"])),
+                Some("HYGIENE_OVERRIDDEN_BY_ARGV"),
+                "{undo}"
+            );
+        }
+    }
+
+    fn pip(args: &[&str]) -> Hygiene {
+        hygiene_with(&at("/opt/python/bin/pip"), args, PIP)
+    }
+
+    #[test]
+    fn pip_keeps_install_of_names_with_its_prefix_after_the_subcommand() {
+        assert_eq!(
+            pip(&["install", "x"]),
+            Hygiene::Profiled {
+                profile: Profile::Pip,
+                prefix: &[
+                    "--only-binary=:all:",
+                    "--no-cache-dir",
+                    "--no-input",
+                    "--disable-pip-version-check",
+                    "--cert",
+                    "/etc/direwolf/pip-ca.pem"
+                ],
+                at: 1,
+            }
+        );
+        assert!(matches!(
+            pip(&["-v", "install", "x"]),
+            Hygiene::Profiled { at: 2, .. }
+        ));
+        assert!(matches!(
+            pip(&["--log", "/tmp/l", "install", "x"]),
+            Hygiene::Profiled { at: 3, .. }
+        ));
+        for ok in [
+            &["install", "x==1.0"][..],
+            &["install", "x>=1,<2", "y[extra,other]"],
+            &[
+                "install",
+                "--index-url",
+                "https://r.test:18443/simple/",
+                "x",
+            ],
+            &["install", "--index-url=https://r/simple", "x"],
+            &["install", "-i", "https://r/", "x"],
+            &["install", "-ihttps://r/", "x"],
+            &["install", "--extra-index-url", "https://e/", "x"],
+            &["install", "--only-binary", ":all:", "x"],
+            &["install", "--only-binary=:all:", "x"],
+            &["install", "--target", "/workspace/t", "x"],
+            &["install", "-t", "/tmp/t", "x"],
+            &["install", "--no-deps", "--pre", "-U", "--no-index", "x"],
+            &[
+                "install",
+                "--no-cache-dir",
+                "--retries",
+                "0",
+                "--timeout",
+                "30",
+                "x",
+            ],
+        ] {
+            assert!(
+                matches!(
+                    pip(ok),
+                    Hygiene::Profiled {
+                        profile: Profile::Pip,
+                        ..
+                    }
+                ),
+                "{ok:?}: {:?}",
+                pip(ok)
+            );
+        }
+        for path in ["/usr/bin/pip3", "/usr/bin/pip3.12", "/usr/local/bin/pip"] {
+            assert!(matches!(
+                hygiene_with(&at(path), &["install", "x"], PIP),
+                Hygiene::Profiled {
+                    profile: Profile::Pip,
+                    ..
+                }
+            ));
+        }
+        // Not pip's identity: `pip-compile`, `pip3x`, `pipx` stay today's.
+        for path in ["/usr/bin/pip-compile", "/usr/bin/pip3x", "/usr/bin/pipx"] {
+            assert_eq!(
+                hygiene_with(&at(path), &["install", "x"], PIP),
+                Hygiene::Kept { prefix: &[] },
+                "{path}"
+            );
+        }
+    }
+
+    #[test]
+    fn pip_refuses_every_other_subcommand_and_an_install_of_nothing() {
+        for sub in [
+            "download",
+            "wheel",
+            "uninstall",
+            "config",
+            "cache",
+            "debug",
+            "freeze",
+            "list",
+            "show",
+            "check",
+            "hash",
+            "index",
+            "inspect",
+            "lock",
+            "search",
+            "completion",
+            "help",
+            "i",
+            "Install",
+        ] {
+            assert_eq!(
+                refused(&pip(&[sub, "x"])),
+                Some("HYGIENE_NOT_EVIDENCED"),
+                "{sub}"
+            );
+        }
+        for args in [
+            &[][..],
+            &["install"],
+            &["--version"],
+            &["install", "--", "x"],
+        ] {
+            assert_eq!(
+                refused(&pip(args)),
+                Some("HYGIENE_NOT_EVIDENCED"),
+                "{args:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn pip_refuses_every_spec_that_is_not_a_name() {
+        for spec in [
+            ".",
+            "./x",
+            "../x",
+            "/abs/x",
+            "x/y",
+            "C:\\x",
+            "x.whl",
+            "x-1.0-py3-none-any.whl",
+            "x.tar.gz",
+            "x.zip",
+            "x.tgz",
+            "https://h/x.whl",
+            "git+https://h/x.git",
+            "hg+https://h/x",
+            "x @ https://h/x.whl",
+            "x@https://h/x",
+            "file:///x",
+            "x; python_version>'3'",
+            "-",
+            "~/x",
+            "x#egg=y",
+            "[extra]",
+            "x[",
+            "",
+        ] {
+            assert_eq!(
+                refused(&pip(&["install", spec])),
+                Some("HYGIENE_NOT_EVIDENCED"),
+                "{spec:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn pip_refuses_each_argument_that_would_undo_or_widen_it() {
+        for undo in [
+            &["--no-binary", ":all:"][..],
+            &["--no-binary=x"],
+            &["--no-bin=:all:"],
+            &["--only-binary", "x"],
+            &["--only-binary=:none:"],
+            &["--only-b=x"],
+            &["-e", "."],
+            &["-e."],
+            &["--editable", "."],
+            &["--edit=."],
+            &["--config-settings", "a=b"],
+            &["-C", "a=b"],
+            &["-Ca=b"],
+            &["--global-option=x"],
+            &["--build-option=x"],
+            &["--no-build-isolation"],
+            &["--use-pep517"],
+            &["--no-use-pep517"],
+            &["--isolated"],
+            &["--isol"],
+            &["--proxy", "http://p"],
+            &["--proxy=http://p"],
+            &["--trusted-host", "h"],
+            &["--trusted-host=h"],
+            &["--cert", "/workspace/ca.pem"],
+            &["--cert=/workspace/ca.pem"],
+            &["--client-cert", "/workspace/c.pem"],
+            &["-r", "req.txt"],
+            &["-rreq.txt"],
+            &["--requirement=req.txt"],
+            &["-Ur", "req.txt"],
+            &["-c", "c.txt"],
+            &["--constraint", "c.txt"],
+            &["-f", "/workspace/wheels"],
+            &["--find-links=https://h/"],
+            &["--user"],
+            &["--root", "/x"],
+            &["--prefix=/x"],
+            &["--src", "/x"],
+            &["--cache-dir", "/workspace/c"],
+            &["--index-url", "http://plain/simple"],
+            &["--index-url=http://plain"],
+            &["-i", "http://plain"],
+            &["-ihttp://plain"],
+            &["--extra-index-url", "ftp://x"],
+            &["--index-url"],
+        ] {
+            let mut args = vec!["install"];
+            args.extend_from_slice(undo);
+            args.push("x");
+            assert_eq!(
+                refused(&pip(&args)),
+                Some("HYGIENE_OVERRIDDEN_BY_ARGV"),
+                "{undo:?}"
+            );
+        }
+        for before in [
+            &["--isolated"][..],
+            &["--cert", "/w/ca.pem"],
+            &["--proxy=http://p"],
+        ] {
+            let mut args = before.to_vec();
+            args.extend(["install", "x"]);
+            assert_eq!(
+                refused(&pip(&args)),
+                Some("HYGIENE_OVERRIDDEN_BY_ARGV"),
+                "{before:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn with_pips_profile_the_interpreter_cannot_run_pip_or_ensurepip() {
+        let python = at("/usr/bin/python3");
+        for runs in [
+            &["-m", "pip", "install", "x"][..],
+            &["-mpip", "install"],
+            &["-I", "-m", "pip"],
+            &["-Im", "pip"],
+            &["-Impip"],
+            &["-m", "ensurepip"],
+            &["-m", "pip._internal"],
+            &["-B", "-W", "ignore", "-m", "pip"],
+            &["-X", "utf8", "-m", "pip"],
+        ] {
+            assert_eq!(
+                hygiene_with(&python, runs, PIP),
+                Hygiene::Unenforceable("HYGIENE_NOT_EVIDENCED"),
+                "{runs:?}"
+            );
+            assert_eq!(
+                hygiene_with(&python, runs, NPM),
+                hygiene(&python, runs),
+                "{runs:?}"
+            );
+        }
+        for not in [
+            &["-m", "pytest"][..],
+            &["-m", "pipx"],
+            &["-m", "piptools"],
+            &["script.py", "-m", "pip"],
+            &["-c", "import pip"],
+            &["-m", "mypip"],
+        ] {
+            assert_eq!(
+                hygiene_with(&python, not, PIP),
+                hygiene(&python, not),
+                "{not:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn npx_the_runners_and_the_wrappers_stay_refused_with_a_profile_on() {
+        for profiles in [NPM, BOTH] {
+            for (path, args) in [
+                ("/opt/node/bin/npx", &["cowsay"][..]),
+                ("/usr/bin/env", &["npm", "ci"]),
+                ("/usr/bin/env", &["/opt/node/bin/npm", "install", "x"]),
+                ("/usr/bin/time", &["npm", "install"]),
+                ("/usr/bin/uv", &["run", "npm", "ci"]),
+                ("/usr/bin/corepack", &["npm", "ci"]),
+            ] {
+                assert_eq!(
+                    hygiene_with(&at(path), args, profiles),
+                    Hygiene::Unenforceable("HYGIENE_NOT_EVIDENCED"),
+                    "{path} {args:?}"
+                );
+            }
+        }
     }
 }

@@ -135,6 +135,16 @@ pub const LAUNCH_SECRET_FD_HYGIENE: &str = "secret-fd-hygiene";
 pub const LAUNCH_SECRET_ENV: &str = "secret-env";
 /// [`LAUNCH_SECRET_ENV`] with [`HYGIENE_ENVIRONMENT`] set as well.
 pub const LAUNCH_SECRET_ENV_HYGIENE: &str = "secret-env-hygiene";
+/// The launch profile of ADR-0054's proposed npm profile (M5e.5):
+/// [`HYGIENE_ENVIRONMENT`] and [`HYGIENE_NPM_ENVIRONMENT`] over it. Reached
+/// only by a workload the authority kept under the unaccepted profile its
+/// operator's evidence-only start-up option named; never with a secret. Kept
+/// apart from [`LAUNCH_HYGIENE`] so every other launch is unchanged until the
+/// ADR is accepted (the preparation handoff's D1).
+pub const LAUNCH_HYGIENE_NPM: &str = "hygiene-npm";
+/// The launch profile of ADR-0055's proposed pip profile (M5e.5):
+/// [`HYGIENE_ENVIRONMENT`] and [`HYGIENE_PIP_ENVIRONMENT`] over it.
+pub const LAUNCH_HYGIENE_PIP: &str = "hygiene-pip";
 /// Whether `name` is a variable the environment or the launcher already sets
 /// -- one of [`HYGIENE_ENVIRONMENT`] or [`PROXY_VARIABLES`] -- and so may not
 /// carry a secret (M5d.3): a mode B value never shadows the environment's
@@ -170,6 +180,33 @@ pub const HYGIENE_ENVIRONMENT: &[(&str, &str)] = &[
     ("PYTHONSAFEPATH", "1"),
     ("CARGO_NET_OFFLINE", "1"),
     ("npm_config_ignore_scripts", "true"),
+];
+/// npm's one trust file in the image (ADR-0054 §4, the owner's OD-E6;
+/// proposed path): the operator's, pinned by the image digest.
+pub const NPM_TRUST_FILE: &str = "/etc/direwolf/npm-ca.pem";
+/// pip's one trust file in the image (ADR-0055 §5, P4; proposed path).
+pub const PIP_TRUST_FILE: &str = "/etc/direwolf/pip-ca.pem";
+/// The variables ADR-0054 §2 adds for npm, set by [`LAUNCH_HYGIENE_NPM`] over
+/// [`HYGIENE_ENVIRONMENT`] (which already sets `npm_config_ignore_scripts`).
+pub const HYGIENE_NPM_ENVIRONMENT: &[(&str, &str)] = &[
+    ("npm_config_userconfig", "/dev/null"),
+    ("npm_config_globalconfig", "/dev/null"),
+    ("npm_config_strict_ssl", "true"),
+    ("npm_config_update_notifier", "false"),
+    ("npm_config_audit", "false"),
+    ("npm_config_fund", "false"),
+    ("npm_config_cache", "/tmp/.npm"),
+    ("npm_config_cafile", NPM_TRUST_FILE),
+];
+/// The variables ADR-0055 §2 adds for pip, set by [`LAUNCH_HYGIENE_PIP`] over
+/// [`HYGIENE_ENVIRONMENT`].
+pub const HYGIENE_PIP_ENVIRONMENT: &[(&str, &str)] = &[
+    ("PIP_CONFIG_FILE", "/dev/null"),
+    ("PIP_NO_INPUT", "1"),
+    ("PIP_DISABLE_PIP_VERSION_CHECK", "1"),
+    ("PIP_NO_CACHE_DIR", "1"),
+    ("PIP_ONLY_BINARY", ":all:"),
+    ("PIP_CERT", PIP_TRUST_FILE),
 ];
 /// The launcher's exit status when it executes nothing: a refused profile,
 /// a relative path, or an `exec` the kernel refused. The runtime's client
