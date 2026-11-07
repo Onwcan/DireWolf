@@ -23,7 +23,7 @@
 //! | `hygiene` | `workspace_exec_hygiene`'s variables | 0 `/dev/null`, 1, 2 |
 //! | `secret-fd`, `secret-fd-hygiene` | (and the hygiene variables) | 0 `/dev/null`, 1, 2, and 3: a fresh pipe holding exactly the value |
 //! | `secret-env`, `secret-env-hygiene` | `NAME=value` (and the hygiene variables) | 0 `/dev/null`, 1, 2 |
-//! | `hygiene-npm`, `hygiene-pip` | the hygiene variables and npm's or pip's (M5e.5, unaccepted profiles; never with a secret) | 0 `/dev/null`, 1, 2 |
+//! | `hygiene-npm`, `hygiene-pip` | the hygiene variables and npm's or pip's (M5e.5, unaccepted profiles; never with a secret); `hygiene-npm` executes nothing unless npm's trust file is present | 0 `/dev/null`, 1, 2 |
 //!
 //! **A secret arrives on standard input, framed** (M5d.3): the broker filled
 //! a pipe with the value's length ([`profile::SECRET_FRAME_PREFIX_BYTES`],
@@ -95,6 +95,31 @@ impl Variables {
         };
         base.iter().chain(extra).copied().collect()
     }
+
+    /// The trust file the profile's tool must find before anything runs, if
+    /// it names one: npm's (ADR-0054 §4, the owner's OD-E6). npm ignores a
+    /// `cafile` it cannot find -- npm 11 reads it through `maybeReadFile`,
+    /// which answers nothing on `ENOENT` -- and then trusts Node.js's bundled
+    /// roots, so a missing file would not fail closed: the launcher stops
+    /// the launch instead. pip refuses a missing `--cert` itself, before it
+    /// connects (`requests`: "Could not find a suitable TLS CA certificate
+    /// bundle"), which the hosted evidence measures; no other profile names
+    /// one.
+    const fn trust_file(self) -> Option<&'static str> {
+        match self {
+            Self::Npm => Some(profile::NPM_TRUST_FILE),
+            Self::None | Self::Hygiene | Self::Pip => None,
+        }
+    }
+}
+
+/// Whether `path` is a trust file the tool can use: a regular, non-empty
+/// file this process can open. Absent, empty, a directory, a dangling link
+/// or unreadable is not one, and the launch executes nothing.
+fn trust_present(path: &str) -> bool {
+    std::fs::File::open(path)
+        .and_then(|file| file.metadata())
+        .is_ok_and(|meta| meta.is_file() && meta.len() > 0)
 }
 
 /// The profile's delivery, and the variables it sets.
@@ -231,6 +256,14 @@ pub(crate) fn run(args: &[String]) -> ExitCode {
     let Some((delivery, variables)) = profile_of(name) else {
         return failed;
     };
+    // A tool that would trust another store without its trust file never
+    // starts without it (ADR-0054 §4, OD-E6): fail closed here, not in npm.
+    if variables
+        .trust_file()
+        .is_some_and(|file| !trust_present(file))
+    {
+        return failed;
+    }
     let (variable, rest) = match delivery {
         Delivery::Env => match rest.split_first() {
             Some((variable, rest)) if name_allowed(variable) => (Some(variable), rest),
@@ -291,8 +324,37 @@ pub(crate) fn run(args: &[String]) -> ExitCode {
 
 #[cfg(test)]
 mod tests {
-    use super::{Delivery, Variables, name_allowed, profile_of};
+    use super::{Delivery, Variables, name_allowed, profile_of, trust_present};
     use dwk_sandbox_profile as profile;
+
+    #[test]
+    fn only_npms_profile_needs_its_trust_file_before_it_launches() {
+        assert_eq!(Variables::Npm.trust_file(), Some(profile::NPM_TRUST_FILE));
+        for variables in [Variables::None, Variables::Hygiene, Variables::Pip] {
+            assert_eq!(variables.trust_file(), None, "{variables:?}");
+        }
+        assert_eq!(profile::NPM_TRUST_FILE, "/etc/direwolf/npm-ca.pem");
+    }
+
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn a_trust_file_is_present_only_when_regular_readable_and_non_empty() {
+        let dir = std::env::temp_dir().join(format!("dw-launch-trust-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = |name: &str| dir.join(name).to_str().unwrap().to_owned();
+        std::fs::write(dir.join("ca.pem"), b"-----BEGIN CERTIFICATE-----\n").unwrap();
+        std::fs::write(dir.join("empty.pem"), b"").unwrap();
+        std::fs::create_dir(dir.join("a-directory")).unwrap();
+        std::os::unix::fs::symlink(dir.join("gone.pem"), dir.join("dangling.pem")).unwrap();
+        std::os::unix::fs::symlink(dir.join("ca.pem"), dir.join("linked.pem")).unwrap();
+        assert!(trust_present(&path("ca.pem")));
+        assert!(trust_present(&path("linked.pem")));
+        for absent in ["gone.pem", "empty.pem", "a-directory", "dangling.pem"] {
+            assert!(!trust_present(&path(absent)), "{absent}");
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn every_profile_is_one_closed_word_and_nothing_else_launches() {

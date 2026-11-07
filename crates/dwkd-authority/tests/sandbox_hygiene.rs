@@ -264,6 +264,24 @@ mod linux {
         })
     }
 
+    /// The ways a tunnel the proxy accepted can end (ADR-0048): each one
+    /// counted at destruction is a `CONNECT` that was carried.
+    const ACCEPTED: [&str; 6] = [
+        "CLOSED",
+        "UPLOAD_BUDGET",
+        "DOWNLOAD_BUDGET",
+        "IDLE_TIMEOUT",
+        "LIFETIME_EXCEEDED",
+        "ENVIRONMENT_CLOSED",
+    ];
+
+    /// How many tunnels the proxy carried for the environment: none, when a
+    /// tool failed closed before it connected -- a failed TLS handshake
+    /// over a carried tunnel looks the same from the tool's exit status.
+    fn tunnels(dispositions: &[String]) -> u64 {
+        ACCEPTED.iter().map(|way| counted(dispositions, way)).sum()
+    }
+
     const TAIL: usize = 4096;
 
     /// Output for a failure's report: key material and credential headers
@@ -1194,20 +1212,26 @@ reason = "NO_MATCHING_RULE"
         /// refusals its workloads caused.
         fn release(&self, peer: &mut Peer, environment: &str) -> u64 {
             peer.release();
+            beyond_the_probe(
+                &self.destroyed(environment),
+                self.probe_questions(environment),
+            )
+        }
+
+        /// A destroyed environment, its containers gone: the proxy's
+        /// dispositions its destruction recorded.
+        fn destroyed(&self, environment: &str) -> Vec<String> {
             for role in ["environment", "relay", "setup"] {
                 assert!(
                     self.runtime.role(environment, role).is_empty(),
-                    "a {role} container of the released environment remains"
+                    "a {role} container of the destroyed environment remains"
                 );
             }
             let destroyed = audit_records(&self.dir.state(), "environment.destroyed")
                 .into_iter()
                 .find(|r| super::state_support::text(r, "environment_id") == Some(environment))
                 .expect("the destruction was audited");
-            beyond_the_probe(
-                &texts(&destroyed, "egress_dispositions"),
-                self.probe_questions(environment),
-            )
+            texts(&destroyed, "egress_dispositions")
         }
 
         /// The plan the authority recorded for the run's last workload:
@@ -1225,6 +1249,45 @@ reason = "NO_MATCHING_RULE"
                 texts(&record, "hygiene_args"),
                 texts(&record, "argv"),
             )
+        }
+
+        /// pip told to install `base` from the granted name served on
+        /// `port` under an issuer it must not trust (`origin`'s): the proxy
+        /// carries the granted tunnel and pip's own verification ends it.
+        fn untrusted_issuer(&self, n: u64, case: &str, origin: &str, port: u16, base: &str) {
+            let mut a = self.peer(n, &[format!("network.https:{GRANTED}:{port}")]);
+            let target = format!("{TARGETS}/{origin}");
+            let ran = self.pip(
+                &mut a,
+                &[
+                    "install",
+                    "--index-url",
+                    &index(GRANTED, port),
+                    "--target",
+                    &target,
+                    base,
+                ],
+            );
+            assert!(ran.failed(), "{}", self.why(case, Some(&ran)));
+            assert!(
+                ran.said("CERTIFICATE_VERIFY_FAILED") || ran.said("certificate verify failed"),
+                "{}",
+                self.why("no verification failure", Some(&ran))
+            );
+            self.container(&a.run);
+            assert_eq!(self.files(&mut a, &target), 0);
+            let reached = if origin == "rogue" {
+                self.rogue.requests().len()
+            } else {
+                self.system.requests().len()
+            };
+            assert_eq!(reached, 0, "{case}: a request reached the origin");
+            assert_eq!(self.release(&mut a, &ran.environment), 0);
+            evidence(
+                case,
+                &format!("refused:nothing-installed;{origin}-issuer;certificate-verify-failed"),
+                "workload-tls-verification",
+            );
         }
 
         /// The census at a lab's end: every environment its store made gone
@@ -1305,15 +1368,8 @@ reason = "NO_MATCHING_RULE"
             ),
             "hygiene-launcher",
         );
-        assert!(
-            changed.is_empty(),
-            "the container's own files changed: {changed:?}"
-        );
-        evidence(
-            "npm-writes-only-workspace-and-tmp",
-            "contained:no-change-outside-workspace-and-tmp",
-            "read-only-root",
-        );
+        // `changed` is judged last, with the other measured-not-assumed
+        // cases, so a first run's surprise there hides no other case.
         assert_eq!(launch, "HYGIENE_NPM");
         assert_eq!(prefix, NPM_PREFIX);
         assert_eq!(&argv[1..=NPM_PREFIX.len()], NPM_PREFIX, "{argv:?}");
@@ -1392,40 +1448,32 @@ reason = "NO_MATCHING_RULE"
             );
         }
 
-        // 6. npm told to go around its proxy: only the topology answers.
-        n += 1;
-        let mut a = lab.peer(n, &[]);
-        let unrouted = format!("https://{UNROUTED}:{GRANTED_PORT}/npm/");
-        let ran = lab.npm(
-            &mut a,
-            &[
-                "install",
-                &format!("--noproxy={UNROUTED}"),
-                "--registry",
-                &unrouted,
-                &plain,
-            ],
-        );
-        assert!(ran.failed(), "{}", lab.why("direct npm", Some(&ran)));
-        assert!(
-            ran.said("ENETUNREACH"),
-            "{}",
-            lab.why("not ENETUNREACH", Some(&ran))
-        );
-        lab.container(&a.run);
-        assert_eq!(lab.files(&mut a, "/workspace/node_modules"), 0);
-        lab.release(&mut a, &ran.environment);
-        evidence(
-            "npm-direct-route-refused",
-            "refused:nothing-installed;ENETUNREACH",
-            "topology-no-route",
-        );
-
         // 7-8. A workspace `.npmrc` asking for scripts, TLS off and its own
-        // trust: scripts stay off and the image's trust stays in force.
+        // trust, and naming a user and a global configuration in the
+        // workspace that would send npm to an unrouted proxy: scripts stay
+        // off, the image's trust stays in force and neither file is read
+        // (`npm_config_userconfig` and `npm_config_globalconfig` outrank a
+        // project's choice of them).
         n += 1;
         lab.npm_project(n);
         lab.place(n, "workspace/npm-hostile.npmrc", ".npmrc");
+        let hostile =
+            std::fs::read_to_string(lab.fixtures.join("workspace/npm-hostile.npmrc")).unwrap();
+        let mut redirected = 0;
+        for key in ["userconfig=", "globalconfig="] {
+            let named = hostile
+                .lines()
+                .find_map(|line| line.strip_prefix(key))
+                .unwrap_or_else(|| panic!("the hostile .npmrc names no {key}"));
+            let file = named
+                .strip_prefix("/workspace/")
+                .unwrap_or_else(|| panic!("{key} names {named}, outside the workspace"));
+            let at = lab.workspace(n).join(file);
+            std::fs::write(&at, format!("https-proxy=http://{UNROUTED}:9/\n")).unwrap();
+            mode(&at, 0o644);
+            redirected += 1;
+        }
+        assert_eq!(redirected, 2);
         let mut a = lab.peer(n, &[]);
         let ran = lab.npm(&mut a, &["ci", "--registry", &granted]);
         assert_eq!(
@@ -1443,7 +1491,10 @@ reason = "NO_MATCHING_RULE"
         lab.release(&mut a, &ran.environment);
         evidence(
             "npm-project-npmrc-cannot-reenable-scripts",
-            &format!("not-run:{}-markers-absent;hostile-npmrc", markers.len()),
+            &format!(
+                "not-run:{}-markers-absent;hostile-npmrc;its-user-and-global-config-unread",
+                markers.len()
+            ),
             "hygiene-launcher",
         );
 
@@ -1657,6 +1708,50 @@ reason = "NO_MATCHING_RULE"
             "a refusal prepared an environment"
         );
         a.release();
+
+        // Last, the cases measured rather than assumed, so that a first
+        // run's surprise in one hides no other case.
+        // 6. npm told to go around its proxy: only the topology answers.
+        n += 1;
+        let mut a = lab.peer(n, &[]);
+        let unrouted = format!("https://{UNROUTED}:{GRANTED_PORT}/npm/");
+        let ran = lab.npm(
+            &mut a,
+            &[
+                "install",
+                &format!("--noproxy={UNROUTED}"),
+                "--registry",
+                &unrouted,
+                &plain,
+            ],
+        );
+        assert!(ran.failed(), "{}", lab.why("direct npm", Some(&ran)));
+        assert!(
+            ran.said("ENETUNREACH"),
+            "{}",
+            lab.why("not ENETUNREACH", Some(&ran))
+        );
+        lab.container(&a.run);
+        assert_eq!(lab.files(&mut a, "/workspace/node_modules"), 0);
+        lab.release(&mut a, &ran.environment);
+        evidence(
+            "npm-direct-route-refused",
+            "refused:nothing-installed;ENETUNREACH",
+            "topology-no-route",
+        );
+
+        // 15. What `npm ci` changed in its container's own filesystem, read
+        // in the first case: nothing, its writes all under the workspace's
+        // and the temporary directories' mounts.
+        assert!(
+            changed.is_empty(),
+            "the container's own files changed: {changed:?}"
+        );
+        evidence(
+            "npm-writes-only-workspace-and-tmp",
+            "contained:no-change-outside-workspace-and-tmp",
+            "read-only-root",
+        );
         lab.census();
     }
 
@@ -1696,15 +1791,7 @@ reason = "NO_MATCHING_RULE"
             &format!("installed:{files}-files-as-the-fixture;{base}=={base_version}"),
             "relay-and-connect-proxy-grant",
         );
-        assert!(
-            changed.is_empty(),
-            "the container's own files changed: {changed:?}"
-        );
-        evidence(
-            "pip-writes-only-workspace-and-tmp",
-            "contained:no-change-outside-workspace-and-tmp",
-            "read-only-root",
-        );
+        // `changed` is judged last, with the other measured-not-assumed cases.
         assert_eq!(launch, "HYGIENE_PIP");
         assert_eq!(prefix, PIP_PREFIX);
         // After the subcommand: `pip install <prefix> <the invocation's rest>`.
@@ -1892,47 +1979,16 @@ reason = "NO_MATCHING_RULE"
             "hygiene-launcher",
         );
 
-        // 10-11. Issuers pip must not trust: the rogue authority's, and the
-        // one only the image's system store holds.
-        for (case, origin, port) in [
-            ("pip-untrusted-issuer-refused", "rogue", ROGUE_PORT),
-            ("pip-os-trust-store-not-used", "system", SYSTEM_PORT),
-        ] {
-            n += 1;
-            let mut a = lab.peer(n, &[format!("network.https:{GRANTED}:{port}")]);
-            let target = format!("{TARGETS}/{origin}");
-            let ran = lab.pip(
-                &mut a,
-                &[
-                    "install",
-                    "--index-url",
-                    &index(GRANTED, port),
-                    "--target",
-                    &target,
-                    &base,
-                ],
-            );
-            assert!(ran.failed(), "{}", lab.why(case, Some(&ran)));
-            assert!(
-                ran.said("CERTIFICATE_VERIFY_FAILED") || ran.said("certificate verify failed"),
-                "{}",
-                lab.why("no verification failure", Some(&ran))
-            );
-            lab.container(&a.run);
-            assert_eq!(lab.files(&mut a, &target), 0);
-            let reached = if origin == "rogue" {
-                lab.rogue.requests().len()
-            } else {
-                lab.system.requests().len()
-            };
-            assert_eq!(reached, 0, "{case}: a request reached the origin");
-            assert_eq!(lab.release(&mut a, &ran.environment), 0);
-            evidence(
-                case,
-                &format!("refused:nothing-installed;{origin}-issuer;certificate-verify-failed"),
-                "workload-tls-verification",
-            );
-        }
+        // 10. An issuer pip must not trust: the rogue authority's. (11, the
+        // one only the image's system store holds, is measured last.)
+        n += 1;
+        lab.untrusted_issuer(
+            n,
+            "pip-untrusted-issuer-refused",
+            "rogue",
+            ROGUE_PORT,
+            &base,
+        );
 
         // 13-15 and D4. Refused before an intent, each by the authority.
         n += 1;
@@ -2094,6 +2150,31 @@ reason = "NO_MATCHING_RULE"
             &format!("not-run:pth-marker-absent;{files}-files-as-the-fixture"),
             "workload-effects-measured",
         );
+
+        // Last, the cases measured rather than assumed, so that a first
+        // run's surprise in one hides no other case.
+        // 17. What the first install changed in its container's own
+        // filesystem: nothing outside the mounts.
+        assert!(
+            changed.is_empty(),
+            "the container's own files changed: {changed:?}"
+        );
+        evidence(
+            "pip-writes-only-workspace-and-tmp",
+            "contained:no-change-outside-workspace-and-tmp",
+            "read-only-root",
+        );
+        // 11. The granted name under an authority only the image's system
+        // store holds (ADR-0055 §5: whether a pinned `--cert` keeps pip from
+        // that store is measured, not assumed).
+        n += 1;
+        lab.untrusted_issuer(
+            n,
+            "pip-os-trust-store-not-used",
+            "system",
+            SYSTEM_PORT,
+            &base,
+        );
         lab.census();
     }
 
@@ -2112,9 +2193,30 @@ reason = "NO_MATCHING_RULE"
         let (plain, _) = lab.npm_package("plain");
         let (base, _, _) = lab.project("base");
 
+        // The image, measured from inside: no file at either trust path. The
+        // workload is the interpreter, which no trust file concerns, so the
+        // environment and the launcher work, and what follows is the trust
+        // file's absence alone.
         let mut a = lab.peer(1, &[]);
-        let ran = lab.npm(
-            &mut a,
+        let ran = lab.python(&mut a, &["-I", INSPECT, "tree", "/etc/direwolf"]);
+        assert_eq!(ran.exit, Some(0), "{}", lab.why("trust paths", Some(&ran)));
+        let measured = object(&ran.stdout);
+        assert!(
+            matches!(measured.get("files"), Some(Value::Object(files)) if files.is_empty()),
+            "the image without trust files carries one: {measured:?}"
+        );
+        lab.container(&a.run);
+        lab.release(&mut a, &ran.environment);
+
+        // npm ignores a `cafile` it cannot find and would trust Node.js's
+        // bundled roots instead, so the launcher refuses the launch: npm
+        // never starts, nothing is tunnelled, and the authority, which
+        // cannot believe the launcher's status as npm's, ends the run's
+        // environment (ADR-0052 §5).
+        let served = lab.granted.requests().len();
+        let mut a = lab.peer(2, &[]);
+        let body = a.exec(
+            &lab.pins.npm,
             &[
                 "install",
                 "--registry",
@@ -2122,21 +2224,45 @@ reason = "NO_MATCHING_RULE"
                 &plain,
             ],
         );
-        assert!(
-            ran.failed(),
-            "{}",
-            lab.why("npm without its trust file", Some(&ran))
+        let DwkpBody::ToolFailedV5(failure) = &body else {
+            panic!(
+                "npm without its trust file was not refused at launch: {body:?}\n{}",
+                lab.why("npm without its trust file", None)
+            )
+        };
+        assert_eq!(failure.reason.as_str(), "OUTCOME_UNKNOWN", "{failure:?}");
+        assert_eq!(failure.environment_destroyed, Some(true), "{failure:?}");
+        let environment = failure
+            .environment_id
+            .as_ref()
+            .expect("the failure names its environment")
+            .as_str()
+            .to_owned();
+        a.release();
+        let dispositions = lab.destroyed(&environment);
+        assert_eq!(
+            tunnels(&dispositions),
+            0,
+            "npm reached a tunnel without its trust file: {dispositions:?}"
         );
-        lab.container(&a.run);
-        assert_eq!(lab.files(&mut a, "/workspace/node_modules"), 0);
-        lab.release(&mut a, &ran.environment);
+        assert_eq!(
+            beyond_the_probe(&dispositions, lab.probe_questions(&environment)),
+            0
+        );
+        assert_eq!(
+            lab.granted.requests().len(),
+            served,
+            "the registry was asked"
+        );
+        assert!(!lab.workspace(2).join("node_modules").exists());
         evidence(
             "npm-missing-trust-file-fails-closed",
-            "refused:nothing-installed;no-trust-file-in-the-image",
-            "workload-tls-verification",
+            "refused:nothing-installed;no-tunnel;launcher-refused;OUTCOME_UNKNOWN",
+            "hygiene-launcher",
         );
 
-        let mut a = lab.peer(2, &[]);
+        // pip refuses a `--cert` it cannot find itself, before it connects.
+        let mut a = lab.peer(3, &[]);
         let target = format!("{TARGETS}/no-trust");
         let ran = lab.pip(
             &mut a,
@@ -2154,12 +2280,23 @@ reason = "NO_MATCHING_RULE"
             "{}",
             lab.why("pip without its trust file", Some(&ran))
         );
+        assert!(
+            ran.said("Could not find a suitable TLS CA certificate bundle"),
+            "{}",
+            lab.why("pip did not refuse its missing trust file", Some(&ran))
+        );
         lab.container(&a.run);
         assert_eq!(lab.files(&mut a, &target), 0);
-        lab.release(&mut a, &ran.environment);
+        a.release();
+        let dispositions = lab.destroyed(&ran.environment);
+        assert_eq!(
+            tunnels(&dispositions),
+            0,
+            "pip reached a tunnel without its trust file: {dispositions:?}"
+        );
         evidence(
             "pip-missing-trust-file-fails-closed",
-            "refused:nothing-installed;no-trust-file-in-the-image",
+            "refused:nothing-installed;no-tunnel;cert-bundle-missing",
             "workload-tls-verification",
         );
         lab.census();

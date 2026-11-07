@@ -4760,7 +4760,9 @@ HYGIENE_OUTCOMES = {
     "npm-project-npmrc-cannot-reenable-scripts": "not-run:",
     "npm-project-npmrc-cannot-disable-tls": "refused:nothing-installed",
     "npm-project-npmrc-cannot-replace-ca": "installed:image-trust-file-in-force",
-    "npm-missing-trust-file-fails-closed": "refused:nothing-installed",
+    # Not that TLS failed -- npm would fall back to Node.js's bundled roots,
+    # pip to nothing -- but that nothing was tunnelled at all.
+    "npm-missing-trust-file-fails-closed": ("refused:nothing-installed;no-tunnel;launcher-refused"),
     "npm-git-dependency-not-prepared": "not-prepared:no-prepare-marker",
     "npm-untrusted-issuer-refused": "refused:nothing-installed",
     "npm-tampered-tarball-refused": "refused:EINTEGRITY",
@@ -4783,7 +4785,9 @@ HYGIENE_OUTCOMES = {
     "pip-image-configuration-not-read": "not-read:",
     "pip-untrusted-issuer-refused": "refused:nothing-installed",
     "pip-os-trust-store-not-used": "refused:nothing-installed",
-    "pip-missing-trust-file-fails-closed": "refused:nothing-installed",
+    "pip-missing-trust-file-fails-closed": (
+        "refused:nothing-installed;no-tunnel;cert-bundle-missing"
+    ),
     "pip-undoing-arguments-refused": "refused:OBLIGATION_UNENFORCEABLE",
     "pip-other-subcommands-refused": "refused:OBLIGATION_UNENFORCEABLE",
     "pip-non-name-specs-refused": "refused:OBLIGATION_UNENFORCEABLE",
@@ -4808,6 +4812,49 @@ def hygiene_refusal(environ: Mapping[str, str]) -> str | None:
     return registry_refusal({**environ, "DW_REGISTRY_EVIDENCE": "1"})
 
 
+# Where the environment mounts its workspace and its two temporary
+# directories (`dwk-sandbox-profile`'s WORKSPACE_TARGET, TMP_TARGET and
+# VAR_TMP_TARGET). The hygiene images carry each as an empty directory, so
+# the runtime makes no mount point in a container's own layer and
+# `docker container diff` shows writes, not mounts
+# (`*-writes-only-workspace-and-tmp`).
+# Paths inside an image, never this host's.
+HYGIENE_MOUNT_POINTS = ("/workspace", "/tmp", "/var/tmp")  # noqa: S108
+
+
+def hygiene_rootfs(base: Path, context: Path, pki: Path, minor: str, *, trusted: bool) -> Path:
+    """One hygiene image's root at `context/rootfs`, copied from the
+    registry tools image's checked rootfs (`base/rootfs`): `pip` and `npx`
+    launchers, the image `pip.conf`, the third authority in the system
+    store, an empty directory at each of HYGIENE_MOUNT_POINTS, and -- when
+    `trusted` -- the run's anchor (`pki/ca.pem`) at both trust paths. No
+    runtime is touched. Returns the rootfs."""
+    shutil.rmtree(context, ignore_errors=True)
+    shutil.copytree(base / "rootfs", context / "rootfs", symlinks=True)
+    rootfs = context / "rootfs"
+    pip = rootfs / HYGIENE_PIP_PATH.lstrip("/")
+    pip.unlink(missing_ok=True)
+    pip.write_bytes(hygiene_pip_launcher(minor).encode("utf-8"))
+    pip.chmod(0o755)
+    npx = rootfs / HYGIENE_NPX_PATH.lstrip("/")
+    npx.unlink(missing_ok=True)
+    npx.write_bytes(HYGIENE_NPX_LAUNCHER.encode("utf-8"))
+    npx.chmod(0o755)
+    etc = rootfs / "etc"
+    (etc / "direwolf").mkdir(parents=True, exist_ok=True)
+    if trusted:
+        for path in (HYGIENE_NPM_TRUST, HYGIENE_PIP_TRUST):
+            _place(rootfs, pki / "ca.pem", path, 0o644)
+    for path in HYGIENE_SYSTEM_STORES:
+        _place(rootfs, pki / "system.pem", path, 0o644)
+    (etc / "pip.conf").write_text(HYGIENE_PIP_CONF, encoding="utf-8")
+    for point in HYGIENE_MOUNT_POINTS:
+        directory = rootfs / point.lstrip("/")
+        directory.mkdir(parents=True, exist_ok=True)
+        directory.chmod(0o755)
+    return rootfs
+
+
 def _hygiene_images(
     client: Path,
     socket: str,
@@ -4827,25 +4874,9 @@ def _hygiene_images(
     variables: dict[str, str] = {}
     for name, trusted in (("hygiene", True), ("hygiene-no-trust", False)):
         context = base.parent / name
-        shutil.rmtree(context, ignore_errors=True)
-        shutil.copytree(base / "rootfs", context / "rootfs", symlinks=True)
-        rootfs = context / "rootfs"
+        rootfs = hygiene_rootfs(base, context, pki, minor, trusted=trusted)
         pip = rootfs / HYGIENE_PIP_PATH.lstrip("/")
-        pip.unlink(missing_ok=True)
-        pip.write_bytes(hygiene_pip_launcher(minor).encode("utf-8"))
-        pip.chmod(0o755)
         npx = rootfs / HYGIENE_NPX_PATH.lstrip("/")
-        npx.unlink(missing_ok=True)
-        npx.write_bytes(HYGIENE_NPX_LAUNCHER.encode("utf-8"))
-        npx.chmod(0o755)
-        etc = rootfs / "etc"
-        (etc / "direwolf").mkdir(parents=True, exist_ok=True)
-        if trusted:
-            for path in (HYGIENE_NPM_TRUST, HYGIENE_PIP_TRUST):
-                _place(rootfs, pki / "ca.pem", path, 0o644)
-        for path in HYGIENE_SYSTEM_STORES:
-            _place(rootfs, pki / "system.pem", path, 0o644)
-        (etc / "pip.conf").write_text(HYGIENE_PIP_CONF, encoding="utf-8")
         (context / "Dockerfile").write_text("FROM scratch\nCOPY rootfs/ /\n", encoding="utf-8")
         iid = context / "iid"
         _docker(
@@ -4965,13 +4996,23 @@ def task_sandbox_hygiene_evidence() -> None:
 _HYGIENE_RS = "crates/dwkd-authority/src/resource/exec/hygiene.rs"
 _PROFILE_RS = "crates/dwk-sandbox-profile/src/lib.rs"
 _SANDBOX_RS = "crates/dwkd-authority/src/sandbox.rs"
-HYGIENE_MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
+_LAUNCH_RS = "crates/dwk-sandbox-probe/src/launch.rs"
+# The tests each guard's unit mutants must fail, by name.
+_KEEPS_NPM = ("npm_keeps_ci_and_install_of_registry_names_with_its_prefix",)
+_UNDOES_NPM = ("npm_refuses_each_argument_that_would_undo_it_in_every_spelling",)
+_UNDOES_PIP = ("pip_refuses_each_argument_that_would_undo_or_widen_it",)
+_NPM_EVIDENCE = ("npm_under_its_proposed_profile",)
+_PIP_EVIDENCE = ("pip_under_its_proposed_profile",)
+# (name, file, the guard's text, its weakening, unit or hosted, the tests at
+# least one of which must fail for the mutant to be killed).
+HYGIENE_MUTATIONS: tuple[tuple[str, str, str, str, str, tuple[str, ...]], ...] = (
     (
         "default: a profile on with no flag",
         _HYGIENE_RS,
         "    pub const NONE: Self = Self {\n        npm: false,\n        pip: false,\n    };",
         "    pub const NONE: Self = Self {\n        npm: true,\n        pip: true,\n    };",
         "unit",
+        ("with_no_profile_every_decision_is_todays",),
     ),
     (
         "fence: the option kept outside the evidence's workspace",
@@ -4980,6 +5021,7 @@ HYGIENE_MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
         "WorkspaceSetting::UnverifiedEvidence) {\n",
         "        if false && !matches!(self.workspace, WorkspaceSetting::UnverifiedEvidence) {\n",
         "unit",
+        ("an_unaccepted_profile_is_kept_only_in_the_evidence_harness_configuration",),
     ),
     (
         "npm subcommands: run allowed",
@@ -4987,6 +5029,7 @@ HYGIENE_MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
         'const NPM_SUBCOMMANDS: &[&str] = &["ci", "install"];',
         'const NPM_SUBCOMMANDS: &[&str] = &["ci", "install", "run"];',
         "unit",
+        ("npm_refuses_every_other_subcommand_alias_and_separator",),
     ),
     (
         "npm specs: a git URL allowed",
@@ -4994,6 +5037,7 @@ HYGIENE_MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
         "        _ => specs.iter().all(|spec| npm_registry_spec(spec)),",
         "        _ => true,",
         "unit",
+        ("npm_refuses_every_spec_that_is_not_a_registry_name",),
     ),
     *(
         (
@@ -5002,6 +5046,7 @@ HYGIENE_MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
             f'    "{option}",\n',
             "",
             "unit",
+            _UNDOES_NPM,
         )
         for option in (
             "userconfig",
@@ -5019,6 +5064,7 @@ HYGIENE_MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
         'const NPM_PINNED_TRUE: &[&str] = &["ignore-scripts", "strict-ssl"];',
         "const NPM_PINNED_TRUE: &[&str] = &[];",
         "unit",
+        _UNDOES_NPM,
     ),
     (
         "npm prefix: --ignore-scripts dropped",
@@ -5026,6 +5072,7 @@ HYGIENE_MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
         'const NPM_PREFIX: &[&str] = &[\n    "--ignore-scripts",\n',
         "const NPM_PREFIX: &[&str] = &[\n",
         "unit",
+        _KEEPS_NPM,
     ),
     (
         "npx: moved out of UNEVIDENCED",
@@ -5033,6 +5080,10 @@ HYGIENE_MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
         'const UNEVIDENCED: &[&str] = &["npm", "npx", "pnpm", "yarn", "bun", "cargo"];',
         'const UNEVIDENCED: &[&str] = &["npm", "pnpm", "yarn", "bun", "cargo"];',
         "unit",
+        (
+            "a_tool_without_real_tool_evidence_is_not_kept",
+            "npx_the_runners_and_the_wrappers_stay_refused_with_a_profile_on",
+        ),
     ),
     (
         "pip subcommands: download allowed",
@@ -5040,6 +5091,7 @@ HYGIENE_MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
         '    if *subcommand != "install" ',
         '    if *subcommand != "install" && *subcommand != "download" ',
         "unit",
+        ("pip_refuses_every_other_subcommand_and_an_install_of_nothing",),
     ),
     (
         "pip specs: a URL allowed",
@@ -5048,6 +5100,7 @@ HYGIENE_MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
         "                '.' | '-' | '_' | '*' | '+' | '!' | '=' | '<' | '>' | '~' | ','"
         " | ' ' | ':' | '/' | '@'\n",
         "unit",
+        ("pip_refuses_every_spec_that_is_not_a_name",),
     ),
     *(
         (
@@ -5056,6 +5109,7 @@ HYGIENE_MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
             f'    "{option}",\n',
             "",
             "unit",
+            _UNDOES_PIP,
         )
         for option in (
             "no-binary",
@@ -5076,6 +5130,7 @@ HYGIENE_MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
         'const PIP_PREFIX: &[&str] = &[\n    "--only-binary=:all:",\n',
         "const PIP_PREFIX: &[&str] = &[\n",
         "unit",
+        ("pip_keeps_install_of_names_with_its_prefix_after_the_subcommand",),
     ),
     (
         "pip interpreter: -m pip allowed (D4)",
@@ -5083,6 +5138,31 @@ HYGIENE_MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
         'matches!(module.split(\'.\').next(), Some("pip" | "ensurepip"))',
         "module.is_empty()",
         "unit",
+        ("with_pips_profile_the_interpreter_cannot_run_pip_or_ensurepip",),
+    ),
+    (
+        "npm trust: the launcher names no trust file for npm",
+        _LAUNCH_RS,
+        "            Self::Npm => Some(profile::NPM_TRUST_FILE),\n",
+        "            Self::Npm => None,\n",
+        "unit",
+        ("only_npms_profile_needs_its_trust_file_before_it_launches",),
+    ),
+    (
+        "npm trust: an empty trust file accepted",
+        _LAUNCH_RS,
+        "        .is_ok_and(|meta| meta.is_file() && meta.len() > 0)\n",
+        "        .is_ok_and(|meta| meta.is_file())\n",
+        "unit",
+        ("a_trust_file_is_present_only_when_regular_readable_and_non_empty",),
+    ),
+    (
+        "npm trust: the launcher's check removed",
+        _LAUNCH_RS,
+        "        .is_some_and(|file| !trust_present(file))\n",
+        "        .is_some_and(|file| file.is_empty() && !trust_present(file))\n",
+        "hosted",
+        ("without_a_trust_file_both_fail_closed",),
     ),
     (
         "npm variables: npm_config_cafile dropped",
@@ -5090,6 +5170,7 @@ HYGIENE_MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
         '    ("npm_config_cafile", NPM_TRUST_FILE),\n',
         "",
         "hosted",
+        _NPM_EVIDENCE,
     ),
     (
         "npm variables: npm_config_userconfig dropped",
@@ -5097,6 +5178,15 @@ HYGIENE_MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
         '    ("npm_config_userconfig", "/dev/null"),\n',
         "",
         "hosted",
+        _NPM_EVIDENCE,
+    ),
+    (
+        "npm variables: npm_config_globalconfig dropped",
+        _PROFILE_RS,
+        '    ("npm_config_globalconfig", "/dev/null"),\n',
+        "",
+        "hosted",
+        _NPM_EVIDENCE,
     ),
     (
         "pip variables: PIP_CONFIG_FILE dropped",
@@ -5104,13 +5194,20 @@ HYGIENE_MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
         '    ("PIP_CONFIG_FILE", "/dev/null"),\n',
         "",
         "hosted",
+        _PIP_EVIDENCE,
     ),
+)
+# Weakenings no test can observe while another layer of the same profile
+# stands, each with why: applied by no run, never counted as killed, listed
+# so the review is complete. Each target is still held to its file.
+HYGIENE_EQUIVALENT_MUTATIONS: tuple[tuple[str, str, str, str], ...] = (
     (
         "pip binary-only: PIP_ONLY_BINARY dropped",
         _PROFILE_RS,
         '    ("PIP_ONLY_BINARY", ":all:"),\n',
-        "",
-        "hosted",
+        "the authority's prefix puts `--only-binary=:all:` on every profiled pip "
+        "invocation, and pip's command line outranks the variable; removing the prefix's "
+        "copy is the unit mutant 'pip binary-only: --only-binary dropped from the prefix'",
     ),
 )
 HYGIENE_UNIT_TESTS = (
@@ -5118,45 +5215,93 @@ HYGIENE_UNIT_TESTS = (
     ("dwkd-authority", "--lib", "sandbox::tests"),
     ("dwk-sandbox-probe", "--bin", "dwk-sandbox-probe"),
 )
+_FAILED_TEST = re.compile(r"^test (\S+) \.\.\. FAILED$", re.MULTILINE)
 
 
-def _mutant_outcome(rel: str, old: str, new: str, command: list[list[str]]) -> str:
-    """Apply one mutation, run `command`'s steps, restore the file: `killed`
-    when a step failed, `survived` when every step passed, `not-applied`
-    when the target is not in the file exactly once."""
+def failed_tests(output: str) -> set[str]:
+    """Every test `cargo test`'s output says failed: its `test <name> ...
+    FAILED` lines and the names its closing `failures:` list gives."""
+    failed = set(_FAILED_TEST.findall(output))
+    listing = False
+    for line in output.splitlines():
+        if line.strip() == "failures:":
+            listing = True
+        elif listing and line.startswith("    ") and re.fullmatch(r"[\w:]+", line.strip()):
+            failed.add(line.strip())
+        elif line.startswith("test result:"):
+            listing = False
+    return failed
+
+
+def mutant_verdict(output: str, any_step_failed: bool, expect: tuple[str, ...]) -> str:
+    """A mutant's verdict from what its run printed: `killed` only when one
+    of the tests `expect` names failed; `not-compiled` when the mutant did
+    not build, which kills nothing; `failed-elsewhere` when a step failed
+    but not one of those tests; `survived` when every step passed."""
+    if "could not compile" in output or re.search(r"^error\[E\d+\]", output, re.MULTILINE):
+        return "not-compiled"
+    failed = failed_tests(output)
+    if any(test == name or test.endswith(f"::{name}") for test in failed for name in expect):
+        return "killed"
+    return "failed-elsewhere" if any_step_failed else "survived"
+
+
+def _mutant_outcome(
+    rel: str, old: str, new: str, command: list[list[str]], expect: tuple[str, ...]
+) -> tuple[str, list[str]]:
+    """Apply one mutation, run every step of `command`, restore the file
+    byte-identical: the verdict (`mutant_verdict`, or `not-applied` when the
+    target is not in the file exactly once) and the tests that failed."""
     path = ROOT / rel
     original = path.read_bytes()
     digest = hashlib.sha256(original).hexdigest()
     text = original.decode("utf-8")
     if text.count(old) != 1:
-        return "not-applied"
+        return "not-applied", []
+    outputs: list[str] = []
+    any_step_failed = False
     try:
         path.write_bytes(text.replace(old, new).encode("utf-8"))
-        killed = any(
-            subprocess.run(step, cwd=str(ROOT), check=False).returncode != 0 for step in command
-        )
+        for step in command:
+            result = subprocess.run(
+                step,
+                cwd=str(ROOT),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                errors="replace",
+                check=False,
+            )
+            outputs.append(result.stdout)
+            any_step_failed = any_step_failed or result.returncode != 0
     finally:
         path.write_bytes(original)
     if hashlib.sha256(path.read_bytes()).hexdigest() != digest:
         raise TaskError(f"{rel} was not restored byte-identical")
-    return "killed" if killed else "survived"
+    output = "".join(outputs)
+    return mutant_verdict(output, any_step_failed, expect), sorted(failed_tests(output))
 
 
 def task_sandbox_registry_mutations() -> None:
     """The profiles' mutation review (ADR-0054 §9, ADR-0055 §10): every
     `unit` mutant must be killed by the unit tests, here or hosted; every
     `hosted` one by the hosted evidence, only in the manual job -- anywhere
-    else it is reported NOT EXERCISED and fails the task, never counted."""
+    else it is reported NOT EXERCISED and fails the task, never counted. A
+    mutant is killed only when a test it names failed: one that does not
+    build, or fails another test, is reported as such and fails the task.
+    Each file is restored and proved byte-identical. The equivalent
+    mutants are listed with why, and run by nothing."""
     unit = [
-        ["cargo", "test", "--locked", "-q", "-p", crate, kind, "--", filter]
+        ["cargo", "test", "--locked", "-p", crate, kind, "--", filter]
         if kind == "--lib"
-        else ["cargo", "test", "--locked", "-q", "-p", crate, kind, crate]
+        else ["cargo", "test", "--locked", "-p", crate, kind, crate]
         for crate, kind, filter in HYGIENE_UNIT_TESTS
     ]
     hosted = hygiene_refusal(os.environ) is None and sys.platform.startswith("linux")
     results: list[tuple[str, str, str]] = []
-    for name, rel, old, new, kind in HYGIENE_MUTATIONS:
+    for name, rel, old, new, kind, expect in HYGIENE_MUTATIONS:
         if kind == "hosted" and not hosted:
+            print(f"  {'not-exercised':<16} {kind:<6} {name}", flush=True)
             results.append((name, kind, "not-exercised"))
             continue
         command = (
@@ -5164,14 +5309,24 @@ def task_sandbox_registry_mutations() -> None:
             if kind == "unit"
             else [[sys.executable, str(ROOT / "scripts" / "dw.py"), "sandbox-hygiene-evidence"]]
         )
-        outcome = _mutant_outcome(rel, old, new, command)
-        print(f"  {outcome:<14} {kind:<6} {name}", flush=True)
+        outcome, failed = _mutant_outcome(rel, old, new, command, expect)
+        shown = ", ".join(failed[:3]) + (" ..." if len(failed) > 3 else "")
+        print(
+            f"  {outcome:<16} {kind:<6} {name}; expected {' or '.join(expect)}; "
+            f"failed: {shown or 'none'}; {rel} restored byte-identical",
+            flush=True,
+        )
         results.append((name, kind, outcome))
-    bad = [r for r in results if r[2] not in ("killed",)]
+    for name, _rel, _old, why in HYGIENE_EQUIVALENT_MUTATIONS:
+        print(f"  {'equivalent':<16} {'-':<6} {name}: {why}", flush=True)
+    bad = [r for r in results if r[2] != "killed"]
     for name, kind, outcome in bad:
         print(f"{RED}  {outcome}: {name} ({kind}){OFF}")
     killed = sum(1 for r in results if r[2] == "killed")
-    print(f"{BOLD}{killed}/{len(results)} mutants killed{OFF}")
+    print(
+        f"{BOLD}{killed}/{len(results)} mutants killed; "
+        f"{len(HYGIENE_EQUIVALENT_MUTATIONS)} equivalent, not run{OFF}"
+    )
     if bad:
         raise TaskError(
             f"{len(bad)} mutant(s) not killed: "
@@ -7554,7 +7709,9 @@ ATTRIBUTION: dict[str, tuple[tuple[str, str, str | tuple[str, ...]], ...]] = {
         ("npm-project-npmrc-cannot-reenable-scripts", _DWKP, "hygiene-launcher"),
         ("npm-project-npmrc-cannot-replace-ca", _DWKP, "hygiene-launcher"),
         ("npm-project-npmrc-cannot-disable-tls", _DWKP, "workload-tls-verification"),
-        ("*-missing-trust-file-fails-closed", _DWKP, "workload-tls-verification"),
+        # npm ignores a missing `cafile`: the launcher refuses the launch.
+        ("npm-missing-trust-file-fails-closed", _DWKP, "hygiene-launcher"),
+        ("pip-missing-trust-file-fails-closed", _DWKP, "workload-tls-verification"),
         ("*-untrusted-issuer-refused", _DWKP, "workload-tls-verification"),
         ("pip-os-trust-store-not-used", _DWKP, "workload-tls-verification"),
         ("npm-git-dependency-not-prepared", _DWKP, "workload-effects-measured"),

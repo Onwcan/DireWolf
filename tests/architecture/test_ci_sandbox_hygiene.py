@@ -119,6 +119,13 @@ def _suite_problems(text: str) -> list[str]:
         problems.append("the suite counts the probe's own question as a workload's refusal")
     if 'const LEVEL: &str = "dwkp-end-to-end";' not in text:
         problems.append("the suite's level is not dwkp-end-to-end")
+    # A missing trust file fails closed only if nothing was tunnelled: a
+    # failed TLS handshake after a fallback to another store looks the same
+    # from the exit status (npm ignores a missing `cafile`).
+    trust = text[text.find("fn without_a_trust_file_both_fail_closed()") :]
+    trust = trust[: trust.find("\n    }\n")]
+    if trust.count("tunnels(") < 2 or "fn tunnels(" not in text:
+        problems.append("a missing trust file is not shown to have tunnelled nothing")
     return problems
 
 
@@ -132,9 +139,10 @@ def test_the_suite_prints_every_case_and_checks_where_it_is_first() -> None:
         (lambda t: t.replace('"npx-still-refused"', '"npx-refused"', 1), "never prints"),
         (lambda t: t.replace('#[ignore = "hosted only', '#[ignore = "later', 1), "hosted only"),
         (lambda t: t.replace("            hosted();\n", "", 1), "where it is"),
-        (lambda t: t.replace("beyond_the_probe(", "counted_raw(", 2), "probe's own question"),
+        (lambda t: t.replace("beyond_the_probe(", "counted_raw("), "probe's own question"),
+        (lambda t: t.replace("tunnels(&", "sum_of(&"), "tunnelled nothing"),
     ],
-    ids=["case-lost", "not-hosted", "no-guard", "raw-count"],
+    ids=["case-lost", "not-hosted", "no-guard", "raw-count", "trust-by-exit-status"],
 )
 def test_a_weakened_suite_fails(mutate: object, said: str) -> None:
     text = SUITE.read_text(encoding="utf-8")
@@ -290,12 +298,89 @@ def test_the_task_refuses_anywhere_but_a_hosted_runner_with_its_flag() -> None:
     assert dw.hygiene_refusal({**HOSTED, "DW_REGISTRY_EVIDENCE": "1"}) is not None
 
 
-def test_every_mutant_targets_its_guard_exactly_once() -> None:
-    kinds = {kind for *_, kind in dw.HYGIENE_MUTATIONS}
+def _rust_tests() -> set[str]:
+    """Every Rust test function's name in the crates the review runs."""
+    names: set[str] = set()
+    for path in (REPO_ROOT / "crates").rglob("*.rs"):
+        names.update(
+            re.findall(r"#\[test\]\n(?:\s*#\[[^\]]*\]\n)*\s*fn (\w+)\(", path.read_text("utf-8"))
+        )
+    return names
+
+
+def test_every_mutant_targets_its_guard_exactly_once_and_names_its_detector() -> None:
+    kinds = {mutant[4] for mutant in dw.HYGIENE_MUTATIONS}
     assert kinds == {"unit", "hosted"}
-    names = [name for name, *_ in dw.HYGIENE_MUTATIONS]
+    names = [mutant[0] for mutant in dw.HYGIENE_MUTATIONS]
+    names += [name for name, *_ in dw.HYGIENE_EQUIVALENT_MUTATIONS]
     assert len(names) == len(set(names))
-    for name, rel, old, new, _kind in dw.HYGIENE_MUTATIONS:
+    tests = _rust_tests()
+    hosted = {test.removeprefix("linux::") for test in dw.HYGIENE_TESTS}
+    for name, rel, old, new, kind, expect in dw.HYGIENE_MUTATIONS:
         text = (REPO_ROOT / rel).read_text(encoding="utf-8")
         assert text.count(old) == 1, f"{name}: its target is in {rel} {text.count(old)} times"
         assert old != new, name
+        assert expect, f"{name} names no test that must fail"
+        # A unit mutant is killed by a unit test; a hosted one by the
+        # hosted suite's own tests; a name that does not exist kills nothing.
+        known = tests if kind == "unit" else hosted
+        assert set(expect) <= known, f"{name}: no such test {sorted(set(expect) - known)}"
+    for name, rel, old, why in dw.HYGIENE_EQUIVALENT_MUTATIONS:
+        text = (REPO_ROOT / rel).read_text(encoding="utf-8")
+        assert text.count(old) == 1, f"{name}: its target is in {rel} {text.count(old)} times"
+        assert len(why) > 40, f"{name}: an equivalent mutant says why"
+
+
+_PASSED = "test result: ok. 3 passed; 0 failed\n"
+_FAILED = (
+    "test resource::exec::hygiene::tests::the_expected_one ... FAILED\n\n"
+    "failures:\n    resource::exec::hygiene::tests::the_expected_one\n\n"
+    "test result: FAILED. 2 passed; 1 failed\n"
+)
+
+
+def test_a_mutant_is_killed_only_by_a_test_it_names() -> None:
+    expect = ("the_expected_one",)
+    assert dw.mutant_verdict(_FAILED, True, expect) == "killed"
+    assert dw.failed_tests(_FAILED) == {"resource::exec::hygiene::tests::the_expected_one"}
+    # The negative controls: another test failing, a mutant that does not
+    # build, a step that failed with no test named, and nothing failing.
+    assert dw.mutant_verdict(_FAILED, True, ("another_one",)) == "failed-elsewhere"
+    broken = "error[E0308]: mismatched types\nerror: could not compile `dwkd-authority`\n"
+    assert dw.mutant_verdict(broken + _FAILED, True, expect) == "not-compiled"
+    assert dw.mutant_verdict("error: no such command\n", True, expect) == "failed-elsewhere"
+    assert dw.mutant_verdict(_PASSED, False, expect) == "survived"
+    # The hosted suite's own report: `--nocapture` splits its result line.
+    hosted = (
+        "test linux::npm_under_its_proposed_profile ... \nthread panicked\n"
+        "failures:\n    linux::npm_under_its_proposed_profile\n\ntest result: FAILED.\n"
+    )
+    assert dw.mutant_verdict(hosted, True, ("npm_under_its_proposed_profile",)) == "killed"
+
+
+def test_the_hygiene_images_carry_their_mount_points_and_trust_as_asked(tmp_path: Path) -> None:
+    profile = PROFILE_RS.read_text(encoding="utf-8")
+    targets = {
+        name: re.search(rf'pub const {name}: &str = "([^"]+)";', profile)
+        for name in ("WORKSPACE_TARGET", "TMP_TARGET", "VAR_TMP_TARGET")
+    }
+    assert all(targets.values()), targets
+    assert set(dw.HYGIENE_MOUNT_POINTS) == {m.group(1) for m in targets.values() if m}
+    base = tmp_path / "registry"
+    (base / "rootfs" / "opt" / "direwolf" / "python" / "bin").mkdir(parents=True)
+    (base / "rootfs" / "opt" / "direwolf" / "node" / "bin").mkdir(parents=True)
+    pki = tmp_path / "pki"
+    pki.mkdir()
+    (pki / "ca.pem").write_text("anchor\n", encoding="utf-8")
+    (pki / "system.pem").write_text("system\n", encoding="utf-8")
+    for trusted in (True, False):
+        rootfs = dw.hygiene_rootfs(
+            base, tmp_path / f"image-{trusted}", pki, "3.12", trusted=trusted
+        )
+        for point in dw.HYGIENE_MOUNT_POINTS:
+            assert (rootfs / point.lstrip("/")).is_dir(), point
+        for trust in (dw.HYGIENE_NPM_TRUST, dw.HYGIENE_PIP_TRUST):
+            assert (rootfs / trust.lstrip("/")).is_file() == trusted, trust
+        for store in dw.HYGIENE_SYSTEM_STORES:
+            assert (rootfs / store.lstrip("/")).read_text(encoding="utf-8") == "system\n"
+        assert (rootfs / "etc" / "pip.conf").read_text(encoding="utf-8") == dw.HYGIENE_PIP_CONF
