@@ -36,8 +36,19 @@
 //! `.pth` file at a later interpreter's start -- the line says so: a residual
 //! the environment contains, never one neutralised.
 //!
-//! Every test is `#[ignore]`d and runs only on a disposable GitHub-hosted
-//! runner (`DW_REGISTRY_EVIDENCE=1`): anywhere else it panics NOT EXERCISED.
+//! **The proxy's count includes the boundary measuring itself.** Every
+//! measurement of a `PROXY_ONLY` environment asks its proxy for a name no
+//! grant can hold (`CONTAINER_PROXY_REACHABLE`), and the proxy refuses and
+//! counts that `TARGET_NOT_GRANTED` like any other. So a case reads the
+//! refusals its workloads caused as the destruction's count less the probe's
+//! questions (`beyond_the_probe`), never the raw count: hosted run
+//! 42296614431 failed a granted install on the probe's one refusal, and a
+//! refused case's `>= 1` would have passed on it alone.
+//!
+//! Every evidence test is `#[ignore]`d and runs only on a disposable
+//! GitHub-hosted runner (`DW_REGISTRY_EVIDENCE=1`): anywhere else it panics NOT
+//! EXERCISED. The one test of that accounting runs everywhere, and needs
+//! nothing.
 
 #![allow(
     clippy::panic,
@@ -131,6 +142,9 @@ mod linux {
     const UNROUTED: &str = "192.0.2.1";
     /// The operator's rule for the registry tools.
     const RULE: &str = "registry-tools-in-a-sandbox";
+    /// The invariant whose measurement asks the proxy its unanswerable
+    /// question (`beyond_the_probe`).
+    const PROBE_INVARIANT: &str = "CONTAINER_PROXY_REACHABLE";
     /// The wall clock every workload asks for, and the operator's budgets.
     const WALL: u32 = 120;
     const MAX_TUNNELS: usize = 8;
@@ -249,6 +263,108 @@ mod linux {
             .iter()
             .find_map(|d| d.strip_prefix(&format!("{disposition}=")))
             .map_or(0, |n| n.parse::<u64>().unwrap())
+    }
+
+    /// The `TARGET_NOT_GRANTED` refusals an environment's workloads caused:
+    /// its destruction's count less the questions its own probe asked.
+    ///
+    /// Each measurement of a `PROXY_ONLY` environment sends the proxy one
+    /// `CONNECT` for a name no grant can hold (`CONTAINER_PROXY_REACHABLE`;
+    /// `dwk-sandbox-probe`'s `network.rs`, `PROXY_PROBE_HOST`) and passes only
+    /// on the proxy's refusal, which the proxy counts like any other. That is
+    /// the boundary measuring itself, not a workload reaching for a host. A
+    /// count below the questions is a measurement the proxy never refused --
+    /// an error, never zero.
+    fn beyond_the_probe(dispositions: &[String], probe_questions: u64) -> Result<u64, String> {
+        let refused = counted(dispositions, "TARGET_NOT_GRANTED");
+        refused.checked_sub(probe_questions).ok_or_else(|| {
+            format!(
+                "{refused} TARGET_NOT_GRANTED counted, fewer than the {probe_questions} \
+                 question(s) the environment's own probe asked: {dispositions:?}"
+            )
+        })
+    }
+
+    /// The accounting every registry case relies on, needing no runtime: the
+    /// hosted failure's own numbers, and the controls either side of them.
+    #[test]
+    fn a_probes_own_question_is_never_counted_as_a_workloads_refusal() {
+        let d = |items: &[&str]| -> Vec<String> { items.iter().map(|s| (*s).to_owned()).collect() };
+        // Run 42296614431: a granted install's environment, measured once,
+        // destroyed with the probe's one refusal. The workload caused none.
+        assert_eq!(
+            beyond_the_probe(&d(&["CLOSED=2", "TARGET_NOT_GRANTED=1"]), 1),
+            Ok(0)
+        );
+        // The probe's refusal alone is no refusal of the workload's: a
+        // refused case can no longer pass on the measurement's question...
+        assert_eq!(beyond_the_probe(&d(&["TARGET_NOT_GRANTED=1"]), 1), Ok(0));
+        // ...and one tunnel refused beside it is exactly one.
+        assert_eq!(beyond_the_probe(&d(&["TARGET_NOT_GRANTED=2"]), 1), Ok(1));
+        // A later measurement asks again.
+        assert_eq!(beyond_the_probe(&d(&["TARGET_NOT_GRANTED=3"]), 2), Ok(1));
+        // A question the proxy never refused is an error, never zero.
+        assert!(beyond_the_probe(&d(&["CLOSED=1"]), 1).is_err());
+        assert!(beyond_the_probe(&d(&[]), 1).is_err());
+        assert!(beyond_the_probe(&d(&["TARGET_NOT_GRANTED=1"]), 2).is_err());
+    }
+
+    /// At most this much of a workload's output goes into a failure's report.
+    const TAIL: usize = 4096;
+
+    /// `text` for a failure's report: key or certificate material and
+    /// credential headers withheld, then its last [`TAIL`] bytes.
+    fn bounded(text: &str) -> String {
+        let mut kept = String::new();
+        let mut material = false;
+        for line in text.lines() {
+            if line.contains("-----BEGIN ") {
+                material = true;
+                kept.push_str("[key or certificate material withheld]\n");
+            }
+            if material {
+                material = !line.contains("-----END ");
+                continue;
+            }
+            if line.to_ascii_lowercase().contains("authorization") {
+                kept.push_str("[a credential header withheld]\n");
+                continue;
+            }
+            kept.push_str(line);
+            kept.push('\n');
+        }
+        let from = kept.len().saturating_sub(TAIL);
+        let from = (from..=kept.len())
+            .find(|&at| kept.is_char_boundary(at))
+            .unwrap_or(kept.len());
+        if from == 0 {
+            kept
+        } else {
+            format!("[{from} earlier bytes omitted]\n{}", &kept[from..])
+        }
+    }
+
+    #[test]
+    fn a_failures_report_is_bounded_and_withholds_key_material() {
+        let pem = "a\n-----BEGIN PRIVATE KEY-----\nMIIsecret\n-----END PRIVATE KEY-----\nb\n";
+        let shown = bounded(pem);
+        assert!(!shown.contains("MIIsecret"), "{shown}");
+        assert!(shown.contains("withheld") && shown.contains("a\n") && shown.contains("b\n"));
+        assert!(!bounded("Proxy-Authorization: Basic c2VjcmV0\n").contains("c2VjcmV0"));
+        let long = "é".repeat(5 * TAIL);
+        let shown = bounded(&long);
+        assert!(
+            shown.starts_with('[') && shown.len() < TAIL + 64,
+            "{}",
+            shown.len()
+        );
+        assert_eq!(bounded("short\n"), "short\n");
+    }
+
+    /// The path a logged origin request asked for.
+    fn target_of(line: &str) -> Option<&str> {
+        let (_, rest) = line.split_once("\"target\": \"")?;
+        rest.split('"').next()
     }
 
     /// A host-side helper of the evidence's (`tests/sandbox/*.py`, standard
@@ -568,6 +684,8 @@ mod linux {
         exit: Option<u8>,
         stdout: String,
         stderr: String,
+        /// The workload's arguments, as the request named them.
+        invocation: String,
     }
 
     impl Ran {
@@ -591,6 +709,7 @@ mod linux {
                 exit: out.exit_code.map(|c| c.get()),
                 stdout: String::from_utf8_lossy(&out.stdout.content.to_bytes()).into_owned(),
                 stderr: String::from_utf8_lossy(&out.stderr.content.to_bytes()).into_owned(),
+                invocation: String::new(),
             }
         }
 
@@ -981,10 +1100,104 @@ reason = "NO_MATCHING_RULE"
                 "the workload did not run: {body:?}\nthe broker's last events:\n{}",
                 self.last_events()
             );
-            let ran = Ran::of(&body);
+            let mut ran = Ran::of(&body);
             assert_eq!(ran.image, self.pins.image);
             assert_eq!(ran.sha256, self.pins.python_sha);
+            ran.invocation = args.join(" ");
             ran
+        }
+
+        /// How many questions `environment`'s own probe asked its proxy: one
+        /// at its preparation -- which it passed, or it would never have
+        /// been ready -- and one at every later measurement the authority
+        /// recorded. A workload's launch is judged from the host and asks
+        /// nothing (`judged_for_work`).
+        fn probe_questions(&self, environment: &str) -> u64 {
+            let state = self.dir.state();
+            let of = |event: &str| -> Vec<json::Object> {
+                audit_records(&state, event)
+                    .into_iter()
+                    .filter(|r| {
+                        super::state_support::text(r, "environment_id") == Some(environment)
+                    })
+                    .collect()
+            };
+            let ready = of("environment.ready");
+            assert_eq!(
+                ready.len(),
+                1,
+                "{environment} was not made ready once: {ready:?}"
+            );
+            for list in ["failed", "unobservable"] {
+                assert!(
+                    !texts(&ready[0], list).iter().any(|i| i == PROBE_INVARIANT),
+                    "{environment} was ready with {PROBE_INVARIANT} {list}: {ready:?}"
+                );
+            }
+            1 + u64::try_from(of("environment.measured").len()).unwrap()
+        }
+
+        /// The `TARGET_NOT_GRANTED` refusals `environment`'s workloads caused,
+        /// from its destruction's record (`beyond_the_probe`).
+        fn refused_by_proxy(&self, destroyed: &json::Object, environment: &str) -> u64 {
+            let dispositions = texts(destroyed, "egress_dispositions");
+            beyond_the_probe(&dispositions, self.probe_questions(environment)).unwrap_or_else(
+                |why| {
+                    panic!(
+                        "{why}\n{}",
+                        self.why("the proxy's count", None, Some(destroyed))
+                    )
+                },
+            )
+        }
+
+        /// A failure's report, bounded: what ran and how it ended, what the
+        /// proxy counted at the destruction, what each origin was asked, and
+        /// the broker's last events. Output only as its withheld, bounded
+        /// tail (`bounded`); the suite holds no credential, and the run's
+        /// anchor is only ever named by its path.
+        fn why(&self, what: &str, ran: Option<&Ran>, destroyed: Option<&json::Object>) -> String {
+            let mut report = format!("{what}\n");
+            if let Some(ran) = ran {
+                report.push_str(&format!(
+                    "workload: {} {}\nexit: {:?}; environment {}\n\
+                     stdout, last {TAIL} bytes:\n{}stderr, last {TAIL} bytes:\n{}",
+                    self.pins.python,
+                    ran.invocation,
+                    ran.exit,
+                    ran.environment,
+                    bounded(&ran.stdout),
+                    bounded(&ran.stderr),
+                ));
+            }
+            if let Some(destroyed) = destroyed {
+                report.push_str(&format!(
+                    "counted at the destruction: {:?}\n",
+                    texts(destroyed, "egress_dispositions")
+                ));
+            }
+            for (name, origin) in [
+                ("granted", &self.granted),
+                ("ungranted", &self.ungranted),
+                ("rogue", &self.rogue),
+            ] {
+                let requests = origin.requests();
+                let last: Vec<&str> = requests
+                    .iter()
+                    .rev()
+                    .take(6)
+                    .filter_map(|r| target_of(r))
+                    .collect();
+                report.push_str(&format!(
+                    "the {name} origin: {} request(s), the last {last:?}\n",
+                    requests.len()
+                ));
+            }
+            report.push_str(&format!(
+                "the broker's last events:\n{}\n",
+                self.last_events()
+            ));
+            report
         }
 
         /// pip, as it is today, installing `args` into a target of its own:
@@ -1113,7 +1326,12 @@ reason = "NO_MATCHING_RULE"
         n += 1;
         let mut a = lab.peer(n, &[]);
         let ran = lab.python(&mut a, &["-I", INSPECT, "versions"]);
-        assert_eq!(ran.exit, Some(0), "{ran:?}");
+        assert_eq!(
+            ran.exit,
+            Some(0),
+            "{}",
+            lab.why("the workload did not succeed", Some(&ran), None)
+        );
         let found = object(&ran.stdout);
         assert_eq!(text(&found, "python"), lab.pins.python_version);
         assert_eq!(text(&found, "pip"), lab.pins.pip_version);
@@ -1139,7 +1357,12 @@ reason = "NO_MATCHING_RULE"
             false,
             &["--index-url", &granted_index, &base.name],
         );
-        assert_eq!(ran.exit, Some(0), "{ran:?}");
+        assert_eq!(
+            ran.exit,
+            Some(0),
+            "{}",
+            lab.why("the workload did not succeed", Some(&ran), None)
+        );
         lab.container(&a.run);
         let files = lab.installed(&mut a, "granted", &["base"]);
         assert_eq!(lab.granted.to(&format!("/files/{}", base.file)).len(), 1);
@@ -1149,11 +1372,14 @@ reason = "NO_MATCHING_RULE"
         );
         let destroyed = lab.release(&mut a, &ran.environment);
         assert_eq!(
-            counted(
-                &texts(&destroyed, "egress_dispositions"),
-                "TARGET_NOT_GRANTED"
-            ),
-            0
+            lab.refused_by_proxy(&destroyed, &ran.environment),
+            0,
+            "{}",
+            lab.why(
+                "the proxy refused a tunnel of a granted install",
+                Some(&ran),
+                Some(&destroyed)
+            )
         );
         evidence(
             "registry-pip-granted-index-installs",
@@ -1175,7 +1401,12 @@ reason = "NO_MATCHING_RULE"
             false,
             &["--index-url", &granted_index, &dependent.name],
         );
-        assert_eq!(ran.exit, Some(0), "{ran:?}");
+        assert_eq!(
+            ran.exit,
+            Some(0),
+            "{}",
+            lab.why("the workload did not succeed", Some(&ran), None)
+        );
         lab.container(&a.run);
         let files = lab.installed(&mut a, "dependency", &["dependent", "base"]);
         assert_eq!(
@@ -1191,7 +1422,17 @@ reason = "NO_MATCHING_RULE"
             lab.ungranted.requests().is_empty(),
             "the ungranted origin was reached"
         );
-        lab.release(&mut a, &ran.environment);
+        let destroyed = lab.release(&mut a, &ran.environment);
+        assert_eq!(
+            lab.refused_by_proxy(&destroyed, &ran.environment),
+            0,
+            "{}",
+            lab.why(
+                "the proxy refused a tunnel of a granted dependency install",
+                Some(&ran),
+                Some(&destroyed)
+            )
+        );
         evidence(
             "registry-pip-dependency-from-granted-index",
             &format!(
@@ -1210,10 +1451,15 @@ reason = "NO_MATCHING_RULE"
             false,
             &["--index-url", &ungranted_index, &base.name],
         );
-        assert!(ran.failed(), "{ran:?}");
+        assert!(
+            ran.failed(),
+            "{}",
+            lab.why("pip succeeded where it must fail", Some(&ran), None)
+        );
         assert!(
             ran.said("403"),
-            "pip never saw the proxy's refusal: {ran:?}"
+            "{}",
+            lab.why("pip never saw the proxy refusal", Some(&ran), None)
         );
         lab.container(&a.run);
         lab.nothing(&mut a, "ungranted");
@@ -1223,11 +1469,16 @@ reason = "NO_MATCHING_RULE"
         );
         let targets = lab.intent_targets(&ran.environment);
         let destroyed = lab.release(&mut a, &ran.environment);
-        let refusals = counted(
-            &texts(&destroyed, "egress_dispositions"),
-            "TARGET_NOT_GRANTED",
+        let refusals = lab.refused_by_proxy(&destroyed, &ran.environment);
+        assert!(
+            refusals >= 1,
+            "{}",
+            lab.why(
+                "the proxy refused nothing of the workload",
+                Some(&ran),
+                Some(&destroyed)
+            )
         );
-        assert!(refusals >= 1, "{destroyed:?}");
         refused.push(format!("ungranted-index:TARGET_NOT_GRANTED={refusals}"));
         evidence(
             "registry-pip-ungranted-index-refused",
@@ -1255,11 +1506,26 @@ reason = "NO_MATCHING_RULE"
             false,
             &["--index-url", &ungranted_index, &base.name],
         );
-        assert_eq!(ran.exit, Some(0), "{ran:?}");
+        assert_eq!(
+            ran.exit,
+            Some(0),
+            "{}",
+            lab.why("the workload did not succeed", Some(&ran), None)
+        );
         lab.container(&a.run);
         let files = lab.installed(&mut a, "control", &["base"]);
         assert_eq!(lab.ungranted.to(&format!("/files/{}", base.file)).len(), 1);
-        lab.release(&mut a, &ran.environment);
+        let destroyed = lab.release(&mut a, &ran.environment);
+        assert_eq!(
+            lab.refused_by_proxy(&destroyed, &ran.environment),
+            0,
+            "{}",
+            lab.why(
+                "the proxy refused a tunnel of the granted control",
+                Some(&ran),
+                Some(&destroyed)
+            )
+        );
         evidence(
             "registry-pip-ungranted-index-installs-when-granted",
             &format!("installed:{files}-files-as-the-fixture;from-{UNGRANTED}"),
@@ -1277,10 +1543,15 @@ reason = "NO_MATCHING_RULE"
             false,
             &["--index-url", &granted_index, &offsite.name],
         );
-        assert!(ran.failed(), "{ran:?}");
+        assert!(
+            ran.failed(),
+            "{}",
+            lab.why("pip succeeded where it must fail", Some(&ran), None)
+        );
         assert!(
             ran.said("403"),
-            "pip never saw the proxy's refusal: {ran:?}"
+            "{}",
+            lab.why("pip never saw the proxy refusal", Some(&ran), None)
         );
         assert_eq!(
             lab.granted.to(&format!("/simple/{}/", offsite.name)).len(),
@@ -1294,11 +1565,16 @@ reason = "NO_MATCHING_RULE"
             "the file's host was reached"
         );
         let destroyed = lab.release(&mut a, &ran.environment);
-        let refusals = counted(
-            &texts(&destroyed, "egress_dispositions"),
-            "TARGET_NOT_GRANTED",
+        let refusals = lab.refused_by_proxy(&destroyed, &ran.environment);
+        assert!(
+            refusals >= 1,
+            "{}",
+            lab.why(
+                "the proxy refused nothing of the workload",
+                Some(&ran),
+                Some(&destroyed)
+            )
         );
-        assert!(refusals >= 1, "{destroyed:?}");
         refused.push(format!(
             "file-on-ungranted-host:TARGET_NOT_GRANTED={refusals}"
         ));
@@ -1321,10 +1597,15 @@ reason = "NO_MATCHING_RULE"
             false,
             &["--index-url", &granted_index, &redirected.name],
         );
-        assert!(ran.failed(), "{ran:?}");
+        assert!(
+            ran.failed(),
+            "{}",
+            lab.why("pip succeeded where it must fail", Some(&ran), None)
+        );
         assert!(
             ran.said("403"),
-            "pip never saw the proxy's refusal: {ran:?}"
+            "{}",
+            lab.why("pip never saw the proxy refusal", Some(&ran), None)
         );
         assert_eq!(
             lab.granted
@@ -1340,11 +1621,16 @@ reason = "NO_MATCHING_RULE"
             "the redirect was followed"
         );
         let destroyed = lab.release(&mut a, &ran.environment);
-        let refusals = counted(
-            &texts(&destroyed, "egress_dispositions"),
-            "TARGET_NOT_GRANTED",
+        let refusals = lab.refused_by_proxy(&destroyed, &ran.environment);
+        assert!(
+            refusals >= 1,
+            "{}",
+            lab.why(
+                "the proxy refused nothing of the workload",
+                Some(&ran),
+                Some(&destroyed)
+            )
         );
-        assert!(refusals >= 1, "{destroyed:?}");
         refused.push(format!("redirect:TARGET_NOT_GRANTED={refusals}"));
         evidence(
             "registry-pip-redirect-to-ungranted-host-refused",
@@ -1367,11 +1653,29 @@ reason = "NO_MATCHING_RULE"
             true,
             &["--index-url", &unrouted, &base.name],
         );
-        assert!(ran.failed(), "{ran:?}");
-        assert!(ran.said("Errno 101"), "not ENETUNREACH: {ran:?}");
+        assert!(
+            ran.failed(),
+            "{}",
+            lab.why("pip succeeded where it must fail", Some(&ran), None)
+        );
+        assert!(
+            ran.said("Errno 101"),
+            "{}",
+            lab.why("not ENETUNREACH", Some(&ran), None)
+        );
         lab.container(&a.run);
         lab.nothing(&mut a, "direct");
-        lab.release(&mut a, &ran.environment);
+        let destroyed = lab.release(&mut a, &ran.environment);
+        assert_eq!(
+            lab.refused_by_proxy(&destroyed, &ran.environment),
+            0,
+            "{}",
+            lab.why(
+                "the proxy refused a tunnel of pip without its proxy",
+                Some(&ran),
+                Some(&destroyed)
+            )
+        );
         evidence(
             "registry-pip-direct-route-refused",
             "refused:nothing-installed;ENETUNREACH",
@@ -1387,7 +1691,11 @@ reason = "NO_MATCHING_RULE"
             true,
             &["--index-url", &granted_index, &base.name],
         );
-        assert!(ran.failed(), "{ran:?}");
+        assert!(
+            ran.failed(),
+            "{}",
+            lab.why("pip succeeded where it must fail", Some(&ran), None)
+        );
         // getaddrinfo's own failure, a negative `EAI_*` code -- which one
         // depends on what the environment's resolver configuration names;
         // none of them is an answer.
@@ -1397,7 +1705,12 @@ reason = "NO_MATCHING_RULE"
             .and_then(|rest| rest.split(']').next())
             .filter(|code| !code.is_empty() && code.bytes().all(|b| b.is_ascii_digit()))
             .map(|code| format!("[Errno -{code}]"))
-            .unwrap_or_else(|| panic!("the name was not left unresolved: {ran:?}"));
+            .unwrap_or_else(|| {
+                panic!(
+                    "{}",
+                    lab.why("the name was not left unresolved", Some(&ran), None)
+                )
+            });
         lab.container(&a.run);
         lab.nothing(&mut a, "direct-name");
         assert_eq!(
@@ -1405,7 +1718,17 @@ reason = "NO_MATCHING_RULE"
             served,
             "a direct attempt reached the origin"
         );
-        lab.release(&mut a, &ran.environment);
+        let destroyed = lab.release(&mut a, &ran.environment);
+        assert_eq!(
+            lab.refused_by_proxy(&destroyed, &ran.environment),
+            0,
+            "{}",
+            lab.why(
+                "the proxy refused a tunnel of pip without its proxy",
+                Some(&ran),
+                Some(&destroyed)
+            )
+        );
         evidence(
             "registry-pip-direct-by-name-unresolved",
             &format!("refused:nothing-installed;getaddrinfo-{unresolved}"),
@@ -1423,10 +1746,15 @@ reason = "NO_MATCHING_RULE"
             false,
             &["--index-url", &rogue_index, &base.name],
         );
-        assert!(ran.failed(), "{ran:?}");
+        assert!(
+            ran.failed(),
+            "{}",
+            lab.why("pip succeeded where it must fail", Some(&ran), None)
+        );
         assert!(
             ran.said("CERTIFICATE_VERIFY_FAILED") || ran.said("certificate verify failed"),
-            "pip did not refuse the issuer: {ran:?}"
+            "{}",
+            lab.why("pip did not refuse the issuer", Some(&ran), None)
         );
         lab.container(&a.run);
         lab.nothing(&mut a, "rogue");
@@ -1436,12 +1764,14 @@ reason = "NO_MATCHING_RULE"
         );
         let destroyed = lab.release(&mut a, &ran.environment);
         assert_eq!(
-            counted(
-                &texts(&destroyed, "egress_dispositions"),
-                "TARGET_NOT_GRANTED"
-            ),
+            lab.refused_by_proxy(&destroyed, &ran.environment),
             0,
-            "the proxy refused a granted tunnel: {destroyed:?}"
+            "{}",
+            lab.why(
+                "the proxy refused a granted tunnel",
+                Some(&ran),
+                Some(&destroyed)
+            )
         );
         evidence(
             "registry-pip-untrusted-issuer-refused",
@@ -1462,8 +1792,16 @@ reason = "NO_MATCHING_RULE"
             false,
             &["--index-url", &granted_index, &sdist.name],
         );
-        assert!(ran.failed(), "{ran:?}");
-        assert!(backend.exists(), "the build backend did not run: {ran:?}");
+        assert!(
+            ran.failed(),
+            "{}",
+            lab.why("pip succeeded where it must fail", Some(&ran), None)
+        );
+        assert!(
+            backend.exists(),
+            "{}",
+            lab.why("the build backend did not run", Some(&ran), None)
+        );
         lab.container(&a.run);
         lab.nothing(&mut a, "sdist");
         lab.release(&mut a, &ran.environment);
@@ -1489,7 +1827,12 @@ reason = "NO_MATCHING_RULE"
             false,
             &["--index-url", &granted_index, &project.name],
         );
-        assert_eq!(ran.exit, Some(0), "{ran:?}");
+        assert_eq!(
+            ran.exit,
+            Some(0),
+            "{}",
+            lab.why("the workload did not succeed", Some(&ran), None)
+        );
         lab.container(&a.run);
         let files = lab.installed(&mut a, "pth", &["pth"]);
         assert!(!pth.exists(), "the install ran the .pth");
@@ -1513,7 +1856,7 @@ reason = "NO_MATCHING_RULE"
         assert_eq!(refused.len(), 3, "{refused:?}");
         evidence(
             "registry-egress-counted-at-destruction",
-            &format!("counted:{}", refused.join(";")),
+            &format!("counted:{};probe-questions-excluded", refused.join(";")),
             "authority-audit-at-destruction",
         );
 

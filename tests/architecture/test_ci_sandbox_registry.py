@@ -921,3 +921,127 @@ def test_a_tool_that_reports_another_version_fails_closed(
         _build(tmp_path, monkeypatch, reported, calls)
     # Refused, and the image that failed its check is not left behind.
     assert calls[-1] == ["image", "rm", "--force", "sha256:" + "a" * 64], calls[-1]
+
+
+# --- the proxy's count ----------------------------------------------------------
+
+# Every case that reads what the proxy refused, by the rule it must keep: a
+# workload that reaches only what it was granted, or no proxy at all, caused
+# none; a refused one caused at least one. Hosted run 42296614431 failed the
+# granted install on the probe's own question (`beyond_the_probe`).
+EXACTLY_NONE = 6
+AT_LEAST_ONE = 3
+ACCOUNTING_TEST = "a_probes_own_question_is_never_counted_as_a_workloads_refusal"
+
+
+def _accounting_problems(text: str) -> list[str]:
+    """Every way the suite `text` could count its environments' own probe
+    question as a workload's refusal again, or lose what holds that."""
+    problems: list[str] = []
+    try:
+        helper = text[text.index("    fn beyond_the_probe(") :]
+        helper = helper[: helper.index("\n    }\n")]
+    except ValueError:
+        return ["no beyond_the_probe"]
+    if "checked_sub(probe_questions)" not in helper:
+        problems.append("beyond_the_probe does not take the probe's questions away, or errs")
+    outside = text.replace(helper, "")
+    raw = [
+        m.start()
+        for m in re.finditer(r"(?<![\w:])counted\(", outside)
+        if outside[max(0, m.start() - 3) : m.start()] != "fn "
+    ]
+    if raw:
+        problems.append(f"{len(raw)} raw count(s) of a disposition outside beyond_the_probe")
+    if not re.search(r"#\[test\]\n    fn " + ACCOUNTING_TEST + r"\(\)", text):
+        problems.append(f"{ACCOUNTING_TEST} is gone, or is not run everywhere")
+    if "Ok(0)" not in text[text.find(ACCOUNTING_TEST) :][:2400]:
+        problems.append("the accounting test no longer holds the hosted failure's numbers")
+    questions = text[text.find("fn probe_questions(") :][:1600]
+    for needed in (
+        '"environment.ready"',
+        '1 + u64::try_from(of("environment.measured")',
+        "PROBE_INVARIANT",
+    ):
+        if needed not in questions:
+            problems.append(f"probe_questions does not read {needed}")
+    try:
+        start = text.index("    fn pip_as_it_is_today_reaches_only_the_granted_fixture_registry(")
+        pip = text[start : text.index("    // ---- npm, refused", start)]
+    except ValueError:
+        return [*problems, "no pip test"]
+    none = len(re.findall(r"lab\.refused_by_proxy\([^)]*\),\s*0,", pip))
+    if none != EXACTLY_NONE:
+        problems.append(f"{none} cases hold the proxy to no refusal, not {EXACTLY_NONE}")
+    some = len(re.findall(r"let refusals = lab\.refused_by_proxy\(", pip))
+    if some != AT_LEAST_ONE or pip.count("refusals >= 1") != AT_LEAST_ONE:
+        problems.append(f"{some} refused cases read the workload's own refusals")
+    return problems
+
+
+def test_no_case_counts_the_probes_own_question_as_a_workloads_refusal() -> None:
+    assert _accounting_problems(SUITE_SOURCE.read_text(encoding="utf-8")) == []
+
+
+@pytest.mark.parametrize(
+    ("mutate", "said"),
+    [
+        # The hosted failure's own shape: the raw count, held to zero.
+        (
+            lambda t: t.replace(
+                "lab.refused_by_proxy(&destroyed, &ran.environment),\n            0,",
+                'counted(&texts(&destroyed, "egress_dispositions"), "TARGET_NOT_GRANTED"),\n'
+                "            0,",
+                1,
+            ),
+            "raw count",
+        ),
+        # The false pass it hid: a refused case satisfied by the probe alone.
+        (
+            lambda t: t.replace(
+                "let refusals = lab.refused_by_proxy(&destroyed, &ran.environment);",
+                'let refusals = counted(&texts(&destroyed, "egress_dispositions"), '
+                '"TARGET_NOT_GRANTED");',
+                1,
+            ),
+            "raw count",
+        ),
+        (
+            lambda t: t.replace("checked_sub(probe_questions)", "checked_sub(0)", 1),
+            "take the probe",
+        ),
+        (
+            lambda t: t.replace(
+                f"#[test]\n    fn {ACCOUNTING_TEST}(",
+                f'#[test]\n    #[ignore = "later"]\n    fn {ACCOUNTING_TEST}(',
+                1,
+            ),
+            "run everywhere",
+        ),
+        (lambda t: t.replace("1 + u64::try_from(", "u64::try_from(", 1), "measured"),
+        (
+            lambda t: t.replace(
+                "lab.refused_by_proxy(&destroyed, &ran.environment),\n            0,",
+                "lab.refused_by_proxy(&destroyed, &ran.environment),\n            1,",
+                1,
+            ),
+            "no refusal",
+        ),
+        (lambda t: t.replace("refusals >= 1", "refusals >= 0", 1), "refused cases"),
+    ],
+    ids=[
+        "granted-raw-count",
+        "refused-raw-count",
+        "probe-not-taken-away",
+        "accounting-test-ignored",
+        "re-measurement-forgotten",
+        "granted-case-tolerates-a-refusal",
+        "refused-case-tolerates-none",
+    ],
+)
+def test_counting_the_probe_as_the_workloads_is_caught(mutate: object, said: str) -> None:
+    text = SUITE_SOURCE.read_text(encoding="utf-8")
+    mutated = mutate(text)  # type: ignore[operator]
+    assert mutated != text, "the mutation did not apply"
+    problems = _accounting_problems(mutated)
+    assert any(said in problem for problem in problems), problems

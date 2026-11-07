@@ -12,6 +12,10 @@ evidence is NOT EXERCISED by design.\
 **Status (2026-11-06):** **IMPLEMENTATION REPAIRED / HOSTED REVERIFICATION PENDING.** The first
 hosted run failed at the first Python workload (§11). It is repaired, unstaged, and M5e.4 is not
 complete until the hosted job passes and the owner accepts it.\
+**Status (2026-11-07):** **REPAIR COMMIT-READY / HOSTED VERIFICATION PENDING.** The second hosted
+run got past the interpreter and installed from the granted index. It failed on the suite's own
+count of the proxy's refusals, which included the environment's probe (§12). The test's
+accounting is repaired, unstaged; nothing in production changed.\
 **Authority of this document:** a technical handoff, not an ADR. It approves nothing.
 [ADR-0054](adr/0054-m5e-npm-hygiene-profile.md) and
 [ADR-0055](adr/0055-m5e-pip-hygiene-profile.md) stay **Proposed**, and npm stays
@@ -296,3 +300,84 @@ That hash is a real change of the expected digest, derived from the new pin, nev
 the wire says `EXECUTABLE_CHANGED`; the log says why. The official Node.js binary is past it.
 M5e.4 is unaffected, since `npm`'s launcher is the file pinned and hashed, and M5e.5 must keep
 that in view.
+
+## 12. The second hosted run, and its repair (2026-11-07)
+
+**What happened.** Hosted run
+[42296614431](https://github.com/Onwcan/DireWolf/actions/runs/42296614431) (run no. 133,
+`cb76b67`; the two runs before it were cancelled by the next push) passed 28 of 30 jobs.
+`sandbox-registry` failed, and the `ci` aggregate with it. The stripped interpreter worked:
+`registry-tools-pinned-in-the-environment` was printed with SHA-256 `eaaa3080…`. The pip test
+then stopped at `sandbox_registry.rs:1151` with `left: 1, right: 0`.
+
+**What that line is.** It is not pip's exit code. The exit-code assertion two cases above it
+(`:1142`) prints `Some(…)` and pip's whole output; the assertion at `:1151` is the count of
+`TARGET_NOT_GRANTED` refusals in the environment's destruction record, held to zero, with no
+message. So, by the panic's line and values (the job's log needs a sign-in and was not read
+here), the granted install had exited 0, installed the base wheel byte for byte, fetched its
+file from the granted origin once and left the ungranted origin untouched. Then the proxy's
+count for that environment was 1.
+
+**The cause.** Every measurement of a `PROXY_ONLY` environment asks the proxy for a name no grant
+can hold: `CONTAINER_PROXY_REACHABLE` sends one `CONNECT direwolf-probe.invalid:443`
+(`crates/dwk-sandbox-probe/src/network.rs`, `proxy_reachable`) and passes only on DireWolf's
+own `403 TARGET_NOT_GRANTED`. The proxy counts that refusal like any other
+(`crates/dwkd-broker/src/egress/tunnel.rs`), and the destruction's record reports the
+environment's counters (`egress_fields`, `crates/dwkd-authority/src/state/environment.rs`). The
+probe runs at preparation and at each later measurement; a workload's launch is judged from
+the host and asks nothing (`judged_for_work`, `crates/dwkd-broker/src/sandbox/oci.rs`). So every
+environment the suite makes ends with one `TARGET_NOT_GRANTED` that is the boundary measuring
+itself. The broker's own real-runtime evidence already counted it ("the counters say what the
+probe asked", `crates/dwkd-broker/tests/sandbox_egress.rs`, at least 2 after a preparation and
+one more measurement); the registry suite did not.
+
+**Reproduced.** In process, with no runtime: the broker's
+`egress::tests::a_target_that_is_not_granted_is_refused_before_anything_is_resolved` sends the
+probe's exact request and counts it `TARGET_NOT_GRANTED`; it passes. The suite's new
+`a_probes_own_question_is_never_counted_as_a_workloads_refusal` holds the run's own numbers
+(`TARGET_NOT_GRANTED=1`, one measurement: no refusal of the workload's).
+
+**Two more defects of the same kind, found reading the rest of the test.**
+
+- The untrusted-issuer case held the raw count to zero too. It would have failed the same way.
+- The three refused cases (`ungranted-index`, `file-on-ungranted-host`, `redirect`) required a
+  raw count of at least one. **The probe's question alone satisfied that**, so those assertions
+  could pass with the workload refused nothing. pip's `403` was asserted separately, so the
+  evidence did not rest on the count alone, but the count proved nothing.
+
+**The repair: the test's accounting, not the boundary.** `beyond_the_probe` takes the probe's
+questions out of the destruction's count. `Lab::probe_questions` derives them from the audit
+log: the environment's `environment.ready` record, with `CONTAINER_PROXY_REACHABLE` neither
+failed nor unobservable, plus every `environment.measured` record. A count below the questions
+is an error, never zero. The granted install, the dependency, the granted control, both
+direct-route cases and the untrusted issuer now hold the workload to exactly no refusal. The
+three refused cases hold it to at least one of its own. `registry-egress-counted-at-destruction`
+reports the workloads' counts, `probe-questions-excluded`.
+
+**Observability.** Every pip assertion now reports, bounded:
+
+- the invocation, exit code and environment;
+- the last 4 KiB of stdout and stderr, with key or certificate material and credential headers
+  withheld;
+- the destruction's dispositions and each origin's request count and last paths;
+- the broker's last 24 events.
+
+`a_failures_report_is_bounded_and_withholds_key_material` holds the bound and the withholding.
+
+**Guarded.** `tests/architecture/test_ci_sandbox_registry.py` refuses any raw disposition count
+outside `beyond_the_probe`, and checks five more things:
+
+- the accounting test runs everywhere;
+- the preparation's own question is counted;
+- six cases hold the workload to no refusal;
+- three hold it to at least one;
+- every one of those holds is caught by a negative control.
+
+**Not changed:** production code, the probe, the proxy, any grant, TLS, the pins, the image,
+`REGISTRY_CASES`, `REGISTRY_OUTCOMES`, the job and the hosted-only gate.
+
+**Still unproven until the next hosted run.** Everything after the granted install has never run
+on any host: the dependency, the refused and direct cases, pip's error texts (`403`,
+`[Errno 101]`, `[Errno -N]`, `CERTIFICATE_VERIFY_FAILED`), the source distribution's backend
+and the `.pth` cases. If one fails, its report now says why. M5e.4 stays **IN PROGRESS** until
+that run passes and the owner accepts it, the OD-E4 provenance deviation included.
