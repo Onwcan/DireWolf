@@ -1,0 +1,269 @@
+# ADR-0058: M5e.2 — R3's E6: each hard rule weakened in a real `PROXY_ONLY` environment the released broker prepared, by a test-only runtime that does not do what the plan asks, measured from both vantages and refused by the production decision
+
+**Status:** Proposed · **Date:** 2026-11-08 · **Would supersede (only on the owner's acceptance, after its hosted evidence passes):** [ADR-0057](0057-m5e-proxy-only-real-container-evidence-residual.md) · **Refines:** [ADR-0047](0047-m5a-oci-execution-environment-and-measured-assurance.md) §9 (weakened profiles are caught by measurement), [ADR-0048](0048-m5b-proxy-only-topology-and-connect-proxy.md) §§9, 14 (`PROXY_ONLY`'s measurement and its weakened topologies) · **Addresses:** R3's E6 ([M5E_ASSURANCE_PLAN.md](../M5E_ASSURANCE_PLAN.md) §§3a, 3b), [issue #19](https://github.com/Onwcan/DireWolf/issues/19) · **Implementation authorised by:** the owner, 2026-11-08 — the implementation and its evidence path only: not an acceptance of this record, not evidence, and not a change to M5's acceptance contract
+
+> **ADR-0057's E6 is built: for each of the fifteen rows ADR-0057 §1a names,
+> the released, unmodified broker prepares a genuine `PROXY_ONLY` environment
+> along its production path, and the container runtime it is handed records
+> and runs the environment with exactly that row's hard rule weakened. The
+> broker's own measurement must catch it from the vantage(s) §1a names and its
+> production decision must refuse it; a conforming control through the same
+> runtime must be kept. Every raw observation is digested where it is made,
+> checked again from its bytes, and published with the run's provenance. It
+> runs only on a disposable GitHub-hosted runner, and has not run there yet:
+> E6 is NOT EXERCISED until the owner's hosted run passes, and nothing here
+> closes R3, M5e.2 or issue #19.**
+
+## Context
+
+**What R-B requires.** The owner selected R-B on ADR-0057 (2026-11-01): R3's
+real-container level is required, the residual is not accepted, and M5e.2
+cannot close without E6 — real `PROXY_ONLY` containers weakened one hard rule
+at a time, measured from both vantages and refused by the production broker
+(ADR-0057 §§1, 8). The plan's §3b says what such evidence must carry; its
+§3a found that no existing source observes it.
+
+**Why it was not built before.** An earlier session's work on exactly that was
+stopped by a safety control, and the owner directed that it not be worked
+around (ADR-0057, Context). On 2026-11-08 the owner authorised this defensive
+assurance work on the project's own sandbox, in writing, within the applicable
+safety controls and with no control circumvented, in an isolated and
+disposable environment (§3b, criterion 1). It was built openly under that
+authorisation: what it does is stated here, in its tests and in its job, and
+nothing was obscured to get past any control.
+
+**Why the weakening cannot be the broker's.** The broker's plan spells
+`oci-strict` and nothing else: TX032 refuses a weakening word in `plan.rs`,
+and the plan's tests hold that it spells every hard rule (ADR-0057 §4). That
+must stay true. So a weakened environment the production broker prepares can
+only come from where ADR-0057 §4 says one could: **a runtime that does not do
+what the plan asks.**
+
+## Decision (proposed)
+
+### 1. The evidence path: a faulty runtime at the runtime's API
+
+The test (the egress suite's `e6` module,
+`crates/dwkd-broker/tests/sandbox_egress.rs`), playing the authority as every
+broker suite does, hands the released broker a runtime socket that is a
+test-only forwarder between the real client the authority hashed and the real
+daemon. The forwarder relays every request and every answer byte for byte —
+the version check, the image check, the relay's and the probe's copies, the
+setup's `run`, the relay's `create` and `start`, every `inspect`, every
+`exec`, every removal — **except one request**: the `create` whose labels name
+the case's environment and the `environment` role, in which it changes
+exactly the field (for the resource limits, the two fields) that M5a's
+matching weakening flag puts there (§3). The daemon then records and runs
+exactly that container. Nothing the daemon or the kernel answers is changed:
+the record the broker judges is the daemon's own, and the probe's report is
+the kernel's view from inside, read through the same socket, which keeps a
+copy of each.
+
+So everything that makes the environment `PROXY_ONLY` is the broker's own:
+its proxy opened before anything could connect, the environment created in
+the `none` network with the broker's proxy variables, the relay in the image
+hashed against the authority's digest, the setup run and removed, the relay
+started in the environment's namespace with the broker's directory mounted —
+and so is the measurement (`HOST_*` from the record, `CONTAINER_*` from the
+digest-pinned probe) and the decision (`kept_or_taken_down`, `oci::clean`)
+that refuses it and tears it down whole. The broker under test is the
+released binary, unmodified; the test changes no product line.
+
+### 2. The control, and what keeps a refusal the weakening's
+
+The same forwarder with no fault must forward a conforming environment's
+`create` byte for byte, and the broker must keep it — every required
+invariant passing, the topology's four included — and then destroy it
+exactly. Each weakened case must have asked for that same strict plan (its
+labels aside, its environment compared as a set: Docker's CLI 29.9.2 orders
+the proxy variables differently from one invocation to the next, which the
+judgement does not depend on), and the daemon must have received it with
+**exactly** the case's fields changed and no other.
+
+### 3. The cases
+
+ADR-0057 §1a's fifteen rows, one case each; the resource-limit row's task
+backstop (ADR-0056) a second case of its row. The host's network runs last.
+
+| Case | §1a's row | The `create` field(s) changed | Must fail (vantage) |
+|---|---|---|---|
+| `e6-weakened-writable-root-refused` | Read-only root | `HostConfig.ReadonlyRootfs` | `HOST_ROOT_READ_ONLY`, `CONTAINER_ROOT_READ_ONLY` (both) |
+| `e6-weakened-root-user-refused` | Non-root user | `User` | `HOST_USER_NON_ROOT`, `CONTAINER_UID_GID` (both) |
+| `e6-weakened-privileged-refused` | Not privileged | `HostConfig.Privileged` | `HOST_NOT_PRIVILEGED`, `CONTAINER_CAPABILITIES_EMPTY`, `CONTAINER_DEVICES_MINIMAL`, `CONTAINER_PROC_RESTRICTED` (both) |
+| `e6-weakened-runtime-socket-mounted-refused` | No runtime socket | `HostConfig.Binds` | `HOST_NO_RUNTIME_SOCKET`, `HOST_MOUNTS_EXACT`, `CONTAINER_NO_RUNTIME_SOCKET` (both) |
+| `e6-weakened-capability-added-refused` | Capabilities dropped | `HostConfig.CapAdd` | `HOST_CAPABILITIES_DROPPED`, `CONTAINER_CAPABILITIES_EMPTY` (both) |
+| `e6-weakened-no-new-privileges-disabled-refused` | `no-new-privileges` | `HostConfig.SecurityOpt` | `HOST_NO_NEW_PRIVILEGES`, `CONTAINER_NO_NEW_PRIVILEGES` (both) |
+| `e6-weakened-seccomp-unconfined-refused` | Pinned seccomp, not unconfined | `HostConfig.SecurityOpt` | `HOST_SECCOMP_PROFILE`, `CONTAINER_SECCOMP_PROFILE_ACTIVE` (both) |
+| `e6-weakened-seccomp-default-profile-refused` | Pinned seccomp, not the runtime's default | `HostConfig.SecurityOpt` | the same (both) |
+| `e6-weakened-host-pid-refused` | Private PID namespace | `HostConfig.PidMode` | `HOST_PID_NAMESPACE_PRIVATE`, `CONTAINER_PID_NAMESPACE_PRIVATE` (both) |
+| `e6-weakened-host-ipc-refused` | Private IPC namespace | `HostConfig.IpcMode` | `HOST_IPC_NAMESPACE_PRIVATE` (host only) |
+| `e6-weakened-host-uts-refused` | Private UTS namespace | `HostConfig.UTSMode` | `HOST_UTS_NAMESPACE_PRIVATE` (host only) |
+| `e6-weakened-mutable-image-tag-refused` | Image pinned by digest | `Image` | `HOST_IMAGE_PINNED` (host only) |
+| `e6-weakened-extra-device-refused` | No devices | `HostConfig.Devices` | `HOST_NO_DEVICES`, `CONTAINER_DEVICES_MINIMAL` (both) |
+| `e6-weakened-resource-limits-dropped-refused` | Resource limits | `HostConfig.PidsLimit`, `HostConfig.MemorySwap` | `HOST_RESOURCE_LIMITS`, `CONTAINER_CGROUP_LIMITS` (both) |
+| `e6-weakened-task-backstop-at-256-refused` | Resource limits (the 8 192 task backstop) | `HostConfig.Ulimits` (`nproc` 256) | `HOST_RESOURCE_LIMITS`, `CONTAINER_RLIMITS` (both) |
+| `e6-weakened-host-network-refused` | Isolated network | `HostConfig.NetworkMode` | `HOST_NETWORK_ISOLATED`, `CONTAINER_NETWORK_ISOLATED`, `CONTAINER_DIRECT_EGRESS_REFUSED`, `CONTAINER_DIRECT_DNS_REFUSED` (both) |
+
+With the control (`e6-faulty-runtime-forwards-a-conforming-environment-kept`)
+and the count (`e6-row-count`), 18 cases, suite `sandbox-proxy-weakened`, each
+at `real-oci` (`scripts/dw.py`, `E6_ROWS`, `ATTRIBUTION`). The test's rows and
+the task's are held equal, and their coverage of §1a's rows and vantages
+checked, by `tests/architecture/test_m5e_e6.py`.
+
+### 4. What each case must show, three times over
+
+1. **In the test, as it runs.** Exactly one `create` weakened — the
+   environment's, in exactly its fields — every other forwarded unchanged; the
+   setup and the relay made; the environment **not kept**, and the broker's
+   own `environment_prepared … retained=false` event; the probe's report
+   arrived; every invariant of the row `FAIL`; the record the broker judged
+   showing the weakening; every inside verdict of the broker's answer equal to
+   the probe's own report; nothing of the environment left — no container of
+   its labels, no listener directory.
+2. **In its line** (`e6_outcome_problem`, through
+   `require_attributed_evidence`). Refused by exactly the row's invariants, of
+   the vantage its enforcement names; every other invariant that did not pass
+   reported (`also:`); the topology's four reported whatever their verdicts
+   (`topology:`) — how a weakening and the topology interact is observed
+   (ADR-0057 §3, U3), not assumed; the fields changed; for the host's network,
+   what the host's loopback gained. The control kept, its topology passing;
+   the count complete. A row not exercised fails E6 whole.
+3. **From the raw bytes, independently** (`e6_check_raw`, Python, over what
+   the test wrote). Each case's eight files — the create as sent and as
+   received, the daemon's record, the probe's raw stream and its report, the
+   broker's answer, its requests and its events — at the digest the test
+   printed when it wrote them, and nothing else; the same plan for every
+   case; the row's fields alone changed; the record showing the weakening; the
+   report exactly the stream's stdout; the broker's inside verdicts the
+   report's; the refusal in the answer and in the event; the setup and relay
+   created; the line's topology the answer's.
+
+### 5. Where it runs
+
+Only on a disposable GitHub-hosted runner: the required job
+`sandbox-proxy-weakened` runs `make sandbox-proxy-weakened-evidence` with
+`DW_E6_EVIDENCE=1`, which no other job sets; the task refuses before it builds
+anything anywhere else (NOT EXERCISED, which fails), and refuses Docker
+Desktop. The one case that touches the host — the host's network, in which
+the broker's setup, run in a namespace that is the host's, adds the proxy
+address to the host's own loopback (§8) — is refused by the test itself
+anywhere but such a runner. A run anywhere else is development, never E6.
+
+### 6. Against §3b's criteria
+
+| §3b | How it is met |
+|---|---|
+| 1. Authorisation | The owner's authorisation of 2026-11-08 (this record's status line); a disposable GitHub-hosted runner, enforced by the task and the test (§5) |
+| 2. Provenance | The published manifest: the commit (and `GITHUB_SHA`), whether the tree was clean, the run's URL and attempt, the runner's image and kernel, the runtime's version, API, OS and architecture, the client's path, identity and SHA-256, the probe's and relay's SHA-256 (equal to what the measurement pinned), every image |
+| 3. Authentic observations | Per case, the daemon's record as the broker read it and the probe's raw stream, unedited, each with its SHA-256 — kept by the forwarder, never re-typed |
+| 4. Vantage attribution | Each refusal names its invariants; the gate holds them to the vantage the contract gives each case (three host-only rows, the rest both) |
+| 5. `PROXY_ONLY`, really | The broker's own preparation and its `PROXY_ONLY` measurement; the topology's four invariants reported for every case; the control kept through the same runtime |
+| 6. One hard rule at a time | Exactly the row's fields changed, from the control's plan; every other invariant that moved reported |
+| 7. The production refusal | `retained=false` from the broker's `prepare`, and its own event — its measurement and `oci::clean`, never a re-implementation; a container that failed to start would show no measurement and fail the case |
+| 8. Cleanup and ownership | Per case, no container of the environment's labels and no listener directory; the task's before-and-after census of every container and network |
+| 9. Completeness | 16 cases over all 15 rows, the control and the count required by name; one not exercised fails E6 |
+| 10. Integrity and reproducibility | Every file digested where it is written and checked again where it is read; all of them, base64, and one manifest with its own digest published into the job's log; `make sandbox-proxy-weakened-review` (`DW_E6_LOG=<downloaded log>`) re-verifies a hosted log offline, needing no runtime |
+
+### 7. Observed in development, not evidence (2026-11-08)
+
+Run on the developer's Docker Desktop (engine 29.9.2, API 1.56) by a scratch
+harness through the task's own helpers, `DW_E6_EVIDENCE=1` and no hosted
+runner — so the host's network was refused by the test, as §5 requires, and
+the count and the attribution gate failed, as they must off a runner. The
+control was kept; each of the other fifteen cases was refused by exactly its
+row's invariants, the topology's four passing in every one; and the 128 raw
+observations passed the independent check. Also reported, never hidden: the
+runtime socket also fails `CONTAINER_MOUNTS_EXPECTED`; seccomp unconfined
+also fails the canaries `CONTAINER_UNSHARE_BLOCKED` and
+`CONTAINER_KEYRING_BLOCKED`; and the host's PID and IPC namespaces also fail
+`HOST_NOT_PRIVILEGED` — the daemon records more than the one field there, and
+nothing that hides the weakening. The client hangs up on one of `docker run
+--rm`'s two `wait` requests for the setup; the forwarder records each such
+hang-up in the case's requests, and a step the broker needed and did not get
+would fail that step. **None of this is E6**: it ran on a daemon that is not
+disposable, at no hosted commit, and without the host's network.
+
+### 8. Predicted, for the hosted run: the host's network and the setup
+
+A runtime that gives the environment the host's network namespace makes the
+broker's setup — root with `NET_ADMIN`, joining the environment's namespace —
+add `169.254.7.1/32` to **the host's own loopback**, and the relay then
+serves the run's proxy on the host's network until the measurement refuses
+the environment and tears it down; the teardown removes the containers and
+the listener but not the address. The case is expected to pass — the hard
+rule refused from both vantages — and to report the address as what the
+host's loopback gained; the gate accepts nothing else there. If the hosted run
+shows it, it is finding **F-E6-HOSTNET**: not fail-open (the environment is
+refused) but a host-side residue and a short exposure of the run's grant to
+the host, under a runtime that ignores `--network none`. A remedy — judging
+the record's host invariants before connecting the peer, so the setup never
+runs in a namespace that is not the environment's own — would change
+ADR-0048's preparation order and is the owner's to decide; it is not built
+here, and building it first would hide the interaction E6 exists to observe.
+
+### 9. What closes E6, R3 and issue #19
+
+1. The owner commits this change; the hosted `sandbox-proxy-weakened` job
+   passes with every case at its level, and the `ci` aggregate with it.
+2. The owner reviews the hosted log — `make sandbox-proxy-weakened-review`
+   over the downloaded log, and the manifest's provenance against the run.
+3. The owner accepts this record. Then ADR-0057's status becomes "Superseded
+   by ADR-0058", the index moves it to the superseded table, and
+   `dwcheck adr --record` records this one in the accepted digest; the
+   `test_m5e_r3_closure.py` guard then requires exactly that.
+4. The owner explicitly authorises R3 satisfied and M5e.2 complete, and
+   closes issue #19.
+
+Until then E6 is **NOT EXERCISED — hosted evidence pending**, R3 is not met,
+M5e.2 stays IN PROGRESS, and ADR-0057 stays Proposed under the owner's R-B.
+
+## Consequences
+
+**Positive.** E6 exists, as R-B requires, at the real-container level and
+through the production path: the broker's own topology, measurement and
+decision, over a container the real daemon recorded and ran weakened. It
+closes ADR-0057's U1–U3 on its evidence (the record of a weakened
+`PROXY_ONLY` environment, the inside vantage under each weakening, and how
+each weakening and the topology interact), with every other moved invariant
+reported. It is a required job, so a later change to the broker, the probe,
+the topology or the runtime that stops a weakening being refused under
+`PROXY_ONLY` fails CI. The raw observations make the result reviewable by
+someone who trusts neither the test nor the task.
+
+**Negative.** The weakening is injected at the API, so the daemon records it:
+this shows each hard rule caught when the runtime's record and the kernel
+tell the truth about a weakened container, not a runtime that lies in its
+record — the inside vantage is the defence there, and no case here models
+it. A required job that runs privileged and host-sharing containers on every
+commit is CI time and risk the hosted runner bears. The host's network case
+changes the runner's loopback (§8). The forwarder is some 650 lines of test
+code (the whole `e6` module about 2 100, its own unit tests included) that
+must keep parsing the client's HTTP; its unit tests, against a fake daemon,
+run in `make test`.
+
+## Alternatives considered
+
+**A weakening switch in the broker, test-only.** Rejected: the product would
+hold a path to a weaker plan, which TX032 and ADR-0047 §4 exist to refuse.
+
+**Containers made by the test, as M5a's `NO_NETWORK` cases are.** Rejected for
+E6: the topology — the proxy listener, its directory, the setup, the relay —
+would be the test's re-implementation, not the broker's, which §3b's criteria
+5 and 7 refuse; it stays the right shape for E3.
+
+**An OCI runtime shim behind the daemon.** Rejected for E6: it would weaken
+the running container while the daemon's record stays strict — a lying
+runtime, whose host-only rows (IPC, UTS, the image) no vantage could catch.
+That is a different, deeper experiment; it is not what §1a's rows ask, and it
+would need its own decision.
+
+**An external laboratory.** Not needed: the owner's own disposable hosted
+runner is isolated and disposable (§3b, criterion 1), and its log is the
+record.
+
+## Revisit if
+
+The hosted run fails or shows an invariant move that this record does not
+expect; F-E6-HOSTNET is confirmed and the owner decides the setup's order; the
+topology, the probe's or the record's hard-rule code, or the runtime client
+changes; or a runtime that misreports its record is to be modelled.

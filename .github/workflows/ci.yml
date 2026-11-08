@@ -622,6 +622,39 @@ jobs:
         env:
           DW_CAPACITY_EVIDENCE: "1"
 
+  # M5e.2 (R3's E6; ADR-0057, the owner's R-B; ADR-0058): every hard rule of
+  # oci-strict weakened, one at a time, in a real PROXY_ONLY environment the
+  # released broker prepares along its production path -- its proxy, the
+  # environment, the relay's digest, the setup, the relay -- on this
+  # runner's Docker Engine, measured from both vantages and refused by the
+  # production decision; and the conforming control through the same test
+  # runtime, kept. The broker never asks for a weaker container: a test-only
+  # socket between the real client and the real daemon changes exactly one
+  # field of the environment's create, and forwards everything else, the
+  # daemon's record and the probe's report among it, unchanged. Every case's
+  # raw observations are checked again from their bytes and published into
+  # this log with their digests and the run's provenance, for the owner's
+  # offline review (make sandbox-proxy-weakened-review). One case gives the
+  # environment the host's network, where the broker's setup adds the proxy
+  # address to this runner's own loopback; so it is a job of its own, on this
+  # disposable runner only: DW_E6_EVIDENCE=1 says so here and nowhere else,
+  # and the task and the test each refuse anywhere else. A case not exercised
+  # fails. The `ci` job requires it.
+  sandbox-proxy-weakened:
+    name: sandbox PROXY_ONLY hard rules weakened (make sandbox-proxy-weakened-evidence)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v5.0.1
+      - uses: ./.github/actions/setup
+      - name: Show the OCI runtime and the runner's loopback
+        run: |
+          docker version --format 'client {{.Client.Version}} server {{.Server.Version}} api {{.Server.APIVersion}} {{.Server.Os}}/{{.Server.Arch}}'
+          docker info --format '{{.OperatingSystem}} kernel {{.KernelVersion}} cgroup v{{.CgroupVersion}} runtime {{.DefaultRuntime}} {{.SecurityOptions}}'
+          ip -o -4 addr show dev lo
+      - run: make sandbox-proxy-weakened-evidence
+        env:
+          DW_E6_EVIDENCE: "1"
+
   # M5e.4 (M5E_ASSURANCE_PLAN.md §§6, 8): pip as it is today against M5e.3's
   # fixture registries, and npm refused before anything is prepared -- a real
   # DWKP client on the released `serve --sandbox-config`, the released broker
@@ -747,7 +780,7 @@ jobs:
   ci:
     name: CI
     runs-on: ubuntu-latest
-    needs: [format, lint, typecheck, architecture, schema, evals, test, authority-transport, filesystem-canonicalization, broker-fs-read, filesystem-operations, process-broker, secret-broker, sandbox-foundation, sandbox-egress, sandbox-workload, sandbox-secret, sandbox-workspace, sandbox-agent, sandbox-release, sandbox-restart, sandbox-capacity, sandbox-registry, d11-hardening, net-http, supply-chain, build]
+    needs: [format, lint, typecheck, architecture, schema, evals, test, authority-transport, filesystem-canonicalization, broker-fs-read, filesystem-operations, process-broker, secret-broker, sandbox-foundation, sandbox-egress, sandbox-workload, sandbox-secret, sandbox-workspace, sandbox-agent, sandbox-release, sandbox-restart, sandbox-capacity, sandbox-proxy-weakened, sandbox-registry, d11-hardening, net-http, supply-chain, build]
     if: always()
     steps:
       - name: Fail unless every required job succeeded

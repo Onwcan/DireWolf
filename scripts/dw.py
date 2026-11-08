@@ -21,6 +21,7 @@ it is about to create.
 from __future__ import annotations
 
 import argparse
+import base64
 import fnmatch
 import hashlib
 import json
@@ -30,6 +31,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import urllib.parse
 from collections.abc import Callable, Mapping
 from pathlib import Path
@@ -3976,6 +3978,848 @@ def task_sandbox_capacity_evidence() -> None:
     require_attributed_evidence(output, CAPACITY_CASES)
 
 
+# --- M5e.2's R3: ADR-0057's E6, a hard rule weakened in a real PROXY_ONLY environment ---
+#
+# The owner's R-B (ADR-0057 §8) requires real `PROXY_ONLY` containers weakened
+# one hard rule at a time, measured from both vantages and refused by the
+# production broker (M5E_ASSURANCE_PLAN.md §§3a, 3b; issue #19). The broker
+# never asks for a weaker container, so the weakening is the runtime's: the
+# released broker prepares its genuine `PROXY_ONLY` topology through a
+# test-only socket between the real client and the real daemon that changes
+# exactly one field of the environment's `create` (the egress suite's `e6`
+# module, ADR-0058). Every case's raw observations -- the create as sent and
+# as received, the daemon's record, the probe's stream and report, the
+# broker's answer and events -- are written out by the test, digested there,
+# checked again here independently, and published into the job's log with
+# their digests, so the owner can verify the hosted run offline
+# (`make sandbox-proxy-weakened-review`).
+
+E6_SUITE = "sandbox-proxy-weakened"
+E6_TESTS = ("linux::e6::every_hard_rule_weakened_in_a_real_proxy_only_environment_is_refused",)
+E6_CONTROL = "e6-faulty-runtime-forwards-a-conforming-environment-kept"
+E6_COUNT = "e6-row-count"
+# ADR-0057 §1a's fifteen rows (the seccomp rule twice; the resource limits'
+# task backstop a second case of its row). For each case: its row, the
+# invariants that must fail (each of the vantage §1a names), and the fields of
+# the environment's `create` the faulty runtime changes -- no other.
+E6_ROWS: dict[str, tuple[str, tuple[str, ...], tuple[str, ...]]] = {
+    "e6-weakened-writable-root-refused": (
+        "read-only-root",
+        ("HOST_ROOT_READ_ONLY", "CONTAINER_ROOT_READ_ONLY"),
+        ("HostConfig.ReadonlyRootfs",),
+    ),
+    "e6-weakened-root-user-refused": (
+        "non-root-user",
+        ("HOST_USER_NON_ROOT", "CONTAINER_UID_GID"),
+        ("User",),
+    ),
+    "e6-weakened-privileged-refused": (
+        "not-privileged",
+        (
+            "HOST_NOT_PRIVILEGED",
+            "CONTAINER_CAPABILITIES_EMPTY",
+            "CONTAINER_DEVICES_MINIMAL",
+            "CONTAINER_PROC_RESTRICTED",
+        ),
+        ("HostConfig.Privileged",),
+    ),
+    "e6-weakened-runtime-socket-mounted-refused": (
+        "no-runtime-socket",
+        ("HOST_NO_RUNTIME_SOCKET", "HOST_MOUNTS_EXACT", "CONTAINER_NO_RUNTIME_SOCKET"),
+        ("HostConfig.Binds",),
+    ),
+    "e6-weakened-capability-added-refused": (
+        "capabilities-dropped",
+        ("HOST_CAPABILITIES_DROPPED", "CONTAINER_CAPABILITIES_EMPTY"),
+        ("HostConfig.CapAdd",),
+    ),
+    "e6-weakened-no-new-privileges-disabled-refused": (
+        "no-new-privileges",
+        ("HOST_NO_NEW_PRIVILEGES", "CONTAINER_NO_NEW_PRIVILEGES"),
+        ("HostConfig.SecurityOpt",),
+    ),
+    "e6-weakened-seccomp-unconfined-refused": (
+        "seccomp-not-unconfined",
+        ("HOST_SECCOMP_PROFILE", "CONTAINER_SECCOMP_PROFILE_ACTIVE"),
+        ("HostConfig.SecurityOpt",),
+    ),
+    "e6-weakened-seccomp-default-profile-refused": (
+        "seccomp-not-runtime-default",
+        ("HOST_SECCOMP_PROFILE", "CONTAINER_SECCOMP_PROFILE_ACTIVE"),
+        ("HostConfig.SecurityOpt",),
+    ),
+    "e6-weakened-host-pid-refused": (
+        "private-pid-namespace",
+        ("HOST_PID_NAMESPACE_PRIVATE", "CONTAINER_PID_NAMESPACE_PRIVATE"),
+        ("HostConfig.PidMode",),
+    ),
+    "e6-weakened-host-ipc-refused": (
+        "private-ipc-namespace",
+        ("HOST_IPC_NAMESPACE_PRIVATE",),
+        ("HostConfig.IpcMode",),
+    ),
+    "e6-weakened-host-uts-refused": (
+        "private-uts-namespace",
+        ("HOST_UTS_NAMESPACE_PRIVATE",),
+        ("HostConfig.UTSMode",),
+    ),
+    "e6-weakened-mutable-image-tag-refused": (
+        "digest-pinned-image",
+        ("HOST_IMAGE_PINNED",),
+        ("Image",),
+    ),
+    "e6-weakened-extra-device-refused": (
+        "no-additional-devices",
+        ("HOST_NO_DEVICES", "CONTAINER_DEVICES_MINIMAL"),
+        ("HostConfig.Devices",),
+    ),
+    "e6-weakened-resource-limits-dropped-refused": (
+        "resource-limits",
+        ("HOST_RESOURCE_LIMITS", "CONTAINER_CGROUP_LIMITS"),
+        ("HostConfig.MemorySwap", "HostConfig.PidsLimit"),
+    ),
+    "e6-weakened-task-backstop-at-256-refused": (
+        "resource-limits",
+        ("HOST_RESOURCE_LIMITS", "CONTAINER_RLIMITS"),
+        ("HostConfig.Ulimits",),
+    ),
+    "e6-weakened-host-network-refused": (
+        "isolated-network",
+        (
+            "HOST_NETWORK_ISOLATED",
+            "CONTAINER_NETWORK_ISOLATED",
+            "CONTAINER_DIRECT_EGRESS_REFUSED",
+            "CONTAINER_DIRECT_DNS_REFUSED",
+        ),
+        ("HostConfig.NetworkMode",),
+    ),
+}
+# The one case that changes the runtime's host: the broker's setup, run in a
+# namespace that is the host's, adds the proxy address to the host's own
+# loopback. A disposable runner's alone; the address is reported, not hidden.
+E6_HOST_SIDE_EFFECT = "e6-weakened-host-network-refused"
+E6_PROXY_ADDRESS = "169.254.7.1/32"
+E6_ROW_NAMES = tuple(dict.fromkeys(row for row, _, _ in E6_ROWS.values()))
+E6_CASES = tuple((E6_SUITE, case) for case in (E6_CONTROL, *E6_ROWS, E6_COUNT))
+# `PROXY_ONLY`'s own invariants: reported for every case, never required to
+# pass under a weakening -- how the two interact is observed (ADR-0057 U3).
+E6_TOPOLOGY = (
+    "HOST_PROXY_ENVIRONMENT",
+    "HOST_PROXY_RELAY",
+    "HOST_RELAY_DIGEST",
+    "CONTAINER_PROXY_REACHABLE",
+)
+E6_VERDICTS = frozenset(("PASS", "FAIL", "UNOBSERVABLE"))
+# What the test keeps of each case, every one of them digested.
+E6_RAW_FILES = (
+    "create-sent.json",
+    "create-received.json",
+    "record.json",
+    "probe-stream.bin",
+    "probe-report.json",
+    "measurement.txt",
+    "requests.txt",
+    "broker-events.txt",
+)
+E6_RAW_PREFIX = "E6-RAW "
+E6_FILE_PREFIX = "E6-EVIDENCE-FILE "
+E6_MANIFEST_PREFIX = "E6-EVIDENCE-MANIFEST "
+
+
+def _proxy_only_images(
+    client: Path, socket: str, server: Mapping[str, object], target_root: Path, work: Path
+) -> tuple[dict[str, str], dict[str, str]]:
+    """The egress evidence's own setup, for E6: the probe, the relay and the
+    workload fixture built statically and proved static; their digests
+    pinned; the evidence images built offline `FROM scratch` and named by
+    content (the product's, the fixture's, and one whose relay differs by a
+    byte). The images by name, and the variables the egress suite reads."""
+    arch = {"amd64": "x86_64", "arm64": "aarch64"}.get(str(server.get("Arch")))
+    if arch is None:
+        raise TaskError(f"the runtime's architecture {server.get('Arch')!r} is not supported")
+    triple = f"{arch}-unknown-linux-gnu"
+    platform_ = f"linux/{server.get('Arch')}"
+    static = target_root / "sandbox-static"
+    env = dict(os.environ, RUSTFLAGS="-C target-feature=+crt-static")
+    command = [
+        "cargo",
+        "build",
+        "--locked",
+        "--release",
+        "-p",
+        "dwk-sandbox-probe",
+        "--bin",
+        "dwk-sandbox-probe",
+        "--example",
+        "sandbox_fixture",
+        "-p",
+        "dwk-sandbox-relay",
+        "--bin",
+        "dwk-sandbox-relay",
+        "--target",
+        triple,
+        "--target-dir",
+        str(static),
+    ]
+    print(f"{DIM}$ RUSTFLAGS='-C target-feature=+crt-static' {' '.join(command)}{OFF}", flush=True)
+    if subprocess.run(command, cwd=str(ROOT), env=env, check=False).returncode != 0:
+        raise TaskError("the static probe, relay and fixture did not build")
+    release = static / triple / "release"
+    probe = release / "dwk-sandbox-probe"
+    relay = release / "dwk-sandbox-relay"
+    fixture = release / "examples" / "sandbox_fixture"
+    linking = {
+        name: _static_elf(path)
+        for name, path in (("probe", probe), ("relay", relay), ("fixture", fixture))
+    }
+    probe_sha = hashlib.sha256(probe.read_bytes()).hexdigest()
+    relay_sha = hashlib.sha256(relay.read_bytes()).hexdigest()
+    changed_relay = work / "relay-changed"
+    _one_byte_changed(relay, changed_relay)
+    images = {
+        "product": _build_image(
+            client,
+            socket,
+            work / "images" / "product",
+            probe,
+            platform_,
+            None,
+            {SANDBOX_RELAY_PATH: relay},
+        ),
+        "fixture": _build_image(
+            client,
+            socket,
+            work / "images" / "fixture",
+            probe,
+            platform_,
+            None,
+            {SANDBOX_RELAY_PATH: relay, SANDBOX_FIXTURE_PATH: fixture},
+        ),
+        "tampered-relay": _build_image(
+            client,
+            socket,
+            work / "images" / "tampered-relay",
+            probe,
+            platform_,
+            None,
+            {SANDBOX_RELAY_PATH: changed_relay},
+        ),
+    }
+    print(f"{BOLD}E6 evidence setup{OFF}")
+    print(f"  runtime            {server.get('Version')} (api {server.get('ApiVersion')})")
+    print(f"  probe              {linking['probe']}, sha256 {probe_sha}")
+    print(f"  relay              {linking['relay']}, sha256 {relay_sha}")
+    for name, image in images.items():
+        print(f"  image {name:<14}{image}")
+    variables = {
+        "DW_SANDBOX_RUNTIME": str(client),
+        "DW_SANDBOX_SOCKET": socket,
+        "DW_SANDBOX_PROBE_SHA256": probe_sha,
+        "DW_EGRESS_RELAY_SHA256": relay_sha,
+        "DW_EGRESS_IMAGE": images["product"],
+        "DW_EGRESS_IMAGE_FIXTURE": images["fixture"],
+        "DW_EGRESS_IMAGE_TAMPERED_RELAY": images["tampered-relay"],
+    }
+    return images, variables
+
+
+def _e6_fields(outcome: str) -> dict[str, str]:
+    """An E6 outcome's `name:value` parts; a part without a colon is kept
+    whole, as its own name."""
+    fields: dict[str, str] = {}
+    for part in outcome.split(";"):
+        name, _, value = part.partition(":")
+        fields[name] = value
+    return fields
+
+
+def _e6_verdicts(text: str) -> dict[str, str] | None:
+    """`INV=VERDICT+...` as a mapping; `{}` for `none`; `None` if malformed."""
+    if text == "none":
+        return {}
+    pairs: dict[str, str] = {}
+    for item in text.split("+"):
+        name, _, verdict = item.partition("=")
+        if not _INVARIANT.fullmatch(name) or verdict not in E6_VERDICTS or name in pairs:
+            return None
+        pairs[name] = verdict
+    return pairs
+
+
+def e6_outcome_problem(case: str, outcome: str, enforcement: object) -> str | None:
+    """Why an E6 line does not show what its case must, or `None`.
+
+    The control says it was kept, every required invariant passing, the
+    topology's four passing, forwarded unchanged and destroyed. A row says it
+    was refused by exactly the invariants its row names, of the vantage its
+    enforcement claims; it reports every other invariant that did not pass and
+    the topology's four, whatever their verdicts; it names the fields the
+    runtime changed, and for the host's network what the host's loopback
+    gained. The count says every case was refused and every row covered."""
+    if case == E6_CONTROL:
+        fields = _e6_fields(outcome)
+        topology = _e6_verdicts(fields.get("topology", ""))
+        if not outcome.startswith("kept:every-required-invariant-pass;"):
+            return f"the control must be kept, every required invariant passing: {outcome!r}"
+        if topology != dict.fromkeys(E6_TOPOLOGY, "PASS"):
+            return f"the control's topology must pass whole: {fields.get('topology')!r}"
+        if "forwarded-unchanged" not in fields or fields.get("destroyed") != "removed":
+            return "the control must be forwarded unchanged and destroyed"
+        return None
+    if case == E6_COUNT:
+        wanted = (
+            f"refused-{len(E6_ROWS)}-of-{len(E6_ROWS)}-cases;"
+            f"rows-{len(E6_ROW_NAMES)}-of-{len(E6_ROW_NAMES)}"
+        )
+        if outcome != wanted:
+            return f"every case refused and every row covered: {outcome!r} must be {wanted!r}"
+        return None
+    row = E6_ROWS.get(case)
+    if row is None:
+        return "an E6 case with no row"
+    _, caught, changed = row
+    fields = _e6_fields(outcome)
+    if not outcome.startswith("refused:"):
+        return f"a weakened PROXY_ONLY environment must be refused: {outcome!r}"
+    named = _named_invariants(fields["refused"])
+    if named is None or sorted(named) != sorted(caught):
+        return f"refused by {fields['refused']!r}, which must be exactly {'+'.join(caught)}"
+    measured = _VANTAGE[
+        (
+            any(name.startswith("HOST_") for name in named),
+            any(name.startswith("CONTAINER_") for name in named),
+        )
+    ]
+    if measured != enforcement:
+        return f"its invariants were {measured}, not {enforcement}"
+    also = _e6_verdicts(fields.get("also", ""))
+    if also is None or set(also) & set(caught) or any(v == "PASS" for v in also.values()):
+        return f"what else did not pass is not reported: {fields.get('also')!r}"
+    topology = _e6_verdicts(fields.get("topology", ""))
+    if topology is None or sorted(topology) != sorted(E6_TOPOLOGY):
+        return f"the topology's four invariants are not reported: {fields.get('topology')!r}"
+    if fields.get("weakened") != "+".join(changed):
+        return f"the weakening must be {'+'.join(changed)!r}, not {fields.get('weakened')!r}"
+    added = fields.get("host-loopback-added")
+    if case == E6_HOST_SIDE_EFFECT:
+        if added not in ("none", E6_PROXY_ADDRESS):
+            return f"what the host's loopback gained is not observed: {added!r}"
+    elif added != "not-applicable":
+        return f"a case that touches no host reports its loopback: {added!r}"
+    return None
+
+
+def e6_refusal(environ: Mapping[str, str]) -> str | None:
+    """Why E6's qualifying evidence must not run here, or None. Never
+    inferred: `DW_E6_EVIDENCE=1`, on a GitHub-hosted runner -- the
+    disposable environment ADR-0057's E6 asks for (M5E_ASSURANCE_PLAN.md §3b,
+    criterion 1). The test checks again before the one case that touches the
+    host, and that the runtime is not Docker Desktop."""
+    if environ.get("DW_E6_EVIDENCE", "").strip() != "1":
+        return (
+            "DW_E6_EVIDENCE=1 is not set: E6's qualifying evidence is the hosted "
+            "`sandbox-proxy-weakened` job's alone"
+        )
+    if (
+        environ.get("GITHUB_ACTIONS") != "true"
+        or environ.get("RUNNER_ENVIRONMENT") != "github-hosted"
+    ):
+        return "this is not a disposable GitHub-hosted runner"
+    return None
+
+
+def _e6_raw_lines(output: str) -> dict[tuple[str, str], tuple[str, int]]:
+    """Every `E6-RAW` line the test printed: (case, file) -> (sha256, bytes)."""
+    found: dict[tuple[str, str], tuple[str, int]] = {}
+    for line in output.splitlines():
+        at = line.find(E6_RAW_PREFIX)
+        if at < 0:
+            continue
+        try:
+            record = json.loads(line[at + len(E6_RAW_PREFIX) :])
+        except json.JSONDecodeError as exc:
+            raise TaskError(f"unreadable E6-RAW line: {line[:200]}") from exc
+        case, file, digest, size = (
+            record.get("case"),
+            record.get("file"),
+            record.get("sha256"),
+            record.get("bytes"),
+        )
+        if not (
+            isinstance(case, str)
+            and isinstance(file, str)
+            and isinstance(digest, str)
+            and re.fullmatch(r"[0-9a-f]{64}", digest)
+            and isinstance(size, int)
+        ):
+            raise TaskError(f"malformed E6-RAW line: {line[:200]}")
+        if (case, file) in found:
+            raise TaskError(f"E6-RAW {case}/{file} reported twice")
+        found[(case, file)] = (digest, size)
+    return found
+
+
+def _e6_json(data: bytes, what: str) -> dict[str, object]:
+    try:
+        value = json.loads(data)
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise TaskError(f"{what} is not JSON") from exc
+    if not isinstance(value, dict):
+        raise TaskError(f"{what} is not one JSON object")
+    return value
+
+
+def _e6_at(value: object, *path: str) -> object:
+    for key in path:
+        if not isinstance(value, dict):
+            return None
+        value = value.get(key)
+    return value
+
+
+def _e6_changed(a: object, b: object, path: str = "") -> list[str]:
+    """Every path at which two JSON values differ, objects member by member
+    (as the test's own comparison is)."""
+    if isinstance(a, dict) and isinstance(b, dict):
+        out: list[str] = []
+        for key in sorted(set(a) | set(b)):
+            inner = f"{path}.{key}" if path else key
+            if key in a and key in b:
+                out.extend(_e6_changed(a[key], b[key], inner))
+            else:
+                out.append(inner)
+        return out
+    return [] if a == b and type(a) is type(b) else [path]
+
+
+def _e6_list(value: object) -> list[object]:
+    return list(value) if isinstance(value, list) else []
+
+
+def _e6_strings(value: object) -> list[str]:
+    return [item for item in _e6_list(value) if isinstance(item, str)]
+
+
+def _e6_recorded(case: str, record: dict[str, object], tag: str) -> bool:
+    """Whether the daemon's own record shows the case's weakening -- the
+    Python twin of the test's `recorded` predicates."""
+    host = _e6_at(record, "HostConfig")
+    security = _e6_strings(_e6_at(host, "SecurityOpt"))
+    checks: dict[str, bool] = {
+        "e6-weakened-writable-root-refused": _e6_at(host, "ReadonlyRootfs") is False,
+        "e6-weakened-root-user-refused": _e6_at(record, "Config", "User") == "0:0",
+        "e6-weakened-privileged-refused": _e6_at(host, "Privileged") is True,
+        "e6-weakened-runtime-socket-mounted-refused": any(
+            isinstance(m, dict) and m.get("Destination") == "/var/run/docker.sock"
+            for m in _e6_list(_e6_at(record, "Mounts"))
+        ),
+        "e6-weakened-capability-added-refused": bool(
+            {"NET_RAW", "CAP_NET_RAW"} & set(_e6_strings(_e6_at(host, "CapAdd")))
+        ),
+        "e6-weakened-no-new-privileges-disabled-refused": not any(
+            o.startswith("no-new-privileges") for o in security
+        ),
+        "e6-weakened-seccomp-unconfined-refused": "seccomp=unconfined" in security,
+        "e6-weakened-seccomp-default-profile-refused": not any(
+            o.startswith("seccomp=") for o in security
+        ),
+        "e6-weakened-host-pid-refused": _e6_at(host, "PidMode") == "host",
+        "e6-weakened-host-ipc-refused": _e6_at(host, "IpcMode") == "host",
+        "e6-weakened-host-uts-refused": _e6_at(host, "UTSMode") == "host",
+        "e6-weakened-host-network-refused": _e6_at(host, "NetworkMode") == "host",
+        "e6-weakened-mutable-image-tag-refused": _e6_at(record, "Config", "Image") == tag,
+        "e6-weakened-extra-device-refused": any(
+            isinstance(d, dict) and d.get("PathInContainer") == "/dev/extra"
+            for d in _e6_list(_e6_at(host, "Devices"))
+        ),
+        "e6-weakened-resource-limits-dropped-refused": _e6_at(host, "PidsLimit") != 256
+        and _e6_at(host, "MemorySwap") == -1,
+        "e6-weakened-task-backstop-at-256-refused": any(
+            isinstance(u, dict)
+            and u.get("Name") == "nproc"
+            and u.get("Soft") == 256
+            and u.get("Hard") == 256
+            for u in _e6_list(_e6_at(host, "Ulimits"))
+        ),
+    }
+    return checks[case]
+
+
+def _e6_demux(raw: bytes) -> bytes | None:
+    """An exec stream's stdout, by its 8-byte frame headers; `None` if it is
+    not a multiplexed stream."""
+    out = bytearray()
+    at = 0
+    while at < len(raw):
+        header = raw[at : at + 8]
+        if len(header) < 8 or header[0] not in (1, 2) or header[1:4] != b"\0\0\0":
+            return None
+        size = int.from_bytes(header[4:8], "big")
+        payload = raw[at + 8 : at + 8 + size]
+        if len(payload) != size:
+            return None
+        if header[0] == 1:
+            out += payload
+        at += 8 + size
+    return bytes(out)
+
+
+def e6_check_raw(
+    output: str, raw: Path, lines: list[dict[str, object]], tag: str
+) -> dict[tuple[str, str], bytes]:
+    """E6's raw observations, checked again from their bytes -- independently
+    of the test that made them -- before a line is believed.
+
+    For the control and every exercised row: each of `E6_RAW_FILES`, once,
+    at the digest and length the test printed when it wrote it, and nothing
+    else; the create as the client sent it is the same strict plan for every
+    case (its labels aside), and the daemon received it unchanged (the
+    control) or changed in exactly the row's fields; the daemon's record shows
+    the weakening; the probe's stream holds exactly its report; every inside
+    verdict of the broker's answer is the probe's own, every invariant the
+    row names failed, and the topology's verdicts are the line's; the broker
+    was told nothing was kept (a row) or kept it (the control), and its own
+    event says so; and the broker's requests built the whole topology. Any
+    other finding fails the task. The checked bytes, by (case, file)."""
+    printed = _e6_raw_lines(output)
+    outcomes = {str(line["case"]): str(line["outcome"]) for line in lines}
+    exercised = [E6_CONTROL] + [c for c in E6_ROWS if not outcomes[c].startswith("not-exercised")]
+    files: dict[tuple[str, str], bytes] = {}
+    for case in exercised:
+        where = raw / case
+        present = sorted(p.name for p in where.iterdir()) if where.is_dir() else []
+        if present != sorted(E6_RAW_FILES):
+            raise TaskError(f"E6 {case}: raw files {present}, not {sorted(E6_RAW_FILES)}")
+        for name in E6_RAW_FILES:
+            data = (where / name).read_bytes()
+            said = printed.get((case, name))
+            digest = hashlib.sha256(data).hexdigest()
+            if said != (digest, len(data)):
+                raise TaskError(
+                    f"E6 {case}/{name}: {digest} ({len(data)} bytes) is not what the test "
+                    f"printed when it wrote it: {said}"
+                )
+            files[(case, name)] = data
+    extra = sorted({case for case, _ in printed} - set(exercised))
+    if extra:
+        raise TaskError(f"E6 raw observations of cases not exercised: {extra}")
+    plans: dict[str, object] = {}
+    for case in exercised:
+        sent = _e6_json(files[(case, "create-sent.json")], f"E6 {case}: the create sent")
+        received = _e6_json(files[(case, "create-received.json")], f"E6 {case}: received")
+        if _e6_at(sent, "Labels", "io.direwolf.role") != "environment":
+            raise TaskError(f"E6 {case}: the create kept is not the environment's")
+        # The plan, its labels aside; its environment a set (the client
+        # orders the proxy variables differently from one call to the next).
+        plan = {
+            k: sorted(_e6_strings(v)) if k == "Env" else v for k, v in sent.items() if k != "Labels"
+        }
+        plans[case] = plan
+        if case == E6_CONTROL:
+            if files[(case, "create-sent.json")] != files[(case, "create-received.json")]:
+                raise TaskError("E6 control: the create was not forwarded byte for byte")
+        else:
+            changed = _e6_changed(sent, received)
+            if changed != sorted(E6_ROWS[case][2]):
+                raise TaskError(f"E6 {case}: the daemon received {changed} changed")
+            if plan != plans[E6_CONTROL]:
+                raise TaskError(f"E6 {case}: the client asked for another plan")
+            record = _e6_json(files[(case, "record.json")], f"E6 {case}: the record")
+            if not _e6_recorded(case, record, tag):
+                raise TaskError(f"E6 {case}: the daemon's record does not show the weakening")
+        stdout = _e6_demux(files[(case, "probe-stream.bin")])
+        if stdout is None or stdout != files[(case, "probe-report.json")]:
+            raise TaskError(f"E6 {case}: the probe's report is not its stream's stdout")
+        report = _e6_json(stdout, f"E6 {case}: the probe's report")
+        answer = files[(case, "measurement.txt")].decode("utf-8").splitlines()
+        retained = answer[0] if answer else ""
+        verdicts = {name: verdict for name, _, verdict in (a.partition(" ") for a in answer[1:])}
+        checks = report.get("checks")
+        if not isinstance(checks, list) or not checks:
+            raise TaskError(f"E6 {case}: the probe's report holds no checks")
+        for check in checks:
+            if not isinstance(check, dict) or verdicts.get(
+                str(check.get("invariant"))
+            ) != check.get("verdict"):
+                raise TaskError(f"E6 {case}: {check} is not the broker's inside verdict")
+        events = files[(case, "broker-events.txt")].decode("utf-8", "replace")
+        requests = files[(case, "requests.txt")].decode("utf-8", "replace")
+        for role in ("environment", "setup", "relay"):
+            if f"POST /containers/create 201 role={role}" not in requests:
+                raise TaskError(f"E6 {case}: the broker's {role} was never created")
+        fields = _e6_fields(outcomes[case])
+        topology = _e6_verdicts(fields.get("topology", "")) or {}
+        if any(verdicts.get(name) != verdict for name, verdict in topology.items()):
+            raise TaskError(f"E6 {case}: the line's topology is not the broker's answer")
+        if case == E6_CONTROL:
+            if retained != "retained=true" or "retained=true" not in events:
+                raise TaskError("E6 control: not kept by the broker")
+            if any(v != "PASS" for k, v in verdicts.items() if k in E6_TOPOLOGY):
+                raise TaskError("E6 control: the topology did not pass")
+            continue
+        if retained != "retained=false" or "retained=false" not in events:
+            raise TaskError(f"E6 {case}: the broker did not refuse it")
+        for invariant in E6_ROWS[case][1]:
+            if verdicts.get(invariant) != "FAIL":
+                raise TaskError(f"E6 {case}: {invariant} is {verdicts.get(invariant)}, not FAIL")
+    return files
+
+
+def _e6_provenance(
+    client: Path, chosen: str, server: Mapping[str, object], images: Mapping[str, str]
+) -> dict[str, object]:
+    """Where E6's evidence ran, and from what (§3b criterion 2)."""
+    environ = os.environ
+    commit = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=str(ROOT), capture_output=True, text=True, check=False
+    ).stdout.strip()
+    dirty = subprocess.run(
+        ["git", "status", "--porcelain"], cwd=str(ROOT), capture_output=True, text=True, check=False
+    ).stdout.strip()
+    run_url = None
+    if environ.get("GITHUB_RUN_ID"):
+        run_url = (
+            f"{environ.get('GITHUB_SERVER_URL', 'https://github.com')}/"
+            f"{environ.get('GITHUB_REPOSITORY', '')}/actions/runs/{environ['GITHUB_RUN_ID']}"
+            f"/attempts/{environ.get('GITHUB_RUN_ATTEMPT', '1')}"
+        )
+    return {
+        "commit": commit,
+        "github_sha": environ.get("GITHUB_SHA"),
+        "worktree_clean": not dirty,
+        "run": run_url,
+        "job": environ.get("GITHUB_JOB"),
+        "runner": {
+            "environment": environ.get("RUNNER_ENVIRONMENT"),
+            "os": environ.get("RUNNER_OS"),
+            "arch": environ.get("RUNNER_ARCH"),
+            "image": environ.get("ImageOS"),
+            "image_version": environ.get("ImageVersion"),
+            "kernel": platform.release(),
+        },
+        "runtime": {
+            "version": server.get("Version"),
+            "api": server.get("ApiVersion"),
+            "os": server.get("Os"),
+            "arch": server.get("Arch"),
+            "kernel": server.get("KernelVersion"),
+        },
+        "client": {
+            "path": str(client),
+            "identity": chosen,
+            "sha256": hashlib.sha256(client.read_bytes()).hexdigest(),
+        },
+        "probe_sha256": environ.get("DW_SANDBOX_PROBE_SHA256"),
+        "relay_sha256": environ.get("DW_EGRESS_RELAY_SHA256"),
+        "images": dict(images),
+        "tests": list(E6_TESTS),
+    }
+
+
+def _e6_publish(
+    files: Mapping[tuple[str, str], bytes],
+    provenance: Mapping[str, object],
+    census: str,
+) -> str:
+    """Every checked observation into the log, each with its digest, then
+    one manifest of them all and of where they came from: the hosted run's
+    log is the evidence's record (§3b criterion 10). The manifest's own
+    digest, which the review recomputes."""
+    entries = []
+    for (case, name), data in sorted(files.items()):
+        entry = {
+            "case": case,
+            "file": name,
+            "bytes": len(data),
+            "sha256": hashlib.sha256(data).hexdigest(),
+        }
+        entries.append(entry)
+        print(
+            E6_FILE_PREFIX
+            + json.dumps(
+                {**entry, "base64": base64.b64encode(data).decode("ascii")},
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+            flush=True,
+        )
+    manifest = {
+        "schema": "direwolf.m5e2.e6-evidence",
+        "version": 1,
+        "provenance": dict(provenance),
+        "census": census,
+        "cases": [case for _, case in E6_CASES],
+        "files": entries,
+    }
+    text = json.dumps(manifest, sort_keys=True, separators=(",", ":"))
+    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    print(E6_MANIFEST_PREFIX + json.dumps({"manifest": manifest, "sha256": digest}), flush=True)
+    return digest
+
+
+def task_sandbox_proxy_weakened_evidence() -> None:
+    """M5e.2's R3 at the real-container level -- ADR-0057's E6, the owner's
+    R-B -- hosted only: every hard rule of `oci-strict` weakened, one at a
+    time, in a real `PROXY_ONLY` environment the released broker prepared
+    through its production path, measured from both vantages and refused by
+    its production decision; and the conforming control through the same
+    faulty runtime, kept.
+
+    Anywhere but a disposable GitHub-hosted runner this refuses before
+    anything is built: NOT EXERCISED, which fails. Every case must report at
+    `real-oci` with what caught it and what else moved; each case's raw
+    observations are then checked again from their bytes (`e6_check_raw`)
+    and published into the log with their digests and the run's provenance
+    (`_e6_publish`). No container or network the evidence made may remain,
+    and every one that predates it must. Linux only.
+    """
+    if not sys.platform.startswith("linux"):
+        raise TaskError("NOT EXERCISED: E6 runs only on Linux")
+    refusal = e6_refusal(os.environ)
+    if refusal is not None:
+        raise TaskError(f"NOT EXERCISED: {refusal}")
+    found = shutil.which("docker")
+    if found is None:
+        raise TaskError("NOT EXERCISED: no container runtime client (`docker`) on PATH")
+    socket = os.environ.get("DW_SANDBOX_SOCKET", "/var/run/docker.sock")
+    target_root = Path(os.environ.get("CARGO_TARGET_DIR", str(ROOT / "target")))
+    work = Path(os.environ.get("DW_E6_WORK", str(Path.home() / ".cache" / "dw-m5e2-e6")))
+    shutil.rmtree(work, ignore_errors=True)
+    work.mkdir(mode=0o700, parents=True)
+    client, chosen = _trusted_client(Path(found), work / "client")
+    try:
+        server = json.loads(
+            _docker(client, socket, "version", "--format", "{{json .Server}}").strip()
+        )
+    except (TaskError, json.JSONDecodeError) as exc:
+        raise TaskError(f"NOT EXERCISED: the runtime at {socket} does not answer: {exc}") from exc
+    if server.get("Os") != "linux":
+        raise TaskError(f"NOT EXERCISED: the runtime is not a Linux one: {server.get('Os')}")
+    system = _docker(client, socket, "info", "--format", "{{.OperatingSystem}}")
+    if "Docker Desktop" in system:
+        raise TaskError(f"NOT EXERCISED: the runtime is {system.strip()}, not a runner's")
+    before_containers, before_networks = _runtime_state(client, socket)
+    images: dict[str, str] = {}
+    tag = f"direwolf-e6-mutable:{os.getpid()}"
+    try:
+        images, variables = _proxy_only_images(client, socket, server, target_root, work)
+        _docker(client, socket, "image", "tag", images["product"], tag)
+        raw = work / "raw"
+        raw.mkdir(mode=0o700)
+        os.environ.update(
+            {**variables, "DW_E6_IMAGE_TAG": tag, "DW_E6_RAW_DIR": str(raw), "DW_E6_EVIDENCE": "1"}
+        )
+        run("cargo", "build", "--locked", "-p", "dwkd-broker")
+        output = run_captured(
+            "cargo",
+            "test",
+            "--locked",
+            "-p",
+            "dwkd-broker",
+            "--test",
+            "sandbox_egress",
+            "--",
+            "--ignored",
+            "--exact",
+            "--nocapture",
+            "--test-threads=1",
+            *E6_TESTS,
+        )
+        summaries = [line for line in output.splitlines() if line.startswith("test result: ")]
+        expected = f"test result: ok. {len(E6_TESTS)} passed; 0 failed; 0 ignored"
+        if len(summaries) != 1 or not summaries[0].startswith(expected):
+            raise TaskError(
+                f"E6 did not run: expected `{expected}`, got {summaries or 'no summary'}"
+            )
+    finally:
+        after_containers, after_networks = _runtime_state(client, socket)
+        _docker(client, socket, "image", "rm", tag, check=False)
+        for image in set(images.values()):
+            _docker(client, socket, "image", "rm", "--force", image, check=False)
+    left = sorted(after_containers - before_containers)
+    removed = sorted(before_containers - after_containers)
+    left_networks = sorted(after_networks - before_networks)
+    removed_networks = sorted(before_networks - after_networks)
+    if left or left_networks:
+        raise TaskError(
+            f"the evidence left {len(left)} container(s) and {len(left_networks)} network(s) "
+            f"behind: {left + left_networks}"
+        )
+    if removed or removed_networks:
+        raise TaskError(
+            f"{len(removed) + len(removed_networks)} resource(s) that predate the evidence are "
+            f"gone: {removed + removed_networks}"
+        )
+    census = (
+        f"no evidence container or network remains; {len(before_containers)} container(s) "
+        f"and {len(before_networks)} network(s) pre-existing kept"
+    )
+    print(f"{GREEN}cleanup: {census}{OFF}")
+    lines = require_attributed_evidence(output, E6_CASES)
+    files = e6_check_raw(output, raw, lines, tag)
+    provenance = _e6_provenance(client, chosen, server, {**images, "mutable-tag": tag})
+    digest = _e6_publish(files, provenance, census)
+    print(
+        f"{GREEN}E6: {len(E6_ROWS)} cases over {len(E6_ROW_NAMES)} rows refused, the control "
+        f"kept; {len(files)} raw observations checked and published, manifest sha256 "
+        f"{digest}{OFF}"
+    )
+
+
+def e6_review(log: str) -> str:
+    """A hosted E6 log, verified offline: every published observation
+    decoded at its digest, the manifest's digest recomputed, the lines
+    attributed as the task requires, and every observation checked again
+    (`e6_check_raw`) from the decoded bytes. The manifest's digest."""
+    manifests = []
+    published: dict[tuple[str, str], bytes] = {}
+    for line in log.splitlines():
+        for prefix in (E6_FILE_PREFIX, E6_MANIFEST_PREFIX):
+            at = line.find(prefix)
+            if at < 0:
+                continue
+            record = json.loads(line[at + len(prefix) :])
+            if prefix == E6_MANIFEST_PREFIX:
+                manifests.append(record)
+                continue
+            data = base64.b64decode(record["base64"], validate=True)
+            if hashlib.sha256(data).hexdigest() != record["sha256"] or len(data) != record["bytes"]:
+                raise TaskError(f"E6 review: {record['case']}/{record['file']} is not its digest")
+            key = (record["case"], record["file"])
+            if key in published:
+                raise TaskError(f"E6 review: {key} published twice")
+            published[key] = data
+    if len(manifests) != 1:
+        raise TaskError(f"E6 review: {len(manifests)} manifests, not one")
+    manifest, said = manifests[0]["manifest"], manifests[0]["sha256"]
+    text = json.dumps(manifest, sort_keys=True, separators=(",", ":"))
+    if hashlib.sha256(text.encode("utf-8")).hexdigest() != said:
+        raise TaskError("E6 review: the manifest is not its digest")
+    listed = {(f["case"], f["file"]): f["sha256"] for f in manifest["files"]}
+    if listed != {k: hashlib.sha256(v).hexdigest() for k, v in published.items()}:
+        raise TaskError("E6 review: the published files are not the manifest's")
+    lines = require_attributed_evidence(log, E6_CASES)
+    tag = str(manifest["provenance"]["images"].get("mutable-tag", ""))
+    with tempfile.TemporaryDirectory() as scratch:
+        raw = Path(scratch)
+        for (case, name), data in published.items():
+            (raw / case).mkdir(exist_ok=True)
+            (raw / case / name).write_bytes(data)
+        e6_check_raw(log, raw, lines, tag)
+    return str(said)
+
+
+def task_sandbox_proxy_weakened_review() -> None:
+    """Verify a downloaded hosted `sandbox-proxy-weakened` job log offline
+    (`DW_E6_LOG=<file>`): what the owner's review of E6 runs, needing no
+    runtime. Reads the file and nothing else."""
+    path = os.environ.get("DW_E6_LOG", "")
+    if not path:
+        raise TaskError("set DW_E6_LOG to a downloaded `sandbox-proxy-weakened` job log")
+    digest = e6_review(Path(path).read_text(encoding="utf-8", errors="replace"))
+    print(f"{GREEN}E6 review: every observation verified; manifest sha256 {digest}{OFF}")
+
+
 # --- M5e.4: pip as it is today, and npm refused (M5E_ASSURANCE_PLAN.md §§6, 8) ---
 
 # The registry tools' pins (OD-E4): each tool's exact version, its upstream
@@ -7666,6 +8510,19 @@ ATTRIBUTION: dict[str, tuple[tuple[str, str, str | tuple[str, ...]], ...]] = {
         ("restart-foreign-untouched", _PRIV, "exact-label-ownership"),
         ("restart-new-workload-served", _PRIV, "authority-ledger"),
     ),
+    # M5e.2 (R3's E6; ADR-0057, the owner's R-B; ADR-0058): a hard rule
+    # weakened in a real PROXY_ONLY environment the released broker prepared,
+    # caught by its measurement from the vantage(s) ADR-0057 §1a names and
+    # refused by its production decision; the conforming control kept. One
+    # vantage alone catches three of the rows; both, the rest. Hosted only.
+    E6_SUITE: (
+        (E6_CONTROL, _OCI, "measured-both"),
+        ("e6-weakened-host-ipc-refused", _OCI, "measured-host"),
+        ("e6-weakened-host-uts-refused", _OCI, "measured-host"),
+        ("e6-weakened-mutable-image-tag-refused", _OCI, "measured-host"),
+        ("e6-weakened-*-refused", _OCI, "measured-both"),
+        (E6_COUNT, _OCI, "measured-both"),
+    ),
     # M5e.4 (plan §6): pip as it is today against the fixture registries, and
     # npm refused before anything is prepared -- a real DWKP client on the
     # released `serve`, the released broker, the runner's runtime; hosted only.
@@ -7748,6 +8605,7 @@ ATTRIBUTED_CASES = frozenset(
         *WORKSPACE_PRIVILEGED_CASES,
         *RESTART_CASES,
         *CAPACITY_CASES,
+        *E6_CASES,
         *REGISTRY_CASES,
         *HYGIENE_CASES,
     )
@@ -7810,6 +8668,8 @@ def outcome_problem(suite: str, case: str, outcome: str, enforcement: object) ->
     (`REGISTRY_OUTCOMES`): an install, what it installed; a refusal, that
     nothing was installed; a source distribution's build, that it ran today.
     """
+    if suite == E6_SUITE:
+        return e6_outcome_problem(case, outcome, enforcement)
     if suite == HYGIENE_SUITE:
         shows = HYGIENE_OUTCOMES.get(case)
         if shows is None:
@@ -10499,6 +11359,8 @@ TASKS = {
     "sandbox-workload-evidence": task_sandbox_workload_evidence,
     "sandbox-restart-evidence": task_sandbox_restart_evidence,
     "sandbox-capacity-evidence": task_sandbox_capacity_evidence,
+    "sandbox-proxy-weakened-evidence": task_sandbox_proxy_weakened_evidence,
+    "sandbox-proxy-weakened-review": task_sandbox_proxy_weakened_review,
     "sandbox-registry-evidence": task_sandbox_registry_evidence,
     "sandbox-hygiene-evidence": task_sandbox_hygiene_evidence,
     "sandbox-registry-mutations": task_sandbox_registry_mutations,

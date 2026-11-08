@@ -73,6 +73,7 @@ TASKS = {
     ),
     "task_sandbox_restart_evidence": ((dw.RESTART_CASES, dw.SANDBOX_EVIDENCE_PREFIX),),
     "task_sandbox_capacity_evidence": ((dw.CAPACITY_CASES, dw.SANDBOX_EVIDENCE_PREFIX),),
+    "task_sandbox_proxy_weakened_evidence": ((dw.E6_CASES, dw.SANDBOX_EVIDENCE_PREFIX),),
     "task_sandbox_registry_evidence": ((dw.REGISTRY_CASES, dw.SANDBOX_EVIDENCE_PREFIX),),
     "task_sandbox_hygiene_evidence": ((dw.HYGIENE_CASES, dw.SANDBOX_EVIDENCE_PREFIX),),
 }
@@ -84,6 +85,13 @@ CONST = {"OCI": "real-oci", "E2E": "dwkp-end-to-end", "PRIV": "privileged-oci"}
 EMITTERS = (
     ("crates/dwkd-broker/tests/sandbox_foundation.rs", "evidence", "sandbox-broker", None, None),
     ("crates/dwkd-broker/tests/sandbox_egress.rs", "evidence", "sandbox-egress", None, None),
+    (
+        "crates/dwkd-broker/tests/sandbox_egress.rs",
+        "evidence_in",
+        "sandbox-proxy-weakened",
+        "    mod e6 {",
+        None,
+    ),
     (
         "crates/dwkd-broker/tests/sandbox_workload.rs",
         "evidence",
@@ -262,7 +270,29 @@ def _outcome(suite: str, case: str, enforcement: str) -> str:
         return f"detected:{named};measured-in-7ms"
     if suite == dw.REGISTRY_SUITE:
         return f"{dw.REGISTRY_OUTCOMES[case]};synthetic"
+    if suite == dw.E6_SUITE:
+        return _e6_outcome(case)
     return "ok"
+
+
+def _e6_outcome(case: str) -> str:
+    """An E6 outcome the gate accepts: the control kept, each row refused by
+    exactly its invariants, the count complete."""
+    topology = "+".join(f"{name}=PASS" for name in dw.E6_TOPOLOGY)
+    if case == dw.E6_CONTROL:
+        return (
+            f"kept:every-required-invariant-pass;topology:{topology};"
+            "forwarded-unchanged;destroyed:removed"
+        )
+    if case == dw.E6_COUNT:
+        n, rows = len(dw.E6_ROWS), len(dw.E6_ROW_NAMES)
+        return f"refused-{n}-of-{n}-cases;rows-{rows}-of-{rows}"
+    _, caught, changed = dw.E6_ROWS[case]
+    added = "none" if case == dw.E6_HOST_SIDE_EFFECT else "not-applicable"
+    return (
+        f"refused:{'+'.join(caught)};also:none;topology:{topology};"
+        f"weakened:{'+'.join(changed)};host-loopback-added:{added}"
+    )
 
 
 def _record(suite: str, case: str) -> dict[str, object]:
@@ -307,6 +337,7 @@ def test_every_required_case_is_attributed_and_every_rule_is_used() -> None:
         dw.WORKSPACE_PRIVILEGED_CASES,
         dw.RESTART_CASES,
         dw.CAPACITY_CASES,
+        dw.E6_CASES,
         dw.REGISTRY_CASES,
         dw.HYGIENE_CASES,
     )
@@ -334,7 +365,9 @@ def test_every_required_case_is_attributed_and_every_rule_is_used() -> None:
     # cap); and M5e.4's 19 registry cases, hosted only, and 2 at the broker's
     # executable-copy bound on a real runtime; and M5e.5's 44, hosted only and
     # manual: ADR-0054 §8's 22, ADR-0055 §9's 21, and the interpreter's way
-    # around pip's profile (D4). A smaller one is a lost case.
+    # around pip's profile (D4); and R3's E6 (ADR-0058), 18 on the hosted
+    # runner: the control, ADR-0057 §1a's 15 rows in 16 cases, and their
+    # count. A smaller one is a lost case.
     assert len(dw.BROKER_ASSURANCE_CASES) == 20
     assert len(dw.CAPTURED_ASSURANCE_CASES) == 19
     closure = [c for s, c in dw.WORKLOAD_CASES if s == "sandbox-closure"]
@@ -353,7 +386,8 @@ def test_every_required_case_is_attributed_and_every_rule_is_used() -> None:
     assert len(dw.HYGIENE_NPM_CASES) == 22
     assert len(dw.HYGIENE_PIP_CASES) == 21
     assert len(dw.HYGIENE_CASES) == 44
-    assert len(inventory) == 627
+    assert len(dw.E6_CASES) == 18
+    assert len(inventory) == 645
 
 
 def test_the_vocabulary_is_closed_used_and_documented() -> None:
@@ -398,6 +432,7 @@ def test_each_suite_is_only_at_the_levels_it_can_reach() -> None:
         "sandbox-authority-workspace": {"real-oci", "dwkp-end-to-end", "privileged-oci"},
         "sandbox-registry": {"dwkp-end-to-end"},
         "sandbox-hygiene": {"dwkp-end-to-end"},
+        "sandbox-proxy-weakened": {"real-oci"},
     }
     assert set(reachable) == set(dw.ATTRIBUTION)
     # The provisioned workspace's cases, and the runtime's restart (which
@@ -483,6 +518,7 @@ def test_every_literal_case_prints_what_the_contract_says() -> None:
         (dw.WORKSPACE_CASES + dw.WORKSPACE_PRIVILEGED_CASES, dw.SANDBOX_EVIDENCE_PREFIX),
         (dw.RESTART_CASES, dw.SANDBOX_EVIDENCE_PREFIX),
         (dw.CAPACITY_CASES, dw.SANDBOX_EVIDENCE_PREFIX),
+        (dw.E6_CASES, dw.SANDBOX_EVIDENCE_PREFIX),
         (dw.REGISTRY_CASES, dw.SANDBOX_EVIDENCE_PREFIX),
     ],
 )

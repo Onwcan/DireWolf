@@ -451,7 +451,7 @@ and package-manager acceptance are M5e's, and the `local` environment is M6's (O
 stays in progress until M5e meets its own acceptance. Passing CI is the evidence named
 here — not a deployment, and not a certification.
 
-#### M5e · The M5 adversarial gate and closeout — **IN PROGRESS** (M5e.1 complete; M5e.2 partially implemented / assurance blocked — its engineering hosted-verified, R8, R9 and R11 included, ADR-0056 accepted, R3's real-container E6 required by the owner (R-B on ADR-0057, 2026-11-01) and blocked, issue #19; M5e.3 complete ahead of M5e.2's close, by the owner's exception (2026-11-03), hosted-verified; M5e.4 in progress ahead of M5e.2's close, by the owner's exception (2026-11-05) — hosted-verified, owner acceptance pending; M5e.5 in progress — implementation authorised by the owner (2026-11-07) and complete, hosted evidence pending, ADR-0054 and ADR-0055 not accepted; M5e.6 not started)
+#### M5e · The M5 adversarial gate and closeout — **IN PROGRESS** (M5e.1 complete; M5e.2 partially implemented / assurance pending — its engineering hosted-verified, R8, R9 and R11 included, ADR-0056 accepted, R3's real-container E6 required by the owner (R-B on ADR-0057, 2026-11-01), built 2026-11-08 (ADR-0058, Proposed) and not yet exercised, hosted evidence pending, issue #19; M5e.3 complete ahead of M5e.2's close, by the owner's exception (2026-11-03), hosted-verified; M5e.4 in progress ahead of M5e.2's close, by the owner's exception (2026-11-05) — hosted-verified, owner acceptance pending; M5e.5 in progress — implementation authorised by the owner (2026-11-07) and complete, hosted evidence pending, ADR-0054 and ADR-0055 not accepted; M5e.6 not started)
 
 **Planned 2026-10-26.** The gap analysis, the requirements-to-evidence matrix,
 the implementation sequence and the owner's decisions of 2026-10-26 on its open points are in
@@ -737,10 +737,25 @@ job before M5e.4's repair passes hosted.
 **M5e.4 hosted-verified; M5e.5 reviewed (2026-11-07, later).** The owner committed M5e.4's repair and M5e.5's implementation as `7aa784a`, `bbe3561`, `7df0840` and `6a702d7`; hosted runs [42390237238](https://github.com/Onwcan/DireWolf/actions/runs/42390237238) to [42397671369](https://github.com/Onwcan/DireWolf/actions/runs/42397671369) (run nos. 134–137) passed 30 of 30 jobs each, `sandbox-registry` with every one of its 19 cases at `dwkp-end-to-end` and a clean census among them ([M5E4_IMPLEMENTATION_HANDOFF.md](M5E4_IMPLEMENTATION_HANDOFF.md) §13). M5e.5's evidence runs only in its manual workflow, which has not run; reviewed before its first run, npm's profile now refuses to start without its trust file, the evidence's own defects are corrected, unstaged, and a predicted failure of ADR-0055's trust is left to be measured ([M5E5_IMPLEMENTATION_HANDOFF.md](M5E5_IMPLEMENTATION_HANDOFF.md) §8).
 **M5e.4 — hosted verified, owner acceptance pending. M5e.5 — implementation complete, hosted evidence pending.**
 
-Still to do: R3's real-container level (E6: required by the owner's R-B, BLOCKED — not built
-and not planned while the safety control stands; it needs a plan the owner approves within
-that control, or genuine independent evidence meeting the plan's §3b that the owner accepts;
-tracked in [issue #19](https://github.com/Onwcan/DireWolf/issues/19));
+**E6 built (2026-11-08).** After hosted runs
+[42415183157](https://github.com/Onwcan/DireWolf/actions/runs/42415183157) to
+[42419107712](https://github.com/Onwcan/DireWolf/actions/runs/42419107712) (run nos.
+138–140, 30 of 30 jobs each, none of them E6) the owner authorised E6's implementation
+within the applicable safety controls. It is built
+([ADR-0058](adr/0058-m5e-proxy-only-hard-rules-weakened-in-a-real-environment.md),
+**Proposed**): for each of ADR-0057 §1a's fifteen rows the released broker prepares a genuine
+`PROXY_ONLY` environment through a test-only runtime that records and runs it with exactly that
+row's hard rule weakened, and its own measurement and decision must refuse it from the vantage(s)
+§1a names; a conforming control is kept. Its 18 cases are required, hosted only, by the new
+`sandbox-proxy-weakened` job, every raw observation digested and published into the job's log
+for the owner's offline review. A development run against a developer's daemon passed the
+control and fifteen of the sixteen cases — not evidence. **M5e.2 is IN PROGRESS, R3 E6 NOT
+EXERCISED — hosted evidence pending.**
+
+Still to do: R3's real-container level (E6: required by the owner's R-B, built 2026-11-08
+and NOT EXERCISED until the hosted `sandbox-proxy-weakened` job passes and the owner reviews
+its log and accepts ADR-0058, which supersedes ADR-0057; tracked in
+[issue #19](https://github.com/Onwcan/DireWolf/issues/19));
 the owner's acceptance of M5e.4, hosted-verified, the OD-E4 provenance
 mechanism included; M5e.5's npm and pip profiles
 ([ADR-0054](adr/0054-m5e-npm-hygiene-profile.md), [ADR-0055](adr/0055-m5e-pip-hygiene-profile.md),

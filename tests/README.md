@@ -296,8 +296,14 @@ it could not ask, so a suite believes a container gone only from a listing of
 exactly its id that the client answered, and fails its test otherwise (the
 evidence's side of F-ABSENT). `tests/architecture/test_m5e_r3_closure.py` holds the owner's
 R-B: ADR-0057 never accepted and outside the digest, its unapproved limited
-claim nowhere M5's, and, while it is Proposed, E6 said NOT EXERCISED or
-BLOCKED wherever R3 is stated and M5e.2 never said complete. It reads
+claim nowhere M5's, and, while it is Proposed, E6 said NOT EXERCISED (BLOCKED,
+or since 2026-11-08 hosted evidence pending) wherever R3 is stated, E6 never
+said passed, ADR-0058 never accepted ahead of it, and M5e.2 never said complete.
+`tests/architecture/test_m5e_e6.py` holds E6 itself (ADR-0058): its required,
+hosted-only job and flag; the test's rows equal to the task's and covering every
+row of ADR-0057 §1a from its vantage; and the gate, the independent check of the
+raw observations and the offline review of a hosted log, each refusing every
+way it could be misled -- with synthetic data, which tests the gate only. It reads
 documents only and plans no container.
 
 **The closure (M5e.2)** ([the M5e plan](../docs/M5E_ASSURANCE_PLAN.md) §3).

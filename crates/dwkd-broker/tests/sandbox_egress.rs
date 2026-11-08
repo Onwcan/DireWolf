@@ -2447,4 +2447,2105 @@ mod linux {
         );
         destroy(&socket, &ev, (&e, &r), Some(&container));
     }
+
+    // ---- E6: one hard rule weakened in a real PROXY_ONLY environment -------
+
+    /// ADR-0057's E6 (M5e.2, R3; the owner's R-B): a real `PROXY_ONLY`
+    /// environment, prepared by the released broker along its production path
+    /// -- its proxy opened, the environment created and started, the relay in
+    /// the image hashed, the setup run, the relay started -- measured from
+    /// both vantages and judged by the production decision, with exactly one
+    /// hard rule of the environment weakened.
+    ///
+    /// The broker never asks for a weaker container: its plan spells
+    /// `oci-strict` and nothing else (TX032, `plan_tests.rs`). So the
+    /// weakening is the runtime's, as ADR-0057 §4 says one could arise: the
+    /// broker is handed a runtime that does not do what the plan asks -- a
+    /// test-only socket between the real client the authority hashed and the
+    /// real daemon ([`faulty`]). It forwards every byte both ways unchanged
+    /// but for one request, the environment's `create`, in which it changes
+    /// the field (or the two fields) the matching weakening flag of M5a's real
+    /// `NO_NETWORK` cases puts there (`sandbox_foundation.rs`). The daemon then
+    /// records and runs exactly that container, and the broker's record of it
+    /// and its probe's report are the daemon's and the kernel's own, read
+    /// through the same socket and never changed: the socket keeps a copy of
+    /// each, which this test checks and writes out for the evidence task to
+    /// check again (`DW_E6_RAW_DIR`).
+    ///
+    /// **Test code only.** No product path reaches it; the broker under test
+    /// is the released binary, unmodified, and the socket is a value the test
+    /// -- playing the authority -- passes, as the authority passes the
+    /// operator's. The conforming control goes through the same socket with
+    /// no fault and must be kept, clean from both vantages, so a refusal below
+    /// is the weakening's and never the socket's.
+    mod e6 {
+        use std::net::Shutdown;
+        use std::os::unix::net::UnixListener;
+
+        use dwk_proto::brokerp::sandbox::ProbeReport;
+        use dwk_proto::json::{self, Number, ParseOptions};
+
+        use super::*;
+
+        /// `PROXY_ONLY`'s own invariants: the topology's, not hard rules.
+        /// Reported for every case -- how a weakening and the topology
+        /// interact is observed, never assumed (ADR-0057 §3, U3).
+        const TOPOLOGY: [I; 4] = [
+            I::HostProxyEnvironment,
+            I::HostProxyRelay,
+            I::HostRelayDigest,
+            I::ContainerProxyReachable,
+        ];
+
+        /// The address the setup adds to the environment's loopback.
+        const PROXY_ADDRESS: &str = "169.254.7.1/32";
+
+        /// What a weakening needs to know of the evidence: the tag the task
+        /// gave the product image, and the runtime's socket as the host has it.
+        #[derive(Clone, Debug)]
+        struct Facts {
+            tag: String,
+            runtime_socket: String,
+        }
+
+        /// One field (or two) of a `create` changed, in place.
+        type Weaken = fn(&mut Object, &Facts);
+
+        // ---- the JSON of a `create` and of a record ----------------------
+
+        fn text_value(text: &str) -> Value {
+            Value::String(text.to_owned())
+        }
+
+        fn int(value: i64) -> Value {
+            Value::Number(Number::from_i64(value).unwrap())
+        }
+
+        /// The value at `path`.
+        fn at<'a>(object: &'a Object, path: &[&str]) -> Option<&'a Value> {
+            let (first, rest) = path.split_first()?;
+            let value = object.get(first)?;
+            if rest.is_empty() {
+                return Some(value);
+            }
+            match value {
+                Value::Object(inner) => at(inner, rest),
+                _ => None,
+            }
+        }
+
+        /// Replace (or add) the value at `path`; every object above it must exist.
+        fn set(object: &mut Object, path: &[&str], value: Value) {
+            let (first, rest) = path.split_first().unwrap();
+            if rest.is_empty() {
+                let _ = object.remove(first);
+                object.insert((*first).to_owned(), value).unwrap();
+                return;
+            }
+            let Some(Value::Object(mut inner)) = object.remove(first) else {
+                panic!("{first} is not an object in the create");
+            };
+            set(&mut inner, rest, value);
+            object
+                .insert((*first).to_owned(), Value::Object(inner))
+                .unwrap();
+        }
+
+        /// The strings of the array at `path`; `null` or absent is none.
+        fn strings(object: &Object, path: &[&str]) -> Vec<String> {
+            match at(object, path) {
+                Some(Value::Array(items)) => items
+                    .iter()
+                    .map(|item| match item {
+                        Value::String(s) => s.clone(),
+                        other => panic!("{path:?} holds {other:?}"),
+                    })
+                    .collect(),
+                None | Some(Value::Null) => Vec::new(),
+                Some(other) => panic!("{path:?} is {other:?}"),
+            }
+        }
+
+        fn string_array(items: Vec<String>) -> Value {
+            Value::Array(items.into_iter().map(Value::String).collect())
+        }
+
+        fn is_text(object: &Object, path: &[&str], wanted: &str) -> bool {
+            matches!(at(object, path), Some(Value::String(s)) if s == wanted)
+        }
+
+        fn is_bool(object: &Object, path: &[&str], wanted: bool) -> bool {
+            matches!(at(object, path), Some(Value::Bool(b)) if *b == wanted)
+        }
+
+        fn is_int(object: &Object, path: &[&str], wanted: i64) -> bool {
+            matches!(at(object, path), Some(Value::Number(Number::Int(n))) if *n == wanted)
+        }
+
+        /// Change `HostConfig.SecurityOpt` with `edit`, which must change it.
+        fn security_opt(create: &mut Object, edit: impl FnOnce(&mut Vec<String>)) {
+            let path = ["HostConfig", "SecurityOpt"];
+            let before = strings(create, &path);
+            let mut after = before.clone();
+            edit(&mut after);
+            assert_ne!(before, after, "the weakening changed no security option");
+            set(create, &path, string_array(after));
+        }
+
+        /// Exactly one JSON object, or `None`.
+        fn try_object(bytes: &[u8]) -> Option<Object> {
+            match json::parse(bytes, ParseOptions::ijson()) {
+                Ok(Value::Object(object)) => Some(object),
+                _ => None,
+            }
+        }
+
+        /// Exactly one JSON object.
+        fn object(bytes: &[u8]) -> Object {
+            try_object(bytes)
+                .unwrap_or_else(|| panic!("not one JSON object ({} bytes)", bytes.len()))
+        }
+
+        /// Every path at which `a` and `b` differ: an object's members one
+        /// by one, any other value (an array included) as a whole.
+        fn differing(a: &Value, b: &Value, path: &str, out: &mut Vec<String>) {
+            if let (Value::Object(x), Value::Object(y)) = (a, b) {
+                let mut keys: Vec<&str> = x.iter().map(|(k, _)| k).collect();
+                keys.extend(y.iter().map(|(k, _)| k));
+                keys.sort_unstable();
+                keys.dedup();
+                for key in keys {
+                    let inner = if path.is_empty() {
+                        key.to_owned()
+                    } else {
+                        format!("{path}.{key}")
+                    };
+                    match (x.get(key), y.get(key)) {
+                        (Some(p), Some(q)) => differing(p, q, &inner, out),
+                        _ => out.push(inner),
+                    }
+                }
+            } else if a != b {
+                out.push(path.to_owned());
+            }
+        }
+
+        fn changed(a: &Object, b: &Object) -> Vec<String> {
+            let mut out = Vec::new();
+            differing(
+                &Value::Object(a.clone()),
+                &Value::Object(b.clone()),
+                "",
+                &mut out,
+            );
+            out
+        }
+
+        // ---- the weakenings: M5a's flags, as the API carries them ---------
+
+        fn writable_root(c: &mut Object, _: &Facts) {
+            set(c, &["HostConfig", "ReadonlyRootfs"], Value::Bool(false));
+        }
+        fn root_user(c: &mut Object, _: &Facts) {
+            set(c, &["User"], text_value("0:0"));
+        }
+        fn privileged(c: &mut Object, _: &Facts) {
+            set(c, &["HostConfig", "Privileged"], Value::Bool(true));
+        }
+        fn runtime_socket(c: &mut Object, f: &Facts) {
+            let mut binds = strings(c, &["HostConfig", "Binds"]);
+            binds.push(format!("{}:/var/run/docker.sock", f.runtime_socket));
+            set(c, &["HostConfig", "Binds"], string_array(binds));
+        }
+        fn capability_added(c: &mut Object, _: &Facts) {
+            set(
+                c,
+                &["HostConfig", "CapAdd"],
+                string_array(vec!["NET_RAW".into()]),
+            );
+        }
+        fn no_new_privileges_off(c: &mut Object, _: &Facts) {
+            security_opt(c, |o| o.retain(|opt| !opt.starts_with("no-new-privileges")));
+        }
+        fn seccomp_unconfined(c: &mut Object, _: &Facts) {
+            security_opt(c, |o| {
+                for opt in o.iter_mut().filter(|opt| opt.starts_with("seccomp=")) {
+                    "seccomp=unconfined".clone_into(opt);
+                }
+            });
+        }
+        fn seccomp_default(c: &mut Object, _: &Facts) {
+            security_opt(c, |o| o.retain(|opt| !opt.starts_with("seccomp=")));
+        }
+        fn host_pid(c: &mut Object, _: &Facts) {
+            set(c, &["HostConfig", "PidMode"], text_value("host"));
+        }
+        fn host_ipc(c: &mut Object, _: &Facts) {
+            set(c, &["HostConfig", "IpcMode"], text_value("host"));
+        }
+        fn host_uts(c: &mut Object, _: &Facts) {
+            set(c, &["HostConfig", "UTSMode"], text_value("host"));
+        }
+        fn host_network(c: &mut Object, _: &Facts) {
+            set(c, &["HostConfig", "NetworkMode"], text_value("host"));
+        }
+        fn mutable_tag(c: &mut Object, f: &Facts) {
+            set(c, &["Image"], text_value(&f.tag));
+        }
+        fn extra_device(c: &mut Object, _: &Facts) {
+            let mut device = Object::new();
+            for (key, value) in [
+                ("PathOnHost", "/dev/zero"),
+                ("PathInContainer", "/dev/extra"),
+                ("CgroupPermissions", "rwm"),
+            ] {
+                device.insert(key.to_owned(), text_value(value)).unwrap();
+            }
+            set(
+                c,
+                &["HostConfig", "Devices"],
+                Value::Array(vec![Value::Object(device)]),
+            );
+        }
+        fn limits_dropped(c: &mut Object, _: &Facts) {
+            set(c, &["HostConfig", "PidsLimit"], int(-1));
+            set(c, &["HostConfig", "MemorySwap"], int(-1));
+        }
+        fn backstop_at_256(c: &mut Object, _: &Facts) {
+            let Some(Value::Array(limits)) = at(c, &["HostConfig", "Ulimits"]).cloned() else {
+                panic!("the create has no ulimits");
+            };
+            let mut found = 0usize;
+            let limits = limits
+                .into_iter()
+                .map(|limit| match limit {
+                    Value::Object(mut l) if is_text(&l, &["Name"], "nproc") => {
+                        found += 1;
+                        set(&mut l, &["Soft"], int(256));
+                        set(&mut l, &["Hard"], int(256));
+                        Value::Object(l)
+                    }
+                    other => other,
+                })
+                .collect();
+            assert_eq!(found, 1, "one nproc limit in the create");
+            set(c, &["HostConfig", "Ulimits"], Value::Array(limits));
+        }
+
+        // ---- what the daemon's own record shows of each ---------------------
+
+        fn recorded_writable_root(r: &Object, _: &Facts) -> bool {
+            is_bool(r, &["HostConfig", "ReadonlyRootfs"], false)
+        }
+        fn recorded_root_user(r: &Object, _: &Facts) -> bool {
+            is_text(r, &["Config", "User"], "0:0")
+        }
+        fn recorded_privileged(r: &Object, _: &Facts) -> bool {
+            is_bool(r, &["HostConfig", "Privileged"], true)
+        }
+        fn recorded_runtime_socket(r: &Object, _: &Facts) -> bool {
+            matches!(at(r, &["Mounts"]), Some(Value::Array(mounts)) if mounts.iter().any(|m| {
+                matches!(m, Value::Object(m) if is_text(m, &["Destination"], "/var/run/docker.sock"))
+            }))
+        }
+        fn recorded_capability(r: &Object, _: &Facts) -> bool {
+            strings(r, &["HostConfig", "CapAdd"])
+                .iter()
+                .any(|c| c == "NET_RAW" || c == "CAP_NET_RAW")
+        }
+        fn recorded_no_new_privileges_off(r: &Object, _: &Facts) -> bool {
+            !strings(r, &["HostConfig", "SecurityOpt"])
+                .iter()
+                .any(|o| o.starts_with("no-new-privileges"))
+        }
+        fn recorded_seccomp_unconfined(r: &Object, _: &Facts) -> bool {
+            strings(r, &["HostConfig", "SecurityOpt"])
+                .iter()
+                .any(|o| o == "seccomp=unconfined")
+        }
+        fn recorded_seccomp_default(r: &Object, _: &Facts) -> bool {
+            !strings(r, &["HostConfig", "SecurityOpt"])
+                .iter()
+                .any(|o| o.starts_with("seccomp="))
+        }
+        fn recorded_host_pid(r: &Object, _: &Facts) -> bool {
+            is_text(r, &["HostConfig", "PidMode"], "host")
+        }
+        fn recorded_host_ipc(r: &Object, _: &Facts) -> bool {
+            is_text(r, &["HostConfig", "IpcMode"], "host")
+        }
+        fn recorded_host_uts(r: &Object, _: &Facts) -> bool {
+            is_text(r, &["HostConfig", "UTSMode"], "host")
+        }
+        fn recorded_host_network(r: &Object, _: &Facts) -> bool {
+            is_text(r, &["HostConfig", "NetworkMode"], "host")
+        }
+        fn recorded_mutable_tag(r: &Object, f: &Facts) -> bool {
+            is_text(r, &["Config", "Image"], &f.tag)
+        }
+        fn recorded_extra_device(r: &Object, _: &Facts) -> bool {
+            matches!(at(r, &["HostConfig", "Devices"]), Some(Value::Array(devices)) if devices.iter().any(|d| {
+                matches!(d, Value::Object(d) if is_text(d, &["PathInContainer"], "/dev/extra"))
+            }))
+        }
+        fn recorded_limits_dropped(r: &Object, _: &Facts) -> bool {
+            let pids = i64::try_from(profile::PIDS_LIMIT).unwrap();
+            !is_int(r, &["HostConfig", "PidsLimit"], pids)
+                && is_int(r, &["HostConfig", "MemorySwap"], -1)
+        }
+        fn recorded_backstop_at_256(r: &Object, _: &Facts) -> bool {
+            matches!(at(r, &["HostConfig", "Ulimits"]), Some(Value::Array(limits)) if limits.iter().any(|l| {
+                matches!(l, Value::Object(l) if is_text(l, &["Name"], "nproc")
+                    && is_int(l, &["Soft"], 256) && is_int(l, &["Hard"], 256))
+            }))
+        }
+
+        /// One E6 case: one hard rule of ADR-0057 §1a's rows weakened.
+        struct Row {
+            case: &'static str,
+            /// The row of ADR-0057 §1a (and issue #19) it is evidence for.
+            row: &'static str,
+            weaken: Weaken,
+            /// The fields of the `create` the weakening changes, and no other.
+            changed: &'static [&'static str],
+            /// The weakening, as the daemon's own record of the container shows it.
+            recorded: fn(&Object, &Facts) -> bool,
+            /// The invariants that must fail, from the vantage(s) §1a names.
+            caught: &'static [I],
+            /// Whether the case changes the runtime's host (the setup would
+            /// add the proxy address to the host's own loopback): a
+            /// disposable runner's alone.
+            host_side_effect: bool,
+        }
+
+        /// ADR-0057 §1a's fifteen rows -- the seccomp rule twice -- one case
+        /// each, the resource-limit row's task backstop (ADR-0056) as a
+        /// second case of that row. The host's network last: it is the one
+        /// that touches the host.
+        const ROWS: &[Row] = &[
+            Row {
+                case: "e6-weakened-writable-root-refused",
+                row: "read-only-root",
+                weaken: writable_root,
+                changed: &["HostConfig.ReadonlyRootfs"],
+                recorded: recorded_writable_root,
+                caught: &[I::HostRootReadOnly, I::ContainerRootReadOnly],
+                host_side_effect: false,
+            },
+            Row {
+                case: "e6-weakened-root-user-refused",
+                row: "non-root-user",
+                weaken: root_user,
+                changed: &["User"],
+                recorded: recorded_root_user,
+                caught: &[I::HostUserNonRoot, I::ContainerUidGid],
+                host_side_effect: false,
+            },
+            Row {
+                case: "e6-weakened-privileged-refused",
+                row: "not-privileged",
+                weaken: privileged,
+                changed: &["HostConfig.Privileged"],
+                recorded: recorded_privileged,
+                caught: &[
+                    I::HostNotPrivileged,
+                    I::ContainerCapabilitiesEmpty,
+                    I::ContainerDevicesMinimal,
+                    I::ContainerProcRestricted,
+                ],
+                host_side_effect: false,
+            },
+            Row {
+                case: "e6-weakened-runtime-socket-mounted-refused",
+                row: "no-runtime-socket",
+                weaken: runtime_socket,
+                changed: &["HostConfig.Binds"],
+                recorded: recorded_runtime_socket,
+                caught: &[
+                    I::HostNoRuntimeSocket,
+                    I::HostMountsExact,
+                    I::ContainerNoRuntimeSocket,
+                ],
+                host_side_effect: false,
+            },
+            Row {
+                case: "e6-weakened-capability-added-refused",
+                row: "capabilities-dropped",
+                weaken: capability_added,
+                changed: &["HostConfig.CapAdd"],
+                recorded: recorded_capability,
+                caught: &[I::HostCapabilitiesDropped, I::ContainerCapabilitiesEmpty],
+                host_side_effect: false,
+            },
+            Row {
+                case: "e6-weakened-no-new-privileges-disabled-refused",
+                row: "no-new-privileges",
+                weaken: no_new_privileges_off,
+                changed: &["HostConfig.SecurityOpt"],
+                recorded: recorded_no_new_privileges_off,
+                caught: &[I::HostNoNewPrivileges, I::ContainerNoNewPrivileges],
+                host_side_effect: false,
+            },
+            Row {
+                case: "e6-weakened-seccomp-unconfined-refused",
+                row: "seccomp-not-unconfined",
+                weaken: seccomp_unconfined,
+                changed: &["HostConfig.SecurityOpt"],
+                recorded: recorded_seccomp_unconfined,
+                caught: &[I::HostSeccompProfile, I::ContainerSeccompProfileActive],
+                host_side_effect: false,
+            },
+            Row {
+                case: "e6-weakened-seccomp-default-profile-refused",
+                row: "seccomp-not-runtime-default",
+                weaken: seccomp_default,
+                changed: &["HostConfig.SecurityOpt"],
+                recorded: recorded_seccomp_default,
+                caught: &[I::HostSeccompProfile, I::ContainerSeccompProfileActive],
+                host_side_effect: false,
+            },
+            Row {
+                case: "e6-weakened-host-pid-refused",
+                row: "private-pid-namespace",
+                weaken: host_pid,
+                changed: &["HostConfig.PidMode"],
+                recorded: recorded_host_pid,
+                caught: &[I::HostPidNamespacePrivate, I::ContainerPidNamespacePrivate],
+                host_side_effect: false,
+            },
+            Row {
+                case: "e6-weakened-host-ipc-refused",
+                row: "private-ipc-namespace",
+                weaken: host_ipc,
+                changed: &["HostConfig.IpcMode"],
+                recorded: recorded_host_ipc,
+                caught: &[I::HostIpcNamespacePrivate],
+                host_side_effect: false,
+            },
+            Row {
+                case: "e6-weakened-host-uts-refused",
+                row: "private-uts-namespace",
+                weaken: host_uts,
+                changed: &["HostConfig.UTSMode"],
+                recorded: recorded_host_uts,
+                caught: &[I::HostUtsNamespacePrivate],
+                host_side_effect: false,
+            },
+            Row {
+                case: "e6-weakened-mutable-image-tag-refused",
+                row: "digest-pinned-image",
+                weaken: mutable_tag,
+                changed: &["Image"],
+                recorded: recorded_mutable_tag,
+                caught: &[I::HostImagePinned],
+                host_side_effect: false,
+            },
+            Row {
+                case: "e6-weakened-extra-device-refused",
+                row: "no-additional-devices",
+                weaken: extra_device,
+                changed: &["HostConfig.Devices"],
+                recorded: recorded_extra_device,
+                caught: &[I::HostNoDevices, I::ContainerDevicesMinimal],
+                host_side_effect: false,
+            },
+            Row {
+                case: "e6-weakened-resource-limits-dropped-refused",
+                row: "resource-limits",
+                weaken: limits_dropped,
+                changed: &["HostConfig.MemorySwap", "HostConfig.PidsLimit"],
+                recorded: recorded_limits_dropped,
+                caught: &[I::HostResourceLimits, I::ContainerCgroupLimits],
+                host_side_effect: false,
+            },
+            Row {
+                case: "e6-weakened-task-backstop-at-256-refused",
+                row: "resource-limits",
+                weaken: backstop_at_256,
+                changed: &["HostConfig.Ulimits"],
+                recorded: recorded_backstop_at_256,
+                caught: &[I::HostResourceLimits, I::ContainerRlimits],
+                host_side_effect: false,
+            },
+            Row {
+                case: "e6-weakened-host-network-refused",
+                row: "isolated-network",
+                weaken: host_network,
+                changed: &["HostConfig.NetworkMode"],
+                recorded: recorded_host_network,
+                caught: &[
+                    I::HostNetworkIsolated,
+                    I::ContainerNetworkIsolated,
+                    I::ContainerDirectEgressRefused,
+                    I::ContainerDirectDnsRefused,
+                ],
+                host_side_effect: true,
+            },
+        ];
+
+        // ---- the faulty runtime -------------------------------------------
+
+        /// A runtime that does not do what the plan asks: the real daemon
+        /// behind a socket that forwards every request and every answer byte
+        /// for byte, except the one `create` its fault names, and keeps a copy
+        /// of what the evidence must show. Test code only.
+        mod faulty {
+            use std::collections::BTreeMap;
+            use std::io::{BufRead as _, BufReader, Read as _, Write as _};
+            use std::net::Shutdown;
+            use std::os::unix::net::{UnixListener, UnixStream};
+            use std::path::{Path, PathBuf};
+            use std::sync::atomic::{AtomicBool, Ordering};
+            use std::sync::{Arc, Mutex};
+
+            use dwk_proto::json::{Object, Value, to_canonical_bytes};
+            use dwk_sandbox_profile as profile;
+
+            use super::{Facts, Weaken, try_object};
+
+            /// The longest request or answer head read.
+            const HEAD: usize = 64 * 1024;
+            /// The most bytes of one kept body or stream.
+            const KEPT: usize = 8 * 1024 * 1024;
+
+            /// The one `create` to weaken, and how.
+            #[derive(Clone)]
+            pub(super) struct Fault {
+                pub(super) weaken: Weaken,
+                pub(super) facts: Facts,
+                /// The environment whose container is weakened.
+                pub(super) environment: String,
+            }
+
+            /// One container's creation, as it crossed the socket.
+            #[derive(Clone, Debug)]
+            pub(super) struct Created {
+                pub(super) role: String,
+                pub(super) environment: String,
+                /// The body as the client sent it.
+                pub(super) sent: Vec<u8>,
+                /// The body as the daemon received it.
+                pub(super) received: Vec<u8>,
+                /// The id the daemon answered, if it created one.
+                pub(super) id: Option<String>,
+            }
+
+            /// What crossed the socket that the evidence must show.
+            #[derive(Clone, Debug, Default)]
+            pub(super) struct Seen {
+                pub(super) created: Vec<Created>,
+                /// Every inspection of a container: the id asked, the
+                /// daemon's status, its body (decoded), as it sent it.
+                pub(super) inspected: Vec<(String, u16, Vec<u8>)>,
+                /// Every exec the client made: its id, the container, the command.
+                pub(super) execs: BTreeMap<String, (String, Vec<String>)>,
+                /// Every exec started: its id and the stream the daemon sent.
+                pub(super) streams: Vec<(String, Vec<u8>)>,
+                /// Every request, `METHOD path status` (and a create's role).
+                pub(super) requests: Vec<String>,
+                /// How many bodies were changed.
+                pub(super) rewritten: usize,
+                /// What could not be forwarded or kept.
+                pub(super) failures: Vec<String>,
+                /// Connections the client closed before its answer was
+                /// written: its own choice, never a failure of the socket --
+                /// a step the broker needed and did not get fails that step,
+                /// which its measurement shows.
+                pub(super) hangups: Vec<String>,
+            }
+
+            /// What marks a write the client had already hung up on.
+            const HANGUP: &str = "the client hung up: ";
+
+            /// A write to the client that failed: a hang-up, or a failure.
+            fn client_error(e: &std::io::Error) -> String {
+                match e.kind() {
+                    std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::ConnectionReset => {
+                        format!("{HANGUP}{e}")
+                    }
+                    _ => format!("to the client: {e}"),
+                }
+            }
+
+            /// The faulty runtime's socket, removed when dropped.
+            pub(super) struct FaultyRuntime {
+                path: PathBuf,
+                seen: Arc<Mutex<Seen>>,
+                stop: Arc<AtomicBool>,
+                accept: Option<std::thread::JoinHandle<()>>,
+            }
+
+            impl FaultyRuntime {
+                /// Listen at `path`, forwarding to the daemon at `daemon`.
+                pub(super) fn start(path: PathBuf, daemon: PathBuf, fault: Option<Fault>) -> Self {
+                    let _ = std::fs::remove_file(&path);
+                    let listener = UnixListener::bind(&path).unwrap();
+                    let seen = Arc::new(Mutex::new(Seen::default()));
+                    let stop = Arc::new(AtomicBool::new(false));
+                    let (keep, halt) = (Arc::clone(&seen), Arc::clone(&stop));
+                    let accept = std::thread::spawn(move || {
+                        for stream in listener.incoming() {
+                            if halt.load(Ordering::SeqCst) {
+                                return;
+                            }
+                            let Ok(client) = stream else { continue };
+                            let (daemon, fault, keep) =
+                                (daemon.clone(), fault.clone(), Arc::clone(&keep));
+                            std::thread::spawn(move || {
+                                if let Err(why) = serve(client, &daemon, fault.as_ref(), &keep) {
+                                    let mut seen = keep.lock().unwrap();
+                                    if why.contains(HANGUP) {
+                                        seen.hangups.push(why);
+                                    } else {
+                                        seen.failures.push(why);
+                                    }
+                                }
+                            });
+                        }
+                    });
+                    Self {
+                        path,
+                        seen,
+                        stop,
+                        accept: Some(accept),
+                    }
+                }
+
+                pub(super) fn path(&self) -> &Path {
+                    &self.path
+                }
+
+                /// What it has seen so far.
+                pub(super) fn seen(&self) -> Seen {
+                    self.seen.lock().unwrap().clone()
+                }
+            }
+
+            impl Drop for FaultyRuntime {
+                fn drop(&mut self) {
+                    self.stop.store(true, Ordering::SeqCst);
+                    let _ = UnixStream::connect(&self.path);
+                    if let Some(accept) = self.accept.take() {
+                        let _ = accept.join();
+                    }
+                    let _ = std::fs::remove_file(&self.path);
+                }
+            }
+
+            /// A request's or an answer's head: its bytes, start line and headers.
+            pub(super) struct Head {
+                pub(super) raw: Vec<u8>,
+                pub(super) start: String,
+                headers: Vec<(String, String)>,
+            }
+
+            impl Head {
+                fn parse(raw: Vec<u8>) -> Result<Self, String> {
+                    let text = String::from_utf8(raw.clone()).map_err(|_| "a head not in UTF-8")?;
+                    let mut lines = text.split("\r\n");
+                    let start = lines.next().unwrap_or_default().to_owned();
+                    let mut headers = Vec::new();
+                    for line in lines.filter(|l| !l.is_empty()) {
+                        let (name, value) = line.split_once(':').ok_or("a header without ':'")?;
+                        headers.push((name.trim().to_ascii_lowercase(), value.trim().to_owned()));
+                    }
+                    Ok(Self {
+                        raw,
+                        start,
+                        headers,
+                    })
+                }
+
+                fn header(&self, name: &str) -> Option<&str> {
+                    self.headers
+                        .iter()
+                        .find(|(n, _)| n == name)
+                        .map(|(_, v)| v.as_str())
+                }
+
+                fn chunked(&self) -> bool {
+                    self.header("transfer-encoding")
+                        .is_some_and(|v| v.to_ascii_lowercase().contains("chunked"))
+                }
+
+                fn length(&self) -> Result<Option<usize>, String> {
+                    self.header("content-length")
+                        .map(|v| v.parse::<usize>().map_err(|_| format!("a length {v:?}")))
+                        .transpose()
+                }
+
+                fn method(&self) -> &str {
+                    self.start.split(' ').next().unwrap_or_default()
+                }
+
+                /// The request's path, its API version and query left off.
+                fn path(&self) -> String {
+                    let target = self.start.split(' ').nth(1).unwrap_or_default();
+                    let path = target.split('?').next().unwrap_or_default();
+                    match path.strip_prefix("/v") {
+                        Some(rest)
+                            if rest.split('/').next().is_some_and(|v| {
+                                !v.is_empty() && v.chars().all(|c| c.is_ascii_digit() || c == '.')
+                            }) =>
+                        {
+                            rest.split_once('/')
+                                .map_or("/".to_owned(), |(_, p)| format!("/{p}"))
+                        }
+                        _ => path.to_owned(),
+                    }
+                }
+
+                fn status(&self) -> Result<u16, String> {
+                    self.start
+                        .split(' ')
+                        .nth(1)
+                        .and_then(|s| s.parse().ok())
+                        .ok_or_else(|| format!("no status in {:?}", self.start))
+                }
+
+                /// The head with its body's length set to `length`, unchunked.
+                fn with_length(&self, length: usize) -> Vec<u8> {
+                    let mut out = self.start.clone().into_bytes();
+                    out.extend_from_slice(b"\r\n");
+                    let text = String::from_utf8_lossy(&self.raw).into_owned();
+                    for line in text.split("\r\n").skip(1).filter(|l| !l.is_empty()) {
+                        let name = line.split(':').next().unwrap_or_default().trim();
+                        if name.eq_ignore_ascii_case("content-length")
+                            || name.eq_ignore_ascii_case("transfer-encoding")
+                        {
+                            continue;
+                        }
+                        out.extend_from_slice(line.as_bytes());
+                        out.extend_from_slice(b"\r\n");
+                    }
+                    out.extend_from_slice(format!("Content-Length: {length}\r\n\r\n").as_bytes());
+                    out
+                }
+            }
+
+            /// What a request is, for what the evidence keeps of it.
+            #[derive(Clone, Debug, PartialEq, Eq)]
+            enum Kind {
+                Create,
+                ExecCreate(String),
+                ExecStart(String),
+                Inspect(String),
+                Other,
+            }
+
+            fn kind(head: &Head) -> Kind {
+                let path = head.path();
+                let words: Vec<&str> = path.trim_start_matches('/').split('/').collect();
+                match (head.method(), words.as_slice()) {
+                    ("POST", ["containers", "create"]) => Kind::Create,
+                    ("POST", ["containers", id, "exec"]) => Kind::ExecCreate((*id).to_owned()),
+                    ("POST", ["exec", id, "start"]) => Kind::ExecStart((*id).to_owned()),
+                    ("GET", ["containers", id, "json"]) => Kind::Inspect((*id).to_owned()),
+                    _ => Kind::Other,
+                }
+            }
+
+            /// One head, through its blank line; `None` at a clean end.
+            fn read_head(from: &mut BufReader<UnixStream>) -> Result<Option<Vec<u8>>, String> {
+                let mut raw = Vec::new();
+                loop {
+                    let mut line = Vec::new();
+                    let n = from
+                        .read_until(b'\n', &mut line)
+                        .map_err(|e| format!("reading a head: {e}"))?;
+                    if n == 0 {
+                        return if raw.is_empty() {
+                            Ok(None)
+                        } else {
+                            Err("a head cut short".to_owned())
+                        };
+                    }
+                    raw.extend_from_slice(&line);
+                    if raw.len() > HEAD {
+                        return Err("a head past its bound".to_owned());
+                    }
+                    if line == b"\r\n" {
+                        return Ok(Some(raw));
+                    }
+                }
+            }
+
+            /// A body: its bytes as they crossed (`raw`), and its content.
+            pub(super) struct Body {
+                pub(super) raw: Vec<u8>,
+                pub(super) content: Vec<u8>,
+                /// It ran to the connection's end.
+                pub(super) to_end: bool,
+            }
+
+            fn read_exact(from: &mut BufReader<UnixStream>, n: usize) -> Result<Vec<u8>, String> {
+                let mut bytes = vec![0u8; n];
+                from.read_exact(&mut bytes)
+                    .map_err(|e| format!("a body cut short: {e}"))?;
+                Ok(bytes)
+            }
+
+            /// Read a body whole. An answer with neither a length nor chunks
+            /// runs to the connection's end; a request with neither has none.
+            fn read_body(
+                from: &mut BufReader<UnixStream>,
+                head: &Head,
+                answer: bool,
+            ) -> Result<Body, String> {
+                let mut body = Body {
+                    raw: Vec::new(),
+                    content: Vec::new(),
+                    to_end: false,
+                };
+                if head.chunked() {
+                    loop {
+                        let mut line = Vec::new();
+                        from.read_until(b'\n', &mut line)
+                            .map_err(|e| format!("a chunk: {e}"))?;
+                        body.raw.extend_from_slice(&line);
+                        let size = String::from_utf8_lossy(&line);
+                        let size = size.split(';').next().unwrap_or_default().trim();
+                        let size = usize::from_str_radix(size, 16)
+                            .map_err(|_| format!("a chunk size {size:?}"))?;
+                        if size == 0 {
+                            loop {
+                                let mut trailer = Vec::new();
+                                from.read_until(b'\n', &mut trailer)
+                                    .map_err(|e| format!("a trailer: {e}"))?;
+                                body.raw.extend_from_slice(&trailer);
+                                if trailer == b"\r\n" || trailer.is_empty() {
+                                    return Ok(body);
+                                }
+                            }
+                        }
+                        let data = read_exact(from, size)?;
+                        body.content.extend_from_slice(&data);
+                        body.raw.extend_from_slice(&data);
+                        body.raw.extend_from_slice(&read_exact(from, 2)?);
+                        if body.content.len() > KEPT {
+                            return Err("a kept body past its bound".to_owned());
+                        }
+                    }
+                }
+                if let Some(n) = head.length()? {
+                    if n > KEPT {
+                        return Err("a kept body past its bound".to_owned());
+                    }
+                    body.raw = read_exact(from, n)?;
+                    body.content.clone_from(&body.raw);
+                    return Ok(body);
+                }
+                if answer {
+                    from.take(u64::try_from(KEPT).unwrap())
+                        .read_to_end(&mut body.raw)
+                        .map_err(|e| format!("a body to the end: {e}"))?;
+                    body.content.clone_from(&body.raw);
+                    body.to_end = true;
+                }
+                Ok(body)
+            }
+
+            /// Forward an answer's body as it arrives; whether it ran to the end.
+            fn stream_body(
+                from: &mut BufReader<UnixStream>,
+                to: &mut UnixStream,
+                head: &Head,
+            ) -> Result<bool, String> {
+                let send = |to: &mut UnixStream, bytes: &[u8]| {
+                    to.write_all(bytes).map_err(|e| client_error(&e))
+                };
+                if head.chunked() {
+                    loop {
+                        let mut line = Vec::new();
+                        from.read_until(b'\n', &mut line)
+                            .map_err(|e| format!("a chunk: {e}"))?;
+                        send(to, &line)?;
+                        let size = String::from_utf8_lossy(&line);
+                        let size = size.split(';').next().unwrap_or_default().trim();
+                        let size = usize::from_str_radix(size, 16)
+                            .map_err(|_| format!("a chunk size {size:?}"))?;
+                        if size == 0 {
+                            loop {
+                                let mut trailer = Vec::new();
+                                from.read_until(b'\n', &mut trailer)
+                                    .map_err(|e| format!("a trailer: {e}"))?;
+                                send(to, &trailer)?;
+                                if trailer == b"\r\n" || trailer.is_empty() {
+                                    return Ok(false);
+                                }
+                            }
+                        }
+                        let mut left = size + 2;
+                        let mut buffer = [0u8; 16 * 1024];
+                        while left > 0 {
+                            let want = left.min(buffer.len());
+                            let n = from
+                                .read(&mut buffer[..want])
+                                .map_err(|e| format!("a chunk's data: {e}"))?;
+                            if n == 0 {
+                                return Err("a chunk cut short".to_owned());
+                            }
+                            send(to, &buffer[..n])?;
+                            left -= n;
+                        }
+                    }
+                }
+                if let Some(mut left) = head.length()? {
+                    let mut buffer = [0u8; 16 * 1024];
+                    while left > 0 {
+                        let want = left.min(buffer.len());
+                        let n = from
+                            .read(&mut buffer[..want])
+                            .map_err(|e| format!("a body's data: {e}"))?;
+                        if n == 0 {
+                            return Err("a body cut short".to_owned());
+                        }
+                        send(to, &buffer[..n])?;
+                        left -= n;
+                    }
+                    return Ok(false);
+                }
+                std::io::copy(from, to).map_err(|e| client_error(&e))?;
+                Ok(true)
+            }
+
+            fn label<'a>(create: &'a Object, name: &str) -> &'a str {
+                match super::at(create, &["Labels", name]) {
+                    Some(Value::String(s)) => s,
+                    _ => "",
+                }
+            }
+
+            fn answered_id(content: &[u8]) -> Option<String> {
+                match super::at(&try_object(content)?, &["Id"]) {
+                    Some(Value::String(id)) => Some(id.clone()),
+                    _ => None,
+                }
+            }
+
+            /// One client connection, request by request, to its end; a
+            /// failure names the request it happened in.
+            fn serve(
+                client: UnixStream,
+                daemon: &Path,
+                fault: Option<&Fault>,
+                seen: &Mutex<Seen>,
+            ) -> Result<(), String> {
+                let mut last = String::from("before any request");
+                forward(client, daemon, fault, seen, &mut last).map_err(|e| format!("{last}: {e}"))
+            }
+
+            fn forward(
+                client: UnixStream,
+                daemon: &Path,
+                fault: Option<&Fault>,
+                seen: &Mutex<Seen>,
+                last: &mut String,
+            ) -> Result<(), String> {
+                let upstream =
+                    UnixStream::connect(daemon).map_err(|e| format!("the daemon: {e}"))?;
+                let mut from_client =
+                    BufReader::new(client.try_clone().map_err(|e| e.to_string())?);
+                let mut to_client = client;
+                let mut from_daemon =
+                    BufReader::new(upstream.try_clone().map_err(|e| e.to_string())?);
+                let mut to_daemon = upstream;
+                let send = |to: &mut UnixStream, bytes: &[u8], whom: &str| {
+                    to.write_all(bytes).map_err(|e| {
+                        if whom == "client" {
+                            client_error(&e)
+                        } else {
+                            format!("to the {whom}: {e}")
+                        }
+                    })
+                };
+                loop {
+                    let Some(raw) = read_head(&mut from_client)? else {
+                        let _ = to_daemon.shutdown(Shutdown::Write);
+                        return Ok(());
+                    };
+                    let request = Head::parse(raw)?;
+                    request.start.clone_into(last);
+                    let body = read_body(&mut from_client, &request, false)?;
+                    let request_content = body.content.clone();
+                    let what = kind(&request);
+                    let mut note = String::new();
+                    let mut created = None;
+                    // The one place a byte is changed: the faulted
+                    // environment's create, re-encoded with its length.
+                    let (head, sent) = if what == Kind::Create {
+                        let mut create = try_object(&body.content)
+                            .ok_or("a create whose body is not one JSON object")?;
+                        let (role, environment) = (
+                            label(&create, profile::LABEL_ROLE).to_owned(),
+                            label(&create, profile::LABEL_ENVIRONMENT).to_owned(),
+                        );
+                        note = format!(" role={role}");
+                        let weakened =
+                            fault.filter(|f| role == "environment" && environment == f.environment);
+                        let (head, sent) = if let Some(f) = weakened {
+                            (f.weaken)(&mut create, &f.facts);
+                            let bytes = to_canonical_bytes(&Value::Object(create));
+                            seen.lock().unwrap().rewritten += 1;
+                            (request.with_length(bytes.len()), bytes)
+                        } else {
+                            (request.raw.clone(), body.raw.clone())
+                        };
+                        let received = if weakened.is_some() {
+                            sent.clone()
+                        } else {
+                            body.content.clone()
+                        };
+                        created = Some(Created {
+                            role,
+                            environment,
+                            sent: body.content.clone(),
+                            received,
+                            id: None,
+                        });
+                        (head, sent)
+                    } else {
+                        (request.raw.clone(), body.raw.clone())
+                    };
+                    send(&mut to_daemon, &head, "daemon")?;
+                    send(&mut to_daemon, &sent, "daemon")?;
+                    let upgrade = request.header("upgrade").is_some();
+                    let Some(raw) = read_head(&mut from_daemon)? else {
+                        return Err(format!(
+                            "the daemon closed before answering {}",
+                            request.start
+                        ));
+                    };
+                    let answer = Head::parse(raw)?;
+                    let status = answer.status()?;
+                    seen.lock().unwrap().requests.push(format!(
+                        "{} {} {status}{note}",
+                        request.method(),
+                        request.path()
+                    ));
+                    if upgrade || status == 101 {
+                        // A hijacked stream: raw both ways from here.
+                        send(&mut to_client, &answer.raw, "client")?;
+                        let mut back = to_daemon.try_clone().map_err(|e| e.to_string())?;
+                        std::thread::spawn(move || {
+                            let _ = std::io::copy(&mut from_client, &mut back);
+                            let _ = back.shutdown(Shutdown::Write);
+                        });
+                        let mut stream = Vec::new();
+                        let mut buffer = [0u8; 16 * 1024];
+                        loop {
+                            let n = from_daemon
+                                .read(&mut buffer)
+                                .map_err(|e| format!("a stream: {e}"))?;
+                            if n == 0 {
+                                break;
+                            }
+                            if stream.len() < KEPT {
+                                stream.extend_from_slice(&buffer[..n]);
+                            }
+                            send(&mut to_client, &buffer[..n], "client")?;
+                        }
+                        if let Kind::ExecStart(id) = what {
+                            seen.lock().unwrap().streams.push((id, stream));
+                        }
+                        let _ = to_client.shutdown(Shutdown::Write);
+                        return Ok(());
+                    }
+                    let bodiless = request.method() == "HEAD"
+                        || status == 204
+                        || status == 304
+                        || (100..200).contains(&status);
+                    let keep = !matches!(what, Kind::Other | Kind::ExecStart(_));
+                    if bodiless {
+                        send(&mut to_client, &answer.raw, "client")?;
+                    } else if keep {
+                        // Kept whole, recorded, then forwarded: the client
+                        // never has an answer the evidence has not.
+                        let body = read_body(&mut from_daemon, &answer, true)?;
+                        {
+                            let mut seen = seen.lock().unwrap();
+                            match &what {
+                                Kind::Create => {
+                                    if let Some(mut c) = created.take() {
+                                        c.id = (status == 201)
+                                            .then(|| answered_id(&body.content))
+                                            .flatten();
+                                        seen.created.push(c);
+                                    }
+                                }
+                                Kind::ExecCreate(container) if status == 201 => {
+                                    let command = try_object(&request_content)
+                                        .map(|o| super::strings(&o, &["Cmd"]))
+                                        .unwrap_or_default();
+                                    if let Some(id) = answered_id(&body.content) {
+                                        seen.execs.insert(id, (container.clone(), command));
+                                    }
+                                }
+                                Kind::Inspect(container) => {
+                                    seen.inspected.push((
+                                        container.clone(),
+                                        status,
+                                        body.content.clone(),
+                                    ));
+                                }
+                                _ => {}
+                            }
+                        }
+                        send(&mut to_client, &answer.raw, "client")?;
+                        send(&mut to_client, &body.raw, "client")?;
+                        if body.to_end {
+                            let _ = to_client.shutdown(Shutdown::Write);
+                            return Ok(());
+                        }
+                    } else {
+                        send(&mut to_client, &answer.raw, "client")?;
+                        if stream_body(&mut from_daemon, &mut to_client, &answer)? {
+                            let _ = to_client.shutdown(Shutdown::Write);
+                            return Ok(());
+                        }
+                    }
+                    let closing = |h: &Head| {
+                        h.header("connection")
+                            .is_some_and(|v| v.eq_ignore_ascii_case("close"))
+                    };
+                    if closing(&request) || closing(&answer) {
+                        return Ok(());
+                    }
+                }
+            }
+
+            /// The stdout and stderr of a multiplexed exec stream (8-byte frame
+            /// headers: stream, three zeros, a big-endian length); `None` if it
+            /// is not one.
+            pub(super) fn demux(raw: &[u8]) -> Option<(Vec<u8>, Vec<u8>)> {
+                let (mut out, mut err) = (Vec::new(), Vec::new());
+                let mut rest = raw;
+                while !rest.is_empty() {
+                    let header = rest.get(..8)?;
+                    let size = u32::from_be_bytes(header.get(4..8)?.try_into().ok()?);
+                    let size = usize::try_from(size).ok()?;
+                    let payload = rest.get(8..8 + size)?;
+                    match header.first()? {
+                        1 => out.extend_from_slice(payload),
+                        2 => err.extend_from_slice(payload),
+                        _ => return None,
+                    }
+                    rest = rest.get(8 + size..)?;
+                }
+                Some((out, err))
+            }
+        }
+
+        use faulty::{Created, Fault, FaultyRuntime, Seen, demux};
+
+        // ---- the cases -------------------------------------------------------
+
+        /// Where this is, for the one case that touches the host: a disposable
+        /// GitHub-hosted runner whose engine is not Docker Desktop.
+        fn disposable_runner(ev: &Evidence) -> Result<(), String> {
+            let env = |name: &str| std::env::var(name).unwrap_or_default();
+            if env("GITHUB_ACTIONS") != "true" || env("RUNNER_ENVIRONMENT") != "github-hosted" {
+                return Err("this is not a disposable GitHub-hosted runner".to_owned());
+            }
+            let system = ev.docker_ok(&["info", "--format", "{{.OperatingSystem}}"]);
+            if system.contains("Docker Desktop") {
+                return Err(format!("the runtime is {}", system.trim()));
+            }
+            Ok(())
+        }
+
+        /// The host's own IPv4 loopback addresses, as `ip` lists them.
+        fn host_loopback() -> Option<Vec<String>> {
+            let out = Command::new("ip")
+                .args(["-o", "-4", "addr", "show", "dev", "lo"])
+                .output()
+                .ok()?;
+            if !out.status.success() {
+                return None;
+            }
+            let text = String::from_utf8(out.stdout).ok()?;
+            let mut found: Vec<String> = text
+                .lines()
+                .filter_map(|line| {
+                    let mut words = line.split_whitespace();
+                    words.position(|w| w == "inet")?;
+                    words.next().map(str::to_owned)
+                })
+                .collect();
+            found.sort();
+            Some(found)
+        }
+
+        struct Lab<'a> {
+            ev: &'a Evidence,
+            socket: &'a Path,
+            dir: &'a Scratch,
+            workspace: &'a Path,
+            broker: &'a Broker,
+            facts: Facts,
+            raw: PathBuf,
+        }
+
+        /// A preparation through a faulty runtime.
+        struct Through {
+            e: EnvironmentId,
+            r: RunId,
+            runtime: FaultyRuntime,
+            through: Evidence,
+            container: Option<ContainerRef>,
+            retained: bool,
+            measurement: Option<EnvironmentMeasurement>,
+            events: String,
+        }
+
+        fn prepare_through(lab: &Lab<'_>, fault: Option<Weaken>) -> Through {
+            let (e, r) = (environment(), run());
+            let s = spec(
+                (&e, &r),
+                lab.workspace,
+                &lab.ev.image,
+                &lab.ev.relay_sha256,
+                grant(vec![target(ORIGIN, 443)], 4, 1 << 20, 1 << 20),
+                lab.ev,
+            );
+            let fault = fault.map(|weaken| Fault {
+                weaken,
+                facts: lab.facts.clone(),
+                environment: e.as_str().to_owned(),
+            });
+            let runtime = FaultyRuntime::start(
+                lab.dir.0.join(format!("runtime-{}.sock", next())),
+                PathBuf::from(&lab.ev.socket),
+                fault,
+            );
+            let mut through = lab.ev.clone();
+            through.socket = runtime.path().display().to_string();
+            let before = lab.broker.stderr().len();
+            let prepared = done(prepare(lab.socket, &through, &s))
+                .environment_prepare
+                .unwrap();
+            let events = lab
+                .broker
+                .stderr()
+                .get(before..)
+                .unwrap_or_default()
+                .to_owned();
+            Through {
+                e,
+                r,
+                runtime,
+                through,
+                container: prepared.container,
+                retained: prepared.retained,
+                measurement: prepared.measurement,
+                events,
+            }
+        }
+
+        /// The one environment create the socket saw, and every other create
+        /// forwarded byte for byte; the setup and the relay among them.
+        fn environment_create<'a>(case: &str, seen: &'a Seen, e: &EnvironmentId) -> &'a Created {
+            let ours: Vec<&Created> = seen
+                .created
+                .iter()
+                .filter(|c| c.role == "environment")
+                .collect();
+            assert_eq!(ours.len(), 1, "{case}: environment creates {ours:?}");
+            let created = ours[0];
+            assert_eq!(created.environment, e.as_str(), "{case}");
+            for other in seen.created.iter().filter(|c| c.role != "environment") {
+                assert_eq!(
+                    other.sent, other.received,
+                    "{case}: the {} create changed",
+                    other.role
+                );
+            }
+            for role in ["setup", "relay"] {
+                assert!(
+                    seen.created
+                        .iter()
+                        .any(|c| c.role == role && c.environment == e.as_str()),
+                    "{case}: the broker made no {role}: {:?}",
+                    seen.requests
+                );
+            }
+            created
+        }
+
+        /// The record the broker judged -- the daemon's first answer of the
+        /// environment's own -- and the probe report it read, each checked
+        /// against the broker's measurement.
+        fn observed(
+            case: &str,
+            seen: &Seen,
+            container: &ContainerRef,
+            e: &EnvironmentId,
+            measurement: &EnvironmentMeasurement,
+        ) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+            let record = seen
+                .inspected
+                .iter()
+                .find(|(id, status, _)| id == container.as_str() && *status == 200)
+                .map(|(_, _, body)| body.clone())
+                .unwrap_or_else(|| {
+                    panic!("{case}: the broker read no record: {:?}", seen.requests)
+                });
+            let measure = vec![
+                profile::PROBE_PATH.to_owned(),
+                profile::PROBE_MEASURE.to_owned(),
+                e.as_str().to_owned(),
+                NetworkTopology::ProxyOnly.as_str().to_owned(),
+            ];
+            let execs: Vec<&String> = seen
+                .execs
+                .iter()
+                .filter(|(_, (c, command))| c == container.as_str() && *command == measure)
+                .map(|(id, _)| id)
+                .collect();
+            assert_eq!(execs.len(), 1, "{case}: probe measurements {execs:?}");
+            let streams: Vec<&Vec<u8>> = seen
+                .streams
+                .iter()
+                .filter(|(id, _)| id == execs[0])
+                .map(|(_, s)| s)
+                .collect();
+            assert_eq!(streams.len(), 1, "{case}: the probe's stream");
+            let stream = streams[0].clone();
+            let (stdout, _stderr) =
+                demux(&stream).unwrap_or_else(|| panic!("{case}: not a stream"));
+            let report = ProbeReport::decode_bytes(&stdout)
+                .unwrap_or_else(|e| panic!("{case}: the probe's report: {e:?}"));
+            // Every inside verdict the broker answered is the probe's own.
+            for check in report.checks.iter() {
+                assert_eq!(
+                    verdict(measurement, check.invariant),
+                    check.verdict,
+                    "{case}: {:?} is not what the probe reported",
+                    check.invariant
+                );
+            }
+            (record, stream, stdout)
+        }
+
+        fn joined(invariants: &[I]) -> String {
+            invariants
+                .iter()
+                .map(|i| i.as_str())
+                .collect::<Vec<_>>()
+                .join("+")
+        }
+
+        fn verdicts(pairs: &[(I, Verdict)]) -> String {
+            if pairs.is_empty() {
+                return "none".to_owned();
+            }
+            pairs
+                .iter()
+                .map(|(i, v)| format!("{}={}", i.as_str(), v.as_str()))
+                .collect::<Vec<_>>()
+                .join("+")
+        }
+
+        fn hex(digest: &[u8]) -> String {
+            digest.iter().map(|b| format!("{b:02x}")).collect()
+        }
+
+        /// Write one raw observation of `case` and say its digest.
+        fn keep(lab: &Lab<'_>, case: &str, file: &str, bytes: &[u8]) {
+            let dir = lab.raw.join(case);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join(file), bytes).unwrap();
+            let mut fields = Object::new();
+            for (key, value) in [
+                ("case", case.to_owned()),
+                ("file", file.to_owned()),
+                ("sha256", hex(&Sha256::digest(bytes))),
+            ] {
+                fields.insert(key.to_owned(), Value::String(value)).unwrap();
+            }
+            fields
+                .insert(
+                    "bytes".to_owned(),
+                    Value::Number(Number::from_i64(i64::try_from(bytes.len()).unwrap()).unwrap()),
+                )
+                .unwrap();
+            println!("E6-RAW {}", to_canonical_string(&Value::Object(fields)));
+        }
+
+        fn kept_all(
+            lab: &Lab<'_>,
+            case: &str,
+            t: &Through,
+            created: &Created,
+            (record, stream, report): (&[u8], &[u8], &[u8]),
+        ) {
+            let measurement = t.measurement.as_ref().unwrap();
+            let mut answer = format!("retained={}\n", t.retained);
+            for check in measurement.checks.iter() {
+                answer.push_str(&format!(
+                    "{} {}\n",
+                    check.invariant.as_str(),
+                    check.verdict.as_str()
+                ));
+            }
+            let seen = t.runtime.seen();
+            keep(lab, case, "create-sent.json", &created.sent);
+            keep(lab, case, "create-received.json", &created.received);
+            keep(lab, case, "record.json", record);
+            keep(lab, case, "probe-stream.bin", stream);
+            keep(lab, case, "probe-report.json", report);
+            keep(lab, case, "measurement.txt", answer.as_bytes());
+            // Every request the broker's client made, and every connection
+            // its client closed before its answer was written.
+            let mut requests = seen.requests.join("\n") + "\n";
+            for hangup in &seen.hangups {
+                requests.push_str(&format!("hung-up {hangup}\n"));
+            }
+            keep(lab, case, "requests.txt", requests.as_bytes());
+            keep(lab, case, "broker-events.txt", t.events.as_bytes());
+        }
+
+        /// The conforming plan as the client sent it, its labels left out:
+        /// every case's create must be this one before its weakening. Its
+        /// environment is a set: Docker's CLI 29.9.2 orders the proxy
+        /// variables differently from one invocation to the next (measured),
+        /// and the broker's judgement counts each by name, in any order.
+        fn plan_of(sent: &[u8]) -> Object {
+            let mut plan = object(sent);
+            let _ = plan.remove("Labels");
+            let mut env = strings(&plan, &["Env"]);
+            env.sort();
+            set(&mut plan, &["Env"], string_array(env));
+            plan
+        }
+
+        fn the_control(lab: &Lab<'_>) -> Object {
+            let case = "e6-faulty-runtime-forwards-a-conforming-environment-kept";
+            let t = prepare_through(lab, None);
+            let seen = t.runtime.seen();
+            assert!(seen.failures.is_empty(), "{case}: {:?}", seen.failures);
+            assert_eq!(seen.rewritten, 0);
+            let created = environment_create(case, &seen, &t.e);
+            assert_eq!(
+                created.sent, created.received,
+                "{case}: forwarded byte for byte"
+            );
+            let measurement = t.measurement.clone().expect("measured");
+            assert!(
+                t.retained,
+                "{case}: a conforming environment through the faulty runtime was not kept: {:?}\n{}",
+                not_passing(&measurement),
+                t.events
+            );
+            assert!(not_passing(&measurement).is_empty(), "{case}");
+            assert_eq!(measurement.checks.len(), I::ALL.len());
+            let container = t.container.clone().unwrap();
+            assert_eq!(created.id.as_deref(), Some(container.as_str()));
+            let observed = observed(case, &seen, &container, &t.e, &measurement);
+            kept_all(
+                lab,
+                case,
+                &t,
+                created,
+                (&observed.0, &observed.1, &observed.2),
+            );
+            let destroyed = destroy(lab.socket, &t.through, (&t.e, &t.r), Some(&container));
+            assert_eq!(destroyed.state, DestroyState::Removed, "{case}");
+            assert!(
+                lab.ev.labelled(&t.e, None).is_empty(),
+                "{case}: left behind"
+            );
+            assert!(
+                !egress_dir(lab.dir, &t.e).exists(),
+                "{case}: the listener's directory"
+            );
+            let topology: Vec<(I, Verdict)> = TOPOLOGY
+                .iter()
+                .map(|i| (*i, verdict(&measurement, *i)))
+                .collect();
+            evidence_in(
+                case,
+                &format!(
+                    "kept:every-required-invariant-pass;topology:{};forwarded-unchanged;destroyed:removed",
+                    verdicts(&topology)
+                ),
+                "measured-both",
+            );
+            plan_of(&created.sent)
+        }
+
+        /// One row: prepared through the faulty runtime with its weakening,
+        /// and refused. Its outcome line.
+        fn refused(lab: &Lab<'_>, row: &Row, plan: &Object) -> String {
+            let case = row.case;
+            let host_before = if row.host_side_effect {
+                host_loopback()
+            } else {
+                None
+            };
+            let t = prepare_through(lab, Some(row.weaken));
+            let seen = t.runtime.seen();
+            assert!(
+                seen.failures.is_empty(),
+                "{case}: the faulty runtime: {:?}",
+                seen.failures
+            );
+            assert_eq!(seen.rewritten, 1, "{case}: one create weakened");
+            let created = environment_create(case, &seen, &t.e);
+            // The client asked for the strict plan the control measured
+            // clean; the daemon received it with exactly the row's fields
+            // changed.
+            let differs = changed(plan, &plan_of(&created.sent));
+            assert!(
+                differs.is_empty(),
+                "{case}: not the strict plan: {differs:?}\ncontrol {:?}\nthis    {:?}",
+                at(plan, &["Env"]),
+                at(&plan_of(&created.sent), &["Env"]).cloned()
+            );
+            let sent = object(&created.sent);
+            let received = object(&created.received);
+            assert_eq!(
+                changed(&sent, &received),
+                row.changed,
+                "{case}: the weakening"
+            );
+            // The production decision: never kept.
+            let measurement = t
+                .measurement
+                .clone()
+                .unwrap_or_else(|| panic!("{case}: no measurement\n{}", t.events));
+            assert!(
+                !t.retained,
+                "{case}: a weakened PROXY_ONLY environment was KEPT\n{}",
+                t.events
+            );
+            assert!(
+                t.events.contains("environment_prepared declared=")
+                    && t.events.contains("retained=false"),
+                "{case}: the broker's own event: {}",
+                t.events
+            );
+            assert_ne!(
+                verdict(&measurement, I::ContainerUidGid),
+                Verdict::Unobservable,
+                "{case}: the probe's report did not arrive; {:?}",
+                not_passing(&measurement)
+            );
+            for invariant in row.caught {
+                assert_eq!(
+                    verdict(&measurement, *invariant),
+                    Verdict::Fail,
+                    "{case}: {invariant:?} not caught; {:?}",
+                    not_passing(&measurement)
+                );
+            }
+            let also: Vec<(I, Verdict)> = not_passing(&measurement)
+                .into_iter()
+                .filter(|(i, _)| !row.caught.contains(i) && !TOPOLOGY.contains(i))
+                .collect();
+            let topology: Vec<(I, Verdict)> = TOPOLOGY
+                .iter()
+                .map(|i| (*i, verdict(&measurement, *i)))
+                .collect();
+            // What the broker judged is what the daemon recorded and ran.
+            let container = t
+                .container
+                .clone()
+                .unwrap_or_else(|| panic!("{case}: no container"));
+            assert_eq!(created.id.as_deref(), Some(container.as_str()), "{case}");
+            let (record, stream, report) = observed(case, &seen, &container, &t.e, &measurement);
+            assert!(
+                (row.recorded)(&object(&record), &lab.facts),
+                "{case}: the daemon's record does not show the weakening"
+            );
+            // Nothing left: every role, the listener's directory.
+            assert!(
+                lab.ev.labelled(&t.e, None).is_empty(),
+                "{case}: left behind"
+            );
+            assert!(
+                !egress_dir(lab.dir, &t.e).exists(),
+                "{case}: the listener's directory"
+            );
+            let residue = match (
+                host_before,
+                row.host_side_effect.then(host_loopback).flatten(),
+            ) {
+                (Some(before), Some(after)) => {
+                    let added: Vec<String> =
+                        after.into_iter().filter(|a| !before.contains(a)).collect();
+                    for address in &added {
+                        assert_eq!(
+                            address, PROXY_ADDRESS,
+                            "{case}: the host's loopback gained {address}"
+                        );
+                    }
+                    if added.is_empty() {
+                        "none".to_owned()
+                    } else {
+                        added.join("+")
+                    }
+                }
+                _ if row.host_side_effect => "unobservable".to_owned(),
+                _ => "not-applicable".to_owned(),
+            };
+            kept_all(lab, case, &t, created, (&record, &stream, &report));
+            format!(
+                "refused:{};also:{};topology:{};weakened:{};host-loopback-added:{residue}",
+                joined(row.caught),
+                verdicts(&also),
+                verdicts(&topology),
+                row.changed.join("+"),
+            )
+        }
+
+        /// A line of this evidence: the egress suite's shape, E6's suite.
+        fn evidence_in(case: &str, outcome: &str, enforcement: &str) {
+            let mut fields = Object::new();
+            for (key, value) in [
+                ("suite", "sandbox-proxy-weakened"),
+                ("case", case),
+                ("outcome", outcome),
+                ("level", LEVEL),
+                ("enforcement", enforcement),
+            ] {
+                fields
+                    .insert(key.to_owned(), Value::String(value.to_owned()))
+                    .unwrap();
+            }
+            println!(
+                "SANDBOX-EVIDENCE {}",
+                to_canonical_string(&Value::Object(fields))
+            );
+        }
+
+        #[test]
+        #[ignore = "needs a real OCI runtime; the qualifying run is hosted only: make sandbox-proxy-weakened-evidence"]
+        fn every_hard_rule_weakened_in_a_real_proxy_only_environment_is_refused() {
+            // Before anything is made: the evidence task's flag.
+            assert_eq!(
+                std::env::var("DW_E6_EVIDENCE").unwrap_or_default(),
+                "1",
+                "NOT EXERCISED: DW_E6_EVIDENCE is not 1; run `make sandbox-proxy-weakened-evidence`"
+            );
+            let ev = Evidence::load();
+            let facts = Facts {
+                tag: var("DW_E6_IMAGE_TAG"),
+                runtime_socket: ev.socket.clone(),
+            };
+            let raw = PathBuf::from(var("DW_E6_RAW_DIR"));
+            let runner = disposable_runner(&ev);
+            let _reaper = Reaper(ev.clone());
+            let dir = Scratch::new("e6");
+            let socket = dir.socket();
+            let broker = Broker::evidence(&socket, &dir.resolver_fixture());
+            let workspace = dir.workspace("ws");
+            let lab = Lab {
+                ev: &ev,
+                socket: &socket,
+                dir: &dir,
+                workspace: &workspace,
+                broker: &broker,
+                facts,
+                raw,
+            };
+            let plan = the_control(&lab);
+            let mut refused_cases = 0usize;
+            let mut rows: Vec<&str> = Vec::new();
+            for row in ROWS {
+                if row.host_side_effect
+                    && let Err(why) = &runner
+                {
+                    evidence_in(row.case, &format!("not-exercised: {why}"), "measured-both");
+                    continue;
+                }
+                let outcome = refused(&lab, row, &plan);
+                evidence_in(row.case, &outcome, vantage(row.caught));
+                refused_cases += 1;
+                if !rows.contains(&row.row) {
+                    rows.push(row.row);
+                }
+            }
+            evidence_in(
+                "e6-row-count",
+                &format!(
+                    "refused-{refused_cases}-of-{}-cases;rows-{}-of-15",
+                    ROWS.len(),
+                    rows.len()
+                ),
+                "measured-both",
+            );
+        }
+
+        // ---- the faulty runtime's own tests: no runtime needed ---------------
+
+        /// The strict plan's `create`, as Docker's CLI 29.9.2 sends it (its
+        /// seccomp profile shortened): what each weakening is applied to.
+        const PLAN: &str = concat!(
+            r#"{"Hostname":"","Domainname":"","User":"10001:10001","AttachStdin":false,"#,
+            r#""AttachStdout":true,"AttachStderr":true,"Tty":false,"OpenStdin":false,"#,
+            r#""StdinOnce":false,"Env":["HTTPS_PROXY=http://169.254.7.1:8080"],"Cmd":["hold"],"#,
+            r#""Image":"sha256:aa0736be0177","Volumes":{},"WorkingDir":"/workspace","#,
+            r#""Entrypoint":["/usr/libexec/direwolf/sandbox-probe"],"#,
+            r#""Labels":{"io.direwolf.role":"environment","io.direwolf.environment":"env-1"},"#,
+            r#""HostConfig":{"Binds":null,"NetworkMode":"none","CapAdd":null,"CapDrop":["ALL"],"#,
+            r#""CgroupnsMode":"private","IpcMode":"private","PidMode":"","Privileged":false,"#,
+            r#""ReadonlyRootfs":true,"SecurityOpt":["no-new-privileges=true","seccomp={\"defaultAction\":\"SCMP_ACT_ERRNO\"}"],"#,
+            r#""UTSMode":"","Memory":536870912,"MemorySwap":536870912,"PidsLimit":256,"#,
+            r#""Devices":[],"Ulimits":[{"Name":"nofile","Hard":1024,"Soft":1024},"#,
+            r#"{"Name":"nproc","Hard":8192,"Soft":8192}]},"NetworkingConfig":{"EndpointsConfig":{}}}"#
+        );
+
+        fn facts() -> Facts {
+            Facts {
+                tag: "direwolf-e6:product".to_owned(),
+                runtime_socket: "/var/run/docker.sock".to_owned(),
+            }
+        }
+
+        #[test]
+        fn each_weakening_changes_exactly_its_fields() {
+            let plan = object(PLAN.as_bytes());
+            let mut rows = Vec::new();
+            for row in ROWS {
+                let mut weakened = plan.clone();
+                (row.weaken)(&mut weakened, &facts());
+                assert_eq!(changed(&plan, &weakened), row.changed, "{}", row.case);
+                // A weakening is never one the judgement would wave through:
+                // the rewritten field no longer holds the plan's value.
+                assert_ne!(weakened, plan, "{}", row.case);
+                assert!(!row.caught.is_empty(), "{}", row.case);
+                if !rows.contains(&row.row) {
+                    rows.push(row.row);
+                }
+            }
+            // ADR-0057 §1a's fifteen rows, each once at least.
+            assert_eq!(rows.len(), 15, "{rows:?}");
+            let mut cases: Vec<&str> = ROWS.iter().map(|r| r.case).collect();
+            cases.sort_unstable();
+            cases.dedup();
+            assert_eq!(cases.len(), ROWS.len());
+        }
+
+        #[test]
+        fn the_differences_of_two_objects_are_found_member_by_member() {
+            let a = object(br#"{"a":1,"b":{"c":[1,2],"d":"x"},"e":null}"#);
+            let b = object(br#"{"a":1,"b":{"c":[2,1],"d":"x","f":true}}"#);
+            assert_eq!(changed(&a, &b), ["b.c", "b.f", "e"]);
+            assert!(changed(&a, &a).is_empty());
+        }
+
+        #[test]
+        fn a_multiplexed_stream_is_read_frame_by_frame() {
+            let mut raw = vec![1, 0, 0, 0, 0, 0, 0, 3];
+            raw.extend_from_slice(b"out");
+            raw.extend_from_slice(&[2, 0, 0, 0, 0, 0, 0, 2]);
+            raw.extend_from_slice(b"er");
+            raw.extend_from_slice(&[1, 0, 0, 0, 0, 0, 0, 1]);
+            raw.extend_from_slice(b"!");
+            assert_eq!(demux(&raw), Some((b"out!".to_vec(), b"er".to_vec())));
+            assert_eq!(demux(&raw[..5]), None, "a frame cut short");
+            assert_eq!(demux(&[3, 0, 0, 0, 0, 0, 0, 0]), None, "no such stream");
+        }
+
+        /// A daemon that answers each request in `script` in turn, and keeps
+        /// every byte it received.
+        struct FakeDaemon {
+            path: PathBuf,
+            received: Arc<Mutex<Vec<u8>>>,
+        }
+
+        impl FakeDaemon {
+            fn start(dir: &Path, script: Vec<Vec<u8>>, close_after: bool) -> Self {
+                let path = dir.join("daemon.sock");
+                let listener = UnixListener::bind(&path).unwrap();
+                let received = Arc::new(Mutex::new(Vec::new()));
+                let keep = Arc::clone(&received);
+                std::thread::spawn(move || {
+                    let (mut stream, _) = listener.accept().unwrap();
+                    stream
+                        .set_read_timeout(Some(Duration::from_secs(10)))
+                        .unwrap();
+                    let mut buffer = [0u8; 4096];
+                    for (answered, answer) in script.into_iter().enumerate() {
+                        // One more request, whole: its head and its body.
+                        while requests_in(&keep.lock().unwrap()) <= answered {
+                            let n = stream.read(&mut buffer).unwrap();
+                            if n == 0 {
+                                return;
+                            }
+                            keep.lock().unwrap().extend_from_slice(&buffer[..n]);
+                        }
+                        stream.write_all(&answer).unwrap();
+                    }
+                    if close_after {
+                        let _ = stream.shutdown(Shutdown::Write);
+                    }
+                    // Keep reading what follows (a hijacked stream's input).
+                    while let Ok(n) = stream.read(&mut buffer) {
+                        if n == 0 {
+                            break;
+                        }
+                        keep.lock().unwrap().extend_from_slice(&buffer[..n]);
+                    }
+                });
+                Self { path, received }
+            }
+        }
+
+        /// How many whole requests `bytes` holds (heads, and bodies by length).
+        fn requests_in(bytes: &[u8]) -> usize {
+            let mut count = 0usize;
+            let mut rest = bytes;
+            while let Some(end) = rest.windows(4).position(|w| w == b"\r\n\r\n") {
+                let head = String::from_utf8_lossy(&rest[..end]).to_ascii_lowercase();
+                let length = head
+                    .lines()
+                    .find_map(|l| l.strip_prefix("content-length:"))
+                    .map_or(0, |v| v.trim().parse::<usize>().unwrap());
+                if rest.len() < end + 4 + length {
+                    break;
+                }
+                count += 1;
+                rest = &rest[end + 4 + length..];
+            }
+            count
+        }
+
+        fn request(method: &str, path: &str, body: &[u8], extra: &str) -> Vec<u8> {
+            let mut out = format!(
+                "{method} {path} HTTP/1.1\r\nHost: api.moby.localhost\r\n{extra}Content-Length: {}\r\nContent-Type: application/json\r\n\r\n",
+                body.len()
+            )
+            .into_bytes();
+            out.extend_from_slice(body);
+            out
+        }
+
+        fn chunked_answer(status: &str, body: &[u8]) -> Vec<u8> {
+            let mut out = format!(
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n{:x}\r\n",
+                body.len()
+            )
+            .into_bytes();
+            out.extend_from_slice(body);
+            out.extend_from_slice(b"\r\n0\r\n\r\n");
+            out
+        }
+
+        fn exchange_with(runtime: &FaultyRuntime, bytes: &[u8], wanted: usize) -> Vec<u8> {
+            let mut client = UnixStream::connect(runtime.path()).unwrap();
+            client
+                .set_read_timeout(Some(Duration::from_secs(10)))
+                .unwrap();
+            client.write_all(bytes).unwrap();
+            let mut got = Vec::new();
+            let mut buffer = [0u8; 4096];
+            while got.len() < wanted {
+                let n = client.read(&mut buffer).unwrap();
+                if n == 0 {
+                    break;
+                }
+                got.extend_from_slice(&buffer[..n]);
+            }
+            got
+        }
+
+        fn create_body(role: &str, environment: &str) -> Vec<u8> {
+            PLAN.replace(
+                r#""io.direwolf.role":"environment""#,
+                &format!(r#""io.direwolf.role":"{role}""#),
+            )
+            .replace("env-1", environment)
+            .into_bytes()
+        }
+
+        #[test]
+        fn without_a_fault_every_byte_crosses_unchanged_and_the_evidence_is_kept() {
+            let dir = Scratch::new("e6-unit-a");
+            let id = "a".repeat(64);
+            let created = chunked_answer(
+                "201 Created",
+                format!(r#"{{"Id":"{id}","Warnings":[]}}"#).as_bytes(),
+            );
+            let record =
+                chunked_answer("200 OK", br#"{"Id":"x","HostConfig":{"Privileged":false}}"#);
+            let daemon = FakeDaemon::start(&dir.0, vec![created.clone(), record.clone()], false);
+            let runtime =
+                FaultyRuntime::start(dir.0.join("faulty.sock"), daemon.path.clone(), None);
+            let mut sent = request(
+                "POST",
+                "/v1.56/containers/create?name=x",
+                &create_body("environment", "env-1"),
+                "",
+            );
+            sent.extend(request(
+                "GET",
+                &format!("/v1.56/containers/{id}/json"),
+                b"",
+                "",
+            ));
+            let answer = exchange_with(&runtime, &sent, created.len() + record.len());
+            let mut expected = created.clone();
+            expected.extend_from_slice(&record);
+            assert_eq!(answer, expected, "the answers byte for byte");
+            assert_eq!(
+                *daemon.received.lock().unwrap(),
+                sent,
+                "the requests byte for byte"
+            );
+            let seen = runtime.seen();
+            assert!(seen.failures.is_empty(), "{:?}", seen.failures);
+            assert_eq!(seen.rewritten, 0);
+            assert_eq!(seen.created.len(), 1);
+            assert_eq!(seen.created[0].sent, seen.created[0].received);
+            assert_eq!(seen.created[0].id.as_deref(), Some(id.as_str()));
+            assert_eq!(seen.created[0].role, "environment");
+            assert_eq!(seen.inspected.len(), 1);
+            assert_eq!(seen.inspected[0].0, id);
+            assert_eq!(
+                seen.inspected[0].2,
+                br#"{"Id":"x","HostConfig":{"Privileged":false}}"#
+            );
+            assert_eq!(
+                seen.requests,
+                vec![
+                    "POST /containers/create 201 role=environment".to_owned(),
+                    format!("GET /containers/{id}/json 200"),
+                ]
+            );
+        }
+
+        #[test]
+        fn only_the_named_environments_create_is_weakened() {
+            for (role, environment, weakened) in [
+                ("environment", "env-1", true),
+                ("relay", "env-1", false),
+                ("setup", "env-1", false),
+                ("environment", "env-2", false),
+            ] {
+                let dir = Scratch::new("e6-unit-b");
+                let created = chunked_answer("201 Created", br#"{"Id":"b","Warnings":[]}"#);
+                let daemon = FakeDaemon::start(&dir.0, vec![created.clone()], false);
+                let fault = Fault {
+                    weaken: privileged,
+                    facts: facts(),
+                    environment: "env-1".to_owned(),
+                };
+                let runtime = FaultyRuntime::start(
+                    dir.0.join("faulty.sock"),
+                    daemon.path.clone(),
+                    Some(fault),
+                );
+                let body = create_body(role, environment);
+                let sent = request("POST", "/v1.56/containers/create", &body, "");
+                let answer = exchange_with(&runtime, &sent, created.len());
+                assert_eq!(answer, created);
+                let received = daemon.received.lock().unwrap().clone();
+                let seen = runtime.seen();
+                assert!(seen.failures.is_empty(), "{:?}", seen.failures);
+                if weakened {
+                    assert_eq!(seen.rewritten, 1);
+                    let end = received.windows(4).position(|w| w == b"\r\n\r\n").unwrap();
+                    let head = String::from_utf8_lossy(&received[..end]).into_owned();
+                    let got = &received[end + 4..];
+                    assert!(
+                        head.contains(&format!("Content-Length: {}", got.len())),
+                        "{head}"
+                    );
+                    assert_eq!(
+                        changed(&object(&body), &object(got)),
+                        ["HostConfig.Privileged"]
+                    );
+                    assert_eq!(seen.created[0].received, got);
+                    assert_eq!(seen.created[0].sent, body);
+                } else {
+                    assert_eq!(seen.rewritten, 0, "{role} {environment}");
+                    assert_eq!(received, sent, "{role} {environment}");
+                }
+            }
+        }
+
+        #[test]
+        fn a_chunked_request_is_read_whole_and_weakened_with_its_length() {
+            let dir = Scratch::new("e6-unit-c");
+            let created = chunked_answer("201 Created", br#"{"Id":"c","Warnings":[]}"#);
+            let daemon = FakeDaemon::start(&dir.0, vec![created.clone()], false);
+            let fault = Fault {
+                weaken: writable_root,
+                facts: facts(),
+                environment: "env-1".to_owned(),
+            };
+            let runtime =
+                FaultyRuntime::start(dir.0.join("faulty.sock"), daemon.path.clone(), Some(fault));
+            let body = create_body("environment", "env-1");
+            let (first, second) = body.split_at(100);
+            let mut sent = b"POST /v1.56/containers/create HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n".to_vec();
+            for part in [first, second] {
+                sent.extend_from_slice(format!("{:x}\r\n", part.len()).as_bytes());
+                sent.extend_from_slice(part);
+                sent.extend_from_slice(b"\r\n");
+            }
+            sent.extend_from_slice(b"0\r\n\r\n");
+            assert_eq!(exchange_with(&runtime, &sent, created.len()), created);
+            let received = daemon.received.lock().unwrap().clone();
+            let end = received.windows(4).position(|w| w == b"\r\n\r\n").unwrap();
+            let head = String::from_utf8_lossy(&received[..end]).to_ascii_lowercase();
+            assert!(!head.contains("transfer-encoding"), "{head}");
+            assert_eq!(
+                changed(&object(&body), &object(&received[end + 4..])),
+                ["HostConfig.ReadonlyRootfs"]
+            );
+        }
+
+        #[test]
+        fn an_upgraded_stream_crosses_both_ways_and_is_kept_by_its_exec() {
+            let dir = Scratch::new("e6-unit-d");
+            let exec = "e".repeat(64);
+            let made = chunked_answer("201 Created", format!(r#"{{"Id":"{exec}"}}"#).as_bytes());
+            let mut upgraded = b"HTTP/1.1 101 UPGRADED\r\nContent-Type: application/vnd.docker.multiplexed-stream\r\nConnection: Upgrade\r\nUpgrade: tcp\r\n\r\n".to_vec();
+            let mut frames = vec![1, 0, 0, 0, 0, 0, 0, 6];
+            frames.extend_from_slice(b"report");
+            upgraded.extend_from_slice(&frames);
+            let daemon = FakeDaemon::start(&dir.0, vec![made.clone(), upgraded.clone()], true);
+            let runtime =
+                FaultyRuntime::start(dir.0.join("faulty.sock"), daemon.path.clone(), None);
+            let command = br#"{"AttachStdout":true,"Cmd":["/usr/libexec/direwolf/sandbox-probe","measure","env-1","PROXY_ONLY"]}"#;
+            let mut sent = request("POST", "/v1.56/containers/abc/exec", command, "");
+            sent.extend(request(
+                "POST",
+                &format!("/v1.56/exec/{exec}/start"),
+                br#"{"Detach":false,"Tty":false}"#,
+                "Connection: Upgrade\r\nUpgrade: tcp\r\n",
+            ));
+            let answer = exchange_with(&runtime, &sent, made.len() + upgraded.len());
+            let mut expected = made.clone();
+            expected.extend_from_slice(&upgraded);
+            assert_eq!(answer, expected);
+            // The stream is kept once the daemon ended it.
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while runtime.seen().streams.is_empty() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            let seen = runtime.seen();
+            assert!(seen.failures.is_empty(), "{:?}", seen.failures);
+            assert_eq!(seen.execs.get(&exec).map(|(c, _)| c.as_str()), Some("abc"));
+            assert_eq!(seen.execs[&exec].1[1], "measure");
+            assert_eq!(seen.streams, [(exec.clone(), frames.clone())]);
+            assert_eq!(demux(&seen.streams[0].1).unwrap().0, b"report");
+        }
+
+        #[test]
+        fn an_answer_without_a_length_runs_to_the_end_and_is_forwarded() {
+            let dir = Scratch::new("e6-unit-e");
+            let answer =
+                b"HTTP/1.1 200 OK\r\nContent-Type: application/x-tar\r\n\r\nall of it".to_vec();
+            let daemon = FakeDaemon::start(&dir.0, vec![answer.clone()], true);
+            let runtime =
+                FaultyRuntime::start(dir.0.join("faulty.sock"), daemon.path.clone(), None);
+            let sent = request("GET", "/v1.56/containers/abc/archive?path=/x", b"", "");
+            assert_eq!(exchange_with(&runtime, &sent, answer.len()), answer);
+            assert!(runtime.seen().failures.is_empty());
+        }
+    }
 }

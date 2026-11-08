@@ -23,6 +23,7 @@ DW := $(PY) scripts/dw.py
         sandbox-secret-mutations sandbox-workspace-evidence sandbox-workspace-mutations \
         sandbox-agent-evidence sandbox-agent-mutations sandbox-release-evidence \
         sandbox-release-mutations sandbox-restart-evidence sandbox-capacity-evidence \
+        sandbox-proxy-weakened-evidence sandbox-proxy-weakened-review \
         sandbox-registry-evidence sandbox-hygiene-evidence sandbox-registry-mutations \
         sandbox-neighbour-mutations d11-hardening-evidence d11-hardening-mutations d11-posture fuzz-smoke fuzz security docs \
         preflight tools hooks clean
@@ -143,6 +144,12 @@ sandbox-restart-evidence: ## M5e.2 R11, HOSTED ONLY: restarts the runner's Docke
 
 sandbox-capacity-evidence: ## M5e.2 R8 at the cap, HOSTED ONLY: every live environment the authority allows, all but one at their own task bound, the last prepared, measured and served (ADR-0056); refuses anywhere but a disposable GitHub-hosted runner (DW_CAPACITY_EVIDENCE=1)
 	@$(DW) sandbox-capacity-evidence
+
+sandbox-proxy-weakened-evidence: ## M5e.2 R3's E6, HOSTED ONLY: every oci-strict hard rule weakened in turn in a real PROXY_ONLY environment the released broker prepares, measured from both vantages and refused (ADR-0057's R-B, ADR-0058); refuses anywhere but a disposable GitHub-hosted runner (DW_E6_EVIDENCE=1)
+	@$(DW) sandbox-proxy-weakened-evidence
+
+sandbox-proxy-weakened-review: ## M5e.2 R3's E6, offline: verify a downloaded hosted sandbox-proxy-weakened job log, every observation from its bytes (DW_E6_LOG=<file>); needs no runtime
+	@$(DW) sandbox-proxy-weakened-review
 
 sandbox-registry-evidence: ## M5e.4, HOSTED ONLY: pip as it is today against the fixture registries, npm refused before anything is prepared; builds the registry tools image from its checksum-verified pins; refuses anywhere but a disposable GitHub-hosted runner (DW_REGISTRY_EVIDENCE=1)
 	@$(DW) sandbox-registry-evidence

@@ -25,7 +25,7 @@ choice in it is a recommendation for the owner.
 | Step | State | What closes it |
 |---|---|---|
 | M5e.1 attribution | COMPLETE (run 40774766063) | — |
-| M5e.2 closure | PARTIALLY IMPLEMENTED / ASSURANCE BLOCKED. R3's E6 is required by the owner's R-B and BLOCKED: required 15, passed 0, blocked 15 ([issue #19](https://github.com/Onwcan/DireWolf/issues/19)) | E6 evidence the owner accepts (ADR-0057 §8) |
+| M5e.2 closure | PARTIALLY IMPLEMENTED / ASSURANCE PENDING. R3's E6 is required by the owner's R-B; since 2026-11-08 built (ADR-0058, Proposed) in the required `sandbox-proxy-weakened` job, never run hosted: 15 rows implemented, 0 passed hosted ([issue #19](https://github.com/Onwcan/DireWolf/issues/19)) | the hosted job passing, the owner's review of its log and acceptance of ADR-0058 (superseding ADR-0057, §8 there) |
 | M5e.3 fixtures | COMPLETE (runs 41916040076, 41920008027) | — |
 | M5e.4 pip, npm refused | HOSTED VERIFIED / OWNER ACCEPTANCE PENDING (runs 134–137) | the owner's acceptance, the OD-E4 deviation included ([M5E4_IMPLEMENTATION_HANDOFF.md](M5E4_IMPLEMENTATION_HANDOFF.md) §13) |
 | M5e.5 npm and pip profiles | IMPLEMENTATION COMPLETE / HOSTED EVIDENCE PENDING | the manual run; ADR-0055's trust revision; acceptance of both ADRs; the acceptance change ([M5E5_IMPLEMENTATION_HANDOFF.md](M5E5_IMPLEMENTATION_HANDOFF.md) §§7–10) |
@@ -78,7 +78,7 @@ it.
 | `sandbox-capacity-evidence` | `sandbox-capacity` | `CAPACITY_CASES` | 4 |
 | `sandbox-registry-evidence` | `sandbox-registry` | `REGISTRY_CASES` | 19 |
 | `sandbox-hygiene-evidence` | none yet: the manual job, until M5e.5's acceptance change | `HYGIENE_CASES` | 44 |
-| E6 (R3, ADR-0057) | none: BLOCKED | the plan's §3a, 15 rows | 0 of 15 |
+| `sandbox-proxy-weakened-evidence` | `sandbox-proxy-weakened` (since 2026-11-08; ADR-0058, never run hosted) | `E6_CASES` | 18 |
 
 Four tasks judge their own output in their own way and are not in `ATTRIBUTED_CASES`:
 `sandbox-agent-evidence`, `sandbox-release-evidence` (the `m5d-sandbox-exec` eval's runner),
@@ -211,7 +211,7 @@ engineering steps.
    commit and `github-hosted`.
 2. After G2: `m5e-gate` passes, printing the inventory verdict (`627` minus the not-yet-required
    tables, every one re-judged) and the acceptance verdict `NOT READY`, with its blockers
-   listed: E6 0 of 15, M5e.5 not required, ADR-0054 and ADR-0055 Proposed, ADR-0057 Proposed.
+   listed: E6 until its hosted job passes and ADR-0058 is accepted, M5e.5 not required, ADR-0054 and ADR-0055 Proposed, ADR-0057 Proposed.
 3. Then one deliberate check per negative control, in unit tests, never by breaking `main`.
 
 ## 12. The owner's checklist, before G1

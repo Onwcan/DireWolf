@@ -2,17 +2,24 @@
 
 On 2026-11-01 the owner selected R-B on ADR-0057: R3 needs real `PROXY_ONLY`
 containers weakened one hard rule at a time, measured from both vantages
-(ADR-0057's E6), and the residual that record proposed is not accepted. E6 is
-BLOCKED -- not built and not planned while an earlier safety control stands --
-and nothing else stands in for it. So:
+(ADR-0057's E6), and the residual that record proposed is not accepted. E6 was
+BLOCKED -- not built and not planned while an earlier safety control stood --
+until the owner authorised its implementation on 2026-11-08; it is now built
+(ADR-0058, Proposed) and NOT EXERCISED until its hosted job passes, and nothing
+else stands in for it. So:
 
 * ADR-0057 is never Accepted -- accepting it would accept the residual R-B
   refused -- and stays outside the accepted digest; its one exit is
   "Superseded by" an accepted record of E6's evidence (ADR-0057 §8);
 * while it is Proposed, its own E6 row and the plan's R3 and E6 rows say E6 is
-  NOT EXERCISED or BLOCKED, the ROADMAP's M5e heading says R3 is blocked, no
-  status document says M5e.2 is COMPLETE, and its limited claim (§5, not
-  approved) is not M5's;
+  NOT EXERCISED -- BLOCKED, or since 2026-11-08 hosted evidence pending -- the
+  ROADMAP's M5e heading says R3 is blocked or pending, no status document says
+  M5e.2 is COMPLETE or E6 passed, and its limited claim (§5, not approved) is
+  not M5's;
+* ADR-0058, which states E6's evidence path, stays Proposed and outside the
+  digest while ADR-0057 is Proposed -- accepted, it must be ADR-0057's
+  successor, ADR-0057 marked "Superseded by" it -- each with a negative
+  control;
 * ADR-0056, accepted, stays in the digest at its accepted bytes;
 * the owner's three exceptions to M5e's order (the plan's §10) move M5e.3
   (2026-11-03), M5e.4 (2026-11-05) and M5e.5's implementation (2026-11-07)
@@ -50,6 +57,9 @@ import dw  # noqa: E402  - imported after the path is extended
 
 ADR_DIR = REPO_ROOT / "docs" / "adr"
 RESIDUAL = ADR_DIR / "0057-m5e-proxy-only-real-container-evidence-residual.md"
+# E6's evidence path (2026-11-08): the record that supersedes ADR-0057 only on
+# the owner's acceptance, after its hosted evidence passes.
+E6_PATH = ADR_DIR / "0058-m5e-proxy-only-hard-rules-weakened-in-a-real-environment.md"
 TASK_LIMIT = ADR_DIR / "0056-m5e-cross-run-task-limit-isolation.md"
 MANIFEST = ADR_DIR / "accepted.sha256"
 PLAN = REPO_ROOT / "docs" / "M5E_ASSURANCE_PLAN.md"
@@ -61,6 +71,7 @@ STATUS_DOCUMENTS = (
     ROADMAP,
     PLAN,
     RESIDUAL,
+    E6_PATH,
     REPO_ROOT / "docs" / "SANDBOX.md",
     REPO_ROOT / "docs" / "SECURITY.md",
     REPO_ROOT / "docs" / "EVALS.md",
@@ -71,6 +82,12 @@ STATUS_DOCUMENTS = (
 # "M5e.2 COMPLETE", "**M5e.2 is COMPLETE**", "M5e.2 — COMPLETE": the
 # documents' own way of saying a step closed.
 _COMPLETE = re.compile(r"M5e\.2\W{0,4}(?:is\W{1,4})?COMPLETE\b")
+# E6 or R3 said to have passed: "E6 PASSED", "**E6 — VERIFIED**", "R3 is MET".
+_E6_PASSED = re.compile(
+    r"\b(?:E6|R3)\W{1,6}(?:is\W{1,4})?(?:PASS(?:ED)?|VERIFIED|HOSTED[ -]VERIFIED|MET|SATISFIED)\b"
+)
+# What E6's row may say while ADR-0057 stands: not yet, blocked or pending.
+_NOT_YET = re.compile(r"BLOCKED|HOSTED EVIDENCE PENDING")
 # The owner's exceptions to M5e's order, as the plan's §10 records them.
 _SEQUENCING = "**M5e.3's sequencing (2026-11-03).**"
 _SEQUENCING_M5E4 = "**M5e.4's sequencing (2026-11-05).**"
@@ -142,20 +159,124 @@ def test_while_adr_0057_stands_e6_is_never_claimed() -> None:
         assert _status(_text(successors[0])).startswith("accepted")
         assert successors[0].name in _manifest()
         return
-    e6 = _row(_text(RESIDUAL), "| E6 |")
-    assert "NOT EXERCISED" in e6 and "BLOCKED" in e6, e6
-    plan = _text(PLAN)
+    problems = _e6_claim_problems(_text(RESIDUAL), _text(PLAN), _text(ROADMAP), _documents())
+    assert not problems, problems
+
+
+def _e6_claim_problems(
+    residual: str, plan: str, roadmap: str, documents: dict[str, str]
+) -> list[str]:
+    """Every way E6, R3 or M5e.2 would be claimed while ADR-0057 stands."""
+    problems: list[str] = []
+    e6 = _row(residual, "| E6 |")
+    if "NOT EXERCISED" not in e6 or not _NOT_YET.search(e6):
+        problems.append(f"ADR-0057's E6 row does not say NOT EXERCISED: {e6[:120]}")
     r3 = _row(plan, "| R3 | `sandbox-egress-evidence`")
-    assert "NOT EXERCISED" in r3 and "BLOCKED" in r3, "the plan's R3 row"
-    assert "**BLOCKED**" in _row(plan, "(R3, E6)"), "the plan's local-versus-hosted E6 row"
-    heading = next(line for line in _text(ROADMAP).splitlines() if line.startswith("#### M5e "))
-    assert "IN PROGRESS" in heading and "blocked" in heading.lower(), heading
-    claimed = [
-        f"{path.relative_to(REPO_ROOT)}: {found.group(0)!r}"
-        for path in STATUS_DOCUMENTS
-        for found in _COMPLETE.finditer(_text(path))
-    ]
-    assert not claimed, f"M5e.2 claimed complete while E6 is blocked: {claimed}"
+    if "NOT EXERCISED" not in r3 or not _NOT_YET.search(r3):
+        problems.append("the plan's R3 row does not say E6 is NOT EXERCISED")
+    hosted = _row(plan, "(R3, E6)")
+    if "**BLOCKED**" not in hosted and "**HOSTED EVIDENCE PENDING**" not in hosted:
+        problems.append("the plan's local-versus-hosted E6 row does not say not yet")
+    heading = next(line for line in roadmap.splitlines() if line.startswith("#### M5e "))
+    if "IN PROGRESS" not in heading or not re.search(r"blocked|pending", heading.lower()):
+        problems.append(f"the ROADMAP's M5e heading: {heading[:120]}")
+    for name, text in documents.items():
+        for found in _COMPLETE.finditer(text):
+            problems.append(f"{name}: M5e.2 claimed complete: {found.group(0)!r}")
+        for found in _E6_PASSED.finditer(text):
+            problems.append(f"{name}: E6 or R3 claimed passed: {found.group(0)!r}")
+    return problems
+
+
+@pytest.mark.parametrize(
+    ("change", "said"),
+    [
+        ("e6-row-passed", "ADR-0057's E6 row"),
+        ("r3-row-passed", "the plan's R3 row"),
+        ("hosted-row-passed", "local-versus-hosted"),
+        ("heading-done", "the ROADMAP's M5e heading"),
+        ("e6-claimed", "E6 or R3 claimed passed"),
+        ("r3-claimed", "E6 or R3 claimed passed"),
+        ("m5e2-claimed", "M5e.2 claimed complete"),
+    ],
+)
+def test_an_e6_claim_while_adr_0057_stands_fails(change: str, said: str) -> None:
+    if _status(_text(RESIDUAL)).startswith("superseded"):
+        pytest.skip("ADR-0057 superseded: E6 may be claimed")
+    residual, plan, roadmap, documents = _text(RESIDUAL), _text(PLAN), _text(ROADMAP), _documents()
+    if change == "e6-row-passed":
+        row = _row(residual, "| E6 |")
+        residual = residual.replace(row, "| E6 | real weakened containers | `e6-*` | PASS |")
+    elif change == "r3-row-passed":
+        row = _row(plan, "| R3 | `sandbox-egress-evidence`")
+        plan = plan.replace(row, "| R3 | `sandbox-egress-evidence`: all | Hosted — PASS | none |")
+    elif change == "hosted-row-passed":
+        row = _row(plan, "(R3, E6)")
+        plan = plan.replace(row, "| real weakened containers (R3, E6) | runs | passed |")
+    elif change == "heading-done":
+        heading = next(line for line in roadmap.splitlines() if line.startswith("#### M5e "))
+        roadmap = roadmap.replace(heading, "#### M5e · the gate — **IN PROGRESS** (R3 done)")
+    elif change == "e6-claimed":
+        documents["README.md"] += "\n**E6 PASSED** in the hosted run.\n"
+    elif change == "r3-claimed":
+        documents["docs/ROADMAP.md"] += "\nR3 is SATISFIED.\n"
+    elif change == "m5e2-claimed":
+        documents["docs/ROADMAP.md"] += "\n**M5e.2 is COMPLETE**\n"
+    problems = _e6_claim_problems(residual, plan, roadmap, documents)
+    assert any(said in problem for problem in problems), (change, problems)
+
+
+def test_adr_0058_stays_proposed_until_it_supersedes_adr_0057() -> None:
+    """E6's evidence path is a proposal until the owner accepts it after its
+    hosted evidence passes; accepted, it is ADR-0057's successor, and nothing
+    else may be."""
+    problems = _successor_problems(_text(RESIDUAL), _text(E6_PATH), set(_manifest()))
+    assert not problems, problems
+
+
+def _successor_problems(residual: str, path: str, digest: set[str]) -> list[str]:
+    problems: list[str] = []
+    status, own = _status(residual), _status(path)
+    if "adr-0057" not in path.split("\n", 3)[2].lower():
+        problems.append("ADR-0058's status line does not name ADR-0057 as what it would supersede")
+    if status.startswith("proposed"):
+        if not own.startswith("proposed"):
+            problems.append(f"ADR-0058 reads {own!r} while ADR-0057 is Proposed")
+        if E6_PATH.name in digest:
+            problems.append("ADR-0058 is in the accepted digest while ADR-0057 is Proposed")
+    elif own.startswith("accepted") and "adr-0058" not in status:
+        problems.append(f"ADR-0058 is accepted but ADR-0057 reads {status!r}")
+    return problems
+
+
+@pytest.mark.parametrize(
+    ("change", "said"),
+    [
+        ("accepted-early", "while ADR-0057 is Proposed"),
+        ("digested-early", "in the accepted digest"),
+        ("superseded-by-another", "ADR-0057 reads"),
+        ("names-no-predecessor", "does not name ADR-0057"),
+    ],
+)
+def test_adr_0058_accepted_out_of_turn_fails(change: str, said: str) -> None:
+    residual, path, digest = _text(RESIDUAL), _text(E6_PATH), set(_manifest())
+    proposed = "**Status:** Proposed"
+    assert proposed in path, "ADR-0058's status line"
+    if change == "accepted-early":
+        path = path.replace(proposed, "**Status:** Accepted", 1)
+    elif change == "digested-early":
+        digest.add(E6_PATH.name)
+    elif change == "superseded-by-another":
+        path = path.replace(proposed, "**Status:** Accepted", 1)
+        residual = re.sub(
+            r"\*\*Status:\*\* [^\n]*", "**Status:** Superseded by ADR-0099", residual, count=1
+        )
+    elif change == "names-no-predecessor":
+        lines = path.split("\n")
+        lines[2] = lines[2].replace("ADR-0057", "ADR-0000").replace("0057-", "0000-")
+        path = "\n".join(lines)
+    problems = _successor_problems(residual, path, digest)
+    assert any(said in problem for problem in problems), (change, problems)
 
 
 def test_the_residuals_limited_claim_is_not_m5s() -> None:

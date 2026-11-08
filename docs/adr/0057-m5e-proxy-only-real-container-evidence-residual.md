@@ -87,7 +87,7 @@ carry ([SANDBOX.md](../SANDBOX.md) §6a); nothing is listed on any other basis.
 | E3 | Real weakened hard rules, under `NO_NETWORK` | `weakened-writable-root`, `-root-user`, `-privileged`, `-runtime-socket-mounted`, `-capability-added`, `-no-new-privileges-disabled`, `-seccomp-unconfined`, `-seccomp-default-profile`, `-host-pid`, `-host-ipc`, `-host-uts`, `-host-network`, `-mutable-image-tag`, `-extra-device`, `-resource-limits-dropped`, `weakened-count`; `drift-pids-limit-raised` | `real-oci`; both vantages, except host IPC, host UTS and the image tag (host-side facts) | `sandbox-foundation`, since M5a; host UTS since run 41130431929 |
 | E4 | The production judgement over a real runtime's own `PROXY_ONLY` record | `captured-proxy-only-conforming-kept` and eighteen `captured-proxy-only-weakened-*-refused`: the `PROXY_ONLY` hard rules of E5 (U4's three among them since 2026-11-01) and the task backstop put back at 256 | `in-process` — the record is real; each weakening, and its judgement, are made in the test process | `sandbox-egress`, run 41242001763; U4's three since run 41323258812 |
 | E5 | The production judgement over hand-written records | `proxy-only-conforming-kept`, `no-network-conforming-kept`; `proxy-only-weakened-*-refused` for host UTS, a writable root, root, privileged, an added capability, `no-new-privileges` off, seccomp unconfined, host PID, host IPC, host network, a mutable tag, the runtime socket, an extra device and the limits dropped; since 2026-11-01 (U4) the runtime's default seccomp profile, the swap limit lifted, and the pids and swap limits lifted together; `no-network-weakened-host-uts-refused` | `in-process` | `sandbox-foundation`, since run 40954372045; U4's three since run 41323258812 |
-| E6 | **Real `PROXY_ONLY` containers, one hard rule weakened at a time, measured from both vantages** | none | — | **NOT EXERCISED — BLOCKED**: not built and not planned; required by the owner's R-B (§8); no existing source observes it (§9) |
+| E6 | **Real `PROXY_ONLY` containers, one hard rule weakened at a time, measured from both vantages** | since 2026-11-08, `e6-weakened-*` and the control ([ADR-0058](0058-m5e-proxy-only-hard-rules-weakened-in-a-real-environment.md), Proposed; §10) | `real-oci` | **NOT EXERCISED — HOSTED EVIDENCE PENDING**: built 2026-11-08 and required by the hosted `sandbox-proxy-weakened` job, which has not run; required by the owner's R-B (§8); BLOCKED from 2026-11-01 to 2026-11-08, when no existing source observed it (§9) |
 
 ### 1a. By hard rule
 
@@ -96,7 +96,7 @@ must fail, and from which vantage the architecture measures them (ADR-0047
 §8) — three are host-only facts, read from the runtime's record, which no
 probe is asked to see from inside. Case names are abbreviated
 (`…` = `proxy-only-weakened-`, `captured-` the same over the real record).
-E6 is not a column: for every row it is **NOT EXERCISED — BLOCKED** (§8).
+E6 is not a column: for every row it was **NOT EXERCISED — BLOCKED** (§8) until 2026-11-08, and is now built and **NOT EXERCISED — hosted evidence pending** (§10; ADR-0058 §3 names its case per row).
 
 | Hard rule | Invariants that must fail (vantage) | Real `NO_NETWORK` (E3, `real-oci`) | `PROXY_ONLY` judged, the host's invariants only (E5; E4 as `captured-`; `in-process`) |
 |---|---|---|---|
@@ -326,6 +326,10 @@ alone, a real weakening naming what caught it from the vantage it says — and
 an architecture test fails this record accepted, its §5 claim adopted, or E6
 or M5e.2 claimed while it stands. None of that is E6. **R3 is not met; E6 is
 BLOCKED; M5e.2 stays IN PROGRESS;** this record stays Proposed.
+
+### 10. E6 built (2026-11-08), hosted evidence pending
+
+On 2026-11-08 the owner authorised E6's implementation, within the applicable safety controls and in an isolated, disposable environment. It is built, and specified in [ADR-0058](0058-m5e-proxy-only-hard-rules-weakened-in-a-real-environment.md) (**Proposed**): for each row of §1a the released broker prepares a genuine `PROXY_ONLY` environment along its production path, through a test-only runtime that records and runs it with exactly that row's hard rule weakened, and its own measurement and decision must refuse it from the vantage(s) §1a names; a conforming control through the same runtime must be kept. It answers U1–U3 on its evidence, reports every other invariant that moves, and runs only in the hosted `sandbox-proxy-weakened` job. That job has **not run**: E6 is NOT EXERCISED, R3 is not met, and this record stays Proposed under the owner's R-B. Its one exit is unchanged (§8): if the hosted evidence passes and the owner accepts ADR-0058, this record becomes "Superseded by ADR-0058".
 
 ## Consequences
 
