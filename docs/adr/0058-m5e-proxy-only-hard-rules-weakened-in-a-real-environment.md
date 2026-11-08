@@ -1,6 +1,6 @@
 # ADR-0058: M5e.2 — R3's E6: each hard rule weakened in a real `PROXY_ONLY` environment the released broker prepared, by a test-only runtime that does not do what the plan asks, measured from both vantages and refused by the production decision
 
-**Status:** Proposed · **Date:** 2026-11-08 · **Would supersede (only on the owner's acceptance, after its hosted evidence passes):** [ADR-0057](0057-m5e-proxy-only-real-container-evidence-residual.md) · **Refines:** [ADR-0047](0047-m5a-oci-execution-environment-and-measured-assurance.md) §9 (weakened profiles are caught by measurement), [ADR-0048](0048-m5b-proxy-only-topology-and-connect-proxy.md) §§9, 14 (`PROXY_ONLY`'s measurement and its weakened topologies) · **Addresses:** R3's E6 ([M5E_ASSURANCE_PLAN.md](../M5E_ASSURANCE_PLAN.md) §§3a, 3b), [issue #19](https://github.com/Onwcan/DireWolf/issues/19) · **Implementation authorised by:** the owner, 2026-11-08 — the implementation and its evidence path only: not an acceptance of this record, not evidence, and not a change to M5's acceptance contract
+**Status:** Proposed · **Date:** 2026-11-08 · **Would supersede (only on the owner's acceptance, after its hosted evidence passes):** [ADR-0057](0057-m5e-proxy-only-real-container-evidence-residual.md) · **Refines:** [ADR-0047](0047-m5a-oci-execution-environment-and-measured-assurance.md) §9 (weakened profiles are caught by measurement), [ADR-0048](0048-m5b-proxy-only-topology-and-connect-proxy.md) §§9, 14 (`PROXY_ONLY`'s measurement and its weakened topologies) · **Addresses:** R3's E6 ([M5E_ASSURANCE_PLAN.md](../M5E_ASSURANCE_PLAN.md) §§3a, 3b), [issue #19](https://github.com/Onwcan/DireWolf/issues/19) · **Refined by:** [ADR-0059](0059-m5e-proxy-only-peer-joins-only-its-own-network-namespace.md) (Proposed: the host-network case, after F-E6-HOSTNET, §8) · **Implementation authorised by:** the owner, 2026-11-08 — the implementation and its evidence path only: not an acceptance of this record, not evidence, and not a change to M5's acceptance contract
 
 > **ADR-0057's E6 is built: for each of the fifteen rows ADR-0057 §1a names,
 > the released, unmodified broker prepares a genuine `PROXY_ONLY` environment
@@ -10,9 +10,11 @@
 > production decision must refuse it; a conforming control through the same
 > runtime must be kept. Every raw observation is digested where it is made,
 > checked again from its bytes, and published with the run's provenance. It
-> runs only on a disposable GitHub-hosted runner, and has not run there yet:
-> E6 is NOT EXERCISED until the owner's hosted run passes, and nothing here
-> closes R3, M5e.2 or issue #19.**
+> runs only on a disposable GitHub-hosted runner. Its first hosted run, at
+> `3ca842c`, observed F-E6-HOSTNET (§8), and the broker was changed because
+> of it (ADR-0059): E6 is NOT EXERCISED for the broker as it now is until the
+> owner's hosted run at that change passes, and nothing here closes R3, M5e.2
+> or issue #19.**
 
 ## Context
 
@@ -114,7 +116,9 @@ checked, by `tests/architecture/test_m5e_e6.py`.
 
 1. **In the test, as it runs.** Exactly one `create` weakened — the
    environment's, in exactly its fields — every other forwarded unchanged; the
-   setup and the relay made; the environment **not kept**, and the broker's
+   setup and the relay made — for the host's network neither, the broker's own
+   `relay_withheld network=FAIL`, and the host's loopback, kept before and
+   after, unchanged (ADR-0059 §3); the environment **not kept**, and the broker's
    own `environment_prepared … retained=false` event; the probe's report
    arrived; every invariant of the row `FAIL`; the record the broker judged
    showing the weakening; every inside verdict of the broker's answer equal to
@@ -126,17 +130,22 @@ checked, by `tests/architecture/test_m5e_e6.py`.
    reported (`also:`); the topology's four reported whatever their verdicts
    (`topology:`) — how a weakening and the topology interact is observed
    (ADR-0057 §3, U3), not assumed; the fields changed; for the host's network,
-   what the host's loopback gained. The control kept, its topology passing;
-   the count complete. A row not exercised fails E6 whole.
+   that the host's loopback gained nothing (`none`, ADR-0059). The control
+   kept, its topology passing; the count complete. A row not exercised fails
+   E6 whole.
 3. **From the raw bytes, independently** (`e6_check_raw`, Python, over what
    the test wrote). Each case's eight files — the create as sent and as
-   received, the daemon's record, the probe's raw stream and its report, the
-   broker's answer, its requests and its events — at the digest the test
-   printed when it wrote them, and nothing else; the same plan for every
-   case; the row's fields alone changed; the record showing the weakening; the
-   report exactly the stream's stdout; the broker's inside verdicts the
-   report's; the refusal in the answer and in the event; the setup and relay
-   created; the line's topology the answer's.
+   received, the daemon's record (the measurement's read), the probe's raw
+   stream and its report, the broker's answer, its requests and its events —
+   and for the host's network a ninth, the host's loopback before and after,
+   at the digest the test printed when it wrote them, and nothing else; the
+   same plan for every case; the row's fields alone changed; the record
+   showing the weakening; the report exactly the stream's stdout; the broker's
+   inside verdicts the report's; the refusal in the answer and in the event;
+   the environment's record read before any peer was asked for; the setup and
+   relay created — for the host's network neither, the withholding in the
+   broker's event, no relay measured and the loopback unchanged, as the line
+   says; the line's topology the answer's.
 
 ### 5. Where it runs
 
@@ -144,10 +153,11 @@ Only on a disposable GitHub-hosted runner: the required job
 `sandbox-proxy-weakened` runs `make sandbox-proxy-weakened-evidence` with
 `DW_E6_EVIDENCE=1`, which no other job sets; the task refuses before it builds
 anything anywhere else (NOT EXERCISED, which fails), and refuses Docker
-Desktop. The one case that touches the host — the host's network, in which
-the broker's setup, run in a namespace that is the host's, adds the proxy
-address to the host's own loopback (§8) — is refused by the test itself
-anywhere but such a runner. A run anywhere else is development, never E6.
+Desktop. The one case that could touch the host — the host's network, in
+which the broker's setup, run in a namespace that is the host's, added the
+proxy address to the host's own loopback until ADR-0059's gate (§8) — is
+refused by the test itself anywhere but such a runner: what protects the host
+there is the gate under test. A run anywhere else is development, never E6.
 
 ### 6. Against §3b's criteria
 
@@ -183,33 +193,48 @@ hang-up in the case's requests, and a step the broker needed and did not get
 would fail that step. **None of this is E6**: it ran on a daemon that is not
 disposable, at no hosted commit, and without the host's network.
 
-### 8. Predicted, for the hosted run: the host's network and the setup
+### 8. The host's network and the setup: predicted, observed, remedied
 
-A runtime that gives the environment the host's network namespace makes the
-broker's setup — root with `NET_ADMIN`, joining the environment's namespace —
-add `169.254.7.1/32` to **the host's own loopback**, and the relay then
-serves the run's proxy on the host's network until the measurement refuses
-the environment and tears it down; the teardown removes the containers and
-the listener but not the address. The case is expected to pass — the hard
-rule refused from both vantages — and to report the address as what the
-host's loopback gained; the gate accepts nothing else there. If the hosted run
-shows it, it is finding **F-E6-HOSTNET**: not fail-open (the environment is
-refused) but a host-side residue and a short exposure of the run's grant to
-the host, under a runtime that ignores `--network none`. A remedy — judging
-the record's host invariants before connecting the peer, so the setup never
-runs in a namespace that is not the environment's own — would change
-ADR-0048's preparation order and is the owner's to decide; it is not built
-here, and building it first would hide the interaction E6 exists to observe.
+**Predicted (2026-11-08).** A runtime that gives the environment the host's
+network namespace makes the broker's setup — root with `NET_ADMIN`, joining
+the environment's namespace — add `169.254.7.1/32` to **the host's own
+loopback**, and the relay then serves the run's proxy on the host's network
+until the measurement refuses the environment and tears it down; the teardown
+removes the containers and the listener but not the address. Not fail-open
+(the environment is refused), but a host-side residue and a short exposure of
+the run's grant to the host, under a runtime that ignores `--network none`:
+finding **F-E6-HOSTNET**. Not remedied before the hosted run, so that the run
+could observe it.
+
+**Observed (hosted, `3ca842c`, run
+[42484188848](https://github.com/Onwcan/DireWolf/actions/runs/42484188848)).**
+Exactly that: the daemon's record shows `NetworkMode: host`; the setup and the
+relay were created and started; the case reported
+`host-loopback-added:169.254.7.1/32`, the hard rule refused from both
+vantages. The residue was the line's word alone, not a raw observation, so the
+offline review could not hold it (ADR-0059, Context).
+
+**Remedied (built 2026-11-08, hosted evidence pending; the owner's direction
+"build the fix first").** [ADR-0059](0059-m5e-proxy-only-peer-joins-only-its-own-network-namespace.md):
+the broker makes no peer unless the started environment's record passes
+`HOST_NETWORK_ISOLATED`. The host-network case must now show no setup, no
+relay, the broker's `relay_withheld network=FAIL`, and the host's loopback
+unchanged, kept raw; the gate accepts `host-loopback-added:none` and nothing
+else. The gate is the network's alone: every other weakening still gets its
+peer, so the interaction this record exists to observe stays observed.
 
 ### 9. What closes E6, R3 and issue #19
 
-1. The owner commits this change; the hosted `sandbox-proxy-weakened` job
-   passes with every case at its level, and the `ci` aggregate with it.
+1. The owner commits this change and ADR-0059's; the hosted
+   `sandbox-proxy-weakened` job at that commit passes with every case at its
+   level — the host's network with no peer and nothing gained (§8) — and the
+   `ci` aggregate with it. (The run at `3ca842c` was of the broker before
+   ADR-0059 and does not count.)
 2. The owner reviews the hosted log — `make sandbox-proxy-weakened-review`
    over the downloaded log, and the manifest's provenance against the run.
-3. The owner accepts this record. Then ADR-0057's status becomes "Superseded
-   by ADR-0058", the index moves it to the superseded table, and
-   `dwcheck adr --record` records this one in the accepted digest; the
+3. The owner accepts ADR-0059 and this record. Then ADR-0057's status becomes
+   "Superseded by ADR-0058", the index moves it to the superseded table, and
+   `dwcheck adr --record` records both in the accepted digest; the
    `test_m5e_r3_closure.py` guard then requires exactly that.
 4. The owner explicitly authorises R3 satisfied and M5e.2 complete, and
    closes issue #19.
@@ -236,7 +261,8 @@ tell the truth about a weakened container, not a runtime that lies in its
 record — the inside vantage is the defence there, and no case here models
 it. A required job that runs privileged and host-sharing containers on every
 commit is CI time and risk the hosted runner bears. The host's network case
-changes the runner's loopback (§8). The forwarder is some 650 lines of test
+changed the runner's loopback before ADR-0059 (§8), and would again under a
+broker without its gate. The forwarder is some 650 lines of test
 code (the whole `e6` module about 2 100, its own unit tests included) that
 must keep parsing the client's HTTP; its unit tests, against a fake daemon,
 run in `make test`.
@@ -264,6 +290,6 @@ record.
 ## Revisit if
 
 The hosted run fails or shows an invariant move that this record does not
-expect; F-E6-HOSTNET is confirmed and the owner decides the setup's order; the
+expect; ADR-0059 is not accepted, or its gate changes; the
 topology, the probe's or the record's hard-rule code, or the runtime client
 changes; or a runtime that misreports its record is to be modelled.

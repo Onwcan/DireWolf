@@ -2812,16 +2812,19 @@ mod linux {
             recorded: fn(&Object, &Facts) -> bool,
             /// The invariants that must fail, from the vantage(s) §1a names.
             caught: &'static [I],
-            /// Whether the case changes the runtime's host (the setup would
-            /// add the proxy address to the host's own loopback): a
-            /// disposable runner's alone.
-            host_side_effect: bool,
+            /// Whether the environment is given the host's network namespace:
+            /// the broker must make no peer there (ADR-0059) -- a setup
+            /// would add the proxy address to the host's own loopback, and a
+            /// relay serve the run's proxy on the host's network -- and the
+            /// host's loopback is observed before and after. A disposable
+            /// runner's alone: a broker without that gate changes the host.
+            on_host_network: bool,
         }
 
         /// ADR-0057 §1a's fifteen rows -- the seccomp rule twice -- one case
         /// each, the resource-limit row's task backstop (ADR-0056) as a
         /// second case of that row. The host's network last: it is the one
-        /// that touches the host.
+        /// that could touch the host.
         const ROWS: &[Row] = &[
             Row {
                 case: "e6-weakened-writable-root-refused",
@@ -2830,7 +2833,7 @@ mod linux {
                 changed: &["HostConfig.ReadonlyRootfs"],
                 recorded: recorded_writable_root,
                 caught: &[I::HostRootReadOnly, I::ContainerRootReadOnly],
-                host_side_effect: false,
+                on_host_network: false,
             },
             Row {
                 case: "e6-weakened-root-user-refused",
@@ -2839,7 +2842,7 @@ mod linux {
                 changed: &["User"],
                 recorded: recorded_root_user,
                 caught: &[I::HostUserNonRoot, I::ContainerUidGid],
-                host_side_effect: false,
+                on_host_network: false,
             },
             Row {
                 case: "e6-weakened-privileged-refused",
@@ -2853,7 +2856,7 @@ mod linux {
                     I::ContainerDevicesMinimal,
                     I::ContainerProcRestricted,
                 ],
-                host_side_effect: false,
+                on_host_network: false,
             },
             Row {
                 case: "e6-weakened-runtime-socket-mounted-refused",
@@ -2866,7 +2869,7 @@ mod linux {
                     I::HostMountsExact,
                     I::ContainerNoRuntimeSocket,
                 ],
-                host_side_effect: false,
+                on_host_network: false,
             },
             Row {
                 case: "e6-weakened-capability-added-refused",
@@ -2875,7 +2878,7 @@ mod linux {
                 changed: &["HostConfig.CapAdd"],
                 recorded: recorded_capability,
                 caught: &[I::HostCapabilitiesDropped, I::ContainerCapabilitiesEmpty],
-                host_side_effect: false,
+                on_host_network: false,
             },
             Row {
                 case: "e6-weakened-no-new-privileges-disabled-refused",
@@ -2884,7 +2887,7 @@ mod linux {
                 changed: &["HostConfig.SecurityOpt"],
                 recorded: recorded_no_new_privileges_off,
                 caught: &[I::HostNoNewPrivileges, I::ContainerNoNewPrivileges],
-                host_side_effect: false,
+                on_host_network: false,
             },
             Row {
                 case: "e6-weakened-seccomp-unconfined-refused",
@@ -2893,7 +2896,7 @@ mod linux {
                 changed: &["HostConfig.SecurityOpt"],
                 recorded: recorded_seccomp_unconfined,
                 caught: &[I::HostSeccompProfile, I::ContainerSeccompProfileActive],
-                host_side_effect: false,
+                on_host_network: false,
             },
             Row {
                 case: "e6-weakened-seccomp-default-profile-refused",
@@ -2902,7 +2905,7 @@ mod linux {
                 changed: &["HostConfig.SecurityOpt"],
                 recorded: recorded_seccomp_default,
                 caught: &[I::HostSeccompProfile, I::ContainerSeccompProfileActive],
-                host_side_effect: false,
+                on_host_network: false,
             },
             Row {
                 case: "e6-weakened-host-pid-refused",
@@ -2911,7 +2914,7 @@ mod linux {
                 changed: &["HostConfig.PidMode"],
                 recorded: recorded_host_pid,
                 caught: &[I::HostPidNamespacePrivate, I::ContainerPidNamespacePrivate],
-                host_side_effect: false,
+                on_host_network: false,
             },
             Row {
                 case: "e6-weakened-host-ipc-refused",
@@ -2920,7 +2923,7 @@ mod linux {
                 changed: &["HostConfig.IpcMode"],
                 recorded: recorded_host_ipc,
                 caught: &[I::HostIpcNamespacePrivate],
-                host_side_effect: false,
+                on_host_network: false,
             },
             Row {
                 case: "e6-weakened-host-uts-refused",
@@ -2929,7 +2932,7 @@ mod linux {
                 changed: &["HostConfig.UTSMode"],
                 recorded: recorded_host_uts,
                 caught: &[I::HostUtsNamespacePrivate],
-                host_side_effect: false,
+                on_host_network: false,
             },
             Row {
                 case: "e6-weakened-mutable-image-tag-refused",
@@ -2938,7 +2941,7 @@ mod linux {
                 changed: &["Image"],
                 recorded: recorded_mutable_tag,
                 caught: &[I::HostImagePinned],
-                host_side_effect: false,
+                on_host_network: false,
             },
             Row {
                 case: "e6-weakened-extra-device-refused",
@@ -2947,7 +2950,7 @@ mod linux {
                 changed: &["HostConfig.Devices"],
                 recorded: recorded_extra_device,
                 caught: &[I::HostNoDevices, I::ContainerDevicesMinimal],
-                host_side_effect: false,
+                on_host_network: false,
             },
             Row {
                 case: "e6-weakened-resource-limits-dropped-refused",
@@ -2956,7 +2959,7 @@ mod linux {
                 changed: &["HostConfig.MemorySwap", "HostConfig.PidsLimit"],
                 recorded: recorded_limits_dropped,
                 caught: &[I::HostResourceLimits, I::ContainerCgroupLimits],
-                host_side_effect: false,
+                on_host_network: false,
             },
             Row {
                 case: "e6-weakened-task-backstop-at-256-refused",
@@ -2965,7 +2968,7 @@ mod linux {
                 changed: &["HostConfig.Ulimits"],
                 recorded: recorded_backstop_at_256,
                 caught: &[I::HostResourceLimits, I::ContainerRlimits],
-                host_side_effect: false,
+                on_host_network: false,
             },
             Row {
                 case: "e6-weakened-host-network-refused",
@@ -2979,7 +2982,7 @@ mod linux {
                     I::ContainerDirectEgressRefused,
                     I::ContainerDirectDnsRefused,
                 ],
-                host_side_effect: true,
+                on_host_network: true,
             },
         ];
 
@@ -3743,8 +3746,15 @@ mod linux {
         }
 
         /// The one environment create the socket saw, and every other create
-        /// forwarded byte for byte; the setup and the relay among them.
-        fn environment_create<'a>(case: &str, seen: &'a Seen, e: &EnvironmentId) -> &'a Created {
+        /// forwarded byte for byte; the setup and the relay among them when
+        /// `peer`, and neither when not -- never one, for an environment
+        /// whose namespace is not its own (ADR-0059).
+        fn environment_create<'a>(
+            case: &str,
+            seen: &'a Seen,
+            e: &EnvironmentId,
+            peer: bool,
+        ) -> &'a Created {
             let ours: Vec<&Created> = seen
                 .created
                 .iter()
@@ -3761,20 +3771,26 @@ mod linux {
                 );
             }
             for role in ["setup", "relay"] {
-                assert!(
-                    seen.created
-                        .iter()
-                        .any(|c| c.role == role && c.environment == e.as_str()),
-                    "{case}: the broker made no {role}: {:?}",
+                let made = seen
+                    .created
+                    .iter()
+                    .any(|c| c.role == role && c.environment == e.as_str());
+                assert_eq!(
+                    made,
+                    peer,
+                    "{case}: the broker {} {role}: {:?}",
+                    if peer { "made no" } else { "made a" },
                     seen.requests
                 );
             }
             created
         }
 
-        /// The record the broker judged -- the daemon's first answer of the
-        /// environment's own -- and the probe report it read, each checked
-        /// against the broker's measurement.
+        /// The record the measurement judged -- the daemon's first answer of
+        /// the environment's own after the measurement's version check; the
+        /// peer's gate (ADR-0059) read one before it, and the client's
+        /// `exec` reads one after -- and the probe report it read, each
+        /// checked against the broker's measurement.
         fn observed(
             case: &str,
             seen: &Seen,
@@ -3782,14 +3798,6 @@ mod linux {
             e: &EnvironmentId,
             measurement: &EnvironmentMeasurement,
         ) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
-            let record = seen
-                .inspected
-                .iter()
-                .find(|(id, status, _)| id == container.as_str() && *status == 200)
-                .map(|(_, _, body)| body.clone())
-                .unwrap_or_else(|| {
-                    panic!("{case}: the broker read no record: {:?}", seen.requests)
-                });
             let measure = vec![
                 profile::PROBE_PATH.to_owned(),
                 profile::PROBE_MEASURE.to_owned(),
@@ -3803,6 +3811,38 @@ mod linux {
                 .map(|(id, _)| id)
                 .collect();
             assert_eq!(execs.len(), 1, "{case}: probe measurements {execs:?}");
+            // Where the measurement began: the last version check before the
+            // probe ran. Every answer of the environment's record before it
+            // is not the measurement's.
+            let read = format!("GET /containers/{}/json 200", container.as_str());
+            let ran = format!("POST /exec/{}/start ", execs[0]);
+            let probe = seen
+                .requests
+                .iter()
+                .position(|r| r.starts_with(&ran))
+                .unwrap_or_else(|| panic!("{case}: the probe never ran: {:?}", seen.requests));
+            let began = seen.requests[..probe]
+                .iter()
+                .rposition(|r| r == "GET /version 200")
+                .unwrap_or_else(|| panic!("{case}: no measurement: {:?}", seen.requests));
+            assert!(
+                seen.requests[began..probe].contains(&read),
+                "{case}: the measurement read no record: {:?}",
+                seen.requests
+            );
+            let earlier = seen.requests[..began]
+                .iter()
+                .filter(|r| **r == read)
+                .count();
+            let record = seen
+                .inspected
+                .iter()
+                .filter(|(id, status, _)| id == container.as_str() && *status == 200)
+                .nth(earlier)
+                .map(|(_, _, body)| body.clone())
+                .unwrap_or_else(|| {
+                    panic!("{case}: the broker read no record: {:?}", seen.requests)
+                });
             let streams: Vec<&Vec<u8>> = seen
                 .streams
                 .iter()
@@ -3925,10 +3965,15 @@ mod linux {
             let seen = t.runtime.seen();
             assert!(seen.failures.is_empty(), "{case}: {:?}", seen.failures);
             assert_eq!(seen.rewritten, 0);
-            let created = environment_create(case, &seen, &t.e);
+            let created = environment_create(case, &seen, &t.e, true);
             assert_eq!(
                 created.sent, created.received,
                 "{case}: forwarded byte for byte"
+            );
+            assert!(
+                !t.events.contains("relay_withheld"),
+                "{case}: the peer was withheld: {}",
+                t.events
             );
             let measurement = t.measurement.clone().expect("measured");
             assert!(
@@ -3978,11 +4023,11 @@ mod linux {
         /// and refused. Its outcome line.
         fn refused(lab: &Lab<'_>, row: &Row, plan: &Object) -> String {
             let case = row.case;
-            let host_before = if row.host_side_effect {
+            let observe = || {
                 host_loopback()
-            } else {
-                None
+                    .unwrap_or_else(|| panic!("{case}: the host's loopback is not observed"))
             };
+            let host_before = row.on_host_network.then(observe);
             let t = prepare_through(lab, Some(row.weaken));
             let seen = t.runtime.seen();
             assert!(
@@ -3991,7 +4036,21 @@ mod linux {
                 seen.failures
             );
             assert_eq!(seen.rewritten, 1, "{case}: one create weakened");
-            let created = environment_create(case, &seen, &t.e);
+            // The peer: made for every weakening but the network's, where
+            // the namespace is not the environment's own (ADR-0059).
+            let created = environment_create(case, &seen, &t.e, !row.on_host_network);
+            assert_eq!(
+                t.events.contains("relay_withheld network=FAIL"),
+                row.on_host_network,
+                "{case}: the broker's gate: {}",
+                t.events
+            );
+            assert_eq!(
+                t.events.contains("relay_withheld"),
+                row.on_host_network,
+                "{case}: the peer withheld: {}",
+                t.events
+            );
             // The client asked for the strict plan the control measured
             // clean; the daemon received it with exactly the row's fields
             // changed.
@@ -4067,29 +4126,40 @@ mod linux {
                 !egress_dir(lab.dir, &t.e).exists(),
                 "{case}: the listener's directory"
             );
-            let residue = match (
-                host_before,
-                row.host_side_effect.then(host_loopback).flatten(),
-            ) {
-                (Some(before), Some(after)) => {
-                    let added: Vec<String> =
-                        after.into_iter().filter(|a| !before.contains(a)).collect();
-                    for address in &added {
+            kept_all(lab, case, &t, created, (&record, &stream, &report));
+            // The host's network: the host's loopback before and after, kept
+            // raw, and nothing gained. No peer was made, so nothing could
+            // be; the measurement saw none.
+            let residue = match host_before {
+                Some(before) => {
+                    let after = observe();
+                    let mut kept = String::new();
+                    for (when, addresses) in [("before", &before), ("after", &after)] {
+                        for address in addresses {
+                            kept.push_str(&format!("{when} {address}\n"));
+                        }
+                    }
+                    keep(lab, case, "host-loopback.txt", kept.as_bytes());
+                    assert!(
+                        before.iter().any(|a| a == "127.0.0.1/8"),
+                        "{case}: not the host's loopback: {before:?}"
+                    );
+                    assert!(
+                        !before.iter().chain(&after).any(|a| a == PROXY_ADDRESS),
+                        "{case}: the proxy address is on the host's loopback: {after:?}"
+                    );
+                    assert_eq!(after, before, "{case}: the host's loopback changed");
+                    for invariant in [I::HostProxyRelay, I::HostRelayDigest] {
                         assert_eq!(
-                            address, PROXY_ADDRESS,
-                            "{case}: the host's loopback gained {address}"
+                            verdict(&measurement, invariant),
+                            Verdict::Fail,
+                            "{case}: {invariant:?} with no peer"
                         );
                     }
-                    if added.is_empty() {
-                        "none".to_owned()
-                    } else {
-                        added.join("+")
-                    }
+                    "none".to_owned()
                 }
-                _ if row.host_side_effect => "unobservable".to_owned(),
-                _ => "not-applicable".to_owned(),
+                None => "not-applicable".to_owned(),
             };
-            kept_all(lab, case, &t, created, (&record, &stream, &report));
             format!(
                 "refused:{};also:{};topology:{};weakened:{};host-loopback-added:{residue}",
                 joined(row.caught),
@@ -4153,7 +4223,7 @@ mod linux {
             let mut refused_cases = 0usize;
             let mut rows: Vec<&str> = Vec::new();
             for row in ROWS {
-                if row.host_side_effect
+                if row.on_host_network
                     && let Err(why) = &runner
                 {
                     evidence_in(row.case, &format!("not-exercised: {why}"), "measured-both");

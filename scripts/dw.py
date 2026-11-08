@@ -4094,11 +4094,16 @@ E6_ROWS: dict[str, tuple[str, tuple[str, ...], tuple[str, ...]]] = {
         ("HostConfig.NetworkMode",),
     ),
 }
-# The one case that changes the runtime's host: the broker's setup, run in a
-# namespace that is the host's, adds the proxy address to the host's own
-# loopback. A disposable runner's alone; the address is reported, not hidden.
-E6_HOST_SIDE_EFFECT = "e6-weakened-host-network-refused"
-E6_PROXY_ADDRESS = "169.254.7.1/32"
+# The one case whose environment is given the host's network namespace. The
+# broker must make no peer there (ADR-0059): its setup would add the proxy
+# address to the host's own loopback, and its relay serve the run's proxy on
+# the host's network -- what the hosted run at `3ca842c` observed
+# (F-E6-HOSTNET). The host's loopback is kept before and after, and must not
+# have changed. A disposable runner's alone: a broker without that gate
+# changes the host.
+E6_HOST_NETWORK = "e6-weakened-host-network-refused"
+E6_HOST_LOOPBACK = "host-loopback.txt"
+_E6_ADDRESS = re.compile(r"[0-9]{1,3}(?:\.[0-9]{1,3}){3}/[0-9]{1,2}")
 E6_ROW_NAMES = tuple(dict.fromkeys(row for row, _, _ in E6_ROWS.values()))
 E6_CASES = tuple((E6_SUITE, case) for case in (E6_CONTROL, *E6_ROWS, E6_COUNT))
 # `PROXY_ONLY`'s own invariants: reported for every case, never required to
@@ -4254,8 +4259,9 @@ def e6_outcome_problem(case: str, outcome: str, enforcement: object) -> str | No
     was refused by exactly the invariants its row names, of the vantage its
     enforcement claims; it reports every other invariant that did not pass and
     the topology's four, whatever their verdicts; it names the fields the
-    runtime changed, and for the host's network what the host's loopback
-    gained. The count says every case was refused and every row covered."""
+    runtime changed, and for the host's network that the host's loopback
+    gained nothing (ADR-0059). The count says every case was refused and every
+    row covered."""
     if case == E6_CONTROL:
         fields = _e6_fields(outcome)
         topology = _e6_verdicts(fields.get("topology", ""))
@@ -4301,9 +4307,10 @@ def e6_outcome_problem(case: str, outcome: str, enforcement: object) -> str | No
     if fields.get("weakened") != "+".join(changed):
         return f"the weakening must be {'+'.join(changed)!r}, not {fields.get('weakened')!r}"
     added = fields.get("host-loopback-added")
-    if case == E6_HOST_SIDE_EFFECT:
-        if added not in ("none", E6_PROXY_ADDRESS):
-            return f"what the host's loopback gained is not observed: {added!r}"
+    if case == E6_HOST_NETWORK:
+        # ADR-0059: no peer in the host's namespace, so nothing gained.
+        if added != "none":
+            return f"the host's loopback must have gained nothing: {added!r}"
     elif added != "not-applicable":
         return f"a case that touches no host reports its loopback: {added!r}"
     return None
@@ -4464,13 +4471,50 @@ def _e6_demux(raw: bytes) -> bytes | None:
     return bytes(out)
 
 
+def _e6_files_of(case: str) -> tuple[str, ...]:
+    """The raw files the test keeps of `case`: every case's, and for the
+    host's network the host's loopback before and after."""
+    return (*E6_RAW_FILES, E6_HOST_LOOPBACK) if case == E6_HOST_NETWORK else E6_RAW_FILES
+
+
+def _e6_gate_read(requests: list[str], container: str) -> str | None:
+    """Why the broker's requests do not show it reading the environment's
+    record once the environment started, before it made any peer -- the
+    peer's gate (ADR-0059) -- or `None`."""
+    started = f"POST /containers/{container}/start 204"
+    read = f"GET /containers/{container}/json 200"
+    if started not in requests:
+        return "the environment was never started"
+    after = requests[requests.index(started) + 1 :]
+    if read not in after:
+        return "the broker never read the environment's record"
+    peer = next((i for i, r in enumerate(after) if r.startswith("POST /containers/create ")), None)
+    if peer is not None and peer < after.index(read):
+        return "the broker made a peer before it read the environment's record"
+    return None
+
+
+def _e6_loopback(data: bytes) -> tuple[list[str], list[str]]:
+    """The host's IPv4 loopback addresses before and after, as the test kept
+    them (`before <address>` and `after <address>`, one per line), or
+    TaskError."""
+    kept: dict[str, list[str]] = {"before": [], "after": []}
+    for line in data.decode("utf-8", "replace").splitlines():
+        when, _, address = line.partition(" ")
+        if when not in kept or not _E6_ADDRESS.fullmatch(address):
+            raise TaskError(f"E6 {E6_HOST_NETWORK}: an unreadable loopback line: {line[:80]!r}")
+        kept[when].append(address)
+    return kept["before"], kept["after"]
+
+
 def e6_check_raw(
     output: str, raw: Path, lines: list[dict[str, object]], tag: str
 ) -> dict[tuple[str, str], bytes]:
     """E6's raw observations, checked again from their bytes -- independently
     of the test that made them -- before a line is believed.
 
-    For the control and every exercised row: each of `E6_RAW_FILES`, once,
+    For the control and every exercised row: each of its raw files
+    (`E6_RAW_FILES`, and the host's loopback for the host's network), once,
     at the digest and length the test printed when it wrote it, and nothing
     else; the create as the client sent it is the same strict plan for every
     case (its labels aside), and the daemon received it unchanged (the
@@ -4479,8 +4523,13 @@ def e6_check_raw(
     verdict of the broker's answer is the probe's own, every invariant the
     row names failed, and the topology's verdicts are the line's; the broker
     was told nothing was kept (a row) or kept it (the control), and its own
-    event says so; and the broker's requests built the whole topology. Any
-    other finding fails the task. The checked bytes, by (case, file)."""
+    event says so; the broker read the environment's record before it made
+    any peer (ADR-0059); its requests built the whole topology -- except for
+    the host's network, where it made no setup and no relay, its own event
+    says it withheld them, the measurement found no relay, and the host's
+    loopback is what it was, the proxy address on it neither before nor
+    after, as the line says. Any other finding fails the task. The checked
+    bytes, by (case, file)."""
     printed = _e6_raw_lines(output)
     outcomes = {str(line["case"]): str(line["outcome"]) for line in lines}
     exercised = [E6_CONTROL] + [c for c in E6_ROWS if not outcomes[c].startswith("not-exercised")]
@@ -4488,9 +4537,10 @@ def e6_check_raw(
     for case in exercised:
         where = raw / case
         present = sorted(p.name for p in where.iterdir()) if where.is_dir() else []
-        if present != sorted(E6_RAW_FILES):
-            raise TaskError(f"E6 {case}: raw files {present}, not {sorted(E6_RAW_FILES)}")
-        for name in E6_RAW_FILES:
+        wanted = sorted(_e6_files_of(case))
+        if present != wanted:
+            raise TaskError(f"E6 {case}: raw files {present}, not {wanted}")
+        for name in wanted:
             data = (where / name).read_bytes()
             said = printed.get((case, name))
             digest = hashlib.sha256(data).hexdigest()
@@ -4544,10 +4594,38 @@ def e6_check_raw(
                 raise TaskError(f"E6 {case}: {check} is not the broker's inside verdict")
         events = files[(case, "broker-events.txt")].decode("utf-8", "replace")
         requests = files[(case, "requests.txt")].decode("utf-8", "replace")
-        for role in ("environment", "setup", "relay"):
-            if f"POST /containers/create 201 role={role}" not in requests:
+        if "POST /containers/create 201 role=environment" not in requests:
+            raise TaskError(f"E6 {case}: the broker's environment was never created")
+        record = _e6_json(files[(case, "record.json")], f"E6 {case}: the record")
+        unread = _e6_gate_read(requests.splitlines(), str(record.get("Id")))
+        if unread is not None:
+            raise TaskError(f"E6 {case}: {unread}")
+        host = case == E6_HOST_NETWORK
+        for role in ("setup", "relay"):
+            made = f"role={role}" in requests
+            if made and host:
+                raise TaskError(f"E6 {case}: the broker made a {role} in the host's namespace")
+            if not made and not host:
                 raise TaskError(f"E6 {case}: the broker's {role} was never created")
+        withheld = "relay_withheld network=FAIL" in events
+        if withheld != host or ("relay_withheld" in events) != host:
+            raise TaskError(f"E6 {case}: the broker's own event of its peer: withheld={withheld}")
         fields = _e6_fields(outcomes[case])
+        if host:
+            before, after = _e6_loopback(files[(case, E6_HOST_LOOPBACK)])
+            if "127.0.0.1/8" not in before:
+                raise TaskError(f"E6 {case}: not the host's loopback: {before}")
+            if "169.254.7.1/32" in before + after or sorted(after) != sorted(before):
+                raise TaskError(
+                    f"E6 {case}: the host's loopback changed, or holds the proxy address: "
+                    f"{before} -> {after}"
+                )
+            if fields.get("host-loopback-added") != "none":
+                raise TaskError(f"E6 {case}: the line's loopback is not what the host kept")
+            for invariant in ("HOST_PROXY_RELAY", "HOST_RELAY_DIGEST"):
+                if verdicts.get(invariant) != "FAIL":
+                    found = verdicts.get(invariant)
+                    raise TaskError(f"E6 {case}: {invariant} is {found}, with no peer made")
         topology = _e6_verdicts(fields.get("topology", "")) or {}
         if any(verdicts.get(name) != verdict for name, verdict in topology.items()):
             raise TaskError(f"E6 {case}: the line's topology is not the broker's answer")

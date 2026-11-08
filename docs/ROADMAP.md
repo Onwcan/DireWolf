@@ -752,9 +752,21 @@ for the owner's offline review. A development run against a developer's daemon p
 control and fifteen of the sixteen cases — not evidence. **M5e.2 is IN PROGRESS, R3 E6 NOT
 EXERCISED — hosted evidence pending.**
 
+**F-E6-HOSTNET observed, its fix built (2026-11-08).** The owner committed E6 as `3ca842c`;
+its first hosted run, [42484188848](https://github.com/Onwcan/DireWolf/actions/runs/42484188848)
+(run no. 141), refused all sixteen cases and kept the control, and an offline review of its log
+held. In the host's network case the broker's setup and relay ran in the host's namespace and
+left `169.254.7.1/32` on the runner's loopback (F-E6-HOSTNET,
+[M5E_ASSURANCE_PLAN.md](M5E_ASSURANCE_PLAN.md) §5a). At the owner's direction the fix was built
+first ([ADR-0059](adr/0059-m5e-proxy-only-peer-joins-only-its-own-network-namespace.md),
+**Proposed**): the broker makes no peer unless the started environment's record passes
+`HOST_NETWORK_ISOLATED`, and E6's host-network case must show no peer and the host's loopback
+unchanged, kept raw. Run 141 was of the broker before it, so **R3 E6 is NOT EXERCISED — hosted
+evidence pending** again.
+
 Still to do: R3's real-container level (E6: required by the owner's R-B, built 2026-11-08
-and NOT EXERCISED until the hosted `sandbox-proxy-weakened` job passes and the owner reviews
-its log and accepts ADR-0058, which supersedes ADR-0057; tracked in
+and NOT EXERCISED until the hosted `sandbox-proxy-weakened` job passes at ADR-0059's fix and the
+owner reviews its log and accepts ADR-0059 and ADR-0058, which supersedes ADR-0057; tracked in
 [issue #19](https://github.com/Onwcan/DireWolf/issues/19));
 the owner's acceptance of M5e.4, hosted-verified, the OD-E4 provenance
 mechanism included; M5e.5's npm and pip profiles

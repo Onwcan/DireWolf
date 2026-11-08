@@ -21,6 +21,8 @@
 //! broker listener, made in this order and taken down in the reverse: the
 //! broker's proxy for it is opened; the environment is created and started
 //! in the runtime's `none` network with the broker's proxy variables; the
+//! runtime's record of it must show a network namespace of its own
+//! (`HOST_NETWORK_ISOLATED`, ADR-0059), or no peer is made at all; the
 //! relay inside the image is hashed against the authority's digest; the
 //! one-shot setup container adds the proxy address to the environment's
 //! loopback and is removed by the runtime; the relay is started in the
@@ -551,11 +553,27 @@ impl<'a> Oci<'a> {
         helpers.and(environment)
     }
 
-    /// Give a started `PROXY_ONLY` environment its one peer: hash the relay
-    /// in its image, run the setup, start the relay. A step that does not
-    /// happen is not retried and not fatal here: the measurement shows it,
-    /// and an environment without its peer is not kept.
+    /// Give a started `PROXY_ONLY` environment its one peer: prove from the
+    /// runtime's record that its network namespace is its own, hash the
+    /// relay in its image, run the setup, start the relay. A step that does
+    /// not happen is not retried and not fatal here: the measurement shows
+    /// it, and an environment without its peer is not kept.
     fn connect_peer(&self, spec: &EnvironmentSpec, container: &ContainerRef, egress_dir: &str) {
+        // The setup joins the environment's network namespace as root with
+        // `NET_ADMIN` and adds the proxy address to its loopback; the relay
+        // serves the run's proxy there. Neither is made unless the runtime's
+        // own record shows that namespace is the environment's: in one that
+        // is the host's, the host's loopback would be changed and the run's
+        // grant served on the host's network (F-E6-HOSTNET, ADR-0059).
+        let network = match self.record(container) {
+            Ok(Some(object)) => inspect::Record::new(&object).peer_may_join(spec),
+            Ok(None) => Verdict::Fail,
+            Err(_) => Verdict::Unobservable,
+        };
+        if network != Verdict::Pass {
+            crate::event(&format!("relay_withheld network={}", network.as_str()));
+            return;
+        }
         // The relay runs as root with one capability in the setup: it is
         // never started unless it is the pinned one.
         let digest = self.relay_digest(container, spec);

@@ -10,7 +10,8 @@ GitHub-hosted runner, so its wiring and its gate are held here:
 * the required `sandbox-proxy-weakened` job runs the task once, with its flag,
   which no other job sets; the task refuses before it builds anything
   anywhere else; the test is ignored, hosted only, checks its flag before it
-  makes anything, and runs the one case that touches the host only where
+  makes anything, and runs the one case that could touch the host -- the
+  host's network, where the broker must make no peer (ADR-0059) -- only where
   that host is disposable;
 * the test's rows and the task's are one account, and together they cover
   every one of ADR-0057 §1a's fifteen rows, each with the invariants §1a
@@ -22,7 +23,9 @@ GitHub-hosted runner, so its wiring and its gate are held here:
   extra file, a record that does not show the weakening, a create changed
   beyond its row, a report that is not the probe's, an inside verdict the
   broker did not answer, a refusal the broker never made, a topology never
-  built; and the offline review of a hosted log refuses a tampered one.
+  built, a peer made before the broker read the record or in the host's
+  namespace, a host loopback that changed or a line that says otherwise; and
+  the offline review of a hosted log refuses a tampered one.
 
 The synthetic data below tests the gate only; it is never evidence. Only the
 hosted job, on a real runtime, produces E6.
@@ -206,7 +209,7 @@ def test_the_test_is_ignored_hosted_only_and_guarded_before_it_makes_anything() 
     assert body.index("disposable_runner(") < body.index("the_control(")
     loop = body[body.index("for row in ROWS") :]
     assert (
-        loop.index("row.host_side_effect")
+        loop.index("row.on_host_network")
         < loop.index("Err(why) = &runner")
         < loop.index("refused(&lab")
     ), "the case that touches the host runs only where the host is disposable"
@@ -236,7 +239,7 @@ def _rust_rows() -> dict[str, tuple[str, tuple[str, ...], tuple[str, ...], bool]
         row = re.search(r'row: "([^"]+)"', body)
         changed = re.search(r"changed: &\[(.*?)\]", body, re.DOTALL)
         caught = re.search(r"caught: &\[(.*?)\]", body, re.DOTALL)
-        side = re.search(r"host_side_effect: (true|false)", body)
+        side = re.search(r"on_host_network: (true|false)", body)
         assert case and row and changed and caught and side, body
         rows[case.group(1)] = (
             row.group(1),
@@ -252,8 +255,8 @@ def test_the_tests_rows_and_the_tasks_are_one_account() -> None:
     assert list(rust) == list(dw.E6_ROWS), "the same cases, in the same order"
     for case, (row, caught, changed, side) in rust.items():
         assert dw.E6_ROWS[case] == (row, caught, changed), case
-        assert side == (case == dw.E6_HOST_SIDE_EFFECT), case
-    assert list(rust)[-1] == dw.E6_HOST_SIDE_EFFECT, "the host's network runs last"
+        assert side == (case == dw.E6_HOST_NETWORK), case
+    assert list(rust)[-1] == dw.E6_HOST_NETWORK, "the host's network runs last"
 
 
 # ADR-0057 §1a's rows, by their first column, and the E6 row each is.
@@ -331,7 +334,7 @@ def _good(case: str) -> str:
         n, rows = len(dw.E6_ROWS), len(dw.E6_ROW_NAMES)
         return f"refused-{n}-of-{n}-cases;rows-{rows}-of-{rows}"
     _, caught, changed = dw.E6_ROWS[case]
-    added = "169.254.7.1/32" if case == dw.E6_HOST_SIDE_EFFECT else "not-applicable"
+    added = "none" if case == dw.E6_HOST_NETWORK else "not-applicable"
     return (
         f"refused:{'+'.join(caught)};also:CONTAINER_RAW_SOCKETS_REFUSED=UNOBSERVABLE;"
         f"topology:{TOPOLOGY};weakened:{'+'.join(changed)};host-loopback-added:{added}"
@@ -382,10 +385,18 @@ def test_a_complete_e6_output_passes() -> None:
             "the weakening must be",
         ),
         (
-            dw.E6_HOST_SIDE_EFFECT,
-            _good(dw.E6_HOST_SIDE_EFFECT).replace("169.254.7.1/32", "unobservable"),
+            dw.E6_HOST_NETWORK,
+            _good(dw.E6_HOST_NETWORK).replace(":none", ":unobservable"),
             None,
-            "loopback gained is not observed",
+            "the host's loopback must have gained nothing",
+        ),
+        (
+            # F-E6-HOSTNET, as the hosted run at `3ca842c` reported it: no
+            # longer an outcome E6 accepts (ADR-0059).
+            dw.E6_HOST_NETWORK,
+            _good(dw.E6_HOST_NETWORK).replace(":none", ":169.254.7.1/32"),
+            None,
+            "the host's loopback must have gained nothing",
         ),
         (ROW, _good(ROW).replace("not-applicable", "none"), None, "touches no host"),
         (
@@ -406,6 +417,7 @@ def test_a_complete_e6_output_passes() -> None:
         "also-names-a-caught-one",
         "another-field",
         "host-residue-unobserved",
+        "host-residue-reported",
         "residue-where-no-host",
         "control-topology-failed",
         "control-refused",
@@ -424,10 +436,10 @@ def test_an_e6_line_that_misleads_fails(
 
 def test_a_row_not_exercised_or_missing_fails_e6_whole() -> None:
     lines = _complete()
-    at = next(i for i, line in enumerate(lines) if line["case"] == dw.E6_HOST_SIDE_EFFECT)
+    at = next(i for i, line in enumerate(lines) if line["case"] == dw.E6_HOST_NETWORK)
     unexercised = [
         *lines[:at],
-        _line(dw.E6_HOST_SIDE_EFFECT, "not-exercised: here"),
+        _line(dw.E6_HOST_NETWORK, "not-exercised: here"),
         *lines[at + 1 :],
     ]
     with pytest.raises(dw.TaskError, match="NOT EXERCISED: 1 required case"):
@@ -447,12 +459,29 @@ PRIVILEGED = (
 )
 
 
+HOST = dw.E6_HOST_NETWORK
+HOST_CAUGHT = dw.E6_ROWS[HOST][1]
+# What the measurement finds with no peer: no relay, and no proxy to reach.
+NO_PEER = {
+    "HOST_PROXY_RELAY": "FAIL",
+    "HOST_RELAY_DIGEST": "FAIL",
+    "CONTAINER_PROXY_REACHABLE": "FAIL",
+}
+HOST_TOPOLOGY = "+".join(f"{name}={NO_PEER.get(name, 'PASS')}" for name in dw.E6_TOPOLOGY)
+CAUGHT = {ROW: PRIVILEGED, HOST: HOST_CAUGHT}
+LOOPBACK = b"before 127.0.0.1/8\nafter 127.0.0.1/8\n"
+
+
 def _plan() -> dict[str, object]:
     return {
         "User": "10001:10001",
         "Image": "sha256:aa",
         "Labels": {"io.direwolf.role": "environment", "io.direwolf.environment": "e1"},
-        "HostConfig": {"Privileged": False, "SecurityOpt": ["no-new-privileges=true"]},
+        "HostConfig": {
+            "NetworkMode": "none",
+            "Privileged": False,
+            "SecurityOpt": ["no-new-privileges=true"],
+        },
     }
 
 
@@ -460,39 +489,56 @@ def _frames(stdout: bytes) -> bytes:
     return bytes([1, 0, 0, 0]) + len(stdout).to_bytes(4, "big") + stdout
 
 
-def _case_files(row: bool) -> dict[str, bytes]:
+def _requests(peer: bool) -> str:
+    """The broker's requests, in their order: the environment made and
+    started, its record read (the peer's gate), the peer made unless it was
+    withheld, the measurement's version check and its read of the record."""
+    made = ["POST /containers/create 201 role=setup", "POST /containers/create 201 role=relay"]
+    lines = [
+        "POST /containers/create 201 role=environment",
+        "POST /containers/c/start 204",
+        "GET /containers/c/json 200",
+        *(made if peer else []),
+        "GET /version 200",
+        "GET /containers/c/json 200",
+    ]
+    return "".join(f"{line}\n" for line in lines)
+
+
+def _case_files(case: str) -> dict[str, bytes]:
     sent = _plan()
     received = json.loads(json.dumps(sent))
-    if row:
+    host = case == HOST
+    if case == ROW:
         received["HostConfig"]["Privileged"] = True
+    if host:
+        received["HostConfig"]["NetworkMode"] = "host"
     record = {"Id": "c", "Config": {"User": "10001:10001"}, "HostConfig": received["HostConfig"]}
-    fail = set(PRIVILEGED) if row else set()
-    kept = "false" if row else "true"
+    fail = set(CAUGHT.get(case, ()))
+    kept = "true" if case == dw.E6_CONTROL else "false"
+    names = dict.fromkeys((*PRIVILEGED, *HOST_CAUGHT, *dw.E6_TOPOLOGY))
+    verdicts = {i: ("FAIL" if i in fail else "PASS") for i in names}
+    if host:
+        verdicts.update(NO_PEER)
     inside = [
-        "CONTAINER_CAPABILITIES_EMPTY",
-        "CONTAINER_DEVICES_MINIMAL",
-        "CONTAINER_PROXY_REACHABLE",
+        {"invariant": i, "verdict": v} for i, v in verdicts.items() if i.startswith("CONTAINER_")
     ]
-    report = json.dumps(
-        {"checks": [{"invariant": i, "verdict": "FAIL" if i in fail else "PASS"} for i in inside]}
-    ).encode()
-    verdicts = {i: ("FAIL" if i in fail else "PASS") for i in (*PRIVILEGED, *dw.E6_TOPOLOGY)}
+    report = json.dumps({"checks": inside}).encode()
     measurement = f"retained={kept}\n" + "".join(f"{k} {v}\n" for k, v in verdicts.items())
-    requests = "".join(
-        f"POST /containers/create 201 role={role}\n" for role in ("environment", "setup", "relay")
-    )
-    return {
+    events = f"environment_prepared declared=CONTAINER_ISOLATION retained={kept}\n"
+    files = {
         "create-sent.json": json.dumps(sent).encode(),
         "create-received.json": json.dumps(received).encode(),
         "record.json": json.dumps(record).encode(),
         "probe-stream.bin": _frames(report),
         "probe-report.json": report,
         "measurement.txt": measurement.encode(),
-        "requests.txt": requests.encode(),
-        "broker-events.txt": (
-            f"environment_prepared declared=CONTAINER_ISOLATION retained={kept}\n"
-        ).encode(),
+        "requests.txt": _requests(peer=not host).encode(),
+        "broker-events.txt": (("relay_withheld network=FAIL\n" if host else "") + events).encode(),
     }
+    if host:
+        files[dw.E6_HOST_LOOPBACK] = LOOPBACK
+    return files
 
 
 @pytest.fixture
@@ -505,11 +551,68 @@ def one_row(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
-def _lab(tmp_path: Path, change: str = "") -> tuple[str, Path, list[dict[str, object]]]:
+@pytest.fixture
+def host_row(monkeypatch: pytest.MonkeyPatch) -> None:
+    """E6 cut down to the control and the host's network."""
+    monkeypatch.setattr(dw, "E6_ROWS", {HOST: dw.E6_ROWS[HOST]})
+    monkeypatch.setattr(dw, "E6_ROW_NAMES", ("isolated-network",))
+    monkeypatch.setattr(
+        dw, "E6_CASES", tuple((dw.E6_SUITE, c) for c in (dw.E6_CONTROL, HOST, dw.E6_COUNT))
+    )
+
+
+def _host_change(files: dict[str, bytes], change: str) -> None:
+    """One way the host's network's observations could not hold."""
+    requests = files["requests.txt"]
+    if change in ("setup-in-host", "relay-in-host"):
+        role = change.split("-", 1)[0].encode()
+        made = b"POST /containers/create 201 role=" + role + b"\nGET /version 200"
+        files["requests.txt"] = requests.replace(b"GET /version 200", made)
+    if change == "loopback-gained":
+        files[dw.E6_HOST_LOOPBACK] = LOOPBACK + b"after 169.254.7.1/32\n"
+    if change == "loopback-lost":
+        files[dw.E6_HOST_LOOPBACK] = b"before 127.0.0.1/8\n"
+    if change == "address-before":
+        files[dw.E6_HOST_LOOPBACK] = LOOPBACK + b"before 169.254.7.1/32\nafter 169.254.7.1/32\n"
+    if change == "not-the-loopback":
+        files[dw.E6_HOST_LOOPBACK] = b"before 10.1.0.4/16\nafter 10.1.0.4/16\n"
+    if change == "loopback-unreadable":
+        files[dw.E6_HOST_LOOPBACK] = b"before: 127.0.0.1\n"
+    if change == "loopback-missing":
+        del files[dw.E6_HOST_LOOPBACK]
+    if change == "not-withheld":
+        files["broker-events.txt"] = files["broker-events.txt"].replace(
+            b"relay_withheld network=FAIL\n", b""
+        )
+    if change == "relay-found":
+        files["measurement.txt"] = files["measurement.txt"].replace(
+            b"HOST_PROXY_RELAY FAIL", b"HOST_PROXY_RELAY PASS"
+        )
+
+
+def _lab(
+    tmp_path: Path, change: str = "", row: str = ROW
+) -> tuple[str, Path, list[dict[str, object]]]:
     raw = tmp_path / "raw"
     printed: list[str] = []
-    for case, row in ((dw.E6_CONTROL, False), (ROW, True)):
-        files = _case_files(row)
+    for case in (dw.E6_CONTROL, row):
+        files = _case_files(case)
+        if case == HOST:
+            _host_change(files, change)
+        if case == ROW and change == "withheld-in-a-row":
+            files["broker-events.txt"] = (
+                b"relay_withheld network=FAIL\n" + files["broker-events.txt"]
+            )
+        if case == ROW and change == "peer-before-read":
+            files["requests.txt"] = files["requests.txt"].replace(
+                b"GET /containers/c/json 200\n", b"", 1
+            )
+        if case == ROW and change == "never-read":
+            files["requests.txt"] = files["requests.txt"].replace(
+                b"GET /containers/c/json 200\n", b""
+            )
+        if case == ROW and change == "never-started":
+            files["requests.txt"] = files["requests.txt"].replace(b"/c/start 204", b"/c/start 500")
         if case == ROW and change == "record-not-weakened":
             files["record.json"] = json.dumps({"HostConfig": {"Privileged": False}}).encode()
         if case == ROW and change == "another-field-received":
@@ -556,13 +659,20 @@ def _lab(tmp_path: Path, change: str = "") -> tuple[str, Path, list[dict[str, ob
         if (change == "topology-not-the-answer")
         else TOPOLOGY
     )
+    if row == HOST:
+        added = "169.254.7.1/32" if change == "line-not-the-loopback" else "none"
+        outcome = (
+            f"refused:{'+'.join(HOST_CAUGHT)};also:none;topology:{HOST_TOPOLOGY};"
+            f"weakened:HostConfig.NetworkMode;host-loopback-added:{added}"
+        )
+    else:
+        outcome = (
+            f"refused:{'+'.join(PRIVILEGED)};also:none;topology:{topology};"
+            "weakened:HostConfig.Privileged;host-loopback-added:not-applicable"
+        )
     lines = [
         _line(dw.E6_CONTROL, _good(dw.E6_CONTROL)),
-        _line(
-            ROW,
-            f"refused:{'+'.join(PRIVILEGED)};also:none;topology:{topology};"
-            "weakened:HostConfig.Privileged;host-loopback-added:not-applicable",
-        ),
+        _line(row, outcome),
         _line(dw.E6_COUNT, "refused-1-of-1-cases;rows-1-of-1"),
     ]
     return "\n".join([*printed, _output(lines)]), raw, lines
@@ -574,6 +684,53 @@ def test_complete_raw_observations_pass(tmp_path: Path) -> None:
     assert dw.require_attributed_evidence(output, dw.E6_CASES) == lines
     files = dw.e6_check_raw(output, raw, lines, "tag")
     assert len(files) == 2 * len(dw.E6_RAW_FILES)
+
+
+@pytest.mark.usefixtures("host_row")
+def test_the_host_networks_observations_pass_with_no_peer_and_no_residue(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """ADR-0059: no setup and no relay in the host's namespace, the broker's
+    own event saying so, no relay measured, and the host's loopback, kept
+    before and after, unchanged -- and the offline review of the published
+    log holds it."""
+    output, raw, lines = _lab(tmp_path, row=HOST)
+    assert dw.require_attributed_evidence(output, dw.E6_CASES) == lines
+    files = dw.e6_check_raw(output, raw, lines, "tag")
+    assert len(files) == 2 * len(dw.E6_RAW_FILES) + 1
+    assert files[(HOST, dw.E6_HOST_LOOPBACK)] == LOOPBACK
+    capsys.readouterr()
+    digest = dw._e6_publish(files, {"images": {"mutable-tag": "tag"}}, "census")
+    log = output + "\n" + capsys.readouterr().out
+    assert dw.e6_review(log) == digest
+    # The residue F-E6-HOSTNET left, written into the line: refused.
+    with pytest.raises(dw.TaskError, match="must have gained nothing"):
+        dw.e6_review(log.replace("host-loopback-added:none", "host-loopback-added:169.254.7.1/32"))
+
+
+@pytest.mark.usefixtures("host_row")
+@pytest.mark.parametrize(
+    ("change", "said"),
+    [
+        ("setup-in-host", "made a setup in the host's namespace"),
+        ("relay-in-host", "made a relay in the host's namespace"),
+        ("loopback-gained", "the host's loopback changed"),
+        ("loopback-lost", "the host's loopback changed"),
+        ("address-before", "the host's loopback changed"),
+        ("not-the-loopback", "not the host's loopback"),
+        ("loopback-unreadable", "an unreadable loopback line"),
+        ("loopback-missing", "raw files"),
+        ("not-withheld", "the broker's own event of its peer"),
+        ("relay-found", "HOST_PROXY_RELAY is PASS"),
+        ("line-not-the-loopback", "the line's loopback is not what the host kept"),
+    ],
+)
+def test_host_network_observations_that_do_not_hold_fail(
+    tmp_path: Path, change: str, said: str
+) -> None:
+    output, raw, lines = _lab(tmp_path, change, row=HOST)
+    with pytest.raises(dw.TaskError, match=re.escape(said)):
+        dw.e6_check_raw(output, raw, lines, "tag")
 
 
 @pytest.mark.usefixtures("one_row")
@@ -592,6 +749,10 @@ def test_complete_raw_observations_pass(tmp_path: Path) -> None:
         ("no-relay", "relay was never created"),
         ("topology-not-the-answer", "the line's topology is not the broker's answer"),
         ("control-changed", "forwarded byte for byte"),
+        ("withheld-in-a-row", "the broker's own event of its peer"),
+        ("peer-before-read", "made a peer before it read the environment's record"),
+        ("never-read", "never read the environment's record"),
+        ("never-started", "the environment was never started"),
     ],
 )
 def test_raw_observations_that_do_not_hold_fail(tmp_path: Path, change: str, said: str) -> None:

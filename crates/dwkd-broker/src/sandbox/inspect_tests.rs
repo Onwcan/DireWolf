@@ -1093,6 +1093,153 @@ fn every_resource_limit_is_required_in_proxy_only_missing_or_mismatched() {
     }
 }
 
+// ---- ADR-0059: the peer joins only the environment's own namespace ---------
+
+/// Whether the peer's gate is open for `weakened`, and the
+/// `HOST_NETWORK_ISOLATED` verdict the measurement would give it: the same,
+/// always.
+fn gate(weakened: &Object, spec: &EnvironmentSpec) -> Verdict {
+    let open = Record::new(weakened).peer_may_join(spec);
+    let isolated = Record::new(weakened)
+        .judge(spec, PROFILE, SOCKET)
+        .into_iter()
+        .find(|(i, _)| *i == SandboxInvariant::HostNetworkIsolated)
+        .map(|(_, v)| v);
+    if Record::new(weakened).is(&spec.store, (&spec.environment_id, &spec.run_id)) {
+        assert_eq!(
+            Some(open),
+            isolated,
+            "the gate is not HOST_NETWORK_ISOLATED"
+        );
+    }
+    open
+}
+
+/// The peer's gate (ADR-0059), over the record the runtime keeps: the
+/// conforming `PROXY_ONLY` record lets the setup and the relay join its
+/// namespace; every way the record says that namespace is not the
+/// environment's own — the host's, another container's, a bridge, a second
+/// network, a port published, an extra host — withholds both, a record
+/// labelled as another environment withholds both, and a record that does
+/// not say is never a pass. Every other hard rule broken leaves the gate
+/// open: the peer is connected and the measurement refuses the environment
+/// as before, so E6 still observes how each weakening and the topology
+/// interact. Withheld is always refused: the gate is
+/// `HOST_NETWORK_ISOLATED`'s own verdict, which `PROXY_ONLY` requires.
+#[test]
+fn the_peer_joins_only_a_network_namespace_the_record_shows_is_the_environments_own() {
+    let spec = spec_with(NetworkTopology::ProxyOnly);
+    let base = conforming_for(NetworkTopology::ProxyOnly);
+    assert_eq!(gate(&base, &spec), Verdict::Pass);
+    assert!(super::super::oci::clean(&all_checks(&base, &spec), &spec));
+    let text = |s: &str| Value::String(s.to_owned());
+    let networks = |names: &[&str]| {
+        let mut all = Object::new();
+        for name in names {
+            let mut network = Object::new();
+            network.insert("NetworkID".to_owned(), text("x")).unwrap();
+            all.insert((*name).to_owned(), Value::Object(network))
+                .unwrap();
+        }
+        Value::Object(all)
+    };
+    let published = dwk_proto::json::parse(
+        br#"{"8080/tcp":[{"HostIp":"","HostPort":"8080"}]}"#,
+        dwk_proto::json::ParseOptions::ijson(),
+    )
+    .unwrap();
+    let other_container = format!("container:{}", "d".repeat(64));
+    let mode: &[&str] = &["HostConfig", "NetworkMode"];
+    let attached: &[&str] = &["NetworkSettings", "Networks"];
+    let withheld: Vec<(&str, &[&str], Value, Verdict)> = vec![
+        ("the host's namespace", mode, text("host"), Verdict::Fail),
+        (
+            "another container's namespace",
+            mode,
+            text(&other_container),
+            Verdict::Fail,
+        ),
+        ("the default bridge", mode, text("bridge"), Verdict::Fail),
+        ("a user-defined network", mode, text("lab"), Verdict::Fail),
+        (
+            "a second network attached",
+            attached,
+            networks(&["none", "bridge"]),
+            Verdict::Fail,
+        ),
+        (
+            "the host's network attached",
+            attached,
+            networks(&["host"]),
+            Verdict::Fail,
+        ),
+        (
+            "a port published",
+            &["HostConfig", "PortBindings"],
+            published,
+            Verdict::Fail,
+        ),
+        (
+            "every port published",
+            &["HostConfig", "PublishAllPorts"],
+            Value::Bool(true),
+            Verdict::Fail,
+        ),
+        (
+            "an extra host",
+            &["HostConfig", "ExtraHosts"],
+            strings(&["metadata:169.254.169.254"]),
+            Verdict::Fail,
+        ),
+        ("no network mode", mode, Value::Null, Verdict::Unobservable),
+        (
+            "networks of another shape",
+            attached,
+            text("none"),
+            Verdict::Unobservable,
+        ),
+        (
+            "another environment's record",
+            &["Config", "Labels", "io.direwolf.environment"],
+            text("env_01M24BB8G3E0A851TRWE3M8FZG"),
+            Verdict::Fail,
+        ),
+        (
+            "another run's record",
+            &["Config", "Labels", "io.direwolf.run"],
+            text("run_01M24BB8G3E0A851TRWE3M8FZG"),
+            Verdict::Fail,
+        ),
+    ];
+    for (what, path, value, want) in withheld {
+        let weakened = replace(base.clone(), path, value);
+        assert_eq!(gate(&weakened, &spec), want, "{what}");
+        assert!(
+            !super::super::oci::clean(&all_checks(&weakened, &spec), &spec),
+            "{what}: withheld, yet the decision would keep it"
+        );
+    }
+    // Every other hard rule broken: the gate stays open, the decision
+    // refuses.
+    let mut weakenings = hard_rule_weakenings(PROFILE);
+    weakenings.retain(|(_, network, ..)| *network == NetworkTopology::ProxyOnly);
+    assert_eq!(weakenings.len(), 16);
+    for (case, _, path, value, expected) in weakenings {
+        let weakened = replace(base.clone(), path, value);
+        let network = expected.contains(&SandboxInvariant::HostNetworkIsolated);
+        let want = if network {
+            Verdict::Fail
+        } else {
+            Verdict::Pass
+        };
+        assert_eq!(gate(&weakened, &spec), want, "{case}");
+        assert!(
+            !super::super::oci::clean(&all_checks(&weakened, &spec), &spec),
+            "{case}"
+        );
+    }
+}
+
 /// Where `make sandbox-egress-evidence` leaves the runtime's own record of
 /// a real `PROXY_ONLY` environment that measured clean, and the facts of
 /// its specification the host judgement reads: one fixed directory beneath
@@ -1189,7 +1336,17 @@ fn a_real_proxy_only_record_is_kept_and_each_hard_rule_broken_in_it_refused() {
         &[SandboxInvariant::HostResourceLimits],
     ));
     assert_eq!(cases.len(), 17);
+    // ADR-0059: the real record lets the peer join; broken, only the
+    // network's rule withholds it.
+    assert_eq!(
+        Record::new(&base).peer_may_join(&spec),
+        Verdict::Pass,
+        "the captured record withholds the peer"
+    );
     for (case, _, path, value, expected) in cases {
+        let open = Record::new(&replace(base.clone(), path, value.clone())).peer_may_join(&spec);
+        let network = expected.contains(&SandboxInvariant::HostNetworkIsolated);
+        assert_eq!(open == Verdict::Pass, !network, "{case}: the peer's gate");
         let case = format!("captured-{case}");
         refused(&case, &base, &[(path, value)], expected, &spec, against);
     }

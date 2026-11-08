@@ -250,6 +250,27 @@ impl<'a> Record<'a> {
         })
     }
 
+    /// Whether a `PROXY_ONLY` environment's peer may join the network
+    /// namespace this record gives it (ADR-0059): the record is labelled as
+    /// `spec`'s environment, and judged `HOST_NETWORK_ISOLATED` — the
+    /// runtime's `none` network and no other, nothing published, no extra
+    /// host — so the namespace is the environment's own, holding its
+    /// loopback alone. The setup joins that namespace as root with
+    /// `NET_ADMIN` and changes its loopback, and the relay serves the run's
+    /// proxy in it: a namespace the record does not show is the
+    /// environment's own — the host's, another container's, a bridge's — is
+    /// given neither. Anything the record does not say is not a pass.
+    ///
+    /// The same verdict `HOST_NETWORK_ISOLATED` is judged with, which
+    /// `PROXY_ONLY` requires: withholding the peer never refuses an
+    /// environment the measurement would keep.
+    pub(crate) fn peer_may_join(&self, spec: &EnvironmentSpec) -> Verdict {
+        if !self.is(&spec.store, (&spec.environment_id, &spec.run_id)) {
+            return Verdict::Fail;
+        }
+        verdict(self.network_isolated())
+    }
+
     /// The host invariants this record can speak to, each judged. The probe
     /// digest and the workspace identity come from elsewhere.
     pub(crate) fn judge(

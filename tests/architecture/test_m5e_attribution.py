@@ -288,7 +288,7 @@ def _e6_outcome(case: str) -> str:
         n, rows = len(dw.E6_ROWS), len(dw.E6_ROW_NAMES)
         return f"refused-{n}-of-{n}-cases;rows-{rows}-of-{rows}"
     _, caught, changed = dw.E6_ROWS[case]
-    added = "none" if case == dw.E6_HOST_SIDE_EFFECT else "not-applicable"
+    added = "none" if case == dw.E6_HOST_NETWORK else "not-applicable"
     return (
         f"refused:{'+'.join(caught)};also:none;topology:{topology};"
         f"weakened:{'+'.join(changed)};host-loopback-added:{added}"
