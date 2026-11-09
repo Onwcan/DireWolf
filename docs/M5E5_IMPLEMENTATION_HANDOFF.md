@@ -136,8 +136,9 @@ which fails the task; it is never counted as killed. The manual workflow runs it
 
 ## 7. What acceptance still needs
 
-1. **M5e.4 first.** Its repaired hosted run passed (runs 42390237238 to 42397671369); the owner
-   records its acceptance ([M5E4_IMPLEMENTATION_HANDOFF.md](M5E4_IMPLEMENTATION_HANDOFF.md) §13).
+1. **M5e.4 first — done.** Its repaired hosted run passed (runs 42390237238 to 42397671369), and
+   the owner accepted it on 2026-11-09 ([M5E4_IMPLEMENTATION_HANDOFF.md](M5E4_IMPLEMENTATION_HANDOFF.md) §13;
+   the plan's §10, "M5e.4's acceptance").
 2. **This evidence, hosted.** Commit §8's corrections, then run the manual workflow with
    `both` (§11) and read every case and its attribution.
 3. **ADR-0055's trust.** On F-PIP-TRUST, the owner's revision of ADR-0055 §2 and §5, its
@@ -147,8 +148,8 @@ which fails the task; it is never counted as killed. The manual workflow runs it
 5. **The change that implements acceptance** (§10). It is separate, and it is not part of
    this work.
 
-M5e.2 is unchanged by any of it: PARTIALLY IMPLEMENTED / ASSURANCE BLOCKED, tracked by
-[issue #19](https://github.com/Onwcan/DireWolf/issues/19). M5's acceptance still waits for it.
+M5e.2 is COMPLETE (2026-11-09; the plan's §10, "M5e.2's closure"), and
+[issue #19](https://github.com/Onwcan/DireWolf/issues/19) is closed. None of the above bears on it.
 
 ## 8. The review before the first hosted run (2026-11-07)
 

@@ -32,10 +32,11 @@ ADR-0057 superseded by ADR-0058; nothing else stood in for it. So:
   neither of its ADRs is accepted, that its evidence joins no required job
   before M5e.4 passes hosted and that M5e.6 is not authorised, and issue #19
   stays cited; and, whether or not ADR-0057 stands -- closing M5e.2 closes
-  none of what follows it -- no status document claims M5e.4, M5e.5, M5e.6,
-  M5e or M5 complete, or M5e.6 begun, the ROADMAP keeps M5e.6 not started, and
-  neither `M5e` nor `M5` is an available milestone -- each held with a
-  negative control;
+  none of what follows it -- no status document claims M5e.4 complete unless
+  the plan's §10 records the owner's acceptance of it (2026-11-09), nor M5e.5,
+  M5e.6, M5e or M5 complete, nor M5e.6 begun, the ROADMAP keeps M5e.6 not
+  started, and neither `M5e` nor `M5` is an available milestone -- each held
+  with a negative control;
 * the two tasks that carry R3's supporting evidence keep their cleanup and
   ownership census -- nothing the evidence made left behind, nothing that
   predates it gone -- and check it before they count a line.
@@ -108,6 +109,18 @@ _M5E5_RECORD_SAYS = (
     "R-B",
 )
 ISSUE_19 = "https://github.com/Onwcan/DireWolf/issues/19"
+# The owner's acceptance of M5e.4 (2026-11-09), as the plan's §10 records it,
+# and what that record must keep saying: the owner's answer, the runs, OD-E4's
+# mechanism, and that nothing after M5e.4 was accepted with it. While it
+# stands, M5e.4 may be called complete; nothing after it may.
+_M5E4_ACCEPTANCE = "**M5e.4's acceptance (2026-11-09).**"
+_M5E4_ACCEPTANCE_SAYS = (
+    '"Accept both"',
+    "run nos. 134\N{EN DASH}137",
+    "OD-E4's mechanism is accepted as built",
+    "it accepts neither ADR-0054, ADR-0055 nor M5e.5",
+    "authorises no M5e.6 work",
+)
 # A step after M5e.3, M5e itself or M5 said to be closed: "M5e.6 COMPLETE",
 # "**M5e — COMPLETE**", "M5 · Sandbox — **COMPLETE**", "**M5 is COMPLETE**".
 _GATE_COMPLETE = re.compile(
@@ -406,7 +419,7 @@ def _sequencing_problems(
     says M5e.5 and M5e.6 are not authorised; M5e.5's keeps `_M5E5_RECORD_SAYS`;
     the plan's current status line and the ROADMAP's "Still to do" cite issue
     #19; and `_later_step_problems` holds."""
-    problems = _later_step_problems(roadmap, documents, available)
+    problems = _later_step_problems(plan, roadmap, documents, available)
     if "## 10. " not in plan or "## 11. " not in plan:
         return [*problems, "the plan has no owner's decisions (§10)"]
     decisions = plan[plan.index("## 10. ") : plan.index("## 11. ")]
@@ -445,18 +458,47 @@ def _m5e_section(roadmap: str) -> str | None:
     return roadmap[roadmap.index("#### M5e ") : roadmap.index("#### The M5 contract")]
 
 
+def _m5e4_acceptance_problems(plan: str) -> list[str]:
+    """Why the plan's §10 does not hold the owner's acceptance of M5e.4: none
+    when it is recorded once, among the owner's decisions, and says
+    `_M5E4_ACCEPTANCE_SAYS`."""
+    if "## 10. " not in plan or "## 11. " not in plan:
+        return ["the plan has no owner's decisions (§10)"]
+    decisions = plan[plan.index("## 10. ") : plan.index("## 11. ")]
+    count = plan.count(_M5E4_ACCEPTANCE)
+    if count != 1:
+        return [f"its acceptance is recorded {count} times, not once"]
+    if _M5E4_ACCEPTANCE not in decisions:
+        return ["its acceptance is not among the owner's decisions"]
+    record = " ".join(_record(decisions, _M5E4_ACCEPTANCE).split())
+    return [
+        f"its acceptance does not say {needed!r}"
+        for needed in _M5E4_ACCEPTANCE_SAYS
+        if needed not in record
+    ]
+
+
 def _later_step_problems(
-    roadmap: str, documents: dict[str, str], available: frozenset[str] | set[str]
+    plan: str, roadmap: str, documents: dict[str, str], available: frozenset[str] | set[str]
 ) -> list[str]:
     """What closing M5e.2 does not change, held whether or not ADR-0057 stands:
-    no status document claims M5e.4, M5e.5, M5e.6, M5e or M5 complete, or M5e.6
-    begun; the ROADMAP's M5e heading keeps M5e.6 not started; and neither `M5e`
-    nor `M5` is an available milestone, so no eval that waits for M5's gate
-    turns on. Each of those moves only by its own change, on the owner's
-    decision (M5E6_PREPARATION_HANDOFF.md §9), which amends this guard."""
+    no status document claims M5e.4 complete unless the plan's §10 records the
+    owner's acceptance of it (`_m5e4_acceptance_problems`, 2026-11-09), nor
+    M5e.5, M5e.6, M5e or M5 complete, nor M5e.6 begun; the ROADMAP's M5e
+    heading keeps M5e.6 not started; and neither `M5e` nor `M5` is an available
+    milestone, so no eval that waits for M5's gate turns on. Each of those
+    moves only by its own change, on the owner's decision
+    (M5E6_PREPARATION_HANDOFF.md §9), which amends this guard."""
     problems: list[str] = []
+    m5e4 = _m5e4_acceptance_problems(plan)
     for name, text in documents.items():
         for found in _GATE_COMPLETE.finditer(text):
+            if found.group(0).startswith("M5e.4"):
+                if m5e4:
+                    problems.append(
+                        f"{name}: M5e.4 claimed complete, but {m5e4[0]}: {found.group(0)!r}"
+                    )
+                continue
             problems.append(f"{name}: a later step, M5e or M5 claimed complete: {found.group(0)!r}")
         for found in _LATER_STARTED.finditer(text):
             problems.append(f"{name}: a step no exception covers: {found.group(0)!r}")
@@ -482,11 +524,14 @@ def test_the_sequencing_exceptions_move_m5e3_and_m5e4_alone() -> None:
     ahead of M5e.2's close and change nothing else (`_sequencing_problems`).
     Once ADR-0057 is superseded M5e.2 is closed and the exceptions to its order
     bind no more; what follows it is unchanged by its closing
-    (`_later_step_problems`)."""
+    (`_later_step_problems`), M5e.4 complete only on the owner's acceptance
+    recorded in §10 (2026-11-09)."""
     from direwolf_evals.runner import AVAILABLE_MILESTONES
 
     if _status(_text(RESIDUAL)).startswith("superseded"):
-        problems = _later_step_problems(_text(ROADMAP), _documents(), AVAILABLE_MILESTONES)
+        problems = _later_step_problems(
+            _text(PLAN), _text(ROADMAP), _documents(), AVAILABLE_MILESTONES
+        )
     else:
         problems = _sequencing_problems(
             _text(PLAN), _text(ROADMAP), _documents(), AVAILABLE_MILESTONES
@@ -565,7 +610,24 @@ def _weakened(change: str, *, standing: bool = True) -> list[str]:
         assert m5e6 != m5e5, "the negative control changed nothing"
         plan = plan.replace(m5e5, m5e6)
     elif change == "m5e4-claimed-complete":
+        # Claimed with no acceptance of the owner's in §10.
+        plan = plan.replace(_M5E4_ACCEPTANCE, "**A decision.**")
         documents["README.md"] += "\n**M5e.4 is COMPLETE**\n"
+    elif change.startswith("m5e4-acceptance-"):
+        documents["README.md"] += "\n**M5e.4 is COMPLETE**\n"
+        accepted = _record(plan[plan.index("## 10. ") :], _M5E4_ACCEPTANCE)
+        if change == "m5e4-acceptance-twice":
+            plan = plan.replace("## 11. ", f"{accepted}\n\n## 11. ", 1)
+        elif change == "m5e4-acceptance-outside-the-decisions":
+            plan = plan.replace(accepted, "").replace("## 6. ", f"{accepted}\n\n## 6. ", 1)
+        elif change == "m5e4-acceptance-overstated":
+            overstated = accepted.replace(
+                "it accepts neither ADR-0054, ADR-0055 nor M5e.5", "it accepts M5e.5 too"
+            )
+            assert overstated != accepted, "the negative control changed nothing"
+            plan = plan.replace(accepted, overstated)
+        else:
+            raise AssertionError(change)
     elif change == "heading-drops-m5e6":
         # The M5e heading's own words, not the first that read so elsewhere.
         heading = roadmap[roadmap.index("#### M5e ") :].split("\n", 1)[0]
@@ -579,7 +641,7 @@ def _weakened(change: str, *, standing: bool = True) -> list[str]:
     else:
         raise AssertionError(change)
     if not standing:
-        return _later_step_problems(roadmap, documents, available)
+        return _later_step_problems(plan, roadmap, documents, available)
     return _sequencing_problems(plan, roadmap, documents, available)
 
 
@@ -590,6 +652,9 @@ _LATER_STEP_CHANGES = frozenset(
     {
         "m5e6-started",
         "m5e4-claimed-complete",
+        "m5e4-acceptance-twice",
+        "m5e4-acceptance-outside-the-decisions",
+        "m5e4-acceptance-overstated",
         "m5e5-claimed-complete",
         "heading-drops-m5e6",
         "milestone-available",
@@ -605,7 +670,10 @@ _LATER_STEP_CHANGES = frozenset(
         ("m5e4-record-outside-the-decisions", "not among the owner's decisions"),
         ("m5e5-authorised-silently", "M5e.5 and M5e.6 are not authorised"),
         ("m5e6-started", "a step no exception covers"),
-        ("m5e4-claimed-complete", "claimed complete"),
+        ("m5e4-claimed-complete", "recorded 0 times"),
+        ("m5e4-acceptance-twice", "recorded 2 times"),
+        ("m5e4-acceptance-outside-the-decisions", "not among the owner's decisions"),
+        ("m5e4-acceptance-overstated", "does not say 'it accepts neither"),
         ("m5e5-claimed-complete", "claimed complete"),
         ("m5e5-record-missing", "recorded 0 times"),
         ("m5e5-accepts-its-adrs", "it accepts neither"),

@@ -27,7 +27,7 @@ choice in it is a recommendation for the owner.
 | M5e.1 attribution | COMPLETE (run 40774766063) | — |
 | M5e.2 closure | COMPLETE (2026-11-09). R3's E6, required by the owner's R-B, built 2026-11-08 ([ADR-0058](adr/0058-m5e-proxy-only-hard-rules-weakened-in-a-real-environment.md)) in the required `sandbox-proxy-weakened` job, passed hosted at `14405ab` (run 42525106398) after [ADR-0059](adr/0059-m5e-proxy-only-peer-joins-only-its-own-network-namespace.md)'s fix: 15 of 15 rows; the owner accepted both records, ADR-0057 superseded, and authorised R3 satisfied and M5e.2 complete ([M5E_ASSURANCE_PLAN.md](M5E_ASSURANCE_PLAN.md) §10, "M5e.2's closure"; [issue #19](https://github.com/Onwcan/DireWolf/issues/19), the owner's to close) | — |
 | M5e.3 fixtures | COMPLETE (runs 41916040076, 41920008027) | — |
-| M5e.4 pip, npm refused | HOSTED VERIFIED / OWNER ACCEPTANCE PENDING (runs 134–137) | the owner's acceptance, the OD-E4 deviation included ([M5E4_IMPLEMENTATION_HANDOFF.md](M5E4_IMPLEMENTATION_HANDOFF.md) §13) |
+| M5e.4 pip, npm refused | COMPLETE (runs 134–137; accepted by the owner 2026-11-09, OD-E4's mechanism as built: [M5E_ASSURANCE_PLAN.md](M5E_ASSURANCE_PLAN.md) §10, "M5e.4's acceptance") | — |
 | M5e.5 npm and pip profiles | IMPLEMENTATION COMPLETE / HOSTED EVIDENCE PENDING | the manual run; ADR-0055's trust revision; acceptance of both ADRs; the acceptance change ([M5E5_IMPLEMENTATION_HANDOFF.md](M5E5_IMPLEMENTATION_HANDOFF.md) §§7–10) |
 | M5e.6 the gate | not started; this preparation only | below |
 
@@ -48,8 +48,8 @@ whole inventory.
 ## 4. Dependency graph
 
 ```text
-issue #19: E6 evidence (BLOCKED) ──► M5e.2 closed by the owner ─────────────────────┐
-M5e.4 owner acceptance (OD-E4) ─────────────────────────────────────────────────────┤
+issue #19: E6 evidence (DONE) ──► M5e.2 closed by the owner (2026-11-09) ───────────┐
+M5e.4 owner acceptance (OD-E4) (DONE, 2026-11-09) ──────────────────────────────────┤
 M5e.5 manual run ──► ADR-0055 trust revision ──► rerun ──► ADR-0054/0055 accepted ──► │
       acceptance change (option removed, `sandbox-hygiene` required) ──────────────┤
                                                                                     ▼
@@ -78,7 +78,7 @@ it.
 | `sandbox-capacity-evidence` | `sandbox-capacity` | `CAPACITY_CASES` | 4 |
 | `sandbox-registry-evidence` | `sandbox-registry` | `REGISTRY_CASES` | 19 |
 | `sandbox-hygiene-evidence` | none yet: the manual job, until M5e.5's acceptance change | `HYGIENE_CASES` | 44 |
-| `sandbox-proxy-weakened-evidence` | `sandbox-proxy-weakened` (since 2026-11-08; ADR-0058, never run hosted) | `E6_CASES` | 18 |
+| `sandbox-proxy-weakened-evidence` | `sandbox-proxy-weakened` (since 2026-11-08; ADR-0058, accepted 2026-11-09; passed hosted in run 42525106398) | `E6_CASES` | 18 |
 
 Four tasks judge their own output in their own way and are not in `ATTRIBUTED_CASES`:
 `sandbox-agent-evidence`, `sandbox-release-evidence` (the `m5d-sandbox-exec` eval's runner),
@@ -211,7 +211,7 @@ engineering steps.
    commit and `github-hosted`.
 2. After G2: `m5e-gate` passes, printing the inventory verdict (`627` minus the not-yet-required
    tables, every one re-judged) and the acceptance verdict `NOT READY`, with its blockers
-   listed: E6 until its hosted job passes and ADR-0058 is accepted, M5e.5 not required, ADR-0054 and ADR-0055 Proposed, ADR-0057 Proposed.
+   listed: M5e.5 not required, ADR-0054 and ADR-0055 Proposed (E6, ADR-0058 and M5e.4 were cleared on 2026-11-09).
 3. Then one deliberate check per negative control, in unit tests, never by breaking `main`.
 
 ## 12. The owner's checklist, before G1
@@ -228,10 +228,10 @@ engineering steps.
 
 ## 13. External prerequisites
 
-- **E6** ([issue #19](https://github.com/Onwcan/DireWolf/issues/19)). It is BLOCKED, and only
-  the owner can unblock it: under a plan the owner approves within the safety control, or with
-  independent evidence meeting the plan's §3b. This handoff plans nothing for it.
-- **The owner's acceptances.** M5e.4 (with OD-E4), D1–D4, ADR-0054 and ADR-0055.
+- **E6** ([issue #19](https://github.com/Onwcan/DireWolf/issues/19)). Met: hosted run 42525106398,
+  ADR-0058 accepted and ADR-0057 superseded on 2026-11-09, and the issue closed.
+- **The owner's acceptances.** M5e.4 (with OD-E4): given 2026-11-09. Still needed: D1–D4,
+  ADR-0054 and ADR-0055.
 - **GitHub Actions.** `actions/upload-artifact` and `actions/download-artifact` at commits the
   repository pins, as `actions/checkout` is pinned today.
 
