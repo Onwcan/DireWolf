@@ -33,7 +33,7 @@ import subprocess
 import sys
 import tempfile
 import urllib.parse
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -2944,7 +2944,7 @@ def task_sandbox_foundation_evidence() -> None:
         raise TaskError(
             f"{len(removed)} container(s) that predate the evidence are gone: {removed}"
         )
-    print(f"{GREEN}cleanup: no evidence container remains; {len(before)} pre-existing kept{OFF}")
+    report_cleanup(f"cleanup: no evidence container remains; {len(before)} pre-existing kept")
     records = require_attributed_evidence("\n".join(outputs), SANDBOX_CASES)
     latency = [r for r in records if r.get("case") == "latency"]
     if latency:
@@ -3297,9 +3297,9 @@ def task_sandbox_egress_evidence() -> None:
             f"{len(removed) + len(removed_networks)} resource(s) that predate the evidence are "
             f"gone: {removed + removed_networks}"
         )
-    print(
-        f"{GREEN}cleanup: no evidence container or network remains; {len(before_containers)} "
-        f"container(s) and {len(before_networks)} network(s) pre-existing kept{OFF}"
+    report_cleanup(
+        f"cleanup: no evidence container or network remains; {len(before_containers)} "
+        f"container(s) and {len(before_networks)} network(s) pre-existing kept"
     )
     require_attributed_evidence("\n".join(outputs), EGRESS_CASES)
     # R3 over the record the runtime kept of the real PROXY_ONLY environment
@@ -3804,7 +3804,7 @@ def task_sandbox_workload_evidence() -> None:
         raise TaskError(
             f"{len(removed)} container(s) that predate the evidence are gone: {removed}"
         )
-    print(f"{GREEN}cleanup: no evidence container remains; {len(before)} pre-existing kept{OFF}")
+    report_cleanup(f"cleanup: no evidence container remains; {len(before)} pre-existing kept")
     require_attributed_evidence("\n".join(outputs), WORKLOAD_CASES)
     uvrun("dwcheck", "closure", "--report")
 
@@ -3891,7 +3891,7 @@ def task_sandbox_restart_evidence() -> None:
         raise TaskError(
             f"{len(removed)} container(s) that predate the evidence are gone: {removed}"
         )
-    print(f"{GREEN}cleanup: no evidence container remains; {len(before)} pre-existing kept{OFF}")
+    report_cleanup(f"cleanup: no evidence container remains; {len(before)} pre-existing kept")
     require_attributed_evidence(output, RESTART_CASES)
 
 
@@ -3974,7 +3974,7 @@ def task_sandbox_capacity_evidence() -> None:
         raise TaskError(
             f"{len(removed)} container(s) that predate the evidence are gone: {removed}"
         )
-    print(f"{GREEN}cleanup: no evidence container remains; {len(before)} pre-existing kept{OFF}")
+    report_cleanup(f"cleanup: no evidence container remains; {len(before)} pre-existing kept")
     require_attributed_evidence(output, CAPACITY_CASES)
 
 
@@ -4832,7 +4832,7 @@ def task_sandbox_proxy_weakened_evidence() -> None:
         f"no evidence container or network remains; {len(before_containers)} container(s) "
         f"and {len(before_networks)} network(s) pre-existing kept"
     )
-    print(f"{GREEN}cleanup: {census}{OFF}")
+    report_cleanup(f"cleanup: {census}")
     lines = require_attributed_evidence(output, E6_CASES)
     files = e6_check_raw(output, raw, lines, tag)
     provenance = _e6_provenance(client, chosen, server, {**images, "mutable-tag": tag})
@@ -5563,9 +5563,9 @@ def task_sandbox_registry_evidence() -> None:
     problems = registry_census_problems(before, after, networks, networks_after)
     if problems:
         raise TaskError("cleanup failed: " + "; ".join(problems))
-    print(
-        f"{GREEN}cleanup: no evidence container or network remains; {len(before)} pre-existing "
-        f"container(s) and {len(networks)} network(s) kept; the images removed{OFF}"
+    report_cleanup(
+        f"cleanup: no evidence container or network remains; {len(before)} pre-existing "
+        f"container(s) and {len(networks)} network(s) kept; the images removed"
     )
     require_attributed_evidence(output, REGISTRY_CASES)
 
@@ -5902,9 +5902,9 @@ def task_sandbox_hygiene_evidence() -> None:
     problems = registry_census_problems(before, after, networks, networks_after)
     if problems:
         raise TaskError("cleanup failed: " + "; ".join(problems))
-    print(
-        f"{GREEN}cleanup: no evidence container or network remains; {len(before)} pre-existing "
-        f"container(s) and {len(networks)} network(s) kept; the images removed{OFF}"
+    report_cleanup(
+        f"cleanup: no evidence container or network remains; {len(before)} pre-existing "
+        f"container(s) and {len(networks)} network(s) kept; the images removed"
     )
     require_attributed_evidence(output, HYGIENE_CASES)
 
@@ -7040,7 +7040,7 @@ def task_sandbox_secret_evidence() -> None:
         raise TaskError(
             f"{len(removed)} container(s) that predate the evidence are gone: {removed}"
         )
-    print(f"{GREEN}cleanup: no evidence container remains; {len(before)} pre-existing kept{OFF}")
+    report_cleanup(f"cleanup: no evidence container remains; {len(before)} pre-existing kept")
     require_attributed_evidence("\n".join(outputs), SECRET_SANDBOX_CASES)
     uvrun("dwcheck", "closure", "--report")
 
@@ -7580,7 +7580,7 @@ def _unprovision_workspaces(base: Path) -> None:
         shutil.rmtree(base)
     if base.exists():
         raise TaskError(f"cleanup: {base} remains")
-    print(f"{GREEN}cleanup: no workspace mount, loop device or directory remains{OFF}")
+    report_cleanup("cleanup: no workspace mount, loop device or directory remains")
 
 
 def task_sandbox_workspace_evidence() -> None:
@@ -7693,7 +7693,7 @@ def _sandbox_workspace_evidence(*, require_privileged: bool) -> None:
         raise TaskError(
             f"{len(removed)} container(s) that predate the evidence are gone: {removed}"
         )
-    print(f"{GREEN}cleanup: no evidence container remains; {len(before)} pre-existing kept{OFF}")
+    report_cleanup(f"cleanup: no evidence container remains; {len(before)} pre-existing kept")
     if privileged:
         # One account of both halves: their lines are one output.
         require_attributed_evidence(
@@ -8915,6 +8915,8 @@ def require_attributed_evidence(
         + ", ".join(f"{level} {count}" for level, count in sorted(levels.items()))
         + f"){OFF}"
     )
+    # Judged and passed: kept for the M5 gate (`save_judged_evidence`).
+    _JUDGED.append((_table_name(cases), prefix, output))
     return [seen[key] for key in cases]
 
 
@@ -11406,6 +11408,242 @@ def task_hooks() -> None:
     print(f"{DIM}It runs fmt-check and arch only. Remove it with: rm .git/hooks/pre-commit{OFF}")
 
 
+# ---- M5e.6: what each M5 evidence task judged, kept for the gate ------------
+#
+# The M5 gate (M5E6_PREPARATION_HANDOFF.md §§5-6) re-judges every M5 evidence
+# task's own output, in the run that produced it. Its first slice, G1: each
+# task of the gate, once all of its own checks have passed, keeps exactly what
+# it judged -- each `require_attributed_evidence` call's text, with its case
+# table and line prefix -- and its cleanup census, under
+# `target/m5e-evidence/<task>/`. The task runner keeps it
+# (`save_judged_evidence`), never the task's own code, so a task that fails
+# keeps nothing. A later step of the same job, `make m5e-evidence-bundle`,
+# checks it byte for byte and seals it with the run's provenance, on a
+# disposable GitHub-hosted runner only; the job then uploads it. Nothing here
+# judges again: that is the gate's (G2).
+
+# Each task of the gate, and the CI job that runs it (`.github/workflows/ci.yml`;
+# `tests/architecture/test_ci_m5e_gate.py` holds the two equal).
+M5E_GATE_TASKS: dict[str, str] = {
+    "sandbox-foundation-evidence": "sandbox-foundation",
+    "sandbox-egress-evidence": "sandbox-egress",
+    "sandbox-workload-evidence": "sandbox-workload",
+    "sandbox-secret-evidence": "sandbox-secret",
+    "sandbox-workspace-evidence": "sandbox-workspace",
+    "sandbox-restart-evidence": "sandbox-restart",
+    "sandbox-capacity-evidence": "sandbox-capacity",
+    "sandbox-registry-evidence": "sandbox-registry",
+    "sandbox-proxy-weakened-evidence": "sandbox-proxy-weakened",
+}
+M5E_EVIDENCE_DIR = ROOT / "target" / "m5e-evidence"
+M5E_KEPT_SCHEMA = "direwolf.m5e.judged-evidence"
+M5E_BUNDLE_SCHEMA = "direwolf.m5e.evidence-bundle"
+M5E_BUNDLE_VERSION = 1
+# What this process judged and passed, and the census lines it reported.
+_JUDGED: list[tuple[str | None, str, str]] = []
+_CLEANUP: list[str] = []
+_JUDGED_FILE = re.compile(r"judged-[0-9]{1,3}\.txt")
+_COMMIT_SHA = re.compile(r"[0-9a-f]{40}")
+_RUN_NUMBER = re.compile(r"[1-9][0-9]{0,19}")
+
+
+def report_cleanup(text: str) -> None:
+    """Print a task's cleanup census and keep it for the M5 gate."""
+    print(f"{GREEN}{text}{OFF}")
+    _CLEANUP.append(text)
+
+
+def _table_name(cases: tuple[tuple[str, str], ...]) -> str | None:
+    """The module-level name of a case table; None for one made elsewhere (a
+    test's own), which nothing keeps."""
+    names = [name for name, value in globals().items() if value is cases and name.isupper()]
+    return names[0] if len(names) == 1 else None
+
+
+def _strict_json(text: str) -> object:
+    """JSON with no repeated key and no NaN or infinity."""
+
+    def pairs(items: list[tuple[str, object]]) -> dict[str, object]:
+        keys = [key for key, _ in items]
+        if len(keys) != len(set(keys)):
+            raise TaskError(f"a repeated key among {keys}")
+        return dict(items)
+
+    def constant(name: str) -> object:
+        raise TaskError(f"{name} is not JSON")
+
+    return json.loads(text, object_pairs_hook=pairs, parse_constant=constant)
+
+
+def save_judged_evidence(
+    task: str,
+    root: Path = M5E_EVIDENCE_DIR,
+    judged: Sequence[tuple[str | None, str, str]] | None = None,
+    cleanup: Sequence[str] | None = None,
+) -> Path:
+    """Keep what `task` judged, after all of its checks passed: each judged
+    output as `judged-<n>.txt`, its case table, prefix, SHA-256 and size in
+    `judged.json`, with its cleanup census. Refuses a task outside the gate,
+    one that judged nothing or reported no census, and a table with no name."""
+    judged = list(_JUDGED if judged is None else judged)
+    cleanup = list(_CLEANUP if cleanup is None else cleanup)
+    if task not in M5E_GATE_TASKS:
+        raise TaskError(f"{task} is not a task of the M5 gate")
+    if not judged:
+        raise TaskError(f"{task} judged no evidence: nothing to keep for the M5 gate")
+    if not cleanup:
+        raise TaskError(f"{task} reported no cleanup census: nothing to keep for the M5 gate")
+    if any(table is None for table, _, _ in judged):
+        raise TaskError(f"{task} judged an output against a case table with no name")
+    directory = root / task
+    if directory.exists():
+        shutil.rmtree(directory)
+    directory.mkdir(parents=True)
+    files: list[dict[str, object]] = []
+    for number, (table, prefix, output) in enumerate(judged):
+        data = output.encode("utf-8")
+        name = f"judged-{number}.txt"
+        (directory / name).write_bytes(data)
+        files.append(
+            {
+                "file": name,
+                "table": table,
+                "prefix": prefix,
+                "sha256": hashlib.sha256(data).hexdigest(),
+                "bytes": len(data),
+            }
+        )
+    record = {
+        "schema": M5E_KEPT_SCHEMA,
+        "version": M5E_BUNDLE_VERSION,
+        "task": task,
+        "judged": files,
+        "cleanup": cleanup,
+    }
+    (directory / "judged.json").write_text(
+        json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8", newline="\n"
+    )
+    print(
+        f"{DIM}kept for the M5 gate: {len(files)} judged output(s) and {len(cleanup)} "
+        f"census line(s) in {directory}{OFF}"
+    )
+    return directory
+
+
+def m5e_bundle_record(
+    environ: Mapping[str, str], root: Path = M5E_EVIDENCE_DIR
+) -> dict[str, object]:
+    """The bundle a job of the M5 gate uploads: what its task kept, checked
+    byte for byte, with this run's provenance. Only on a disposable
+    GitHub-hosted runner (NOT EXERCISED anywhere else), only in the job the
+    task belongs to, and only for exactly one task's record, nothing beside it."""
+    if environ.get("GITHUB_ACTIONS") != "true" or (
+        environ.get("RUNNER_ENVIRONMENT") != "github-hosted"
+    ):
+        raise TaskError(
+            "NOT EXERCISED: an M5 evidence bundle is sealed only on a disposable "
+            "GitHub-hosted runner"
+        )
+    if not root.is_dir():
+        raise TaskError(f"nothing kept under {root}: the task kept no evidence")
+    entries = sorted(root.iterdir())
+    if len(entries) != 1 or not entries[0].is_dir():
+        raise TaskError(
+            f"{root} must hold one task's kept evidence, not {[entry.name for entry in entries]}"
+        )
+    directory = entries[0]
+    task = directory.name
+    job = M5E_GATE_TASKS.get(task)
+    if job is None:
+        raise TaskError(f"{task} is not a task of the M5 gate")
+    if environ.get("GITHUB_JOB") != job:
+        raise TaskError(
+            f"{task}'s evidence is sealed by the {job!r} job, not {environ.get('GITHUB_JOB')!r}"
+        )
+    try:
+        kept = _strict_json((directory / "judged.json").read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, ValueError, TaskError) as exc:
+        raise TaskError(f"{task}'s judged.json is unreadable: {exc}") from exc
+    fields = {"schema", "version", "task", "judged", "cleanup"}
+    if not isinstance(kept, dict) or set(kept) != fields:
+        raise TaskError(f"{task}'s judged.json does not have exactly {sorted(fields)}")
+    if (kept["schema"], kept["version"], kept["task"]) != (
+        M5E_KEPT_SCHEMA,
+        M5E_BUNDLE_VERSION,
+        task,
+    ):
+        raise TaskError(f"{task}'s judged.json is not its own, at this schema and version")
+    judged, cleanup = kept["judged"], kept["cleanup"]
+    if not isinstance(judged, list) or not judged:
+        raise TaskError(f"{task} kept no judged output")
+    if not isinstance(cleanup, list) or not cleanup:
+        raise TaskError(f"{task} kept no cleanup census")
+    if not all(isinstance(line, str) and line.startswith("cleanup: ") for line in cleanup):
+        raise TaskError(f"{task}'s census is not its cleanup lines")
+    names: set[str] = set()
+    for entry in judged:
+        entry_fields = {"file", "table", "prefix", "sha256", "bytes"}
+        if not isinstance(entry, dict) or set(entry) != entry_fields:
+            raise TaskError(f"{task}: a judged entry without exactly {sorted(entry_fields)}")
+        name, table = entry["file"], entry["table"]
+        if not isinstance(name, str) or not _JUDGED_FILE.fullmatch(name) or name in names:
+            raise TaskError(f"{task}: {name!r} is not one judged output's file")
+        names.add(name)
+        if not isinstance(table, str) or not isinstance(globals().get(table), tuple):
+            raise TaskError(f"{task}: {table!r} is not a case table")
+        if not isinstance(entry["prefix"], str) or not entry["prefix"]:
+            raise TaskError(f"{task}: {name} has no line prefix")
+        data = (directory / name).read_bytes()
+        if hashlib.sha256(data).hexdigest() != entry["sha256"] or len(data) != entry["bytes"]:
+            raise TaskError(f"{task}: {name} is not the output the task judged")
+    beside = sorted({path.name for path in directory.iterdir()} - names - {"judged.json"})
+    if beside:
+        raise TaskError(f"files beside {task}'s kept evidence: {beside}")
+    run_id = environ.get("GITHUB_RUN_ID", "")
+    attempt = environ.get("GITHUB_RUN_ATTEMPT", "")
+    sha = environ.get("GITHUB_SHA", "")
+    if not (_RUN_NUMBER.fullmatch(run_id) and _RUN_NUMBER.fullmatch(attempt)):
+        raise TaskError("the run's id or attempt is missing or malformed")
+    if not _COMMIT_SHA.fullmatch(sha):
+        raise TaskError("the run's commit is missing or malformed")
+    return {
+        "schema": M5E_BUNDLE_SCHEMA,
+        "version": M5E_BUNDLE_VERSION,
+        "task": task,
+        "job": job,
+        "run_id": run_id,
+        "run_attempt": attempt,
+        "sha": sha,
+        "ref": environ.get("GITHUB_REF", ""),
+        "runner": {
+            "environment": "github-hosted",
+            "os": environ.get("RUNNER_OS", ""),
+            "image": environ.get("ImageOS", ""),
+            "image_version": environ.get("ImageVersion", ""),
+        },
+        "judged": judged,
+        "cleanup": cleanup,
+        "exit": 0,
+    }
+
+
+def task_m5e_evidence_bundle() -> None:
+    """M5e.6 (G1), HOSTED ONLY: seal what this job's M5 evidence task kept with
+    the run's provenance, for the job to upload to the M5 gate."""
+    record = m5e_bundle_record(os.environ)
+    path = M5E_EVIDENCE_DIR / str(record["task"]) / "bundle.json"
+    path.write_text(
+        json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8", newline="\n"
+    )
+    judged = record["judged"]
+    count = len(judged) if isinstance(judged, list) else 0
+    print(
+        f"{GREEN}M5 evidence bundle: {record['task']} ({record['job']}), run "
+        f"{record['run_id']} attempt {record['run_attempt']} at {str(record['sha'])[:12]}, "
+        f"{count} judged output(s){OFF}"
+    )
+
+
 TASKS = {
     "preflight": task_preflight,
     "tools": task_tools,
@@ -11442,6 +11680,7 @@ TASKS = {
     "sandbox-registry-evidence": task_sandbox_registry_evidence,
     "sandbox-hygiene-evidence": task_sandbox_hygiene_evidence,
     "sandbox-registry-mutations": task_sandbox_registry_mutations,
+    "m5e-evidence-bundle": task_m5e_evidence_bundle,
     "net-http-evidence": task_net_http_evidence,
     "net-http-mutations": task_net_http_mutations,
     "sandbox-workload-mutations": task_sandbox_workload_mutations,
@@ -11540,6 +11779,8 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         TASKS[args.task]()
+        if args.task in M5E_GATE_TASKS:
+            save_judged_evidence(args.task)
     except TaskError as exc:
         print(f"\n{RED}dw: {exc}{OFF}", file=sys.stderr)
         return 1

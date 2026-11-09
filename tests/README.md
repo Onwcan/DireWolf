@@ -304,7 +304,15 @@ ahead of it, and M5e.2 never said complete; ADR-0058, accepted, in the digest as
 ADR-0057's successor; and, whether or not ADR-0057 stands, M5e.4 said complete
 only while the plan's §10 records its acceptance (2026-11-09), no
 later step, M5e or M5 said complete, M5e.6 begun, or `M5e` or `M5` available --
-each with a negative control.
+each with a negative control; and M5e.6 said in progress only while the plan's §10
+records its implementation (2026-11-09).
+`tests/architecture/test_ci_m5e_gate.py` holds M5e.6's first slice (G1): each task of
+the gate (`M5E_GATE_TASKS`) is one job, which right after its evidence step seals and
+uploads what the task kept with the one pinned upload action, kept 7 days, under no
+`if:`; a task keeps exactly what `require_attributed_evidence` judged and passed, and
+its census, only after it returned; and a bundle is sealed only on a disposable
+GitHub-hosted runner, in the task's own job, over one task's record, each file at its
+digest and nothing beside it -- each with a negative control.
 `tests/architecture/test_m5e_e6.py` holds E6 itself (ADR-0058): its required,
 hosted-only job and flag; the test's rows equal to the task's and covering every
 row of ADR-0057 §1a from its vantage; and the gate, the independent check of the

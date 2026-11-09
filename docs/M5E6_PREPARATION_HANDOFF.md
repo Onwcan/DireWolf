@@ -6,6 +6,7 @@
 research, design, dependency analysis, test planning and this handoff. Implementation is not
 authorised. No code, CI job, eval, baseline or milestone list changes with this document, and
 it starts no step of M5e.6.\
+**Status (2026-11-09):** **IN PROGRESS.** Implementation is authorised on §12's recommendations (G-D1 a separate `m5e-gate` job; G-D2 7 days; G-Q1 the four self-judging tasks by their own verdict; G-D3 neither M4 task in the gate) — [M5E_ASSURANCE_PLAN.md](M5E_ASSURANCE_PLAN.md) §10, "M5e.6's implementation". G1 is built for the nine attributed tasks: `save_judged_evidence`, `make m5e-evidence-bundle` and an upload in each job, held by `tests/architecture/test_ci_m5e_gate.py`; the four self-judging tasks follow, then G2–G4. G5 and G6 stay decisions of their own.\
 **Authority of this document:** a technical handoff, not an ADR. It approves nothing, and every
 choice in it is a recommendation for the owner.
 
@@ -29,7 +30,7 @@ choice in it is a recommendation for the owner.
 | M5e.3 fixtures | COMPLETE (runs 41916040076, 41920008027) | — |
 | M5e.4 pip, npm refused | COMPLETE (runs 134–137; accepted 2026-11-09, OD-E4's mechanism as built: [M5E_ASSURANCE_PLAN.md](M5E_ASSURANCE_PLAN.md) §10, "M5e.4's acceptance") | — |
 | M5e.5 npm and pip profiles | IMPLEMENTATION COMPLETE / HOSTED EVIDENCE PENDING | the manual run; ADR-0055's trust revision; acceptance of both ADRs; the acceptance change ([M5E5_IMPLEMENTATION_HANDOFF.md](M5E5_IMPLEMENTATION_HANDOFF.md) §§7–10) |
-| M5e.6 the gate | not started; this preparation only | below |
+| M5e.6 the gate | IN PROGRESS (2026-11-09): G1 built for the nine attributed tasks, hosted run pending | G1's hosted run; the four self-judging tasks' bundles; G2–G4; then G5 and G6, each a decision of its own |
 
 ## 3. What M5e.6 is, and what it is not
 

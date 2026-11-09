@@ -363,6 +363,16 @@ jobs:
           docker version --format 'client {{.Client.Version}} server {{.Server.Version}} api {{.Server.APIVersion}} {{.Server.Os}}/{{.Server.Arch}}'
           docker info --format '{{.OperatingSystem}} kernel {{.KernelVersion}} cgroup v{{.CgroupVersion}} runtime {{.DefaultRuntime}} {{.SecurityOptions}}'
       - run: make sandbox-foundation-evidence
+      # M5e.6 (G1): what the task judged and its census, kept by the task
+      # runner once every check passed, sealed with this run's provenance and
+      # kept for the M5 gate. Only after the evidence step succeeded: no `if:`.
+      - run: make m5e-evidence-bundle
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: m5e-evidence-sandbox-foundation
+          path: target/m5e-evidence/
+          if-no-files-found: error
+          retention-days: 7
 
   # M5b (ADR-0048): PROXY_ONLY against the same real runtime -- the
   # environment, its one-shot setup and its relay as real containers in one
@@ -386,6 +396,16 @@ jobs:
           docker version --format 'client {{.Client.Version}} server {{.Server.Version}} api {{.Server.APIVersion}} {{.Server.Os}}/{{.Server.Arch}}'
           docker info --format '{{.OperatingSystem}} kernel {{.KernelVersion}} cgroup v{{.CgroupVersion}} runtime {{.DefaultRuntime}} {{.SecurityOptions}}'
       - run: make sandbox-egress-evidence
+      # M5e.6 (G1): what the task judged and its census, kept by the task
+      # runner once every check passed, sealed with this run's provenance and
+      # kept for the M5 gate. Only after the evidence step succeeded: no `if:`.
+      - run: make m5e-evidence-bundle
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: m5e-evidence-sandbox-egress
+          path: target/m5e-evidence/
+          if-no-files-found: error
+          retention-days: 7
 
   # M5d.1 (ADR-0052): workloads in a REAL OCI environment -- the released
   # broker running the sandbox fixture as a workload through its real runtime
@@ -412,6 +432,16 @@ jobs:
           git --version
           readlink -f /usr/bin/python3
       - run: make sandbox-workload-evidence
+      # M5e.6 (G1): what the task judged and its census, kept by the task
+      # runner once every check passed, sealed with this run's provenance and
+      # kept for the M5 gate. Only after the evidence step succeeded: no `if:`.
+      - run: make m5e-evidence-bundle
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: m5e-evidence-sandbox-workload
+          path: target/m5e-evidence/
+          if-no-files-found: error
+          retention-days: 7
 
   # M5d.3 (ADR-0052 §7): secret modes B and C INSIDE the sandbox -- the
   # authority's pipeline against a fake broker with real kernel-keyring
@@ -438,6 +468,16 @@ jobs:
           git --version
           readlink -f /usr/bin/python3
       - run: make sandbox-secret-evidence
+      # M5e.6 (G1): what the task judged and its census, kept by the task
+      # runner once every check passed, sealed with this run's provenance and
+      # kept for the M5 gate. Only after the evidence step succeeded: no `if:`.
+      - run: make m5e-evidence-bundle
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: m5e-evidence-sandbox-secret
+          path: target/m5e-evidence/
+          if-no-files-found: error
+          retention-days: 7
 
   # M5d.4 (ADR-0052 §§6, 10): workspace ownership and the measured disk
   # quota. In process: the broker's group convention and a REAL full tmpfs
@@ -478,6 +518,16 @@ jobs:
         env:
           DW_WORKSPACE_PRIVILEGED: "1"
           DW_WORKSPACE_PEER: nobody
+      # M5e.6 (G1): what the task judged and its census, kept by the task
+      # runner once every check passed, sealed with this run's provenance and
+      # kept for the M5 gate. Only after the evidence step succeeded: no `if:`.
+      - run: make m5e-evidence-bundle
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: m5e-evidence-sandbox-workspace
+          path: target/m5e-evidence/
+          if-no-files-found: error
+          retention-days: 7
 
   # M5d.5 (ADR-0052 §§11, 13, 17; docs/M5D5_IMPLEMENTATION_HANDOFF.md): an
   # agent-shaped workload -- a plan, workers, a daemonised helper, a stock
@@ -593,6 +643,16 @@ jobs:
       - run: make sandbox-restart-evidence
         env:
           DW_RUNTIME_RESTART: "1"
+      # M5e.6 (G1): what the task judged and its census, kept by the task
+      # runner once every check passed, sealed with this run's provenance and
+      # kept for the M5 gate. Only after the evidence step succeeded: no `if:`.
+      - run: make m5e-evidence-bundle
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: m5e-evidence-sandbox-restart
+          path: target/m5e-evidence/
+          if-no-files-found: error
+          retention-days: 7
 
   # M5e.2 (R8 at the cap; ADR-0056 §6, the owner's Option B): every live
   # environment the authority allows, all of the one sandbox uid -- all but
@@ -621,6 +681,16 @@ jobs:
       - run: make sandbox-capacity-evidence
         env:
           DW_CAPACITY_EVIDENCE: "1"
+      # M5e.6 (G1): what the task judged and its census, kept by the task
+      # runner once every check passed, sealed with this run's provenance and
+      # kept for the M5 gate. Only after the evidence step succeeded: no `if:`.
+      - run: make m5e-evidence-bundle
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: m5e-evidence-sandbox-capacity
+          path: target/m5e-evidence/
+          if-no-files-found: error
+          retention-days: 7
 
   # M5e.2 (R3's E6; ADR-0057, the owner's R-B; ADR-0058): every hard rule of
   # oci-strict weakened, one at a time, in a real PROXY_ONLY environment the
@@ -654,6 +724,16 @@ jobs:
       - run: make sandbox-proxy-weakened-evidence
         env:
           DW_E6_EVIDENCE: "1"
+      # M5e.6 (G1): what the task judged and its census, kept by the task
+      # runner once every check passed, sealed with this run's provenance and
+      # kept for the M5 gate. Only after the evidence step succeeded: no `if:`.
+      - run: make m5e-evidence-bundle
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: m5e-evidence-sandbox-proxy-weakened
+          path: target/m5e-evidence/
+          if-no-files-found: error
+          retention-days: 7
 
   # M5e.4 (M5E_ASSURANCE_PLAN.md §§6, 8): pip as it is today against M5e.3's
   # fixture registries, and npm refused before anything is prepared -- a real
@@ -682,6 +762,16 @@ jobs:
       - run: make sandbox-registry-evidence
         env:
           DW_REGISTRY_EVIDENCE: "1"
+      # M5e.6 (G1): what the task judged and its census, kept by the task
+      # runner once every check passed, sealed with this run's provenance and
+      # kept for the M5 gate. Only after the evidence step succeeded: no `if:`.
+      - run: make m5e-evidence-bundle
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: m5e-evidence-sandbox-registry
+          path: target/m5e-evidence/
+          if-no-files-found: error
+          retention-days: 7
 
   # D11 hardening (ADR-0053): the exchange worker's syscall filter, the
   # broker's vouching for each worker from the kernel, the start-up window

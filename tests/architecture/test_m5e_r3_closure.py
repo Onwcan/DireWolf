@@ -34,9 +34,10 @@ ADR-0057 superseded by ADR-0058; nothing else stood in for it. So:
   stays cited; and, whether or not ADR-0057 stands -- closing M5e.2 closes
   none of what follows it -- no status document claims M5e.4 complete unless
   the plan's §10 records its acceptance (2026-11-09), nor M5e.5,
-  M5e.6, M5e or M5 complete, nor M5e.6 begun, the ROADMAP keeps M5e.6 not
-  started, and neither `M5e` nor `M5` is an available milestone -- each held
-  with a negative control;
+  M5e.6, M5e or M5 complete, nor M5e.6 begun unless §10 records its
+  implementation (2026-11-09) -- the ROADMAP's M5e heading saying M5e.6 not
+  started without that record and in progress with it -- and neither `M5e`
+  nor `M5` is an available milestone -- each held with a negative control;
 * the two tasks that carry R3's supporting evidence keep their cleanup and
   ownership census -- nothing the evidence made left behind, nothing that
   predates it gone -- and check it before they count a line.
@@ -120,6 +121,18 @@ _M5E4_ACCEPTANCE_SAYS = (
     "OD-E4's mechanism as built",
     "it accepts neither ADR-0054, ADR-0055 nor M5e.5",
     "authorises no M5e.6 work",
+)
+# M5e.6's implementation (2026-11-09), as the plan's §10 records it, and what
+# that record must keep saying: the four choices it was authorised on, and that
+# it makes neither `M5e` nor `M5` available. While it stands, M5e.6 may be
+# called in progress; never complete.
+_M5E6_IMPLEMENTATION = "**M5e.6's implementation (2026-11-09).**"
+_M5E6_IMPLEMENTATION_SAYS = (
+    "G-D1",
+    "G-D2",
+    "G-Q1",
+    "G-D3",
+    "nothing here makes either available",
 )
 # A step after M5e.3, M5e itself or M5 said to be closed: "M5e.6 COMPLETE",
 # "**M5e — COMPLETE**", "M5 · Sandbox — **COMPLETE**", "**M5 is COMPLETE**".
@@ -458,24 +471,31 @@ def _m5e_section(roadmap: str) -> str | None:
     return roadmap[roadmap.index("#### M5e ") : roadmap.index("#### The M5 contract")]
 
 
-def _m5e4_acceptance_problems(plan: str) -> list[str]:
-    """Why the plan's §10 does not hold M5e.4's acceptance: none when it is
-    recorded once, among §10's decisions, and says
-    `_M5E4_ACCEPTANCE_SAYS`."""
+def _record_problems(plan: str, marker: str, says: tuple[str, ...], what: str) -> list[str]:
+    """Why the plan's §10 does not hold the record `marker` opens: none when it
+    is recorded once, among §10's decisions, and says each of `says`."""
     if "## 10. " not in plan or "## 11. " not in plan:
-        return ["the plan has no owner's decisions (§10)"]
+        return ["the plan has no decisions section (§10)"]
     decisions = plan[plan.index("## 10. ") : plan.index("## 11. ")]
-    count = plan.count(_M5E4_ACCEPTANCE)
+    count = plan.count(marker)
     if count != 1:
-        return [f"its acceptance is recorded {count} times, not once"]
-    if _M5E4_ACCEPTANCE not in decisions:
-        return ["its acceptance is not among the plan's §10 decisions"]
-    record = " ".join(_record(decisions, _M5E4_ACCEPTANCE).split())
-    return [
-        f"its acceptance does not say {needed!r}"
-        for needed in _M5E4_ACCEPTANCE_SAYS
-        if needed not in record
-    ]
+        return [f"{what} is recorded {count} times, not once"]
+    if marker not in decisions:
+        return [f"{what} is not among the plan's §10 decisions"]
+    record = " ".join(_record(decisions, marker).split())
+    return [f"{what} does not say {needed!r}" for needed in says if needed not in record]
+
+
+def _m5e4_acceptance_problems(plan: str) -> list[str]:
+    """Why the plan's §10 does not hold M5e.4's acceptance."""
+    return _record_problems(plan, _M5E4_ACCEPTANCE, _M5E4_ACCEPTANCE_SAYS, "its acceptance")
+
+
+def _m5e6_implementation_problems(plan: str) -> list[str]:
+    """Why the plan's §10 does not hold M5e.6's implementation."""
+    return _record_problems(
+        plan, _M5E6_IMPLEMENTATION, _M5E6_IMPLEMENTATION_SAYS, "its implementation"
+    )
 
 
 def _later_step_problems(
@@ -484,13 +504,15 @@ def _later_step_problems(
     """What closing M5e.2 does not change, held whether or not ADR-0057 stands:
     no status document claims M5e.4 complete unless the plan's §10 records its
     acceptance (`_m5e4_acceptance_problems`, 2026-11-09), nor
-    M5e.5, M5e.6, M5e or M5 complete, nor M5e.6 begun; the ROADMAP's M5e
-    heading keeps M5e.6 not started; and neither `M5e` nor `M5` is an available
-    milestone, so no eval that waits for M5's gate turns on. Each of those
-    moves only by its own change and decision
-    (M5E6_PREPARATION_HANDOFF.md §9), which amends this guard."""
+    M5e.5, M5e.6, M5e or M5 complete, nor M5e.6 begun unless §10 records its
+    implementation (`_m5e6_implementation_problems`, 2026-11-09); the ROADMAP's
+    M5e heading says M5e.6 not started without that record, in progress with
+    it; and neither `M5e` nor `M5` is an available milestone, so no eval that
+    waits for M5's gate turns on. Each of those moves only by its own change
+    and decision (M5E6_PREPARATION_HANDOFF.md §9), which amends this guard."""
     problems: list[str] = []
     m5e4 = _m5e4_acceptance_problems(plan)
+    m5e6 = _m5e6_implementation_problems(plan)
     for name, text in documents.items():
         for found in _GATE_COMPLETE.finditer(text):
             if found.group(0).startswith("M5e.4"):
@@ -501,14 +523,19 @@ def _later_step_problems(
                 continue
             problems.append(f"{name}: a later step, M5e or M5 claimed complete: {found.group(0)!r}")
         for found in _LATER_STARTED.finditer(text):
-            problems.append(f"{name}: a step no exception covers: {found.group(0)!r}")
+            if m5e6:
+                problems.append(
+                    f"{name}: a step no exception covers ({m5e6[0]}): {found.group(0)!r}"
+                )
     section = _m5e_section(roadmap)
     if section is None:
         problems.append("the ROADMAP has no M5e section")
-    elif "M5e.6 not started" not in section.splitlines()[0]:
-        problems.append(
-            f"the ROADMAP's M5e heading does not keep M5e.6 not started: {section.splitlines()[0]}"
-        )
+    else:
+        wanted = "M5e.6 not started" if m5e6 else "M5e.6 in progress"
+        if wanted not in section.splitlines()[0]:
+            problems.append(
+                f"the ROADMAP's M5e heading does not say {wanted!r}: {section.splitlines()[0]}"
+            )
     if {"M5e", "M5"} & set(available):
         problems.append(f"M5e or M5 is an available milestone: {sorted(available)}")
     return problems
@@ -588,7 +615,17 @@ def _weakened(change: str, *, standing: bool = True) -> list[str]:
         assert silent != m5e4, "the negative control changed nothing"
         plan = plan.replace(m5e4, silent)
     elif change == "m5e6-started":
+        # Begun with no implementation in §10.
+        plan = plan.replace(_M5E6_IMPLEMENTATION, "**A decision.**")
         documents["docs/ROADMAP.md"] += "\n**M5e.6 is IN PROGRESS.**\n"
+    elif change == "m5e6-implementation-overstated":
+        documents["docs/ROADMAP.md"] += "\n**M5e.6 is IN PROGRESS.**\n"
+        record = _record(plan[plan.index("## 10. ") :], _M5E6_IMPLEMENTATION)
+        overstated = record.replace("nothing here makes either available", "both are available")
+        assert overstated != record, "the negative control changed nothing"
+        plan = plan.replace(record, overstated)
+    elif change == "m5e6-claimed-complete":
+        documents["README.md"] += "\n**M5e.6 is COMPLETE**\n"
     elif change == "m5e5-claimed-complete":
         documents["docs/ROADMAP.md"] += "\n**M5e.5 is COMPLETE**\n"
     elif change == "m5e5-record-missing":
@@ -631,7 +668,7 @@ def _weakened(change: str, *, standing: bool = True) -> list[str]:
     elif change == "heading-drops-m5e6":
         # The M5e heading's own words, not the first that read so elsewhere.
         heading = roadmap[roadmap.index("#### M5e ") :].split("\n", 1)[0]
-        dropped = heading.replace("M5e.6 not started", "M5e.6 begun")
+        dropped = re.sub(r"M5e\.6 (?:not started|in progress)", "M5e.6 begun", heading)
         assert dropped != heading, "the negative control changed nothing"
         roadmap = roadmap.replace(heading, dropped, 1)
     elif change == "issue-19-dropped":
@@ -651,6 +688,8 @@ def _weakened(change: str, *, standing: bool = True) -> list[str]:
 _LATER_STEP_CHANGES = frozenset(
     {
         "m5e6-started",
+        "m5e6-implementation-overstated",
+        "m5e6-claimed-complete",
         "m5e4-claimed-complete",
         "m5e4-acceptance-twice",
         "m5e4-acceptance-outside-the-decisions",
@@ -670,6 +709,8 @@ _LATER_STEP_CHANGES = frozenset(
         ("m5e4-record-outside-the-decisions", "not among the owner's decisions"),
         ("m5e5-authorised-silently", "M5e.5 and M5e.6 are not authorised"),
         ("m5e6-started", "a step no exception covers"),
+        ("m5e6-implementation-overstated", "does not say 'nothing here makes either available'"),
+        ("m5e6-claimed-complete", "claimed complete"),
         ("m5e4-claimed-complete", "recorded 0 times"),
         ("m5e4-acceptance-twice", "recorded 2 times"),
         ("m5e4-acceptance-outside-the-decisions", "not among the plan's §10 decisions"),
@@ -679,7 +720,7 @@ _LATER_STEP_CHANGES = frozenset(
         ("m5e5-accepts-its-adrs", "it accepts neither"),
         ("m5e5-required-before-m5e4", "joins no job"),
         ("m5e5-authorises-m5e6", "M5e.6 is not authorised"),
-        ("heading-drops-m5e6", "M5e.6 not started"),
+        ("heading-drops-m5e6", "the ROADMAP's M5e heading does not say"),
         ("issue-19-dropped", "issue #19"),
         ("milestone-available", "available milestone"),
     ],
