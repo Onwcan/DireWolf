@@ -137,7 +137,7 @@ which fails the task; it is never counted as killed. The manual workflow runs it
 ## 7. What acceptance still needs
 
 1. **M5e.4 first — done.** Its repaired hosted run passed (runs 42390237238 to 42397671369), and
-   the owner accepted it on 2026-11-09 ([M5E4_IMPLEMENTATION_HANDOFF.md](M5E4_IMPLEMENTATION_HANDOFF.md) §13;
+   it was accepted on 2026-11-09 ([M5E4_IMPLEMENTATION_HANDOFF.md](M5E4_IMPLEMENTATION_HANDOFF.md) §13;
    the plan's §10, "M5e.4's acceptance").
 2. **This evidence, hosted.** Commit §8's corrections, then run the manual workflow with
    `both` (§11) and read every case and its attribution.

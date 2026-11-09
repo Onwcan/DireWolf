@@ -8,9 +8,9 @@
 > ([ADR-0059](adr/0059-m5e-proxy-only-peer-joins-only-its-own-network-namespace.md)),
 > and passed at `14405ab` in hosted run
 > [42525106398](https://github.com/Onwcan/DireWolf/actions/runs/42525106398):
-> all fifteen rows, sixteen weakened cases and the control, at `real-oci`. The
-> owner accepted ADR-0059 and ADR-0058 on 2026-11-09, ADR-0057 superseded by
-> ADR-0058 and never accepted, and authorised R3 satisfied and **M5e.2
+> all fifteen rows, sixteen weakened cases and the control, at `real-oci`.
+> ADR-0059 and ADR-0058 were accepted on 2026-11-09, ADR-0057 superseded by
+> ADR-0058 and never accepted, and R3 and M5e.2 closed: **M5e.2 is
 > COMPLETE**. Where M5e stands now is the
 > [M5e plan](M5E_ASSURANCE_PLAN.md)'s latest status and the
 > [ROADMAP](ROADMAP.md)'s M5e section.

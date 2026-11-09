@@ -17,7 +17,7 @@ run got past the interpreter and installed from the granted index. It failed on 
 count of the proxy's refusals, which included the environment's probe (§12). The test's
 accounting is repaired, unstaged; nothing in production changed.\
 **Status (2026-11-07, later):** **HOSTED VERIFIED / OWNER ACCEPTANCE PENDING.** The owner committed the repair as `7aa784a`. Hosted runs 42390237238, 42392419869, 42394667883 and 42397671369 (run nos. 134–137) passed 30 of 30 jobs each, `sandbox-registry` and the `ci` aggregate among them. The closeout record and the decision it asks of the owner are §13.\
-**Status (2026-11-09):** **COMPLETE.** The owner accepted M5e.4 on runs 134–137 and the OD-E4 mechanism as built ([M5E_ASSURANCE_PLAN.md](M5E_ASSURANCE_PLAN.md) §10, "M5e.4's acceptance"); §13 records it.\
+**Status (2026-11-09):** **COMPLETE.** M5e.4 was accepted on runs 134–137, with the OD-E4 mechanism as built ([M5E_ASSURANCE_PLAN.md](M5E_ASSURANCE_PLAN.md) §10, "M5e.4's acceptance"); §13 records it.\
 **Authority of this document:** a technical handoff, not an ADR. It approves nothing.
 [ADR-0054](adr/0054-m5e-npm-hygiene-profile.md) and
 [ADR-0055](adr/0055-m5e-pip-hygiene-profile.md) stay **Proposed**, and npm stays
@@ -436,7 +436,7 @@ against the SHA-256 recorded in `tests/sandbox/registry_tools.toml` before use (
 reviewed diff. The mechanism differs: no third-party action's code runs, and nothing depends on
 what a runner image caches.
 
-**Decision requested (the owner's):**
+**Decision requested:**
 
 1. Accept M5e.4 as complete on runs 134–137.
 2. Accept the OD-E4 mechanism as built, or name the one to use instead.
@@ -448,7 +448,7 @@ that calls M5e.4 complete, to allow that one step. Nothing else changes. M5e.2 s
 IMPLEMENTED / ASSURANCE BLOCKED ([issue #19](https://github.com/Onwcan/DireWolf/issues/19)) until
 its own closure on 2026-11-09.
 
-**Decided (2026-11-09).** The owner answered both: "Accept both". M5e.4 is **COMPLETE** on
+**Decided (2026-11-09).** Both points are decided. M5e.4 is **COMPLETE** on
 runs 134–137, and OD-E4's mechanism is accepted as built — each publisher's archive fetched
 over https and checked against `tests/sandbox/registry_tools.toml`'s SHA-256 before use. The
 change that records it adds the plan's §10 record ("M5e.4's acceptance"), updates the plan's,

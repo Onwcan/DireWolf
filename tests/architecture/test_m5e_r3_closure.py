@@ -1,12 +1,12 @@
-"""R3 under the owner's R-B: no record or document turns E6 into a pass early.
+"""R3 under R-B: no record or document turns E6 into a pass early.
 
 On 2026-11-01 the owner selected R-B on ADR-0057: R3 needs real `PROXY_ONLY`
 containers weakened one hard rule at a time, measured from both vantages
 (ADR-0057's E6), and the residual that record proposed is not accepted. E6 was
 BLOCKED -- not built and not planned while an earlier safety control stood --
-until the owner authorised its implementation on 2026-11-08. It was built
+until its implementation was authorised on 2026-11-08. It was built
 (ADR-0058), its required hosted job passed at `14405ab` after ADR-0059's fix
-(run 42525106398), and on 2026-11-09 the owner accepted ADR-0059 and ADR-0058,
+(run 42525106398), and on 2026-11-09 ADR-0059 and ADR-0058 were accepted,
 ADR-0057 superseded by ADR-0058; nothing else stood in for it. So:
 
 * ADR-0057 is never Accepted -- accepting it would accept the residual R-B
@@ -33,7 +33,7 @@ ADR-0057 superseded by ADR-0058; nothing else stood in for it. So:
   before M5e.4 passes hosted and that M5e.6 is not authorised, and issue #19
   stays cited; and, whether or not ADR-0057 stands -- closing M5e.2 closes
   none of what follows it -- no status document claims M5e.4 complete unless
-  the plan's §10 records the owner's acceptance of it (2026-11-09), nor M5e.5,
+  the plan's §10 records its acceptance (2026-11-09), nor M5e.5,
   M5e.6, M5e or M5 complete, nor M5e.6 begun, the ROADMAP keeps M5e.6 not
   started, and neither `M5e` nor `M5` is an available milestone -- each held
   with a negative control;
@@ -109,15 +109,15 @@ _M5E5_RECORD_SAYS = (
     "R-B",
 )
 ISSUE_19 = "https://github.com/Onwcan/DireWolf/issues/19"
-# The owner's acceptance of M5e.4 (2026-11-09), as the plan's §10 records it,
-# and what that record must keep saying: the owner's answer, the runs, OD-E4's
-# mechanism, and that nothing after M5e.4 was accepted with it. While it
+# M5e.4's acceptance (2026-11-09), as the plan's §10 records it, and what that
+# record must keep saying: what was accepted, the runs, OD-E4's mechanism, and
+# that nothing after M5e.4 was accepted with it. While it
 # stands, M5e.4 may be called complete; nothing after it may.
 _M5E4_ACCEPTANCE = "**M5e.4's acceptance (2026-11-09).**"
 _M5E4_ACCEPTANCE_SAYS = (
-    '"Accept both"',
+    "M5e.4 is accepted as complete",
     "run nos. 134\N{EN DASH}137",
-    "OD-E4's mechanism is accepted as built",
+    "OD-E4's mechanism as built",
     "it accepts neither ADR-0054, ADR-0055 nor M5e.5",
     "authorises no M5e.6 work",
 )
@@ -153,8 +153,8 @@ def _row(text: str, marker: str) -> str:
 
 
 # ADR-0057's two lawful status lines, up to the line's first `·`: standing
-# under the owner's R-B, and superseded by ADR-0058.
-_STANDING = "**Status:** Proposed — the owner selected **R-B** on 2026-11-01 (§8)"
+# under R-B, and superseded by ADR-0058.
+_STANDING = "**Status:** Proposed — **R-B** selected on 2026-11-01 (§8)"
 _SUPERSEDED = (
     "**Status:** **Superseded by "
     "[ADR-0058](0058-m5e-proxy-only-hard-rules-weakened-in-a-real-environment.md)**"
@@ -172,7 +172,7 @@ def _with_status(text: str, status: str) -> str:
 
 def _residual_problems(residual: str, recorded: dict[str, str], digest: str) -> list[str]:
     """ADR-0057 against the accepted digest. Never Accepted. While it stands --
-    Proposed, the owner's R-B on its status line -- outside the digest. Once
+    Proposed, R-B on its status line -- outside the digest. Once
     superseded, by ADR-0058 and no other record, inside it at `digest`, its
     bytes: `dwcheck adr` holds a superseded record as immutable as an accepted
     one, and `dwcheck adr --record` records it."""
@@ -180,7 +180,7 @@ def _residual_problems(residual: str, recorded: dict[str, str], digest: str) -> 
     problems: list[str] = []
     if status.startswith("proposed"):
         if "r-b" not in status:
-            problems.append("the owner's R-B is not stated on ADR-0057's status line")
+            problems.append("R-B is not stated on ADR-0057's status line")
         if RESIDUAL.name in recorded:
             problems.append("ADR-0057 is in the accepted digest while it stands")
     elif status.startswith("superseded"):
@@ -190,7 +190,7 @@ def _residual_problems(residual: str, recorded: dict[str, str], digest: str) -> 
             problems.append("ADR-0057, superseded, is not in the accepted digest at its bytes")
     else:
         problems.append(
-            f"ADR-0057 reads {status!r}: accepting it would accept the residual the owner's "
+            f"ADR-0057 reads {status!r}: accepting it would accept the residual "
             "R-B refused; its one exit is 'Superseded by' a record of E6's evidence (§8 there)"
         )
     return problems
@@ -208,7 +208,7 @@ def test_adr_0057_is_never_accepted_and_in_the_digest_only_once_superseded() -> 
     ("change", "said"),
     [
         ("accepted", "accepting it would accept the residual"),
-        ("standing-without-r-b", "the owner's R-B is not stated"),
+        ("standing-without-r-b", "R-B is not stated"),
         ("standing-in-the-digest", "in the accepted digest while it stands"),
         ("superseded-outside-the-digest", "not in the accepted digest at its bytes"),
         ("superseded-at-other-bytes", "not in the accepted digest at its bytes"),
@@ -352,7 +352,7 @@ def _successor_problems(residual: str, path: str, digest: set[str]) -> list[str]
     ],
 )
 def test_adr_0058_accepted_out_of_turn_fails(change: str, said: str) -> None:
-    # Each control starts where the owner's acceptance started -- ADR-0057
+    # Each control starts where the acceptance started -- ADR-0057
     # standing, ADR-0058 Proposed, neither in the digest -- whatever state the
     # tree is in, and makes one change.
     residual = _with_status(_text(RESIDUAL), _STANDING)
@@ -421,7 +421,7 @@ def _sequencing_problems(
     #19; and `_later_step_problems` holds."""
     problems = _later_step_problems(plan, roadmap, documents, available)
     if "## 10. " not in plan or "## 11. " not in plan:
-        return [*problems, "the plan has no owner's decisions (§10)"]
+        return [*problems, "the plan has no decisions section (§10)"]
     decisions = plan[plan.index("## 10. ") : plan.index("## 11. ")]
     for marker in (_SEQUENCING, _SEQUENCING_M5E4, _SEQUENCING_M5E5):
         if plan.count(marker) != 1:
@@ -459,8 +459,8 @@ def _m5e_section(roadmap: str) -> str | None:
 
 
 def _m5e4_acceptance_problems(plan: str) -> list[str]:
-    """Why the plan's §10 does not hold the owner's acceptance of M5e.4: none
-    when it is recorded once, among the owner's decisions, and says
+    """Why the plan's §10 does not hold M5e.4's acceptance: none when it is
+    recorded once, among §10's decisions, and says
     `_M5E4_ACCEPTANCE_SAYS`."""
     if "## 10. " not in plan or "## 11. " not in plan:
         return ["the plan has no owner's decisions (§10)"]
@@ -469,7 +469,7 @@ def _m5e4_acceptance_problems(plan: str) -> list[str]:
     if count != 1:
         return [f"its acceptance is recorded {count} times, not once"]
     if _M5E4_ACCEPTANCE not in decisions:
-        return ["its acceptance is not among the owner's decisions"]
+        return ["its acceptance is not among the plan's §10 decisions"]
     record = " ".join(_record(decisions, _M5E4_ACCEPTANCE).split())
     return [
         f"its acceptance does not say {needed!r}"
@@ -482,12 +482,12 @@ def _later_step_problems(
     plan: str, roadmap: str, documents: dict[str, str], available: frozenset[str] | set[str]
 ) -> list[str]:
     """What closing M5e.2 does not change, held whether or not ADR-0057 stands:
-    no status document claims M5e.4 complete unless the plan's §10 records the
-    owner's acceptance of it (`_m5e4_acceptance_problems`, 2026-11-09), nor
+    no status document claims M5e.4 complete unless the plan's §10 records its
+    acceptance (`_m5e4_acceptance_problems`, 2026-11-09), nor
     M5e.5, M5e.6, M5e or M5 complete, nor M5e.6 begun; the ROADMAP's M5e
     heading keeps M5e.6 not started; and neither `M5e` nor `M5` is an available
     milestone, so no eval that waits for M5's gate turns on. Each of those
-    moves only by its own change, on the owner's decision
+    moves only by its own change and decision
     (M5E6_PREPARATION_HANDOFF.md §9), which amends this guard."""
     problems: list[str] = []
     m5e4 = _m5e4_acceptance_problems(plan)
@@ -524,7 +524,7 @@ def test_the_sequencing_exceptions_move_m5e3_and_m5e4_alone() -> None:
     ahead of M5e.2's close and change nothing else (`_sequencing_problems`).
     Once ADR-0057 is superseded M5e.2 is closed and the exceptions to its order
     bind no more; what follows it is unchanged by its closing
-    (`_later_step_problems`), M5e.4 complete only on the owner's acceptance
+    (`_later_step_problems`), M5e.4 complete only on its acceptance
     recorded in §10 (2026-11-09)."""
     from direwolf_evals.runner import AVAILABLE_MILESTONES
 
@@ -610,7 +610,7 @@ def _weakened(change: str, *, standing: bool = True) -> list[str]:
         assert m5e6 != m5e5, "the negative control changed nothing"
         plan = plan.replace(m5e5, m5e6)
     elif change == "m5e4-claimed-complete":
-        # Claimed with no acceptance of the owner's in §10.
+        # Claimed with no acceptance in §10.
         plan = plan.replace(_M5E4_ACCEPTANCE, "**A decision.**")
         documents["README.md"] += "\n**M5e.4 is COMPLETE**\n"
     elif change.startswith("m5e4-acceptance-"):
@@ -672,7 +672,7 @@ _LATER_STEP_CHANGES = frozenset(
         ("m5e6-started", "a step no exception covers"),
         ("m5e4-claimed-complete", "recorded 0 times"),
         ("m5e4-acceptance-twice", "recorded 2 times"),
-        ("m5e4-acceptance-outside-the-decisions", "not among the owner's decisions"),
+        ("m5e4-acceptance-outside-the-decisions", "not among the plan's §10 decisions"),
         ("m5e4-acceptance-overstated", "does not say 'it accepts neither"),
         ("m5e5-claimed-complete", "claimed complete"),
         ("m5e5-record-missing", "recorded 0 times"),

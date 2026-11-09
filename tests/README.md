@@ -302,7 +302,7 @@ was Proposed, E6 said NOT EXERCISED (BLOCKED, or from 2026-11-08 hosted evidence
 pending) wherever R3 is stated, E6 never said passed, ADR-0058 never accepted
 ahead of it, and M5e.2 never said complete; ADR-0058, accepted, in the digest as
 ADR-0057's successor; and, whether or not ADR-0057 stands, M5e.4 said complete
-only while the plan's §10 records the owner's acceptance of it (2026-11-09), no
+only while the plan's §10 records its acceptance (2026-11-09), no
 later step, M5e or M5 said complete, M5e.6 begun, or `M5e` or `M5` available --
 each with a negative control.
 `tests/architecture/test_m5e_e6.py` holds E6 itself (ADR-0058): its required,
