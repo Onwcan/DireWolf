@@ -226,7 +226,7 @@ of them parse the policy text, which is why the loader has fuzz targets in
 `fuzz/` and a stable mutation harness in
 `crates/dwkd-authority/tests/fuzz_smoke.rs`. And, since M3d
 ([ADR-0039](docs/adr/0039-durable-authority-state.md)), `kernel.db` and the
-audit hash: `rusqlite` and `libsqlite3-sys` (the bundled **SQLite 3.53.2 C
+audit hash: `rusqlite` and `libsqlite3-sys` (the bundled **SQLite 3.54.1 C
 amalgamation**, compiled into the authority) with `bitflags`,
 `fallible-iterator`, `fallible-streaming-iterator` and `smallvec`; `sha2` with
 `digest`, `block-buffer`, `crypto-common`, `hybrid-array`, `typenum`,
@@ -317,8 +317,9 @@ That no longer describes the whole of what the authority plane links, and
 since M3d the gap is not theoretical. The lint governs this workspace's code,
 not its dependencies': the authority links twenty crates this workspace does
 not lint, and one of them, `libsqlite3-sys`, compiles **SQLite's C
-amalgamation — 269,376 lines — into the authority process**
-([ADR-0039](docs/adr/0039-durable-authority-state.md) §15). "DireWolf's Rust
+amalgamation — 271,131 lines at SQLite 3.54.1 — into the authority process**
+(269,376 lines at 3.53.2, when [ADR-0039](docs/adr/0039-durable-authority-state.md) §15
+measured it). "DireWolf's Rust
 contains no `unsafe`" is true. "The authority contains no unsafe or native
 code" is false, and nothing in this repository may say it.
 

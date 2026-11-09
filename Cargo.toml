@@ -74,8 +74,14 @@ toml = { version = "=1.1.6", default-features = false, features = ["parse"] }
 #
 # Pinned exactly for the same reason as `toml`. No default features: the
 # defaults turn on a prepared-statement cache (`hashlink`) and a WebAssembly
-# backend, and the authority needs neither.
-rusqlite = { version = "=0.40.2", default-features = false, features = ["bundled"] }
+# backend, and the authority needs neither. 0.41.1 (2026-10-28), from the
+# 0.40.2 ADR-0039 measured: its `libsqlite3-sys` 0.39.1 bundles SQLite 3.54.1,
+# the fix for RUSTSEC-2026-0459 (CVE-2026-119375: uninitialised page-cache
+# bytes returned when a database is opened with a `-wal` file of another page
+# size). Same required dependencies and features. The exposure needs a
+# database and `-wal` a less trusted party could have written; the fix is taken
+# anyway: the gate is the advisory, not a reachability argument.
+rusqlite = { version = "=0.41.1", default-features = false, features = ["bundled"] }
 
 # The audit hash chain and every content-derived identity (policy revision,
 # AdmitRun request digest). RustCrypto's implementation, pure Rust, no

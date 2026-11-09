@@ -2564,8 +2564,8 @@ generated bindings agree on.
 #   serde_spanned, winnow   `fuzz/` targets them.
 #
 #   rusqlite                kernel.db (M3d).  default-features = false,
-#   libsqlite3-sys          features = ["bundled"]: SQLite 3.53.2's
-#   bitflags                amalgamation, 269,376 lines of C compiled INTO the
+#   libsqlite3-sys          features = ["bundled"]: SQLite 3.54.1's
+#   bitflags                amalgamation, 271,131 lines of C compiled INTO the
 #   fallible-iterator       authority.  `forbid(unsafe_code)` governs
 #   fallible-streaming-     DireWolf's Rust and does not reach it.
 #     iterator              libsqlite3-sys parses the database file, which is
