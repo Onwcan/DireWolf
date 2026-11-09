@@ -1,6 +1,6 @@
 # ADR-0059: M5e.2 — F-E6-HOSTNET: a `PROXY_ONLY` environment's peer joins only a network namespace the runtime's record shows is the environment's own
 
-**Status:** Proposed · **Date:** 2026-11-08 · **Would amend (only on the owner's acceptance, after its hosted evidence passes):** [ADR-0048](0048-m5b-proxy-only-topology-and-connect-proxy.md) §§2, 10 (the preparation order: the environment's record is read before its peer is made) · **Refines:** [ADR-0058](0058-m5e-proxy-only-hard-rules-weakened-in-a-real-environment.md) §§4, 5, 8 (what E6's host-network case must show) · **Addresses:** finding F-E6-HOSTNET ([M5E_ASSURANCE_PLAN.md](../M5E_ASSURANCE_PLAN.md) §5a), observed by the hosted E6 run at `3ca842c` · **Implementation authorised by:** the owner, 2026-11-08 ("Build the fix first") — the implementation and its evidence path only: not an acceptance of this record or of ADR-0058, not evidence, and not a change to M5's acceptance contract
+**Status:** Accepted · **Date:** 2026-11-09 (proposed and built 2026-11-08 after finding F-E6-HOSTNET, committed by the owner as `14405ab`; accepted by the owner on 2026-11-09 after hosted CI run 42525106398 at `14405ab` — 31 of 31 jobs, `sandbox-proxy-weakened` and the `ci` aggregate among them — and the offline review of its E6 log, §§5, 6) · **Amends:** [ADR-0048](0048-m5b-proxy-only-topology-and-connect-proxy.md) §§2, 10 (the preparation order: the environment's record is read before its peer is made) · **Refines:** [ADR-0058](0058-m5e-proxy-only-hard-rules-weakened-in-a-real-environment.md) §§4, 5, 8 (what E6's host-network case must show) · **Addresses:** finding F-E6-HOSTNET ([M5E_ASSURANCE_PLAN.md](../M5E_ASSURANCE_PLAN.md) §5a), observed by the hosted E6 run at `3ca842c`, closed by this record · **Implementation authorised by:** the owner, 2026-11-08 ("Build the fix first") — the implementation and its evidence path only, not acceptance
 
 > **The broker no longer makes a `PROXY_ONLY` environment's setup or relay
 > until the runtime's own record of the started environment shows a network
@@ -10,8 +10,18 @@
 > measures: the environment is refused as before, but nothing of the run is
 > put into a namespace that is not the environment's. E6's host-network case
 > must now show no setup, no relay, and the host's loopback unchanged, kept
-> as a raw observation. Built 2026-11-08; **hosted evidence pending** — the
-> hosted run that observed F-E6-HOSTNET was of the broker before this change.
+> as a raw observation. Built 2026-11-08 and committed as `14405ab`; its
+> hosted run (42525106398) showed exactly that (§6), and the owner accepted
+> this record on 2026-11-09.**
+
+Accepted on 2026-11-09. The owner's direction to build the fix (2026-11-08),
+the implementation and its hosted evidence (run 42525106398 at `14405ab`),
+the review of that evidence, and this formal acceptance were separate steps,
+taken in that order. It amends ADR-0048 §§2 and 10 as stated above; ADR-0048's
+body is unchanged, as every accepted record's is (README.md, rule 1), so this
+record is where `PROXY_ONLY`'s preparation order now lives. Finding
+F-E6-HOSTNET is closed by it — with §2's limit, that the gate trusts the
+runtime's record, which acceptance does not narrow.
 
 ## Context
 
@@ -52,7 +62,7 @@ which one that was.
 or build the remedy before ADR-0058's acceptance, the owner directed: build
 the fix first. E6 is then evidenced again, hosted, over the fixed broker.
 
-## Decision (proposed)
+## Decision
 
 ### 1. The peer's gate
 
@@ -146,9 +156,54 @@ requires, so nothing local shows this gate on a namespace that is the host's.
 3. The owner accepts this record (then `dwcheck adr --record`), and ADR-0058
    by its §9.
 
-Until then F-E6-HOSTNET is **OBSERVED, FIX BUILT — hosted evidence pending**,
-E6 is NOT EXERCISED for the broker as it now is, R3 is not met, M5e.2 stays IN
-PROGRESS, and issue #19 stays open.
+Each step was taken (§6). Before them F-E6-HOSTNET was **OBSERVED, FIX BUILT —
+hosted evidence pending**, and E6 NOT EXERCISED for the broker as it now is;
+with them it is **CLOSED**.
+
+### 6. The hosted evidence (run 42525106398 at `14405ab`)
+
+*Hosted (run
+[42525106398](https://github.com/Onwcan/DireWolf/actions/runs/42525106398),
+run no. 142, attempt 1, at `14405ab`, 2026-11-08): 31 of 31 jobs, the `ci`
+aggregate among them; `sandbox-proxy-weakened` is job
+[128866884086](https://github.com/Onwcan/DireWolf/actions/runs/42525106398/job/128866884086).*
+A GitHub-hosted Ubuntu 26 runner (image 20261101.186.1, kernel
+7.0.0-1019-azure), Docker 29.4.2, API 1.54. The host's network case showed what
+§3 requires:
+
+- the daemon's record `NetworkMode: host`, its sandbox key the host's own
+  namespace; the broker read that record right after the environment started,
+  then made **no setup and no relay** — no `create` of either in the case's
+  requests — and emitted `relay_withheld network=FAIL`;
+- refused by `HOST_NETWORK_ISOLATED`, `CONTAINER_NETWORK_ISOLATED`,
+  `CONTAINER_DIRECT_EGRESS_REFUSED` and `CONTAINER_DIRECT_DNS_REFUSED`, as at
+  `3ca842c`; of the topology's four, `HOST_PROXY_ENVIRONMENT` passed and
+  `HOST_PROXY_RELAY`, `HOST_RELAY_DIGEST` and `CONTAINER_PROXY_REACHABLE`
+  failed — no peer, nothing to measure;
+- `host-loopback.txt`, the case's ninth raw file: `127.0.0.1/8` before and
+  after, unchanged; the line `host-loopback-added:none`; the environment not
+  kept, and removed.
+
+Every other case — the control and the fifteen other weakened cases — had its
+record read before any peer was asked for, then the setup and the relay made,
+and no `relay_withheld`; each of their lines is byte-identical to run
+42484188848's.
+
+*Reviewed offline (2026-11-09).* `make sandbox-proxy-weakened-review` over the
+downloaded job log (SHA-256 `aa208e4cb07b2e4d88cf051052faec041d0cd8b7fc35641dbc08777aa6752330`)
+passed: 18 cases at `real-oci`; the manifest's SHA-256
+`4f5ec9950bd6e502393d20be014c74b25dc325397b7abc062b3551f63f5e0840`, 137 raw
+observations over 17 cases, every one at its digest; the provenance the run's
+own — commit and `GITHUB_SHA` `14405ab`, a clean tree, run 42525106398
+attempt 1, the runner and runtime above. The same review refuses run
+42484188848's log (the host's loopback gained `169.254.7.1/32`), and refused
+each of fifteen tampered copies of the new log for its own reason — nine of
+them with every digest re-signed, so that only the review's reading of the raw
+bytes could catch them: the proxy address added to the loopback file, that
+file dropped or its "before" lost, a setup or relay `create` in the case's
+requests, the withholding event removed or added to another case, the gate's
+read moved after the first peer request, and the relay measured as passing.
+The review was run for the owner, who accepted this record on it.
 
 ## Consequences
 
@@ -161,12 +216,26 @@ loopback held is a raw, digested observation.
 
 **Negative.** One more runtime call per `PROXY_ONLY` preparation. A record the
 runtime fails to answer at the gate refuses an environment that might
-otherwise have been kept. E6 must run hosted again before ADR-0058 can be
-accepted. The gate trusts the record: a runtime that misreports it is
-caught only afterwards, by the inside vantage, after the setup has run. The
-host-network case still runs only on a disposable runner, because what
-protects the host there is the gate under test. ADR-0048 is accepted and
-immutable, so its §10 is amended only by this record's acceptance.
+otherwise have been kept. E6 had to run hosted again before ADR-0058 could be
+accepted (run 42525106398, §6). The gate trusts the record: a runtime that
+misreports it is caught only afterwards, by the inside vantage, after the
+setup has run. The host-network case still runs only on a disposable runner,
+because what protects the host there is the gate under test. ADR-0048 is
+accepted and immutable, so its §§2 and 10 are amended by this record, not
+edited; the index marks the amendment.
+
+## Owner decision
+
+**2026-11-08.** Asked whether to accept F-E6-HOSTNET's residue or remedy it
+before ADR-0058's acceptance, the owner directed: "Build the fix first". That
+authorised the implementation and its evidence path only.
+
+**2026-11-09: accepted.** After run 42525106398 at `14405ab` passed and its E6
+log was reviewed (§6), the owner adopted this record — the host-network fix
+and the change to ADR-0048's preparation order — with ADR-0058, in that order,
+and approved the change that records it ("Yes, build it"). The gate's limit
+(§2: the runtime's record is trusted) stands as stated. Acceptance changed no
+product code, protocol, schema, dependency or CI gate.
 
 ## Alternatives considered
 
@@ -191,6 +260,5 @@ that crashes between the setup and the teardown would leave the address.
 
 A runtime is found that records `none` but runs the environment elsewhere (a
 check from inside, before the setup, would then be needed); the topology, the
-setup or the relay changes; or the hosted E6 at the fixed commit shows anything
-but no peer and an unchanged loopback for the host's network, or a change in
-any other case.
+setup or the relay changes; or a hosted E6 run shows anything but no peer and
+an unchanged loopback for the host's network, or a change in any other case.

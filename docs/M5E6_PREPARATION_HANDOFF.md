@@ -25,7 +25,7 @@ choice in it is a recommendation for the owner.
 | Step | State | What closes it |
 |---|---|---|
 | M5e.1 attribution | COMPLETE (run 40774766063) | — |
-| M5e.2 closure | PARTIALLY IMPLEMENTED / ASSURANCE PENDING. R3's E6 is required by the owner's R-B; since 2026-11-08 built (ADR-0058, Proposed) in the required `sandbox-proxy-weakened` job, never run hosted: 15 rows implemented, 0 passed hosted ([issue #19](https://github.com/Onwcan/DireWolf/issues/19)) | the hosted job passing, the owner's review of its log and acceptance of ADR-0058 (superseding ADR-0057, §8 there) |
+| M5e.2 closure | COMPLETE (2026-11-09). R3's E6, required by the owner's R-B, built 2026-11-08 ([ADR-0058](adr/0058-m5e-proxy-only-hard-rules-weakened-in-a-real-environment.md)) in the required `sandbox-proxy-weakened` job, passed hosted at `14405ab` (run 42525106398) after [ADR-0059](adr/0059-m5e-proxy-only-peer-joins-only-its-own-network-namespace.md)'s fix: 15 of 15 rows; the owner accepted both records, ADR-0057 superseded, and authorised R3 satisfied and M5e.2 complete ([M5E_ASSURANCE_PLAN.md](M5E_ASSURANCE_PLAN.md) §10, "M5e.2's closure"; [issue #19](https://github.com/Onwcan/DireWolf/issues/19), the owner's to close) | — |
 | M5e.3 fixtures | COMPLETE (runs 41916040076, 41920008027) | — |
 | M5e.4 pip, npm refused | HOSTED VERIFIED / OWNER ACCEPTANCE PENDING (runs 134–137) | the owner's acceptance, the OD-E4 deviation included ([M5E4_IMPLEMENTATION_HANDOFF.md](M5E4_IMPLEMENTATION_HANDOFF.md) §13) |
 | M5e.5 npm and pip profiles | IMPLEMENTATION COMPLETE / HOSTED EVIDENCE PENDING | the manual run; ADR-0055's trust revision; acceptance of both ADRs; the acceptance change ([M5E5_IMPLEMENTATION_HANDOFF.md](M5E5_IMPLEMENTATION_HANDOFF.md) §§7–10) |
@@ -172,7 +172,7 @@ NOT EXERCISED, never a pass.
 | The expected-task table equals `ci.yml` | same | an extra task; a missing task |
 | Bundles are judged, not trusted | unit tests of the gate task | a fabricated record with no lines; a wrong `sha`, run or attempt; a self-hosted runner; an output digest mismatch; a duplicate case; an unknown case; a level downgraded; an enforcement swapped; a NOT EXERCISED line; a missing census line; an oversized file; malformed or duplicate-key JSON |
 | The acceptance verdict cannot be READY early | unit tests | E6 rows absent; `HYGIENE_CASES` not required; ADR-0054 or ADR-0055 Proposed; ADR-0057 not superseded |
-| `M5e` and `M5` stay unavailable while ADR-0057 stands | existing `test_m5e_r3_closure.py` | existing controls |
+| `M5e` and `M5` stay unavailable until the owner's milestone decision (§9) — while ADR-0057 stood and, since 2026-11-09, after it was superseded | existing `test_m5e_r3_closure.py` | existing controls |
 
 ## 9. Milestone availability
 
@@ -184,7 +184,7 @@ NOT EXERCISED, never a pass.
 - the `m5e-gate` acceptance verdict is READY on that commit's hosted run.
 
 The same change updates `test_m5e_r3_closure.py`, which refuses `M5e` or `M5` as available
-while ADR-0057 stands, and records the owner's decision in the plan's §10.
+whether or not ADR-0057 stands (since 2026-11-09), and records the owner's decision in the plan's §10.
 
 `M5` joins later and separately, when the owner accepts M5 against its contract. That change
 gives `pending-kernel/sandbox-egress` a runner: the `m5e-gate` verdict over `sandbox-egress`'s

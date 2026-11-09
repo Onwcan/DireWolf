@@ -1,16 +1,20 @@
-"""R3 under the owner's R-B: no record or document turns E6 into a pass.
+"""R3 under the owner's R-B: no record or document turns E6 into a pass early.
 
 On 2026-11-01 the owner selected R-B on ADR-0057: R3 needs real `PROXY_ONLY`
 containers weakened one hard rule at a time, measured from both vantages
 (ADR-0057's E6), and the residual that record proposed is not accepted. E6 was
 BLOCKED -- not built and not planned while an earlier safety control stood --
-until the owner authorised its implementation on 2026-11-08; it is now built
-(ADR-0058, Proposed) and NOT EXERCISED until its hosted job passes, and nothing
-else stands in for it. So:
+until the owner authorised its implementation on 2026-11-08. It was built
+(ADR-0058), its required hosted job passed at `14405ab` after ADR-0059's fix
+(run 42525106398), and on 2026-11-09 the owner accepted ADR-0059 and ADR-0058,
+ADR-0057 superseded by ADR-0058; nothing else stood in for it. So:
 
 * ADR-0057 is never Accepted -- accepting it would accept the residual R-B
-  refused -- and stays outside the accepted digest; its one exit is
-  "Superseded by" an accepted record of E6's evidence (ADR-0057 §8);
+  refused. While it stands (Proposed, R-B on its status line) it stays outside
+  the accepted digest; its one exit is "Superseded by" ADR-0058, the accepted
+  record of E6's evidence (ADR-0057 §8), which puts it in the digest at its
+  bytes, as `dwcheck adr` holds every superseded record -- each with a
+  negative control;
 * while it is Proposed, its own E6 row and the plan's R3 and E6 rows say E6 is
   NOT EXERCISED -- BLOCKED, or since 2026-11-08 hosted evidence pending -- the
   ROADMAP's M5e heading says R3 is blocked or pending, no status document says
@@ -26,10 +30,12 @@ else stands in for it. So:
   alone: while ADR-0057 stands, each is recorded once among the owner's
   decisions, M5e.4's saying M5e.5 and M5e.6 were not authorised, M5e.5's that
   neither of its ADRs is accepted, that its evidence joins no required job
-  before M5e.4 passes hosted and that M5e.6 is not authorised; no status
-  document claims M5e.4, M5e.5, M5e.6, M5e or M5 complete, or M5e.6 begun; the
-  ROADMAP keeps M5e.6 not started; issue #19 stays cited; and neither `M5e` nor
-  `M5` is an available milestone -- each held with a negative control;
+  before M5e.4 passes hosted and that M5e.6 is not authorised, and issue #19
+  stays cited; and, whether or not ADR-0057 stands -- closing M5e.2 closes
+  none of what follows it -- no status document claims M5e.4, M5e.5, M5e.6,
+  M5e or M5 complete, or M5e.6 begun, the ROADMAP keeps M5e.6 not started, and
+  neither `M5e` nor `M5` is an available milestone -- each held with a
+  negative control;
 * the two tasks that carry R3's supporting evidence keep their cleanup and
   ownership census -- nothing the evidence made left behind, nothing that
   predates it gone -- and check it before they count a line.
@@ -133,18 +139,92 @@ def _row(text: str, marker: str) -> str:
     return rows[0]
 
 
-def test_adr_0057_is_never_accepted_and_stays_outside_the_digest() -> None:
-    status = _status(_text(RESIDUAL))
-    assert status.startswith(("proposed", "superseded")), (
-        f"ADR-0057 reads {status!r}: accepting it would accept the residual the owner's "
-        "R-B refused; its one exit is 'Superseded by' a record of E6's evidence (§8 there)"
+# ADR-0057's two lawful status lines, up to the line's first `·`: standing
+# under the owner's R-B, and superseded by ADR-0058.
+_STANDING = "**Status:** Proposed — the owner selected **R-B** on 2026-11-01 (§8)"
+_SUPERSEDED = (
+    "**Status:** **Superseded by "
+    "[ADR-0058](0058-m5e-proxy-only-hard-rules-weakened-in-a-real-environment.md)**"
+)
+
+
+def _with_status(text: str, status: str) -> str:
+    """`text` with its status, up to the status line's first `·`, replaced."""
+    changed, found = re.subn(
+        r"^\*\*Status:\*\*[^·\n]*", lambda _: f"{status} ", text, count=1, flags=re.MULTILINE
     )
+    assert found == 1, "the record has no status line"
+    return changed
+
+
+def _residual_problems(residual: str, recorded: dict[str, str], digest: str) -> list[str]:
+    """ADR-0057 against the accepted digest. Never Accepted. While it stands --
+    Proposed, the owner's R-B on its status line -- outside the digest. Once
+    superseded, by ADR-0058 and no other record, inside it at `digest`, its
+    bytes: `dwcheck adr` holds a superseded record as immutable as an accepted
+    one, and `dwcheck adr --record` records it."""
+    status = _status(residual)
+    problems: list[str] = []
     if status.startswith("proposed"):
-        assert "r-b" in status, "the owner's decision is stated on the status line"
-    assert RESIDUAL.name not in _manifest()
+        if "r-b" not in status:
+            problems.append("the owner's R-B is not stated on ADR-0057's status line")
+        if RESIDUAL.name in recorded:
+            problems.append("ADR-0057 is in the accepted digest while it stands")
+    elif status.startswith("superseded"):
+        if "adr-0058" not in status:
+            problems.append(f"ADR-0057 is superseded by another record: {status!r}")
+        if recorded.get(RESIDUAL.name) != digest:
+            problems.append("ADR-0057, superseded, is not in the accepted digest at its bytes")
+    else:
+        problems.append(
+            f"ADR-0057 reads {status!r}: accepting it would accept the residual the owner's "
+            "R-B refused; its one exit is 'Superseded by' a record of E6's evidence (§8 there)"
+        )
+    return problems
+
+
+def test_adr_0057_is_never_accepted_and_in_the_digest_only_once_superseded() -> None:
+    problems = _residual_problems(_text(RESIDUAL), _manifest(), _digest(RESIDUAL))
+    assert not problems, problems
     # ADR-0056, accepted, at the bytes it was accepted with.
     assert _status(_text(TASK_LIMIT)).startswith("accepted")
     assert _manifest()[TASK_LIMIT.name] == _digest(TASK_LIMIT)
+
+
+@pytest.mark.parametrize(
+    ("change", "said"),
+    [
+        ("accepted", "accepting it would accept the residual"),
+        ("standing-without-r-b", "the owner's R-B is not stated"),
+        ("standing-in-the-digest", "in the accepted digest while it stands"),
+        ("superseded-outside-the-digest", "not in the accepted digest at its bytes"),
+        ("superseded-at-other-bytes", "not in the accepted digest at its bytes"),
+        ("superseded-by-another", "superseded by another record"),
+    ],
+)
+def test_adr_0057_against_the_digest_out_of_turn_fails(change: str, said: str) -> None:
+    residual, digest = _text(RESIDUAL), _digest(RESIDUAL)
+    standing, superseded = _with_status(residual, _STANDING), _with_status(residual, _SUPERSEDED)
+    # The two lawful states, each sound before it is changed.
+    assert not _residual_problems(standing, {}, digest)
+    assert not _residual_problems(superseded, {RESIDUAL.name: digest}, digest)
+    if change == "accepted":
+        text, recorded = _with_status(residual, "**Status:** Accepted"), {RESIDUAL.name: digest}
+    elif change == "standing-without-r-b":
+        text, recorded = _with_status(residual, "**Status:** Proposed"), {}
+    elif change == "standing-in-the-digest":
+        text, recorded = standing, {RESIDUAL.name: digest}
+    elif change == "superseded-outside-the-digest":
+        text, recorded = superseded, {}
+    elif change == "superseded-at-other-bytes":
+        text, recorded = superseded, {RESIDUAL.name: "0" * 64}
+    elif change == "superseded-by-another":
+        text = _with_status(residual, "**Status:** **Superseded by ADR-0099**")
+        recorded = {RESIDUAL.name: digest}
+    else:
+        raise AssertionError(change)
+    problems = _residual_problems(text, recorded, digest)
+    assert any(said in problem for problem in problems), (change, problems)
 
 
 def test_while_adr_0057_stands_e6_is_never_claimed() -> None:
@@ -259,18 +339,20 @@ def _successor_problems(residual: str, path: str, digest: set[str]) -> list[str]
     ],
 )
 def test_adr_0058_accepted_out_of_turn_fails(change: str, said: str) -> None:
-    residual, path, digest = _text(RESIDUAL), _text(E6_PATH), set(_manifest())
-    proposed = "**Status:** Proposed"
-    assert proposed in path, "ADR-0058's status line"
+    # Each control starts where the owner's acceptance started -- ADR-0057
+    # standing, ADR-0058 Proposed, neither in the digest -- whatever state the
+    # tree is in, and makes one change.
+    residual = _with_status(_text(RESIDUAL), _STANDING)
+    path = _with_status(_text(E6_PATH), "**Status:** Proposed")
+    digest = set(_manifest()) - {RESIDUAL.name, E6_PATH.name}
+    assert not _successor_problems(residual, path, digest), "the starting state"
     if change == "accepted-early":
-        path = path.replace(proposed, "**Status:** Accepted", 1)
+        path = _with_status(path, "**Status:** Accepted")
     elif change == "digested-early":
         digest.add(E6_PATH.name)
     elif change == "superseded-by-another":
-        path = path.replace(proposed, "**Status:** Accepted", 1)
-        residual = re.sub(
-            r"\*\*Status:\*\* [^\n]*", "**Status:** Superseded by ADR-0099", residual, count=1
-        )
+        path = _with_status(path, "**Status:** Accepted")
+        residual = _with_status(residual, "**Status:** Superseded by ADR-0099")
     elif change == "names-no-predecessor":
         lines = path.split("\n")
         lines[2] = lines[2].replace("ADR-0057", "ADR-0000").replace("0057-", "0000-")
@@ -322,14 +404,11 @@ def _sequencing_problems(
     M5e.5's implementation and accepts neither of its ADRs. While ADR-0057
     stands, then: each is recorded once, among the owner's decisions; M5e.4's
     says M5e.5 and M5e.6 are not authorised; M5e.5's keeps `_M5E5_RECORD_SAYS`;
-    no status document claims M5e.4, M5e.5, M5e.6, M5e or M5 complete, or M5e.6
-    begun; the ROADMAP's M5e heading keeps M5e.6 not started; the plan's
-    current status line and the ROADMAP's "Still to do" cite issue #19; and
-    neither `M5e` nor `M5` is an available milestone, so no eval that waits for
-    M5's gate turns on."""
-    problems: list[str] = []
+    the plan's current status line and the ROADMAP's "Still to do" cite issue
+    #19; and `_later_step_problems` holds."""
+    problems = _later_step_problems(roadmap, documents, available)
     if "## 10. " not in plan or "## 11. " not in plan:
-        return ["the plan has no owner's decisions (§10)"]
+        return [*problems, "the plan has no owner's decisions (§10)"]
     decisions = plan[plan.index("## 10. ") : plan.index("## 11. ")]
     for marker in (_SEQUENCING, _SEQUENCING_M5E4, _SEQUENCING_M5E5):
         if plan.count(marker) != 1:
@@ -346,26 +425,48 @@ def _sequencing_problems(
         for needed in (*_M5E5_RECORD_SAYS, ISSUE_19):
             if needed not in record:
                 problems.append(f"M5e.5's record does not say {needed!r}")
+    section = _m5e_section(roadmap)
+    if section is not None:
+        if "\nStill to do: " not in section:
+            problems.append("the ROADMAP's M5e section has no 'Still to do'")
+        else:
+            todo = section[section.index("\nStill to do: ") :]
+            if ISSUE_19 not in todo[: todo.find("\n\n") if "\n\n" in todo else len(todo)]:
+                problems.append("the ROADMAP's 'Still to do' does not cite issue #19")
+    statuses = [line for line in plan.splitlines() if line.startswith("**Status (")]
+    if not statuses or ISSUE_19 not in statuses[-1]:
+        problems.append("the plan's current status line does not cite issue #19")
+    return problems
+
+
+def _m5e_section(roadmap: str) -> str | None:
+    if "#### M5e " not in roadmap or "#### The M5 contract" not in roadmap:
+        return None
+    return roadmap[roadmap.index("#### M5e ") : roadmap.index("#### The M5 contract")]
+
+
+def _later_step_problems(
+    roadmap: str, documents: dict[str, str], available: frozenset[str] | set[str]
+) -> list[str]:
+    """What closing M5e.2 does not change, held whether or not ADR-0057 stands:
+    no status document claims M5e.4, M5e.5, M5e.6, M5e or M5 complete, or M5e.6
+    begun; the ROADMAP's M5e heading keeps M5e.6 not started; and neither `M5e`
+    nor `M5` is an available milestone, so no eval that waits for M5's gate
+    turns on. Each of those moves only by its own change, on the owner's
+    decision (M5E6_PREPARATION_HANDOFF.md §9), which amends this guard."""
+    problems: list[str] = []
     for name, text in documents.items():
         for found in _GATE_COMPLETE.finditer(text):
             problems.append(f"{name}: a later step, M5e or M5 claimed complete: {found.group(0)!r}")
         for found in _LATER_STARTED.finditer(text):
             problems.append(f"{name}: a step no exception covers: {found.group(0)!r}")
-    if "#### M5e " not in roadmap or "#### The M5 contract" not in roadmap:
-        return [*problems, "the ROADMAP has no M5e section"]
-    section = roadmap[roadmap.index("#### M5e ") : roadmap.index("#### The M5 contract")]
-    heading = section.splitlines()[0]
-    if "M5e.6 not started" not in heading:
-        problems.append(f"the ROADMAP's M5e heading does not keep M5e.6 not started: {heading}")
-    if "\nStill to do: " not in section:
-        problems.append("the ROADMAP's M5e section has no 'Still to do'")
-    else:
-        todo = section[section.index("\nStill to do: ") :]
-        if ISSUE_19 not in todo[: todo.find("\n\n") if "\n\n" in todo else len(todo)]:
-            problems.append("the ROADMAP's 'Still to do' does not cite issue #19")
-    statuses = [line for line in plan.splitlines() if line.startswith("**Status (")]
-    if not statuses or ISSUE_19 not in statuses[-1]:
-        problems.append("the plan's current status line does not cite issue #19")
+    section = _m5e_section(roadmap)
+    if section is None:
+        problems.append("the ROADMAP has no M5e section")
+    elif "M5e.6 not started" not in section.splitlines()[0]:
+        problems.append(
+            f"the ROADMAP's M5e heading does not keep M5e.6 not started: {section.splitlines()[0]}"
+        )
     if {"M5e", "M5"} & set(available):
         problems.append(f"M5e or M5 is an available milestone: {sorted(available)}")
     return problems
@@ -378,12 +479,18 @@ def _documents() -> dict[str, str]:
 def test_the_sequencing_exceptions_move_m5e3_and_m5e4_alone() -> None:
     """The owner's two exceptions to M5e's order -- M5e.3's fixtures
     (2026-11-03) and M5e.4's implementation (2026-11-05) -- each move one step
-    ahead of M5e.2's close and change nothing else (`_sequencing_problems`)."""
+    ahead of M5e.2's close and change nothing else (`_sequencing_problems`).
+    Once ADR-0057 is superseded M5e.2 is closed and the exceptions to its order
+    bind no more; what follows it is unchanged by its closing
+    (`_later_step_problems`)."""
     from direwolf_evals.runner import AVAILABLE_MILESTONES
 
     if _status(_text(RESIDUAL)).startswith("superseded"):
-        return
-    problems = _sequencing_problems(_text(PLAN), _text(ROADMAP), _documents(), AVAILABLE_MILESTONES)
+        problems = _later_step_problems(_text(ROADMAP), _documents(), AVAILABLE_MILESTONES)
+    else:
+        problems = _sequencing_problems(
+            _text(PLAN), _text(ROADMAP), _documents(), AVAILABLE_MILESTONES
+        )
     assert not problems, problems
     # The test of the patterns themselves: they find the claims they exist to
     # refuse, and none of what may be said.
@@ -418,8 +525,9 @@ def test_the_sequencing_exceptions_move_m5e3_and_m5e4_alone() -> None:
         assert _GATE_COMPLETE.search(claim), claim
 
 
-def _weakened(change: str) -> list[str]:
-    """`_sequencing_problems` over the real documents, with `change` made."""
+def _weakened(change: str, *, standing: bool = True) -> list[str]:
+    """`_sequencing_problems` over the real documents, with `change` made --
+    `_later_step_problems` alone once ADR-0057 no longer stands."""
     plan, roadmap, documents = _text(PLAN), _text(ROADMAP), _documents()
     available: set[str] = set()
     m5e4 = _record(plan[plan.index("## 10. ") :], _SEQUENCING_M5E4)
@@ -459,14 +567,34 @@ def _weakened(change: str) -> list[str]:
     elif change == "m5e4-claimed-complete":
         documents["README.md"] += "\n**M5e.4 is COMPLETE**\n"
     elif change == "heading-drops-m5e6":
-        roadmap = roadmap.replace("M5e.6 not started", "M5e.6 begun", 1)
+        # The M5e heading's own words, not the first that read so elsewhere.
+        heading = roadmap[roadmap.index("#### M5e ") :].split("\n", 1)[0]
+        dropped = heading.replace("M5e.6 not started", "M5e.6 begun")
+        assert dropped != heading, "the negative control changed nothing"
+        roadmap = roadmap.replace(heading, dropped, 1)
     elif change == "issue-19-dropped":
         roadmap = roadmap.replace(ISSUE_19, "https://example.invalid/elsewhere")
     elif change == "milestone-available":
         available = {"M5e"}
     else:
         raise AssertionError(change)
+    if not standing:
+        return _later_step_problems(roadmap, documents, available)
     return _sequencing_problems(plan, roadmap, documents, available)
+
+
+# The controls `_later_step_problems` must refuse, whether or not ADR-0057
+# stands; the others are of the exceptions' records, which bind only while it
+# does.
+_LATER_STEP_CHANGES = frozenset(
+    {
+        "m5e6-started",
+        "m5e4-claimed-complete",
+        "m5e5-claimed-complete",
+        "heading-drops-m5e6",
+        "milestone-available",
+    }
+)
 
 
 @pytest.mark.parametrize(
@@ -489,9 +617,10 @@ def _weakened(change: str) -> list[str]:
     ],
 )
 def test_an_overstated_sequencing_fails(change: str, said: str) -> None:
-    if _status(_text(RESIDUAL)).startswith("superseded"):
-        pytest.skip("ADR-0057 superseded: the exceptions no longer bind")
-    problems = _weakened(change)
+    standing = not _status(_text(RESIDUAL)).startswith("superseded")
+    if not standing and change not in _LATER_STEP_CHANGES:
+        pytest.skip("ADR-0057 superseded: the exceptions' records no longer bind")
+    problems = _weakened(change, standing=standing)
     assert any(said in problem for problem in problems), (change, problems)
 
 

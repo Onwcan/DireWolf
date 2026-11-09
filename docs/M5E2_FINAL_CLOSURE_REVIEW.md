@@ -1,5 +1,20 @@
 # M5e.2 closure assessment and independent review handoff
 
+> **Superseded as a status (2026-11-09).** This review is a snapshot of
+> 2026-11-03 and is kept as written; its verdict below — E6 BLOCKED, 0 of 15,
+> M5e.2 in progress — was true then and is not now. Since: E6 was authorised
+> (2026-11-08), built ([ADR-0058](adr/0058-m5e-proxy-only-hard-rules-weakened-in-a-real-environment.md)),
+> run hosted, its finding F-E6-HOSTNET fixed
+> ([ADR-0059](adr/0059-m5e-proxy-only-peer-joins-only-its-own-network-namespace.md)),
+> and passed at `14405ab` in hosted run
+> [42525106398](https://github.com/Onwcan/DireWolf/actions/runs/42525106398):
+> all fifteen rows, sixteen weakened cases and the control, at `real-oci`. The
+> owner accepted ADR-0059 and ADR-0058 on 2026-11-09, ADR-0057 superseded by
+> ADR-0058 and never accepted, and authorised R3 satisfied and **M5e.2
+> COMPLETE**. Where M5e stands now is the
+> [M5e plan](M5E_ASSURANCE_PLAN.md)'s latest status and the
+> [ROADMAP](ROADMAP.md)'s M5e section.
+
 Initial review and external-source snapshot: 2026-11-02. Final reconciliation:
 2026-11-03. This assesses an uncommitted working tree; it is not an acceptance
 decision or real-container E6 evidence.

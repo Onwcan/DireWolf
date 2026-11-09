@@ -1,6 +1,6 @@
 # ADR-0058: M5e.2 — R3's E6: each hard rule weakened in a real `PROXY_ONLY` environment the released broker prepared, by a test-only runtime that does not do what the plan asks, measured from both vantages and refused by the production decision
 
-**Status:** Proposed · **Date:** 2026-11-08 · **Would supersede (only on the owner's acceptance, after its hosted evidence passes):** [ADR-0057](0057-m5e-proxy-only-real-container-evidence-residual.md) · **Refines:** [ADR-0047](0047-m5a-oci-execution-environment-and-measured-assurance.md) §9 (weakened profiles are caught by measurement), [ADR-0048](0048-m5b-proxy-only-topology-and-connect-proxy.md) §§9, 14 (`PROXY_ONLY`'s measurement and its weakened topologies) · **Addresses:** R3's E6 ([M5E_ASSURANCE_PLAN.md](../M5E_ASSURANCE_PLAN.md) §§3a, 3b), [issue #19](https://github.com/Onwcan/DireWolf/issues/19) · **Refined by:** [ADR-0059](0059-m5e-proxy-only-peer-joins-only-its-own-network-namespace.md) (Proposed: the host-network case, after F-E6-HOSTNET, §8) · **Implementation authorised by:** the owner, 2026-11-08 — the implementation and its evidence path only: not an acceptance of this record, not evidence, and not a change to M5's acceptance contract
+**Status:** Accepted · **Date:** 2026-11-09 (proposed and built 2026-11-08 under the owner's authorisation, committed as `3ca842c`; its first hosted run observed F-E6-HOSTNET, remedied by ADR-0059 at `14405ab`; accepted by the owner on 2026-11-09 after hosted CI run 42525106398 at `14405ab` — 31 of 31 jobs, `sandbox-proxy-weakened` and the `ci` aggregate among them — and the offline review of its E6 log, §§9, 10) · **Supersedes:** [ADR-0057](0057-m5e-proxy-only-real-container-evidence-residual.md) · **Refines:** [ADR-0047](0047-m5a-oci-execution-environment-and-measured-assurance.md) §9 (weakened profiles are caught by measurement), [ADR-0048](0048-m5b-proxy-only-topology-and-connect-proxy.md) §§9, 14 (`PROXY_ONLY`'s measurement and its weakened topologies) · **Addresses:** R3's E6 ([M5E_ASSURANCE_PLAN.md](../M5E_ASSURANCE_PLAN.md) §§3a, 3b), [issue #19](https://github.com/Onwcan/DireWolf/issues/19) · **Refined by:** [ADR-0059](0059-m5e-proxy-only-peer-joins-only-its-own-network-namespace.md) (accepted 2026-11-09: the host-network case, after F-E6-HOSTNET, §8) · **Implementation authorised by:** the owner, 2026-11-08 — the implementation and its evidence path only, not acceptance
 
 > **ADR-0057's E6 is built: for each of the fifteen rows ADR-0057 §1a names,
 > the released, unmodified broker prepares a genuine `PROXY_ONLY` environment
@@ -12,9 +12,19 @@
 > checked again from its bytes, and published with the run's provenance. It
 > runs only on a disposable GitHub-hosted runner. Its first hosted run, at
 > `3ca842c`, observed F-E6-HOSTNET (§8), and the broker was changed because
-> of it (ADR-0059): E6 is NOT EXERCISED for the broker as it now is until the
-> owner's hosted run at that change passes, and nothing here closes R3, M5e.2
-> or issue #19.**
+> of it (ADR-0059). The hosted run at that change, `14405ab` (run
+> 42525106398), passed every case — the control kept, each of the sixteen
+> weakened cases refused by exactly its row's invariants, all fifteen rows —
+> and the owner accepted this record on 2026-11-09 (§10).**
+
+Accepted on 2026-11-09. The owner's authorisation of E6's implementation
+(2026-11-08), the implementation and its first hosted run, ADR-0059's fix and
+its hosted run (42525106398 at `14405ab`), the review of that run's evidence,
+and this formal acceptance were separate steps, taken in that order. It
+supersedes ADR-0057: R3's real-container level, which the owner's R-B
+required, is evidenced here, and ADR-0057's residual was never accepted. What
+this evidence does not show is stated in §10 and under Consequences, and
+acceptance does not narrow it.
 
 ## Context
 
@@ -41,7 +51,7 @@ must stay true. So a weakened environment the production broker prepares can
 only come from where ADR-0057 §4 says one could: **a runtime that does not do
 what the plan asks.**
 
-## Decision (proposed)
+## Decision
 
 ### 1. The evidence path: a faulty runtime at the runtime's API
 
@@ -214,14 +224,24 @@ relay were created and started; the case reported
 vantages. The residue was the line's word alone, not a raw observation, so the
 offline review could not hold it (ADR-0059, Context).
 
-**Remedied (built 2026-11-08, hosted evidence pending; the owner's direction
-"build the fix first").** [ADR-0059](0059-m5e-proxy-only-peer-joins-only-its-own-network-namespace.md):
+**Remedied (built 2026-11-08, the owner's direction "build the fix first";
+committed as `14405ab`).** [ADR-0059](0059-m5e-proxy-only-peer-joins-only-its-own-network-namespace.md):
 the broker makes no peer unless the started environment's record passes
 `HOST_NETWORK_ISOLATED`. The host-network case must now show no setup, no
 relay, the broker's `relay_withheld network=FAIL`, and the host's loopback
 unchanged, kept raw; the gate accepts `host-loopback-added:none` and nothing
 else. The gate is the network's alone: every other weakening still gets its
 peer, so the interaction this record exists to observe stays observed.
+
+**Verified (hosted, `14405ab`, run
+[42525106398](https://github.com/Onwcan/DireWolf/actions/runs/42525106398)).**
+The daemon's record again `NetworkMode: host`; the broker read it right after
+the environment started and made no setup and no relay; its event
+`relay_withheld network=FAIL`; the same four invariants refused the
+environment, `HOST_PROXY_RELAY`, `HOST_RELAY_DIGEST` and
+`CONTAINER_PROXY_REACHABLE` failing beside them for want of a peer; the host's
+loopback `127.0.0.1/8` before and after, kept raw; the line
+`host-loopback-added:none` (ADR-0059 §6).
 
 ### 9. What closes E6, R3 and issue #19
 
@@ -234,13 +254,89 @@ peer, so the interaction this record exists to observe stays observed.
    over the downloaded log, and the manifest's provenance against the run.
 3. The owner accepts ADR-0059 and this record. Then ADR-0057's status becomes
    "Superseded by ADR-0058", the index moves it to the superseded table, and
-   `dwcheck adr --record` records both in the accepted digest; the
-   `test_m5e_r3_closure.py` guard then requires exactly that.
+   `dwcheck adr --record` records all three in the accepted digest — ADR-0057
+   too, because `dwcheck` holds a superseded record as immutable as an
+   accepted one. The `test_m5e_r3_closure.py` guard, amended in the same
+   change, then requires exactly that: ADR-0057 never Accepted, outside the
+   digest while it stood, and inside it, at its bytes, once superseded by
+   this record — which must itself be accepted and in the digest.
 4. The owner explicitly authorises R3 satisfied and M5e.2 complete, and
-   closes issue #19.
+   closes issue #19 once the hosted run of the change that records it
+   passes.
 
-Until then E6 is **NOT EXERCISED — hosted evidence pending**, R3 is not met,
-M5e.2 stays IN PROGRESS, and ADR-0057 stays Proposed under the owner's R-B.
+*Taken (2026-11-09).* Step 1: `14405ab`, hosted run 42525106398, 31 of 31 jobs
+(§10). Step 2: the review passed (§10), run for the owner. Step 3: the owner
+accepted ADR-0059 and this record on 2026-11-09; ADR-0057 reads "Superseded
+by ADR-0058", and the digest and the guard say so. Step 4: the owner
+authorised R3 satisfied and M5e.2 complete on 2026-11-09
+([M5E_ASSURANCE_PLAN.md](../M5E_ASSURANCE_PLAN.md) §10); issue #19 is the
+owner's to close, after this change's own hosted run.
+
+Before these steps E6 was **NOT EXERCISED — hosted evidence pending**, R3 was
+not met, M5e.2 was IN PROGRESS, and ADR-0057 was Proposed under the owner's
+R-B.
+
+### 10. The hosted evidence (run 42525106398 at `14405ab`)
+
+*Hosted (run
+[42525106398](https://github.com/Onwcan/DireWolf/actions/runs/42525106398),
+run no. 142, attempt 1, at `14405ab`, 2026-11-08): 31 of 31 jobs, the `ci`
+aggregate among them; `sandbox-proxy-weakened` is job
+[128866884086](https://github.com/Onwcan/DireWolf/actions/runs/42525106398/job/128866884086).*
+A GitHub-hosted Ubuntu 26 runner (image 20261101.186.1, kernel
+7.0.0-1019-azure), Docker 29.4.2, API 1.54, `runc`, cgroup v2. All 18 cases at
+`real-oci`:
+
+| Case | Refused by (vantage) | Also reported |
+|---|---|---|
+| `e6-faulty-runtime-forwards-a-conforming-environment-kept` | — kept, every required invariant passing, the topology's four passing; forwarded unchanged; destroyed | — |
+| `e6-weakened-writable-root-refused` | `HOST_ROOT_READ_ONLY`, `CONTAINER_ROOT_READ_ONLY` (both) | none |
+| `e6-weakened-root-user-refused` | `HOST_USER_NON_ROOT`, `CONTAINER_UID_GID` (both) | none |
+| `e6-weakened-privileged-refused` | `HOST_NOT_PRIVILEGED`, `CONTAINER_CAPABILITIES_EMPTY`, `CONTAINER_DEVICES_MINIMAL`, `CONTAINER_PROC_RESTRICTED` (both) | none |
+| `e6-weakened-runtime-socket-mounted-refused` | `HOST_NO_RUNTIME_SOCKET`, `HOST_MOUNTS_EXACT`, `CONTAINER_NO_RUNTIME_SOCKET` (both) | `CONTAINER_MOUNTS_EXPECTED` |
+| `e6-weakened-capability-added-refused` | `HOST_CAPABILITIES_DROPPED`, `CONTAINER_CAPABILITIES_EMPTY` (both) | none |
+| `e6-weakened-no-new-privileges-disabled-refused` | `HOST_NO_NEW_PRIVILEGES`, `CONTAINER_NO_NEW_PRIVILEGES` (both) | none |
+| `e6-weakened-seccomp-unconfined-refused` | `HOST_SECCOMP_PROFILE`, `CONTAINER_SECCOMP_PROFILE_ACTIVE` (both) | `CONTAINER_SECCOMP_FILTER`, `CONTAINER_NETWORK_ISOLATED`, `CONTAINER_UNSHARE_BLOCKED`, `CONTAINER_KEYRING_BLOCKED` |
+| `e6-weakened-seccomp-default-profile-refused` | `HOST_SECCOMP_PROFILE`, `CONTAINER_SECCOMP_PROFILE_ACTIVE` (both) | none |
+| `e6-weakened-host-pid-refused` | `HOST_PID_NAMESPACE_PRIVATE`, `CONTAINER_PID_NAMESPACE_PRIVATE` (both) | `HOST_NOT_PRIVILEGED` |
+| `e6-weakened-host-ipc-refused` | `HOST_IPC_NAMESPACE_PRIVATE` (host) | `HOST_NOT_PRIVILEGED` |
+| `e6-weakened-host-uts-refused` | `HOST_UTS_NAMESPACE_PRIVATE` (host) | none |
+| `e6-weakened-mutable-image-tag-refused` | `HOST_IMAGE_PINNED` (host) | none |
+| `e6-weakened-extra-device-refused` | `HOST_NO_DEVICES`, `CONTAINER_DEVICES_MINIMAL` (both) | none |
+| `e6-weakened-resource-limits-dropped-refused` | `HOST_RESOURCE_LIMITS`, `CONTAINER_CGROUP_LIMITS` (both) | none |
+| `e6-weakened-task-backstop-at-256-refused` | `HOST_RESOURCE_LIMITS`, `CONTAINER_RLIMITS` (both) | none |
+| `e6-weakened-host-network-refused` | `HOST_NETWORK_ISOLATED`, `CONTAINER_NETWORK_ISOLATED`, `CONTAINER_DIRECT_EGRESS_REFUSED`, `CONTAINER_DIRECT_DNS_REFUSED` (both) | none; no peer (§8), the host's loopback gained nothing |
+| `e6-row-count` | refused 16 of 16 cases; rows 15 of 15 | — |
+
+In every weakened case the daemon received the control's plan with exactly
+the row's field(s) changed, the environment was not kept, and nothing of it
+was left; in every case but the host's network the setup and the relay were
+made, the topology's four passing. The task's census found no evidence
+container or network left, and the three networks that predated the run kept.
+Every line but the host's network is byte-identical to run 42484188848's.
+
+*Reviewed offline (2026-11-09), for the owner.* `make
+sandbox-proxy-weakened-review` over the downloaded job log (SHA-256
+`aa208e4cb07b2e4d88cf051052faec041d0cd8b7fc35641dbc08777aa6752330`) passed:
+the manifest's SHA-256
+`4f5ec9950bd6e502393d20be014c74b25dc325397b7abc062b3551f63f5e0840`, 137 raw
+observations over 17 cases, each at its digest; the provenance the run's own —
+commit and `GITHUB_SHA` `14405ab`, a clean tree, run 42525106398 attempt 1,
+job `sandbox-proxy-weakened`, the runner and runtime above, the client
+`/usr/bin/docker` with its SHA-256, the probe's and the relay's SHA-256, every
+image. The same review refuses run 42484188848's log, and refused fifteen
+tampered copies of this one, each for its own reason (ADR-0059 §6).
+
+*What it does not show.* The weakening is injected at the runtime's API, so
+the daemon records it: a runtime that lies in its record is not modelled
+(Consequences). Three rows — the IPC and UTS namespaces and the mutable image
+tag — are refused from the host's vantage alone, as ADR-0057 §1a's contract
+gives them. The probe's and the relay's SHA-256 in the manifest are those the
+run built and the measurement pinned; the repository records no expected
+value for them, so they are checked against the run, not against a pin.
+ADR-0059's gate trusts the runtime's record (its §2). The evidence is one
+hosted run on one runner image and runtime version; a change to either is
+caught only by the required job's next run.
 
 ## Consequences
 
@@ -253,7 +349,9 @@ each weakening and the topology interact), with every other moved invariant
 reported. It is a required job, so a later change to the broker, the probe,
 the topology or the runtime that stops a weakening being refused under
 `PROXY_ONLY` fails CI. The raw observations make the result reviewable by
-someone who trusts neither the test nor the task.
+someone who trusts neither the test nor the task. Its hosted run at
+`14405ab` passed every case (§10), and R3's real-container level, which the
+owner's R-B required, is met on it.
 
 **Negative.** The weakening is injected at the API, so the daemon records it:
 this shows each hard rule caught when the runtime's record and the kernel
@@ -265,7 +363,8 @@ changed the runner's loopback before ADR-0059 (§8), and would again under a
 broker without its gate. The forwarder is some 650 lines of test
 code (the whole `e6` module about 2 100, its own unit tests included) that
 must keep parsing the client's HTTP; its unit tests, against a fake daemon,
-run in `make test`.
+run in `make test`. The probe's and the relay's digests are checked against
+the run that built them, not against a pin the repository records (§10).
 
 ## Alternatives considered
 
@@ -287,9 +386,26 @@ would need its own decision.
 runner is isolated and disposable (§3b, criterion 1), and its log is the
 record.
 
+## Owner decision
+
+**2026-11-08.** The owner authorised E6's implementation, its approach the
+implementer's, within the applicable safety controls and in an isolated,
+disposable environment ([M5E_ASSURANCE_PLAN.md](../M5E_ASSURANCE_PLAN.md) §10,
+"E6's evidence path") — the implementation and its evidence path only. After
+the first hosted run observed F-E6-HOSTNET, the owner directed: "Build the fix
+first" (ADR-0059).
+
+**2026-11-09: accepted.** After run 42525106398 at `14405ab` passed every case
+and its E6 log was reviewed (§10), the owner adopted ADR-0059 and then this
+record — the verified evidence for ADR-0057 §1a's fifteen rows — with ADR-0057
+superseded by it, and approved the change that records it ("Yes, build it").
+The limits §10 states stand as stated. Acceptance changed no product code,
+protocol, schema, dependency or CI gate: the job stays required, and every
+case in it.
+
 ## Revisit if
 
-The hosted run fails or shows an invariant move that this record does not
-expect; ADR-0059 is not accepted, or its gate changes; the
-topology, the probe's or the record's hard-rule code, or the runtime client
-changes; or a runtime that misreports its record is to be modelled.
+A hosted run of `sandbox-proxy-weakened` fails or shows an invariant move that
+§10 does not record; ADR-0059's gate changes; the topology, the probe's or the
+record's hard-rule code, or the runtime client changes; or a runtime that
+misreports its record is to be modelled.

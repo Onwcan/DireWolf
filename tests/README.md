@@ -295,10 +295,15 @@ inspection alike for a container the runtime does not hold and for a runtime
 it could not ask, so a suite believes a container gone only from a listing of
 exactly its id that the client answered, and fails its test otherwise (the
 evidence's side of F-ABSENT). `tests/architecture/test_m5e_r3_closure.py` holds the owner's
-R-B: ADR-0057 never accepted and outside the digest, its unapproved limited
-claim nowhere M5's, and, while it is Proposed, E6 said NOT EXERCISED (BLOCKED,
-or since 2026-11-08 hosted evidence pending) wherever R3 is stated, E6 never
-said passed, ADR-0058 never accepted ahead of it, and M5e.2 never said complete.
+R-B: ADR-0057 never accepted -- outside the digest while it stood, inside it at
+its bytes once superseded by ADR-0058 (2026-11-09), as `dwcheck adr` holds every
+superseded record -- its unapproved limited claim nowhere M5's, and, while it
+was Proposed, E6 said NOT EXERCISED (BLOCKED, or from 2026-11-08 hosted evidence
+pending) wherever R3 is stated, E6 never said passed, ADR-0058 never accepted
+ahead of it, and M5e.2 never said complete; ADR-0058, accepted, in the digest as
+ADR-0057's successor; and, whether or not ADR-0057 stands, no later step, M5e or
+M5 said complete, M5e.6 begun, or `M5e` or `M5` available -- each with a negative
+control.
 `tests/architecture/test_m5e_e6.py` holds E6 itself (ADR-0058): its required,
 hosted-only job and flag; the test's rows equal to the task's and covering every
 row of ADR-0057 §1a from its vantage; and the gate, the independent check of the

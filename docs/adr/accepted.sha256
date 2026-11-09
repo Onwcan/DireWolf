@@ -62,3 +62,6 @@ e43d57fa9e76969355e2871f7b788dcffd0e690543ff2969fc523201c0f34bbb  0050-m5c-kerne
 daa15b7e48be1955b7638fa878e3d42aa52c7183c57866a323e9258f7db29171  0052-m5d-sandboxed-process-exec.md
 486fa7c1a8dbdec7cae6b6186d5f856ff099669f37495744cfe8cb9a54f15c0c  0053-d11-exchange-worker-confinement-and-secret-memory.md
 a5dcf7c529379c8bd60e033884c50f1a40d60c949123896f69f3362925d786f4  0056-m5e-cross-run-task-limit-isolation.md
+9fe524f30adf6f5a331f9ad2be327a7519171cbaaba0941422825ba80970d6ef  0057-m5e-proxy-only-real-container-evidence-residual.md
+a2fc103e8e36802c93c2f8e4fb5d8bc334478c649a82bdba9c303e9846811c46  0058-m5e-proxy-only-hard-rules-weakened-in-a-real-environment.md
+173958a5b21e258ff754734123448468d67d70aa5a930b4f9d110e77375ea6ba  0059-m5e-proxy-only-peer-joins-only-its-own-network-namespace.md

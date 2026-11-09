@@ -155,7 +155,7 @@ and serving on Linux only. **M5 is in progress: M5a, M5b and M5c are complete (s
 **Adversarial:** the full path-traversal set ([EVALS.md](EVALS.md) §3) including Unicode normalisation and TOCTOU swap races in a tight loop; secret-in-output detection; core-dump inspection for secret residue.
 **Deferred:** remote fs, Windows-native hardening beyond the fallback walker.
 
-### M5 · Sandbox — **IN PROGRESS** (M5a complete, hosted acceptance passed; M5b complete, hosted acceptance passed; M5c complete, ADR-0050 accepted, hosted acceptance passed; M5d complete, ADR-0052 accepted 2026-10-26, hosted acceptance passed; M5e in progress: M5e.1 complete, hosted run 40774766063; M5e.2 in progress — R8, R9 and R11 hosted-verified, ADR-0056 accepted 2026-11-01, R3's real-container level required by the owner (R-B on ADR-0057) and blocked — M5 is complete only when M5e meets its own acceptance)
+### M5 · Sandbox — **IN PROGRESS** (M5a complete, hosted acceptance passed; M5b complete, hosted acceptance passed; M5c complete, ADR-0050 accepted, hosted acceptance passed; M5d complete, ADR-0052 accepted 2026-10-26, hosted acceptance passed; M5e in progress: M5e.1 complete, hosted run 40774766063; M5e.2 complete (2026-11-09) — R8, R9 and R11 hosted-verified, ADR-0056 accepted 2026-11-01; R3's real-container level, required by the owner (R-B on ADR-0057), hosted-verified at `14405ab` (run 42525106398), ADR-0059 and ADR-0058 accepted 2026-11-09, ADR-0057 superseded; M5e.3 complete; M5e.4 hosted-verified, owner acceptance pending; M5e.5 in progress; M5e.6 not started — M5 is complete only when M5e meets its own acceptance)
 
 M5 is two products in one (a sandbox *and* an egress proxy), so it is decomposed like M4
 ([ADR-0047](adr/0047-m5a-oci-execution-environment-and-measured-assurance.md)). The
@@ -451,7 +451,7 @@ and package-manager acceptance are M5e's, and the `local` environment is M6's (O
 stays in progress until M5e meets its own acceptance. Passing CI is the evidence named
 here — not a deployment, and not a certification.
 
-#### M5e · The M5 adversarial gate and closeout — **IN PROGRESS** (M5e.1 complete; M5e.2 partially implemented / assurance pending — its engineering hosted-verified, R8, R9 and R11 included, ADR-0056 accepted, R3's real-container E6 required by the owner (R-B on ADR-0057, 2026-11-01), built 2026-11-08 (ADR-0058, Proposed) and not yet exercised, hosted evidence pending, issue #19; M5e.3 complete ahead of M5e.2's close, by the owner's exception (2026-11-03), hosted-verified; M5e.4 in progress ahead of M5e.2's close, by the owner's exception (2026-11-05) — hosted-verified, owner acceptance pending; M5e.5 in progress — implementation authorised by the owner (2026-11-07) and complete, hosted evidence pending, ADR-0054 and ADR-0055 not accepted; M5e.6 not started)
+#### M5e · The M5 adversarial gate and closeout — **IN PROGRESS** (M5e.1 complete; M5e.2 complete (2026-11-09) — its engineering hosted-verified, R8, R9 and R11 included, ADR-0056 accepted; R3 satisfied, its real-container E6, required by the owner (R-B on ADR-0057, 2026-11-01), built 2026-11-08 and hosted-verified at `14405ab` (run 42525106398), ADR-0059 and ADR-0058 accepted, ADR-0057 superseded, issue #19; M5e.3 complete ahead of M5e.2's close, by the owner's exception (2026-11-03), hosted-verified; M5e.4 in progress ahead of M5e.2's close, by the owner's exception (2026-11-05) — hosted-verified, owner acceptance pending; M5e.5 in progress — implementation authorised by the owner (2026-11-07) and complete, hosted evidence pending, ADR-0054 and ADR-0055 not accepted; M5e.6 not started)
 
 **Planned 2026-10-26.** The gap analysis, the requirements-to-evidence matrix,
 the implementation sequence and the owner's decisions of 2026-10-26 on its open points are in
@@ -764,10 +764,23 @@ first ([ADR-0059](adr/0059-m5e-proxy-only-peer-joins-only-its-own-network-namesp
 unchanged, kept raw. Run 141 was of the broker before it, so **R3 E6 is NOT EXERCISED — hosted
 evidence pending** again.
 
-Still to do: R3's real-container level (E6: required by the owner's R-B, built 2026-11-08
-and NOT EXERCISED until the hosted `sandbox-proxy-weakened` job passes at ADR-0059's fix and the
-owner reviews its log and accepts ADR-0059 and ADR-0058, which supersedes ADR-0057; tracked in
-[issue #19](https://github.com/Onwcan/DireWolf/issues/19));
+**E6 hosted-verified; M5e.2 closed (2026-11-09).** The owner committed ADR-0059's fix as
+`14405ab`; hosted run [42525106398](https://github.com/Onwcan/DireWolf/actions/runs/42525106398)
+(run no. 142) passed **31 of 31 jobs**, `sandbox-proxy-weakened` among them: the control kept,
+each of the sixteen weakened cases — all fifteen of ADR-0057 §1a's rows — refused by exactly its
+row's invariants at `real-oci`, and in the host's network case no setup, no relay and the host's
+loopback unchanged, kept raw. Its log held offline (manifest SHA-256 `4f5ec995…`, 137 raw
+observations; [M5E_ASSURANCE_PLAN.md](M5E_ASSURANCE_PLAN.md) §3a.1). On that record the owner
+accepted [ADR-0059](adr/0059-m5e-proxy-only-peer-joins-only-its-own-network-namespace.md) and
+[ADR-0058](adr/0058-m5e-proxy-only-hard-rules-weakened-in-a-real-environment.md) on 2026-11-09 —
+ADR-0057 superseded by ADR-0058, never accepted; ADR-0048's preparation order amended by
+ADR-0059 — and authorised R3 satisfied and M5e.2 complete (the plan's §10, "M5e.2's closure").
+F-E6-HOSTNET is closed. **R3 is SATISFIED; M5e.2 is COMPLETE.** What E6 does not show is stated
+in ADR-0058 §10. M5e.3 is complete; M5e.4 hosted-verified, its acceptance the owner's separate
+decision; M5e.5 in progress; M5e.6 not started; M5 in progress.
+
+Still to do: [issue #19](https://github.com/Onwcan/DireWolf/issues/19), which tracked E6, closed
+by the owner after this change's own hosted run;
 the owner's acceptance of M5e.4, hosted-verified, the OD-E4 provenance
 mechanism included; M5e.5's npm and pip profiles
 ([ADR-0054](adr/0054-m5e-npm-hygiene-profile.md), [ADR-0055](adr/0055-m5e-pip-hygiene-profile.md),
