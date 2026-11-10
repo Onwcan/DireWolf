@@ -6064,6 +6064,27 @@ HYGIENE_MUTATIONS: tuple[tuple[str, str, str, str, str, tuple[str, ...]], ...] =
         "unit",
         ("pip_keeps_install_of_names_with_its_prefix_after_the_subcommand",),
     ),
+    # ADR-0055 §5, revised for F-PIP-TRUST: the prefix's `legacy-certs` is what
+    # keeps pip's `truststore` context, and with it `certifi`'s roots and the
+    # system's store, out of the trust. The unit mutant names another value;
+    # the hosted one drops it, which only `pip-os-trust-store-not-used` -- last
+    # in its test -- can catch: the evidence that the case can fail.
+    (
+        "pip trust: the prefix names another deprecated feature",
+        _HYGIENE_RS,
+        '    "--disable-pip-version-check",\n    "--use-deprecated=legacy-certs",\n',
+        '    "--disable-pip-version-check",\n    "--use-deprecated=legacy-resolver",\n',
+        "unit",
+        ("pip_keeps_install_of_names_with_its_prefix_after_the_subcommand",),
+    ),
+    (
+        "pip trust: --use-deprecated=legacy-certs dropped from the prefix",
+        _HYGIENE_RS,
+        '    "--disable-pip-version-check",\n    "--use-deprecated=legacy-certs",\n',
+        '    "--disable-pip-version-check",\n',
+        "hosted",
+        _PIP_EVIDENCE,
+    ),
     (
         "pip interpreter: -m pip allowed (D4)",
         _HYGIENE_RS,

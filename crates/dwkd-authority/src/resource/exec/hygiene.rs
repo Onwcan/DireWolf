@@ -479,11 +479,18 @@ pub const PIP_TRUST_FILE: &str = "/etc/direwolf/pip-ca.pem";
 
 /// The arguments ADR-0055 §2 adds to pip's own, after its subcommand --
 /// `--only-binary` is `install`'s option, which pip refuses before it.
+///
+/// `--use-deprecated=legacy-certs` (ADR-0055 §5, revised for F-PIP-TRUST):
+/// without it pip builds a `truststore` context holding `certifi`'s roots and
+/// the system's store, and loads the `--cert` file beside them; with it pip
+/// makes no such context, and the `--cert` file is its whole trust. A
+/// workload cannot take it back: pip appends each `--use-deprecated` value.
 const PIP_PREFIX: &[&str] = &[
     "--only-binary=:all:",
     "--no-cache-dir",
     "--no-input",
     "--disable-pip-version-check",
+    "--use-deprecated=legacy-certs",
     "--cert",
     PIP_TRUST_FILE,
 ];
@@ -1252,6 +1259,7 @@ mod tests {
                     "--no-cache-dir",
                     "--no-input",
                     "--disable-pip-version-check",
+                    "--use-deprecated=legacy-certs",
                     "--cert",
                     "/etc/direwolf/pip-ca.pem"
                 ],

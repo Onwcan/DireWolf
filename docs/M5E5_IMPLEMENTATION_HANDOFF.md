@@ -5,6 +5,7 @@
 second repair (unstaged at the time of writing)\
 **Reviewed:** 2026-11-07, on `main` at `6a702d710a1750be656c698722825c3f89ad5304`, before the
 evidence's first hosted run (§8)\
+**Revised:** 2026-11-10, on `main` at `8c2bd8acf860e9669dbfdbd8c1b2e3abb6469733` (hosted [run 42820123829](https://github.com/Onwcan/DireWolf/actions/runs/42820123829), 32 of 32 jobs): ADR-0055's trust, F-PIP-TRUST (§12), before the evidence's first hosted run\
 **Status:** **IMPLEMENTATION COMPLETE / HOSTED EVIDENCE PENDING.** The profiles, the
 evidence-only option, the launcher's profiles, the evidence suite, its task, its manual job
 and its mutation review were committed as `bbe3561`, `7df0840` and `6a702d7`; required CI passed
@@ -107,9 +108,12 @@ manual job runs it.** None has run anywhere.
 **Where a case may fail on its first run**, in order of likelihood. Each runs last in its
 test, so that its failure leaves every other case reported (§8, F-ORDER):
 
-1. **`pip-os-trust-store-not-used` — expected to fail.** pip 26.2.2's own source says so
-   (§8, F-PIP-TRUST). If it fails, ADR-0055 is revised, as its §9 requires; the profile is
-   not weakened and the case is not dropped.
+1. **`pip-os-trust-store-not-used`.** As built on 2026-11-07 it was expected to fail
+   (§8, F-PIP-TRUST). ADR-0055 §5 is revised for it before the first run (§12): the
+   prefix's `--use-deprecated=legacy-certs` keeps pip's `truststore` context out, so
+   the case is expected to pass, and the hosted mutant that drops the value must make
+   it fail. If it still fails, ADR-0055 is revised again; the profile is not weakened
+   and the case is not dropped.
 2. **`*-writes-only-workspace-and-tmp`** read `docker container diff`. The images now carry
    the mount points (§8, F-MOUNTS); anything the runtime still lists fails the case.
 3. **`npm-direct-route-refused`** uses npm's own `--noproxy`, which the profile does not
@@ -130,8 +134,8 @@ which fails the task; it is never counted as killed. The manual workflow runs it
 
 | Kind | Mutants | Where | As of this review |
 |---|---|---|---|
-| `unit` | 30: the default, the fence, npm's and pip's subcommands, specs, refusals, prefixes, `npx`, D4, the launcher's trust check | locally and hosted | run locally on the review's tree; the result is in the owner's report, from that run's own output |
-| `hosted` | 5: the launcher's trust check removed; `npm_config_cafile`, `npm_config_userconfig`, `npm_config_globalconfig` and `PIP_CONFIG_FILE` dropped | the manual job only | NOT EXERCISED |
+| `unit` | 31: the default, the fence, npm's and pip's subcommands, specs, refusals, prefixes, pip's trust value (§12), `npx`, D4, the launcher's trust check | locally and hosted | run locally on the review's tree; the result is in the owner's report, from that run's own output |
+| `hosted` | 6: the launcher's trust check removed; `npm_config_cafile`, `npm_config_userconfig`, `npm_config_globalconfig` and `PIP_CONFIG_FILE` dropped; `--use-deprecated=legacy-certs` dropped from pip's prefix (§12) | the manual job only | NOT EXERCISED |
 | equivalent | 1: `PIP_ONLY_BINARY` dropped — the authority's prefix outranks it on every profiled invocation, and the prefix's own removal is a `unit` mutant | run by nothing | listed with its reason |
 
 ## 7. What acceptance still needs
@@ -141,8 +145,8 @@ which fails the task; it is never counted as killed. The manual workflow runs it
    the plan's §10, "M5e.4's acceptance").
 2. **This evidence, hosted.** Commit §8's corrections, then run the manual workflow with
    `both` (§11) and read every case and its attribution.
-3. **ADR-0055's trust.** On F-PIP-TRUST, the owner's revision of ADR-0055 §2 and §5, its
-   implementation behind the same option, and the evidence again.
+3. **ADR-0055's trust — revised and implemented (2026-11-10, §12)**, behind the same
+   option, before the first run; the first run is its evidence.
 4. **The owner's acceptance** of D1–D4 and the six choices (§4, §9), and of each ADR, or a
    revision of the ADR for any case that did not hold.
 5. **The change that implements acceptance** (§10). It is separate, and it is not part of
@@ -179,7 +183,7 @@ No item here is approved by this document.
 | D4 `python -m pip` and `-m ensurepip` refused under pip's profile | **Approve** | Stricter; unit-tested and mutant-killed; its hosted case is pending |
 | The five stricter choices (§4) | **Approve** | Each is stricter than the ADRs' text and unit-tested |
 | The launcher's npm trust check (F-NPM-TRUST) | **Approve** | It keeps OD-E6 as decided. ADR-0054 §4's reason ("as npm documents it") is wrong for npm 11 and needs rewording at acceptance |
-| ADR-0055's trust (F-PIP-TRUST) | **Revise ADR-0055 §2 and §5 after the first run** | Run the evidence as built first, so the case's failure is on record. Then revise, implement behind the option and rerun |
+| ADR-0055's trust (F-PIP-TRUST) | **Revised before the first run (2026-11-10, §12)** | `--use-deprecated=legacy-certs` in pip's prefix; the hosted mutant that drops it records that the case can fail, in place of a first run that would only have recorded the predicted failure. Its evidence is the first manual run |
 | ADR-0054 acceptance | **Not ready** | No hosted evidence; §4's wording |
 | ADR-0055 acceptance | **Not ready** | No hosted evidence; F-PIP-TRUST |
 
@@ -223,8 +227,31 @@ Only the owner starts it. On GitHub: **Actions → M5e.5 evidence (manual) → R
 - **`sandbox hygiene evidence (make sandbox-hygiene-evidence)`.** It passes only if it ends
   with `attributed evidence: 44 cases reported`, after the cleanup line.
 - **`profile mutation review (make sandbox-registry-mutations)`.** It passes only with
-  `35/35 mutants killed; 1 equivalent, not run`. Each hosted mutant reruns the whole
+  `37/37 mutants killed; 1 equivalent, not run`. Each hosted mutant reruns the whole
   evidence, so this job takes the longer of the two.
 
 A failed case prints its workload, exit, bounded output, the origins' request counts and the
 broker's last events. Read the job log, then this document's §5 and §8.
+
+## 12. ADR-0055's trust revision (2026-11-10)
+
+F-PIP-TRUST (§8) is resolved in the profile before the evidence's first hosted run, as
+§8's suggestion described, rather than after a run that would only have recorded the
+predicted failure. The hosted mutant below records instead that the case can fail.
+
+| Where | Change |
+|---|---|
+| [ADR-0055](adr/0055-m5e-pip-hygiene-profile.md) §§2, 5, 10, *Revisit if* | The authority's prefix gains `--use-deprecated=legacy-certs`; §5 says why the pinned `--cert` is then pip's whole trust store, and why a workload cannot take it back; the mutation review covers it; a pip that removes the value is a revisit. Still **Proposed** |
+| `resource/exec/hygiene.rs` | `PIP_PREFIX` gains the value, before `--cert`, and its unit test the same |
+| `tests/sandbox_hygiene.rs` | The suite's copy of the prefix; `pip-os-trust-store-not-used` is unchanged and now expected to pass |
+| `scripts/dw.py` | Two mutants: `unit`, the prefix naming `legacy-resolver` instead (killed by the prefix's unit test); `hosted`, the value dropped (killed only by `pip_under_its_proposed_profile`, at its last case) |
+
+pip's source (26.2.1, the same paths as the pinned 26.2.2): `_build_session` makes the
+`truststore` context only when `"legacy-certs" not in options.deprecated_features_enabled`;
+`--use-deprecated` is an `append` option whose choices include `legacy-certs`; and
+`--use-feature=truststore` is listed as always on, a no-op. Without that context,
+`session.verify` is the `--cert` path alone. No launcher variable repeats the value: the
+prefix covers every profiled invocation, and `python -m pip` is refused (D4).
+
+Nothing else changes: no production behaviour, no case, no outcome, no attribution. The
+first manual run (§11) is this revision's evidence as well as M5e.5's.

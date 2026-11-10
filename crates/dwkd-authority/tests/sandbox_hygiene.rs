@@ -136,11 +136,12 @@ mod linux {
         "--no-fund",
         "--no-update-notifier",
     ];
-    const PIP_PREFIX: [&str; 6] = [
+    const PIP_PREFIX: [&str; 7] = [
         "--only-binary=:all:",
         "--no-cache-dir",
         "--no-input",
         "--disable-pip-version-check",
+        "--use-deprecated=legacy-certs",
         "--cert",
         "/etc/direwolf/pip-ca.pem",
     ];
@@ -2165,8 +2166,10 @@ reason = "NO_MATCHING_RULE"
             "read-only-root",
         );
         // 11. The granted name under an authority only the image's system
-        // store holds (ADR-0055 §5: whether a pinned `--cert` keeps pip from
-        // that store is measured, not assumed).
+        // store holds (ADR-0055 §5, revised for F-PIP-TRUST: with the
+        // prefix's `--use-deprecated=legacy-certs`, pip makes no `truststore`
+        // context, so the pinned `--cert` is its whole trust -- measured, not
+        // assumed; the hosted mutant that drops the value must fail here).
         n += 1;
         lab.untrusted_issuer(
             n,

@@ -1,6 +1,6 @@
 # ADR-0055: M5e — an evidence-backed pip profile for `workspace_exec_hygiene`: `pip install` of named wheels only, no build backend, configuration and trust pinned, everything else refused
 
-**Status:** Proposed · **Date:** 2026-10-27 · **Would amend (on acceptance):** [ADR-0052](0052-m5d-sandboxed-process-exec.md) §5a (`pip` leaves the obligation's "anything else" row — kept with nothing pip-specific — for this profile) · **Refines:** [ADR-0048](0048-m5b-proxy-only-topology-and-connect-proxy.md) (a package index is one more exact `network.https` grant through the proxy), [ADR-0045](0045-m4d-process-execution-broker.md) §8 (states how `argv_safe`'s R3 meets this profile, and changes nothing in it; §6), [SANDBOX.md](../SANDBOX.md) §4a · **Sibling of:** [ADR-0054](0054-m5e-npm-hygiene-profile.md) (npm; Proposed) · **Addresses:** [ADR-0000](0000-authority-plane-separation.md) (no second path, §11) · **Plan:** [M5E_ASSURANCE_PLAN.md](../M5E_ASSURANCE_PLAN.md) (the owner's decision OD-E2, 2026-10-26: pip gets its own profile in a sibling ADR)
+**Status:** Proposed (§§2, 5 and 10 and *Revisit if* revised on 2026-11-10 for finding F-PIP-TRUST, before the evidence's first hosted run; not accepted) · **Date:** 2026-10-27 · **Would amend (on acceptance):** [ADR-0052](0052-m5d-sandboxed-process-exec.md) §5a (`pip` leaves the obligation's "anything else" row — kept with nothing pip-specific — for this profile) · **Refines:** [ADR-0048](0048-m5b-proxy-only-topology-and-connect-proxy.md) (a package index is one more exact `network.https` grant through the proxy), [ADR-0045](0045-m4d-process-execution-broker.md) §8 (states how `argv_safe`'s R3 meets this profile, and changes nothing in it; §6), [SANDBOX.md](../SANDBOX.md) §4a · **Sibling of:** [ADR-0054](0054-m5e-npm-hygiene-profile.md) (npm; Proposed) · **Addresses:** [ADR-0000](0000-authority-plane-separation.md) (no second path, §11) · **Plan:** [M5E_ASSURANCE_PLAN.md](../M5E_ASSURANCE_PLAN.md) (the owner's decision OD-E2, 2026-10-26: pip gets its own profile in a sibling ADR)
 
 > **pip runs in an environment, under the obligation, only as `pip install`
 > of named packages from a granted index, as wheels — never a build backend
@@ -96,10 +96,10 @@ reserved name a mode B secret may not take (ADR-0052 §7).
 
 **By the authority**, the arguments it puts before the invocation's own and
 records in the plan it hashes: `--only-binary=:all:`, `--no-cache-dir`,
-`--no-input`, `--disable-pip-version-check` and `--cert
-/etc/direwolf/pip-ca.pem`. If pip's precedence is as documented, the command
-line outranks both the variables and any file; §9 measures it rather than
-assumes it.
+`--no-input`, `--disable-pip-version-check`, `--use-deprecated=legacy-certs`
+(§5) and `--cert /etc/direwolf/pip-ca.pem`. If pip's precedence is as
+documented, the command line outranks both the variables and any file; §9
+measures it rather than assumes it.
 
 ### 3. What would undo or widen it is refused
 
@@ -137,11 +137,32 @@ for npm (OD-E6), proposed here for pip: verification stays on;
 `--trusted-host`, `--cert` and `--client-cert` are refused; and the launcher
 and the authority both point pip at one trust file in the image,
 `/etc/direwolf/pip-ca.pem` (proposed path), which the operator provides and
-the image manifest pins by digest. That file is pip's whole trust store if pip
-behaves as documented — whether a pinned `--cert` also keeps pip from the
-operating system's store (`truststore`) is measured in §9 — and a missing file
-makes pip's TLS fail, closed. A package fetched over verified TLS is trusted
-no further than its grant: TLS says where it came from, not what it does.
+the image manifest pins by digest. A missing file makes pip's TLS fail,
+closed. A package fetched over verified TLS is trusted no further than its
+grant: TLS says where it came from, not what it does.
+
+**Revised 2026-11-10 (F-PIP-TRUST).** A pinned `--cert` alone does not make
+that file pip's whole trust store. pip 26.2 builds a `truststore` context for
+every session unless `legacy-certs` is enabled; that context loads `certifi`'s
+public roots and the operating system's default trust paths, and the `--cert`
+file is loaded beside them
+([M5E5_IMPLEMENTATION_HANDOFF.md](../M5E5_IMPLEMENTATION_HANDOFF.md) §8, read
+from pip's own source). So the authority's prefix also says
+`--use-deprecated=legacy-certs`: pip then makes no `truststore` context, its
+vendored `requests` hands urllib3 the `--cert` file as the only CA file, and no
+default store is loaded beside it. A workload cannot take it back: pip appends
+every `--use-deprecated` value to the prefix's; `--use-feature=truststore` is a
+no-op that turns nothing on; `--isolated` is refused (§3); and no configuration
+file is read (`PIP_CONFIG_FILE=/dev/null`). With it, the pinned file is pip's
+whole trust store, and that is measured, not assumed:
+`pip-os-trust-store-not-used` (§9) requires a certificate that only the image's
+system store trusts to be refused, and the hosted mutant that drops the value
+must fail that case (§10). `certifi`'s roots cannot be shown by a hermetic
+fixture, since no public CA signs one; they leave with `truststore` and nothing
+else. No launcher variable repeats the value (`PIP_USE_DEPRECATED`): the prefix
+is on every profiled invocation, and a second copy would only make that hosted
+mutant impossible to observe. `legacy-certs` is a deprecated value, so a pip
+that removes it or changes what it turns off is a revisit (below).
 
 ### 6. Under the shipped packs
 
@@ -219,7 +240,10 @@ withdrawn, never accepted with that case dropped.
 
 Each guard weakened in turn — the subcommand allowlist, the spec filter, each
 §3 refusal, each added variable, the prefix, the §8 fence — must fail a unit
-suite or the hosted evidence. Unit-killable mutants run locally; the rest run
+suite or the hosted evidence. Since §5's revision, the trust value too: a
+prefix that names another deprecated feature fails a unit test, and one that
+drops `--use-deprecated=legacy-certs` is a hosted mutant that only
+`pip-os-trust-store-not-used` can kill — the evidence that the case can fail. Unit-killable mutants run locally; the rest run
 in the hosted campaign the owner triggers, and are never reported as local
 kills (OD-E7).
 
@@ -275,7 +299,8 @@ documented precedence and binary-only semantics are relied on only as far as
 ## Revisit if
 
 A case in §9 fails on a newer pip; pip changes its precedence, its
-binary-only semantics or its default trust store; P1 or P2 is decided towards
+binary-only semantics or its default trust store; pip removes `legacy-certs`
+from `--use-deprecated`, or changes what it turns off (§5); P1 or P2 is decided towards
 allowing more; a build backend is found to run with `--only-binary=:all:`; or
 hash-checked requirements become necessary — each by its own evidence and
 decision.

@@ -451,7 +451,7 @@ and package-manager acceptance are M5e's, and the `local` environment is M6's (O
 stays in progress until M5e meets its own acceptance. Passing CI is the evidence named
 here — not a deployment, and not a certification.
 
-#### M5e · The M5 adversarial gate and closeout — **IN PROGRESS** (M5e.1 complete; M5e.2 complete (2026-11-09) — its engineering hosted-verified, R8, R9 and R11 included, ADR-0056 accepted; R3 satisfied, its real-container E6, required by R-B on ADR-0057 (2026-11-01), built 2026-11-08 and hosted-verified at `14405ab` (run 42525106398), ADR-0059 and ADR-0058 accepted, ADR-0057 superseded, issue #19; M5e.3 complete ahead of M5e.2's close, by an exception to M5e's order (2026-11-03), hosted-verified; M5e.4 complete (2026-11-09) — built ahead of M5e.2's close by a second exception (2026-11-05), hosted-verified (runs 134–137) and accepted, OD-E4's mechanism as built; M5e.5 in progress — implementation authorised (2026-11-07) and complete, hosted evidence pending, ADR-0054 and ADR-0055 not accepted; M5e.6 in progress — implementation authorised (2026-11-09), its first slice hosted-verified (2026-11-10), the gate job and its eval built, `M5e` and `M5` unavailable)
+#### M5e · The M5 adversarial gate and closeout — **IN PROGRESS** (M5e.1 complete; M5e.2 complete (2026-11-09) — its engineering hosted-verified, R8, R9 and R11 included, ADR-0056 accepted; R3 satisfied, its real-container E6, required by R-B on ADR-0057 (2026-11-01), built 2026-11-08 and hosted-verified at `14405ab` (run 42525106398), ADR-0059 and ADR-0058 accepted, ADR-0057 superseded, issue #19; M5e.3 complete ahead of M5e.2's close, by an exception to M5e's order (2026-11-03), hosted-verified; M5e.4 complete (2026-11-09) — built ahead of M5e.2's close by a second exception (2026-11-05), hosted-verified (runs 134–137) and accepted, OD-E4's mechanism as built; M5e.5 in progress — implementation authorised (2026-11-07) and complete, hosted evidence pending, ADR-0054 and ADR-0055 not accepted; M5e.6 in progress — implementation authorised (2026-11-09), the gate job and its eval hosted-verified (2026-11-10), `M5e` and `M5` unavailable)
 
 **Planned 2026-10-26.** The gap analysis, the requirements-to-evidence matrix,
 the implementation sequence and the owner's decisions of 2026-10-26 on its open points are in
@@ -798,11 +798,11 @@ SQLite 3.53.2 compiled into the authority. `d9cab80` takes `rusqlite` 0.41.1 wit
 
 Still to do: M5e.5's npm and pip profiles
 ([ADR-0054](adr/0054-m5e-npm-hygiene-profile.md), [ADR-0055](adr/0055-m5e-pip-hygiene-profile.md),
-both Proposed): implemented, their hosted evidence (the manual workflow, never run yet),
-ADR-0055's trust revision and their acceptance still to come; and M5e.6's gate: G1
-hosted-verified (run [42800717936](https://github.com/Onwcan/DireWolf/actions/runs/42800717936), no. 148, all nine bundles
-uploaded); G1b–G4 built, their hosted run pending — the four self-judging tasks' bundles,
-the `m5e-gate` job `ci` requires, which judges every bundle of the run again, and the
+both Proposed): implemented, ADR-0055's trust revised for F-PIP-TRUST (2026-11-10), their
+hosted evidence (the manual workflow, never run yet) and their acceptance still to come;
+and M5e.6's gate: G1–G4 hosted-verified (run
+[42820123829](https://github.com/Onwcan/DireWolf/actions/runs/42820123829), no. 151, 32 of 32 jobs) — every M5
+evidence job's bundle judged again by the `m5e-gate` job `ci` requires, and the
 `m5e-gate` eval, pending on `M5e`; then `M5e` and `M5` available, each a decision of its
 own, after M5e.5's acceptance.
 
