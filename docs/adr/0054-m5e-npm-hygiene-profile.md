@@ -1,6 +1,6 @@
 # ADR-0054: M5e — an evidence-backed npm profile for `workspace_exec_hygiene`: `npm ci` and `npm install` of registry packages with scripts off and configuration pinned, everything else still refused
 
-**Status:** Proposed (its open points decided by the owner on 2026-10-26, [plan](../M5E_ASSURANCE_PLAN.md) §10; not accepted) · **Date:** 2026-10-26 · **Would amend (on acceptance):** [ADR-0052](0052-m5d-sandboxed-process-exec.md) §5a (`npm` leaves the tools the obligation refuses as unevidenced, for this profile only; `npx`, `pnpm`, `yarn`, `bun`, `cargo`, a `cargo-*` binary, `rustup`, `corepack`, and a runner naming any of them stay refused) · **Refines:** [ADR-0048](0048-m5b-proxy-only-topology-and-connect-proxy.md) (a package registry is one more exact `network.https` grant through the proxy), [SANDBOX.md](../SANDBOX.md) §4a · **Addresses:** [ADR-0000](0000-authority-plane-separation.md) (no second path, §10) · **Plan:** [M5E_ASSURANCE_PLAN.md](../M5E_ASSURANCE_PLAN.md)
+**Status:** Proposed (its open points decided by the owner on 2026-10-26, [plan](../M5E_ASSURANCE_PLAN.md) §10; §§2, 4 and 8 and *Revisit if* revised on 2026-11-10 for findings F-NPM-CONFIG and F-NPM-TRUST, after the evidence's second hosted run; not accepted) · **Date:** 2026-10-26 · **Would amend (on acceptance):** [ADR-0052](0052-m5d-sandboxed-process-exec.md) §5a (`npm` leaves the tools the obligation refuses as unevidenced, for this profile only; `npx`, `pnpm`, `yarn`, `bun`, `cargo`, a `cargo-*` binary, `rustup`, `corepack`, and a runner naming any of them stay refused) · **Refines:** [ADR-0048](0048-m5b-proxy-only-topology-and-connect-proxy.md) (a package registry is one more exact `network.https` grant through the proxy), [SANDBOX.md](../SANDBOX.md) §4a · **Addresses:** [ADR-0000](0000-authority-plane-separation.md) (no second path, §10) · **Plan:** [M5E_ASSURANCE_PLAN.md](../M5E_ASSURANCE_PLAN.md)
 
 > **npm runs in an environment only as `npm ci` or `npm install` of registry
 > packages, with lifecycle scripts off and its configuration pinned by the
@@ -73,7 +73,7 @@ a tarball, a git or hosting shorthand (`github:`, `user/repo`), `file:`,
 
 **By the launcher**, for every hygiene launch, the profile's fixed variables
 — `npm_config_ignore_scripts=true` as today, and, added by this ADR:
-`npm_config_userconfig=/dev/null`, `npm_config_globalconfig=/dev/null`,
+`npm_config_userconfig=/dev/null`, `npm_config_globalconfig=/dev/null/npmrc`,
 `npm_config_strict_ssl=true`, `npm_config_update_notifier=false`,
 `npm_config_audit=false`, `npm_config_fund=false`,
 `npm_config_cache=/tmp/.npm` (the only writable place outside the workspace)
@@ -86,6 +86,27 @@ records in the plan it hashes: `--ignore-scripts`, `--strict-ssl`,
 `--no-audit`, `--no-fund`, `--no-update-notifier`. With both, a setting the
 workspace's `.npmrc` makes is outranked twice, if npm's precedence is as
 documented; §8 measures it rather than assumes it.
+
+**Revised 2026-11-10 (F-NPM-CONFIG).** The evidence's second hosted run
+showed two things about npm 11.19.1's configuration loader that the text above
+first missed. First, npm refuses to start when one file is named at two
+levels (`double-loading config "/dev/null" as "global"`): with both variables
+naming `/dev/null`, every npm invocation failed before it read anything. The
+global variable therefore names a path no file can have — `/dev/null` is not
+a directory — which npm reads, fails to read (`ENOTDIR`) and treats as it
+treats a missing file: nothing is loaded. Second, npm keeps a `globalconfig`
+taken from the environment or the command line on its lowest, *default*
+layer (its loader installs an accessor there that every later assignment
+reaches), so a workspace `.npmrc` that names `globalconfig` wins over the
+variable, and npm reads the workspace file it names. That file is read as
+global configuration: below the project's own `.npmrc`, which the workspace
+controls already, and below every variable and argument this section pins.
+It therefore lets a workspace set nothing it could not set in its `.npmrc`,
+and no pinned setting changes; §8 measures both. `userconfig` has no such
+accessor, and its variable outranks the project's choice. What the two
+variables guarantee is that npm reads no configuration file from outside the
+workspace except its own builtin one in the image: neither a home directory's
+`.npmrc` nor the image's global `npmrc`.
 
 ### 3. What would undo it is refused
 
@@ -111,10 +132,16 @@ and **the workload does not choose whom npm trusts** (the owner's decision
 OD-E6, 2026-10-26): the profile pins verification on and refuses turning it
 off; it refuses `--cafile` and `--ca`; and the launcher points npm at one trust
 file in the image, `/etc/direwolf/npm-ca.pem` (proposed path), which the operator
-provides and the image manifest pins by digest. As npm documents it, that file
-is npm's whole trust store — an operator using the public registry puts public
-roots in it, one using a private registry its own CA — and a missing file makes
-npm's TLS fail, closed. The evidence bakes its per-run CA into the CI-built
+provides and the image manifest pins by digest. That file is npm's whole
+trust store — an operator using the public registry puts public roots in it,
+one using a private registry its own CA. A missing file must fail closed, and
+npm alone does not: npm 11.19.1 reads `cafile` through a helper that answers
+nothing for a file it cannot find, and then trusts Node.js's bundled public
+roots (finding F-NPM-TRUST, 2026-11-07). The launcher therefore starts npm
+only when the trust file is a regular, readable, non-empty file; otherwise it
+executes nothing, the broker does not believe its status as npm's, and the
+authority answers `OUTCOME_UNKNOWN` and destroys the environment (ADR-0052
+§5). The evidence bakes its per-run CA into the CI-built
 image at that path, and §8 measures that a workspace `.npmrc` naming a CA takes
 no effect.
 
@@ -165,14 +192,14 @@ EXERCISED, never a pass.
 
 | Case | Expected | Enforced by |
 |---|---|---|
-| `npm-ci-granted-registry-installs` | the lockfile's packages installed in the workspace | the profile; npm |
+| `npm-ci-granted-registry-installs` | the lockfile's packages installed in the workspace, the image's own global `npmrc` (which would stop every install) unread | the profile; npm |
 | `npm-install-granted-registry-installs` | a named registry package installed | the profile; npm |
 | `npm-ungranted-registry-refused` | nothing installed, `CONNECT` refused | the proxy's decision |
 | `npm-tarball-on-ungranted-host-refused` | nothing installed | the proxy's decision |
 | `npm-redirect-to-ungranted-host-refused` | nothing installed | the proxy's decision |
 | `npm-direct-route-refused` | no route but the proxy | the namespace's errno |
 | `npm-lifecycle-scripts-not-run` | no marker from any of the root's or a dependency's four scripts | the launcher's variable and the authority's prefix |
-| `npm-project-npmrc-cannot-reenable-scripts` | no marker with the workspace `.npmrc` asking for scripts | precedence, measured |
+| `npm-project-npmrc-cannot-reenable-scripts` | no marker with the workspace `.npmrc` asking for scripts and naming a user and a global configuration in the workspace: the user one unread, the global one, which npm reads (§2), asking for scripts and TLS off without effect | precedence, measured |
 | `npm-project-npmrc-cannot-disable-tls` | the untrusted issuer still refused | precedence, measured |
 | `npm-project-npmrc-cannot-replace-ca` | a workspace `.npmrc` naming its own CA leaves the image's trust file in force | precedence, measured |
 | `npm-missing-trust-file-fails-closed` | an image without the trust file installs nothing | npm's own TLS verification |
@@ -252,6 +279,8 @@ evidence again.
 ## Revisit if
 
 A case in §8 fails on a newer npm; npm changes its configuration precedence
-or what `ignore-scripts` covers; a dependency form is found to run code with
+or what `ignore-scripts` covers; npm stops refusing one file at two levels,
+stops treating an unreadable configuration file as a missing one, or stops
+keeping an environment's `globalconfig` below the project's (§2); a dependency form is found to run code with
 scripts off; a kernel-mediated package fetch becomes worth its surface; or
 `pnpm`, `yarn` or `cargo` is needed — each by its own evidence and decision.

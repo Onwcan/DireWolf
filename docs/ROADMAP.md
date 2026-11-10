@@ -798,10 +798,10 @@ SQLite 3.53.2 compiled into the authority. `d9cab80` takes `rusqlite` 0.41.1 wit
 
 Still to do: M5e.5's npm and pip profiles
 ([ADR-0054](adr/0054-m5e-npm-hygiene-profile.md), [ADR-0055](adr/0055-m5e-pip-hygiene-profile.md),
-both Proposed): implemented, ADR-0055's trust revised for F-PIP-TRUST (2026-11-10), their
-hosted evidence (the manual workflow's first run,
-[42846068083](https://github.com/Onwcan/DireWolf/actions/runs/42846068083), stopped in the evidence's own
-harness; corrected, its rerun pending) and their acceptance still to come;
+both Proposed): implemented, ADR-0055's trust revised for F-PIP-TRUST and ADR-0054's npm
+configuration for F-NPM-CONFIG (2026-11-10), their hosted evidence (the manual workflow's
+second run, [42858621579](https://github.com/Onwcan/DireWolf/actions/runs/42858621579), passed three of five tests;
+corrected, its third run pending) and their acceptance still to come;
 and M5e.6's gate: G1–G4 hosted-verified (run
 [42820123829](https://github.com/Onwcan/DireWolf/actions/runs/42820123829), no. 151, 32 of 32 jobs) — every M5
 evidence job's bundle judged again by the `m5e-gate` job `ci` requires, and the

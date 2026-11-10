@@ -5598,6 +5598,13 @@ HYGIENE_SYSTEM_STORES = ("/etc/ssl/certs/ca-certificates.crt", "/etc/ssl/cert.pe
 HYGIENE_PIP_CONF = (
     "[global]\nindex-url = https://ungranted-registry.test:18444/simple/\nno-binary = :all:\n"
 )
+# npm's own global configuration in the image, where npm looks without
+# `npm_config_globalconfig` (its prefix's `etc/npmrc`): read, it would make
+# every install fail at once (`ENOTCACHED`), so every npm case that installs
+# shows it unread, and the hosted mutant that drops the variable is seen
+# (ADR-0054 §2, revised for F-NPM-CONFIG).
+HYGIENE_NPM_IMAGE_NPMRC = f"{REGISTRY_NODE_HOME}/etc/npmrc"
+HYGIENE_NPM_IMAGE_NPMRC_TEXT = "offline=true\n"
 HYGIENE_PIP_PATH = f"{REGISTRY_PYTHON_HOME}/bin/pip"
 HYGIENE_NPX_PATH = f"{REGISTRY_NODE_HOME}/bin/npx"
 # `npx`, pinned beside npm so its refusal is of a real, pinned npx.
@@ -5757,8 +5764,9 @@ HYGIENE_MOUNT_POINTS = ("/workspace", "/tmp", "/var/tmp")  # noqa: S108
 def hygiene_rootfs(base: Path, context: Path, pki: Path, minor: str, *, trusted: bool) -> Path:
     """One hygiene image's root at `context/rootfs`, copied from the
     registry tools image's checked rootfs (`base/rootfs`): `pip` and `npx`
-    launchers, the image `pip.conf`, the third authority in the system
-    store, an empty directory at each of HYGIENE_MOUNT_POINTS, and -- when
+    launchers, the image `pip.conf`, npm's own global `npmrc` (which npm
+    must not read), the third authority in the system store, an empty
+    directory at each of HYGIENE_MOUNT_POINTS, and -- when
     `trusted` -- the run's anchor (`pki/ca.pem`) at both trust paths. No
     runtime is touched. Returns the rootfs."""
     shutil.rmtree(context, ignore_errors=True)
@@ -5780,6 +5788,10 @@ def hygiene_rootfs(base: Path, context: Path, pki: Path, minor: str, *, trusted:
     for path in HYGIENE_SYSTEM_STORES:
         _place(rootfs, pki / "system.pem", path, 0o644)
     (etc / "pip.conf").write_text(HYGIENE_PIP_CONF, encoding="utf-8")
+    npmrc = rootfs / HYGIENE_NPM_IMAGE_NPMRC.lstrip("/")
+    npmrc.parent.mkdir(parents=True, exist_ok=True)
+    npmrc.write_text(HYGIENE_NPM_IMAGE_NPMRC_TEXT, encoding="utf-8")
+    npmrc.chmod(0o644)
     for point in HYGIENE_MOUNT_POINTS:
         directory = rootfs / point.lstrip("/")
         directory.mkdir(parents=True, exist_ok=True)
@@ -6136,7 +6148,7 @@ HYGIENE_MUTATIONS: tuple[tuple[str, str, str, str, str, tuple[str, ...]], ...] =
     (
         "npm variables: npm_config_globalconfig dropped",
         _PROFILE_RS,
-        '    ("npm_config_globalconfig", "/dev/null"),\n',
+        '    ("npm_config_globalconfig", NPM_GLOBALCONFIG),\n',
         "",
         "hosted",
         _NPM_EVIDENCE,

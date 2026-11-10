@@ -430,6 +430,26 @@ mod tests {
     }
 
     #[test]
+    fn npms_user_and_global_configuration_name_two_different_files() {
+        // npm 11 refuses to start when one file is named at two levels
+        // (`double-loading config "/dev/null"`; run 42858621579, F-NPM-CONFIG).
+        let named = |key: &str| {
+            profile::HYGIENE_NPM_ENVIRONMENT
+                .iter()
+                .find(|(name, _)| *name == key)
+                .map_or("", |(_, value)| *value)
+        };
+        let user = named("npm_config_userconfig");
+        let global = named("npm_config_globalconfig");
+        assert_ne!(user, global);
+        assert_eq!(user, "/dev/null");
+        // A path under `/dev/null`: no file can ever be there.
+        assert_eq!(global, profile::NPM_GLOBALCONFIG);
+        assert!(global.starts_with("/dev/null/"), "{global}");
+        assert!(!std::path::Path::new(global).exists());
+    }
+
+    #[test]
     fn a_secret_variable_is_never_a_control_proxy_or_hygiene_name() {
         assert!(name_allowed("DEPLOY_TOKEN"));
         assert!(name_allowed("GH_TOKEN"));

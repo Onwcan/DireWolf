@@ -404,3 +404,9 @@ def test_the_hygiene_images_carry_their_mount_points_and_trust_as_asked(tmp_path
         for store in dw.HYGIENE_SYSTEM_STORES:
             assert (rootfs / store.lstrip("/")).read_text(encoding="utf-8") == "system\n"
         assert (rootfs / "etc" / "pip.conf").read_text(encoding="utf-8") == dw.HYGIENE_PIP_CONF
+        # npm's own global configuration, where npm looks without the
+        # variable, says something no install survives (F-NPM-CONFIG).
+        npmrc = rootfs / dw.HYGIENE_NPM_IMAGE_NPMRC.lstrip("/")
+        assert npmrc.read_text(encoding="utf-8") == dw.HYGIENE_NPM_IMAGE_NPMRC_TEXT
+        assert f"{dw.REGISTRY_NODE_HOME}/etc/npmrc" == dw.HYGIENE_NPM_IMAGE_NPMRC
+        assert "offline=true" in dw.HYGIENE_NPM_IMAGE_NPMRC_TEXT

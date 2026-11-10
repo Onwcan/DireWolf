@@ -186,11 +186,17 @@ pub const HYGIENE_ENVIRONMENT: &[(&str, &str)] = &[
 pub const NPM_TRUST_FILE: &str = "/etc/direwolf/npm-ca.pem";
 /// pip's one trust file in the image (ADR-0055 §5, P4; proposed path).
 pub const PIP_TRUST_FILE: &str = "/etc/direwolf/pip-ca.pem";
+/// npm's global configuration file under ADR-0054 §2 (revised for
+/// F-NPM-CONFIG): a path no file can have, as `/dev/null` is not a
+/// directory. npm's read of it fails (`ENOTDIR`) and loads nothing, as for a
+/// missing file. It cannot be `/dev/null` as well: npm 11 refuses to load one
+/// file at two levels, and the user configuration is `/dev/null`.
+pub const NPM_GLOBALCONFIG: &str = "/dev/null/npmrc";
 /// The variables ADR-0054 §2 adds for npm, set by [`LAUNCH_HYGIENE_NPM`] over
 /// [`HYGIENE_ENVIRONMENT`] (which already sets `npm_config_ignore_scripts`).
 pub const HYGIENE_NPM_ENVIRONMENT: &[(&str, &str)] = &[
     ("npm_config_userconfig", "/dev/null"),
-    ("npm_config_globalconfig", "/dev/null"),
+    ("npm_config_globalconfig", NPM_GLOBALCONFIG),
     ("npm_config_strict_ssl", "true"),
     ("npm_config_update_notifier", "false"),
     ("npm_config_audit", "false"),

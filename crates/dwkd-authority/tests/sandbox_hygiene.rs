@@ -94,7 +94,7 @@ mod linux {
     use dwkd_authority::capability::PrivacyClass;
     use dwkd_authority::state::PolicySet;
     use dwkd_authority::state::{
-        DEFAULT_LEASE_TTL_MS, ManualClock, Mode, StartupConfig, WorkspaceId, WorkspaceSensitivity,
+        MAX_LEASE_TTL_MS, ManualClock, Mode, StartupConfig, WorkspaceId, WorkspaceSensitivity,
     };
 
     use super::broker_support::Broker;
@@ -282,6 +282,18 @@ mod linux {
     fn tunnels(dispositions: &[String]) -> u64 {
         ACCEPTED.iter().map(|way| counted(dispositions, way)).sum()
     }
+
+    /// Node.js's certificate-verification error codes, as npm prints them
+    /// (`npm error code …`) when its own TLS refuses an issuer.
+    const NODE_TLS_REFUSALS: [&str; 7] = [
+        "UNABLE_TO_GET_ISSUER_CERT_LOCALLY",
+        "UNABLE_TO_GET_ISSUER_CERT",
+        "UNABLE_TO_VERIFY_LEAF_SIGNATURE",
+        "SELF_SIGNED_CERT_IN_CHAIN",
+        "DEPTH_ZERO_SELF_SIGNED_CERT",
+        "CERT_SIGNATURE_FAILURE",
+        "CERT_UNTRUSTED",
+    ];
 
     const TAIL: usize = 4096;
 
@@ -561,7 +573,7 @@ mod linux {
                 DwkpBody::Ack(_) => self.renewed = asked,
                 other => panic!(
                     "the lease was not renewed after {unrenewed:?} (TTL {:?}): {other:?}",
-                    Duration::from_millis(DEFAULT_LEASE_TTL_MS)
+                    Duration::from_millis(MAX_LEASE_TTL_MS)
                 ),
             }
         }
@@ -590,8 +602,12 @@ mod linux {
         }
     }
 
+    /// A `process_exec` call's JSON. Each string through the protocol's own
+    /// encoder, so a multi-line program argument is escaped (run
+    /// 42858621579: a hand-made quote left its newlines raw, and the request
+    /// was refused as invalid JSON).
     fn call(executable: &str, args: &[&str]) -> String {
-        let quote = |s: &str| format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""));
+        let quote = |s: &str| json::to_canonical_string(&Value::String(s.to_owned()));
         let args: Vec<String> = args.iter().map(|a| quote(a)).collect();
         format!(
             r#"{{"executable":{},"args":[{}],"timeout_seconds":{WALL}}}"#,
@@ -703,6 +719,13 @@ mod linux {
 
         fn said(&self, needle: &str) -> bool {
             self.stdout.contains(needle) || self.stderr.contains(needle)
+        }
+
+        /// Whether npm reported Node.js's own refusal of a certificate --
+        /// not merely a failure, which npm's configuration refusing to load
+        /// is too (run 42858621579).
+        fn tls_refused(&self) -> bool {
+            NODE_TLS_REFUSALS.iter().any(|code| self.said(code))
         }
 
         fn failed(&self) -> bool {
@@ -962,8 +985,15 @@ reason = "NO_MATCHING_RULE"
                 ],
             );
             let socket = dir.path().join("ipc").join("kernel.sock");
+            // The longest lease the authority allows: a client cannot renew
+            // while its one request is in flight, and npm retries a refused
+            // connection for over a minute (run 42858621579: a 72 s `npm ci`
+            // outlived the default 60 s lease).
+            let ttl = MAX_LEASE_TTL_MS.to_string();
             let mut args: Vec<String> = [
                 "serve",
+                "--lease-ttl-ms",
+                &ttl,
                 "--state-dir",
                 state.to_str().unwrap(),
                 "--socket",
@@ -1272,6 +1302,23 @@ reason = "NO_MATCHING_RULE"
             )
         }
 
+        /// End a run whose tool refused a certificate itself: the proxy
+        /// carried at least one tunnel -- the refusal was the tool's, past
+        /// the grant -- and refused nothing beyond the probe's questions.
+        fn release_tunnelled(&self, peer: &mut Peer, environment: &str) {
+            peer.release();
+            let dispositions = self.destroyed(environment);
+            assert!(
+                tunnels(&dispositions) >= 1,
+                "the proxy carried no tunnel: {dispositions:?}"
+            );
+            assert_eq!(
+                beyond_the_probe(&dispositions, self.probe_questions(environment)),
+                0,
+                "{dispositions:?}"
+            );
+        }
+
         /// A destroyed environment, its containers gone: the proxy's
         /// dispositions its destruction recorded.
         fn destroyed(&self, environment: &str) -> Vec<String> {
@@ -1288,14 +1335,24 @@ reason = "NO_MATCHING_RULE"
             texts(&destroyed, "egress_dispositions")
         }
 
-        /// The plan the authority recorded for the run's last workload:
-        /// its launch and the obligation's arguments.
-        fn recorded_plan(&self, run: &RunId) -> (String, Vec<String>, Vec<String>) {
+        /// The plan the authority recorded for the run's last workload of
+        /// `executable`: its launch, the obligation's arguments and the
+        /// argv. By executable, not merely the last: a case measures with
+        /// the interpreter after the tool, and that is a workload too (run
+        /// 42858621579 read the measurement's plan, `HYGIENE`, for pip's).
+        fn recorded_plan(
+            &self,
+            run: &RunId,
+            executable: &str,
+        ) -> (String, Vec<String>, Vec<String>) {
             let record = audit_records(&self.dir.state(), "workload.intent_recorded")
                 .into_iter()
                 .rev()
-                .find(|r| super::state_support::text(r, "run_id") == Some(run.as_str()))
-                .expect("the intent was audited");
+                .find(|r| {
+                    super::state_support::text(r, "run_id") == Some(run.as_str())
+                        && texts(r, "argv").first().map(String::as_str) == Some(executable)
+                })
+                .unwrap_or_else(|| panic!("no intent of {executable} was audited"));
             (
                 super::state_support::text(&record, "launch")
                     .unwrap_or_default()
@@ -1409,7 +1466,7 @@ reason = "NO_MATCHING_RULE"
             let run_markers: Vec<&PathBuf> = markers.iter().filter(|m| m.exists()).collect();
             assert!(run_markers.is_empty(), "a script ran: {run_markers:?}");
             changed = Some(lab.runtime.changed(&container));
-            let (launch, prefix, argv) = lab.recorded_plan(&a.run);
+            let (launch, prefix, argv) = lab.recorded_plan(&a.run, &lab.pins.npm);
             let refused = lab.release(&mut a, &ran.environment);
             assert_eq!(refused, 0, "{}", lab.why("a refusal", Some(&ran)));
             evidence(
@@ -1505,18 +1562,26 @@ reason = "NO_MATCHING_RULE"
 
         // 7-8. A workspace `.npmrc` asking for scripts, TLS off and its own
         // trust, and naming a user and a global configuration in the
-        // workspace that would send npm to an unrouted proxy: scripts stay
-        // off, the image's trust stays in force and neither file is read
-        // (`npm_config_userconfig` and `npm_config_globalconfig` outrank a
-        // project's choice of them).
+        // workspace. `npm_config_userconfig` outranks the project's choice:
+        // the user file says `offline=true`, so were it read, `npm ci` would
+        // fail at once (`ENOTCACHED`). The global file is another matter
+        // (ADR-0054 §2, revised for F-NPM-CONFIG): npm 11 keeps a
+        // `globalconfig` from the environment on its lowest, default layer,
+        // so the project's choice of that file wins and npm reads it -- as
+        // global configuration, below the project file itself and below
+        // every pin. It asks for scripts and for TLS off again: scripts stay
+        // off and the image's trust stays in force all the same.
         n += 1;
         groups.run("npm-project-npmrc-cannot-reenable-scripts", || {
             lab.npm_project(n);
             lab.place(n, "workspace/npm-hostile.npmrc", ".npmrc");
             let hostile =
                 std::fs::read_to_string(lab.fixtures.join("workspace/npm-hostile.npmrc")).unwrap();
-            let mut redirected = 0;
-            for key in ["userconfig=", "globalconfig="] {
+            let mut written = 0;
+            for (key, says) in [
+                ("userconfig=", "offline=true\n"),
+                ("globalconfig=", "ignore-scripts=false\nstrict-ssl=false\n"),
+            ] {
                 let named = hostile
                     .lines()
                     .find_map(|line| line.strip_prefix(key))
@@ -1525,11 +1590,11 @@ reason = "NO_MATCHING_RULE"
                     .strip_prefix("/workspace/")
                     .unwrap_or_else(|| panic!("{key} names {named}, outside the workspace"));
                 let at = lab.workspace(n).join(file);
-                std::fs::write(&at, format!("https-proxy=http://{UNROUTED}:9/\n")).unwrap();
+                std::fs::write(&at, says).unwrap();
                 mode(&at, 0o644);
-                redirected += 1;
+                written += 1;
             }
-            assert_eq!(redirected, 2);
+            assert_eq!(written, 2);
             let mut a = lab.peer(n, &[]);
             let ran = lab.npm(&mut a, &["ci", "--registry", &granted]);
             assert_eq!(
@@ -1548,7 +1613,7 @@ reason = "NO_MATCHING_RULE"
             evidence(
                 "npm-project-npmrc-cannot-reenable-scripts",
                 &format!(
-                    "not-run:{}-markers-absent;hostile-npmrc;its-user-and-global-config-unread",
+                    "not-run:{}-markers-absent;hostile-npmrc;user-config-unread;global-below-pins",
                     markers.len()
                 ),
                 "hygiene-launcher",
@@ -1574,13 +1639,18 @@ reason = "NO_MATCHING_RULE"
                 "{}",
                 lab.why("rogue under a hostile .npmrc", Some(&ran))
             );
+            assert!(
+                ran.tls_refused(),
+                "{}",
+                lab.why("no certificate refusal of npm's own", Some(&ran))
+            );
             lab.container(&a.run);
             assert_eq!(lab.files(&mut a, "/workspace/node_modules"), 0);
             assert!(
                 lab.rogue.requests().is_empty(),
                 "a request reached the rogue origin"
             );
-            lab.release(&mut a, &ran.environment);
+            lab.release_tunnelled(&mut a, &ran.environment);
             evidence(
                 "npm-project-npmrc-cannot-disable-tls",
                 "refused:nothing-installed;untrusted-issuer;strict-ssl-false-in-npmrc",
@@ -1622,9 +1692,18 @@ reason = "NO_MATCHING_RULE"
         groups.run("npm-git-dependency-not-prepared", || {
             let (git_parent, _) = lab.npm_package("git-parent");
             let served = lab.ungranted.requests().len();
+            let asked = lab.granted.to(&format!("/npm/{git_parent}")).len();
             let mut a = lab.peer(n, &[]);
             let ran = lab.npm(&mut a, &["install", "--registry", &granted, &git_parent]);
             assert!(ran.failed(), "{}", lab.why("git dependency", Some(&ran)));
+            // npm got as far as the parent: it asked the granted registry
+            // for it, so what stopped it was the git dependency, not npm
+            // failing before it began (run 42858621579 counted that).
+            assert!(
+                lab.granted.to(&format!("/npm/{git_parent}")).len() > asked,
+                "{}",
+                lab.why("npm never asked for the parent", Some(&ran))
+            );
             lab.container(&a.run);
             assert!(
                 !lab.marker(n, "npm-git-dep-prepare").exists(),
@@ -1657,13 +1736,18 @@ reason = "NO_MATCHING_RULE"
                 ],
             );
             assert!(ran.failed(), "{}", lab.why("rogue", Some(&ran)));
+            assert!(
+                ran.tls_refused(),
+                "{}",
+                lab.why("no certificate refusal of npm's own", Some(&ran))
+            );
             lab.container(&a.run);
             assert_eq!(lab.files(&mut a, "/workspace/node_modules"), 0);
-            assert_eq!(
-                lab.release(&mut a, &ran.environment),
-                0,
-                "the granted tunnel was refused"
+            assert!(
+                lab.rogue.requests().is_empty(),
+                "a request reached the rogue origin"
             );
+            lab.release_tunnelled(&mut a, &ran.environment);
             evidence(
                 "npm-untrusted-issuer-refused",
                 "refused:nothing-installed;untrusted-issuer;tunnel-granted",
@@ -1868,7 +1952,7 @@ reason = "NO_MATCHING_RULE"
             let container = lab.container(&a.run);
             let files = lab.installed(&mut a, "granted", &["base"]);
             changed = Some(lab.runtime.changed(&container));
-            let (launch, prefix, argv) = lab.recorded_plan(&a.run);
+            let (launch, prefix, argv) = lab.recorded_plan(&a.run, &lab.pins.pip);
             assert_eq!(lab.release(&mut a, &ran.environment), 0);
             evidence(
                 "pip-install-granted-index-installs",
@@ -2031,6 +2115,13 @@ reason = "NO_MATCHING_RULE"
                 ],
             );
             assert!(ran.failed(), "{}", lab.why("sdist", Some(&ran)));
+            // pip found nothing it may install -- binaries only -- rather
+            // than failing before it looked.
+            assert!(
+                ran.said("No matching distribution found"),
+                "{}",
+                lab.why("not pip's binary-only refusal", Some(&ran))
+            );
             lab.container(&a.run);
             assert!(
                 !lab.marker(n, "pip-build-backend").exists(),
@@ -2066,7 +2157,14 @@ reason = "NO_MATCHING_RULE"
                 served,
                 "the image's pip.conf was read"
             );
-            lab.release(&mut a, &ran.environment);
+            // pip went to its own default index, which no grant names, so the
+            // proxy refused it: pip ran, and without the image's file.
+            let refused = lab.release(&mut a, &ran.environment);
+            assert!(
+                refused >= 1,
+                "{}",
+                lab.why("pip asked no index", Some(&ran))
+            );
             evidence(
                 "pip-image-configuration-not-read",
                 "not-read:ungranted-index-untouched;nothing-installed",
@@ -2477,7 +2575,7 @@ reason = "NO_MATCHING_RULE"
                 &base,
             ],
         );
-        let (launch, prefix, _) = lab.recorded_plan(&a.run);
+        let (launch, prefix, _) = lab.recorded_plan(&a.run, &lab.pins.pip);
         assert_eq!(launch, "HYGIENE", "pip's launch changed without the option");
         assert!(
             prefix.is_empty(),

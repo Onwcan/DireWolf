@@ -7,14 +7,17 @@ second repair (unstaged at the time of writing)\
 evidence's first hosted run (§8)\
 **Revised:** 2026-11-10, on `main` at `8c2bd8acf860e9669dbfdbd8c1b2e3abb6469733` (hosted [run 42820123829](https://github.com/Onwcan/DireWolf/actions/runs/42820123829), 32 of 32 jobs): ADR-0055's trust, F-PIP-TRUST (§12), before the evidence's first hosted run\
 **Revised:** 2026-11-10, after the evidence's first hosted run, [42846068083](https://github.com/Onwcan/DireWolf/actions/runs/42846068083) on `7f0f01c`: five corrections to the evidence and its mutation review (§13)\
+**Revised:** 2026-11-10, after the second hosted run, [42858621579](https://github.com/Onwcan/DireWolf/actions/runs/42858621579) on `2a1bbe9`: ADR-0054's npm configuration (F-NPM-CONFIG) and five corrections to the evidence (§14)\
 **Status:** **IMPLEMENTATION COMPLETE / HOSTED EVIDENCE PENDING.** The profiles, the
 evidence-only option, the launcher's profiles, the evidence suite, its task, its manual job
 and its mutation review were committed as `bbe3561`, `7df0840` and `6a702d7`; required CI passed
 on each, 30 of 30 jobs ([run 42397671369](https://github.com/Onwcan/DireWolf/actions/runs/42397671369)
 on `6a702d7`). Required CI does not run this evidence. The review in §8 corrected the
 evidence and one fail-closed defect before its first run. That first run (2026-11-10, §13)
-stopped in the evidence's own harness in four of its five tests, so no profile case has
-passed hosted yet; the harness is corrected and the rerun is pending.\
+stopped in the evidence's own harness in four of its five tests; the second (§14) passed
+three of five and found that ADR-0054's profile kept npm from starting at all
+(F-NPM-CONFIG). Both are corrected, ADR-0054 is revised, and the third run is pending;
+no run has yet passed.\
 **Authority of this document:** a technical handoff, not an ADR. It approves nothing.
 [ADR-0054](adr/0054-m5e-npm-hygiene-profile.md) and
 [ADR-0055](adr/0055-m5e-pip-hygiene-profile.md) stay **Proposed**. In every production
@@ -145,9 +148,9 @@ which fails the task; it is never counted as killed. The manual workflow runs it
 1. **M5e.4 first — done.** Its repaired hosted run passed (runs 42390237238 to 42397671369), and
    it was accepted on 2026-11-09 ([M5E4_IMPLEMENTATION_HANDOFF.md](M5E4_IMPLEMENTATION_HANDOFF.md) §13;
    the plan's §10, "M5e.4's acceptance").
-2. **This evidence, hosted.** Its first run stopped in the harness (§13). Commit §13's
-   corrections, then run the manual workflow with `both` again (§11) and read every case
-   and its attribution.
+2. **This evidence, hosted.** Its first run stopped in the harness (§13); its second found
+   F-NPM-CONFIG (§14). Commit §14's corrections, then run the manual workflow with `both`
+   again (§11) and read every case and its attribution.
 3. **ADR-0055's trust — revised and implemented (2026-11-10, §12)**, behind the same
    option, before the first run; the first run is its evidence.
 4. **The owner's acceptance** of D1–D4 and the six choices (§4, §9), and of each ADR, or a
@@ -185,9 +188,9 @@ No item here is approved by this document.
 | D3 per-run trust files baked into the evidence's images | **Approve** | The evidence's own images; one without trust files; since §8, the mount points too |
 | D4 `python -m pip` and `-m ensurepip` refused under pip's profile | **Approve** | Stricter; unit-tested and mutant-killed; its hosted case is pending |
 | The five stricter choices (§4) | **Approve** | Each is stricter than the ADRs' text and unit-tested |
-| The launcher's npm trust check (F-NPM-TRUST) | **Approve** | It keeps OD-E6 as decided. ADR-0054 §4's reason ("as npm documents it") is wrong for npm 11 and needs rewording at acceptance |
+| The launcher's npm trust check (F-NPM-TRUST) | **Approve** | It keeps OD-E6 as decided. ADR-0054 §4's reason ("as npm documents it") was wrong for npm 11; reworded 2026-11-10 (§14) |
 | ADR-0055's trust (F-PIP-TRUST) | **Revised before the first run (2026-11-10, §12)** | `--use-deprecated=legacy-certs` in pip's prefix; the hosted mutant that drops it records that the case can fail, in place of a first run that would only have recorded the predicted failure. Its evidence is the first manual run |
-| ADR-0054 acceptance | **Not ready** | No hosted evidence; §4's wording |
+| ADR-0054 acceptance | **Not ready** | No hosted evidence; §2 revised for F-NPM-CONFIG (§14), its first npm install still to run |
 | ADR-0055 acceptance | **Not ready** | No hosted evidence; F-PIP-TRUST |
 
 ## 10. The acceptance change, designed (not built)
@@ -280,3 +283,27 @@ and that pass showed nothing about its hosted mutants.
 | F-BASELINE | The mutation review passed 37 of 37, but all four tests its six hosted mutants name had failed unmutated in the evidence job, and a test that fails anyway "kills" every mutant naming it | the review | Before any hosted mutant, the review runs the evidence unmutated once; after a failed baseline each hosted mutant is reported `baseline-failed`, never killed, and the review fails (`hosted_mutant_skip`, tested) |
 
 Nothing in the profiles, the launcher, the authority or the broker changed, and no case, outcome or attribution changed. The run's two passing cases are not counted: the task judges a run's cases only when all five tests pass, and then requires all 44. The next manual run, with `both`, is the evidence (§11); the review now takes one evidence run longer.
+
+## 14. The second hosted run (2026-11-10)
+
+Run [42858621579](https://github.com/Onwcan/DireWolf/actions/runs/42858621579): the manual workflow with `both`, on `main` at `2a1bbe9` (§13's corrections;
+required CI passed on it, [run 42854803010](https://github.com/Onwcan/DireWolf/actions/runs/42854803010), 32 of 32 jobs). With each
+test's groups now run on their own, the evidence job reported every group that failed.
+Three tests of five passed: `the_shipped_packs_decide`, `without_a_trust_file_both_fail_closed`
+and `without_the_option_nothing_changes`, six cases between them. The pip test failed three
+groups of fifteen: two in the harness, and the census those two left behind. The npm test
+failed twelve of fifteen, nearly all for one defect of ADR-0054's profile. The mutation review
+did what F-BASELINE now requires: the baseline
+failed, so each hosted mutant was reported `baseline-failed`, and the review failed with 31 of
+37 killed (every unit mutant).
+
+| # | Finding | Kind | What changed |
+|---|---|---|---|
+| F-NPM-CONFIG | npm 11.19.1 refuses to load one file at two levels: with `npm_config_userconfig` and `npm_config_globalconfig` both `/dev/null`, every npm invocation ended at once, `double-loading config "/dev/null" as "global"`, before reading anything. And npm keeps a `globalconfig` from the environment on its lowest, default layer (its loader installs an accessor there), so a workspace `.npmrc` naming `globalconfig` wins over the variable: the hostile case's npm read the workspace file it named and followed that file's unroutable proxy (`ENETUNREACH 192.0.2.1:9`) | a defect of ADR-0054's profile, and a claim of its case that npm does not support | ADR-0054 §§2, 8 and *Revisit if* revised (still Proposed): the global variable names `/dev/null/npmrc`, a path no file can have, which npm reads as a missing file (`NPM_GLOBALCONFIG`, a launcher unit test that the two paths differ). The project's choice of the global file is recorded as what it is: a workspace file read below the project file and every pin, so nothing new. The hostile case now writes `offline=true` into the user file (read, every install would fail) and scripts and TLS off into the global one (read, without effect). The images carry a global `npmrc` of their own at npm's default path, `offline=true`, so every install shows it unread and the hosted mutant that drops the variable is seen |
+| F-NPM-TRUST, worded | ADR-0054 §4 still said a missing trust file makes npm's TLS fail, as npm documents it; npm 11 does not, and the launcher's check (§8) is what fails closed | wording | §4 says so |
+| F-FALSE-PASS | `npm-git-dependency-not-prepared` and `npm-untrusted-issuer-refused` printed their lines although npm never ran: each required only that npm fail, and npm failed at its configuration | an evidence defect | The git case requires that npm asked the granted registry for the parent; both TLS cases (the untrusted issuer, and TLS off in a workspace `.npmrc`) require Node.js's own certificate error and a tunnel the proxy carried. Two pip cases that also required only a failure now require pip's reason: `No matching distribution found` for the source distribution, and a refusal by the proxy of pip's own default index for the image's `pip.conf` |
+| F-LEASE | The hostile case's `npm ci` retried its unroutable proxy for 72 s with no heartbeat possible, past the 60 s lease; the next group's first heartbeat, 76 s after its admission, was refused `STALE_EPOCH`. Why that admission waited is not established | an evidence defect | The lab's authority runs with the longest lease it allows (`--lease-ttl-ms 600000`) |
+| F-PLAN-RECORD | `pip-plan-records-prefix-and-profile` read the run's last intent, which was the interpreter measuring pip's target (`HYGIENE`), not pip's | an evidence defect | The plan is read by executable |
+| F-ARG-JSON | `pip-direct-route-refused` sent a multi-line program as an argument through a hand-made quote that left its newlines raw; the request was refused as invalid JSON | an evidence defect | Each string goes through the protocol's own encoder |
+
+What the run showed, not counted (the task judges a run's cases only when all five tests pass): every pip case but those two, `pip-os-trust-store-not-used` among them, held as ADR-0055 states it, with its §12 trust revision; both missing-trust-file cases held; the shipped packs permit `npm ci` with the evidence option on and deny `pip install` (`deny-approval-needed-when-unattended`); every refusal before an intent held for npm and pip. No npm install has run yet: the next manual run is the first.
