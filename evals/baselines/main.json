@@ -78,6 +78,10 @@
    "status": "pass",
    "min_score": 1.0
   },
+  "m5e-gate/integrated-m5-gate": {
+   "status": "pending",
+   "pending_reason": "requires M5e: the M5 gate's inventory verdict runs in CI's `m5e-gate` job from M5e.6's G2 on; `M5e` becomes available only with M5e.5 accepted (the M5E6 handoff's \u00a79)."
+  },
   "pending-kernel/approval-binding-drift": {
    "status": "pending",
    "pending_reason": "requires M6: there is no approval registry and no binding hash."

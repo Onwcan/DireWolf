@@ -8,6 +8,7 @@ authorised. No code, CI job, eval, baseline or milestone list changes with this 
 it starts no step of M5e.6.\
 **Status (2026-11-09):** **IN PROGRESS.** Implementation is authorised on §12's recommendations (G-D1 a separate `m5e-gate` job; G-D2 7 days; G-Q1 the four self-judging tasks by their own verdict; G-D3 neither M4 task in the gate) — [M5E_ASSURANCE_PLAN.md](M5E_ASSURANCE_PLAN.md) §10, "M5e.6's implementation". G1 is built for the nine attributed tasks: `save_judged_evidence`, `make m5e-evidence-bundle` and an upload in each job, held by `tests/architecture/test_ci_m5e_gate.py`; the four self-judging tasks follow, then G2–G4. G5 and G6 stay decisions of their own.\
 **Status (2026-11-10):** G1's first hosted run, [42619476453](https://github.com/Onwcan/DireWolf/actions/runs/42619476453) at `f50286c`, uploaded eight of the nine bundles. The ninth, `sandbox-workspace`'s, was refused by the task runner: the task judged a table built at the call, with no name to keep it by. Named (`WORKSPACE_ALL_CASES`) and guarded; hosted run pending.\
+**Status (2026-11-10, G1b–G4):** G1 passed hosted at `206c821`: [run 42800717936](https://github.com/Onwcan/DireWolf/actions/runs/42800717936) (no. 148), 31 of 31 jobs, all nine bundles uploaded. G1b–G4 are built, unstaged, hosted run pending (§15): the four self-judging tasks' bundles, the required `m5e-gate` job and `make m5e-gate-check`, the pending `m5e-gate` eval, and these documents. G5 and G6 wait for M5e.5's acceptance.\
 **Authority of this document:** a technical handoff, not an ADR. It approves nothing, and every
 choice in it is a recommendation for the owner.
 
@@ -31,7 +32,7 @@ choice in it is a recommendation for the owner.
 | M5e.3 fixtures | COMPLETE (runs 41916040076, 41920008027) | — |
 | M5e.4 pip, npm refused | COMPLETE (runs 134–137; accepted 2026-11-09, OD-E4's mechanism as built: [M5E_ASSURANCE_PLAN.md](M5E_ASSURANCE_PLAN.md) §10, "M5e.4's acceptance") | — |
 | M5e.5 npm and pip profiles | IMPLEMENTATION COMPLETE / HOSTED EVIDENCE PENDING | the manual run; ADR-0055's trust revision; acceptance of both ADRs; the acceptance change ([M5E5_IMPLEMENTATION_HANDOFF.md](M5E5_IMPLEMENTATION_HANDOFF.md) §§7–10) |
-| M5e.6 the gate | IN PROGRESS (2026-11-09): G1 built for the nine attributed tasks, hosted run pending | G1's hosted run; the four self-judging tasks' bundles; G2–G4; then G5 and G6, each a decision of its own |
+| M5e.6 the gate | IN PROGRESS (2026-11-09): G1 hosted-verified (run 42800717936, 2026-11-10); G1b–G4 built, hosted run pending (§15) | G1's hosted run; the four self-judging tasks' bundles; G2–G4; then G5 and G6, each a decision of its own |
 
 ## 3. What M5e.6 is, and what it is not
 
@@ -249,3 +250,30 @@ engineering steps.
 - The acceptance verdict prints its blockers, and nothing makes `M5e` or `M5` available.
 - No task's own check, level, case, outcome, gate or job is weakened, and no hosted-only
   evidence runs anywhere else.
+
+## 15. As built (2026-11-10)
+
+G1 passed hosted in [run 42800717936](https://github.com/Onwcan/DireWolf/actions/runs/42800717936) at `206c821` (31 of 31 jobs, all nine
+bundles uploaded). G1b–G4 follow §§6–8 with these choices, each held by
+`tests/architecture/test_ci_m5e_gate.py` with negative controls:
+
+| Point | As built | Why |
+|---|---|---|
+| G-Q1, the four self-judging tasks | Each judge keeps what it passed: `require_agent_evidence` (`AGENT_CASES`, `AGENT_IDENTITY_CASES`), `require_release_evidence` (`RELEASE_UNIT_CASES`, `RELEASE_CASES`), `require_net_evidence` (`NET_HTTP_CASES`), and `require_m5_eval_results` (`M5_EVAL_CASES`: the `evals` job's strict `eval-check` reads its own results and requires each M5 suite's eval a pass at 1.0, each run once) | Their own verdicts, as G-Q1 recommends; attribution stays a later, separate step |
+| The bundle, version 2 | Each judged output names its judge (`attributed`, `agent`, `release`, `net-http`, `eval`) and is read at that judge's prefix | The gate judges each output again by the very function that judged it |
+| The census | `sandbox-agent` and `sandbox-release` report theirs through `report_cleanup`; `net-http-evidence` and `eval-check` make no container and report none (`M5E_CENSUS_FREE`) | A census-free task is declared, never inferred from a missing line |
+| The upload | Each job uploads `target/m5e-evidence/<task>/`, and the seal step picks the task by its job (`GITHUB_JOB`); the task runner forgets a task's directory before the task runs | The setup action caches `target/`, and the `evals` job's suites run evidence tasks as children: neither's directory is ever sealed or uploaded |
+| `net-http` runs twice | The bundle is the second run's, under CPU contention: each run replaces what the last kept | One bundle per job; the job's own check covers both runs |
+| §6.3 point 2, the attempt | A bundle of an earlier attempt of the same run, on the same commit, is accepted; a later attempt's, another run's or another commit's is refused | Re-running failed jobs leaves the passing jobs' bundles at their attempt; the gate needs every job, so it runs only when each passed |
+| §6.3 point 4, the inventory | 645 attributed cases: 601 judged again, the 44 of `HYGIENE_CASES` not yet required (`M5E_NOT_YET_REQUIRED`); the self-judging tasks add 4 evals and their own tables | M5e.5's evidence runs only in its manual workflow until M5e.5's acceptance change |
+| §6.4, the acceptance verdict | `m5e_acceptance_blockers`: M5e.5's evidence not yet required; ADR-0054 and ADR-0055 not Accepted; ADR-0057 not Superseded, or ADR-0058 or ADR-0059 not Accepted; the plan's §10 recording no M5e.2 closure, M5e.4 acceptance or M5e.5 acceptance. Today it is NOT READY: M5e.5's evidence, ADR-0054, ADR-0055 and M5e.5's acceptance | Read from the records themselves, not restated |
+| G3, where the eval runs | `evals/suites/m5e-gate.toml` (`requires = ["M5e"]`, `gate = false`), runner `m5e.gate`, the need `m5e-gate-job`; the `m5e-gate` job runs `check --all --suite m5e-gate --require-exercised` after the gate task | Only the gate job has the bundles, so the `evals` job's subset leaves it out; anywhere else it is NOT EXERCISED. Pending today, checked as pending against the baseline |
+
+**What remains.** G1b–G4's first hosted run, which must show the `m5e-gate` job passing with a
+COMPLETE inventory verdict and a NOT READY acceptance verdict naming those blockers. Then
+M5e.5: its manual run, ADR-0055's trust revision, the acceptance of both ADRs and of D1–D4, and
+the acceptance change, which makes `sandbox-hygiene` a required job, adds
+`sandbox-hygiene-evidence` to `M5E_GATE_TASKS` and empties `M5E_NOT_YET_REQUIRED`. Then G5:
+`M5e` joins `AVAILABLE_MILESTONES` with `test_m5e_r3_closure.py` and the plan's §10 record,
+only on a hosted run whose verdict is READY. Then G6: `M5` joins and
+`pending-kernel/sandbox-egress` gets its runner.

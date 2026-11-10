@@ -229,7 +229,14 @@ def _replace(old: str, new: str) -> Callable[[str], str]:
             "a bare --preserve-env is back",
         ),
         (_replace("--group dwwrite ", ""), "filesystem-operations: `python3"),
-        (_replace(", sandbox-agent,", ","), "sandbox-agent: the aggregate"),
+        # The aggregate's own list: the M5 gate's job needs the agent job too.
+        (
+            _replace(
+                ", sandbox-agent, sandbox-release, sandbox-restart,",
+                ", sandbox-release, sandbox-restart,",
+            ),
+            "sandbox-agent: the aggregate",
+        ),
         (
             _replace(
                 "    name: sandbox workspace (make sandbox-workspace-evidence)\n",

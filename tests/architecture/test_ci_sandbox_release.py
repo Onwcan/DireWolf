@@ -80,7 +80,10 @@ def test_the_release_job_exists_on_linux_and_is_unconditional() -> None:
     for forbidden in ("strategy:", "matrix", "continue-on-error", "secrets.", "if:", "sudo"):
         assert forbidden not in text, f"`{forbidden}` in {JOB}"
     runs = re.findall(r"^\s+- run:\s*(.+?)\s*$", text, re.MULTILINE)
-    assert runs == [COMMAND], f"{JOB} must run exactly `{COMMAND}`: {runs}"
+    # The evidence, then M5e.6's seal of what it judged for the M5 gate, whose
+    # shape `test_ci_m5e_gate.py` holds; nothing else.
+    expected = [COMMAND, "make m5e-evidence-bundle"]
+    assert runs == expected, f"{JOB} must run exactly {expected}: {runs}"
 
 
 def test_the_aggregate_requires_the_release_job_and_every_job_once() -> None:

@@ -127,7 +127,8 @@ def test_ci_fails_on_stale_generated_protocol_files() -> None:
     CI job, and it is a required one."""
     text = (REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
     assert "run: make schema-check" in text
-    needs = re.search(r"needs:\s*\[([^\]]*)\]", text)
+    # The aggregate `ci` job's own `needs`: the M5 gate job has its own.
+    needs = re.search(r"\n  ci:\n(?:    .*\n)*?    needs:\s*\[([^\]]*)\]", text)
     assert needs is not None and "schema" in [n.strip() for n in needs.group(1).split(",")]
 
 

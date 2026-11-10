@@ -14,7 +14,18 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from direwolf_evals.model import Eval, Outcome
-from direwolf_evals.runners import authority, harness, m4, m5a, m5b, m5c, m5d, protocol, replay
+from direwolf_evals.runners import (
+    authority,
+    harness,
+    m4,
+    m5a,
+    m5b,
+    m5c,
+    m5d,
+    m5e,
+    protocol,
+    replay,
+)
 
 __all__ = ["RUNNERS", "Context", "Runner", "resolve"]
 
@@ -67,6 +78,9 @@ RUNNERS: dict[str, Runner] = {
     # runtime, the real authority over a real DWKP client and the released
     # `serve`; a run's release ending its environment. Never a model of them.
     "m5d.sandbox_exec": m5d.sandbox_exec,
+    # M5e.6: the integrated M5 gate -- the real gate task over this run's
+    # evidence bundles, in CI's `m5e-gate` job. Never a model of them.
+    "m5e.gate": m5e.gate,
     # The harness proving itself against a dummy process.
     "harness.checkpoint": harness.checkpoint,
     "harness.pause_resume": harness.pause_resume,

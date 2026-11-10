@@ -24,7 +24,7 @@ DW := $(PY) scripts/dw.py
         sandbox-agent-evidence sandbox-agent-mutations sandbox-release-evidence \
         sandbox-release-mutations sandbox-restart-evidence sandbox-capacity-evidence \
         sandbox-proxy-weakened-evidence sandbox-proxy-weakened-review \
-        sandbox-registry-evidence sandbox-hygiene-evidence sandbox-registry-mutations m5e-evidence-bundle \
+        sandbox-registry-evidence sandbox-hygiene-evidence sandbox-registry-mutations m5e-evidence-bundle m5e-gate-check \
         sandbox-neighbour-mutations d11-hardening-evidence d11-hardening-mutations d11-posture fuzz-smoke fuzz security docs \
         preflight tools hooks clean
 
@@ -157,8 +157,11 @@ sandbox-registry-evidence: ## M5e.4, HOSTED ONLY: pip as it is today against the
 sandbox-hygiene-evidence: ## M5e.5, HOSTED ONLY, manual: npm and pip under their proposed profiles (ADR-0054 §8, ADR-0055 §9) behind serve --allow-unaccepted-hygiene-profile; refuses anywhere but a disposable GitHub-hosted runner (DW_HYGIENE_EVIDENCE=1); required by no ci job
 	@$(DW) sandbox-hygiene-evidence
 
-m5e-evidence-bundle: ## M5e.6 (G1), HOSTED ONLY: seal what this job's M5 evidence task kept (target/m5e-evidence) with the run's provenance, for the job to upload to the M5 gate; NOT EXERCISED anywhere but a disposable GitHub-hosted runner
+m5e-evidence-bundle: ## M5e.6 (G1), HOSTED ONLY: seal what this job's M5 evidence task kept (target/m5e-evidence/<task>) with the run's provenance, for the job to upload to the M5 gate; NOT EXERCISED anywhere but a disposable GitHub-hosted runner
 	@$(DW) m5e-evidence-bundle
+
+m5e-gate-check: ## M5e.6 (G2), HOSTED ONLY: the M5 gate -- judge again every bundle this run's evidence jobs uploaded (target/m5e-gate) and print the M5e acceptance verdict; NOT EXERCISED anywhere but its own job on a GitHub-hosted runner
+	@$(DW) m5e-gate-check
 
 sandbox-registry-mutations: ## M5e.5's mutation review (ADR-0054 §9, ADR-0055 §10): unit mutants anywhere; hosted ones only in the manual job, NOT EXERCISED elsewhere
 	@$(DW) sandbox-registry-mutations

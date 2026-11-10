@@ -400,11 +400,21 @@ def task_eval_check() -> None:
     Windows, a cross-uid property with no second identity -- is listed as NOT
     EXERCISED, never passed. Strict -- DW_EVAL_REQUIRE_EXERCISED=1, and always
     under GitHub Actions -- not exercising a gating eval fails the gate.
+
+    Strict, it then reads the M5 suites' own verdicts in the results it wrote
+    (`require_m5_eval_results`), which the M5 gate keeps from the `evals` job.
     """
     args = ["check"]
-    if eval_gate_is_strict(os.environ):
+    strict = eval_gate_is_strict(os.environ)
+    if strict:
         args.append("--require-exercised")
     uvrun("direwolf_evals", *args)
+    if strict:
+        try:
+            results = EVAL_RESULTS.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            raise TaskError(f"the eval gate's results are unreadable: {exc}") from exc
+        require_m5_eval_results(results, M5_EVAL_CASES)
 
 
 def eval_gate_is_strict(environ: Mapping[str, str]) -> bool:
@@ -8917,7 +8927,7 @@ def require_attributed_evidence(
         + f"){OFF}"
     )
     # Judged and passed: kept for the M5 gate (`save_judged_evidence`).
-    _JUDGED.append((_table_name(cases), prefix, output))
+    keep_judged("attributed", cases, prefix, output)
     return [seen[key] for key in cases]
 
 
@@ -9156,6 +9166,8 @@ def require_agent_evidence(output: str, cases: tuple[tuple[str, str], ...]) -> N
             continue
         if record.get("level") not in AGENT_EVIDENCE_LEVELS or not record.get("enforcement"):
             raise TaskError(f"agent evidence without its level or enforcement: {record}")
+    # Judged and passed: kept for the M5 gate, by its own verdict (G-Q1).
+    keep_judged("agent", cases, SANDBOX_EVIDENCE_PREFIX, output)
 
 
 def _agent_suite(tests: tuple[str, ...]) -> str:
@@ -9290,9 +9302,9 @@ def _sandbox_agent_evidence(*, require_privileged: bool) -> None:
     problems = _agent_cleanup(client, socket, images, base, before, sockets_before)
     if problems:
         raise TaskError("cleanup failed: " + "; ".join(problems))
-    print(
-        f"{GREEN}cleanup: no evidence container, workspace mount or broker socket directory "
-        f"remains; {len(before)} pre-existing container(s) kept{OFF}"
+    report_cleanup(
+        "cleanup: no evidence container, workspace mount or broker socket directory "
+        f"remains; {len(before)} pre-existing container(s) kept"
     )
     require_agent_evidence("\n".join(outputs), AGENT_CASES)
     if not privileged and not require_privileged:
@@ -9650,6 +9662,8 @@ def require_release_evidence(output: str, cases: tuple[tuple[str, str], ...]) ->
             raise TaskError(f"release evidence at the wrong level: {record}")
         if not record.get("enforcement"):
             raise TaskError(f"release evidence without its enforcement: {record}")
+    # Judged and passed: kept for the M5 gate, by its own verdict (G-Q1).
+    keep_judged("release", cases, SANDBOX_EVIDENCE_PREFIX, output)
 
 
 def _release_unit_half() -> str:
@@ -9720,7 +9734,7 @@ def _release_workload_half() -> str:
         raise TaskError(
             f"{len(removed)} container(s) that predate the evidence are gone: {removed}"
         )
-    print(f"{GREEN}cleanup: no evidence container remains; {len(before)} pre-existing kept{OFF}")
+    report_cleanup(f"cleanup: no evidence container remains; {len(before)} pre-existing kept")
     return output
 
 
@@ -9740,9 +9754,9 @@ def _release_agent_half() -> str:
     problems = _agent_cleanup(client, socket, images, base, before, sockets_before)
     if problems:
         raise TaskError("cleanup failed: " + "; ".join(problems))
-    print(
-        f"{GREEN}cleanup: no evidence container or broker socket directory remains; "
-        f"{len(before)} pre-existing container(s) kept{OFF}"
+    report_cleanup(
+        "cleanup: no evidence container or broker socket directory remains; "
+        f"{len(before)} pre-existing container(s) kept"
     )
     return output
 
@@ -10915,6 +10929,8 @@ def require_net_evidence(output: str, cases: tuple[tuple[str, str], ...]) -> Non
             + ", ".join(missing[:40])
         )
     print(f"{GREEN}net.http evidence: {len(cases)} cases reported{OFF}")
+    # Judged and passed: kept for the M5 gate, by its own verdict (G-Q1).
+    keep_judged("net-http", cases, NET_EVIDENCE_PREFIX, output)
 
 
 def busy_processes(count: int) -> list[subprocess.Popen[bytes]]:
@@ -11409,22 +11425,38 @@ def task_hooks() -> None:
     print(f"{DIM}It runs fmt-check and arch only. Remove it with: rm .git/hooks/pre-commit{OFF}")
 
 
-# ---- M5e.6: what each M5 evidence task judged, kept for the gate ------------
+# ---- M5e.6: the M5 gate ------------------------------------------------------
 #
-# The M5 gate (M5E6_PREPARATION_HANDOFF.md §§5-6) re-judges every M5 evidence
-# task's own output, in the run that produced it. Its first slice, G1: each
-# task of the gate, once all of its own checks have passed, keeps exactly what
-# it judged -- each `require_attributed_evidence` call's text, with its case
-# table and line prefix -- and its cleanup census, under
+# The M5 gate (M5E6_PREPARATION_HANDOFF.md §§5-6) judges every M5 evidence
+# task's own output again, in the run that produced it, and adds what no task
+# can check alone: that every task ran in this run, on this commit, on a
+# disposable GitHub-hosted runner, and that together they cover the whole
+# attributed inventory.
+#
+# G1: each task of the gate, once all of its own checks have passed, keeps
+# exactly what it judged -- each judging call's text, with the judge, its case
+# table and its line prefix -- and its cleanup census, under
 # `target/m5e-evidence/<task>/`. The task runner keeps it
 # (`save_judged_evidence`), never the task's own code, so a task that fails
-# keeps nothing. A later step of the same job, `make m5e-evidence-bundle`,
-# checks it byte for byte and seals it with the run's provenance, on a
-# disposable GitHub-hosted runner only; the job then uploads it. Nothing here
-# judges again: that is the gate's (G2).
+# keeps nothing; and before the task starts it forgets whatever an earlier
+# process or a restored build cache left there (`forget_kept`). A later step
+# of the same job, `make m5e-evidence-bundle`, checks it byte for byte and
+# seals it with the run's provenance, on a disposable GitHub-hosted runner
+# only; the job then uploads that task's directory and nothing else.
+#
+# G2: the `m5e-gate` job downloads this run's bundles, and `make
+# m5e-gate-check` judges them (`m5e_gate_verdict`): every expected bundle
+# once; each of this run and this commit, from a GitHub-hosted runner and the
+# job that runs its task; each file at its digest; each output judged again by
+# the very function that judged it, against the same table; the union of the
+# attributed cases equal to the inventory, less the tables not yet required;
+# a clean census from every task that makes containers. It then prints the M5e
+# acceptance verdict, which the `m5e-gate` eval enforces once `M5e` is
+# available (G3).
 
 # Each task of the gate, and the CI job that runs it (`.github/workflows/ci.yml`;
-# `tests/architecture/test_ci_m5e_gate.py` holds the two equal).
+# `tests/architecture/test_ci_m5e_gate.py` holds the two equal). The last four
+# judge their own output in their own way, and join by that verdict (G-Q1).
 M5E_GATE_TASKS: dict[str, str] = {
     "sandbox-foundation-evidence": "sandbox-foundation",
     "sandbox-egress-evidence": "sandbox-egress",
@@ -11435,17 +11467,102 @@ M5E_GATE_TASKS: dict[str, str] = {
     "sandbox-capacity-evidence": "sandbox-capacity",
     "sandbox-registry-evidence": "sandbox-registry",
     "sandbox-proxy-weakened-evidence": "sandbox-proxy-weakened",
+    "sandbox-agent-evidence": "sandbox-agent",
+    "sandbox-release-evidence": "sandbox-release",
+    "net-http-evidence": "net-http",
+    "eval-check": "evals",
 }
+# What each task of the gate must have judged on its hosted run: (the judge,
+# the case table), each once. The workspace task's hosted run judges both of
+# its halves as one table; the agent task's, its three-identity half too.
+M5E_GATE_JUDGEMENTS: dict[str, tuple[tuple[str, str], ...]] = {
+    "sandbox-foundation-evidence": (
+        ("attributed", "BROKER_ASSURANCE_CASES"),
+        ("attributed", "SANDBOX_CASES"),
+    ),
+    "sandbox-egress-evidence": (
+        ("attributed", "EGRESS_CASES"),
+        ("attributed", "CAPTURED_ASSURANCE_CASES"),
+    ),
+    "sandbox-workload-evidence": (("attributed", "WORKLOAD_CASES"),),
+    "sandbox-secret-evidence": (
+        ("attributed", "SECRET_SANDBOX_UNIT_CASES"),
+        ("attributed", "SECRET_SANDBOX_CASES"),
+    ),
+    "sandbox-workspace-evidence": (
+        ("attributed", "WORKSPACE_UNIT_CASES"),
+        ("attributed", "WORKSPACE_ALL_CASES"),
+    ),
+    "sandbox-restart-evidence": (("attributed", "RESTART_CASES"),),
+    "sandbox-capacity-evidence": (("attributed", "CAPACITY_CASES"),),
+    "sandbox-registry-evidence": (("attributed", "REGISTRY_CASES"),),
+    "sandbox-proxy-weakened-evidence": (("attributed", "E6_CASES"),),
+    "sandbox-agent-evidence": (("agent", "AGENT_CASES"), ("agent", "AGENT_IDENTITY_CASES")),
+    "sandbox-release-evidence": (
+        ("release", "RELEASE_UNIT_CASES"),
+        ("release", "RELEASE_CASES"),
+    ),
+    "net-http-evidence": (("net-http", "NET_HTTP_CASES"),),
+    "eval-check": (("eval", "M5_EVAL_CASES"),),
+}
+# The tasks of the gate that make no container, network or mount, and so
+# report no census of their own.
+M5E_CENSUS_FREE: dict[str, str] = {
+    "net-http-evidence": "its origins, resolver and broker are the test's own processes",
+    "eval-check": "its M5 suites run each evidence task as a child, which fails on its own census",
+}
+# The attributed tables no task of the gate requires yet: M5e.5's evidence
+# runs only in its manual workflow until M5e.5's acceptance change makes
+# `sandbox-hygiene` a required job.
+M5E_NOT_YET_REQUIRED: tuple[str, ...] = ("HYGIENE_CASES",)
+# The M5 eval suites' own verdicts, which the `evals` job keeps: one eval each.
+M5_EVAL_CASES = (
+    ("m5a-sandbox-foundation", "oci-strict-measured-assurance"),
+    ("m5b-sandbox-egress", "proxy-only-egress"),
+    ("m5c-net-http", "kernel-performed-net-http"),
+    ("m5d-sandbox-exec", "sandboxed-exec-and-release-teardown"),
+)
+EVAL_RESULTS = ROOT / "target" / "evals" / "results.jsonl"
+# The line prefix each judge reads; None: the prefix kept with the output.
+M5E_JUDGE_PREFIX: dict[str, str | None] = {
+    "attributed": None,
+    "agent": SANDBOX_EVIDENCE_PREFIX,
+    "release": SANDBOX_EVIDENCE_PREFIX,
+    "net-http": NET_EVIDENCE_PREFIX,
+    "eval": "",
+}
+# What makes `M5e` ready to join the available milestones (the handoff's
+# §§6.4, 9), besides a complete inventory: each record's status, and the
+# plan's records of each step's closure or acceptance.
+M5E_ACCEPTANCE_ADRS = (
+    ("0054", "Accepted"),
+    ("0055", "Accepted"),
+    ("0057", "Superseded"),
+    ("0058", "Accepted"),
+    ("0059", "Accepted"),
+)
+M5E_ACCEPTANCE_RECORDS = (
+    "**M5e.2's closure (",
+    "**M5e.4's acceptance (",
+    "**M5e.5's acceptance (",
+)
 M5E_EVIDENCE_DIR = ROOT / "target" / "m5e-evidence"
+M5E_GATE_DIR = ROOT / "target" / "m5e-gate"
+M5E_GATE_JOB = "m5e-gate"
 M5E_KEPT_SCHEMA = "direwolf.m5e.judged-evidence"
 M5E_BUNDLE_SCHEMA = "direwolf.m5e.evidence-bundle"
-M5E_BUNDLE_VERSION = 1
+# 2 (G2): each judged output names the function that judged it.
+M5E_BUNDLE_VERSION = 2
+# Each file the gate reads is at most this large, checked before it is read.
+M5E_GATE_MAX_FILE = 32 * 1024 * 1024
 # What this process judged and passed, and the census lines it reported.
-_JUDGED: list[tuple[str | None, str, str]] = []
+_JUDGED: list[tuple[str, str | None, str, str]] = []
 _CLEANUP: list[str] = []
 _JUDGED_FILE = re.compile(r"judged-[0-9]{1,3}\.txt")
+_CLEAN_CENSUS = re.compile(r"cleanup: no [^\n]{1,300}")
 _COMMIT_SHA = re.compile(r"[0-9a-f]{40}")
 _RUN_NUMBER = re.compile(r"[1-9][0-9]{0,19}")
+_INVENTORY_VERDICT = "M5 gate: inventory verdict: COMPLETE"
 
 
 def report_cleanup(text: str) -> None:
@@ -11459,6 +11576,134 @@ def _table_name(cases: tuple[tuple[str, str], ...]) -> str | None:
     test's own), which nothing keeps."""
     names = [name for name, value in globals().items() if value is cases and name.isupper()]
     return names[0] if len(names) == 1 else None
+
+
+def _case_table(name: object) -> tuple[tuple[str, str], ...] | None:
+    """The module-level case table `name` names: a tuple of (suite, case)."""
+    if not isinstance(name, str) or not name.isupper():
+        return None
+    value = globals().get(name)
+    if not isinstance(value, tuple) or not value:
+        return None
+    pairs = all(
+        isinstance(item, tuple) and len(item) == 2 and all(isinstance(s, str) for s in item)
+        for item in value
+    )
+    return value if pairs else None
+
+
+def keep_judged(judge: str, cases: tuple[tuple[str, str], ...], prefix: str, output: str) -> None:
+    """Keep what `judge` judged and passed, for the M5 gate: the task runner
+    writes it if this process's task is a task of the gate."""
+    _JUDGED.append((judge, _table_name(cases), prefix, output))
+
+
+def require_m5_eval_results(
+    output: str, cases: tuple[tuple[str, str], ...]
+) -> list[dict[str, object]]:
+    """The M5 suites' own verdicts in the eval gate's results
+    (`target/evals/results.jsonl`): every eval of `cases` reported, every one
+    of its runs a pass at score 1.0. An unreadable line, an M5 suite's eval
+    that `cases` does not list, a run reported twice or missing, or a result
+    of another version fails. Other suites' lines are not this judge's."""
+    if not cases:
+        raise TaskError("M5 eval verdicts: zero evals required")
+    suites = {suite for suite, _ in cases}
+    runs: dict[tuple[str, str], list[dict[str, object]]] = {}
+    problems: list[str] = []
+    for line in output.splitlines():
+        if not line.strip():
+            continue
+        try:
+            record = _strict_json(line)
+        except (ValueError, TaskError) as exc:
+            raise TaskError(f"unreadable eval result: {line[:200]}") from exc
+        if not isinstance(record, dict):
+            raise TaskError(f"malformed eval result: {line[:200]}")
+        suite, eval_id = record.get("suite"), record.get("eval_id")
+        if suite not in suites:
+            continue
+        if not isinstance(eval_id, str) or not eval_id.startswith(f"{suite}/"):
+            problems.append(f"{suite}: a result whose id {eval_id!r} is not its suite's")
+            continue
+        key = (str(suite), eval_id.removeprefix(f"{suite}/"))
+        if key not in cases:
+            problems.append(f"{eval_id}: an M5 eval the gate does not list")
+            continue
+        runs.setdefault(key, []).append(record)
+    for key in cases:
+        named = "/".join(key)
+        got = runs.get(key, [])
+        if not got:
+            problems.append(f"{named}: no result")
+            continue
+        # Every run once: one count, said alike by each run, and each index of
+        # it reported. Anything not an integer is no count and no index.
+        said = [record.get("runs") for record in got]
+        count = said[0]
+        indices = sorted(
+            index
+            for index in (record.get("run_index") for record in got)
+            if isinstance(index, int) and not isinstance(index, bool)
+        )
+        if (
+            not isinstance(count, int)
+            or isinstance(count, bool)
+            or count < 1
+            or any(other != count or isinstance(other, bool) for other in said)
+            or indices != list(range(count))
+        ):
+            problems.append(f"{named}: its runs are not each reported once")
+        for record in got:
+            status, score = record.get("status"), record.get("score")
+            if record.get("result_version") != 1:
+                problems.append(f"{named}: a result of version {record.get('result_version')!r}")
+            if status != "pass" or isinstance(score, bool) or score != 1.0:
+                problems.append(f"{named}: {status!r} at score {score!r}, not a pass at 1.0")
+    if problems:
+        raise TaskError(
+            f"{len(problems)} M5 eval verdict(s) not a pass: " + "; ".join(problems[:20])
+        )
+    print(f"{GREEN}M5 eval verdicts: {len(cases)} evals passed, every run at 1.0{OFF}")
+    keep_judged("eval", cases, "", output)
+    return [record for key in cases for record in runs[key]]
+
+
+def _rejudge(judge: str, output: str, cases: tuple[tuple[str, str], ...], prefix: str) -> None:
+    """Judge `output` again by the function that judged it."""
+    if judge == "attributed":
+        require_attributed_evidence(output, cases, prefix)
+    elif judge == "agent":
+        require_agent_evidence(output, cases)
+    elif judge == "release":
+        require_release_evidence(output, cases)
+    elif judge == "net-http":
+        require_net_evidence(output, cases)
+    elif judge == "eval":
+        require_m5_eval_results(output, cases)
+    else:
+        raise TaskError(f"{judge!r} is no judge of the M5 gate")
+
+
+def m5e_keeps(task: str, environ: Mapping[str, str]) -> bool:
+    """Whether the task runner keeps `task`'s judgement for the M5 gate: every
+    task of the gate, but the eval gate only when it is strict. Lenient -- a
+    contributor's machine -- its M5 suites may be NOT EXERCISED, and nothing
+    reads what it would keep."""
+    if task not in M5E_GATE_TASKS:
+        return False
+    return task != "eval-check" or eval_gate_is_strict(environ)
+
+
+def forget_kept(task: str, root: Path = M5E_EVIDENCE_DIR) -> None:
+    """Remove what was kept for `task`, before it runs: an earlier process's,
+    or a restored build cache's (the setup action caches `target/`)."""
+    directory = root / task
+    if directory.exists():
+        try:
+            shutil.rmtree(directory)
+        except OSError as exc:
+            raise TaskError(f"what was kept for {task} cannot be removed: {exc}") from exc
 
 
 def _strict_json(text: str) -> object:
@@ -11476,38 +11721,56 @@ def _strict_json(text: str) -> object:
     return json.loads(text, object_pairs_hook=pairs, parse_constant=constant)
 
 
+def _read_bounded_json(path: Path, what: str) -> object:
+    """`path`'s strict JSON, refused before it is read if it is too large."""
+    try:
+        size = path.stat().st_size
+    except OSError as exc:
+        raise TaskError(f"{what}: {path.name} is unreadable: {exc}") from exc
+    if size > M5E_GATE_MAX_FILE:
+        raise TaskError(f"{what}: {path.name} is {size} bytes, over {M5E_GATE_MAX_FILE}")
+    try:
+        return _strict_json(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, ValueError, TaskError) as exc:
+        raise TaskError(f"{what}: {path.name} is unreadable: {exc}") from exc
+
+
 def save_judged_evidence(
     task: str,
     root: Path = M5E_EVIDENCE_DIR,
-    judged: Sequence[tuple[str | None, str, str]] | None = None,
+    judged: Sequence[tuple[str, str | None, str, str]] | None = None,
     cleanup: Sequence[str] | None = None,
 ) -> Path:
     """Keep what `task` judged, after all of its checks passed: each judged
-    output as `judged-<n>.txt`, its case table, prefix, SHA-256 and size in
-    `judged.json`, with its cleanup census. Refuses a task outside the gate,
-    one that judged nothing or reported no census, and a table with no name."""
+    output as `judged-<n>.txt`, its judge, case table, prefix, SHA-256 and
+    size in `judged.json`, with its cleanup census. Refuses a task outside the
+    gate, one that judged nothing, a table with no name, an unknown judge, and
+    no census from a task that makes containers."""
     judged = list(_JUDGED if judged is None else judged)
     cleanup = list(_CLEANUP if cleanup is None else cleanup)
     if task not in M5E_GATE_TASKS:
         raise TaskError(f"{task} is not a task of the M5 gate")
     if not judged:
         raise TaskError(f"{task} judged no evidence: nothing to keep for the M5 gate")
-    if not cleanup:
+    if not cleanup and task not in M5E_CENSUS_FREE:
         raise TaskError(f"{task} reported no cleanup census: nothing to keep for the M5 gate")
-    if any(table is None for table, _, _ in judged):
+    if any(table is None for _, table, _, _ in judged):
         raise TaskError(f"{task} judged an output against a case table with no name")
+    if any(judge not in M5E_JUDGE_PREFIX for judge, _, _, _ in judged):
+        raise TaskError(f"{task} judged an output by no judge of the M5 gate")
     directory = root / task
     if directory.exists():
         shutil.rmtree(directory)
     directory.mkdir(parents=True)
     files: list[dict[str, object]] = []
-    for number, (table, prefix, output) in enumerate(judged):
+    for number, (judge, table, prefix, output) in enumerate(judged):
         data = output.encode("utf-8")
         name = f"judged-{number}.txt"
         (directory / name).write_bytes(data)
         files.append(
             {
                 "file": name,
+                "judge": judge,
                 "table": table,
                 "prefix": prefix,
                 "sha256": hashlib.sha256(data).hexdigest(),
@@ -11531,40 +11794,12 @@ def save_judged_evidence(
     return directory
 
 
-def m5e_bundle_record(
-    environ: Mapping[str, str], root: Path = M5E_EVIDENCE_DIR
-) -> dict[str, object]:
-    """The bundle a job of the M5 gate uploads: what its task kept, checked
-    byte for byte, with this run's provenance. Only on a disposable
-    GitHub-hosted runner (NOT EXERCISED anywhere else), only in the job the
-    task belongs to, and only for exactly one task's record, nothing beside it."""
-    if environ.get("GITHUB_ACTIONS") != "true" or (
-        environ.get("RUNNER_ENVIRONMENT") != "github-hosted"
-    ):
-        raise TaskError(
-            "NOT EXERCISED: an M5 evidence bundle is sealed only on a disposable "
-            "GitHub-hosted runner"
-        )
-    if not root.is_dir():
-        raise TaskError(f"nothing kept under {root}: the task kept no evidence")
-    entries = sorted(root.iterdir())
-    if len(entries) != 1 or not entries[0].is_dir():
-        raise TaskError(
-            f"{root} must hold one task's kept evidence, not {[entry.name for entry in entries]}"
-        )
-    directory = entries[0]
-    task = directory.name
-    job = M5E_GATE_TASKS.get(task)
-    if job is None:
-        raise TaskError(f"{task} is not a task of the M5 gate")
-    if environ.get("GITHUB_JOB") != job:
-        raise TaskError(
-            f"{task}'s evidence is sealed by the {job!r} job, not {environ.get('GITHUB_JOB')!r}"
-        )
-    try:
-        kept = _strict_json((directory / "judged.json").read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, ValueError, TaskError) as exc:
-        raise TaskError(f"{task}'s judged.json is unreadable: {exc}") from exc
+def _kept_judgements(
+    directory: Path, task: str, kept: object, beside: frozenset[str] = frozenset()
+) -> list[dict[str, object]]:
+    """`task`'s kept record checked against its directory: its fields, its
+    census, each judged output's judge, table, prefix and file at its digest,
+    and no file but those, `judged.json` and `beside`."""
     fields = {"schema", "version", "task", "judged", "cleanup"}
     if not isinstance(kept, dict) or set(kept) != fields:
         raise TaskError(f"{task}'s judged.json does not have exactly {sorted(fields)}")
@@ -11577,29 +11812,51 @@ def m5e_bundle_record(
     judged, cleanup = kept["judged"], kept["cleanup"]
     if not isinstance(judged, list) or not judged:
         raise TaskError(f"{task} kept no judged output")
-    if not isinstance(cleanup, list) or not cleanup:
+    if not isinstance(cleanup, list) or (not cleanup and task not in M5E_CENSUS_FREE):
         raise TaskError(f"{task} kept no cleanup census")
-    if not all(isinstance(line, str) and line.startswith("cleanup: ") for line in cleanup):
-        raise TaskError(f"{task}'s census is not its cleanup lines")
+    if not all(isinstance(line, str) and _CLEAN_CENSUS.fullmatch(line) for line in cleanup):
+        raise TaskError(f"{task}'s census is not its clean cleanup lines")
     names: set[str] = set()
     for entry in judged:
-        entry_fields = {"file", "table", "prefix", "sha256", "bytes"}
+        entry_fields = {"file", "judge", "table", "prefix", "sha256", "bytes"}
         if not isinstance(entry, dict) or set(entry) != entry_fields:
             raise TaskError(f"{task}: a judged entry without exactly {sorted(entry_fields)}")
-        name, table = entry["file"], entry["table"]
+        name, judge, table, prefix = entry["file"], entry["judge"], entry["table"], entry["prefix"]
         if not isinstance(name, str) or not _JUDGED_FILE.fullmatch(name) or name in names:
             raise TaskError(f"{task}: {name!r} is not one judged output's file")
         names.add(name)
-        if not isinstance(table, str) or not isinstance(globals().get(table), tuple):
+        if not isinstance(judge, str) or judge not in M5E_JUDGE_PREFIX:
+            raise TaskError(f"{task}: {judge!r} is no judge of the M5 gate")
+        if _case_table(table) is None:
             raise TaskError(f"{task}: {table!r} is not a case table")
-        if not isinstance(entry["prefix"], str) or not entry["prefix"]:
-            raise TaskError(f"{task}: {name} has no line prefix")
-        data = (directory / name).read_bytes()
+        fixed = M5E_JUDGE_PREFIX[judge]
+        if not isinstance(prefix, str) or (prefix != fixed if fixed is not None else not prefix):
+            raise TaskError(f"{task}: {name} is not read at its judge's line prefix")
+        path = directory / name
+        try:
+            size = path.stat().st_size
+        except OSError as exc:
+            raise TaskError(f"{task}: {name} is missing: {exc}") from exc
+        if size > M5E_GATE_MAX_FILE:
+            raise TaskError(f"{task}: {name} is {size} bytes, over {M5E_GATE_MAX_FILE}")
+        data = path.read_bytes()
         if hashlib.sha256(data).hexdigest() != entry["sha256"] or len(data) != entry["bytes"]:
             raise TaskError(f"{task}: {name} is not the output the task judged")
-    beside = sorted({path.name for path in directory.iterdir()} - names - {"judged.json"})
-    if beside:
-        raise TaskError(f"files beside {task}'s kept evidence: {beside}")
+    present = {path.name for path in directory.iterdir()}
+    extra = sorted(present - names - {"judged.json"} - beside)
+    if extra:
+        raise TaskError(f"files beside {task}'s kept evidence: {extra}")
+    return judged
+
+
+def _hosted(environ: Mapping[str, str]) -> bool:
+    return environ.get("GITHUB_ACTIONS") == "true" and (
+        environ.get("RUNNER_ENVIRONMENT") == "github-hosted"
+    )
+
+
+def _run_identity(environ: Mapping[str, str]) -> tuple[str, str, str]:
+    """This run's id, attempt and commit, each well formed."""
     run_id = environ.get("GITHUB_RUN_ID", "")
     attempt = environ.get("GITHUB_RUN_ATTEMPT", "")
     sha = environ.get("GITHUB_SHA", "")
@@ -11607,6 +11864,33 @@ def m5e_bundle_record(
         raise TaskError("the run's id or attempt is missing or malformed")
     if not _COMMIT_SHA.fullmatch(sha):
         raise TaskError("the run's commit is missing or malformed")
+    return run_id, attempt, sha
+
+
+def m5e_bundle_record(
+    environ: Mapping[str, str], root: Path = M5E_EVIDENCE_DIR
+) -> dict[str, object]:
+    """The bundle a job of the M5 gate uploads: what its own task kept,
+    checked byte for byte, with this run's provenance. Only on a disposable
+    GitHub-hosted runner (NOT EXERCISED anywhere else), and only for the task
+    this job runs: whatever else lies under `root` is never sealed."""
+    if not _hosted(environ):
+        raise TaskError(
+            "NOT EXERCISED: an M5 evidence bundle is sealed only on a disposable "
+            "GitHub-hosted runner"
+        )
+    job = environ.get("GITHUB_JOB", "")
+    tasks = [task for task, its_job in M5E_GATE_TASKS.items() if its_job == job]
+    if len(tasks) != 1:
+        raise TaskError(f"the {job!r} job runs no task of the M5 gate")
+    task = tasks[0]
+    directory = root / task
+    if not directory.is_dir():
+        raise TaskError(f"nothing kept under {directory}: {task} kept no evidence")
+    kept = _read_bounded_json(directory / "judged.json", task)
+    judged = _kept_judgements(directory, task, kept)
+    run_id, attempt, sha = _run_identity(environ)
+    cleanup = kept["cleanup"] if isinstance(kept, dict) else []
     return {
         "schema": M5E_BUNDLE_SCHEMA,
         "version": M5E_BUNDLE_VERSION,
@@ -11643,6 +11927,193 @@ def task_m5e_evidence_bundle() -> None:
         f"{record['run_id']} attempt {record['run_attempt']} at {str(record['sha'])[:12]}, "
         f"{count} judged output(s){OFF}"
     )
+
+
+def _gate_bundle(directory: Path, task: str, run: tuple[str, str, str]) -> list[dict[str, object]]:
+    """One downloaded bundle, checked against this run before anything in it
+    is judged: its record's fields and provenance, its kept record and files,
+    and the judgements its task must have made."""
+    job = M5E_GATE_TASKS[task]
+    bundle = _read_bounded_json(directory / "bundle.json", task)
+    fields = {
+        "schema",
+        "version",
+        "task",
+        "job",
+        "run_id",
+        "run_attempt",
+        "sha",
+        "ref",
+        "runner",
+        "judged",
+        "cleanup",
+        "exit",
+    }
+    if not isinstance(bundle, dict) or set(bundle) != fields:
+        raise TaskError(f"its bundle.json does not have exactly {sorted(fields)}")
+    if (bundle["schema"], bundle["version"], bundle["task"], bundle["job"]) != (
+        M5E_BUNDLE_SCHEMA,
+        M5E_BUNDLE_VERSION,
+        task,
+        job,
+    ):
+        raise TaskError(f"not {task}'s bundle from the {job!r} job, at this schema and version")
+    run_id, attempt, sha = run
+    said = (bundle["run_id"], bundle["run_attempt"], bundle["sha"])
+    # The same run on the same commit: an earlier attempt's bundle is this
+    # run's, from a job that passed and was not run again; a later one's, or
+    # another run's or commit's, is not.
+    if (
+        said[0] != run_id
+        or said[2] != sha
+        or not isinstance(said[1], str)
+        or not _RUN_NUMBER.fullmatch(said[1])
+        or int(said[1]) > int(attempt)
+    ):
+        raise TaskError(f"from run {said[0]!r} attempt {said[1]!r} at {said[2]!r}: not this run's")
+    runner = bundle["runner"]
+    runner_fields = {"environment", "os", "image", "image_version"}
+    if not isinstance(runner, dict) or set(runner) != runner_fields:
+        raise TaskError(f"its runner is not exactly {sorted(runner_fields)}")
+    if runner["environment"] != "github-hosted":
+        raise TaskError(f"from a {runner['environment']!r} runner, not a GitHub-hosted one")
+    if type(bundle["exit"]) is not int or bundle["exit"] != 0 or not isinstance(bundle["ref"], str):
+        raise TaskError("its task's exit is not 0, or its ref is not a name")
+    kept = _read_bounded_json(directory / "judged.json", task)
+    judged = _kept_judgements(directory, task, kept, frozenset({"bundle.json"}))
+    cleanup = kept["cleanup"] if isinstance(kept, dict) else None
+    if bundle["judged"] != judged or bundle["cleanup"] != cleanup:
+        raise TaskError("its bundle and its kept record disagree")
+    made = sorted((str(entry["judge"]), str(entry["table"])) for entry in judged)
+    if made != sorted(M5E_GATE_JUDGEMENTS[task]):
+        raise TaskError(f"judged {made}, not exactly {sorted(M5E_GATE_JUDGEMENTS[task])}")
+    return judged
+
+
+def m5e_gate_verdict(
+    environ: Mapping[str, str], root: Path = M5E_GATE_DIR, repo: Path = ROOT
+) -> tuple[list[str], list[str]]:
+    """The M5 gate, HOSTED ONLY, in the `m5e-gate` job: judge this run's
+    bundles again. Raises on anything the inventory verdict refuses, every
+    problem named; returns that verdict's lines and the M5e acceptance
+    verdict's blockers (none: READY)."""
+    if not _hosted(environ):
+        raise TaskError(
+            "NOT EXERCISED: the M5 gate judges only the bundles of a run on disposable "
+            "GitHub-hosted runners, in its own job"
+        )
+    if environ.get("GITHUB_JOB") != M5E_GATE_JOB:
+        raise TaskError(
+            f"the M5 gate runs in the {M5E_GATE_JOB!r} job, not {environ.get('GITHUB_JOB')!r}"
+        )
+    run = _run_identity(environ)
+    if not root.is_dir():
+        raise TaskError(f"no bundle under {root}: nothing was downloaded")
+    expected = {f"m5e-evidence-{job}": task for task, job in M5E_GATE_TASKS.items()}
+    present = {entry.name for entry in root.iterdir()}
+    problems: list[str] = []
+    missing = sorted(set(expected) - present)
+    unexpected = sorted(present - set(expected))
+    if missing:
+        problems.append(f"missing bundle(s): {missing}")
+    if unexpected:
+        problems.append(f"bundle(s) no task of the gate uploads: {unexpected}")
+    attributed: set[tuple[str, str]] = set()
+    rejudged: dict[str, int] = {}
+    for artifact in sorted(set(expected) & present):
+        task, directory = expected[artifact], root / artifact
+        try:
+            if not directory.is_dir():
+                raise TaskError("not a directory")
+            judged = _gate_bundle(directory, task, run)
+        except TaskError as exc:
+            problems.append(f"{artifact}: {exc}")
+            continue
+        for entry in judged:
+            judge, table = str(entry["judge"]), str(entry["table"])
+            cases = _case_table(table) or ()
+            try:
+                output = (directory / str(entry["file"])).read_text(encoding="utf-8")
+                _rejudge(judge, output, cases, str(entry["prefix"]))
+            except (OSError, UnicodeDecodeError, TaskError) as exc:
+                problems.append(f"{task}: {judge} {table}: {exc}")
+                continue
+            if judge == "attributed":
+                attributed.update(cases)
+            rejudged[task] = rejudged.get(task, 0) + len(cases)
+    not_yet = {case for table in M5E_NOT_YET_REQUIRED for case in (_case_table(table) or ())}
+    required = set(ATTRIBUTED_CASES) - not_yet
+    if not problems:
+        lost = sorted(f"{suite}/{case}" for suite, case in required - attributed)
+        extra = sorted(f"{suite}/{case}" for suite, case in attributed - required)
+        if lost:
+            problems.append(f"{len(lost)} attributed case(s) no bundle judged: {lost[:20]}")
+        if extra:
+            problems.append(f"{len(extra)} case(s) judged that are not yet required: {extra[:20]}")
+    if problems:
+        raise TaskError(f"M5 gate: {len(problems)} problem(s): " + "; ".join(problems[:30]))
+    run_id, attempt, sha = run
+    lines = [
+        f"{_INVENTORY_VERDICT}: {len(expected)} bundles of run {run_id} attempt {attempt} at "
+        f"{sha[:12]}, each from its job on a GitHub-hosted runner, judged again",
+        f"  attributed inventory: {len(attributed)} of {len(ATTRIBUTED_CASES)} cases judged "
+        f"again; not yet required: {', '.join(M5E_NOT_YET_REQUIRED)} ({len(not_yet)} cases)",
+        *(f"  {task}: {rejudged[task]} case(s) judged again" for task in M5E_GATE_TASKS),
+    ]
+    return lines, m5e_acceptance_blockers(repo)
+
+
+def adr_status(repo: Path, number: str) -> str:
+    """The first word of ADR `number`'s status line ("missing" without one)."""
+    found = sorted((repo / "docs" / "adr").glob(f"{number}-*.md"))
+    if len(found) != 1:
+        return "missing"
+    for line in found[0].read_text(encoding="utf-8").splitlines():
+        if line.startswith("**Status:** "):
+            words = line.removeprefix("**Status:** ").lstrip("*").split()
+            return words[0] if words else "missing"
+    return "missing"
+
+
+def m5e_acceptance_blockers(repo: Path = ROOT) -> list[str]:
+    """What stops `M5e` joining the available milestones, besides the
+    inventory verdict (the handoff's §§6.4, 9): M5e.5's evidence not yet
+    required, a record not at its status, a step's closure or acceptance not
+    recorded in the plan. None: READY."""
+    blockers: list[str] = []
+    if M5E_NOT_YET_REQUIRED or "sandbox-hygiene-evidence" not in M5E_GATE_TASKS:
+        blockers.append(
+            "M5e.5's evidence is not yet required: "
+            + ", ".join(M5E_NOT_YET_REQUIRED or ("sandbox-hygiene-evidence",))
+            + " (M5e.5's acceptance change)"
+        )
+    for number, wanted in M5E_ACCEPTANCE_ADRS:
+        status = adr_status(repo, number)
+        if status != wanted:
+            blockers.append(f"ADR-{number} is {status}, not {wanted}")
+    plan = (repo / "docs" / "M5E_ASSURANCE_PLAN.md").read_text(encoding="utf-8")
+    for marker in M5E_ACCEPTANCE_RECORDS:
+        if marker not in plan:
+            blockers.append(f"the plan records no {marker.strip('*( ')}")
+    return blockers
+
+
+def task_m5e_gate_check() -> None:
+    """M5e.6 (G2), HOSTED ONLY: the M5 gate. Judge again every M5 evidence
+    task's bundle from this run (target/m5e-gate), and print the M5e
+    acceptance verdict; NOT EXERCISED anywhere but its own hosted job."""
+    lines, blockers = m5e_gate_verdict(os.environ)
+    for line in lines:
+        print(f"{GREEN}{line}{OFF}")
+    if blockers:
+        print(
+            f"{BOLD}M5e acceptance verdict: NOT READY{OFF} ({len(blockers)} blocker(s); "
+            "enforced by the m5e-gate eval once M5e is available)"
+        )
+        for blocker in blockers:
+            print(f"  - {blocker}")
+    else:
+        print(f"{GREEN}M5e acceptance verdict: READY{OFF}")
 
 
 TASKS = {
@@ -11682,6 +12153,7 @@ TASKS = {
     "sandbox-hygiene-evidence": task_sandbox_hygiene_evidence,
     "sandbox-registry-mutations": task_sandbox_registry_mutations,
     "m5e-evidence-bundle": task_m5e_evidence_bundle,
+    "m5e-gate-check": task_m5e_gate_check,
     "net-http-evidence": task_net_http_evidence,
     "net-http-mutations": task_net_http_mutations,
     "sandbox-workload-mutations": task_sandbox_workload_mutations,
@@ -11779,8 +12251,11 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     try:
+        keeps = m5e_keeps(args.task, os.environ)
+        if keeps:
+            forget_kept(args.task)
         TASKS[args.task]()
-        if args.task in M5E_GATE_TASKS:
+        if keeps:
             save_judged_evidence(args.task)
     except TaskError as exc:
         print(f"\n{RED}dw: {exc}{OFF}", file=sys.stderr)

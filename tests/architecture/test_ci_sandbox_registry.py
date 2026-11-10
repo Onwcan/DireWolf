@@ -165,9 +165,8 @@ def test_the_registry_job_exists_is_unconditional_required_and_alone_with_its_fl
     [
         (lambda t: t.replace("  sandbox-registry:\n", "  sandbox-registry-x:\n", 1), "no `"),
         (
-            lambda t: t.replace(", sandbox-registry,", ",", 1).replace(
-                ", sandbox-registry]", "]", 1
-            ),
+            # The aggregate's own list: the M5 gate's job needs this job too.
+            lambda t: t.replace(", sandbox-registry, d11-hardening,", ", d11-hardening,", 1),
             "exactly once",
         ),
         (

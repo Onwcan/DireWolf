@@ -15,6 +15,9 @@ exist and still cannot be measured on every machine:
   measured only against a **real OCI runtime**: a `docker` client on PATH whose
   server answers and runs Linux containers. A machine without one does not
   exercise it.
+* ``needs = ["m5e-gate-job"]`` — the integrated M5 gate (M5e.6) judges the
+  bundles this run's evidence jobs uploaded, which only CI's ``m5e-gate`` job
+  downloads, on a GitHub-hosted runner. Anywhere else it is not exercised.
 
 An eval whose precondition is unmet is **not exercised**: SKIP, with a reason
 generated here, never a pass and never pending (the component exists). The
@@ -42,13 +45,14 @@ __all__ = [
     "NOT_EXERCISED",
     "PLATFORMS",
     "current_platform",
+    "m5e_gate_job",
     "oci_runtime",
     "second_identity",
     "unmet",
 ]
 
 PLATFORMS: Final = frozenset({"linux", "macos", "windows"})
-NEEDS: Final = frozenset({"oci-runtime", "second-identity"})
+NEEDS: Final = frozenset({"m5e-gate-job", "oci-runtime", "second-identity"})
 
 NOT_EXERCISED: Final = "not exercised"
 """The prefix of every precondition reason. Stable, so a reader can grep."""
@@ -131,6 +135,17 @@ def oci_runtime() -> str | None:
     return words[1]
 
 
+def m5e_gate_job() -> bool:
+    """Whether this is CI's `m5e-gate` job on a GitHub-hosted runner: the one
+    place this run's M5 evidence bundles are downloaded. Read from the
+    runner's own variables, which the gate task checks again."""
+    return (
+        os.environ.get("GITHUB_ACTIONS") == "true"
+        and os.environ.get("RUNNER_ENVIRONMENT") == "github-hosted"
+        and os.environ.get("GITHUB_JOB") == "m5e-gate"
+    )
+
+
 def _effective_uid() -> int:
     """This process's effective uid, on the one platform that asks."""
     geteuid = getattr(os, "geteuid", None)
@@ -147,6 +162,11 @@ def unmet(platforms: Sequence[str], needs: Sequence[str]) -> str | None:
             return (
                 f"{NOT_EXERCISED}: needs a second operating-system identity; set {PEER_ENV} "
                 f"to a user that `sudo -n -u` can switch to, other than this one and root"
+            )
+        if need == "m5e-gate-job" and not m5e_gate_job():
+            return (
+                f"{NOT_EXERCISED}: judges the bundles of a CI run, which only its "
+                "`m5e-gate` job downloads, on a GitHub-hosted runner"
             )
         if need == "oci-runtime" and oci_runtime() is None:
             return (
