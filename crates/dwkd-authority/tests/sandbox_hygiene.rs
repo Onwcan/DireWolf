@@ -1,11 +1,10 @@
-//! M5e.5's evidence (ADR-0054 §8, ADR-0055 §9; the plan's §10, "M5e.5's
-//! sequencing"): **npm and pip under their proposed profiles**, which no
-//! production configuration keeps, against M5e.3's fixture registries --
-//! run as a runtime runs a workload: a real DWKP client on the **released**
-//! `dwkd-authority serve --allow-unaccepted-hygiene-profile npm
-//! --allow-unaccepted-hygiene-profile pip`, the **released** broker, the
-//! runner's Docker Engine, and a fresh measured `PROXY_ONLY` environment and
-//! workspace for every case.
+//! M5e.5's evidence (ADR-0054 §8, ADR-0055 §9): **npm and pip under their
+//! profiles**, accepted on 2026-11-11 on this evidence (the plan's §10, "M5e.5's
+//! acceptance") and kept by the obligation in every configuration, against
+//! M5e.3's fixture registries -- run as a runtime runs a workload: a real DWKP
+//! client on the **released** `dwkd-authority serve`, started as production
+//! starts it, the **released** broker, the runner's Docker Engine, and a fresh
+//! measured `PROXY_ONLY` environment and workspace for every case.
 //!
 //! What is a fixture here, and what is not:
 //!
@@ -13,7 +12,7 @@
 //!   origins' fixed ports in every URL, on this runner's loopback under the
 //!   task's PKI, named through the broker's evidence-only resolver file.
 //! * The **image** is `make sandbox-hygiene-evidence`'s, built from the
-//!   registry tools image's checked rootfs: the run's anchor at both proposed
+//!   registry tools image's checked rootfs: the run's anchor at both
 //!   trust paths (`/etc/direwolf/npm-ca.pem`, `/etc/direwolf/pip-ca.pem`, the
 //!   preparation handoff's D3), a third authority in the image's system store,
 //!   an image `pip.conf` asking for the ungranted index and source builds,
@@ -29,11 +28,11 @@
 //! the proxy a question no grant can hold. A case reads the refusals its
 //! workloads caused as the destruction's count less those questions.
 //!
-//! **Nothing here is accepted.** Every case is ADR-0054's or ADR-0055's,
-//! required by name; a case that does not hold leaves npm and pip as they are
-//! in production, and the ADR is revised, never accepted without it. Every
-//! test is `#[ignore]`d and runs only on a disposable GitHub-hosted runner
-//! (`DW_HYGIENE_EVIDENCE=1`): anywhere else it panics NOT EXERCISED.
+//! **Every case is ADR-0054's or ADR-0055's**, required by name, and the
+//! required `sandbox-hygiene` job runs them on every change: a case that stops
+//! holding fails CI, and the ADR is revisited. Every test is `#[ignore]`d and
+//! runs only on a disposable GitHub-hosted runner (`DW_HYGIENE_EVIDENCE=1`):
+//! anywhere else it panics NOT EXERCISED.
 
 #![allow(
     clippy::panic,
@@ -128,7 +127,7 @@ mod linux {
     const MAX_DOWNLOAD: usize = 8 * 1024 * 1024;
     /// The most runs (and so workspaces) one lab admits.
     const RUNS: u64 = 48;
-    /// npm's prefix and pip's, as ADR-0054 §2 and ADR-0055 §2 propose them.
+    /// npm's prefix and pip's, as ADR-0054 §2 and ADR-0055 §2 state them.
     const NPM_PREFIX: [&str; 5] = [
         "--ignore-scripts",
         "--strict-ssl",
@@ -746,15 +745,12 @@ mod linux {
 
     #[derive(Clone, Copy, PartialEq, Eq)]
     struct Setup {
-        /// Whether `serve` is given the evidence-only option for both profiles.
-        profiles: bool,
         policy: Policy,
         /// Whether the image carries the two trust files.
         trusted: bool,
     }
 
-    const AS_PROPOSED: Setup = Setup {
-        profiles: true,
+    const AS_ACCEPTED: Setup = Setup {
         policy: Policy::Evidence,
         trusted: true,
     };
@@ -1028,14 +1024,6 @@ reason = "NO_MATCHING_RULE"
                     args.extend(["--policy-shipped".to_owned(), name.to_owned()]);
                 }
             }
-            if setup.profiles {
-                for name in ["npm", "pip"] {
-                    args.extend([
-                        "--allow-unaccepted-hygiene-profile".to_owned(),
-                        name.to_owned(),
-                    ]);
-                }
-            }
             let mut ceiling = ceiling();
             ceiling.push("process.exec:*".to_owned());
             for capability in ceiling {
@@ -1048,12 +1036,10 @@ reason = "NO_MATCHING_RULE"
                 said.contains("execution environment attached from"),
                 "{said}"
             );
-            // The option says so at start, or is absent.
-            assert_eq!(
-                said.contains("REDUCED ASSURANCE: --allow-unaccepted-hygiene-profile npm pip"),
-                setup.profiles,
-                "{said}"
-            );
+            // No profile is reduced assurance any more: the authority says
+            // nothing about npm's or pip's at start.
+            assert!(!said.contains("hygiene profile"), "{said}");
+            assert!(!said.contains("hygiene-profile"), "{said}");
             Self {
                 dir,
                 pins,
@@ -1439,12 +1425,12 @@ reason = "NO_MATCHING_RULE"
         format!("https://{host}:{port}/npm/")
     }
 
-    // ---- npm, as ADR-0054 proposes ------------------------------------------
+    // ---- npm, as ADR-0054 states it --------------------------------------------
 
     #[test]
     #[ignore = "hosted only: make sandbox-hygiene-evidence on a disposable GitHub-hosted runner"]
-    fn npm_under_its_proposed_profile() {
-        let lab = Lab::new("m5e5n", AS_PROPOSED);
+    fn npm_under_its_profile() {
+        let lab = Lab::new("m5e5n", AS_ACCEPTED);
         let granted = registry(GRANTED, GRANTED_PORT);
         let (plain, _) = lab.npm_package("plain");
         let mut groups = Groups::default();
@@ -1920,12 +1906,12 @@ reason = "NO_MATCHING_RULE"
         groups.end();
     }
 
-    // ---- pip, as ADR-0055 proposes ------------------------------------------
+    // ---- pip, as ADR-0055 states it --------------------------------------------
 
     #[test]
     #[ignore = "hosted only: make sandbox-hygiene-evidence on a disposable GitHub-hosted runner"]
-    fn pip_under_its_proposed_profile() {
-        let lab = Lab::new("m5e5p", AS_PROPOSED);
+    fn pip_under_its_profile() {
+        let lab = Lab::new("m5e5p", AS_ACCEPTED);
         let granted = index(GRANTED, GRANTED_PORT);
         let (base, base_version, base_file) = lab.project("base");
         let mut groups = Groups::default();
@@ -2401,7 +2387,7 @@ reason = "NO_MATCHING_RULE"
             "m5e5t",
             Setup {
                 trusted: false,
-                ..AS_PROPOSED
+                ..AS_ACCEPTED
             },
         );
         let (plain, _) = lab.npm_package("plain");
@@ -2526,80 +2512,67 @@ reason = "NO_MATCHING_RULE"
         groups.end();
     }
 
-    // ---- without the option, nothing changes --------------------------------
+    // ---- with no option, both are kept ---------------------------------------
 
+    /// What replaced the two `*-refused-without-the-evidence-option` cases when
+    /// the profiles were accepted (ADR-0054 §7, ADR-0055 §8): the authority,
+    /// started with no option about either, keeps each under its profile --
+    /// its launch and its prefix recorded in the plan it hashed.
     #[test]
     #[ignore = "hosted only: make sandbox-hygiene-evidence on a disposable GitHub-hosted runner"]
-    fn without_the_option_nothing_changes() {
-        let lab = Lab::new(
-            "m5e5o",
-            Setup {
-                profiles: false,
-                ..AS_PROPOSED
-            },
-        );
+    fn with_no_option_both_are_kept() {
+        let lab = Lab::new("m5e5o", AS_ACCEPTED);
         let (base, _, _) = lab.project("base");
-        lab.npm_project(1);
-        let mut a = lab.peer(1, &[]);
-        let (reason, rule) = denied(&a.exec(
-            &lab.pins.npm,
-            &["ci", "--registry", &registry(GRANTED, GRANTED_PORT)],
-        ));
-        assert_eq!(
-            (reason.as_str(), rule.as_str()),
-            ("OBLIGATION_UNENFORCEABLE", RULE)
-        );
-        assert_eq!(
-            lab.rows("SELECT count(*) FROM environment WHERE run_id = ?1", &a.run),
-            0
-        );
-        a.release();
-        evidence(
-            "npm-refused-without-the-evidence-option",
-            "refused:OBLIGATION_UNENFORCEABLE;option-absent;no-environment",
-            "authority-obligation",
-        );
-
-        // pip, as it is today: kept with nothing pip-specific -- the
-        // residual ADR-0055 exists to close, stated as such.
-        let mut a = lab.peer(2, &[]);
-        let target = format!("{TARGETS}/today");
-        let _ = a.exec(
-            &lab.pins.pip,
-            &[
-                "install",
-                "--index-url",
-                &index(GRANTED, GRANTED_PORT),
-                "--target",
-                &target,
-                &base,
-            ],
-        );
-        let (launch, prefix, _) = lab.recorded_plan(&a.run, &lab.pins.pip);
-        assert_eq!(launch, "HYGIENE", "pip's launch changed without the option");
-        assert!(
-            prefix.is_empty(),
-            "pip got a prefix without the option: {prefix:?}"
-        );
-        let environment: Option<String> = raw(&lab.dir.state())
-            .query_row(
-                "SELECT environment_id FROM environment WHERE run_id = ?1",
-                [a.run.as_str()],
-                |row| row.get(0),
-            )
-            .ok();
-        if let Some(environment) = environment {
+        let mut groups = Groups::default();
+        groups.run("npm-kept-with-no-option", || {
+            lab.npm_project(1);
+            let mut a = lab.peer(1, &[]);
+            let ran = lab.npm(
+                &mut a,
+                &["ci", "--registry", &registry(GRANTED, GRANTED_PORT)],
+            );
+            assert_eq!(ran.exit, Some(0), "{}", lab.why("npm ci", Some(&ran)));
             lab.container(&a.run);
-            lab.release(&mut a, &environment);
-        } else {
-            a.release();
-        }
-        evidence(
-            "pip-refused-without-the-evidence-option",
-            "today:launch-HYGIENE;no-pip-prefix;option-absent",
-            "authority-obligation",
-        );
-        lab.census();
+            let (launch, prefix, _) = lab.recorded_plan(&a.run, &lab.pins.npm);
+            assert_eq!(launch, "HYGIENE_NPM");
+            assert_eq!(prefix, NPM_PREFIX);
+            lab.release(&mut a, &ran.environment);
+            evidence(
+                "npm-kept-with-no-option",
+                "kept:launch-HYGIENE_NPM;prefix-recorded;no-option",
+                "authority-obligation",
+            );
+        });
+        groups.run("pip-kept-with-no-option", || {
+            let mut a = lab.peer(2, &[]);
+            let target = format!("{TARGETS}/kept");
+            let ran = lab.pip(
+                &mut a,
+                &[
+                    "install",
+                    "--index-url",
+                    &index(GRANTED, GRANTED_PORT),
+                    "--target",
+                    &target,
+                    &base,
+                ],
+            );
+            assert_eq!(ran.exit, Some(0), "{}", lab.why("pip install", Some(&ran)));
+            lab.container(&a.run);
+            let (launch, prefix, _) = lab.recorded_plan(&a.run, &lab.pins.pip);
+            assert_eq!(launch, "HYGIENE_PIP");
+            assert_eq!(prefix, PIP_PREFIX);
+            lab.release(&mut a, &ran.environment);
+            evidence(
+                "pip-kept-with-no-option",
+                "kept:launch-HYGIENE_PIP;prefix-recorded;no-option",
+                "authority-obligation",
+            );
+        });
+        groups.run("the census", || {
+            lab.census();
+        });
+        groups.end();
     }
 
     // ---- what the shipped packs decide --------------------------------------
@@ -2616,7 +2589,7 @@ reason = "NO_MATCHING_RULE"
                     &format!("m5e5s{pack}"),
                     Setup {
                         policy: Policy::Shipped(pack),
-                        ..AS_PROPOSED
+                        ..AS_ACCEPTED
                     },
                 );
                 let (base, _, _) = lab.project("base");

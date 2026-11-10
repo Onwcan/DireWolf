@@ -1,4 +1,4 @@
-// VIOLATES TX060: an unaccepted hygiene profile switched on outside the server's start-up option.
+// VIOLATES TX060: a switch for the hygiene profiles, which have none since their acceptance.
 fn switched(config: Environment, asked: &str) -> Environment {
     config.with_hygiene_profiles(from_a_request(asked)).unwrap_or_else(|_| unreachable!())
 }

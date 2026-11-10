@@ -5582,11 +5582,11 @@ def task_sandbox_registry_evidence() -> None:
 
 # ---- M5e.5: the npm and pip profiles, evidenced (hosted only) ----------------
 #
-# ADR-0054 §8's and ADR-0055 §9's cases, by name, against the profiles the
-# authority keeps only under its evidence-only start-up option (TX060)
-# (plan §10, "M5e.5's sequencing"). Nothing here is required by `ci`: the
-# owner runs it by hand (`.github/workflows/m5e5-evidence.yml`) until M5e.4's
-# repair has passed hosted and the owner adds it.
+# ADR-0054 §8's and ADR-0055 §9's cases, by name, against npm's and pip's
+# profiles, which the obligation keeps in every configuration since their
+# acceptance (2026-11-11; plan §10, "M5e.5's acceptance"). `ci` requires it
+# (`sandbox-hygiene`); the mutation review stays manual
+# (`.github/workflows/m5e5-evidence.yml`, plan OD-E7).
 HYGIENE_SUITE = "sandbox-hygiene"
 HYGIENE_FLAG = "DW_HYGIENE_EVIDENCE"
 # The image's trust files (ADR-0054 §4, ADR-0055 §5; the preparation
@@ -5628,10 +5628,10 @@ def hygiene_pip_launcher(minor: str) -> str:
 
 
 HYGIENE_TESTS = (
-    "linux::npm_under_its_proposed_profile",
-    "linux::pip_under_its_proposed_profile",
+    "linux::npm_under_its_profile",
+    "linux::pip_under_its_profile",
     "linux::without_a_trust_file_both_fail_closed",
-    "linux::without_the_option_nothing_changes",
+    "linux::with_no_option_both_are_kept",
     "linux::the_shipped_packs_decide",
 )
 # ADR-0054 §8's 22 and ADR-0055 §9's 21, by their exact names; and the
@@ -5656,7 +5656,7 @@ HYGIENE_NPM_CASES = (
     "npm-other-subcommands-refused",
     "npm-non-registry-specs-refused",
     "npx-still-refused",
-    "npm-refused-without-the-evidence-option",
+    "npm-kept-with-no-option",
     "npm-shipped-packs-behaviour",
     "npm-plan-records-prefix-and-profile",
 )
@@ -5679,7 +5679,7 @@ HYGIENE_PIP_CASES = (
     "pip-no-cache-reused",
     "pip-writes-only-workspace-and-tmp",
     "pip-installed-pth-not-executed-by-install",
-    "pip-refused-without-the-evidence-option",
+    "pip-kept-with-no-option",
     "pip-shipped-packs-behaviour",
     "pip-plan-records-prefix-and-profile",
 )
@@ -5710,7 +5710,7 @@ HYGIENE_OUTCOMES = {
     "npm-other-subcommands-refused": "refused:OBLIGATION_UNENFORCEABLE",
     "npm-non-registry-specs-refused": "refused:OBLIGATION_UNENFORCEABLE",
     "npx-still-refused": "refused:OBLIGATION_UNENFORCEABLE",
-    "npm-refused-without-the-evidence-option": "refused:OBLIGATION_UNENFORCEABLE",
+    "npm-kept-with-no-option": "kept:launch-HYGIENE_NPM",
     "npm-shipped-packs-behaviour": "decided:",
     "npm-plan-records-prefix-and-profile": "recorded:launch-HYGIENE_NPM",
     "pip-install-granted-index-installs": "installed:",
@@ -5733,7 +5733,7 @@ HYGIENE_OUTCOMES = {
     "pip-no-cache-reused": "refetched:",
     "pip-writes-only-workspace-and-tmp": "contained:",
     "pip-installed-pth-not-executed-by-install": "not-run:pth-marker-absent",
-    "pip-refused-without-the-evidence-option": "today:launch-HYGIENE",
+    "pip-kept-with-no-option": "kept:launch-HYGIENE_PIP",
     "pip-shipped-packs-behaviour": "denied:",
     "pip-plan-records-prefix-and-profile": "recorded:launch-HYGIENE_PIP",
     "pip-interpreter-module-refused": "refused:OBLIGATION_UNENFORCEABLE",
@@ -5746,7 +5746,7 @@ def hygiene_refusal(environ: Mapping[str, str]) -> str | None:
     if environ.get(HYGIENE_FLAG, "").strip() != "1":
         return (
             f"{HYGIENE_FLAG}=1 is not set: the npm and pip profiles' evidence runs only in the "
-            "manual `sandbox-hygiene` job, on a disposable GitHub-hosted runner"
+            "`sandbox-hygiene` job, on a disposable GitHub-hosted runner"
         )
     return registry_refusal({**environ, "DW_REGISTRY_EVIDENCE": "1"})
 
@@ -5858,16 +5858,16 @@ def _hygiene_images(
 
 def task_sandbox_hygiene_evidence() -> None:
     """M5e.5's evidence (ADR-0054 §8, ADR-0055 §9), hosted only: npm and pip
-    under their proposed profiles, through the released authority started
-    with its evidence-only start-up option for both, the released broker
-    and the runner's Docker Engine, against M5e.3's fixture registries.
+    under their profiles, through the released authority started as in
+    production, the released broker and the runner's Docker Engine, against
+    M5e.3's fixture registries.
 
     Anywhere but a disposable GitHub-hosted runner with DW_HYGIENE_EVIDENCE=1
     it refuses before anything is fetched or built: NOT EXERCISED, which
     fails. Every case must report at `dwkp-end-to-end`, attributed, its
     outcome showing what it claims; no container or network the evidence made
-    may remain; the images are removed. Required by no `ci` job until the
-    owner adds it after M5e.4's repair passes hosted."""
+    may remain; the images are removed. Required by `ci` (`sandbox-hygiene`)
+    since the profiles' acceptance."""
     if not sys.platform.startswith("linux"):
         raise TaskError("NOT EXERCISED: the hygiene evidence runs only on Linux")
     refusal = hygiene_refusal(os.environ)
@@ -5945,28 +5945,11 @@ _LAUNCH_RS = "crates/dwk-sandbox-probe/src/launch.rs"
 _KEEPS_NPM = ("npm_keeps_ci_and_install_of_registry_names_with_its_prefix",)
 _UNDOES_NPM = ("npm_refuses_each_argument_that_would_undo_it_in_every_spelling",)
 _UNDOES_PIP = ("pip_refuses_each_argument_that_would_undo_or_widen_it",)
-_NPM_EVIDENCE = ("npm_under_its_proposed_profile",)
-_PIP_EVIDENCE = ("pip_under_its_proposed_profile",)
+_NPM_EVIDENCE = ("npm_under_its_profile",)
+_PIP_EVIDENCE = ("pip_under_its_profile",)
 # (name, file, the guard's text, its weakening, unit or hosted, the tests at
 # least one of which must fail for the mutant to be killed).
 HYGIENE_MUTATIONS: tuple[tuple[str, str, str, str, str, tuple[str, ...]], ...] = (
-    (
-        "default: a profile on with no flag",
-        _HYGIENE_RS,
-        "    pub const NONE: Self = Self {\n        npm: false,\n        pip: false,\n    };",
-        "    pub const NONE: Self = Self {\n        npm: true,\n        pip: true,\n    };",
-        "unit",
-        ("with_no_profile_every_decision_is_todays",),
-    ),
-    (
-        "fence: the option kept outside the evidence's workspace",
-        _SANDBOX_RS,
-        "        if !profiles.is_none() && !matches!(self.workspace, "
-        "WorkspaceSetting::UnverifiedEvidence) {\n",
-        "        if false && !matches!(self.workspace, WorkspaceSetting::UnverifiedEvidence) {\n",
-        "unit",
-        ("an_unaccepted_profile_is_kept_only_in_the_evidence_harness_configuration",),
-    ),
     (
         "npm subcommands: run allowed",
         _HYGIENE_RS,
@@ -6021,13 +6004,21 @@ HYGIENE_MUTATIONS: tuple[tuple[str, str, str, str, str, tuple[str, ...]], ...] =
     (
         "npx: moved out of UNEVIDENCED",
         _HYGIENE_RS,
-        'const UNEVIDENCED: &[&str] = &["npm", "npx", "pnpm", "yarn", "bun", "cargo"];',
-        'const UNEVIDENCED: &[&str] = &["npm", "pnpm", "yarn", "bun", "cargo"];',
+        'const UNEVIDENCED: &[&str] = &["npx", "pnpm", "yarn", "bun", "cargo"];',
+        'const UNEVIDENCED: &[&str] = &["pnpm", "yarn", "bun", "cargo"];',
         "unit",
         (
             "a_tool_without_real_tool_evidence_is_not_kept",
-            "npx_the_runners_and_the_wrappers_stay_refused_with_a_profile_on",
+            "npx_the_runners_and_the_wrappers_stay_refused",
         ),
+    ),
+    (
+        "runner: npm or pip through a runner kept",
+        _HYGIENE_RS,
+        "            unevidenced(name) || profiled(name)\n",
+        "            unevidenced(name)\n",
+        "unit",
+        ("a_runner_naming_npm_or_pip_is_refused",),
     ),
     (
         "pip subcommands: download allowed",
@@ -8710,8 +8701,8 @@ ATTRIBUTION: dict[str, tuple[tuple[str, str, str | tuple[str, ...]], ...]] = {
         ("registry-npm-*-refused-before-preparation", _DWKP, "authority-obligation"),
         ("registry-npm-nothing-prepared-or-reached", _DWKP, "authority-environment-decision"),
     ),
-    # M5e.5 (ADR-0054 §8, ADR-0055 §9): npm and pip under their proposed
-    # profiles, kept only under the evidence-only option; hosted only.
+    # M5e.5 (ADR-0054 §8, ADR-0055 §9): npm and pip under their profiles,
+    # accepted 2026-11-11; hosted only, in the required `sandbox-hygiene` job.
     "sandbox-hygiene": (
         ("*-granted-registry-installs", _DWKP, "relay-and-connect-proxy-grant"),
         ("pip-install-*-installs", _DWKP, "relay-and-connect-proxy-grant"),
@@ -8738,7 +8729,7 @@ ATTRIBUTION: dict[str, tuple[tuple[str, str, str | tuple[str, ...]], ...]] = {
         ("*-other-subcommands-refused", _DWKP, "authority-obligation"),
         ("*-non-*-specs-refused", _DWKP, "authority-obligation"),
         ("npx-still-refused", _DWKP, "authority-obligation"),
-        ("*-refused-without-the-evidence-option", _DWKP, "authority-obligation"),
+        ("*-kept-with-no-option", _DWKP, "authority-obligation"),
         ("pip-interpreter-module-refused", _DWKP, "authority-obligation"),
         ("*-shipped-packs-behaviour", _DWKP, "authority-policy"),
         ("*-plan-records-prefix-and-profile", _DWKP, "authority-ledger"),
@@ -11538,6 +11529,7 @@ M5E_GATE_TASKS: dict[str, str] = {
     "sandbox-capacity-evidence": "sandbox-capacity",
     "sandbox-registry-evidence": "sandbox-registry",
     "sandbox-proxy-weakened-evidence": "sandbox-proxy-weakened",
+    "sandbox-hygiene-evidence": "sandbox-hygiene",
     "sandbox-agent-evidence": "sandbox-agent",
     "sandbox-release-evidence": "sandbox-release",
     "net-http-evidence": "net-http",
@@ -11568,6 +11560,7 @@ M5E_GATE_JUDGEMENTS: dict[str, tuple[tuple[str, str], ...]] = {
     "sandbox-capacity-evidence": (("attributed", "CAPACITY_CASES"),),
     "sandbox-registry-evidence": (("attributed", "REGISTRY_CASES"),),
     "sandbox-proxy-weakened-evidence": (("attributed", "E6_CASES"),),
+    "sandbox-hygiene-evidence": (("attributed", "HYGIENE_CASES"),),
     "sandbox-agent-evidence": (("agent", "AGENT_CASES"), ("agent", "AGENT_IDENTITY_CASES")),
     "sandbox-release-evidence": (
         ("release", "RELEASE_UNIT_CASES"),
@@ -11582,10 +11575,9 @@ M5E_CENSUS_FREE: dict[str, str] = {
     "net-http-evidence": "its origins, resolver and broker are the test's own processes",
     "eval-check": "its M5 suites run each evidence task as a child, which fails on its own census",
 }
-# The attributed tables no task of the gate requires yet: M5e.5's evidence
-# runs only in its manual workflow until M5e.5's acceptance change makes
-# `sandbox-hygiene` a required job.
-M5E_NOT_YET_REQUIRED: tuple[str, ...] = ("HYGIENE_CASES",)
+# The attributed tables no task of the gate requires yet: none since M5e.5's
+# acceptance (2026-11-11) made `sandbox-hygiene` a required job.
+M5E_NOT_YET_REQUIRED: tuple[str, ...] = ()
 # The M5 eval suites' own verdicts, which the `evals` job keeps: one eval each.
 M5_EVAL_CASES = (
     ("m5a-sandbox-foundation", "oci-strict-measured-assurance"),
@@ -12128,7 +12120,8 @@ def m5e_gate_verdict(
         f"{_INVENTORY_VERDICT}: {len(expected)} bundles of run {run_id} attempt {attempt} at "
         f"{sha[:12]}, each from its job on a GitHub-hosted runner, judged again",
         f"  attributed inventory: {len(attributed)} of {len(ATTRIBUTED_CASES)} cases judged "
-        f"again; not yet required: {', '.join(M5E_NOT_YET_REQUIRED)} ({len(not_yet)} cases)",
+        f"again; not yet required: {', '.join(M5E_NOT_YET_REQUIRED) or 'none'} "
+        f"({len(not_yet)} cases)",
         *(f"  {task}: {rejudged[task]} case(s) judged again" for task in M5E_GATE_TASKS),
     ]
     return lines, m5e_acceptance_blockers(repo)

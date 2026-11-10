@@ -148,12 +148,14 @@ def test_an_available_milestone_with_an_unknown_runner_is_an_error() -> None:
 
 
 def test_a_still_unavailable_milestone_stays_pending_when_a_nearer_one_lands() -> None:
-    """M5 work does not become measurable because M4 shipped."""
-    with_m4 = frozenset({*AVAILABLE_MILESTONES, "M4"})
-    evaluation = _eval(requires=("M5",), pending_reason="there is no sandbox.", runner=None)
-    missing = sorted(set(evaluation.requires) - with_m4)
-    assert missing == ["M5"]
-    assert evaluation.pending_reason_for(missing) == "requires M5: there is no sandbox."
+    """M6 work does not become measurable because M5 shipped."""
+    with_m5 = frozenset({*AVAILABLE_MILESTONES, "M5"})
+    evaluation = _eval(
+        requires=("M6",), pending_reason="there is no approval registry.", runner=None
+    )
+    missing = sorted(set(evaluation.requires) - with_m5)
+    assert missing == ["M6"]
+    assert evaluation.pending_reason_for(missing) == ("requires M6: there is no approval registry.")
 
 
 def test_the_pending_reason_carries_the_milestone_from_requires_not_from_prose() -> None:
@@ -208,6 +210,11 @@ def test_m3_is_available_and_its_evals_are_real_gating_runners() -> None:
         "model-egress-privacy",
     }
     for evaluation in kernel:
+        # `sandbox-egress` waited for M5, which is here (2026-11-11), with its
+        # runner; the others still wait for theirs and nothing else.
+        if evaluation.name == "sandbox-egress":
+            assert evaluation.requires == ("M5",) and evaluation.runner in RUNNERS
+            continue
         assert set(evaluation.requires) - AVAILABLE_MILESTONES == set(evaluation.requires)
 
 

@@ -154,7 +154,7 @@ sandbox-proxy-weakened-review: ## M5e.2 R3's E6, offline: verify a downloaded ho
 sandbox-registry-evidence: ## M5e.4, HOSTED ONLY: pip as it is today against the fixture registries, npm refused before anything is prepared; builds the registry tools image from its checksum-verified pins; refuses anywhere but a disposable GitHub-hosted runner (DW_REGISTRY_EVIDENCE=1)
 	@$(DW) sandbox-registry-evidence
 
-sandbox-hygiene-evidence: ## M5e.5, HOSTED ONLY, manual: npm and pip under their proposed profiles (ADR-0054 §8, ADR-0055 §9) behind serve --allow-unaccepted-hygiene-profile; refuses anywhere but a disposable GitHub-hosted runner (DW_HYGIENE_EVIDENCE=1); required by no ci job
+sandbox-hygiene-evidence: ## M5e.5, HOSTED ONLY: npm and pip under their profiles (ADR-0054 §8, ADR-0055 §9, accepted); refuses anywhere but a disposable GitHub-hosted runner (DW_HYGIENE_EVIDENCE=1); required by ci (sandbox-hygiene)
 	@$(DW) sandbox-hygiene-evidence
 
 m5e-evidence-bundle: ## M5e.6 (G1), HOSTED ONLY: seal what this job's M5 evidence task kept (target/m5e-evidence/<task>) with the run's provenance, for the job to upload to the M5 gate; NOT EXERCISED anywhere but a disposable GitHub-hosted runner

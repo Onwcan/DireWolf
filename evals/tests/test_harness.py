@@ -21,7 +21,13 @@ from direwolf_evals.discovery import DiscoveryError, discover, suite_paths
 from direwolf_evals.fixtures import FixtureError, load_fixture
 from direwolf_evals.model import Outcome, Status
 from direwolf_evals.results import RESULT_VERSION, Result, RunReport, read_jsonl, write_jsonl
-from direwolf_evals.runner import AVAILABLE_MILESTONES, collect, run_eval, run_suites
+from direwolf_evals.runner import (
+    AVAILABLE_MILESTONES,
+    collect,
+    not_exercised,
+    run_eval,
+    run_suites,
+)
 from direwolf_evals.runners import RUNNERS
 from direwolf_evals.scoring import score_outcome
 from direwolf_evals.statistics import wilson_interval
@@ -128,8 +134,8 @@ def test_pending_evals_are_pending_not_passing() -> None:
 
 def test_an_eval_requiring_a_future_milestone_is_pending() -> None:
     """The mechanism that turns suites on: a milestone this build lacks."""
-    assert "M5" not in AVAILABLE_MILESTONES
-    suite, evaluation = next((s, e) for s, e in collect(EVALS_ROOT) if "M5" in e.requires)
+    assert "M6" not in AVAILABLE_MILESTONES
+    suite, evaluation = next((s, e) for s, e in collect(EVALS_ROOT) if "M6" in e.requires)
     results = run_eval(suite, evaluation, repo_root=REPO_ROOT, evals_root=EVALS_ROOT)
     assert [r.status for r in results] == [Status.PENDING]
 
@@ -238,13 +244,17 @@ def test_a_missing_eval_is_a_regression(tmp_path: Path) -> None:
 
 
 def test_the_repository_baseline_matches_a_real_run() -> None:
-    """The committed baseline describes this repository, not an aspiration."""
+    """The committed baseline describes this repository, not an aspiration.
+    An eval this machine cannot exercise -- `pending-kernel/sandbox-egress`
+    off CI's `m5e-gate` job -- is listed, never passed, as the lenient gate
+    lists it."""
     report = run_suites(REPO_ROOT, EVALS_ROOT, suites=FAST_SUITES)
     known = {evaluation.id for _, evaluation in collect(EVALS_ROOT)}
     comparison = baseline_module.compare(
         baseline_module.Baseline.load(EVALS_ROOT / "baselines" / "main.json"),
         report.results,
         known,
+        not_exercised(EVALS_ROOT),
     )
     assert comparison.ok, baseline_module.render(comparison)
 

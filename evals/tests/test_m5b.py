@@ -53,12 +53,12 @@ def _output(
     return "\n".join(lines)
 
 
-def test_m5b_is_available_and_m5_is_not() -> None:
+def test_m5b_and_m5_are_available() -> None:
     assert "M5b" in AVAILABLE_MILESTONES
-    assert "M5" not in AVAILABLE_MILESTONES, "M5 is in progress, not complete"
+    assert "M5" in AVAILABLE_MILESTONES, "M5 is complete (2026-11-11)"
     for _, evaluation in collect(EVALS_ROOT):
         if "M5" in evaluation.requires:
-            assert evaluation.runner is None, evaluation.id
+            assert evaluation.runner in RUNNERS, evaluation.id
 
 
 def test_the_m5b_eval_gates_with_a_real_runner_and_a_real_runtime() -> None:
@@ -74,8 +74,8 @@ def test_the_m5b_eval_gates_with_a_real_runner_and_a_real_runtime() -> None:
 def test_the_inventory_measures_the_m5b_property_in_its_own_suite() -> None:
     properties = [p for p in INVENTORY if p.milestone == "M5b"]
     assert [p.suite for p in properties] == ["m5b-sandbox-egress"]
-    # The end-to-end workload property is the whole of M5's, still pending.
-    assert any(p.milestone == "M5" and p.suite is None for p in INVENTORY)
+    # The end-to-end workload property is the whole of M5's, measured now.
+    assert any(p.milestone == "M5" and p.suite == "pending-kernel" for p in INVENTORY)
 
 
 def test_complete_evidence_passes() -> None:

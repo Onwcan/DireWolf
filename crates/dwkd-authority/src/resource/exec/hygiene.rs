@@ -22,19 +22,21 @@
 //! | family | kept by | undone by (refused) |
 //! |---|---|---|
 //! | `git` | the variables | `-c`, `--config-env`, `--exec-path` before the subcommand; `clone -c`/`--config` |
-//! | `python*` | the variables | `-E` among the interpreter's own options |
+//! | `python*` | the variables | `-E` among the interpreter's own options; `-m pip` or `-m ensurepip` (ADR-0055 P3) |
 //! | `pytest`, `py.test` | the variables, and `-p no:cacheprovider` first | `-p cacheprovider` |
-//! | `npm`, `npx`, `pnpm`, `yarn`, `bun`, `cargo`, a `cargo-*` subcommand, and the wrappers that run them (`rustup`, `corepack`) | **not kept**: no real-tool evidence in an environment yet | — |
-//! | a runner (`env`, `time`, `xargs`, …) or `uv` | the variables | an argument naming one of the tools above to run |
+//! | `npm` | ADR-0054's profile: `ci` and `install` of registry names; its launch's variables, and its prefix first | any other subcommand or spec, and each argument ADR-0054 §3 lists |
+//! | `pip`, `pip3`, `pip3.N` | ADR-0055's profile: `install` of named wheels; its launch's variables, and its prefix after the subcommand | any other subcommand or spec, and each argument ADR-0055 §3 lists |
+//! | `npx`, `pnpm`, `yarn`, `bun`, `cargo`, a `cargo-*` subcommand, and the wrappers that run them (`rustup`, `corepack`) | **not kept**: no real-tool evidence in an environment yet | — |
+//! | a runner (`env`, `time`, `xargs`, …) or `uv` | the variables | an argument naming one of the tools above to run, or `npm` or pip, whose profiles only their own identity reaches |
 //! | anything else | the variables (it reads none of them) | — |
 //!
-//! **M5e.5's unaccepted profiles** ([`hygiene_with`]): only when the
-//! operator's evidence-only start-up option names one, `npm` is ADR-0054's
-//! (`ci` and `install` of registry names; its launcher variables and prefix)
-//! and `pip`, `pip3`, `pip3.N` ADR-0055's (`install` of named wheels; its
-//! launcher variables and prefix after the subcommand), with the interpreter
-//! refused `-m pip` and `-m ensurepip` under pip's (the handoff's D4). Without
-//! it -- every production configuration -- [`hygiene_with`] is [`hygiene`].
+//! **npm's and pip's profiles** (ADR-0054, ADR-0055, accepted 2026-11-11 on
+//! M5e.5's hosted evidence): `npm` is kept as ADR-0054's profile and `pip`,
+//! `pip3`, `pip3.N` as ADR-0055's, each by its own launch and prefix. A
+//! profile is reached only by the tool's own identity: a runner or `uv`
+//! naming either is refused, and the interpreter may not run `-m pip` or
+//! `-m ensurepip` (the M5e.5 handoff's D4). Every other decision is the one
+//! the obligation made before them ([`base`]).
 //!
 //! **What it never claims.** A repository's own `.git/config` and hooks, a
 //! `conftest.py`, a `build.rs`, a `package.json` script the invocation runs,
@@ -59,8 +61,8 @@ pub enum Hygiene {
     },
     /// Not kept, and why: the invocation is `OBLIGATION_UNENFORCEABLE`.
     Unenforceable(&'static str),
-    /// Kept under an unaccepted profile (M5e.5): started by the trusted
-    /// launcher's profile for it, with `prefix` inserted at `at` among the
+    /// Kept under npm's or pip's profile (ADR-0054, ADR-0055): started by
+    /// the trusted launcher's profile for it, with `prefix` inserted at `at` among the
     /// invocation's own arguments (0: before them all).
     Profiled {
         /// Which profile.
@@ -82,8 +84,9 @@ const PYTEST_PREFIX: &[&str] = &["-p", "no:cacheprovider"];
 const GIT_OVERRIDES: &[&str] = &["-c", "--config-env", "--exec-path"];
 
 /// The tools whose neutralisation has no real-tool evidence in an
-/// environment yet (ADR-0052 §5a): their obligation is not kept.
-const UNEVIDENCED: &[&str] = &["npm", "npx", "pnpm", "yarn", "bun", "cargo"];
+/// environment yet (ADR-0052 §5a): their obligation is not kept. `npm`
+/// left the list with ADR-0054's acceptance; it has a profile instead.
+const UNEVIDENCED: &[&str] = &["npx", "pnpm", "yarn", "bun", "cargo"];
 
 /// The wrappers whose purpose is to run those tools: their obligation is
 /// not kept either, whatever they are asked to run.
@@ -95,14 +98,23 @@ fn unevidenced(name: &str) -> bool {
     UNEVIDENCED.contains(&name) || TOOLCHAIN_WRAPPERS.contains(&name) || name.starts_with("cargo-")
 }
 
-/// Whether an argument -- or the value after its `=` -- names such a tool by
-/// its last path component: what a runner or `uv run` would execute.
+/// Whether `name` is a tool with a profile of its own (ADR-0054, ADR-0055):
+/// reached only by its own identity, never through a runner, which would
+/// start it without its launch or its prefix.
+fn profiled(name: &str) -> bool {
+    name == "npm" || is_pip(name)
+}
+
+/// Whether an argument -- or the value after its `=` -- names such a tool, or
+/// one with a profile, by its last path component: what a runner or `uv`
+/// would execute.
 fn names_unevidenced(args: &[&str]) -> bool {
     args.iter().any(|arg| {
         let value = arg.split_once('=').map_or(*arg, |(_, value)| value);
-        [*arg, value]
-            .iter()
-            .any(|text| unevidenced(text.rsplit('/').next().unwrap_or(text)))
+        [*arg, value].iter().any(|text| {
+            let name = text.rsplit('/').next().unwrap_or(text);
+            unevidenced(name) || profiled(name)
+        })
     })
 }
 
@@ -213,9 +225,27 @@ fn pytest_loads_cache(args: &[&str]) -> bool {
 }
 
 /// Whether `workspace_exec_hygiene` can be kept for `executable` run with
-/// `args` (after `argv[0]`) in an environment.
+/// `args` (after `argv[0]`) in an environment: npm's and pip's profiles
+/// (ADR-0054, ADR-0055), and for every other tool [`base`]'s decision. The
+/// interpreter may not run pip's module or ensurepip (ADR-0055 P3).
 #[must_use]
 pub fn hygiene(executable: &ExecutableIdentity, args: &[&str]) -> Hygiene {
+    let name = program(executable);
+    if name == "npm" {
+        return npm(args);
+    }
+    if is_pip(name) {
+        return pip(args);
+    }
+    if is_python(name) && python_runs_pip(args) {
+        return Hygiene::Unenforceable("HYGIENE_NOT_EVIDENCED");
+    }
+    base(executable, args)
+}
+
+/// The obligation's decision for every tool without a profile: the
+/// variables, a tool's own neutralising arguments, or a refusal.
+fn base(executable: &ExecutableIdentity, args: &[&str]) -> Hygiene {
     let name = program(executable);
     if unevidenced(name) {
         return Hygiene::Unenforceable("HYGIENE_NOT_EVIDENCED");
@@ -248,29 +278,9 @@ pub fn hygiene(executable: &ExecutableIdentity, args: &[&str]) -> Hygiene {
     Hygiene::Kept { prefix: &[] }
 }
 
-// ---- M5e.5: the unaccepted profiles (ADR-0054, ADR-0055) -------------------
+// ---- npm's and pip's profiles (ADR-0054, ADR-0055) ---------------------------
 
-/// Which unaccepted profiles the obligation keeps: the state layer's copy of
-/// the operator's evidence-only start-up option (`sandbox::profiles`).
-/// [`Profiles::NONE`] in every production configuration, and then every
-/// decision is today's.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct Profiles {
-    /// ADR-0054's npm profile.
-    pub npm: bool,
-    /// ADR-0055's pip profile.
-    pub pip: bool,
-}
-
-impl Profiles {
-    /// None: production's, and today's decisions.
-    pub const NONE: Self = Self {
-        npm: false,
-        pip: false,
-    };
-}
-
-/// An unaccepted profile a kept invocation was decided under.
+/// The profile a kept invocation was decided under.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Profile {
     /// ADR-0054: the launcher's npm variables, npm's prefix.
@@ -738,27 +748,6 @@ fn python_runs_pip(args: &[&str]) -> bool {
     false
 }
 
-/// [`hygiene`], with the unaccepted profiles the operator's evidence-only
-/// option named (M5e.5). With [`Profiles::NONE`] it is [`hygiene`], for every
-/// input. With npm's, `npm` is ADR-0054's; with pip's, `pip` is ADR-0055's and
-/// the interpreter may not run pip's module (D4). Nothing else changes: `npx`,
-/// `pnpm`, `yarn`, `bun`, `cargo`, the wrappers and a runner naming any of them
-/// -- `npm` included -- stay refused.
-#[must_use]
-pub fn hygiene_with(executable: &ExecutableIdentity, args: &[&str], profiles: Profiles) -> Hygiene {
-    let name = program(executable);
-    if profiles.npm && name == "npm" {
-        return npm(args);
-    }
-    if profiles.pip && is_pip(name) {
-        return pip(args);
-    }
-    if profiles.pip && is_python(name) && python_runs_pip(args) {
-        return Hygiene::Unenforceable("HYGIENE_NOT_EVIDENCED");
-    }
-    hygiene(executable, args)
-}
-
 #[cfg(test)]
 mod tests {
     use super::{Hygiene, hygiene};
@@ -855,7 +844,7 @@ mod tests {
 
     #[test]
     fn a_tool_without_real_tool_evidence_is_not_kept() {
-        for tool in ["npm", "npx", "pnpm", "yarn", "bun", "cargo"] {
+        for tool in ["npx", "pnpm", "yarn", "bun", "cargo"] {
             assert_eq!(
                 hygiene(&at(&format!("/usr/bin/{tool}")), &["install"]),
                 Hygiene::Unenforceable("HYGIENE_NOT_EVIDENCED"),
@@ -905,25 +894,12 @@ mod tests {
         assert_eq!(kept("/opt/tools/fixture", &["-c", "-E"]), Some(&[][..]));
     }
 
-    // ---- M5e.5's profiles ---------------------------------------------------
+    // ---- npm's and pip's profiles ---------------------------------------------
 
-    use super::{Profile, Profiles, hygiene_with};
+    use super::{Profile, base};
 
-    const NPM: Profiles = Profiles {
-        npm: true,
-        pip: false,
-    };
-    const PIP: Profiles = Profiles {
-        npm: false,
-        pip: true,
-    };
-    const BOTH: Profiles = Profiles {
-        npm: true,
-        pip: true,
-    };
-
-    /// Every input the tests above use: today's decisions, which no profile
-    /// may change for any tool but its own.
+    /// Every input the tests above use: the decisions the obligation made
+    /// before the profiles, which neither may change for any tool but its own.
     fn today() -> Vec<(&'static str, Vec<&'static str>)> {
         let mut table: Vec<(&'static str, Vec<&'static str>)> = Vec::new();
         for args in [
@@ -981,70 +957,78 @@ mod tests {
     }
 
     #[test]
-    fn with_no_profile_every_decision_is_todays() {
-        let mut every = today();
-        for (path, args) in [
-            ("/opt/node/bin/npm", &["ci"][..]),
-            ("/opt/node/bin/npm", &["install", "left-pad"]),
-            ("/usr/bin/pip", &["install", "x"]),
-            ("/usr/bin/pip3", &["download", "x"]),
-            ("/usr/bin/pip3.12", &["install", "-r", "req.txt"]),
-            ("/usr/bin/python3", &["-m", "pip", "install", "x"]),
-            ("/usr/bin/python3", &["-m", "ensurepip"]),
-        ] {
-            every.push((path, args.to_vec()));
-        }
-        for (path, args) in every {
+    fn the_profiles_change_no_tool_but_their_own() {
+        for (path, args) in today() {
             assert_eq!(
-                hygiene_with(&at(path), &args, Profiles::NONE),
                 hygiene(&at(path), &args),
+                base(&at(path), &args),
                 "{path} {args:?}"
             );
         }
-        // Today's, named: npm refused, pip kept with nothing pip-specific.
+        // What the two tools were before their profiles: npm refused, pip kept
+        // with nothing pip-specific.
         assert_eq!(
-            hygiene_with(&at("/opt/node/bin/npm"), &["ci"], Profiles::NONE),
-            Hygiene::Unenforceable("HYGIENE_NOT_EVIDENCED")
-        );
-        assert_eq!(
-            hygiene_with(&at("/usr/bin/pip"), &["install", "x"], Profiles::NONE),
+            base(&at("/usr/bin/pip"), &["install", "x"]),
             Hygiene::Kept { prefix: &[] }
         );
-        assert_eq!(
-            hygiene_with(
-                &at("/usr/bin/python3"),
-                &["-m", "pip", "install"],
-                Profiles::NONE
-            ),
-            Hygiene::Kept { prefix: &[] }
-        );
-        assert_eq!(Profiles::default(), Profiles::NONE);
+        assert!(matches!(
+            hygiene(&at("/usr/bin/pip"), &["install", "x"]),
+            Hygiene::Profiled {
+                profile: Profile::Pip,
+                ..
+            }
+        ));
+        assert!(matches!(
+            hygiene(&at("/opt/node/bin/npm"), &["ci"]),
+            Hygiene::Profiled {
+                profile: Profile::Npm,
+                ..
+            }
+        ));
     }
 
     #[test]
-    fn a_profile_changes_no_tool_but_its_own() {
-        for profiles in [NPM, PIP, BOTH] {
-            for (path, args) in today() {
-                assert_eq!(
-                    hygiene_with(&at(path), &args, profiles),
-                    hygiene(&at(path), &args),
-                    "{profiles:?} {path} {args:?}"
-                );
-            }
+    fn a_runner_naming_npm_or_pip_is_refused() {
+        // A profile is reached only by the tool's own identity: through a
+        // runner the tool would start without its launch or its prefix.
+        for (path, args) in [
+            ("/usr/bin/env", &["pip", "install", "x"][..]),
+            ("/usr/bin/env", &["/opt/python/bin/pip3", "install", "x"]),
+            (
+                "/usr/bin/env",
+                &["PIP_ONLY_BINARY=:none:", "pip", "install", "x"],
+            ),
+            ("/usr/bin/time", &["pip3.12", "install", "x"]),
+            ("/usr/bin/xargs", &["-0", "pip"]),
+            ("/usr/bin/uv", &["pip", "install", "x"]),
+            ("/usr/bin/uv", &["run", "pip", "install", "x"]),
+            ("/usr/bin/env", &["npm", "ci"]),
+            (
+                "/usr/bin/nice",
+                &["-n", "5", "/opt/node/bin/npm", "install"],
+            ),
+        ] {
+            assert_eq!(
+                hygiene(&at(path), args),
+                Hygiene::Unenforceable("HYGIENE_NOT_EVIDENCED"),
+                "{path} {args:?}"
+            );
         }
-        // Each profile leaves the other's tool as it is today.
-        assert_eq!(
-            hygiene_with(&at("/usr/bin/pip"), &["download", "x"], NPM),
-            Hygiene::Kept { prefix: &[] }
-        );
-        assert_eq!(
-            hygiene_with(&at("/opt/node/bin/npm"), &["ci"], PIP),
-            Hygiene::Unenforceable("HYGIENE_NOT_EVIDENCED")
-        );
+        // Not pip's identity: a runner naming `pipx` or `pip-compile` is kept.
+        for (path, args) in [
+            ("/usr/bin/env", &["pipx", "run", "x"][..]),
+            ("/usr/bin/time", &["pip-compile", "req.in"]),
+        ] {
+            assert_eq!(
+                hygiene(&at(path), args),
+                Hygiene::Kept { prefix: &[] },
+                "{path} {args:?}"
+            );
+        }
     }
 
     fn npm(args: &[&str]) -> Hygiene {
-        hygiene_with(&at("/opt/node/bin/npm"), args, NPM)
+        hygiene(&at("/opt/node/bin/npm"), args)
     }
 
     fn refused(decided: &Hygiene) -> Option<&'static str> {
@@ -1245,7 +1229,7 @@ mod tests {
     }
 
     fn pip(args: &[&str]) -> Hygiene {
-        hygiene_with(&at("/opt/python/bin/pip"), args, PIP)
+        hygiene(&at("/opt/python/bin/pip"), args)
     }
 
     #[test]
@@ -1316,7 +1300,7 @@ mod tests {
         }
         for path in ["/usr/bin/pip3", "/usr/bin/pip3.12", "/usr/local/bin/pip"] {
             assert!(matches!(
-                hygiene_with(&at(path), &["install", "x"], PIP),
+                hygiene(&at(path), &["install", "x"]),
                 Hygiene::Profiled {
                     profile: Profile::Pip,
                     ..
@@ -1326,7 +1310,7 @@ mod tests {
         // Not pip's identity: `pip-compile`, `pip3x`, `pipx` stay today's.
         for path in ["/usr/bin/pip-compile", "/usr/bin/pip3x", "/usr/bin/pipx"] {
             assert_eq!(
-                hygiene_with(&at(path), &["install", "x"], PIP),
+                hygiene(&at(path), &["install", "x"]),
                 Hygiene::Kept { prefix: &[] },
                 "{path}"
             );
@@ -1501,13 +1485,14 @@ mod tests {
             &["-X", "utf8", "-m", "pip"],
         ] {
             assert_eq!(
-                hygiene_with(&python, runs, PIP),
+                hygiene(&python, runs),
                 Hygiene::Unenforceable("HYGIENE_NOT_EVIDENCED"),
                 "{runs:?}"
             );
+            // Before pip's profile, the interpreter was kept for these.
             assert_eq!(
-                hygiene_with(&python, runs, NPM),
-                hygiene(&python, runs),
+                base(&python, runs),
+                Hygiene::Kept { prefix: &[] },
                 "{runs:?}"
             );
         }
@@ -1519,17 +1504,13 @@ mod tests {
             &["-c", "import pip"],
             &["-m", "mypip"],
         ] {
-            assert_eq!(
-                hygiene_with(&python, not, PIP),
-                hygiene(&python, not),
-                "{not:?}"
-            );
+            assert_eq!(hygiene(&python, not), base(&python, not), "{not:?}");
         }
     }
 
     #[test]
-    fn npx_the_runners_and_the_wrappers_stay_refused_with_a_profile_on() {
-        for profiles in [NPM, BOTH] {
+    fn npx_the_runners_and_the_wrappers_stay_refused() {
+        {
             for (path, args) in [
                 ("/opt/node/bin/npx", &["cowsay"][..]),
                 ("/usr/bin/env", &["npm", "ci"]),
@@ -1539,7 +1520,7 @@ mod tests {
                 ("/usr/bin/corepack", &["npm", "ci"]),
             ] {
                 assert_eq!(
-                    hygiene_with(&at(path), args, profiles),
+                    hygiene(&at(path), args),
                     Hygiene::Unenforceable("HYGIENE_NOT_EVIDENCED"),
                     "{path} {args:?}"
                 );

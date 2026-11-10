@@ -23,7 +23,7 @@
 //! | `hygiene` | `workspace_exec_hygiene`'s variables | 0 `/dev/null`, 1, 2 |
 //! | `secret-fd`, `secret-fd-hygiene` | (and the hygiene variables) | 0 `/dev/null`, 1, 2, and 3: a fresh pipe holding exactly the value |
 //! | `secret-env`, `secret-env-hygiene` | `NAME=value` (and the hygiene variables) | 0 `/dev/null`, 1, 2 |
-//! | `hygiene-npm`, `hygiene-pip` | the hygiene variables and npm's or pip's (M5e.5, unaccepted profiles; never with a secret); `hygiene-npm` executes nothing unless npm's trust file is present | 0 `/dev/null`, 1, 2 |
+//! | `hygiene-npm`, `hygiene-pip` | the hygiene variables and npm's or pip's (ADR-0054, ADR-0055; never with a secret); `hygiene-npm` executes nothing unless npm's trust file is present | 0 `/dev/null`, 1, 2 |
 //!
 //! **A secret arrives on standard input, framed** (M5d.3): the broker filled
 //! a pipe with the value's length ([`profile::SECRET_FRAME_PREFIX_BYTES`],

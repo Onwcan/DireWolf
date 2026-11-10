@@ -1,6 +1,8 @@
-"""M5e.6's gate in the harness: the `m5e-gate` eval exists, is pending until
-`M5e` is available, runs only in CI's `m5e-gate` job, and fails on everything
-short of a complete inventory and a READY acceptance verdict.
+"""M5e.6's gate in the harness: the `m5e-gate` eval runs since `M5e` joined the
+available milestones (2026-11-11), only in CI's `m5e-gate` job, and fails on
+everything short of a complete inventory and a READY acceptance verdict; and
+`pending-kernel/sandbox-egress`, M5's own, reads the same gate's judgement of
+the egress and agent evidence.
 
 The gate itself is `scripts/dw.py m5e-gate-check`, judged against synthetic
 bundles by `tests/architecture/test_ci_m5e_gate.py`. These tests hand the
@@ -36,23 +38,74 @@ NOT_READY = (
 )
 
 
-def test_m5e_and_m5_are_not_available() -> None:
-    assert "M5e" not in AVAILABLE_MILESTONES
-    assert "M5" not in AVAILABLE_MILESTONES
+def test_m5e_and_m5_are_available() -> None:
+    assert "M5e" in AVAILABLE_MILESTONES
+    assert "M5" in AVAILABLE_MILESTONES
 
 
-def test_the_gate_eval_is_pending_with_a_real_runner_and_its_own_job() -> None:
+def test_the_gate_eval_runs_with_a_real_runner_in_its_own_job_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("GITHUB_JOB", raising=False)
     [(suite, evaluation)] = [(s, e) for s, e in collect(EVALS_ROOT) if e.id == EVAL_ID]
     assert suite.gate is False and evaluation.gate is False
     assert evaluation.requires == ("M5e",)
     assert evaluation.runner == "m5e.gate" and RUNNERS["m5e.gate"] is m5e.gate
     assert evaluation.needs == ("m5e-gate-job",) and "m5e-gate-job" in NEEDS
+    # Off its job it is NOT EXERCISED, never a pass and never pending.
     [result] = run_eval(suite, evaluation, repo_root=REPO_ROOT, evals_root=EVALS_ROOT)
-    assert result.status is Status.PENDING
-    assert result.reason.startswith("requires M5e: ")
+    assert result.status is Status.SKIP
+    assert result.reason.startswith(NOT_EXERCISED)
     expected = Baseline.load(BASELINE).evals[EVAL_ID]
-    assert expected.status is Status.PENDING
-    assert expected.pending_reason == result.reason
+    assert expected.status is Status.PASS
+    assert expected.min_score == 1.0
+
+
+EGRESS_ID = "pending-kernel/sandbox-egress"
+JUDGED = (
+    "  sandbox-egress-evidence: 123 case(s) judged again\n"
+    "  sandbox-agent-evidence: 31 case(s) judged again\n"
+)
+AGENT_ONLY = "  sandbox-agent-evidence: 31 case(s) judged again\n"
+EGRESS_ONLY = "  sandbox-egress-evidence: 123 case(s) judged again\n"
+
+
+def test_m5s_egress_property_reads_the_gate_in_the_same_job() -> None:
+    [(_, evaluation)] = [(s, e) for s, e in collect(EVALS_ROOT) if e.id == EGRESS_ID]
+    assert evaluation.requires == ("M5",)
+    assert evaluation.runner == "m5e.egress" and RUNNERS["m5e.egress"] is m5e.egress
+    assert evaluation.needs == ("m5e-gate-job",)
+    expected = Baseline.load(BASELINE).evals[EGRESS_ID]
+    assert expected.status is Status.PASS and expected.min_score == 1.0
+
+
+def test_the_egress_eval_passes_on_the_gates_judgement_of_both_tasks() -> None:
+    outcome = m5e.judge_egress(f"{INVENTORY}\n{JUDGED}", 0)
+    assert outcome.status is Status.PASS, outcome.reason
+    assert outcome.metrics == {"inventory_complete": 1.0, "egress_cases_judged": 154.0}
+
+
+@pytest.mark.parametrize(
+    ("output", "code", "said"),
+    [
+        (f"{INVENTORY}\n{JUDGED}", 1, "the gate task failed (exit 1)"),
+        (JUDGED, 0, "no complete inventory verdict"),
+        (f"{INVENTORY}\n{AGENT_ONLY}", 0, "sandbox-egress"),
+        (f"{INVENTORY}\n{EGRESS_ONLY}", 0, "sandbox-agent"),
+        (f"{INVENTORY}\n" + JUDGED.replace("123", "0"), 0, "no case of sandbox-egress"),
+        (
+            f"{INVENTORY}\n" + JUDGED.replace("  sandbox-egress", "sandbox-egress"),
+            0,
+            "sandbox-egress",
+        ),
+    ],
+)
+def test_the_egress_eval_fails_without_both_tasks_judged_again(
+    output: str, code: int, said: str
+) -> None:
+    outcome = m5e.judge_egress(output, code)
+    assert outcome.status is Status.FAIL
+    assert said in outcome.reason
 
 
 def test_the_gate_job_is_the_only_place_it_is_exercised(monkeypatch: pytest.MonkeyPatch) -> None:

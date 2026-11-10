@@ -81,6 +81,9 @@ RUNNERS: dict[str, Runner] = {
     # M5e.6: the integrated M5 gate -- the real gate task over this run's
     # evidence bundles, in CI's `m5e-gate` job. Never a model of them.
     "m5e.gate": m5e.gate,
+    # M5 (G6): sandboxed workload egress end to end -- the gate task's own
+    # judgement of the egress and agent bundles, in the same job.
+    "m5e.egress": m5e.egress,
     # The harness proving itself against a dummy process.
     "harness.checkpoint": harness.checkpoint,
     "harness.pause_resume": harness.pause_resume,

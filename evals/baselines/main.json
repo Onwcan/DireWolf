@@ -79,8 +79,8 @@
    "min_score": 1.0
   },
   "m5e-gate/integrated-m5-gate": {
-   "status": "pending",
-   "pending_reason": "requires M5e: the M5 gate's inventory verdict runs in CI's `m5e-gate` job from M5e.6's G2 on; `M5e` becomes available only with M5e.5 accepted (the M5E6 handoff's \u00a79)."
+   "status": "pass",
+   "min_score": 1.0
   },
   "pending-kernel/approval-binding-drift": {
    "status": "pending",
@@ -91,8 +91,8 @@
    "pending_reason": "requires M7: there is no provider path, and evals make no live model call."
   },
   "pending-kernel/sandbox-egress": {
-   "status": "pending",
-   "pending_reason": "requires M5: M5b measures the topology and the proxy (m5b-sandbox-egress); a sandboxed workload using them is M5d's, and the complete gate M5e's."
+   "status": "pass",
+   "min_score": 1.0
   },
   "protocol-compat/canonical-determinism": {
    "status": "pass",

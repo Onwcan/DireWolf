@@ -12,7 +12,6 @@
 use std::path::Path;
 
 use super::{ServeError, log};
-use crate::sandbox::profiles::HygieneProfiles;
 use crate::state::Authority;
 
 /// Read the operator's file at `path`, if one is configured, and attach it
@@ -28,7 +27,6 @@ pub(super) fn attach(
     authority: &mut Authority,
     path: Option<&Path>,
     authority_uid: u32,
-    profiles: HygieneProfiles,
 ) -> Result<(), ServeError> {
     let Some(path) = path else {
         return Ok(());
@@ -36,26 +34,8 @@ pub(super) fn attach(
     let text = path.to_str().ok_or_else(|| {
         ServeError::Configuration("--sandbox-config is not a UTF-8 path".to_owned())
     })?;
-    let config = crate::sandbox::operator::load(text, authority_uid)
-        .map_err(ServeError::Configuration)?
-        .with_hygiene_profiles(profiles)
-        .map_err(|_| {
-            ServeError::Configuration(
-                "--allow-unaccepted-hygiene-profile is refused: the execution environment is not \
-                 the evidence harness's ([workspace] unverified_evidence), and a profile whose \
-                 ADR is not accepted is never kept anywhere else (ADR-0054 §7, ADR-0055 §8)"
-                    .to_owned(),
-            )
-        })?;
-    if !profiles.is_none() {
-        log(&format!(
-            "REDUCED ASSURANCE: --allow-unaccepted-hygiene-profile {} -- the hygiene profile of \
-             a Proposed, unaccepted ADR (npm: ADR-0054, pip: ADR-0055) is kept for the evidence \
-             harness's workloads; never a production configuration, and removed when the ADR \
-             is accepted",
-            profiles.names().join(" ")
-        ));
-    }
+    let config =
+        crate::sandbox::operator::load(text, authority_uid).map_err(ServeError::Configuration)?;
     if config.workspace() == crate::sandbox::WorkspaceSetting::UnverifiedEvidence {
         log(
             "REDUCED ASSURANCE: [workspace] unverified_evidence -- no run's workspace has its \

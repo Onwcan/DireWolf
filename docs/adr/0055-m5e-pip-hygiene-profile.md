@@ -1,6 +1,6 @@
 # ADR-0055: M5e — an evidence-backed pip profile for `workspace_exec_hygiene`: `pip install` of named wheels only, no build backend, configuration and trust pinned, everything else refused
 
-**Status:** Proposed (§§2, 5 and 10 and *Revisit if* revised on 2026-11-10 for finding F-PIP-TRUST, before the evidence's first hosted run; not accepted) · **Date:** 2026-10-27 · **Would amend (on acceptance):** [ADR-0052](0052-m5d-sandboxed-process-exec.md) §5a (`pip` leaves the obligation's "anything else" row — kept with nothing pip-specific — for this profile) · **Refines:** [ADR-0048](0048-m5b-proxy-only-topology-and-connect-proxy.md) (a package index is one more exact `network.https` grant through the proxy), [ADR-0045](0045-m4d-process-execution-broker.md) §8 (states how `argv_safe`'s R3 meets this profile, and changes nothing in it; §6), [SANDBOX.md](../SANDBOX.md) §4a · **Sibling of:** [ADR-0054](0054-m5e-npm-hygiene-profile.md) (npm; Proposed) · **Addresses:** [ADR-0000](0000-authority-plane-separation.md) (no second path, §11) · **Plan:** [M5E_ASSURANCE_PLAN.md](../M5E_ASSURANCE_PLAN.md) (the owner's decision OD-E2, 2026-10-26: pip gets its own profile in a sibling ADR)
+**Status:** Accepted · **Date:** 2026-11-11 (proposed 2026-10-27; §§2, 5 and 10 and *Revisit if* revised on 2026-11-10 for finding F-PIP-TRUST, before the evidence's first hosted run; §§3 and 12 completed at acceptance; accepted on M5e.5's hosted evidence, manual [run 42879630675](https://github.com/Onwcan/DireWolf/actions/runs/42879630675) at `05cdb51`: all 44 cases at `dwkp-end-to-end` and the mutation review 37 of 37 after a passing baseline, in the change that makes that evidence a required job) · **Amends:** [ADR-0052](0052-m5d-sandboxed-process-exec.md) §5a (`pip` leaves the obligation's "anything else" row — kept with nothing pip-specific — for this profile) · **Refines:** [ADR-0048](0048-m5b-proxy-only-topology-and-connect-proxy.md) (a package index is one more exact `network.https` grant through the proxy), [ADR-0045](0045-m4d-process-execution-broker.md) §8 (states how `argv_safe`'s R3 meets this profile, and changes nothing in it; §6), [SANDBOX.md](../SANDBOX.md) §4a · **Sibling of:** [ADR-0054](0054-m5e-npm-hygiene-profile.md) (npm; Proposed) · **Addresses:** [ADR-0000](0000-authority-plane-separation.md) (no second path, §11) · **Plan:** [M5E_ASSURANCE_PLAN.md](../M5E_ASSURANCE_PLAN.md) (the owner's decision OD-E2, 2026-10-26: pip gets its own profile in a sibling ADR)
 
 > **pip runs in an environment, under the obligation, only as `pip install`
 > of named packages from a granted index, as wheels — never a build backend
@@ -122,6 +122,13 @@ for an invocation whose own arguments include any of:
 `--target` is allowed, and a target outside `/workspace` and `/tmp` fails on
 the read-only root.
 
+Added at acceptance (2026-11-11): the profile is reached by pip's own identity
+only. A runner (`env`, `time`, `xargs`, …) or `uv` whose arguments name `pip`,
+`pip3` or `pip3.N` is refused, as one naming an unevidenced tool or `npm` is:
+through a runner pip would start without its launch or its prefix. Before
+acceptance such an invocation was kept with nothing pip-specific, like pip
+itself.
+
 ### 4. Destinations
 
 The profile names no index and rewrites none. Where pip may connect is the
@@ -197,9 +204,14 @@ proposes for npm (`--allow-unaccepted-hygiene-profile pip`): logged `REDUCED
 ASSURANCE`, refused without the evidence's other fixture options, fenced by an
 architecture rule, removed by the change that implements acceptance.
 
+**Accepted 2026-11-11.** That change removed the option: pip is kept under
+this profile in every configuration, the interpreter may not run `-m pip` or
+`-m ensurepip` (P3), and a runner naming pip is refused (§3). Under the
+shipped packs `pip install` stays denied (§6, P1).
+
 ### 9. The evidence acceptance requires
 
-`make sandbox-registry-evidence`, a required hosted job, on a pinned pip whose
+`make sandbox-hygiene-evidence`, the required `sandbox-hygiene` job since acceptance, on a pinned pip whose
 checksum is verified before use (OD-E4), built into an offline `FROM scratch`
 image named by content with each tool's digest printed, against the plan's
 hermetic fixtures: a granted PEP 503 index and an ungranted one, on loopback
@@ -229,7 +241,7 @@ be masked by a wheel fetched earlier.
 | `pip-no-cache-reused` | a second install of the same wheel fetches it again | the variable and the prefix; the proxy's counters |
 | `pip-writes-only-workspace-and-tmp` | nothing changed outside `/workspace` and `/tmp` | the read-only root; measured |
 | `pip-installed-pth-not-executed-by-install` | a fixture wheel's `.pth` marker absent after the install | pip; measured |
-| `pip-refused-without-the-evidence-option` | today's behaviour with the option absent | the authority (§8) |
+| `pip-kept-with-no-option` | an authority started with no option about pip keeps `pip install` under this profile, its launch and prefix in the plan (replaced `pip-refused-without-the-evidence-option`, which held before acceptance) | the authority |
 | `pip-shipped-packs-behaviour` | the shipped packs deny `pip install` (R3) | policy |
 | `pip-plan-records-prefix-and-profile` | the recorded, hashed plan names the prefix | the authority's ledger |
 
@@ -263,6 +275,11 @@ dependency is added.
 | P2 | Requirements and constraints files, `--find-links` and hash-checking mode | Refused in this profile. A later revision may allow `-r` with `--require-hashes` only, once §9-style cases show what a file's own options can do against the pins. |
 | P3 | `python -m pip` | Refuse `-m pip` and `-m ensurepip` under the obligation when this profile is accepted, so the interpreter is not a way around it; until then it is R1's and ADR-0052 §5a's. |
 | P4 | The trust file's path and whether npm and pip share one | Separate files (`npm-ca.pem`, `pip-ca.pem`), so an operator can trust a private index for one tool without the other. |
+
+Decided at acceptance (2026-11-11), each as recommended: P1, the shipped packs
+keep denying `pip install`; P2, requirement and constraint files, `--find-links`
+and hash-checking stay refused; P3, `-m pip` and `-m ensurepip` are refused (the
+M5e.5 implementation handoff's D4); P4, two trust files.
 
 ## Consequences
 

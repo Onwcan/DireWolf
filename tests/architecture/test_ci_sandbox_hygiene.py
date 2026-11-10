@@ -1,14 +1,14 @@
 """M5e.5's evidence cannot lose a case, drift from its ADRs, run anywhere
-unsafe, or turn a profile on outside its fence.
+unsafe, or stop being required.
 
-ADR-0054 §8 and ADR-0055 §9 require their cases by name; the authority keeps
-the profiles only under `serve --allow-unaccepted-hygiene-profile`, which no
-shipped configuration may spell; and the evidence runs only in a manual job
-on a disposable GitHub-hosted runner, required by no `ci` job until the owner
-adds it after M5e.4's repair passes hosted (the plan's §10, "M5e.5's
-sequencing"). These tests hold each, reading the ADRs, the sources and the
-workflows as text, with a negative control for each way. Nothing here
-downloads, builds or runs a package manager.
+ADR-0054 §8 and ADR-0055 §9 require their cases by name, and both ADRs are
+accepted (2026-11-11): the profiles are the obligation itself, the
+evidence-only option that once switched them on is gone (TX060 holds that it
+stays gone, and no policy pack, workflow or task runner spells it), and the
+evidence is the required `sandbox-hygiene` job, its mutation review still a
+manual workflow (plan OD-E7). These tests hold each, reading the ADRs, the
+sources and the workflows as text, with a negative control for each way.
+Nothing here downloads, builds or runs a package manager.
 """
 
 from __future__ import annotations
@@ -204,9 +204,10 @@ def test_the_trust_paths_and_prefixes_are_spelled_alike_everywhere() -> None:
 
 
 def _fence_problems(files: dict[str, str]) -> list[str]:
-    """Where the evidence-only option may be spelled: the server's command
-    line (TX060 holds the source), this suite, and documents that describe
-    it -- never a policy pack, a workflow or the task runner."""
+    """Where the removed evidence-only option may still be spelled: the
+    server's test that proves it unknown (TX060 holds the source), and the
+    documents that record it -- never a policy pack, a workflow or the task
+    runner."""
     problems = []
     for name, text in files.items():
         if OPTION in text and (
@@ -240,21 +241,40 @@ def test_the_option_is_spelled_in_no_policy_workflow_or_runner() -> None:
     assert _fence_problems({".github/workflows/ci.yml": f"run: dw {OPTION} pip"}) != []
 
 
+def _needs(ci: str, job: str) -> list[str]:
+    found = re.search(rf"\n  {job}:\n(?:    .*\n)*?    needs:\s*\[([^\]]*)\]", ci)
+    return [n.strip() for n in found.group(1).split(",")] if found else []
+
+
+def _job(ci: str, job: str) -> str:
+    found = re.search(rf"\n  {job}:\n((?:(?:    .*)?\n)*)", ci)
+    return found.group(1) if found else ""
+
+
 def _workflow_problems(manual: str, ci: str) -> list[str]:
+    """The evidence is a job `ci` requires and the M5 gate needs, with its
+    flag; the mutation review stays a manual workflow (OD-E7)."""
     problems = []
     on = manual[manual.index("\non:") : manual.index("\npermissions:")]
     if re.search(r"^\s{2}(push|pull_request|schedule|workflow_run)\b", on, re.MULTILINE):
         problems.append("the manual workflow runs on something other than a dispatch")
     if "workflow_dispatch" not in on:
         problems.append("the manual workflow cannot be dispatched")
-    if "make sandbox-hygiene-evidence" not in manual:
-        problems.append("the manual workflow does not run the hygiene task")
-    if dw.HYGIENE_FLAG in ci or "sandbox-hygiene" in ci:
-        problems.append("ci.yml sets the hygiene flag or runs or requires its job")
+    if "make sandbox-registry-mutations" not in manual:
+        problems.append("the manual workflow does not run the mutation review")
+    job = _job(ci, "sandbox-hygiene")
+    if "make sandbox-hygiene-evidence" not in job or f'{dw.HYGIENE_FLAG}: "1"' not in job:
+        problems.append("ci.yml has no sandbox-hygiene job running the task with its flag")
+    if "sandbox-hygiene" not in _needs(ci, "ci"):
+        problems.append("the ci job does not require sandbox-hygiene")
+    if "sandbox-hygiene" not in _needs(ci, "m5e-gate"):
+        problems.append("the M5 gate does not need sandbox-hygiene")
+    if "make sandbox-registry-mutations" in ci:
+        problems.append("ci.yml runs the mutation review, which is manual")
     return problems
 
 
-def test_the_evidence_is_manual_and_required_by_nothing() -> None:
+def test_the_evidence_is_required_and_its_review_manual() -> None:
     manual = MANUAL.read_text(encoding="utf-8")
     assert _workflow_problems(manual, CI.read_text(encoding="utf-8")) == []
 
@@ -268,17 +288,29 @@ def test_the_evidence_is_manual_and_required_by_nothing() -> None:
             "other than a dispatch",
         ),
         (
-            lambda t: t.replace("make sandbox-hygiene-evidence", "true"),
+            lambda t: t.replace("make sandbox-registry-mutations", "true"),
             lambda t: t,
-            "hygiene task",
+            "mutation review",
         ),
         (
             lambda t: t,
-            lambda t: t.replace(", sandbox-registry,", ", sandbox-registry, sandbox-hygiene,", 1),
-            "ci.yml",
+            lambda t: t.replace(", sandbox-registry, sandbox-hygiene,", ", sandbox-registry,", 1),
+            "the ci job does not require",
+        ),
+        (
+            lambda t: t,
+            lambda t: t.replace(
+                "sandbox-proxy-weakened, sandbox-hygiene,", "sandbox-proxy-weakened,", 1
+            ),
+            "the M5 gate does not need",
+        ),
+        (
+            lambda t: t,
+            lambda t: t.replace(f'          {dw.HYGIENE_FLAG}: "1"\n', "", 1),
+            "with its flag",
         ),
     ],
-    ids=["on-push", "no-task", "required"],
+    ids=["on-push", "no-review", "not-required", "not-gated", "no-flag"],
 )
 def test_a_weakened_workflow_fails(mutate_manual: object, mutate_ci: object, said: str) -> None:
     manual = MANUAL.read_text(encoding="utf-8")

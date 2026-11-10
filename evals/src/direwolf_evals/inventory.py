@@ -175,14 +175,23 @@ INVENTORY: Final[tuple[SecurityProperty, ...]] = (
         "reaped runs' environments the same way; crashes and a lost broker "
         "reconciled, nothing replayed, nothing foreign touched.",
     ),
-    # --- pending: the mechanism does not exist yet -------------------------
+    # --- measurable now: M5e closed M5 (2026-11-11) --------------------------
+    SecurityProperty(
+        "Every M5 evidence task passes again in one run, and M5e is ready",
+        "M5e",
+        "m5e-gate",
+        "This run's evidence bundles, from GitHub-hosted jobs, judged again: the "
+        "attributed inventory complete, every census clean, and the acceptance "
+        "verdict READY.",
+    ),
     SecurityProperty(
         "Sandboxed workload egress, end to end (the complete M5 gate)",
         "M5",
-        None,
-        "Needs sandboxed workloads (M5d); M5b measures the topology and the "
-        "proxy they will use, and M5c the kernel's own HTTPS path.",
+        "pending-kernel",
+        "The M5 gate's judgement of the egress and agent evidence: a real "
+        "PROXY_ONLY workload through the released broker, launcher and proxy.",
     ),
+    # --- pending: the mechanism does not exist yet -------------------------
     SecurityProperty(
         "Approval binding survives drift, replay and substitution",
         "M6",

@@ -30,7 +30,6 @@
 //! [ADR-0048]: ../../../../docs/adr/0048-m5b-proxy-only-topology-and-connect-proxy.md
 
 pub mod operator;
-pub mod profiles;
 
 use core::fmt;
 
@@ -45,8 +44,6 @@ use dwk_proto::brokerp::sandbox::{
 };
 use dwk_proto::brokerp::workload::{ImagePath, WORKLOAD_MAX_SECONDS};
 use dwk_proto::wire::scalar::{ContentDigest, HostPath};
-
-use self::profiles::HygieneProfiles;
 
 use crate::capability::{
     Action, Capability, HostPattern, Namespace, PortSpec, Scope, SyntacticScope,
@@ -298,11 +295,6 @@ pub struct SandboxConfig {
     workload_budget: WorkloadBudget,
     /// What every run's workspace is (M5d.4).
     workspace: WorkspaceSetting,
-    /// The unaccepted hygiene profiles the evidence harness's operator
-    /// switched on (M5e.5): [`HygieneProfiles::NONE`] unless
-    /// [`Self::with_hygiene_profiles`] was given some, which only the
-    /// evidence's workspace allows.
-    hygiene_profiles: HygieneProfiles,
 }
 
 /// The most executables one image manifest names.
@@ -473,9 +465,6 @@ pub enum SandboxConfigError {
     ExecutableDigest,
     /// The manifest names a path twice, or more executables than it may.
     Manifest,
-    /// An unaccepted hygiene profile asked for in a configuration that is not
-    /// the evidence harness's (`[workspace] unverified_evidence`).
-    UnacceptedProfileOutsideEvidence,
 }
 
 impl SandboxConfigError {
@@ -493,7 +482,6 @@ impl SandboxConfigError {
             Self::ExecutablePath => "EXECUTABLE_PATH",
             Self::ExecutableDigest => "EXECUTABLE_DIGEST",
             Self::Manifest => "MANIFEST",
-            Self::UnacceptedProfileOutsideEvidence => "UNACCEPTED_PROFILE_OUTSIDE_EVIDENCE",
         }
     }
 }
@@ -589,7 +577,6 @@ impl SandboxConfig {
             executables: Vec::new(),
             workload_budget: WorkloadBudget::default(),
             workspace,
-            hygiene_profiles: HygieneProfiles::NONE,
         })
     }
 
@@ -597,35 +584,6 @@ impl SandboxConfig {
     #[must_use]
     pub const fn workspace(&self) -> WorkspaceSetting {
         self.workspace
-    }
-
-    /// The same configuration, keeping `profiles` -- hygiene profiles whose
-    /// ADRs are not accepted (M5e.5; ADR-0054 §7, ADR-0055 §8). Only the
-    /// evidence harness's configuration may: one whose workspace is
-    /// `[workspace] unverified_evidence`, which every broker refuses unless
-    /// its own operator acknowledged it. The server alone calls this, from its
-    /// start-up option (TX060).
-    ///
-    /// # Errors
-    ///
-    /// [`SandboxConfigError::UnacceptedProfileOutsideEvidence`] for any other
-    /// workspace, whatever `profiles` holds but none.
-    pub fn with_hygiene_profiles(
-        mut self,
-        profiles: HygieneProfiles,
-    ) -> Result<Self, SandboxConfigError> {
-        if !profiles.is_none() && !matches!(self.workspace, WorkspaceSetting::UnverifiedEvidence) {
-            return Err(SandboxConfigError::UnacceptedProfileOutsideEvidence);
-        }
-        self.hygiene_profiles = profiles;
-        Ok(self)
-    }
-
-    /// The unaccepted hygiene profiles kept: [`HygieneProfiles::NONE`] in
-    /// every production configuration.
-    #[must_use]
-    pub const fn hygiene_profiles(&self) -> HygieneProfiles {
-        self.hygiene_profiles
     }
 
     /// The same configuration, with the image's manifest — the executables
@@ -971,56 +929,6 @@ mod tests {
                 Err(want)
             );
         }
-    }
-
-    #[test]
-    fn an_unaccepted_profile_is_kept_only_in_the_evidence_harness_configuration() {
-        use crate::sandbox::profiles::{HygieneProfiles, UnacceptedProfile};
-        let digest = "a".repeat(64);
-        let image = format!("sha256:{}", "b".repeat(64));
-        let config = |workspace| {
-            SandboxConfig::new(
-                "/usr/bin/docker",
-                "/var/run/docker.sock",
-                &image,
-                &digest,
-                NetworkTopology::NoNetwork,
-                workspace,
-            )
-            .unwrap()
-        };
-        let production = WorkspaceSetting::Bounded(WorkspaceQuota::new(5 << 30).unwrap());
-        // Production's: none by default, and none may be added.
-        assert_eq!(config(production).hygiene_profiles(), HygieneProfiles::NONE);
-        for profile in UnacceptedProfile::ALL {
-            assert_eq!(
-                config(production)
-                    .with_hygiene_profiles(HygieneProfiles::NONE.with(profile))
-                    .err(),
-                Some(SandboxConfigError::UnacceptedProfileOutsideEvidence),
-                "{profile:?}"
-            );
-        }
-        // Asking for none changes nothing anywhere.
-        assert_eq!(
-            config(production)
-                .with_hygiene_profiles(HygieneProfiles::NONE)
-                .unwrap()
-                .hygiene_profiles(),
-            HygieneProfiles::NONE
-        );
-        // The evidence harness's: kept as named, and only as named.
-        let npm = HygieneProfiles::NONE.with(UnacceptedProfile::Npm);
-        let kept = config(WorkspaceSetting::UnverifiedEvidence)
-            .with_hygiene_profiles(npm)
-            .unwrap();
-        assert_eq!(kept.hygiene_profiles(), npm);
-        assert!(!kept.hygiene_profiles().keeps(UnacceptedProfile::Pip));
-        assert_eq!(
-            config(WorkspaceSetting::UnverifiedEvidence).hygiene_profiles(),
-            HygieneProfiles::NONE,
-            "the evidence's own configuration keeps none unless one is named"
-        );
     }
 
     #[test]

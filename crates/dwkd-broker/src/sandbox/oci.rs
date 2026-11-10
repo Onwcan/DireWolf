@@ -1278,7 +1278,7 @@ impl ExecutionEnvironment for Oci<'_> {
                 .as_ref()
                 .map_or("none", |s| s.secret.delivery.as_str())
         ));
-        // An unaccepted profile's launch (M5e.5) is evidenced without a
+        // npm's or pip's profiled launch (ADR-0054, ADR-0055) is evidenced without a
         // secret, and has no secret-bearing launcher profile: refused, never
         // run without its variables.
         if secret.is_some()

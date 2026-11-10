@@ -59,7 +59,8 @@ CHECKOUT = "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
 BUNDLE = "make m5e-evidence-bundle"
 GATE = "make m5e-gate-check"
 GATE_EVAL = (
-    "uv run --frozen python -m direwolf_evals check --all --suite m5e-gate --require-exercised"
+    "uv run --frozen python -m direwolf_evals check --all --suite m5e-gate "
+    "--suite pending-kernel --require-exercised"
 )
 SHA = "0123456789abcdef0123456789abcdef01234567"
 CENSUS = "cleanup: no evidence container remains; 0 pre-existing kept"
@@ -145,9 +146,10 @@ def _gate_problems(text: str, table: dict[str, str]) -> list[str]:
 
 
 def test_every_task_of_the_gate_keeps_and_uploads_its_evidence() -> None:
-    assert len(dw.M5E_GATE_TASKS) == 13
+    # Fourteen since M5e.5's acceptance (2026-11-11) added `sandbox-hygiene`.
+    assert len(dw.M5E_GATE_TASKS) == 14
     assert set(dw.M5E_GATE_TASKS) <= set(dw.TASKS)
-    assert len(set(dw.M5E_GATE_TASKS.values())) == 13
+    assert len(set(dw.M5E_GATE_TASKS.values())) == 14
     assert "m5e-evidence-bundle" in dw.TASKS and "m5e-gate-check" in dw.TASKS
     assert _gate_problems(CI.read_text(encoding="utf-8"), dw.M5E_GATE_TASKS) == []
 
@@ -315,14 +317,15 @@ def test_a_gate_job_that_judges_less_fails(change: str, said: str) -> None:
     assert any(said in problem for problem in problems), (change, problems)
 
 
-def test_the_gate_eval_is_pending_and_runs_only_in_the_gate_job() -> None:
+def test_the_gate_eval_passes_and_runs_only_in_the_gate_job() -> None:
     suite = tomllib.loads((REPO_ROOT / "evals" / "suites" / "m5e-gate.toml").read_text("utf-8"))
     assert suite["requires"] == ["M5e"] and suite["gate"] is False
     [evaluation] = suite["eval"]
     assert evaluation["runner"] == "m5e.gate"
     assert evaluation["needs"] == ["m5e-gate-job"]
     baseline = json.loads((REPO_ROOT / "evals" / "baselines" / "main.json").read_text("utf-8"))
-    assert baseline["evals"]["m5e-gate/integrated-m5-gate"]["status"] == "pending"
+    # `M5e` is available (2026-11-11): the gate eval must pass, at 1.0.
+    assert baseline["evals"]["m5e-gate/integrated-m5-gate"] == {"status": "pass", "min_score": 1.0}
 
 
 # --- what each task must have judged ------------------------------------------------
@@ -389,7 +392,7 @@ def test_every_task_of_the_gate_judges_what_the_gate_expects() -> None:
     )
 
 
-def test_the_gate_covers_the_whole_inventory_less_what_is_not_yet_required() -> None:
+def test_the_gate_covers_the_whole_inventory() -> None:
     judged: set[tuple[str, str]] = set()
     for expected in dw.M5E_GATE_JUDGEMENTS.values():
         for judge, table in expected:
@@ -397,13 +400,11 @@ def test_the_gate_covers_the_whole_inventory_less_what_is_not_yet_required() -> 
             assert cases is not None, table
             if judge == "attributed":
                 judged.update(cases)
-    later: set[tuple[str, str]] = set()
-    for table in dw.M5E_NOT_YET_REQUIRED:
-        later.update(dw._case_table(table) or ())
-    assert later and not judged & later
-    assert judged | later == set(dw.ATTRIBUTED_CASES)
-    assert dw.M5E_NOT_YET_REQUIRED == ("HYGIENE_CASES",)
-    assert "sandbox-hygiene-evidence" not in dw.M5E_GATE_TASKS
+    # Since M5e.5's acceptance (2026-11-11) every attributed case is required,
+    # M5e.5's own among them.
+    assert judged == set(dw.ATTRIBUTED_CASES)
+    assert dw.M5E_NOT_YET_REQUIRED == ()
+    assert dw.M5E_GATE_TASKS["sandbox-hygiene-evidence"] == "sandbox-hygiene"
 
 
 def test_the_eval_verdicts_kept_are_the_m5_suites_evals() -> None:
@@ -907,14 +908,10 @@ def test_a_gate_over_less_than_this_runs_evidence_fails(
 # --- the M5e acceptance verdict ------------------------------------------------------
 
 
-def test_the_acceptance_verdict_is_not_ready_today() -> None:
-    blockers = dw.m5e_acceptance_blockers(REPO_ROOT)
-    assert blockers == [
-        "M5e.5's evidence is not yet required: HYGIENE_CASES (M5e.5's acceptance change)",
-        "ADR-0054 is Proposed, not Accepted",
-        "ADR-0055 is Proposed, not Accepted",
-        "the plan records no M5e.5's acceptance",
-    ]
+def test_the_acceptance_verdict_is_ready_today() -> None:
+    # M5e.5 accepted (2026-11-11): its evidence required, both ADRs
+    # Accepted, every record in the plan.
+    assert dw.m5e_acceptance_blockers(REPO_ROOT) == []
 
 
 def _repo(tmp_path: Path, statuses: dict[str, str], records: str) -> Path:

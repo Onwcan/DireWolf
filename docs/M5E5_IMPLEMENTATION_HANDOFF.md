@@ -8,7 +8,9 @@ evidence's first hosted run (§8)\
 **Revised:** 2026-11-10, on `main` at `8c2bd8acf860e9669dbfdbd8c1b2e3abb6469733` (hosted [run 42820123829](https://github.com/Onwcan/DireWolf/actions/runs/42820123829), 32 of 32 jobs): ADR-0055's trust, F-PIP-TRUST (§12), before the evidence's first hosted run\
 **Revised:** 2026-11-10, after the evidence's first hosted run, [42846068083](https://github.com/Onwcan/DireWolf/actions/runs/42846068083) on `7f0f01c`: five corrections to the evidence and its mutation review (§13)\
 **Revised:** 2026-11-10, after the second hosted run, [42858621579](https://github.com/Onwcan/DireWolf/actions/runs/42858621579) on `2a1bbe9`: ADR-0054's npm configuration (F-NPM-CONFIG) and five corrections to the evidence (§14)\
-**Status:** **IMPLEMENTATION COMPLETE / HOSTED EVIDENCE PENDING.** The profiles, the
+**Status:** **COMPLETE (2026-11-11).** The third hosted run passed, ADR-0054 and ADR-0055
+are accepted, and the acceptance change §10 designed is built (§15). Before that:
+**IMPLEMENTATION COMPLETE / HOSTED EVIDENCE PENDING.** The profiles, the
 evidence-only option, the launcher's profiles, the evidence suite, its task, its manual job
 and its mutation review were committed as `bbe3561`, `7df0840` and `6a702d7`; required CI passed
 on each, 30 of 30 jobs ([run 42397671369](https://github.com/Onwcan/DireWolf/actions/runs/42397671369)
@@ -307,3 +309,29 @@ failed, so each hosted mutant was reported `baseline-failed`, and the review fai
 | F-ARG-JSON | `pip-direct-route-refused` sent a multi-line program as an argument through a hand-made quote that left its newlines raw; the request was refused as invalid JSON | an evidence defect | Each string goes through the protocol's own encoder |
 
 What the run showed, not counted (the task judges a run's cases only when all five tests pass): every pip case but those two, `pip-os-trust-store-not-used` among them, held as ADR-0055 states it, with its §12 trust revision; both missing-trust-file cases held; the shipped packs permit `npm ci` with the evidence option on and deny `pip install` (`deny-approval-needed-when-unattended`); every refusal before an intent held for npm and pip. No npm install has run yet: the next manual run is the first.
+
+## 15. The third hosted run and the acceptance (2026-11-11)
+
+Run [42879630675](https://github.com/Onwcan/DireWolf/actions/runs/42879630675): the manual workflow with `both`, on `main` at `05cdb51` (§14's corrections;
+required CI passed on it, [42875288820](https://github.com/Onwcan/DireWolf/actions/runs/42875288820), 32 of 32 jobs). Both jobs passed. The evidence job's
+five tests passed and reported all 44 cases at `dwkp-end-to-end`, each attributed with its
+outcome, and a clean census. The mutation review's baseline passed, and then all 37
+mutants were killed (31 unit, 6 hosted), the equivalent one listed apart. The shipped packs
+permitted `npm ci` and denied `pip install` (`deny-approval-needed-when-unattended`).
+
+Asked, the answers were "Accept both" (ADR-0054, ADR-0055), "Accept all as built" (§9's
+items), "Accept M5", and "One change" for how the closing change lands (the plan's §10,
+"M5e.5's acceptance" and "M5's acceptance"). The change, as §10 designed it:
+
+| §10 step | As built |
+|---|---|
+| 1. Remove the option | Its parse, usage line and tests in `server/config.rs` (one test now proves it unknown), the attachment's parameter and `REDUCED ASSURANCE` line in `server/sandbox.rs`, `with_hygiene_profiles` and its error in `sandbox.rs`, and `sandbox/profiles.rs`, deleted. TX060 is now "the hygiene profiles have no switch": its three spellings appear nowhere but the test that proves the option unknown |
+| 2. The profiles are the obligation | `hygiene()` applies npm's and pip's profiles over the decision it made before them (`base`); `hygiene_with`, `Profiles` and `profiles_of` are gone; `UNEVIDENCED` drops `npm`. Added: a runner or `uv` naming `npm` or pip is refused (ADR-0055 §3), with its unit test and a unit mutant |
+| 3. Launch values kept (D1) | Unchanged |
+| 4. Evidence for production | The suite starts the authority as production does; `with_no_option_both_are_kept` reports `npm-kept-with-no-option` and `pip-kept-with-no-option`, which replace the two `*-refused-without-the-evidence-option` cases. `sandbox-hygiene` is a job `ci` requires and the M5 gate needs; the manual workflow keeps the mutation review (OD-E7); `test_ci_sandbox_hygiene.py`'s workflow guard is inverted. The review lost its two mutants of the removed switch and gained one of the runner refusal: 36 mutants |
+| 5. Records | Both ADRs Accepted (2026-11-11) with their digests; the plan's §10 records; `test_m5e_plan.py` and `test_m5e_r3_closure.py` follow; SANDBOX.md, the plan, the ROADMAP and README say npm and pip are kept under their profiles |
+| 6. Unchanged | The shipped packs, `npx`, the other package managers and the runners naming them |
+
+With it, the M5 gate requires `sandbox-hygiene-evidence` and nothing is left "not yet
+required", so its acceptance verdict is READY; `M5e` and `M5` are available, and the
+change's own CI run is where that verdict is enforced (the M5E6 handoff's §16).

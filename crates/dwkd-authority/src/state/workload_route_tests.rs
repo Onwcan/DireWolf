@@ -1440,7 +1440,8 @@ fn workspace_exec_hygiene_is_kept_by_the_trusted_launcher_or_denied() {
         ("u1", GIT, &["-c", "core.pager=less", "log"][..]),
         ("u2", PYTEST, &["-p", "cacheprovider"]),
         ("u3", CARGO, &["build"]),
-        ("u4", NPM, &["install"]),
+        // npm has a profile (ADR-0054); a subcommand it does not keep is refused.
+        ("u4", NPM, &["run", "build"]),
     ] {
         let body = fx.answered(&run, key, &call(executable, args));
         let (environment, reason, rule) = denied(&body);

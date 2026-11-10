@@ -449,7 +449,6 @@ fn start(
         &mut authority,
         config.sandbox_config.as_deref(),
         authority_uid,
-        config.hygiene_profiles,
     )?;
     let owner = std::fs::metadata(authority.state_dir())
         .map_err(|e| ServeError::Io(format!("inspecting the state directory: {e}")))?

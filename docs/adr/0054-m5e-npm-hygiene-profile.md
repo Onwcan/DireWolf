@@ -1,6 +1,6 @@
 # ADR-0054: M5e — an evidence-backed npm profile for `workspace_exec_hygiene`: `npm ci` and `npm install` of registry packages with scripts off and configuration pinned, everything else still refused
 
-**Status:** Proposed (its open points decided by the owner on 2026-10-26, [plan](../M5E_ASSURANCE_PLAN.md) §10; §§2, 4 and 8 and *Revisit if* revised on 2026-11-10 for findings F-NPM-CONFIG and F-NPM-TRUST, after the evidence's second hosted run; not accepted) · **Date:** 2026-10-26 · **Would amend (on acceptance):** [ADR-0052](0052-m5d-sandboxed-process-exec.md) §5a (`npm` leaves the tools the obligation refuses as unevidenced, for this profile only; `npx`, `pnpm`, `yarn`, `bun`, `cargo`, a `cargo-*` binary, `rustup`, `corepack`, and a runner naming any of them stay refused) · **Refines:** [ADR-0048](0048-m5b-proxy-only-topology-and-connect-proxy.md) (a package registry is one more exact `network.https` grant through the proxy), [SANDBOX.md](../SANDBOX.md) §4a · **Addresses:** [ADR-0000](0000-authority-plane-separation.md) (no second path, §10) · **Plan:** [M5E_ASSURANCE_PLAN.md](../M5E_ASSURANCE_PLAN.md)
+**Status:** Accepted · **Date:** 2026-11-11 (proposed 2026-10-26, its open points decided that day, [plan](../M5E_ASSURANCE_PLAN.md) §10; §§2, 4 and 8 and *Revisit if* revised on 2026-11-10 for findings F-NPM-CONFIG and F-NPM-TRUST; accepted on M5e.5's hosted evidence, manual [run 42879630675](https://github.com/Onwcan/DireWolf/actions/runs/42879630675) at `05cdb51`: all 44 cases at `dwkp-end-to-end` and the mutation review 37 of 37 after a passing baseline, in the change that makes that evidence a required job) · **Amends:** [ADR-0052](0052-m5d-sandboxed-process-exec.md) §5a (`npm` leaves the tools the obligation refuses as unevidenced, for this profile only; `npx`, `pnpm`, `yarn`, `bun`, `cargo`, a `cargo-*` binary, `rustup`, `corepack`, and a runner naming any of them stay refused) · **Refines:** [ADR-0048](0048-m5b-proxy-only-topology-and-connect-proxy.md) (a package registry is one more exact `network.https` grant through the proxy), [SANDBOX.md](../SANDBOX.md) §4a · **Addresses:** [ADR-0000](0000-authority-plane-separation.md) (no second path, §10) · **Plan:** [M5E_ASSURANCE_PLAN.md](../M5E_ASSURANCE_PLAN.md)
 
 > **npm runs in an environment only as `npm ci` or `npm install` of registry
 > packages, with lifecycle scripts off and its configuration pinned by the
@@ -179,9 +179,16 @@ harness may pass it. Without the option, nothing changes. The change that
 implements this ADR's acceptance removes the option and moves `npm` out of
 `UNEVIDENCED`. The owner chose this fence on 2026-10-26 (plan OD-E3).
 
+**Accepted 2026-11-11.** The change that implements acceptance removed the
+option, its parse, its setter and its type: `npm` is kept under this profile
+in every configuration, it left `UNEVIDENCED`, and architecture rule TX060 now
+holds that no switch for the profile is spelled anywhere. A runner or `uv`
+naming `npm` stays refused, so the profile is reached by npm's own identity
+only.
+
 ### 8. The evidence acceptance requires
 
-`make sandbox-registry-evidence`, a required hosted job, on a pinned npm whose
+`make sandbox-hygiene-evidence`, the required `sandbox-hygiene` job since acceptance, on a pinned npm whose
 checksum is verified before use (plan OD-E4), built into an offline
 `FROM scratch` image named by content with each tool's digest printed, against
 the plan's hermetic fixtures (plan §7): a granted registry and an ungranted
@@ -211,7 +218,7 @@ EXERCISED, never a pass.
 | `npm-other-subcommands-refused` | `run`, `test`, `exec`, an alias, … refused | the authority |
 | `npm-non-registry-specs-refused` | each §1 spec form refused | the authority |
 | `npx-still-refused` | `HYGIENE_NOT_EVIDENCED` | the authority |
-| `npm-refused-without-the-evidence-option` | `HYGIENE_NOT_EVIDENCED` with the option absent | the authority (§7) |
+| `npm-kept-with-no-option` | an authority started with no option about npm keeps `npm ci` under this profile, its launch and prefix in the plan (replaced `npm-refused-without-the-evidence-option`, which held before acceptance) | the authority |
 | `npm-shipped-packs-behaviour` | what the shipped `balanced` and `power` packs decide for `npm ci` | policy |
 | `npm-plan-records-prefix-and-profile` | the recorded, hashed plan names the prefix | the authority's ledger |
 

@@ -39,7 +39,7 @@ MAX_REASON_CHARS: Final = 1000
 that reaches a result file."""
 
 AVAILABLE_MILESTONES: Final[frozenset[str]] = frozenset(
-    {"M1", "M2", "M2.5", "M3", "M4", "M5a", "M5b", "M5c", "M5d"}
+    {"M1", "M2", "M2.5", "M3", "M4", "M5a", "M5b", "M5c", "M5d", "M5e", "M5"}
 )
 """What this build has. An eval requiring anything else is pending.
 
@@ -51,9 +51,7 @@ particular a ``pending_reason`` left in a suite file does not keep an eval
 dormant, and an eval with no runner reports ERROR once its milestone is here.
 
 "M5a" is a SLICE of M5 (ADR-0047): the execution-environment foundation and
-its measured assurance. It turns on exactly the suite that requires it. "M5"
-itself is not here -- M5 is in progress, not complete -- so every property
-waiting for the whole milestone stays pending.
+its measured assurance. It turns on exactly the suite that requires it.
 
 "M5b" is the second slice (ADR-0048): the PROXY_ONLY topology and the opaque
 CONNECT proxy. It turns on exactly the suite that requires it; the complete
@@ -71,6 +69,14 @@ pass in CI's gate. Joining here is the suite's switch, not the milestone's
 acceptance: that is the owner's, with ADR-0052. The complete M5 gate -- the
 sandbox escape suite and the registry scenarios -- is M5e's and still waits
 for "M5".
+
+"M5e" and "M5" joined on 2026-11-11, in the change that accepted ADR-0054
+and ADR-0055 and made M5e.5's evidence a required job (the plan's §10,
+"M5e.5's acceptance" and "M5's acceptance"). "M5e" turns on the
+`m5e-gate` suite, whose eval fails unless the gate's acceptance verdict is
+READY; "M5" turns on `pending-kernel/sandbox-egress`, which reads the same
+gate's judgement of the egress and agent evidence. Both run in CI's
+`m5e-gate` job, which alone holds the run's bundles.
 """
 
 

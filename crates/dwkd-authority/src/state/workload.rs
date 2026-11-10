@@ -56,8 +56,7 @@ use crate::capability::{
 use crate::policy::{ArgvSafety, CanonicalAction, Effect, Environment, Obligation, TaintLevel};
 use crate::resource::ExecutableIdentity;
 use crate::resource::exec::argv::{self, ArgvClass};
-use crate::resource::exec::hygiene::{self, Hygiene, Profile, Profiles};
-use crate::sandbox::profiles::{HygieneProfiles, UnacceptedProfile};
+use crate::resource::exec::hygiene::{self, Hygiene, Profile};
 use crate::sandbox::{SandboxConfig, WorkloadBudget};
 use crate::secret::metadata::InjectionMode;
 
@@ -142,17 +141,6 @@ pub(super) struct Checked {
     /// The credential handle a public launch named (M5d.3): part of what its
     /// key is bound to. The in-process API names none.
     pub(super) credential: Option<String>,
-    /// The unaccepted hygiene profiles the operator's evidence-only option
-    /// named (M5e.5): [`Profiles::NONE`] in every production configuration.
-    pub(super) profiles: Profiles,
-}
-
-/// The obligation's copy of the operator's unaccepted profiles.
-fn profiles_of(kept: HygieneProfiles) -> Profiles {
-    Profiles {
-        npm: kept.keeps(UnacceptedProfile::Npm),
-        pip: kept.keeps(UnacceptedProfile::Pip),
-    }
 }
 
 /// The longest idempotency key, in bytes.
@@ -302,7 +290,6 @@ pub(super) fn check(
         wall_clock,
         key: key.clone(),
         credential: None,
-        profiles: profiles_of(config.hygiene_profiles()),
     })
 }
 
@@ -512,13 +499,13 @@ fn obligations(record: &DecisionRecord, checked: &Checked) -> Kept {
             Obligation::AuditLevel(_) => true,
             Obligation::WorkspaceExecHygiene => {
                 let args: Vec<&str> = checked.args.iter().map(String::as_str).collect();
-                match hygiene::hygiene_with(&checked.identity, &args, checked.profiles) {
+                match hygiene::hygiene(&checked.identity, &args) {
                     Hygiene::Kept { prefix } => {
                         kept.launch = WorkloadLaunch::Hygiene;
                         kept.prefix = prefix;
                         true
                     }
-                    // An unaccepted profile (M5e.5) is evidenced without a
+                    // npm's and pip's profiles (ADR-0054, ADR-0055) are evidenced without a
                     // credential: a launch naming one is not kept under it.
                     Hygiene::Profiled {
                         profile,
@@ -1658,17 +1645,6 @@ mod tests {
             wall_clock_seconds: 30,
             key: "w-1".to_owned(),
         }
-    }
-
-    #[test]
-    fn no_unaccepted_profile_reaches_a_workload_by_default() {
-        let Ok(checked) = check(&request(), &config()) else {
-            unreachable!("the request is valid")
-        };
-        assert_eq!(
-            checked.profiles,
-            crate::resource::exec::hygiene::Profiles::NONE
-        );
     }
 
     #[test]

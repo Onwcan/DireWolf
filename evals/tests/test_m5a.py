@@ -38,14 +38,13 @@ def _output(drop: tuple[str, str] | None = None, weakened: str = "detected-14-of
     return "\n".join(lines)
 
 
-def test_m5a_is_available_and_m5_is_not() -> None:
+def test_m5a_and_m5_are_available() -> None:
     assert "M5a" in AVAILABLE_MILESTONES
-    assert "M5" not in AVAILABLE_MILESTONES, "M5 is in progress, not complete"
-    # Every eval waiting for the whole of M5 is still pending: it names no
-    # runner and is not turned on by the slice.
+    assert "M5" in AVAILABLE_MILESTONES, "M5 is complete (2026-11-11)"
+    # Every eval waiting for the whole of M5 has a real runner now.
     for _, evaluation in collect(EVALS_ROOT):
         if "M5" in evaluation.requires:
-            assert evaluation.runner is None, evaluation.id
+            assert evaluation.runner in RUNNERS, evaluation.id
 
 
 def test_the_m5a_eval_gates_with_a_real_runner_and_a_real_runtime() -> None:
@@ -61,8 +60,8 @@ def test_the_m5a_eval_gates_with_a_real_runner_and_a_real_runtime() -> None:
 def test_the_inventory_measures_the_m5a_property_in_its_own_suite() -> None:
     properties = [p for p in INVENTORY if p.milestone == "M5a"]
     assert [p.suite for p in properties] == ["m5a-sandbox-foundation"]
-    # PROXY_ONLY egress is M5's, and still pending.
-    assert any(p.milestone == "M5" and p.suite is None for p in INVENTORY)
+    # PROXY_ONLY egress end to end is M5's, measured by the M5 gate's eval.
+    assert any(p.milestone == "M5" and p.suite == "pending-kernel" for p in INVENTORY)
 
 
 def test_complete_evidence_passes() -> None:

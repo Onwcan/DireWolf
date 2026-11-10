@@ -35,7 +35,8 @@ fn user() -> String {
 /// Run the workload: `container exec`, as the environment's user, in the
 /// workspace, with exactly its arguments, through the trusted launcher --
 /// the profile its launch names: `hygiene` for `HYGIENE`, `hygiene-npm` and
-/// `hygiene-pip` for M5e.5's unaccepted profiles, `direct` otherwise.
+/// `hygiene-pip` for npm's and pip's profiles (ADR-0054, ADR-0055), `direct`
+/// otherwise.
 #[must_use]
 pub(crate) fn run(container: &ContainerRef, workload: &WorkloadSpec) -> Vec<String> {
     let profile = match workload.launch {

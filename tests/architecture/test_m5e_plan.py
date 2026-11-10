@@ -10,7 +10,8 @@ missing one failing the task -- and every task it names to `dw.TASKS`.
 The cases ADR-0054 §8 and ADR-0055 §9 propose for the registry evidence are
 held to their own shape: well-formed, unique across both ADRs, and new, so
 none can already mean something else when it is implemented. Both ADRs must
-still read as Proposed: neither is accepted by being cited.
+read as Accepted only since their acceptance (2026-11-11), which the plan's
+§10 records: neither is accepted by being cited.
 
 This is M5e.1's groundwork, not its evidence: it reads documents and tables,
 and runs nothing.
@@ -124,6 +125,8 @@ def test_the_proposed_registry_cases_are_well_formed_unique_and_new() -> None:
     assert not missing, f"proposed cases M5e.5's task does not require: {missing}"
 
 
-def test_both_package_manager_adrs_are_still_proposed() -> None:
+def test_both_package_manager_adrs_are_accepted_as_the_plan_records() -> None:
+    plan = (REPO_ROOT / "docs" / "M5E_ASSURANCE_PLAN.md").read_text(encoding="utf-8")
+    assert plan.count("**M5e.5's acceptance (2026-11-11).**") == 1
     for adr in (NPM_ADR, PIP_ADR):
-        assert _status(adr.read_text(encoding="utf-8")).startswith("proposed"), adr.name
+        assert _status(adr.read_text(encoding="utf-8")).startswith("accepted"), adr.name

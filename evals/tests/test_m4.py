@@ -74,7 +74,7 @@ def _traversal_output(race_outcome: str = "escaped-0-unexpected-0-raced-100") ->
 
 def test_m4_is_available_and_every_m4_eval_has_a_registered_runner() -> None:
     assert "M4" in AVAILABLE_MILESTONES
-    assert "M5" not in AVAILABLE_MILESTONES, "M5 is not implemented"
+    assert "M6" not in AVAILABLE_MILESTONES, "M6 is not implemented"
     for name in M4_EVALS:
         _, evaluation = _m4(name)
         assert evaluation.requires == ("M4",) or "M4" in evaluation.requires

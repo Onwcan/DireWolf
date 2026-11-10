@@ -48,9 +48,9 @@ def _output(drop: tuple[str, str] | None = None, change: tuple[str, str, str] | 
     return "\n".join(lines)
 
 
-def test_m5c_is_available_and_m5_is_not() -> None:
+def test_m5c_and_m5_are_available() -> None:
     assert "M5c" in AVAILABLE_MILESTONES
-    assert "M5" not in AVAILABLE_MILESTONES, "M5 is in progress, not complete"
+    assert "M5" in AVAILABLE_MILESTONES, "M5 is complete (2026-11-11)"
 
 
 def test_the_m5c_eval_gates_with_a_real_runner() -> None:

@@ -10,6 +10,9 @@ it starts no step of M5e.6.\
 **Status (2026-11-10):** G1's first hosted run, [42619476453](https://github.com/Onwcan/DireWolf/actions/runs/42619476453) at `f50286c`, uploaded eight of the nine bundles. The ninth, `sandbox-workspace`'s, was refused by the task runner: the task judged a table built at the call, with no name to keep it by. Named (`WORKSPACE_ALL_CASES`) and guarded; hosted run pending.\
 **Status (2026-11-10, G1b–G4):** G1 passed hosted at `206c821`: [run 42800717936](https://github.com/Onwcan/DireWolf/actions/runs/42800717936) (no. 148), 31 of 31 jobs, all nine bundles uploaded. G1b–G4 are built, unstaged, hosted run pending (§15): the four self-judging tasks' bundles, the required `m5e-gate` job and `make m5e-gate-check`, the pending `m5e-gate` eval, and these documents. G5 and G6 wait for M5e.5's acceptance.\
 **Status (2026-11-10, G1b–G4 hosted):** committed as `8c2bd8a`; [run 42820123829](https://github.com/Onwcan/DireWolf/actions/runs/42820123829) (no. 151) passed 32 of 32 jobs, the `m5e-gate` job among them, judging all thirteen bundles again with a complete inventory. G1–G4 are hosted-verified. G5 and G6 wait for M5e.5's acceptance.\
+**Status (2026-11-11, closed):** M5e.5 was accepted on manual run 42879630675, and G5 and G6
+land with that acceptance in one change (§16): the gate requires `sandbox-hygiene-evidence`,
+nothing is left not yet required, `M5e` and `M5` are available, and `pending-kernel/sandbox-egress` has its runner. **M5e.6 is COMPLETE**, on that change's CI run.\
 **Authority of this document:** a technical handoff, not an ADR. It approves nothing, and every
 choice in it is a recommendation for the owner.
 
@@ -278,3 +281,17 @@ the acceptance change, which makes `sandbox-hygiene` a required job, adds
 `M5e` joins `AVAILABLE_MILESTONES` with `test_m5e_r3_closure.py` and the plan's §10 record,
 only on a hosted run whose verdict is READY. Then G6: `M5` joins and
 `pending-kernel/sandbox-egress` gets its runner.
+
+## 16. G5 and G6 (2026-11-11)
+
+Landed in one change with M5e.5's acceptance, as "One change" chose (the plan's §10, "M5's
+acceptance"), instead of the three commits §10 planned: in one commit the `m5e-gate` eval
+enforces the READY verdict in that commit's own CI run, so a green run needs no log read.
+
+| Slice | As built |
+|---|---|
+| G5 | `M5e` joins `AVAILABLE_MILESTONES`; `m5e-gate/integrated-m5-gate` passes at 1.0 in the baseline; `test_m5e_r3_closure.py` allows M5e.5, M5e.6, M5e and M5 complete and both milestones available only while the plan's two acceptance records stand, with a negative control for each |
+| G6 | `M5` joins; `pending-kernel/sandbox-egress` gets its runner, `m5e.egress`: the gate task's own judgement of the `sandbox-egress` and `sandbox-agent` bundles, in the `m5e-gate` job, which now also runs the `pending-kernel` suite; its other evals stay pending on M6 and M7 |
+
+Nothing lowers a requirement, moves a case to pending or edits a baseline to pass: the two
+baseline entries move from pending to pass at 1.0, and fail if their evals do.

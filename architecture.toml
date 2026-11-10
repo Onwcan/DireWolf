@@ -2344,7 +2344,7 @@ evidence shows it.
 """
 
 [[text_rules]]
-id = "TX060-an-unaccepted-hygiene-profile-is-switched-on-in-one-place"
+id = "TX060-the-hygiene-profiles-have-no-switch"
 paths = [
     "crates/dwkd-authority/src",
     "crates/dwkd-broker/src",
@@ -2354,14 +2354,8 @@ paths = [
     "crates/direwolf-cli/src",
 ]
 exempt_paths = [
-    # The server's command line, and its tests.
+    # The server's command line: its test proves the option is unknown.
     "crates/dwkd-authority/src/server/config.rs",
-    # The one attachment, after the evidence harness's workspace is checked.
-    "crates/dwkd-authority/src/server/sandbox.rs",
-    # The setter's definition, and the configuration's tests.
-    "crates/dwkd-authority/src/sandbox.rs",
-    # The profiles' own type, and its tests.
-    "crates/dwkd-authority/src/sandbox/profiles.rs",
 ]
 suffixes = [".rs"]
 patterns = [
@@ -2370,19 +2364,14 @@ patterns = [
     '^(?!\s*//).*UnacceptedProfile::parse\(',
 ]
 reason = """
-A hygiene profile whose ADR is Proposed (npm's, ADR-0054 §7; pip's,
-ADR-0055 §8) exists in a build only so the evidence can exercise it through
-the real authority, broker and launcher before the owner decides on it. It is
-switched on in one place: `dwkd-authority serve
---allow-unaccepted-hygiene-profile`, parsed in `server/config.rs`, attached in
-`server/sandbox.rs` only to the evidence harness's own execution environment
-(`[workspace] unverified_evidence`, which every broker refuses unless its
-operator acknowledged it), and logged `REDUCED ASSURANCE`. A second spelling --
-a request, a variable, a policy key, a default -- would be a second way to
-turn on a profile nobody accepted.
-
-The change that implements an ADR's acceptance removes the option, its parse
-and this rule's patterns for that profile.
+npm's and pip's hygiene profiles (ADR-0054, ADR-0055) were accepted on
+2026-11-11 on M5e.5's hosted evidence, and are now the obligation itself:
+`workspace_exec_hygiene` keeps `npm` and `pip` under them in every
+configuration. Before that they existed only behind an evidence-only start-up
+option, `dwkd-authority serve --allow-unaccepted-hygiene-profile`, which the
+acceptance removed with its parse, its setter and its type. A spelling of any
+of them again would be a switch for profiles that have none: a way to run npm
+or pip without the profile, or to bring back a profile nobody accepted.
 """
 
 # ===========================================================================

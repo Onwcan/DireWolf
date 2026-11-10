@@ -135,14 +135,13 @@ pub const LAUNCH_SECRET_FD_HYGIENE: &str = "secret-fd-hygiene";
 pub const LAUNCH_SECRET_ENV: &str = "secret-env";
 /// [`LAUNCH_SECRET_ENV`] with [`HYGIENE_ENVIRONMENT`] set as well.
 pub const LAUNCH_SECRET_ENV_HYGIENE: &str = "secret-env-hygiene";
-/// The launch profile of ADR-0054's proposed npm profile (M5e.5):
+/// The launch profile of ADR-0054's npm profile (accepted 2026-11-11):
 /// [`HYGIENE_ENVIRONMENT`] and [`HYGIENE_NPM_ENVIRONMENT`] over it. Reached
-/// only by a workload the authority kept under the unaccepted profile its
-/// operator's evidence-only start-up option named; never with a secret. Kept
-/// apart from [`LAUNCH_HYGIENE`] so every other launch is unchanged until the
-/// ADR is accepted (the preparation handoff's D1).
+/// only by a workload the authority kept under npm's profile; never with a
+/// secret. Kept apart from [`LAUNCH_HYGIENE`], so every other launch is as it
+/// was (the M5e.5 handoff's D1).
 pub const LAUNCH_HYGIENE_NPM: &str = "hygiene-npm";
-/// The launch profile of ADR-0055's proposed pip profile (M5e.5):
+/// The launch profile of ADR-0055's pip profile (accepted 2026-11-11):
 /// [`HYGIENE_ENVIRONMENT`] and [`HYGIENE_PIP_ENVIRONMENT`] over it.
 pub const LAUNCH_HYGIENE_PIP: &str = "hygiene-pip";
 /// Whether `name` is a variable the environment or the launcher already sets

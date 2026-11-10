@@ -63,21 +63,24 @@ def _output(**override: tuple[str, str, str, str] | None) -> str:
     return "\n".join(lines)
 
 
-def test_m5d_is_available_and_m5_is_not() -> None:
+def test_m5d_and_m5_are_available() -> None:
     assert "M5d" in AVAILABLE_MILESTONES
-    assert "M5" not in AVAILABLE_MILESTONES, "M5 is M5e's to complete"
+    assert "M5" in AVAILABLE_MILESTONES, "M5e completed M5 (2026-11-11)"
     for _, evaluation in collect(EVALS_ROOT):
         if "M5" in evaluation.requires:
-            assert evaluation.runner is None, evaluation.id
+            assert evaluation.runner in RUNNERS, evaluation.id
 
 
-def test_the_complete_m5_egress_property_stays_pending() -> None:
+def test_the_complete_m5_egress_property_runs_in_the_gate_job() -> None:
     _, evaluation = next(
         (s, e) for s, e in collect(EVALS_ROOT) if e.id == "pending-kernel/sandbox-egress"
     )
     assert evaluation.requires == ("M5",)
-    assert evaluation.runner is None
-    assert Baseline.load(BASELINE).evals[evaluation.id].status is Status.PENDING
+    assert evaluation.runner == "m5e.egress" and evaluation.runner in RUNNERS
+    assert evaluation.needs == ("m5e-gate-job",)
+    expected = Baseline.load(BASELINE).evals[evaluation.id]
+    assert expected.status is Status.PASS
+    assert expected.min_score == 1.0
 
 
 def test_the_m5d_eval_gates_with_a_real_runner_and_a_real_runtime() -> None:
@@ -96,7 +99,7 @@ def test_the_m5d_eval_gates_with_a_real_runner_and_a_real_runtime() -> None:
 def test_the_inventory_measures_the_m5d_property_in_its_own_suite() -> None:
     properties = [p for p in INVENTORY if p.milestone == "M5d"]
     assert [p.suite for p in properties] == ["m5d-sandbox-exec"]
-    assert any(p.milestone == "M5" and p.suite is None for p in INVENTORY)
+    assert any(p.milestone == "M5" and p.suite == "pending-kernel" for p in INVENTORY)
 
 
 def test_complete_evidence_passes() -> None:

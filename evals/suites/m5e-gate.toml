@@ -19,9 +19,9 @@
 # deterministic subset the `evals` job runs, because only the gate job has the
 # bundles: hence `gate = false`, and the `m5e-gate` job is the merge gate.
 #
-# PENDING until `M5e` joins AVAILABLE_MILESTONES (G5), a decision of its own.
-# From that commit on, a NOT READY verdict fails CI loudly; it never passes
-# quietly.
+# `M5e` joined AVAILABLE_MILESTONES on 2026-11-11 (G5, with M5e.5's
+# acceptance): from that commit on, a NOT READY verdict fails CI loudly; it
+# never passes quietly.
 
 id = "m5e-gate"
 title = "Every M5 evidence task passed again, in this run, and M5e is ready"

@@ -11,7 +11,9 @@
 # moving a property to a different milestone changes the recorded reason and
 # the baseline notices, even if nobody edits the prose.
 #
-# None of these declares a `runner`, deliberately. A placeholder pointing at
+# None of these declared a `runner` before its milestone, deliberately; the
+# one that has one, `sandbox-egress`, got it with M5 itself (M5e.6's G6). A
+# placeholder pointing at
 # somebody else's runner is worse than none: the day the milestone lands it
 # would report a pass for a property it never measured. When the milestone is
 # added to AVAILABLE_MILESTONES in direwolf_evals/runner.py, an eval with no
@@ -39,6 +41,13 @@ gate = false
 name = "sandbox-egress"
 description = "From a PROXY_ONLY sandbox, no route exists to any address but the proxy -- for a real sandboxed workload, end to end."
 requires = ["M5"]
+# The M5 gate's own judgement, in CI's `m5e-gate` job, of this run's egress
+# and agent evidence: a real PROXY_ONLY workload through the released stack.
+runner = "m5e.egress"
+scorer = "binary"
+platforms = ["linux"]
+needs = ["m5e-gate-job"]
+timeout_s = 600.0
 pending_reason = "M5b measures the topology and the proxy (m5b-sandbox-egress); a sandboxed workload using them is M5d's, and the complete gate M5e's."
 tags = ["sandbox", "network"]
 

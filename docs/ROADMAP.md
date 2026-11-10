@@ -155,7 +155,7 @@ and serving on Linux only. **M5 is in progress: M5a, M5b and M5c are complete (s
 **Adversarial:** the full path-traversal set ([EVALS.md](EVALS.md) §3) including Unicode normalisation and TOCTOU swap races in a tight loop; secret-in-output detection; core-dump inspection for secret residue.
 **Deferred:** remote fs, Windows-native hardening beyond the fallback walker.
 
-### M5 · Sandbox — **IN PROGRESS** (M5a complete, hosted acceptance passed; M5b complete, hosted acceptance passed; M5c complete, ADR-0050 accepted, hosted acceptance passed; M5d complete, ADR-0052 accepted 2026-10-26, hosted acceptance passed; M5e in progress: M5e.1 complete, hosted run 40774766063; M5e.2 complete (2026-11-09) — R8, R9 and R11 hosted-verified, ADR-0056 accepted 2026-11-01; R3's real-container level, required by R-B on ADR-0057, hosted-verified at `14405ab` (run 42525106398), ADR-0059 and ADR-0058 accepted 2026-11-09, ADR-0057 superseded; M5e.3 complete; M5e.4 complete (2026-11-09), hosted-verified and accepted; M5e.5 in progress; M5e.6 in progress (G1, the evidence bundles, built) — M5 is complete only when M5e meets its own acceptance)
+### M5 · Sandbox — **COMPLETE** (2026-11-11, on the closing change's CI run; M5a complete, hosted acceptance passed; M5b complete, hosted acceptance passed; M5c complete, ADR-0050 accepted, hosted acceptance passed; M5d complete, ADR-0052 accepted 2026-10-26, hosted acceptance passed; M5e complete: M5e.1 complete, hosted run 40774766063; M5e.2 complete (2026-11-09) — R8, R9 and R11 hosted-verified, ADR-0056 accepted 2026-11-01; R3's real-container level, required by R-B on ADR-0057, hosted-verified at `14405ab` (run 42525106398), ADR-0059 and ADR-0058 accepted 2026-11-09, ADR-0057 superseded; M5e.3 complete; M5e.4 complete (2026-11-09), hosted-verified and accepted; M5e.5 complete (2026-11-11), ADR-0054 and ADR-0055 accepted on manual run 42879630675; M5e.6 complete (2026-11-11), the M5 gate required and `M5e` and `M5` available)
 
 M5 is two products in one (a sandbox *and* an egress proxy), so it is decomposed like M4
 ([ADR-0047](adr/0047-m5a-oci-execution-environment-and-measured-assurance.md)). The
@@ -451,7 +451,7 @@ and package-manager acceptance are M5e's, and the `local` environment is M6's (O
 stays in progress until M5e meets its own acceptance. Passing CI is the evidence named
 here — not a deployment, and not a certification.
 
-#### M5e · The M5 adversarial gate and closeout — **IN PROGRESS** (M5e.1 complete; M5e.2 complete (2026-11-09) — its engineering hosted-verified, R8, R9 and R11 included, ADR-0056 accepted; R3 satisfied, its real-container E6, required by R-B on ADR-0057 (2026-11-01), built 2026-11-08 and hosted-verified at `14405ab` (run 42525106398), ADR-0059 and ADR-0058 accepted, ADR-0057 superseded, issue #19; M5e.3 complete ahead of M5e.2's close, by an exception to M5e's order (2026-11-03), hosted-verified; M5e.4 complete (2026-11-09) — built ahead of M5e.2's close by a second exception (2026-11-05), hosted-verified (runs 134–137) and accepted, OD-E4's mechanism as built; M5e.5 in progress — implementation authorised (2026-11-07) and complete, hosted evidence pending, ADR-0054 and ADR-0055 not accepted; M5e.6 in progress — implementation authorised (2026-11-09), the gate job and its eval hosted-verified (2026-11-10), `M5e` and `M5` unavailable)
+#### M5e · The M5 adversarial gate and closeout — **COMPLETE** (2026-11-11; M5e.1 complete; M5e.2 complete (2026-11-09) — its engineering hosted-verified, R8, R9 and R11 included, ADR-0056 accepted; R3 satisfied, its real-container E6, required by R-B on ADR-0057 (2026-11-01), built 2026-11-08 and hosted-verified at `14405ab` (run 42525106398), ADR-0059 and ADR-0058 accepted, ADR-0057 superseded, issue #19; M5e.3 complete ahead of M5e.2's close, by an exception to M5e's order (2026-11-03), hosted-verified; M5e.4 complete (2026-11-09) — built ahead of M5e.2's close by a second exception (2026-11-05), hosted-verified (runs 134–137) and accepted, OD-E4's mechanism as built; M5e.5 complete (2026-11-11) — hosted evidence on manual run 42879630675 (44 cases, 37/37 mutants), ADR-0054 and ADR-0055 accepted, `sandbox-hygiene` required; M5e.6 complete (2026-11-11) — the gate job and its eval hosted-verified (2026-11-10), `M5e` and `M5` available)
 
 **Planned 2026-10-26.** The gap analysis, the requirements-to-evidence matrix,
 the implementation sequence and the owner's decisions of 2026-10-26 on its open points are in
@@ -796,17 +796,18 @@ SQLite 3.53.2 compiled into the authority. `d9cab80` takes `rusqlite` 0.41.1 wit
 `libsqlite3-sys` 0.39.1 (SQLite 3.54.1), the same crates and features; run
 [42608039664](https://github.com/Onwcan/DireWolf/actions/runs/42608039664) (no. 145) passed **31 of 31 jobs**.
 
-Still to do: M5e.5's npm and pip profiles
-([ADR-0054](adr/0054-m5e-npm-hygiene-profile.md), [ADR-0055](adr/0055-m5e-pip-hygiene-profile.md),
-both Proposed): implemented, ADR-0055's trust revised for F-PIP-TRUST and ADR-0054's npm
-configuration for F-NPM-CONFIG (2026-11-10), their hosted evidence (the manual workflow's
-second run, [42858621579](https://github.com/Onwcan/DireWolf/actions/runs/42858621579), passed three of five tests;
-corrected, its third run pending) and their acceptance still to come;
-and M5e.6's gate: G1–G4 hosted-verified (run
-[42820123829](https://github.com/Onwcan/DireWolf/actions/runs/42820123829), no. 151, 32 of 32 jobs) — every M5
-evidence job's bundle judged again by the `m5e-gate` job `ci` requires, and the
-`m5e-gate` eval, pending on `M5e`; then `M5e` and `M5` available, each a decision of its
-own, after M5e.5's acceptance.
+M5 closed (2026-11-11). M5e.5's npm and pip profiles
+([ADR-0054](adr/0054-m5e-npm-hygiene-profile.md), [ADR-0055](adr/0055-m5e-pip-hygiene-profile.md))
+passed their hosted evidence on the manual workflow's third run, [42879630675](https://github.com/Onwcan/DireWolf/actions/runs/42879630675):
+all 44 cases, and the mutation review 37/37 after a passing baseline. Both ADRs are
+accepted, the profiles are the obligation in every configuration, and `sandbox-hygiene`
+is a required job. M5e.6's gate, hosted-verified as G1–G4 (run
+[42820123829](https://github.com/Onwcan/DireWolf/actions/runs/42820123829), no. 151), judges every M5 evidence bundle
+again in the required `m5e-gate` job, and with `M5e` and `M5` available its eval
+fails unless the acceptance verdict is READY; `pending-kernel/sandbox-egress` reads the
+same gate's judgement of the egress and agent evidence. All of it landed in one change,
+whose own CI run is its hosted check (the plan's §10, "M5e.5's acceptance" and "M5's
+acceptance").
 
 **Deps:** M5a–M5d. **Deliverables:** the complete escape, SSRF and persistence suites as
 merge gates; weakened-profile closure for `PROXY_ONLY`; package-manager acceptance
