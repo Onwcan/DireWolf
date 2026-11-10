@@ -6,13 +6,15 @@ second repair (unstaged at the time of writing)\
 **Reviewed:** 2026-11-07, on `main` at `6a702d710a1750be656c698722825c3f89ad5304`, before the
 evidence's first hosted run (§8)\
 **Revised:** 2026-11-10, on `main` at `8c2bd8acf860e9669dbfdbd8c1b2e3abb6469733` (hosted [run 42820123829](https://github.com/Onwcan/DireWolf/actions/runs/42820123829), 32 of 32 jobs): ADR-0055's trust, F-PIP-TRUST (§12), before the evidence's first hosted run\
+**Revised:** 2026-11-10, after the evidence's first hosted run, [42846068083](https://github.com/Onwcan/DireWolf/actions/runs/42846068083) on `7f0f01c`: five corrections to the evidence and its mutation review (§13)\
 **Status:** **IMPLEMENTATION COMPLETE / HOSTED EVIDENCE PENDING.** The profiles, the
 evidence-only option, the launcher's profiles, the evidence suite, its task, its manual job
 and its mutation review were committed as `bbe3561`, `7df0840` and `6a702d7`; required CI passed
 on each, 30 of 30 jobs ([run 42397671369](https://github.com/Onwcan/DireWolf/actions/runs/42397671369)
-on `6a702d7`). Required CI does not run this evidence. The manual workflow has never run (the
-Actions API listed no run of it on 2026-11-07), so no M5e.5 case has run anywhere. The review
-in §8 corrected the evidence and one fail-closed defect before that first run.\
+on `6a702d7`). Required CI does not run this evidence. The review in §8 corrected the
+evidence and one fail-closed defect before its first run. That first run (2026-11-10, §13)
+stopped in the evidence's own harness in four of its five tests, so no profile case has
+passed hosted yet; the harness is corrected and the rerun is pending.\
 **Authority of this document:** a technical handoff, not an ADR. It approves nothing.
 [ADR-0054](adr/0054-m5e-npm-hygiene-profile.md) and
 [ADR-0055](adr/0055-m5e-pip-hygiene-profile.md) stay **Proposed**. In every production
@@ -143,8 +145,9 @@ which fails the task; it is never counted as killed. The manual workflow runs it
 1. **M5e.4 first — done.** Its repaired hosted run passed (runs 42390237238 to 42397671369), and
    it was accepted on 2026-11-09 ([M5E4_IMPLEMENTATION_HANDOFF.md](M5E4_IMPLEMENTATION_HANDOFF.md) §13;
    the plan's §10, "M5e.4's acceptance").
-2. **This evidence, hosted.** Commit §8's corrections, then run the manual workflow with
-   `both` (§11) and read every case and its attribution.
+2. **This evidence, hosted.** Its first run stopped in the harness (§13). Commit §13's
+   corrections, then run the manual workflow with `both` again (§11) and read every case
+   and its attribution.
 3. **ADR-0055's trust — revised and implemented (2026-11-10, §12)**, behind the same
    option, before the first run; the first run is its evidence.
 4. **The owner's acceptance** of D1–D4 and the six choices (§4, §9), and of each ADR, or a
@@ -227,11 +230,14 @@ Only the owner starts it. On GitHub: **Actions → M5e.5 evidence (manual) → R
 - **`sandbox hygiene evidence (make sandbox-hygiene-evidence)`.** It passes only if it ends
   with `attributed evidence: 44 cases reported`, after the cleanup line.
 - **`profile mutation review (make sandbox-registry-mutations)`.** It passes only with
-  `37/37 mutants killed; 1 equivalent, not run`. Each hosted mutant reruns the whole
-  evidence, so this job takes the longer of the two.
+  `37/37 mutants killed; 1 equivalent, not run`. It first runs the evidence unmutated
+  (`baseline: the unmutated hygiene evidence passed`); after a failed baseline every
+  hosted mutant is `baseline-failed` and the review fails (§13, F-BASELINE). Each hosted
+  mutant reruns the whole evidence, so this job takes the longer of the two.
 
 A failed case prints its workload, exit, bounded output, the origins' request counts and the
-broker's last events. Read the job log, then this document's §5 and §8.
+broker's last events, then `GROUP FAILED: <group>`; the test still runs its later groups and
+lists every failed one at its end. Read the job log, then this document's §5, §8 and §13.
 
 ## 12. ADR-0055's trust revision (2026-11-10)
 
@@ -255,3 +261,22 @@ prefix covers every profiled invocation, and `python -m pip` is refused (D4).
 
 Nothing else changes: no production behaviour, no case, no outcome, no attribution. The
 first manual run (§11) is this revision's evidence as well as M5e.5's.
+
+## 13. The first hosted run (2026-11-10)
+
+[Run 42846068083](https://github.com/Onwcan/DireWolf/actions/runs/42846068083): the manual workflow with `both`, on `main` at
+`7f0f01c` (§12's revision, `a2399dd`, and a dependency update; required CI passed on both,
+runs 42824684742 and 42829125085, 32 of 32 jobs each). The evidence job failed: one test of
+five passed, `without_the_option_nothing_changes`, with both its cases. The other four
+stopped in the suite's own harness, never at a profile's guard. The mutation review passed,
+and that pass showed nothing about its hosted mutants.
+
+| # | Finding | Where it stopped | What changed |
+|---|---|---|---|
+| F-PLAN-NPM | `registry_inspect.py plan` named pip's projects and the markers but no npm package, so the suite's `npm_package` panicked (`npm is not an object: None`) before any workload ran | `npm_under_its_proposed_profile` and `without_a_trust_file_both_fail_closed`, at their first line | `plan` names every npm package's name and version; a test reads each role the suite asks for |
+| F-PYC | pip byte-compiles what it installs, by default. M5e.4's install check admits no `__pycache__` because that evidence passes `--no-compile`, which no invocation here does. pip's first install from the granted index exited 0 under the revised prefix, and the check then refused `dwfx_…_base/__pycache__/__init__.cpython-312.pyc` | `pip_under_its_proposed_profile`, its first case | `check --compiled` admits exactly pip's cache file beside each of the wheels' own modules (`D/__pycache__/M.cpython-NNN.pyc` for `D/M.py`) and nothing else: another stem, an optimisation level, another tag and a missing module are each tested to fail. M5e.4's check is unchanged |
+| F-DENIED-ENV | `balanced` ran `npm ci` in the run, then denied `pip install` (`deny-approval-needed-when-unattended`, R3 as expected), its plan naming the environment `npm ci` had made. The suite's helper required every denial to name none | `the_shipped_packs_decide`, `balanced` | A denial may name the run's live environment and never another (`denied_in`); the test proves the denial made no environment by counting the run's environments before and after. Fresh runs still require none |
+| F-ONE-FAILURE | Each test stopped at its first failure, so the run showed one failure per test; §8's F-ORDER only moved the measured cases last | every test | Each test's cases run in groups (`Groups`): a group that fails is reported and the next still runs, and the test fails at its end with every failed group listed. The task judges no evidence line of a run whose tests did not all pass, so nothing is weakened |
+| F-BASELINE | The mutation review passed 37 of 37, but all four tests its six hosted mutants name had failed unmutated in the evidence job, and a test that fails anyway "kills" every mutant naming it | the review | Before any hosted mutant, the review runs the evidence unmutated once; after a failed baseline each hosted mutant is reported `baseline-failed`, never killed, and the review fails (`hosted_mutant_skip`, tested) |
+
+Nothing in the profiles, the launcher, the authority or the broker changed, and no case, outcome or attribution changed. The run's two passing cases are not counted: the task judges a run's cases only when all five tests pass, and then requires all 44. The next manual run, with `both`, is the evidence (§11); the review now takes one evidence run longer.

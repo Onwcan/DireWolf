@@ -6235,15 +6235,51 @@ def _mutant_outcome(
     return mutant_verdict(output, any_step_failed, expect), sorted(failed_tests(output))
 
 
+def hosted_mutant_skip(exercised: bool, baseline_passed: bool) -> str | None:
+    """Why a `hosted` mutant is not run, or None. Off a disposable
+    GitHub-hosted runner it is NOT EXERCISED. On one, it is run only after
+    the unmutated hygiene evidence passed in the same job: a named test that
+    fails without any mutation would otherwise "kill" every hosted mutant
+    naming it. In run 42846068083 the review passed while all four tests
+    its six hosted mutants name failed unmutated in the evidence job, so
+    those kills said nothing (F-BASELINE)."""
+    if not exercised:
+        return "not-exercised"
+    if not baseline_passed:
+        return "baseline-failed"
+    return None
+
+
+def _hygiene_baseline() -> bool:
+    """The hygiene evidence, unmutated, once before any hosted mutant: True
+    when it passed. Its failing tests are named; its full report is the
+    evidence job's."""
+    result = subprocess.run(
+        [sys.executable, str(ROOT / "scripts" / "dw.py"), "sandbox-hygiene-evidence"],
+        cwd=str(ROOT),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        errors="replace",
+        check=False,
+    )
+    failed = ", ".join(sorted(failed_tests(result.stdout))) or "none named"
+    verdict = "passed" if result.returncode == 0 else f"FAILED (exit {result.returncode})"
+    print(f"  baseline: the unmutated hygiene evidence {verdict}; failed: {failed}", flush=True)
+    return result.returncode == 0
+
+
 def task_sandbox_registry_mutations() -> None:
     """The profiles' mutation review (ADR-0054 §9, ADR-0055 §10): every
     `unit` mutant must be killed by the unit tests, here or hosted; every
-    `hosted` one by the hosted evidence, only in the manual job -- anywhere
-    else it is reported NOT EXERCISED and fails the task, never counted. A
-    mutant is killed only when a test it names failed: one that does not
-    build, or fails another test, is reported as such and fails the task.
-    Each file is restored and proved byte-identical. The equivalent
-    mutants are listed with why, and run by nothing."""
+    `hosted` one by the hosted evidence, only in the manual job, and only
+    after that evidence passed unmutated there (`hosted_mutant_skip`) --
+    anywhere else, or after a failed baseline, it is reported as such and
+    fails the task, never counted. A mutant is killed only when a test it
+    names failed: one that does not build, or fails another test, is
+    reported as such and fails the task. Each file is restored and proved
+    byte-identical. The equivalent mutants are listed with why, and run by
+    nothing."""
     unit = [
         ["cargo", "test", "--locked", "-p", crate, kind, "--", filter]
         if kind == "--lib"
@@ -6251,11 +6287,13 @@ def task_sandbox_registry_mutations() -> None:
         for crate, kind, filter in HYGIENE_UNIT_TESTS
     ]
     hosted = hygiene_refusal(os.environ) is None and sys.platform.startswith("linux")
+    baseline_passed = hosted and _hygiene_baseline()
     results: list[tuple[str, str, str]] = []
     for name, rel, old, new, kind, expect in HYGIENE_MUTATIONS:
-        if kind == "hosted" and not hosted:
-            print(f"  {'not-exercised':<16} {kind:<6} {name}", flush=True)
-            results.append((name, kind, "not-exercised"))
+        skip = hosted_mutant_skip(hosted, baseline_passed) if kind == "hosted" else None
+        if skip is not None:
+            print(f"  {skip:<16} {kind:<6} {name}", flush=True)
+            results.append((name, kind, skip))
             continue
         command = (
             unit

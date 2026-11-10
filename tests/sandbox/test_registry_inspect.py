@@ -70,6 +70,21 @@ def test_the_plan_names_every_project_and_marker(tmp_path: Path) -> None:
     assert projects["sdist"]["file"].endswith(".tar.gz")
 
 
+def test_the_plan_names_every_npm_package_the_hygiene_suite_asks_for(tmp_path: Path) -> None:
+    """M5e.5's suite reads each npm package's name from the plan (run
+    42846068083 failed both npm tests at their first line without it)."""
+    out, manifest = _fixtures(tmp_path)
+    packages = ri.plan(out)["npm"]["packages"]  # type: ignore[index]
+    assert isinstance(packages, dict)
+    assert set(packages) == set(manifest["npm"]["packages"])
+    for role in ("plain", "offsite-parent", "redirected", "git-parent", "tampered"):
+        published = manifest["npm"]["packages"][role]
+        assert packages[role] == {
+            "name": str(published["name"]),
+            "version": str(published["version"]),
+        }
+
+
 def test_an_exact_install_passes_and_counts_its_files(tmp_path: Path) -> None:
     out, _ = _fixtures(tmp_path)
     target = tmp_path / "target"
@@ -116,6 +131,67 @@ def test_an_install_that_differs_from_the_fixture_fails(
         roles = ["base", "dependent"]
     verdict = ri.check(out, roles, _tree_file(tmp_path, target))
     assert verdict["ok"] is False and said in str(verdict["problem"]), verdict
+
+
+def _compile_like_pip(target: Path) -> list[Path]:
+    """What pip's default byte-compilation leaves: `__pycache__/M.cpython-NNN.pyc`
+    beside each installed module `M.py` (its bytes are pip's, never checked)."""
+    tag = f"cpython-{sys.version_info.major}{sys.version_info.minor}"
+    written: list[Path] = []
+    for module in sorted(target.rglob("*.py")):
+        cache = module.parent / "__pycache__"
+        cache.mkdir(exist_ok=True)
+        compiled = cache / f"{module.stem}.{tag}.pyc"
+        compiled.write_bytes(b"compiled")
+        written.append(compiled)
+    return written
+
+
+def test_what_pip_compiles_passes_only_when_asked(tmp_path: Path) -> None:
+    """Run 42846068083: under M5e.5's profile pip byte-compiles, as it does by
+    default. `--compiled` admits exactly that; M5e.4's check stays as it was."""
+    out, _ = _fixtures(tmp_path)
+    target = tmp_path / "target"
+    _install(out, ["dependent", "base"], target)
+    written = _compile_like_pip(target)
+    assert written
+    tree = _tree_file(tmp_path, target)
+    assert ri.check(out, ["dependent", "base"], tree)["ok"] is False
+    verdict = ri.check(out, ["dependent", "base"], tree, compiled=True)
+    assert verdict["ok"] is True, verdict
+    members = len(ri.wheel_members(out, "dependent")) + len(ri.wheel_members(out, "base"))
+    assert verdict["files"] == members + 4 + len(written)
+
+
+@pytest.mark.parametrize(
+    "stray",
+    [
+        "evil.cpython-312.pyc",  # no module of the wheels' beside it
+        "__init__.cpython-312.opt-1.pyc",  # an optimisation level pip never asks for
+        "__init__.pyc",  # no cache tag
+        "__init__.pypy-312.pyc",  # another implementation's tag
+    ],
+)
+def test_compiled_admits_nothing_but_pips_own_cache_files(tmp_path: Path, stray: str) -> None:
+    out, _ = _fixtures(tmp_path)
+    target = tmp_path / "target"
+    _install(out, ["base"], target)
+    module = next(target.glob("dwfx_*_base/__init__.py"))
+    (module.parent / "__pycache__").mkdir()
+    (module.parent / "__pycache__" / stray).write_bytes(b"\0")
+    verdict = ri.check(out, ["base"], _tree_file(tmp_path, target), compiled=True)
+    assert verdict["ok"] is False, verdict
+    assert "is no member of the fixture's wheels" in str(verdict["problem"])
+
+
+def test_compiled_never_stands_in_for_a_missing_module(tmp_path: Path) -> None:
+    out, _ = _fixtures(tmp_path)
+    target = tmp_path / "target"
+    _install(out, ["base"], target)
+    _compile_like_pip(target)
+    next(target.glob("dwfx_*_base/__init__.py")).unlink()
+    verdict = ri.check(out, ["base"], _tree_file(tmp_path, target), compiled=True)
+    assert verdict["ok"] is False and "is not installed" in str(verdict["problem"])
 
 
 def test_nothing_installed_is_never_an_install(tmp_path: Path) -> None:
@@ -195,6 +271,12 @@ def test_the_command_line_says_one_json_line_or_its_usage(
     assert line.count("\n") == 1 and json.loads(line)["projects"]
     assert ri.main(["tree"]) == 2
     assert ri.main(["nothing"]) == 2
+    target = tmp_path / "target"
+    _install(out, ["base"], target)
+    tree = str(_tree_file(tmp_path, target))
+    assert ri.main(["check", str(out), "base", tree, "--compiled"]) == 0
+    assert json.loads(capsys.readouterr().out)["ok"] is True
+    assert ri.main(["check", str(out), "base", tree, "--other"]) == 2
     digest = hashlib.sha256(b"x").hexdigest()
     (tmp_path / "t").mkdir()
     (tmp_path / "t" / "x").write_bytes(b"x")

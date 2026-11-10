@@ -609,18 +609,68 @@ mod linux {
         }
     }
 
-    /// The authority's denial of a workload before anything was prepared:
-    /// its reason and rule, and that no environment was named.
+    /// The authority's denial of a workload in a run that has no environment
+    /// yet: its reason and rule, and that no environment was named.
     fn denied(body: &DwkpBody) -> (String, String) {
+        denied_in(body, None)
+    }
+
+    /// The authority's denial of a workload, nothing prepared for it: its
+    /// reason and rule. The plan may name the run's live environment when an
+    /// earlier workload made one (`environment`), and never another; with
+    /// none, it names none (run 42846068083: `balanced` ran `npm ci`, then
+    /// denied `pip install` in the same run, its plan naming the environment
+    /// `npm ci` had made). The caller proves no environment was made.
+    fn denied_in(body: &DwkpBody, environment: Option<&str>) -> (String, String) {
         let DwkpBody::ToolDeniedV5(denied) = body else {
             panic!("not denied: {body:?}")
         };
         let action = denied.plan.actions.as_slice()[0].workload.as_ref().unwrap();
-        assert!(action.environment_id.is_none(), "{action:?}");
+        let named = action.environment_id.as_ref().map(|e| e.as_str());
+        assert!(
+            named.is_none() || named == environment,
+            "the denial names {named:?}, the run's live environment being {environment:?}: \
+             {action:?}"
+        );
         (
             action.decision.reason.as_str().to_owned(),
             action.decision.rule_id.as_str().to_owned(),
         )
+    }
+
+    /// A test's groups of cases, each run on its own: a group that does not
+    /// hold is kept and the next one still runs, so one hosted run reports
+    /// every group that fails, not only a test's first (run 42846068083
+    /// showed one failure per test). The test fails at its end when any
+    /// group did, and the task judges no evidence line of a run whose tests
+    /// did not all pass: nothing is weakened.
+    #[derive(Default)]
+    struct Groups {
+        failed: Vec<String>,
+    }
+
+    impl Groups {
+        fn run(&mut self, name: &str, group: impl FnOnce()) {
+            let held = std::panic::catch_unwind(std::panic::AssertUnwindSafe(group));
+            if let Err(cause) = held {
+                let said = cause
+                    .downcast_ref::<String>()
+                    .map(String::as_str)
+                    .or_else(|| cause.downcast_ref::<&str>().copied())
+                    .unwrap_or("a panic without a message");
+                eprintln!("GROUP FAILED: {name}");
+                self.failed.push(format!("{name}: {}", bounded(said)));
+            }
+        }
+
+        fn end(self) {
+            assert!(
+                self.failed.is_empty(),
+                "{} group(s) did not hold:\n{}",
+                self.failed.len(),
+                self.failed.join("\n")
+            );
+        }
     }
 
     #[derive(Debug)]
@@ -1166,7 +1216,9 @@ reason = "NO_MATCHING_RULE"
         }
 
         /// pip's target holds exactly `roles`' wheels (`registry_inspect.py
-        /// check`): how many files.
+        /// check`), with what pip compiles from them by default
+        /// (`--compiled`: under the profile no invocation says
+        /// `--no-compile`, as M5e.4's did; run 42846068083): how many files.
         fn installed(&self, peer: &mut Peer, target: &str, roles: &[&str]) -> usize {
             let measured = self.tree(peer, &format!("{TARGETS}/{target}"));
             let file = self
@@ -1181,6 +1233,7 @@ reason = "NO_MATCHING_RULE"
                     self.fixtures.to_str().unwrap(),
                     &roles.join(","),
                     file.to_str().unwrap(),
+                    "--compiled",
                 ],
             );
             assert!(flag(&verdict, "ok"), "{target}: {verdict:?}");
@@ -1337,116 +1390,117 @@ reason = "NO_MATCHING_RULE"
         let lab = Lab::new("m5e5n", AS_PROPOSED);
         let granted = registry(GRANTED, GRANTED_PORT);
         let (plain, _) = lab.npm_package("plain");
+        let mut groups = Groups::default();
+        let mut changed: Option<Vec<String>> = None;
         let mut n = 0;
 
         // 1. `npm ci`: the lockfile's packages, scripts off.
         n += 1;
-        lab.npm_project(n);
-        let mut a = lab.peer(n, &[]);
-        let ran = lab.npm(&mut a, &["ci", "--registry", &granted]);
-        assert_eq!(ran.exit, Some(0), "{}", lab.why("npm ci", Some(&ran)));
-        let container = lab.container(&a.run);
-        let modules = lab.files(&mut a, "/workspace/node_modules");
-        assert!(modules >= 4, "{modules} files in node_modules");
-        let markers = lab.markers(n, "npm-");
-        assert!(markers.len() >= 8, "{markers:?}");
-        let run_markers: Vec<&PathBuf> = markers.iter().filter(|m| m.exists()).collect();
-        assert!(run_markers.is_empty(), "a script ran: {run_markers:?}");
-        let changed = lab.runtime.changed(&container);
-        let (launch, prefix, argv) = lab.recorded_plan(&a.run);
-        let refused = lab.release(&mut a, &ran.environment);
-        assert_eq!(refused, 0, "{}", lab.why("a refusal", Some(&ran)));
-        evidence(
-            "npm-ci-granted-registry-installs",
-            &format!("installed:{modules}-files-in-node_modules;lockfile"),
-            "relay-and-connect-proxy-grant",
-        );
-        evidence(
-            "npm-lifecycle-scripts-not-run",
-            &format!(
-                "not-run:{}-markers-absent;root-and-dependency",
-                markers.len()
-            ),
-            "hygiene-launcher",
-        );
-        // `changed` is judged last, with the other measured-not-assumed
-        // cases, so a first run's surprise there hides no other case.
-        assert_eq!(launch, "HYGIENE_NPM");
-        assert_eq!(prefix, NPM_PREFIX);
-        assert_eq!(&argv[1..=NPM_PREFIX.len()], NPM_PREFIX, "{argv:?}");
-        evidence(
-            "npm-plan-records-prefix-and-profile",
-            &format!("recorded:launch-{launch};prefix-{}", prefix.join(" ")),
-            "authority-ledger",
-        );
+        groups.run("npm-ci-granted-registry-installs", || {
+            lab.npm_project(n);
+            let mut a = lab.peer(n, &[]);
+            let ran = lab.npm(&mut a, &["ci", "--registry", &granted]);
+            assert_eq!(ran.exit, Some(0), "{}", lab.why("npm ci", Some(&ran)));
+            let container = lab.container(&a.run);
+            let modules = lab.files(&mut a, "/workspace/node_modules");
+            assert!(modules >= 4, "{modules} files in node_modules");
+            let markers = lab.markers(n, "npm-");
+            assert!(markers.len() >= 8, "{markers:?}");
+            let run_markers: Vec<&PathBuf> = markers.iter().filter(|m| m.exists()).collect();
+            assert!(run_markers.is_empty(), "a script ran: {run_markers:?}");
+            changed = Some(lab.runtime.changed(&container));
+            let (launch, prefix, argv) = lab.recorded_plan(&a.run);
+            let refused = lab.release(&mut a, &ran.environment);
+            assert_eq!(refused, 0, "{}", lab.why("a refusal", Some(&ran)));
+            evidence(
+                "npm-ci-granted-registry-installs",
+                &format!("installed:{modules}-files-in-node_modules;lockfile"),
+                "relay-and-connect-proxy-grant",
+            );
+            evidence(
+                "npm-lifecycle-scripts-not-run",
+                &format!(
+                    "not-run:{}-markers-absent;root-and-dependency",
+                    markers.len()
+                ),
+                "hygiene-launcher",
+            );
+            // `changed` is judged last, with the other measured-not-assumed
+            // cases, so a first run's surprise there hides no other case.
+            assert_eq!(launch, "HYGIENE_NPM");
+            assert_eq!(prefix, NPM_PREFIX);
+            assert_eq!(&argv[1..=NPM_PREFIX.len()], NPM_PREFIX, "{argv:?}");
+            evidence(
+                "npm-plan-records-prefix-and-profile",
+                &format!("recorded:launch-{launch};prefix-{}", prefix.join(" ")),
+                "authority-ledger",
+            );
+        });
 
         // 2. `npm install` of one registry name.
         n += 1;
-        let mut a = lab.peer(n, &[]);
-        let ran = lab.npm(&mut a, &["install", "--registry", &granted, &plain]);
-        assert_eq!(ran.exit, Some(0), "{}", lab.why("npm install", Some(&ran)));
-        lab.container(&a.run);
-        let modules = lab.files(&mut a, &format!("/workspace/node_modules/{plain}"));
-        assert!(modules >= 2, "{modules}");
-        assert_eq!(lab.release(&mut a, &ran.environment), 0);
-        evidence(
-            "npm-install-granted-registry-installs",
-            &format!("installed:{modules}-files;{plain}"),
-            "relay-and-connect-proxy-grant",
-        );
+        groups.run("npm-install-granted-registry-installs", || {
+            let mut a = lab.peer(n, &[]);
+            let ran = lab.npm(&mut a, &["install", "--registry", &granted, &plain]);
+            assert_eq!(ran.exit, Some(0), "{}", lab.why("npm install", Some(&ran)));
+            lab.container(&a.run);
+            let modules = lab.files(&mut a, &format!("/workspace/node_modules/{plain}"));
+            assert!(modules >= 2, "{modules}");
+            assert_eq!(lab.release(&mut a, &ran.environment), 0);
+            evidence(
+                "npm-install-granted-registry-installs",
+                &format!("installed:{modules}-files;{plain}"),
+                "relay-and-connect-proxy-grant",
+            );
+        });
 
         // 3-5. The ungranted registry, a tarball on the ungranted host, and a
         // packument redirected there: each refused at CONNECT.
-        let served = lab.ungranted.requests().len();
-        for (case, args) in [
-            (
-                "npm-ungranted-registry-refused",
-                vec![
-                    "install".to_owned(),
-                    "--registry".to_owned(),
-                    registry(UNGRANTED, UNGRANTED_PORT),
-                    plain.clone(),
-                ],
-            ),
+        for (case, role) in [
+            ("npm-ungranted-registry-refused", None),
             (
                 "npm-tarball-on-ungranted-host-refused",
-                vec![
-                    "install".to_owned(),
-                    "--registry".to_owned(),
-                    granted.clone(),
-                    lab.npm_package("offsite-parent").0,
-                ],
+                Some("offsite-parent"),
             ),
-            (
-                "npm-redirect-to-ungranted-host-refused",
-                vec![
-                    "install".to_owned(),
-                    "--registry".to_owned(),
-                    granted.clone(),
-                    lab.npm_package("redirected").0,
-                ],
-            ),
+            ("npm-redirect-to-ungranted-host-refused", Some("redirected")),
         ] {
             n += 1;
-            let mut a = lab.peer(n, &[]);
-            let refs: Vec<&str> = args.iter().map(String::as_str).collect();
-            let ran = lab.npm(&mut a, &refs);
-            assert!(ran.failed(), "{}", lab.why(case, Some(&ran)));
-            lab.container(&a.run);
-            let left = lab.files(&mut a, "/workspace/node_modules");
-            assert_eq!(left, 0, "{case}: something was installed");
-            let refused = lab.release(&mut a, &ran.environment);
-            assert!(refused >= 1, "{}", lab.why(case, Some(&ran)));
-            assert_eq!(
-                lab.ungranted.requests().len(),
-                served,
-                "{case}: the ungranted origin"
-            );
-            evidence(
-                case,
-                &format!("refused:nothing-installed;TARGET_NOT_GRANTED={refused}"),
-                "connect-proxy:grant",
-            );
+            groups.run(case, || {
+                let served = lab.ungranted.requests().len();
+                let args = match role {
+                    None => vec![
+                        "install".to_owned(),
+                        "--registry".to_owned(),
+                        registry(UNGRANTED, UNGRANTED_PORT),
+                        plain.clone(),
+                    ],
+                    Some(role) => vec![
+                        "install".to_owned(),
+                        "--registry".to_owned(),
+                        granted.clone(),
+                        lab.npm_package(role).0,
+                    ],
+                };
+                let mut a = lab.peer(n, &[]);
+                let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+                let ran = lab.npm(&mut a, &refs);
+                assert!(ran.failed(), "{}", lab.why(case, Some(&ran)));
+                lab.container(&a.run);
+                let left = lab.files(&mut a, "/workspace/node_modules");
+                assert_eq!(left, 0, "{case}: something was installed");
+                let refused = lab.release(&mut a, &ran.environment);
+                assert!(refused >= 1, "{}", lab.why(case, Some(&ran)));
+                assert_eq!(
+                    lab.ungranted.requests().len(),
+                    served,
+                    "{case}: the ungranted origin"
+                );
+                evidence(
+                    case,
+                    &format!("refused:nothing-installed;TARGET_NOT_GRANTED={refused}"),
+                    "connect-proxy:grant",
+                );
+            });
         }
 
         // 7-8. A workspace `.npmrc` asking for scripts, TLS off and its own
@@ -1456,304 +1510,330 @@ reason = "NO_MATCHING_RULE"
         // (`npm_config_userconfig` and `npm_config_globalconfig` outrank a
         // project's choice of them).
         n += 1;
-        lab.npm_project(n);
-        lab.place(n, "workspace/npm-hostile.npmrc", ".npmrc");
-        let hostile =
-            std::fs::read_to_string(lab.fixtures.join("workspace/npm-hostile.npmrc")).unwrap();
-        let mut redirected = 0;
-        for key in ["userconfig=", "globalconfig="] {
-            let named = hostile
-                .lines()
-                .find_map(|line| line.strip_prefix(key))
-                .unwrap_or_else(|| panic!("the hostile .npmrc names no {key}"));
-            let file = named
-                .strip_prefix("/workspace/")
-                .unwrap_or_else(|| panic!("{key} names {named}, outside the workspace"));
-            let at = lab.workspace(n).join(file);
-            std::fs::write(&at, format!("https-proxy=http://{UNROUTED}:9/\n")).unwrap();
-            mode(&at, 0o644);
-            redirected += 1;
-        }
-        assert_eq!(redirected, 2);
-        let mut a = lab.peer(n, &[]);
-        let ran = lab.npm(&mut a, &["ci", "--registry", &granted]);
-        assert_eq!(
-            ran.exit,
-            Some(0),
-            "{}",
-            lab.why("npm ci, hostile .npmrc", Some(&ran))
-        );
-        lab.container(&a.run);
-        let markers = lab.markers(n, "npm-");
-        assert!(
-            markers.iter().all(|m| !m.exists()),
-            "a script ran: {markers:?}"
-        );
-        lab.release(&mut a, &ran.environment);
-        evidence(
-            "npm-project-npmrc-cannot-reenable-scripts",
-            &format!(
-                "not-run:{}-markers-absent;hostile-npmrc;its-user-and-global-config-unread",
-                markers.len()
-            ),
-            "hygiene-launcher",
-        );
+        groups.run("npm-project-npmrc-cannot-reenable-scripts", || {
+            lab.npm_project(n);
+            lab.place(n, "workspace/npm-hostile.npmrc", ".npmrc");
+            let hostile =
+                std::fs::read_to_string(lab.fixtures.join("workspace/npm-hostile.npmrc")).unwrap();
+            let mut redirected = 0;
+            for key in ["userconfig=", "globalconfig="] {
+                let named = hostile
+                    .lines()
+                    .find_map(|line| line.strip_prefix(key))
+                    .unwrap_or_else(|| panic!("the hostile .npmrc names no {key}"));
+                let file = named
+                    .strip_prefix("/workspace/")
+                    .unwrap_or_else(|| panic!("{key} names {named}, outside the workspace"));
+                let at = lab.workspace(n).join(file);
+                std::fs::write(&at, format!("https-proxy=http://{UNROUTED}:9/\n")).unwrap();
+                mode(&at, 0o644);
+                redirected += 1;
+            }
+            assert_eq!(redirected, 2);
+            let mut a = lab.peer(n, &[]);
+            let ran = lab.npm(&mut a, &["ci", "--registry", &granted]);
+            assert_eq!(
+                ran.exit,
+                Some(0),
+                "{}",
+                lab.why("npm ci, hostile .npmrc", Some(&ran))
+            );
+            lab.container(&a.run);
+            let markers = lab.markers(n, "npm-");
+            assert!(
+                markers.iter().all(|m| !m.exists()),
+                "a script ran: {markers:?}"
+            );
+            lab.release(&mut a, &ran.environment);
+            evidence(
+                "npm-project-npmrc-cannot-reenable-scripts",
+                &format!(
+                    "not-run:{}-markers-absent;hostile-npmrc;its-user-and-global-config-unread",
+                    markers.len()
+                ),
+                "hygiene-launcher",
+            );
+        });
 
         // 9. `strict-ssl=false` in the workspace: the untrusted issuer still refused.
         n += 1;
-        lab.place(n, "workspace/npm-hostile.npmrc", ".npmrc");
-        let mut a = lab.peer(n, &[format!("network.https:{GRANTED}:{ROGUE_PORT}")]);
-        let ran = lab.npm(
-            &mut a,
-            &[
-                "install",
-                "--registry",
-                &registry(GRANTED, ROGUE_PORT),
-                &plain,
-            ],
-        );
-        assert!(
-            ran.failed(),
-            "{}",
-            lab.why("rogue under a hostile .npmrc", Some(&ran))
-        );
-        lab.container(&a.run);
-        assert_eq!(lab.files(&mut a, "/workspace/node_modules"), 0);
-        assert!(
-            lab.rogue.requests().is_empty(),
-            "a request reached the rogue origin"
-        );
-        lab.release(&mut a, &ran.environment);
-        evidence(
-            "npm-project-npmrc-cannot-disable-tls",
-            "refused:nothing-installed;untrusted-issuer;strict-ssl-false-in-npmrc",
-            "workload-tls-verification",
-        );
+        groups.run("npm-project-npmrc-cannot-disable-tls", || {
+            lab.place(n, "workspace/npm-hostile.npmrc", ".npmrc");
+            let mut a = lab.peer(n, &[format!("network.https:{GRANTED}:{ROGUE_PORT}")]);
+            let ran = lab.npm(
+                &mut a,
+                &[
+                    "install",
+                    "--registry",
+                    &registry(GRANTED, ROGUE_PORT),
+                    &plain,
+                ],
+            );
+            assert!(
+                ran.failed(),
+                "{}",
+                lab.why("rogue under a hostile .npmrc", Some(&ran))
+            );
+            lab.container(&a.run);
+            assert_eq!(lab.files(&mut a, "/workspace/node_modules"), 0);
+            assert!(
+                lab.rogue.requests().is_empty(),
+                "a request reached the rogue origin"
+            );
+            lab.release(&mut a, &ran.environment);
+            evidence(
+                "npm-project-npmrc-cannot-disable-tls",
+                "refused:nothing-installed;untrusted-issuer;strict-ssl-false-in-npmrc",
+                "workload-tls-verification",
+            );
+        });
 
         // 10. A workspace `.npmrc` naming its own CA (the rogue authority's):
         // the granted registry, trusted only through the image's file, installs.
         n += 1;
-        lab.place_pki(n, "rogue.pem", "own-ca.pem");
-        std::fs::write(
-            lab.workspace(n).join(".npmrc"),
-            "cafile=/workspace/own-ca.pem\n",
-        )
-        .unwrap();
-        mode(&lab.workspace(n).join(".npmrc"), 0o644);
-        let mut a = lab.peer(n, &[]);
-        let ran = lab.npm(&mut a, &["install", "--registry", &granted, &plain]);
-        assert_eq!(
-            ran.exit,
-            Some(0),
-            "{}",
-            lab.why("own CA in .npmrc", Some(&ran))
-        );
-        lab.container(&a.run);
-        assert!(lab.files(&mut a, &format!("/workspace/node_modules/{plain}")) >= 2);
-        lab.release(&mut a, &ran.environment);
-        evidence(
-            "npm-project-npmrc-cannot-replace-ca",
-            "installed:image-trust-file-in-force;npmrc-cafile-ignored",
-            "hygiene-launcher",
-        );
+        groups.run("npm-project-npmrc-cannot-replace-ca", || {
+            lab.place_pki(n, "rogue.pem", "own-ca.pem");
+            std::fs::write(
+                lab.workspace(n).join(".npmrc"),
+                "cafile=/workspace/own-ca.pem\n",
+            )
+            .unwrap();
+            mode(&lab.workspace(n).join(".npmrc"), 0o644);
+            let mut a = lab.peer(n, &[]);
+            let ran = lab.npm(&mut a, &["install", "--registry", &granted, &plain]);
+            assert_eq!(
+                ran.exit,
+                Some(0),
+                "{}",
+                lab.why("own CA in .npmrc", Some(&ran))
+            );
+            lab.container(&a.run);
+            assert!(lab.files(&mut a, &format!("/workspace/node_modules/{plain}")) >= 2);
+            lab.release(&mut a, &ran.environment);
+            evidence(
+                "npm-project-npmrc-cannot-replace-ca",
+                "installed:image-trust-file-in-force;npmrc-cafile-ignored",
+                "hygiene-launcher",
+            );
+        });
 
         // 12. A git dependency: nothing fetched, nothing prepared.
         n += 1;
-        let (git_parent, _) = lab.npm_package("git-parent");
-        let served = lab.ungranted.requests().len();
-        let mut a = lab.peer(n, &[]);
-        let ran = lab.npm(&mut a, &["install", "--registry", &granted, &git_parent]);
-        assert!(ran.failed(), "{}", lab.why("git dependency", Some(&ran)));
-        lab.container(&a.run);
-        assert!(
-            !lab.marker(n, "npm-git-dep-prepare").exists(),
-            "prepare ran"
-        );
-        assert_eq!(
-            lab.ungranted.requests().len(),
-            served,
-            "the git host was reached"
-        );
-        lab.release(&mut a, &ran.environment);
-        evidence(
-            "npm-git-dependency-not-prepared",
-            "not-prepared:no-prepare-marker;no-git-fetch",
-            "workload-effects-measured",
-        );
+        groups.run("npm-git-dependency-not-prepared", || {
+            let (git_parent, _) = lab.npm_package("git-parent");
+            let served = lab.ungranted.requests().len();
+            let mut a = lab.peer(n, &[]);
+            let ran = lab.npm(&mut a, &["install", "--registry", &granted, &git_parent]);
+            assert!(ran.failed(), "{}", lab.why("git dependency", Some(&ran)));
+            lab.container(&a.run);
+            assert!(
+                !lab.marker(n, "npm-git-dep-prepare").exists(),
+                "prepare ran"
+            );
+            assert_eq!(
+                lab.ungranted.requests().len(),
+                served,
+                "the git host was reached"
+            );
+            lab.release(&mut a, &ran.environment);
+            evidence(
+                "npm-git-dependency-not-prepared",
+                "not-prepared:no-prepare-marker;no-git-fetch",
+                "workload-effects-measured",
+            );
+        });
 
         // 13. The granted name under an issuer npm must not trust.
         n += 1;
-        let mut a = lab.peer(n, &[format!("network.https:{GRANTED}:{ROGUE_PORT}")]);
-        let ran = lab.npm(
-            &mut a,
-            &[
-                "install",
-                "--registry",
-                &registry(GRANTED, ROGUE_PORT),
-                &plain,
-            ],
-        );
-        assert!(ran.failed(), "{}", lab.why("rogue", Some(&ran)));
-        lab.container(&a.run);
-        assert_eq!(lab.files(&mut a, "/workspace/node_modules"), 0);
-        assert_eq!(
-            lab.release(&mut a, &ran.environment),
-            0,
-            "the granted tunnel was refused"
-        );
-        evidence(
-            "npm-untrusted-issuer-refused",
-            "refused:nothing-installed;untrusted-issuer;tunnel-granted",
-            "workload-tls-verification",
-        );
+        groups.run("npm-untrusted-issuer-refused", || {
+            let mut a = lab.peer(n, &[format!("network.https:{GRANTED}:{ROGUE_PORT}")]);
+            let ran = lab.npm(
+                &mut a,
+                &[
+                    "install",
+                    "--registry",
+                    &registry(GRANTED, ROGUE_PORT),
+                    &plain,
+                ],
+            );
+            assert!(ran.failed(), "{}", lab.why("rogue", Some(&ran)));
+            lab.container(&a.run);
+            assert_eq!(lab.files(&mut a, "/workspace/node_modules"), 0);
+            assert_eq!(
+                lab.release(&mut a, &ran.environment),
+                0,
+                "the granted tunnel was refused"
+            );
+            evidence(
+                "npm-untrusted-issuer-refused",
+                "refused:nothing-installed;untrusted-issuer;tunnel-granted",
+                "workload-tls-verification",
+            );
+        });
 
         // 14. A tarball tampered against its packument's integrity.
         n += 1;
-        let (tampered, _) = lab.npm_package("tampered");
-        let mut a = lab.peer(n, &[]);
-        let ran = lab.npm(&mut a, &["install", "--registry", &granted, &tampered]);
-        assert!(ran.failed(), "{}", lab.why("tampered", Some(&ran)));
-        assert!(
-            ran.said("EINTEGRITY"),
-            "{}",
-            lab.why("not EINTEGRITY", Some(&ran))
-        );
-        lab.container(&a.run);
-        assert_eq!(lab.files(&mut a, "/workspace/node_modules"), 0);
-        lab.release(&mut a, &ran.environment);
-        evidence(
-            "npm-tampered-tarball-refused",
-            "refused:EINTEGRITY;nothing-installed",
-            "workload-integrity-verification",
-        );
+        groups.run("npm-tampered-tarball-refused", || {
+            let (tampered, _) = lab.npm_package("tampered");
+            let mut a = lab.peer(n, &[]);
+            let ran = lab.npm(&mut a, &["install", "--registry", &granted, &tampered]);
+            assert!(ran.failed(), "{}", lab.why("tampered", Some(&ran)));
+            assert!(
+                ran.said("EINTEGRITY"),
+                "{}",
+                lab.why("not EINTEGRITY", Some(&ran))
+            );
+            lab.container(&a.run);
+            assert_eq!(lab.files(&mut a, "/workspace/node_modules"), 0);
+            lab.release(&mut a, &ran.environment);
+            evidence(
+                "npm-tampered-tarball-refused",
+                "refused:EINTEGRITY;nothing-installed",
+                "workload-integrity-verification",
+            );
+        });
 
         // 16-19. Refused before an intent, each by the authority.
         n += 1;
-        let mut a = lab.peer(n, &[]);
-        let before_runs = lab.rows("SELECT count(*) FROM environment WHERE run_id = ?1", &a.run);
-        let mut undoing = 0;
-        for undo in [
-            "--ignore-scripts=false",
-            "--no-ignore-scripts",
-            "--userconfig=/workspace/x",
-            "--globalconfig=/workspace/x",
-            "--strict-ssl=false",
-            "--no-strict-ssl",
-            "-g",
-            "--global",
-            "--location=global",
-            "--prefix=/workspace/p",
-            "--script-shell=/bin/sh",
-            "--node-options=--require=/workspace/x",
-            "--foreground-scripts",
-            "--cafile=/workspace/ca.pem",
-            "--ca=x",
-        ] {
-            let (reason, rule) = denied(&a.exec(&lab.pins.npm, &["install", undo, &plain]));
-            assert_eq!(reason, "OBLIGATION_UNENFORCEABLE", "{undo}");
-            assert_eq!(rule, RULE, "{undo}");
-            undoing += 1;
-        }
-        evidence(
-            "npm-undoing-arguments-refused",
-            &format!("refused:OBLIGATION_UNENFORCEABLE;{undoing}-arguments;no-intent"),
-            "authority-obligation",
+        groups.run(
+            "npm-undoing-arguments-refused and the other refusals",
+            || {
+                let mut a = lab.peer(n, &[]);
+                let before_runs =
+                    lab.rows("SELECT count(*) FROM environment WHERE run_id = ?1", &a.run);
+                let mut undoing = 0;
+                for undo in [
+                    "--ignore-scripts=false",
+                    "--no-ignore-scripts",
+                    "--userconfig=/workspace/x",
+                    "--globalconfig=/workspace/x",
+                    "--strict-ssl=false",
+                    "--no-strict-ssl",
+                    "-g",
+                    "--global",
+                    "--location=global",
+                    "--prefix=/workspace/p",
+                    "--script-shell=/bin/sh",
+                    "--node-options=--require=/workspace/x",
+                    "--foreground-scripts",
+                    "--cafile=/workspace/ca.pem",
+                    "--ca=x",
+                ] {
+                    let (reason, rule) = denied(&a.exec(&lab.pins.npm, &["install", undo, &plain]));
+                    assert_eq!(reason, "OBLIGATION_UNENFORCEABLE", "{undo}");
+                    assert_eq!(rule, RULE, "{undo}");
+                    undoing += 1;
+                }
+                evidence(
+                    "npm-undoing-arguments-refused",
+                    &format!("refused:OBLIGATION_UNENFORCEABLE;{undoing}-arguments;no-intent"),
+                    "authority-obligation",
+                );
+                let mut subcommands = 0;
+                for sub in [
+                    "run", "test", "start", "exec", "rebuild", "publish", "config", "i",
+                ] {
+                    let (reason, _) = denied(&a.exec(&lab.pins.npm, &[sub]));
+                    assert_eq!(reason, "OBLIGATION_UNENFORCEABLE", "{sub}");
+                    subcommands += 1;
+                }
+                evidence(
+                    "npm-other-subcommands-refused",
+                    &format!("refused:OBLIGATION_UNENFORCEABLE;{subcommands}-subcommands"),
+                    "authority-obligation",
+                );
+                let mut specs = 0;
+                for spec in [
+                    "https://granted-registry.test:18443/x.tgz",
+                    "./local",
+                    "/abs/path",
+                    "x.tgz",
+                    "git+https://h/x.git",
+                    "github:user/repo",
+                    "user/repo",
+                    "file:../x",
+                    "link:../x",
+                    "alias@npm:real",
+                ] {
+                    let (reason, _) = denied(&a.exec(&lab.pins.npm, &["install", spec]));
+                    assert_eq!(reason, "OBLIGATION_UNENFORCEABLE", "{spec}");
+                    specs += 1;
+                }
+                let (reason, _) = denied(&a.exec(&lab.pins.npm, &["install", "--", &plain]));
+                assert_eq!(reason, "OBLIGATION_UNENFORCEABLE");
+                evidence(
+                    "npm-non-registry-specs-refused",
+                    &format!("refused:OBLIGATION_UNENFORCEABLE;{specs}-specs-and-the-separator"),
+                    "authority-obligation",
+                );
+                let (reason, _) = denied(&a.exec(&lab.pins.npx, &["cowsay"]));
+                assert_eq!(reason, "OBLIGATION_UNENFORCEABLE");
+                evidence(
+                    "npx-still-refused",
+                    "refused:OBLIGATION_UNENFORCEABLE;npx-with-the-npm-profile-on",
+                    "authority-obligation",
+                );
+                assert_eq!(
+                    lab.rows("SELECT count(*) FROM environment WHERE run_id = ?1", &a.run),
+                    before_runs,
+                    "a refusal prepared an environment"
+                );
+                a.release();
+            },
         );
-        let mut subcommands = 0;
-        for sub in [
-            "run", "test", "start", "exec", "rebuild", "publish", "config", "i",
-        ] {
-            let (reason, _) = denied(&a.exec(&lab.pins.npm, &[sub]));
-            assert_eq!(reason, "OBLIGATION_UNENFORCEABLE", "{sub}");
-            subcommands += 1;
-        }
-        evidence(
-            "npm-other-subcommands-refused",
-            &format!("refused:OBLIGATION_UNENFORCEABLE;{subcommands}-subcommands"),
-            "authority-obligation",
-        );
-        let mut specs = 0;
-        for spec in [
-            "https://granted-registry.test:18443/x.tgz",
-            "./local",
-            "/abs/path",
-            "x.tgz",
-            "git+https://h/x.git",
-            "github:user/repo",
-            "user/repo",
-            "file:../x",
-            "link:../x",
-            "alias@npm:real",
-        ] {
-            let (reason, _) = denied(&a.exec(&lab.pins.npm, &["install", spec]));
-            assert_eq!(reason, "OBLIGATION_UNENFORCEABLE", "{spec}");
-            specs += 1;
-        }
-        let (reason, _) = denied(&a.exec(&lab.pins.npm, &["install", "--", &plain]));
-        assert_eq!(reason, "OBLIGATION_UNENFORCEABLE");
-        evidence(
-            "npm-non-registry-specs-refused",
-            &format!("refused:OBLIGATION_UNENFORCEABLE;{specs}-specs-and-the-separator"),
-            "authority-obligation",
-        );
-        let (reason, _) = denied(&a.exec(&lab.pins.npx, &["cowsay"]));
-        assert_eq!(reason, "OBLIGATION_UNENFORCEABLE");
-        evidence(
-            "npx-still-refused",
-            "refused:OBLIGATION_UNENFORCEABLE;npx-with-the-npm-profile-on",
-            "authority-obligation",
-        );
-        assert_eq!(
-            lab.rows("SELECT count(*) FROM environment WHERE run_id = ?1", &a.run),
-            before_runs,
-            "a refusal prepared an environment"
-        );
-        a.release();
 
         // Last, the cases measured rather than assumed, so that a first
         // run's surprise in one hides no other case.
         // 6. npm told to go around its proxy: only the topology answers.
         n += 1;
-        let mut a = lab.peer(n, &[]);
-        let unrouted = format!("https://{UNROUTED}:{GRANTED_PORT}/npm/");
-        let ran = lab.npm(
-            &mut a,
-            &[
-                "install",
-                &format!("--noproxy={UNROUTED}"),
-                "--registry",
-                &unrouted,
-                &plain,
-            ],
-        );
-        assert!(ran.failed(), "{}", lab.why("direct npm", Some(&ran)));
-        assert!(
-            ran.said("ENETUNREACH"),
-            "{}",
-            lab.why("not ENETUNREACH", Some(&ran))
-        );
-        lab.container(&a.run);
-        assert_eq!(lab.files(&mut a, "/workspace/node_modules"), 0);
-        lab.release(&mut a, &ran.environment);
-        evidence(
-            "npm-direct-route-refused",
-            "refused:nothing-installed;ENETUNREACH",
-            "topology-no-route",
-        );
+        groups.run("npm-direct-route-refused", || {
+            let mut a = lab.peer(n, &[]);
+            let unrouted = format!("https://{UNROUTED}:{GRANTED_PORT}/npm/");
+            let ran = lab.npm(
+                &mut a,
+                &[
+                    "install",
+                    &format!("--noproxy={UNROUTED}"),
+                    "--registry",
+                    &unrouted,
+                    &plain,
+                ],
+            );
+            assert!(ran.failed(), "{}", lab.why("direct npm", Some(&ran)));
+            assert!(
+                ran.said("ENETUNREACH"),
+                "{}",
+                lab.why("not ENETUNREACH", Some(&ran))
+            );
+            lab.container(&a.run);
+            assert_eq!(lab.files(&mut a, "/workspace/node_modules"), 0);
+            lab.release(&mut a, &ran.environment);
+            evidence(
+                "npm-direct-route-refused",
+                "refused:nothing-installed;ENETUNREACH",
+                "topology-no-route",
+            );
+        });
 
         // 15. What `npm ci` changed in its container's own filesystem, read
         // in the first case: nothing, its writes all under the workspace's
         // and the temporary directories' mounts.
-        assert!(
-            changed.is_empty(),
-            "the container's own files changed: {changed:?}"
-        );
-        evidence(
-            "npm-writes-only-workspace-and-tmp",
-            "contained:no-change-outside-workspace-and-tmp",
-            "read-only-root",
-        );
-        lab.census();
+        groups.run("npm-writes-only-workspace-and-tmp", || {
+            let changed = changed.expect("the first case never measured npm ci's container");
+            assert!(
+                changed.is_empty(),
+                "the container's own files changed: {changed:?}"
+            );
+            evidence(
+                "npm-writes-only-workspace-and-tmp",
+                "contained:no-change-outside-workspace-and-tmp",
+                "read-only-root",
+            );
+        });
+        groups.run("the census", || {
+            lab.census();
+        });
+        groups.end();
     }
 
     // ---- pip, as ADR-0055 proposes ------------------------------------------
@@ -1764,82 +1844,87 @@ reason = "NO_MATCHING_RULE"
         let lab = Lab::new("m5e5p", AS_PROPOSED);
         let granted = index(GRANTED, GRANTED_PORT);
         let (base, base_version, base_file) = lab.project("base");
+        let mut groups = Groups::default();
+        let mut changed: Option<Vec<String>> = None;
         let mut n = 0;
 
         // 1. A named wheel from the granted index, byte for byte.
         n += 1;
-        let mut a = lab.peer(n, &[]);
-        let target = format!("{TARGETS}/granted");
-        let ran = lab.pip(
-            &mut a,
-            &[
-                "install",
-                "--index-url",
-                &granted,
-                "--target",
-                &target,
-                &base,
-            ],
-        );
-        assert_eq!(ran.exit, Some(0), "{}", lab.why("pip install", Some(&ran)));
-        let container = lab.container(&a.run);
-        let files = lab.installed(&mut a, "granted", &["base"]);
-        let changed = lab.runtime.changed(&container);
-        let (launch, prefix, argv) = lab.recorded_plan(&a.run);
-        assert_eq!(lab.release(&mut a, &ran.environment), 0);
-        evidence(
-            "pip-install-granted-index-installs",
-            &format!("installed:{files}-files-as-the-fixture;{base}=={base_version}"),
-            "relay-and-connect-proxy-grant",
-        );
-        // `changed` is judged last, with the other measured-not-assumed cases.
-        assert_eq!(launch, "HYGIENE_PIP");
-        assert_eq!(prefix, PIP_PREFIX);
-        // After the subcommand: `pip install <prefix> <the invocation's rest>`.
-        assert_eq!(argv[1], "install", "{argv:?}");
-        assert_eq!(&argv[2..2 + PIP_PREFIX.len()], PIP_PREFIX, "{argv:?}");
-        evidence(
-            "pip-plan-records-prefix-and-profile",
-            &format!(
-                "recorded:launch-{launch};prefix-after-install;{}-arguments",
-                prefix.len()
-            ),
-            "authority-ledger",
-        );
+        groups.run("pip-install-granted-index-installs", || {
+            let mut a = lab.peer(n, &[]);
+            let target = format!("{TARGETS}/granted");
+            let ran = lab.pip(
+                &mut a,
+                &[
+                    "install",
+                    "--index-url",
+                    &granted,
+                    "--target",
+                    &target,
+                    &base,
+                ],
+            );
+            assert_eq!(ran.exit, Some(0), "{}", lab.why("pip install", Some(&ran)));
+            let container = lab.container(&a.run);
+            let files = lab.installed(&mut a, "granted", &["base"]);
+            changed = Some(lab.runtime.changed(&container));
+            let (launch, prefix, argv) = lab.recorded_plan(&a.run);
+            assert_eq!(lab.release(&mut a, &ran.environment), 0);
+            evidence(
+                "pip-install-granted-index-installs",
+                &format!("installed:{files}-files-as-the-fixture;{base}=={base_version}"),
+                "relay-and-connect-proxy-grant",
+            );
+            // `changed` is judged last, with the other measured-not-assumed cases.
+            assert_eq!(launch, "HYGIENE_PIP");
+            assert_eq!(prefix, PIP_PREFIX);
+            // After the subcommand: `pip install <prefix> <the invocation's rest>`.
+            assert_eq!(argv[1], "install", "{argv:?}");
+            assert_eq!(&argv[2..2 + PIP_PREFIX.len()], PIP_PREFIX, "{argv:?}");
+            evidence(
+                "pip-plan-records-prefix-and-profile",
+                &format!(
+                    "recorded:launch-{launch};prefix-after-install;{}-arguments",
+                    prefix.len()
+                ),
+                "authority-ledger",
+            );
+        });
 
         // 2. A dependency resolved from the same index.
         n += 1;
-        let (dependent, _, _) = lab.project("dependent");
-        let fetched = lab.granted.to(&format!("/files/{base_file}")).len();
-        let mut a = lab.peer(n, &[]);
-        let target = format!("{TARGETS}/dependency");
-        let ran = lab.pip(
-            &mut a,
-            &[
-                "install",
-                "--index-url",
-                &granted,
-                "--target",
-                &target,
-                &dependent,
-            ],
-        );
-        assert_eq!(ran.exit, Some(0), "{}", lab.why("dependency", Some(&ran)));
-        lab.container(&a.run);
-        let files = lab.installed(&mut a, "dependency", &["dependent", "base"]);
-        assert_eq!(
-            lab.granted.to(&format!("/files/{base_file}")).len(),
-            fetched + 1
-        );
-        assert_eq!(lab.release(&mut a, &ran.environment), 0);
-        evidence(
-            "pip-install-dependency-resolved-from-granted-index",
-            &format!("installed:{files}-files-as-the-fixture;{dependent}+{base}"),
-            "relay-and-connect-proxy-grant",
-        );
+        groups.run("pip-install-dependency-resolved-from-granted-index", || {
+            let (dependent, _, _) = lab.project("dependent");
+            let fetched = lab.granted.to(&format!("/files/{base_file}")).len();
+            let mut a = lab.peer(n, &[]);
+            let target = format!("{TARGETS}/dependency");
+            let ran = lab.pip(
+                &mut a,
+                &[
+                    "install",
+                    "--index-url",
+                    &granted,
+                    "--target",
+                    &target,
+                    &dependent,
+                ],
+            );
+            assert_eq!(ran.exit, Some(0), "{}", lab.why("dependency", Some(&ran)));
+            lab.container(&a.run);
+            let files = lab.installed(&mut a, "dependency", &["dependent", "base"]);
+            assert_eq!(
+                lab.granted.to(&format!("/files/{base_file}")).len(),
+                fetched + 1
+            );
+            assert_eq!(lab.release(&mut a, &ran.environment), 0);
+            evidence(
+                "pip-install-dependency-resolved-from-granted-index",
+                &format!("installed:{files}-files-as-the-fixture;{dependent}+{base}"),
+                "relay-and-connect-proxy-grant",
+            );
+        });
 
         // 3-5. Refused at CONNECT.
-        let served = lab.ungranted.requests().len();
         for (case, role, at) in [
             (
                 "pip-ungranted-index-refused",
@@ -1858,237 +1943,82 @@ reason = "NO_MATCHING_RULE"
             ),
         ] {
             n += 1;
-            let (name, _, _) = lab.project(role);
-            let mut a = lab.peer(n, &[]);
-            let target = format!("{TARGETS}/{role}");
-            let ran = lab.pip(
-                &mut a,
-                &["install", "--index-url", &at, "--target", &target, &name],
-            );
-            assert!(ran.failed(), "{}", lab.why(case, Some(&ran)));
-            assert!(ran.said("403"), "{}", lab.why("no 403", Some(&ran)));
-            lab.container(&a.run);
-            assert_eq!(
-                lab.files(&mut a, &target),
-                0,
-                "{case}: something was installed"
-            );
-            let refused = lab.release(&mut a, &ran.environment);
-            assert!(refused >= 1, "{}", lab.why(case, Some(&ran)));
-            assert_eq!(
-                lab.ungranted.requests().len(),
-                served,
-                "{case}: the ungranted origin"
-            );
-            evidence(
-                case,
-                &format!("refused:nothing-installed;TARGET_NOT_GRANTED={refused}"),
-                "connect-proxy:grant",
-            );
+            groups.run(case, || {
+                let served = lab.ungranted.requests().len();
+                let (name, _, _) = lab.project(role);
+                let mut a = lab.peer(n, &[]);
+                let target = format!("{TARGETS}/{role}");
+                let ran = lab.pip(
+                    &mut a,
+                    &["install", "--index-url", &at, "--target", &target, &name],
+                );
+                assert!(ran.failed(), "{}", lab.why(case, Some(&ran)));
+                assert!(ran.said("403"), "{}", lab.why("no 403", Some(&ran)));
+                lab.container(&a.run);
+                assert_eq!(
+                    lab.files(&mut a, &target),
+                    0,
+                    "{case}: something was installed"
+                );
+                let refused = lab.release(&mut a, &ran.environment);
+                assert!(refused >= 1, "{}", lab.why(case, Some(&ran)));
+                assert_eq!(
+                    lab.ungranted.requests().len(),
+                    served,
+                    "{case}: the ungranted origin"
+                );
+                evidence(
+                    case,
+                    &format!("refused:nothing-installed;TARGET_NOT_GRANTED={refused}"),
+                    "connect-proxy:grant",
+                );
+            });
         }
 
         // 6. pip has no way around its proxy under the profile (`--proxy`
         // and `--isolated` are refused); the environment has none either.
         n += 1;
-        let mut a = lab.peer(n, &[]);
-        let target = format!("{TARGETS}/direct");
-        let ran = lab.pip(
-            &mut a,
-            &[
-                "install",
-                "--index-url",
-                &index(UNROUTED, GRANTED_PORT),
-                "--target",
-                &target,
-                &base,
-            ],
-        );
-        assert!(ran.failed(), "{}", lab.why("unrouted", Some(&ran)));
-        lab.container(&a.run);
-        let direct = lab.python(
-            &mut a,
-            &["-I", "-c", DIRECT, UNROUTED, &GRANTED_PORT.to_string()],
-        );
-        assert!(
-            direct.said("errno=101"),
-            "{}",
-            lab.why("not ENETUNREACH", Some(&direct))
-        );
-        assert_eq!(lab.files(&mut a, &target), 0);
-        lab.release(&mut a, &ran.environment);
-        evidence(
-            "pip-direct-route-refused",
-            "refused:nothing-installed;ENETUNREACH",
-            "topology-no-route",
-        );
+        groups.run("pip-direct-route-refused", || {
+            let mut a = lab.peer(n, &[]);
+            let target = format!("{TARGETS}/direct");
+            let ran = lab.pip(
+                &mut a,
+                &[
+                    "install",
+                    "--index-url",
+                    &index(UNROUTED, GRANTED_PORT),
+                    "--target",
+                    &target,
+                    &base,
+                ],
+            );
+            assert!(ran.failed(), "{}", lab.why("unrouted", Some(&ran)));
+            lab.container(&a.run);
+            let direct = lab.python(
+                &mut a,
+                &["-I", "-c", DIRECT, UNROUTED, &GRANTED_PORT.to_string()],
+            );
+            assert!(
+                direct.said("errno=101"),
+                "{}",
+                lab.why("not ENETUNREACH", Some(&direct))
+            );
+            assert_eq!(lab.files(&mut a, &target), 0);
+            lab.release(&mut a, &ran.environment);
+            evidence(
+                "pip-direct-route-refused",
+                "refused:nothing-installed;ENETUNREACH",
+                "topology-no-route",
+            );
+        });
 
         // 7-8. The source distribution, never built -- and still not when the
         // image's `pip.conf` asks for source builds (`no-binary = :all:`).
         n += 1;
-        let (sdist, _, _) = lab.project("sdist");
-        let mut a = lab.peer(n, &[]);
-        let target = format!("{TARGETS}/sdist");
-        let ran = lab.pip(
-            &mut a,
-            &[
-                "install",
-                "--index-url",
-                &granted,
-                "--target",
-                &target,
-                &sdist,
-            ],
-        );
-        assert!(ran.failed(), "{}", lab.why("sdist", Some(&ran)));
-        lab.container(&a.run);
-        assert!(
-            !lab.marker(n, "pip-build-backend").exists(),
-            "the backend ran"
-        );
-        assert_eq!(lab.files(&mut a, &target), 0);
-        lab.release(&mut a, &ran.environment);
-        evidence(
-            "pip-sdist-never-built",
-            "not-built:backend-marker-absent;nothing-installed",
-            "hygiene-launcher",
-        );
-        evidence(
-            "pip-only-binary-cannot-be-undone-by-variable-or-file",
-            "not-built:image-pip-conf-asks-no-binary;backend-marker-absent",
-            "hygiene-launcher",
-        );
-
-        // 9. The image's `pip.conf` names the ungranted index, which is
-        // granted here: were it read, pip would install from it.
-        n += 1;
-        let served = lab.ungranted.requests().len();
-        let mut a = lab.peer(n, &[format!("network.https:{UNGRANTED}:{UNGRANTED_PORT}")]);
-        let target = format!("{TARGETS}/image-conf");
-        let ran = lab.pip(&mut a, &["install", "--target", &target, &base]);
-        assert!(ran.failed(), "{}", lab.why("image pip.conf", Some(&ran)));
-        lab.container(&a.run);
-        assert_eq!(lab.files(&mut a, &target), 0);
-        assert_eq!(
-            lab.ungranted.requests().len(),
-            served,
-            "the image's pip.conf was read"
-        );
-        lab.release(&mut a, &ran.environment);
-        evidence(
-            "pip-image-configuration-not-read",
-            "not-read:ungranted-index-untouched;nothing-installed",
-            "hygiene-launcher",
-        );
-
-        // 10. An issuer pip must not trust: the rogue authority's. (11, the
-        // one only the image's system store holds, is measured last.)
-        n += 1;
-        lab.untrusted_issuer(
-            n,
-            "pip-untrusted-issuer-refused",
-            "rogue",
-            ROGUE_PORT,
-            &base,
-        );
-
-        // 13-15 and D4. Refused before an intent, each by the authority.
-        n += 1;
-        let mut a = lab.peer(n, &[]);
-        let mut undoing = 0;
-        for undo in [
-            &["--no-binary", ":all:"][..],
-            &["--only-binary=:none:"],
-            &["-e", "."],
-            &["--editable=."],
-            &["--config-settings", "a=b"],
-            &["--global-option=x"],
-            &["--build-option=x"],
-            &["--no-build-isolation"],
-            &["--use-pep517"],
-            &["--no-use-pep517"],
-            &["--isolated"],
-            &["--proxy", "http://p"],
-            &["--trusted-host", GRANTED],
-            &["--cert", "/workspace/ca.pem"],
-            &["--client-cert", "/workspace/c.pem"],
-            &["-r", "req.txt"],
-            &["-c", "c.txt"],
-            &["-f", "/workspace/wheels"],
-            &["--user"],
-            &["--root", "/x"],
-            &["--prefix=/x"],
-            &["--src", "/x"],
-        ] {
-            let mut args = vec!["install"];
-            args.extend_from_slice(undo);
-            args.push(&base);
-            let (reason, rule) = denied(&a.exec(&lab.pins.pip, &args));
-            assert_eq!(reason, "OBLIGATION_UNENFORCEABLE", "{undo:?}");
-            assert_eq!(rule, RULE);
-            undoing += 1;
-        }
-        evidence(
-            "pip-undoing-arguments-refused",
-            &format!("refused:OBLIGATION_UNENFORCEABLE;{undoing}-arguments;no-intent"),
-            "authority-obligation",
-        );
-        let mut subcommands = 0;
-        for sub in ["download", "wheel", "uninstall", "config", "cache", "debug"] {
-            let (reason, _) = denied(&a.exec(&lab.pins.pip, &[sub, &base]));
-            assert_eq!(reason, "OBLIGATION_UNENFORCEABLE", "{sub}");
-            subcommands += 1;
-        }
-        evidence(
-            "pip-other-subcommands-refused",
-            &format!("refused:OBLIGATION_UNENFORCEABLE;{subcommands}-subcommands"),
-            "authority-obligation",
-        );
-        let mut specs = 0;
-        for spec in [
-            ".",
-            "./x",
-            "/abs/x",
-            "x.whl",
-            "x.tar.gz",
-            "https://h/x.whl",
-            "git+https://h/x.git",
-            "x @ https://h/x.whl",
-        ] {
-            let (reason, _) = denied(&a.exec(&lab.pins.pip, &["install", spec]));
-            assert_eq!(reason, "OBLIGATION_UNENFORCEABLE", "{spec}");
-            specs += 1;
-        }
-        evidence(
-            "pip-non-name-specs-refused",
-            &format!("refused:OBLIGATION_UNENFORCEABLE;{specs}-specs"),
-            "authority-obligation",
-        );
-        for args in [
-            &["-I", "-m", "pip", "install", "x"][..],
-            &["-Im", "pip", "install", "x"],
-            &["-m", "ensurepip"],
-        ] {
-            let (reason, _) = denied(&a.exec(&lab.pins.python, args));
-            assert_eq!(reason, "OBLIGATION_UNENFORCEABLE", "{args:?}");
-        }
-        evidence(
-            "pip-interpreter-module-refused",
-            "refused:OBLIGATION_UNENFORCEABLE;python-m-pip-and-ensurepip",
-            "authority-obligation",
-        );
-        assert_eq!(
-            lab.rows("SELECT count(*) FROM environment WHERE run_id = ?1", &a.run),
-            0,
-            "a refusal prepared an environment"
-        );
-        a.release();
-
-        // 16. No cache: a second install of the same wheel fetches it again.
-        n += 1;
-        let fetched = lab.granted.to(&format!("/files/{base_file}")).len();
-        let mut a = lab.peer(n, &[]);
-        for target in ["cache-1", "cache-2"] {
-            let target = format!("{TARGETS}/{target}");
+        groups.run("pip-sdist-never-built", || {
+            let (sdist, _, _) = lab.project("sdist");
+            let mut a = lab.peer(n, &[]);
+            let target = format!("{TARGETS}/sdist");
             let ran = lab.pip(
                 &mut a,
                 &[
@@ -2097,88 +2027,271 @@ reason = "NO_MATCHING_RULE"
                     &granted,
                     "--target",
                     &target,
-                    &base,
+                    &sdist,
                 ],
             );
-            assert_eq!(ran.exit, Some(0), "{}", lab.why("no cache", Some(&ran)));
-        }
-        let environment = {
-            let container = lab.container(&a.run);
-            let _ = container;
-            raw(&lab.dir.state())
+            assert!(ran.failed(), "{}", lab.why("sdist", Some(&ran)));
+            lab.container(&a.run);
+            assert!(
+                !lab.marker(n, "pip-build-backend").exists(),
+                "the backend ran"
+            );
+            assert_eq!(lab.files(&mut a, &target), 0);
+            lab.release(&mut a, &ran.environment);
+            evidence(
+                "pip-sdist-never-built",
+                "not-built:backend-marker-absent;nothing-installed",
+                "hygiene-launcher",
+            );
+            evidence(
+                "pip-only-binary-cannot-be-undone-by-variable-or-file",
+                "not-built:image-pip-conf-asks-no-binary;backend-marker-absent",
+                "hygiene-launcher",
+            );
+        });
+
+        // 9. The image's `pip.conf` names the ungranted index, which is
+        // granted here: were it read, pip would install from it.
+        n += 1;
+        groups.run("pip-image-configuration-not-read", || {
+            let served = lab.ungranted.requests().len();
+            let mut a = lab.peer(n, &[format!("network.https:{UNGRANTED}:{UNGRANTED_PORT}")]);
+            let target = format!("{TARGETS}/image-conf");
+            let ran = lab.pip(&mut a, &["install", "--target", &target, &base]);
+            assert!(ran.failed(), "{}", lab.why("image pip.conf", Some(&ran)));
+            lab.container(&a.run);
+            assert_eq!(lab.files(&mut a, &target), 0);
+            assert_eq!(
+                lab.ungranted.requests().len(),
+                served,
+                "the image's pip.conf was read"
+            );
+            lab.release(&mut a, &ran.environment);
+            evidence(
+                "pip-image-configuration-not-read",
+                "not-read:ungranted-index-untouched;nothing-installed",
+                "hygiene-launcher",
+            );
+        });
+
+        // 10. An issuer pip must not trust: the rogue authority's. (11, the
+        // one only the image's system store holds, is measured last.)
+        n += 1;
+        groups.run("pip-untrusted-issuer-refused", || {
+            lab.untrusted_issuer(
+                n,
+                "pip-untrusted-issuer-refused",
+                "rogue",
+                ROGUE_PORT,
+                &base,
+            );
+        });
+
+        // 13-15 and D4. Refused before an intent, each by the authority.
+        n += 1;
+        groups.run(
+            "pip-undoing-arguments-refused and the other refusals",
+            || {
+                let mut a = lab.peer(n, &[]);
+                let mut undoing = 0;
+                for undo in [
+                    &["--no-binary", ":all:"][..],
+                    &["--only-binary=:none:"],
+                    &["-e", "."],
+                    &["--editable=."],
+                    &["--config-settings", "a=b"],
+                    &["--global-option=x"],
+                    &["--build-option=x"],
+                    &["--no-build-isolation"],
+                    &["--use-pep517"],
+                    &["--no-use-pep517"],
+                    &["--isolated"],
+                    &["--proxy", "http://p"],
+                    &["--trusted-host", GRANTED],
+                    &["--cert", "/workspace/ca.pem"],
+                    &["--client-cert", "/workspace/c.pem"],
+                    &["-r", "req.txt"],
+                    &["-c", "c.txt"],
+                    &["-f", "/workspace/wheels"],
+                    &["--user"],
+                    &["--root", "/x"],
+                    &["--prefix=/x"],
+                    &["--src", "/x"],
+                ] {
+                    let mut args = vec!["install"];
+                    args.extend_from_slice(undo);
+                    args.push(&base);
+                    let (reason, rule) = denied(&a.exec(&lab.pins.pip, &args));
+                    assert_eq!(reason, "OBLIGATION_UNENFORCEABLE", "{undo:?}");
+                    assert_eq!(rule, RULE);
+                    undoing += 1;
+                }
+                evidence(
+                    "pip-undoing-arguments-refused",
+                    &format!("refused:OBLIGATION_UNENFORCEABLE;{undoing}-arguments;no-intent"),
+                    "authority-obligation",
+                );
+                let mut subcommands = 0;
+                for sub in ["download", "wheel", "uninstall", "config", "cache", "debug"] {
+                    let (reason, _) = denied(&a.exec(&lab.pins.pip, &[sub, &base]));
+                    assert_eq!(reason, "OBLIGATION_UNENFORCEABLE", "{sub}");
+                    subcommands += 1;
+                }
+                evidence(
+                    "pip-other-subcommands-refused",
+                    &format!("refused:OBLIGATION_UNENFORCEABLE;{subcommands}-subcommands"),
+                    "authority-obligation",
+                );
+                let mut specs = 0;
+                for spec in [
+                    ".",
+                    "./x",
+                    "/abs/x",
+                    "x.whl",
+                    "x.tar.gz",
+                    "https://h/x.whl",
+                    "git+https://h/x.git",
+                    "x @ https://h/x.whl",
+                ] {
+                    let (reason, _) = denied(&a.exec(&lab.pins.pip, &["install", spec]));
+                    assert_eq!(reason, "OBLIGATION_UNENFORCEABLE", "{spec}");
+                    specs += 1;
+                }
+                evidence(
+                    "pip-non-name-specs-refused",
+                    &format!("refused:OBLIGATION_UNENFORCEABLE;{specs}-specs"),
+                    "authority-obligation",
+                );
+                for args in [
+                    &["-I", "-m", "pip", "install", "x"][..],
+                    &["-Im", "pip", "install", "x"],
+                    &["-m", "ensurepip"],
+                ] {
+                    let (reason, _) = denied(&a.exec(&lab.pins.python, args));
+                    assert_eq!(reason, "OBLIGATION_UNENFORCEABLE", "{args:?}");
+                }
+                evidence(
+                    "pip-interpreter-module-refused",
+                    "refused:OBLIGATION_UNENFORCEABLE;python-m-pip-and-ensurepip",
+                    "authority-obligation",
+                );
+                assert_eq!(
+                    lab.rows("SELECT count(*) FROM environment WHERE run_id = ?1", &a.run),
+                    0,
+                    "a refusal prepared an environment"
+                );
+                a.release();
+            },
+        );
+
+        // 16. No cache: a second install of the same wheel fetches it again.
+        n += 1;
+        groups.run("pip-no-cache-reused", || {
+            let fetched = lab.granted.to(&format!("/files/{base_file}")).len();
+            let mut a = lab.peer(n, &[]);
+            for target in ["cache-1", "cache-2"] {
+                let target = format!("{TARGETS}/{target}");
+                let ran = lab.pip(
+                    &mut a,
+                    &[
+                        "install",
+                        "--index-url",
+                        &granted,
+                        "--target",
+                        &target,
+                        &base,
+                    ],
+                );
+                assert_eq!(ran.exit, Some(0), "{}", lab.why("no cache", Some(&ran)));
+            }
+            let environment = {
+                let container = lab.container(&a.run);
+                let _ = container;
+                raw(&lab.dir.state())
                 .query_row(
                     "SELECT environment_id FROM environment WHERE run_id = ?1 AND state = 'READY'",
                     [a.run.as_str()],
                     |row| row.get::<_, String>(0),
                 )
                 .unwrap()
-        };
-        let refetched = lab.granted.to(&format!("/files/{base_file}")).len() - fetched;
-        assert_eq!(refetched, 2, "the second install reused a cached wheel");
-        lab.release(&mut a, &environment);
-        evidence(
-            "pip-no-cache-reused",
-            &format!("refetched:{refetched}-fetches-of-one-wheel"),
-            "hygiene-launcher",
-        );
+            };
+            let refetched = lab.granted.to(&format!("/files/{base_file}")).len() - fetched;
+            assert_eq!(refetched, 2, "the second install reused a cached wheel");
+            lab.release(&mut a, &environment);
+            evidence(
+                "pip-no-cache-reused",
+                &format!("refetched:{refetched}-fetches-of-one-wheel"),
+                "hygiene-launcher",
+            );
+        });
 
         // 18. A wheel's `.pth`, installed and not run by the install.
         n += 1;
-        let (pth, _, _) = lab.project("pth");
-        let mut a = lab.peer(n, &[]);
-        let target = format!("{TARGETS}/pth");
-        let ran = lab.pip(
-            &mut a,
-            &[
-                "install",
-                "--index-url",
-                &granted,
-                "--target",
-                &target,
-                &pth,
-            ],
-        );
-        assert_eq!(ran.exit, Some(0), "{}", lab.why("pth", Some(&ran)));
-        lab.container(&a.run);
-        let files = lab.installed(&mut a, "pth", &["pth"]);
-        assert!(
-            !lab.marker(n, "pip-pth").exists(),
-            "the install ran the .pth"
-        );
-        lab.release(&mut a, &ran.environment);
-        evidence(
-            "pip-installed-pth-not-executed-by-install",
-            &format!("not-run:pth-marker-absent;{files}-files-as-the-fixture"),
-            "workload-effects-measured",
-        );
+        groups.run("pip-installed-pth-not-executed-by-install", || {
+            let (pth, _, _) = lab.project("pth");
+            let mut a = lab.peer(n, &[]);
+            let target = format!("{TARGETS}/pth");
+            let ran = lab.pip(
+                &mut a,
+                &[
+                    "install",
+                    "--index-url",
+                    &granted,
+                    "--target",
+                    &target,
+                    &pth,
+                ],
+            );
+            assert_eq!(ran.exit, Some(0), "{}", lab.why("pth", Some(&ran)));
+            lab.container(&a.run);
+            let files = lab.installed(&mut a, "pth", &["pth"]);
+            assert!(
+                !lab.marker(n, "pip-pth").exists(),
+                "the install ran the .pth"
+            );
+            lab.release(&mut a, &ran.environment);
+            evidence(
+                "pip-installed-pth-not-executed-by-install",
+                &format!("not-run:pth-marker-absent;{files}-files-as-the-fixture"),
+                "workload-effects-measured",
+            );
+        });
 
         // Last, the cases measured rather than assumed, so that a first
         // run's surprise in one hides no other case.
         // 17. What the first install changed in its container's own
         // filesystem: nothing outside the mounts.
-        assert!(
-            changed.is_empty(),
-            "the container's own files changed: {changed:?}"
-        );
-        evidence(
-            "pip-writes-only-workspace-and-tmp",
-            "contained:no-change-outside-workspace-and-tmp",
-            "read-only-root",
-        );
+        groups.run("pip-writes-only-workspace-and-tmp", || {
+            let changed = changed.expect("the first case never measured pip's container");
+            assert!(
+                changed.is_empty(),
+                "the container's own files changed: {changed:?}"
+            );
+            evidence(
+                "pip-writes-only-workspace-and-tmp",
+                "contained:no-change-outside-workspace-and-tmp",
+                "read-only-root",
+            );
+        });
         // 11. The granted name under an authority only the image's system
         // store holds (ADR-0055 §5, revised for F-PIP-TRUST: with the
         // prefix's `--use-deprecated=legacy-certs`, pip makes no `truststore`
         // context, so the pinned `--cert` is its whole trust -- measured, not
         // assumed; the hosted mutant that drops the value must fail here).
         n += 1;
-        lab.untrusted_issuer(
-            n,
-            "pip-os-trust-store-not-used",
-            "system",
-            SYSTEM_PORT,
-            &base,
-        );
-        lab.census();
+        groups.run("pip-os-trust-store-not-used", || {
+            lab.untrusted_issuer(
+                n,
+                "pip-os-trust-store-not-used",
+                "system",
+                SYSTEM_PORT,
+                &base,
+            );
+        });
+        groups.run("the census", || {
+            lab.census();
+        });
+        groups.end();
     }
 
     // ---- without a trust file, both fail closed -----------------------------
@@ -2195,114 +2308,124 @@ reason = "NO_MATCHING_RULE"
         );
         let (plain, _) = lab.npm_package("plain");
         let (base, _, _) = lab.project("base");
+        let mut groups = Groups::default();
 
         // The image, measured from inside: no file at either trust path. The
         // workload is the interpreter, which no trust file concerns, so the
         // environment and the launcher work, and what follows is the trust
         // file's absence alone.
-        let mut a = lab.peer(1, &[]);
-        let ran = lab.python(&mut a, &["-I", INSPECT, "tree", "/etc/direwolf"]);
-        assert_eq!(ran.exit, Some(0), "{}", lab.why("trust paths", Some(&ran)));
-        let measured = object(&ran.stdout);
-        assert!(
-            matches!(measured.get("files"), Some(Value::Object(files)) if files.is_empty()),
-            "the image without trust files carries one: {measured:?}"
-        );
-        lab.container(&a.run);
-        lab.release(&mut a, &ran.environment);
+        groups.run("the image without trust files", || {
+            let mut a = lab.peer(1, &[]);
+            let ran = lab.python(&mut a, &["-I", INSPECT, "tree", "/etc/direwolf"]);
+            assert_eq!(ran.exit, Some(0), "{}", lab.why("trust paths", Some(&ran)));
+            let measured = object(&ran.stdout);
+            assert!(
+                matches!(measured.get("files"), Some(Value::Object(files)) if files.is_empty()),
+                "the image without trust files carries one: {measured:?}"
+            );
+            lab.container(&a.run);
+            lab.release(&mut a, &ran.environment);
+        });
 
         // npm ignores a `cafile` it cannot find and would trust Node.js's
         // bundled roots instead, so the launcher refuses the launch: npm
         // never starts, nothing is tunnelled, and the authority, which
         // cannot believe the launcher's status as npm's, ends the run's
         // environment (ADR-0052 §5).
-        let served = lab.granted.requests().len();
-        let mut a = lab.peer(2, &[]);
-        let body = a.exec(
-            &lab.pins.npm,
-            &[
-                "install",
-                "--registry",
-                &registry(GRANTED, GRANTED_PORT),
-                &plain,
-            ],
-        );
-        let DwkpBody::ToolFailedV5(failure) = &body else {
-            panic!(
-                "npm without its trust file was not refused at launch: {body:?}\n{}",
-                lab.why("npm without its trust file", None)
-            )
-        };
-        assert_eq!(failure.reason.as_str(), "OUTCOME_UNKNOWN", "{failure:?}");
-        assert_eq!(failure.environment_destroyed, Some(true), "{failure:?}");
-        let environment = failure
-            .environment_id
-            .as_ref()
-            .expect("the failure names its environment")
-            .as_str()
-            .to_owned();
-        a.release();
-        let dispositions = lab.destroyed(&environment);
-        assert_eq!(
-            tunnels(&dispositions),
-            0,
-            "npm reached a tunnel without its trust file: {dispositions:?}"
-        );
-        assert_eq!(
-            beyond_the_probe(&dispositions, lab.probe_questions(&environment)),
-            0
-        );
-        assert_eq!(
-            lab.granted.requests().len(),
-            served,
-            "the registry was asked"
-        );
-        assert!(!lab.workspace(2).join("node_modules").exists());
-        evidence(
-            "npm-missing-trust-file-fails-closed",
-            "refused:nothing-installed;no-tunnel;launcher-refused;OUTCOME_UNKNOWN",
-            "hygiene-launcher",
-        );
+        groups.run("npm-missing-trust-file-fails-closed", || {
+            let served = lab.granted.requests().len();
+            let mut a = lab.peer(2, &[]);
+            let body = a.exec(
+                &lab.pins.npm,
+                &[
+                    "install",
+                    "--registry",
+                    &registry(GRANTED, GRANTED_PORT),
+                    &plain,
+                ],
+            );
+            let DwkpBody::ToolFailedV5(failure) = &body else {
+                panic!(
+                    "npm without its trust file was not refused at launch: {body:?}\n{}",
+                    lab.why("npm without its trust file", None)
+                )
+            };
+            assert_eq!(failure.reason.as_str(), "OUTCOME_UNKNOWN", "{failure:?}");
+            assert_eq!(failure.environment_destroyed, Some(true), "{failure:?}");
+            let environment = failure
+                .environment_id
+                .as_ref()
+                .expect("the failure names its environment")
+                .as_str()
+                .to_owned();
+            a.release();
+            let dispositions = lab.destroyed(&environment);
+            assert_eq!(
+                tunnels(&dispositions),
+                0,
+                "npm reached a tunnel without its trust file: {dispositions:?}"
+            );
+            assert_eq!(
+                beyond_the_probe(&dispositions, lab.probe_questions(&environment)),
+                0
+            );
+            assert_eq!(
+                lab.granted.requests().len(),
+                served,
+                "the registry was asked"
+            );
+            assert!(!lab.workspace(2).join("node_modules").exists());
+            evidence(
+                "npm-missing-trust-file-fails-closed",
+                "refused:nothing-installed;no-tunnel;launcher-refused;OUTCOME_UNKNOWN",
+                "hygiene-launcher",
+            );
+        });
 
         // pip refuses a `--cert` it cannot find itself, before it connects.
-        let mut a = lab.peer(3, &[]);
-        let target = format!("{TARGETS}/no-trust");
-        let ran = lab.pip(
-            &mut a,
-            &[
-                "install",
-                "--index-url",
-                &index(GRANTED, GRANTED_PORT),
-                "--target",
-                &target,
-                &base,
-            ],
-        );
-        assert!(
-            ran.failed(),
-            "{}",
-            lab.why("pip without its trust file", Some(&ran))
-        );
-        assert!(
-            ran.said("Could not find a suitable TLS CA certificate bundle"),
-            "{}",
-            lab.why("pip did not refuse its missing trust file", Some(&ran))
-        );
-        lab.container(&a.run);
-        assert_eq!(lab.files(&mut a, &target), 0);
-        a.release();
-        let dispositions = lab.destroyed(&ran.environment);
-        assert_eq!(
-            tunnels(&dispositions),
-            0,
-            "pip reached a tunnel without its trust file: {dispositions:?}"
-        );
-        evidence(
-            "pip-missing-trust-file-fails-closed",
-            "refused:nothing-installed;no-tunnel;cert-bundle-missing",
-            "workload-tls-verification",
-        );
-        lab.census();
+        groups.run("pip-missing-trust-file-fails-closed", || {
+            let mut a = lab.peer(3, &[]);
+            let target = format!("{TARGETS}/no-trust");
+            let ran = lab.pip(
+                &mut a,
+                &[
+                    "install",
+                    "--index-url",
+                    &index(GRANTED, GRANTED_PORT),
+                    "--target",
+                    &target,
+                    &base,
+                ],
+            );
+            assert!(
+                ran.failed(),
+                "{}",
+                lab.why("pip without its trust file", Some(&ran))
+            );
+            assert!(
+                ran.said("Could not find a suitable TLS CA certificate bundle"),
+                "{}",
+                lab.why("pip did not refuse its missing trust file", Some(&ran))
+            );
+            lab.container(&a.run);
+            assert_eq!(lab.files(&mut a, &target), 0);
+            a.release();
+            let dispositions = lab.destroyed(&ran.environment);
+            assert_eq!(
+                tunnels(&dispositions),
+                0,
+                "pip reached a tunnel without its trust file: {dispositions:?}"
+            );
+            evidence(
+                "pip-missing-trust-file-fails-closed",
+                "refused:nothing-installed;no-tunnel;cert-bundle-missing",
+                "workload-tls-verification",
+            );
+        });
+        groups.run("the census", || {
+            lab.census();
+        });
+        groups.end();
     }
 
     // ---- without the option, nothing changes --------------------------------
@@ -2388,62 +2511,81 @@ reason = "NO_MATCHING_RULE"
     fn the_shipped_packs_decide() {
         let mut npm_decided = Vec::new();
         let mut pip_decided = Vec::new();
+        let mut groups = Groups::default();
         for pack in ["balanced", "power"] {
-            let lab = Lab::new(
-                &format!("m5e5s{pack}"),
-                Setup {
-                    policy: Policy::Shipped(pack),
-                    ..AS_PROPOSED
-                },
-            );
-            let (base, _, _) = lab.project("base");
-            lab.npm_project(1);
-            let mut a = lab.peer(1, &[]);
-            let decision = |body: &DwkpBody| -> String {
-                match body {
-                    DwkpBody::ToolDeniedV5(_) => {
-                        let (reason, rule) = denied(body);
-                        format!("denied-{reason}-by-{rule}")
+            groups.run(pack, || {
+                let lab = Lab::new(
+                    &format!("m5e5s{pack}"),
+                    Setup {
+                        policy: Policy::Shipped(pack),
+                        ..AS_PROPOSED
+                    },
+                );
+                let (base, _, _) = lab.project("base");
+                lab.npm_project(1);
+                let mut a = lab.peer(1, &[]);
+                // The run's live environment, if an earlier workload made one.
+                let environment_of = |run: &RunId| -> Option<String> {
+                    raw(&lab.dir.state())
+                        .query_row(
+                            "SELECT environment_id FROM environment WHERE run_id = ?1 \
+                         AND state = 'READY'",
+                            [run.as_str()],
+                            |row| row.get(0),
+                        )
+                        .ok()
+                };
+                let made = "SELECT count(*) FROM environment WHERE run_id = ?1";
+                // A denial may name the run's live environment, never another
+                // (`denied_in`).
+                let decision = |body: &DwkpBody, environment: Option<&str>| -> String {
+                    match body {
+                        DwkpBody::ToolDeniedV5(_) => {
+                            let (reason, rule) = denied_in(body, environment);
+                            format!("denied-{reason}-by-{rule}")
+                        }
+                        DwkpBody::ToolResultV5(_) => "permitted".to_owned(),
+                        other => format!("other-{other:?}").chars().take(60).collect(),
                     }
-                    DwkpBody::ToolResultV5(_) => "permitted".to_owned(),
-                    other => format!("other-{other:?}").chars().take(60).collect(),
+                };
+                let npm = a.exec(
+                    &lab.pins.npm,
+                    &["ci", "--registry", &registry(GRANTED, GRANTED_PORT)],
+                );
+                let npm_decision = decision(&npm, None);
+                let before = environment_of(&a.run);
+                let environments = lab.rows(made, &a.run);
+                let pip = a.exec(
+                    &lab.pins.pip,
+                    &[
+                        "install",
+                        "--index-url",
+                        &index(GRANTED, GRANTED_PORT),
+                        &base,
+                    ],
+                );
+                let pip_decision = decision(&pip, before.as_deref());
+                assert!(
+                    pip_decision.starts_with("denied-"),
+                    "{pack} did not deny pip install (R3): {pip_decision}"
+                );
+                assert_eq!(
+                    lab.rows(made, &a.run),
+                    environments,
+                    "{pack}: the denial prepared an environment"
+                );
+                if let Some(environment) = environment_of(&a.run) {
+                    lab.container(&a.run);
+                    lab.release(&mut a, &environment);
+                } else {
+                    a.release();
                 }
-            };
-            let npm = a.exec(
-                &lab.pins.npm,
-                &["ci", "--registry", &registry(GRANTED, GRANTED_PORT)],
-            );
-            npm_decided.push(format!("{pack}:{}", decision(&npm)));
-            let pip = a.exec(
-                &lab.pins.pip,
-                &[
-                    "install",
-                    "--index-url",
-                    &index(GRANTED, GRANTED_PORT),
-                    &base,
-                ],
-            );
-            let pip_decision = decision(&pip);
-            assert!(
-                pip_decision.starts_with("denied-"),
-                "{pack} did not deny pip install (R3): {pip_decision}"
-            );
-            pip_decided.push(format!("{pack}:{pip_decision}"));
-            let environment: Option<String> = raw(&lab.dir.state())
-                .query_row(
-                    "SELECT environment_id FROM environment WHERE run_id = ?1",
-                    [a.run.as_str()],
-                    |row| row.get(0),
-                )
-                .ok();
-            if let Some(environment) = environment {
-                lab.container(&a.run);
-                lab.release(&mut a, &environment);
-            } else {
-                a.release();
-            }
-            lab.census();
+                lab.census();
+                npm_decided.push(format!("{pack}:{npm_decision}"));
+                pip_decided.push(format!("{pack}:{pip_decision}"));
+            });
         }
+        groups.end();
         evidence(
             "npm-shipped-packs-behaviour",
             &format!("decided:{}", npm_decided.join(";")),

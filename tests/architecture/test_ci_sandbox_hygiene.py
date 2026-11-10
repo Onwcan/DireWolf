@@ -13,6 +13,7 @@ downloads, builds or runs a package manager.
 
 from __future__ import annotations
 
+import inspect
 import re
 import sys
 from pathlib import Path
@@ -356,6 +357,25 @@ def test_a_mutant_is_killed_only_by_a_test_it_names() -> None:
         "failures:\n    linux::npm_under_its_proposed_profile\n\ntest result: FAILED.\n"
     )
     assert dw.mutant_verdict(hosted, True, ("npm_under_its_proposed_profile",)) == "killed"
+
+
+def test_a_hosted_mutant_counts_only_after_the_unmutated_evidence_passed() -> None:
+    """F-BASELINE (run 42846068083): the review passed while every test its
+    hosted mutants name failed unmutated in the evidence job, so those kills
+    said nothing. A hosted mutant now runs only after a passing baseline in
+    the same job."""
+    assert dw.hosted_mutant_skip(False, False) == "not-exercised"
+    assert dw.hosted_mutant_skip(False, True) == "not-exercised"
+    assert dw.hosted_mutant_skip(True, False) == "baseline-failed"
+    assert dw.hosted_mutant_skip(True, True) is None
+    source = inspect.getsource(dw.task_sandbox_registry_mutations)
+    # The baseline is asked for once, before the loop that runs any mutant,
+    # and every hosted mutant goes through the skip.
+    assert source.count("_hygiene_baseline()") == 1
+    assert source.index("_hygiene_baseline()") < source.index("_mutant_outcome(")
+    assert 'hosted_mutant_skip(hosted, baseline_passed) if kind == "hosted"' in source
+    # Nothing but a kill counts: a skipped hosted mutant fails the task.
+    assert 'r[2] != "killed"' in source
 
 
 def test_the_hygiene_images_carry_their_mount_points_and_trust_as_asked(tmp_path: Path) -> None:

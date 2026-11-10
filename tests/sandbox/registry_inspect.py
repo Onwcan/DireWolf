@@ -19,18 +19,23 @@ to uid 10001 and the host cannot read them:
 On the host, against the fixture set `registry_fixtures.generate` wrote:
 
     registry_inspect.py plan FIXTURES             every pip project's name,
-                                                  version and file, and every
-                                                  marker's name
-    registry_inspect.py check FIXTURES ROLES TREE the TREE file (`tree`'s line)
+                                                  version and file, every npm
+                                                  package's name and version,
+                                                  and every marker's name
+    registry_inspect.py check FIXTURES ROLES TREE [--compiled]
+                                                  the TREE file (`tree`'s line)
                                                   against the wheels of ROLES
                                                   (comma-separated)
 
 `check` holds an install to the fixture byte for byte: every member of each
 wheel present with the wheel's own SHA-256 -- the `RECORD` aside, which pip
 rewrites -- and nothing else but what pip itself writes beside it in each
-`.dist-info` (`INSTALLER`, `REQUESTED`, `RECORD`). No `__pycache__`: the
-evidence installs with `--no-compile`. Nothing here is evidence by itself:
-the suite's lines are.
+`.dist-info` (`INSTALLER`, `REQUESTED`, `RECORD`). No `__pycache__` unless
+`--compiled`: M5e.4's evidence installs with `--no-compile`; M5e.5's runs pip
+as its profile leaves it, which byte-compiles, so there a wheel's module
+`D/M.py` may have pip's `D/__pycache__/M.cpython-NNN.pyc` beside it, and
+nothing else may be. Nothing here is evidence by itself: the suite's lines
+are.
 """
 
 from __future__ import annotations
@@ -38,6 +43,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import site
 import sys
 import zipfile
@@ -46,6 +52,9 @@ from pathlib import Path
 # What pip writes into a `.dist-info` beside the wheel's own members.
 PIP_WRITES = frozenset(("INSTALLER", "REQUESTED", "RECORD"))
 INSTALLER = b"pip\n"
+# What pip's byte-compilation writes for a module `M.py`: the interpreter's
+# cache tag and no optimisation level (pip compiles at the default).
+COMPILED = re.compile(r"(?P<dir>(?:.+/)?)__pycache__/(?P<stem>[^/]+)\.cpython-[0-9]+\.pyc")
 
 
 def _sha256(data: bytes) -> str:
@@ -108,12 +117,26 @@ def _projects(manifest: dict[str, object]) -> dict[str, dict[str, str]]:
     return projects
 
 
+def _npm_packages(manifest: dict[str, object]) -> dict[str, dict[str, object]]:
+    npm = manifest["npm"]
+    assert isinstance(npm, dict)
+    packages = npm["packages"]
+    assert isinstance(packages, dict)
+    return packages
+
+
 def plan(fixtures: Path) -> dict[str, object]:
     manifest = _manifest(fixtures)
     return {
         "projects": {
             role: {key: str(project[key]) for key in ("name", "version", "file")}
             for role, project in sorted(_projects(manifest).items())
+        },
+        "npm": {
+            "packages": {
+                role: {key: str(package[key]) for key in ("name", "version")}
+                for role, package in sorted(_npm_packages(manifest).items())
+            }
         },
         "markers": manifest["markers"],
         "marker_dir": manifest["marker_dir"],
@@ -144,9 +167,19 @@ def wheel_members(fixtures: Path, role: str) -> dict[str, str]:
         }
 
 
-def installed_problem(expected: dict[str, str], installed: dict[str, str]) -> str | None:
+def _compiled_by_pip(path: str, expected: dict[str, str]) -> bool:
+    """Whether `path` is what pip's byte-compilation writes for one of the
+    wheels' own modules."""
+    found = COMPILED.fullmatch(path)
+    return found is not None and f"{found['dir']}{found['stem']}.py" in expected
+
+
+def installed_problem(
+    expected: dict[str, str], installed: dict[str, str], *, compiled: bool = False
+) -> str | None:
     """Why `installed` is not exactly `expected`'s wheels as pip installs
-    them, or None."""
+    them -- with what pip compiles from their modules when `compiled` -- or
+    None."""
     tops = {path.split("/", 1)[0] for path in expected}
     infos = {top for top in tops if top.endswith(".dist-info")}
     for path, digest in sorted(expected.items()):
@@ -164,13 +197,17 @@ def installed_problem(expected: dict[str, str], installed: dict[str, str]) -> st
             if rest == "INSTALLER" and digest != _sha256(INSTALLER):
                 return f"{path} does not name pip"
             continue
+        if compiled and _compiled_by_pip(path, expected):
+            continue
         return f"{path} is installed but is no member of the fixture's wheels"
     if not expected:
         return "no wheel is expected"
     return None
 
 
-def check(fixtures: Path, roles: list[str], tree_file: Path) -> dict[str, object]:
+def check(
+    fixtures: Path, roles: list[str], tree_file: Path, *, compiled: bool = False
+) -> dict[str, object]:
     measured = json.loads(tree_file.read_text(encoding="utf-8"))
     expected: dict[str, str] = {}
     for role in roles:
@@ -179,7 +216,7 @@ def check(fixtures: Path, roles: list[str], tree_file: Path) -> dict[str, object
                 return {"ok": False, "problem": f"{path} differs between the roles' wheels"}
             expected[path] = digest
     installed = measured.get("files", {}) if measured.get("exists") else {}
-    problem = installed_problem(expected, installed)
+    problem = installed_problem(expected, installed, compiled=compiled)
     if problem is not None:
         return {"ok": False, "problem": problem}
     return {"ok": True, "files": len(installed), "roles": roles}
@@ -196,6 +233,8 @@ def main(argv: list[str]) -> int:
         result = plan(Path(argv[1]))
     elif argv[:1] == ["check"] and len(argv) == 4:
         result = check(Path(argv[1]), argv[2].split(","), Path(argv[3]))
+    elif argv[:1] == ["check"] and len(argv) == 5 and argv[4] == "--compiled":
+        result = check(Path(argv[1]), argv[2].split(","), Path(argv[3]), compiled=True)
     else:
         print(__doc__, file=sys.stderr)
         return 2
