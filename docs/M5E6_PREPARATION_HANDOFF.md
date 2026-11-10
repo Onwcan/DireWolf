@@ -7,6 +7,7 @@ research, design, dependency analysis, test planning and this handoff. Implement
 authorised. No code, CI job, eval, baseline or milestone list changes with this document, and
 it starts no step of M5e.6.\
 **Status (2026-11-09):** **IN PROGRESS.** Implementation is authorised on §12's recommendations (G-D1 a separate `m5e-gate` job; G-D2 7 days; G-Q1 the four self-judging tasks by their own verdict; G-D3 neither M4 task in the gate) — [M5E_ASSURANCE_PLAN.md](M5E_ASSURANCE_PLAN.md) §10, "M5e.6's implementation". G1 is built for the nine attributed tasks: `save_judged_evidence`, `make m5e-evidence-bundle` and an upload in each job, held by `tests/architecture/test_ci_m5e_gate.py`; the four self-judging tasks follow, then G2–G4. G5 and G6 stay decisions of their own.\
+**Status (2026-11-10):** G1's first hosted run, [42619476453](https://github.com/Onwcan/DireWolf/actions/runs/42619476453) at `f50286c`, uploaded eight of the nine bundles. The ninth, `sandbox-workspace`'s, was refused by the task runner: the task judged a table built at the call, with no name to keep it by. Named (`WORKSPACE_ALL_CASES`) and guarded; hosted run pending.\
 **Authority of this document:** a technical handoff, not an ADR. It approves nothing, and every
 choice in it is a recommendation for the owner.
 

@@ -332,3 +332,44 @@ def test_every_task_of_the_gate_reports_its_census_for_the_gate() -> None:
             source = inspect.getsource(dw._sandbox_workspace_evidence)
         assert "report_cleanup(" in source, task
         assert "{GREEN}cleanup:" not in source, task
+
+
+def _judgement_tables(source: str) -> tuple[int, list[str]]:
+    """How many `require_attributed_evidence` calls `source` makes, and each
+    whose case table is not a module-level table of `dw` named at the call: a
+    table built at the call (`A + B`) has no name to keep it by, and its task
+    would fail after all of its checks passed."""
+    import ast
+    import textwrap
+
+    calls, unnamed = 0, []
+    for node in ast.walk(ast.parse(textwrap.dedent(source))):
+        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)):
+            continue
+        if node.func.id != "require_attributed_evidence":
+            continue
+        calls += 1
+        table = node.args[1] if len(node.args) > 1 else None
+        named = isinstance(table, ast.Name) and isinstance(getattr(dw, table.id, None), tuple)
+        if not named:
+            unnamed.append(ast.unparse(table) if table is not None else "no table")
+    return calls, unnamed
+
+
+def test_every_task_of_the_gate_judges_against_a_named_table() -> None:
+    import inspect
+
+    for task in dw.M5E_GATE_TASKS:
+        source = inspect.getsource(dw.TASKS[task])
+        if task == "sandbox-workspace-evidence":
+            source = inspect.getsource(dw._sandbox_workspace_evidence)
+        calls, unnamed = _judgement_tables(source)
+        assert calls >= 1, f"{task} judges nothing"
+        assert unnamed == [], f"{task} judges against a table with no name: {unnamed}"
+    # The negative control: the call that failed hosted run 42619476453.
+    built = "def f():\n    require_attributed_evidence(out, WORKSPACE_CASES + EXTRA_CASES)\n"
+    assert _judgement_tables(built) == (1, ["WORKSPACE_CASES + EXTRA_CASES"])
+    assert _judgement_tables("def f():\n    require_attributed_evidence(out, NO_SUCH)\n") == (
+        1,
+        ["NO_SUCH"],
+    )

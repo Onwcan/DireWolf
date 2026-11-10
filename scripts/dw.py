@@ -7457,6 +7457,9 @@ WORKSPACE_PRIVILEGED_CASES = (
         )
     ),
 )
+# Both halves, judged as one output on a provisioned host: a table of its own
+# name, so what the task judged is kept for the M5 gate by that name.
+WORKSPACE_ALL_CASES = WORKSPACE_CASES + WORKSPACE_PRIVILEGED_CASES
 
 
 def workspace_privileged() -> bool:
@@ -7696,9 +7699,7 @@ def _sandbox_workspace_evidence(*, require_privileged: bool) -> None:
     report_cleanup(f"cleanup: no evidence container remains; {len(before)} pre-existing kept")
     if privileged:
         # One account of both halves: their lines are one output.
-        require_attributed_evidence(
-            "\n".join(outputs), WORKSPACE_CASES + WORKSPACE_PRIVILEGED_CASES
-        )
+        require_attributed_evidence("\n".join(outputs), WORKSPACE_ALL_CASES)
         uvrun("dwcheck", "closure", "--report")
         return
     require_attributed_evidence("\n".join(outputs), WORKSPACE_CASES)
