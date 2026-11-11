@@ -22,7 +22,7 @@ We accept that estimate rather than defending the original. The implications are
 **Deferred:** live-model evals and the recorded-response corpus (M7); real-process instrumentation of the authority daemon (M3); the vertical-slice measurements, which remain M3.5.
 
 ### M3.5 · Vertical slice — the risk-retirement milestone
-**Deps:** M3, M4 (partial), M2.5. One tool (`fs.read`), one profile, one approval, end to end: CLI → runtime → kernel → sandbox. **Acceptance:** published measurements of kernel round-trip latency (p50/p99, side-effecting and not), cold start, and the approval count for one pinned realistic task. **This milestone exists to find out whether the product is viable before another eighteen months are spent on it.** If p99 or approval frequency is far outside target, the design changes here, not at M18.
+**Deps:** M3, M4 (partial), M2.5, M6. **Order:** after M6 and before M7 (set 2026-11-11, when M5 closed). Its one approval is M6's, so the approval count it publishes is measured against the real approval registry, with its scopes, expiry and standing grants, not a stand-in built for the slice; and it comes before the runtime milestones because its result can still change them. One tool (`fs.read`), one profile, one approval, end to end: CLI → runtime → kernel → sandbox. **Acceptance:** published measurements of kernel round-trip latency (p50/p99, side-effecting and not), cold start, and the approval count for one pinned realistic task. **This milestone exists to find out whether the product is viable before another eighteen months are spent on it.** If p99 or approval frequency is far outside target, the design changes here, not at M18.
 
 ---
 
@@ -51,6 +51,8 @@ M0 architecture ─ M1 foundation ─ M2 protocol+schemas
                                                        └─ M17 CLI + doctor
                                                              └─ M18 V1 HARDENING ── V1.0
 ```
+
+**Build order after M5 (2026-11-11):** M6 → M3.5 → M7 → M8 → M9 → M10–M16 → M17 → M18 → V1.0. The vertical slice (M3.5) is not in the tree above: it runs after M6, whose approvals it measures, and before M7, because its measurements can still change everything from M7 on (M3.5, above).
 
 ---
 
