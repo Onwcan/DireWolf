@@ -166,6 +166,14 @@ durable state, redaction) from `runners/m4.py`, each over the real Rust suites
 and each requiring every case it lists; `path-traversal` left
 `pending-kernel` ([ADR-0046](../docs/adr/0046-m4e-secret-handles-backends-injection-and-redaction.md) §24).
 
+M5 did it in slices: `"M5a"` to `"M5d"` each joined with its gated suite
+(`m5a-sandbox-foundation` to `m5d-sandbox-exec`), and on 2026-11-11 `"M5e"` and
+`"M5"` joined together, once the M5 gate was required: the `m5e-gate` suite's
+`integrated-m5-gate` (runner `m5e.gate`) and `pending-kernel/sandbox-egress` (runner
+`m5e.egress`) run only in CI's `m5e-gate` job, the first failing unless the gate's
+acceptance verdict is READY, the second unless the same gate judged the egress and
+agent evidence again; anywhere else both are NOT EXERCISED, never a pass.
+
 Step 2 is not optional. An eval whose milestone has arrived and which has **no
 runner, or an unknown one, reports ERROR** and fails the gate. That is
 deliberate: a security property that cannot run once its component exists is a

@@ -404,7 +404,7 @@ def test_every_case_is_end_to_end_attributed_and_shows_its_outcome() -> None:
         "registry-pip-redirect-to-ungranted-host-refused",
         "registry-pip-direct-route-refused",
         "registry-pip-untrusted-issuer-refused",
-        "registry-pip-sdist-built-today",
+        "registry-pip-sdist-never-built",
         "registry-pip-pth-not-run-by-install",
         "registry-npm-install-refused-before-preparation",
         "registry-npm-ci-refused-before-preparation",
@@ -444,15 +444,15 @@ def test_a_dropped_case_fails(dropped: int) -> None:
             "is not what this case exercises",
         ),
         (
-            "registry-pip-sdist-built-today",
+            "registry-pip-sdist-never-built",
             {"enforcement": "workload-effects-measured"},
             "is not what this case exercises",
         ),
         # An outcome that does not show what the case claims.
         (
-            "registry-pip-sdist-built-today",
+            "registry-pip-sdist-never-built",
             {"outcome": "refused:nothing-installed"},
-            "must begin 'built-today:backend-marker-present'",
+            "must begin 'not-built:backend-marker-absent'",
         ),
         (
             "registry-pip-ungranted-index-refused",

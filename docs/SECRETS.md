@@ -19,6 +19,10 @@ The agent works with opaque handles. The kernel resolves them at the last possib
 > the `env` and `exec` backends, Secret Service, `mlock`, `MADV_DONTDUMP`,
 > refresh of short-lived credentials, rotation warnings and any CLI secret
 > command are **not**.
+>
+> **Since M5 (complete 2026-11-11)** both consumers exist: mode A's render
+> reaches only `net.http`'s bound origin (M5c, below), and modes B and C a
+> sandboxed `process.exec` through the pinned launcher (M5d.3, below).
 
 ---
 

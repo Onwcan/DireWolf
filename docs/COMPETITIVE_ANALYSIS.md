@@ -15,11 +15,12 @@ reimplemented from described behaviour, under DireWolf's own design.
 
 ## 0. Read this first: the honesty contract
 
-1. **DireWolf is implemented through M4, and no further.** The authority process, its
-   durable state and audit chain, the filesystem, process and secret brokers, and the
-   evaluations that gate them exist and pass in hosted CI. There is **no agent loop, no
-   model provider, no sandbox, no approval flow, no network tool, no memory, no skills and
-   no user-facing agent**. Every competitor below that runs agents is ahead on capability,
+1. **DireWolf is implemented through M5, and no further.** The authority process, its
+   durable state and audit chain, the filesystem, process and secret brokers, the sandbox
+   (measured `oci-strict` environments, `PROXY_ONLY` egress, the kernel's own `net.http`)
+   and the evaluations that gate them exist and pass in hosted CI. There is **no agent
+   loop, no model provider, no approval flow, no memory, no skills and no user-facing
+   agent**. Every competitor below that runs agents is ahead on capability,
    by a wide margin.
 2. **Implemented and planned are never mixed.** Every DireWolf cell in this document says
    either what exists now (with the milestone that delivered it) or what is planned (with
@@ -58,7 +59,7 @@ most of it is not yet built.
 | Process execution | Executable identity (absolute path, SHA-256), argv normalisation, empty environment, limits, `execveat` of the re-proved descriptor (M4d). **No production build launches anything on the host**: a host launch needs a per-invocation approval, which is M6's; with an operator-attached environment the public `process.exec` runs in it instead (M5d) | Approvals for host execution, and the `local` environment (M6) |
 | Secrets | Opaque handles; no operation returns a value; kernel keyring and age backends; one-shot handoff; return-path redaction; residue evidence; daemons dump no core (M4e). Mode A's consumer `net.http` (M5c, complete); modes B/C to a sandboxed `process.exec` through the pinned launcher (M5d, complete), every descendant inheriting the value | Mode D (M6) |
 | Taint | Run-level, monotone, held by the authority; raised to `LOCAL_UNVERIFIED` by file content and process output; a policy predicate (`when.taint_level`) the shipped packs use (M3d–M4d) | Network-sourced taint (M5); artifact and memory provenance (M12, M13) |
-| Sandbox | **Foundation (M5a) and `PROXY_ONLY` networking (M5b, complete, hosted acceptance passed):** an `oci-strict` environment prepared and **measured** from the runtime's record and by a digest-pinned probe inside it, weakened profiles and topologies shown to be detected; its only network peer the broker's opaque CONNECT proxy, every bypass measured as refused. **Sandboxed workloads (M5d, complete, ADR-0052 accepted 2026-10-26):** with an operator-attached environment the public `process.exec` runs there, never on the host — the authority decides each workload, the broker runs exactly its plan as uid 10001, an agent-shaped workload reaches only its granted origins, and a run's or a lease's end destroys the environment; policy is told `sandbox` for those launches and the host for every other action. The kernel's own `net.http` (M5c, complete) is its one network tool | The complete M5 gate and package-manager acceptance (M5e) |
+| Sandbox | **Foundation (M5a) and `PROXY_ONLY` networking (M5b, complete, hosted acceptance passed):** an `oci-strict` environment prepared and **measured** from the runtime's record and by a digest-pinned probe inside it, weakened profiles and topologies shown to be detected; its only network peer the broker's opaque CONNECT proxy, every bypass measured as refused. **Sandboxed workloads (M5d, complete, ADR-0052 accepted 2026-10-26):** with an operator-attached environment the public `process.exec` runs there, never on the host — the authority decides each workload, the broker runs exactly its plan as uid 10001, an agent-shaped workload reaches only its granted origins, and a run's or a lease's end destroys the environment; policy is told `sandbox` for those launches and the host for every other action. The kernel's own `net.http` (M5c, complete) is its one network tool. **The M5 gate (M5e, complete 2026-11-11):** each hard rule weakened in a real `PROXY_ONLY` environment refused; npm and pip only under evidence-backed profiles, npx, pnpm, yarn, bun and cargo refused; every M5 evidence task judged again by one required job | gVisor, Kata or Firecracker, and remote workers (deferred); the `local` environment (M6) |
 | Approvals, budgets | **None.** A decision that would require approval is `DENY` | M6 |
 | Model egress, providers | **None** | M7: native, cloud-platform, OpenAI-compatible and local/self-hosted provider families, Hugging Face and Ollama among them, all behind the authority's model egress (§7a) |
 | External agent interoperability | **None** | M29, post-V1 ([ADR-0051](adr/0051-external-agent-interoperability.md), Proposed): ACP first, external agents as contained workloads or clients, never authorities (§7b) |
@@ -69,7 +70,9 @@ most of it is not yet built.
 The M4 closing evidence is hosted CI run
 [36390815504](https://github.com/Onwcan/DireWolf/actions/runs/36390815504) (attempt 2):
 every job succeeded, including the five M4 evidence jobs, the M3 transport evidence and the
-evaluation gate, whose results include the three `m4-security` evaluations.
+evaluation gate, whose results include the three `m4-security` evaluations. M5's
+closing evidence is its gate: the required `m5e-gate` job judges every M5 evidence
+task's sealed output again ([ROADMAP.md](ROADMAP.md), M5e, records each run).
 
 ---
 
@@ -113,7 +116,7 @@ The projects below are not one category, and comparing across categories needs c
 | **Execution infrastructure** | Sandboxes as a service; whoever runs inside decides the agent | Daytona |
 | **Agent control centres** | A self-hosted surface that runs and schedules other agents | OpenHands (Agent Canvas) |
 | **Hosted agentic coding platforms** | An IDE, a CLI, an SDK and managed cloud agents from one vendor, with the vendor's account and model service in the default path | Qoder (read 2026-11-06, §7c) |
-| **DireWolf** | An authority plane (implemented through M4) under a first-party agent runtime (planned, M7–M17) | — |
+| **DireWolf** | An authority plane (implemented through M5) under a first-party agent runtime (planned, M7–M17) | — |
 
 DireWolf's target overlaps the first two categories; what exists today overlaps the
 enforcement-layer category, which is why the comparisons with Capgate and

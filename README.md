@@ -1,76 +1,139 @@
+<div align="center">
+
 # DireWolf
 
+**Intelligence may propose. Policy grants authority. Execution remains controlled.**
+
+A model-agnostic, local-first, security-first autonomous agent runtime,<br>
+built so that the component that reasons is never the component that is trusted.
+
+[![CI](https://github.com/Onwcan/DireWolf/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Onwcan/DireWolf/actions/workflows/ci.yml)
+[![Licence: Apache-2.0](https://img.shields.io/badge/licence-Apache--2.0-blue)](LICENSE)
+[![Milestone: M5 complete](https://img.shields.io/badge/milestone-M5%20complete-2ea44f)](docs/ROADMAP.md)
+[![Kernel: Rust, no unsafe](https://img.shields.io/badge/kernel-Rust%2C%20no%20unsafe-b7410e?logo=rust&logoColor=white)](crates/)
+[![Runtime: Python 3.12+](https://img.shields.io/badge/runtime-Python%203.12%2B-3776ab?logo=python&logoColor=white)](runtime/)
+[![Serves on: Linux](https://img.shields.io/badge/serves%20on-Linux-555?logo=linux&logoColor=white)](#status)
 [![XERJ Corpus Hub contributor](https://hub.xerj.org/contributors/Onwcan/badge.svg)](https://hub.xerj.org/contributors/Onwcan)
+
+[Quick start](#quick-start) ·
+[Status](#status) ·
+[Architecture](docs/ARCHITECTURE.md) ·
+[Threat model](docs/THREAT_MODEL.md) ·
+[Roadmap](docs/ROADMAP.md) ·
+[Decisions](docs/adr/README.md) ·
+[Security](SECURITY.md) ·
+[Contributing](CONTRIBUTING.md)
 
 **XERJ Corpus Hub:** [Onwcan Contributor Profile](https://hub.xerj.org/contributors/Onwcan)
 
-> **Intelligence may propose. Policy grants authority. Execution remains controlled.**
+</div>
 
-DireWolf is a model-agnostic, local-first, security-first autonomous agent runtime.
+---
 
-It is built on one structural claim that most agent frameworks do not make:
+## Why DireWolf
 
-**The component that reasons is not the component that is trusted.**
+DireWolf is built on one structural claim that most agent frameworks do not make:
+
+> **The component that reasons is not the component that is trusted.**
 
 In DireWolf's design, the process that runs the agent loop — the process that ingests
 model output, web pages, tool results, MCP responses and memory — holds **no credentials,
 no network route, no filesystem handles and no ability to execute anything.** Every side
-effect is requested from a separate, privileged, minimal-dependency process (the
-*kernel*) which independently canonicalises the request, evaluates deterministic policy,
-verifies a capability token, optionally demands human approval, injects credentials the
-requester never sees, performs the effect inside a sandbox, and writes a hash-chained
-audit record.
+effect is requested from a separate, privileged, minimal-dependency process, the
+*kernel*, which:
+
+1. canonicalises the request independently;
+2. evaluates deterministic policy;
+3. verifies a capability token;
+4. optionally demands human approval;
+5. injects credentials the requester never sees;
+6. performs the effect inside a sandbox;
+7. writes a hash-chained audit record.
 
 A fully compromised model — or a fully compromised agent runtime — does not imply a
-compromised host. That is the target; the status below says which parts of it exist.
+compromised host. That is the target; [Status](#status) says which parts of it exist.
 
----
+## What is built
 
-## Status: M1–M4 complete; M5 (sandbox) in progress — M5a to M5d and M5e.1 complete
+The **authority plane** — the kernel side of the trust boundary — is built, through M5.
+The agent above it is not built yet.
 
-The paragraphs above describe the **design**. What is built today is the authority
-plane underneath it — the kernel side of the trust boundary — and none of the agent
-above it. M4, the last whole milestone completed, closed on hosted CI run
-[36390815504](https://github.com/Onwcan/DireWolf/actions/runs/36390815504) (attempt 2);
-the latest verified hosted run is
-[40774766063](https://github.com/Onwcan/DireWolf/actions/runs/40774766063) at `6fd0bc7`,
-27 of 27 jobs. [docs/ROADMAP.md](docs/ROADMAP.md) has every milestone's acceptance
-evidence, and the M5 row below is a summary of it.
-
-| Milestone | Status | What it delivered |
+| | What exists | Since |
 |---|---|---|
-| M1 · Foundation | **COMPLETE** | Monorepo, locked Rust and Python workspaces, quality gates, boundary rules as data (`dwcheck`), CI on three platforms |
-| M2 · Protocol | **COMPLETE** | `dwk-proto`: bounded framing, a strict JSON reader, RFC 8785 canonical JSON, versioned envelopes; generated JSON Schema and Python bindings; fuzzed |
-| M2.5 · Evaluation harness | **COMPLETE** | `evals/`: deterministic suites, versioned results, a reviewed baseline, fault injection; pending is never a pass |
-| M3 · Kernel core | **COMPLETE** | The typed capability lattice (10⁶ delegation chains, zero escalations); the deterministic policy engine (p99 3.6 µs at 300 rules); `kernel.db` with fenced epochs and durable admission; a hash-chained audit record for every authority-changing operation, `fsync`ed before the answer; `dwkd-authority serve`, which identifies its caller through the kernel (`SO_PEERCRED`) before reading a byte |
-| M4 · Brokers | **COMPLETE** | Filesystem resolution by identity (`openat2`, no symlink, mount or Unicode escape); `dwkd-broker`, a second privileged process that acts only on the authority's single-use authorisation; eight filesystem tools with atomic mutation; process execution decided on executable identity; secrets by opaque handle, with no API that returns a value, return-path redaction and residue evidence |
-| M5 · Sandbox | **COMPLETE** (2026-11-11) | **M5a — COMPLETE:** the `oci-strict` execution environment, measured from the runtime's record and by a digest-pinned probe inside it, with a durable, exactly-reconciled lifecycle. **M5b — COMPLETE:** `PROXY_ONLY` — the environment's only network peer is the broker's opaque CONNECT proxy, behind a relay, enforcing the run's exact HTTPS grants, the IP guard, one pinned resolution, server-name agreement and byte budgets; every bypass measured as refused. **M5c — COMPLETE:** `net.http`, the kernel's own HTTPS request, every hop decided by the authority and a credential only at its bound origin ([ADR-0050](docs/adr/0050-m5c-kernel-performed-net-http-ssrf-redirects-and-credential-egress.md), accepted with stated conditions). **M5d — COMPLETE** ([ADR-0052](docs/adr/0052-m5d-sandboxed-process-exec.md), accepted 2026-10-26): the public `process.exec` runs, over DWKP, in a measured environment the operator attaches (`serve --sandbox-config`) — as the environment's own uid, its executable's bytes proved, its output and wall clock bounded, an uncertain ending never run again; secret modes B and C through the pinned launcher; an operator-provisioned, measured workspace; an agent-shaped workload in `PROXY_ONLY`; a run's or a lease's end destroying its environment. Its accepted residuals: a lease that only expires ends nothing until its session is acquired again or the authority restarts, and a destruction a lease's end leaves pending holds brokered writes in its workspace (`SHARED_DIRECTORY`). **D11 hardening — ACCEPTED** ([ADR-0053](docs/adr/0053-d11-exchange-worker-confinement-and-secret-memory.md); `net.http` on `x86_64` only). **M5e** (the M5 gate) — **M5e.1 COMPLETE** (hosted run [40774766063](https://github.com/Onwcan/DireWolf/actions/runs/40774766063)): every line of the sandbox evidence names its level and the existing mechanism that enforced it, and the tasks refuse one that does not — attribution, not a new per-attempt audit event. **M5e.2 COMPLETE** (2026-11-09; R3's E6 hosted-verified in run [42525106398](https://github.com/Onwcan/DireWolf/actions/runs/42525106398), [ADR-0059](docs/adr/0059-m5e-proxy-only-peer-joins-only-its-own-network-namespace.md) and [ADR-0058](docs/adr/0058-m5e-proxy-only-hard-rules-weakened-in-a-real-environment.md) accepted, ADR-0057 superseded): every hard rule refused under `PROXY_ONLY` by the broker's own judgement (in process), and runs that see none of each other's processes, cannot name each other's environment and leave nothing to the next (real runtime) — and, in hosted run [41130431929](https://github.com/Onwcan/DireWolf/actions/runs/41130431929) (28 of 28 jobs), a real container sharing the host's UTS namespace caught, the three privileged jobs an identity switch once broke (CI #106) restored, and the container runtime restarted under a running authority with nothing believed or run twice. **Finding F-R8 (R8) — closed:** every environment runs as host uid 10001, whose `RLIMIT_NPROC` was counted across all of them at 256, so one workload at its task bound could deny every other run its environment. [ADR-0056](docs/adr/0056-m5e-cross-run-task-limit-isolation.md)'s Option B, **accepted** on 2026-11-01 after hosted run [41242001763](https://github.com/Onwcan/DireWolf/actions/runs/41242001763) (29 of 29 jobs): each environment's pids cgroup stays its bound and `RLIMIT_NPROC` becomes a host-wide backstop of 8 192, so a workload at its bound leaves another environment served — at the broker, through the authority, and at the 16-environment cap — while every environment still shares one host uid. The hard rules are judged over a real environment's own record, in process — the last of those cases passed in hosted run [41323258812](https://github.com/Onwcan/DireWolf/actions/runs/41323258812) (29 of 29 jobs); R-B on [ADR-0057](docs/adr/0057-m5e-proxy-only-real-container-evidence-residual.md) (2026-11-01) **required R3's real-container level**, so it was built on 2026-11-08 — each hard rule weakened in a real `PROXY_ONLY` environment the released broker prepares, which its measurement and decision must refuse ([ADR-0058](docs/adr/0058-m5e-proxy-only-hard-rules-weakened-in-a-real-environment.md)). Its first hosted run found the broker's setup changing the host's loopback under a runtime that ignored `--network none`, fixed by making no peer outside the environment's own namespace ([ADR-0059](docs/adr/0059-m5e-proxy-only-peer-joins-only-its-own-network-namespace.md)); at that fix the required `sandbox-proxy-weakened` job passed (run [42525106398](https://github.com/Onwcan/DireWolf/actions/runs/42525106398), 31 of 31 jobs): all fifteen rows refused at `real-oci`, the conforming control kept. Both records were accepted on 2026-11-09, ADR-0057 superseded and never accepted, and R3 and M5e.2 closed ([issue #19](https://github.com/Onwcan/DireWolf/issues/19), closed). **M5e.3** (registry fixtures, their per-run CA and their two HTTPS origins) complete ahead of M5e.2's close, by an exception to M5e's order of 2026-11-03 — hosted-verified (run [41916040076](https://github.com/Onwcan/DireWolf/actions/runs/41916040076), 29 of 29 jobs); **M5e.4** (pip as it is today against the fixture registries, npm refused before anything is prepared) **COMPLETE** (2026-11-09) — built ahead of M5e.2's close by a second exception of 2026-11-05, hosted-verified in runs 134–137 (the required `sandbox-registry` job) and accepted, OD-E4's checksum-verified downloads as built; **M5e.5** (the npm and pip profiles) complete (2026-11-11) — hosted evidence on manual run 42879630675, all 44 cases and the mutation review 37/37, ADR-0054 and ADR-0055 accepted, the profiles the obligation and their evidence a required job; **M5e.6** (the final gate) complete — every M5 evidence task's judged output sealed by its job and judged again by the required `m5e-gate` job, whose eval fails unless the acceptance verdict is READY; `M5e` and `M5` available |
+| **Deterministic policy** | Every decision explainable by rule id, file and line; p99 3.6 µs at 300 rules | M3 |
+| **Capabilities that only narrow** | A typed `⊑` lattice: 10⁶ generated delegation chains, zero escalations | M3 |
+| **Tamper-evident audit** | A hash-chained record of every authority-changing operation, `fsync`ed before the answer; `verify-audit` on every platform | M3 |
+| **An authenticated boundary** | `dwkd-authority serve` identifies its caller through the kernel (`SO_PEERCRED`) before it reads a byte | M3 |
+| **Brokered effects** | Files resolved by identity (`openat2`; no symlink, mount or Unicode escape); processes decided on executable identity; secrets by opaque handle, with no API that returns a value | M4 |
+| **A measured sandbox** | `oci-strict` environments measured from the runtime's record and by a digest-pinned probe; `PROXY_ONLY` egress through the broker's CONNECT proxy; the kernel's own `net.http` | M5 |
+| **Package managers, contained** | `npm ci`, `npm install` and `pip install` only under evidence-backed profiles; npx, pnpm, yarn, bun and cargo refused | M5 |
+| **Evidence, not assertions** | Every property exercised against the real binaries in hosted CI, on three genuine operating-system identities where it needs them; NOT EXERCISED fails rather than passes | every milestone |
+
+## Quick start
+
+```bash
+git clone https://github.com/Onwcan/DireWolf.git direwolf && cd direwolf
+make dev          # verify toolchain, sync, build, check   (idempotent)
+make check        # the core gates: format, lint, types, boundaries, schemas, tests, evals, deps
+make help         # everything else, each evidence campaign among it
+```
+
+Prerequisites: Rust (via [rustup](https://rustup.rs) — it reads the pinned
+toolchain), Python 3.12+, `uv`, and git. Nothing else for `make check`; the sandbox
+campaigns also need Linux and a Docker-compatible runtime.
+[CONTRIBUTING.md](CONTRIBUTING.md) has the detail; on Windows without WSL2, run
+`python scripts/dw.py <task>` instead of `make`.
+
+There is no agent to run yet — `direwolf` supports `--version` and `doctor`. What runs
+today is the authority plane and the evidence for it.
+
+## Status
+
+**M1–M5 are complete.** What is built is the authority plane underneath the design and
+none of the agent above it. [docs/ROADMAP.md](docs/ROADMAP.md) has every milestone's
+acceptance evidence; this table summarises it.
+
+| Milestone | Status | Completed | What it delivered |
+|---|---|---|---|
+| M1 · Foundation | ✅ **COMPLETE** | 2026-09-15 | Monorepo, locked Rust and Python workspaces, quality gates, boundary rules as data (`dwcheck`), CI on three platforms |
+| M2 · Protocol | ✅ **COMPLETE** | 2026-09-16 | `dwk-proto`: bounded framing, a strict JSON reader, RFC 8785 canonical JSON, versioned envelopes; generated JSON Schema and Python bindings; fuzzed |
+| M2.5 · Evaluation harness | ✅ **COMPLETE** | 2026-09-16 | `evals/`: deterministic suites, versioned results, a reviewed baseline, fault injection; pending is never a pass |
+| M3 · Kernel core | ✅ **COMPLETE** | 2026-09-23 | The typed capability lattice (10⁶ delegation chains, zero escalations); the deterministic policy engine (p99 3.6 µs at 300 rules); `kernel.db` with fenced epochs and durable admission; a hash-chained audit record for every authority-changing operation, `fsync`ed before the answer; `dwkd-authority serve`, which identifies its caller through the kernel (`SO_PEERCRED`) before reading a byte |
+| M4 · Brokers | ✅ **COMPLETE** | 2026-09-28 | Filesystem resolution by identity (`openat2`, no symlink, mount or Unicode escape); `dwkd-broker`, a second privileged process that acts only on the authority's single-use authorisation; eight filesystem tools with atomic mutation; process execution decided on executable identity; secrets by opaque handle, with no API that returns a value, return-path redaction and residue evidence |
+| M5 · Sandbox | ✅ **COMPLETE** | 2026-11-11 | **M5a** (2026-10-04): the `oci-strict` execution environment, measured from the runtime's record and by a digest-pinned probe inside it, with a durable, exactly-reconciled lifecycle.<br>**M5b** (2026-10-06): `PROXY_ONLY` — the environment's only network peer is the broker's opaque CONNECT proxy, enforcing the run's exact HTTPS grants, the IP guard, one pinned resolution, server-name agreement and byte budgets; every bypass measured as refused.<br>**M5c** (2026-10-11): `net.http`, the kernel's own HTTPS request, every hop decided by the authority and a credential only at its bound origin ([ADR-0050](docs/adr/0050-m5c-kernel-performed-net-http-ssrf-redirects-and-credential-egress.md), accepted with stated conditions; its exchange worker confined by [ADR-0053](docs/adr/0053-d11-exchange-worker-confinement-and-secret-memory.md), so `net.http` runs on `x86_64` only).<br>**M5d** (2026-10-26): the public `process.exec` runs, over DWKP, in a measured environment the operator attaches (`serve --sandbox-config`) — as the environment's own uid, its executable's bytes proved, its output and wall clock bounded, an uncertain ending never run again; secret modes B and C through the pinned launcher; a measured workspace; a run's or a lease's end destroying its environment ([ADR-0052](docs/adr/0052-m5d-sandboxed-process-exec.md)).<br>**M5e** (2026-11-11): the M5 gate — each hard rule weakened in a real `PROXY_ONLY` environment, refused ([ADR-0058](docs/adr/0058-m5e-proxy-only-hard-rules-weakened-in-a-real-environment.md), [ADR-0059](docs/adr/0059-m5e-proxy-only-peer-joins-only-its-own-network-namespace.md)); one workload at its task bound unable to starve another ([ADR-0056](docs/adr/0056-m5e-cross-run-task-limit-isolation.md)); npm and pip only under evidence-backed profiles ([ADR-0054](docs/adr/0054-m5e-npm-hygiene-profile.md), [ADR-0055](docs/adr/0055-m5e-pip-hygiene-profile.md)); and every M5 evidence task judged again by one required `m5e-gate` job ([plan](docs/M5E_ASSURANCE_PLAN.md)) |
+| M3.5 · Vertical slice | ⏳ planned | — | One tool end to end — CLI → runtime → kernel → sandbox — with published latency, cold-start and approval-count measurements |
+| M6–M18 · to V1.0 | ⏳ planned | — | Approvals and budgets (M6); model providers and egress (M7); storage and run state, the agent loop, tools, skills, context, artifacts, memory, subagents, the task graph and MCP (M8–M16); the CLI (M17); V1 hardening (M18) |
+| Post-V1 | ⏳ planned | — | Channels, a scheduler, a browser, plugins, a web UI and remote workers; interoperability with external coding agents, ACP first (M29, [ADR-0051](docs/adr/0051-external-agent-interoperability.md), Proposed) |
+
+> **M5's final check.** M5 was accepted on 2026-11-11 with its closing change. That
+> change's CI run failed in one job, `sandbox-registry`, whose M5e.4 suite still started
+> pip the way the newly accepted profile refuses; the suite has been brought under the
+> profile, and the repair's own CI run is M5's final hosted check
+> ([ROADMAP](docs/ROADMAP.md), M5e).
 
 **What that means in practice.** A client can connect to `dwkd-authority`, be admitted
 to a run, and ask the authority to read, list, search, stat, write, patch, move or delete
 files beneath an operator-bound workspace, each decided by both gates and audited. The
 shipped policy packs deny every read until a home anchor exists, so a deployment reads
-files with an operator policy. Process execution and secret injection are built and
-tested end to end. **No production build launches a process on the host** — a host launch
-needs a per-invocation approval, and approvals are M6's — but when the operator attaches
-an execution environment (`serve --sandbox-config`, Linux), the public `process.exec` runs
-there (M5d): the authority decides each workload, the broker runs exactly its plan as the
-environment's own uid in a measured `oci-strict` container, and nothing falls back to the
-host. A credential (secret mode A) reaches only `net.http`'s bound origin (M5c); modes B
-and C reach a sandboxed `process.exec` through the pinned launcher (M5d.3), and every
-descendant of that process inherits the value.
+files with an operator policy. **No production build launches a process on the host** — a
+host launch needs a per-invocation approval, and approvals are M6's — but when the
+operator attaches an execution environment (`serve --sandbox-config`, Linux), the public
+`process.exec` runs there: the authority decides each workload, the broker runs exactly
+its plan as the environment's own uid in a measured `oci-strict` container, and nothing
+falls back to the host. Only `process.exec` runs in an environment: the filesystem tools
+act on the workspace through the broker on the host, and policy is told which. A
+`PROXY_ONLY` workload reaches only its granted origins through the broker's proxy, and
+`net.http`, the kernel's own HTTPS request, is the kernel's one network tool. A credential
+(secret mode A) reaches only `net.http`'s bound origin; modes B and C reach a sandboxed
+`process.exec` through the pinned launcher, and every descendant of that process inherits
+the value. `npm ci`, `npm install` and `pip install` run only under their accepted
+profiles ([ADR-0054](docs/adr/0054-m5e-npm-hygiene-profile.md),
+[ADR-0055](docs/adr/0055-m5e-pip-hygiene-profile.md)).
 
 **What does not exist yet**, and which milestone owns it:
 
 - **host-local execution** (M6, ADR-0052 OD-7), and package managers beyond npm and
-  pip: M5 keeps `npm ci`, `npm install` and `pip install` under their accepted profiles
-  ([ADR-0054](docs/adr/0054-m5e-npm-hygiene-profile.md),
-  [ADR-0055](docs/adr/0055-m5e-pip-hygiene-profile.md)) in a measured environment, and
-  npx, pnpm, yarn, bun and cargo stay refused. Only `process.exec` runs in an
-  environment: the filesystem tools still act on the workspace through the broker on the
-  host, and policy is told which. A `PROXY_ONLY` workload reaches only its granted
-  origins through the broker's proxy; `net.http` (M5c, complete), the kernel's own HTTPS
-  request, is the kernel's one network tool;
+  pip: npx, pnpm, yarn, bun and cargo stay refused;
 - **approvals and budgets** (M6) — a decision that would need approval is a denial;
 - **model providers** (M7) — native, cloud-platform, OpenAI-compatible and local or
   self-hosted families, Hugging Face, Ollama and llama.cpp among them, every one behind
@@ -82,6 +145,14 @@ descendant of that process inherits the value.
   interoperability with external coding agents — ACP first, each one a contained workload
   or a client, never an authority (M29, post-V1;
   [ADR-0051](docs/adr/0051-external-agent-interoperability.md), Proposed).
+
+**Limits, stated.** A container is not a VM: `oci-strict` shares the host kernel, and
+every environment runs as one host uid (10001). A lease that only expires ends nothing
+until its session is acquired again or the authority restarts, and a destruction a
+lease's end leaves pending holds brokered writes in its workspace (`SHARED_DIRECTORY`). A
+sandboxed credential reaches every descendant of its process. A `.pth` file an installed
+wheel carries runs at a later interpreter's start — contained by the environment, not
+neutralised. [docs/SECURITY.md](docs/SECURITY.md) §5 lists every known limitation.
 
 **Platforms.** The authority and the broker serve on **Linux only**; on macOS and native
 Windows `serve` refuses to start rather than guess who is on the other end. The Windows
@@ -97,40 +168,85 @@ target: for the authority and the brokers `capability-evidence`,
 for the sandbox `sandbox-foundation-evidence`, `sandbox-egress-evidence`,
 `net-http-evidence`, `sandbox-workload-evidence`, `sandbox-secret-evidence`,
 `sandbox-workspace-evidence`, `sandbox-agent-evidence`, `sandbox-release-evidence`,
-`sandbox-restart-evidence`, `sandbox-capacity-evidence` and
-`sandbox-proxy-weakened-evidence` (all three hosted only) and
-`d11-hardening-evidence`, most with a `…-mutations` review beside it. The gated
-evaluations are `authority-security`, `m4-security`, `m5a-sandbox-foundation`,
-`m5b-sandbox-egress`, `m5c-net-http` and `m5d-sandbox-exec`, the M5 ones on a real OCI
-runtime. Every sandbox evidence line names its level (`real-oci`, `in-process`, …) and the
-mechanism that enforced it, and a task refuses one that does not
+`sandbox-restart-evidence`, `sandbox-capacity-evidence`,
+`sandbox-proxy-weakened-evidence`, `sandbox-registry-evidence` and
+`sandbox-hygiene-evidence` (the last five hosted only) and `d11-hardening-evidence`, most
+with a `…-mutations` review beside it. The gated evaluations are `authority-security`,
+`m4-security`, `m5a-sandbox-foundation`, `m5b-sandbox-egress`, `m5c-net-http` and
+`m5d-sandbox-exec`, the M5 ones on a real OCI runtime. The M5 gate,
+`make m5e-gate-check`, judges every M5 evidence task's sealed output again in the
+required `m5e-gate` job, whose `m5e-gate` evaluation fails unless the gate's acceptance
+verdict is READY. Every sandbox evidence line names its level (`real-oci`, `in-process`,
+…) and the mechanism that enforced it, and a task refuses one that does not
 ([docs/SANDBOX.md](docs/SANDBOX.md) §6a). `make check` runs the core gates, not these
-campaigns: most need Linux, the sandbox ones a container runtime, and some root or separate
-users, so hosted CI runs every one but `capability-evidence` and `authority-state-evidence`
-in a job of its own. The halves that need
-separate operating-system identities, root or a dedicated filesystem run in hosted CI with
-three genuine users; on a one-user workstation they report NOT EXERCISED, which fails
-rather than passes. Where the architecture stands against comparable projects, including
-where it is behind, is in [docs/COMPETITIVE_ANALYSIS.md](docs/COMPETITIVE_ANALYSIS.md).
+campaigns: most need Linux, the sandbox ones a container runtime, and some root or
+separate users, so hosted CI runs every one but `capability-evidence` and
+`authority-state-evidence` in a job of its own. The halves that need separate
+operating-system identities, root or a dedicated filesystem run in hosted CI with three
+genuine users; on a one-user workstation they report NOT EXERCISED, which fails rather
+than passes. Where the architecture stands against comparable projects, including where
+it is behind, is in [docs/COMPETITIVE_ANALYSIS.md](docs/COMPETITIVE_ANALYSIS.md).
 
 DireWolf's own Rust contains no `unsafe`. The authority links third-party crates — among
 them SQLite's C amalgamation — and the broker links a few on Linux; the reviewed sets and
 their reasons are in the ADRs, and the licence obligations in [NOTICE](NOTICE).
 
-```bash
-git clone https://github.com/Onwcan/DireWolf.git direwolf && cd direwolf
-make dev          # verify toolchain, sync, build, check   (idempotent)
-make check        # the core gates: format, lint, types, boundaries, schemas, tests, evals, deps
-make help         # everything else, each evidence campaign among it
+---
+
+## The five planes
+
+```
+Presentation      CLI, Web UI, chat clients           no authority, ever
+      |
+Edge              Gateway: transport, authn, channels  can address, cannot act
+      |
+Cognition         Agent loop, context, memory,         reasons; holds nothing
+                  planner, model router, subagents     no creds / net / fs / exec
+      |  ===================== TRUST BOUNDARY =====================
+Authority         Kernel (dwkd): policy, capabilities, approvals,
+                  secrets, budgets, fs/exec/egress brokers, audit
+      |
+Execution         OCI sandboxes, browser, MCP servers, remote workers
 ```
 
-Prerequisites: Rust (via [rustup](https://rustup.rs) — it reads the pinned
-toolchain), Python 3.12+, `uv`, and git. Nothing else for `make check`; the sandbox
-campaigns also need Linux and a Docker-compatible runtime.
-[CONTRIBUTING.md](CONTRIBUTING.md) has the detail; on Windows without WSL2, run
-`python scripts/dw.py <task>` instead of `make`.
+The `===` line is the only boundary that matters. It is a **process and privilege
+boundary**, not a function call. Everything above it is assumed hostile.
 
-## Read in this order
+## Why the boundary is real
+
+Three properties fall out of putting credentials below the line rather than above it. All
+three are design properties whose mechanisms arrive with model egress (M7), approvals
+(M6) and the runtime's network confinement (M9); none is claimed for the current build.
+
+1. **Budgets are not advisory.** The runtime has no provider API key and no network
+   route. Model calls are performed *by the kernel*, which injects the credential and
+   meters the response. An agent cannot make an unmetered model call because it cannot
+   make a model call at all.
+2. **Privacy routing is enforced, not intended.** "This repository may not be sent to a
+   non-local provider" is checked at the egress point that holds the credential, so a
+   mis-planning or manipulated router cannot leak it.
+3. **Approval prompts cannot be phished.** What a human is asked to approve is rendered
+   from the kernel's canonicalised request — resolved paths, resolved IPs, hashed
+   argv — never from model-authored prose describing what it intends to do.
+
+## Non-negotiable invariants
+
+| # | Invariant | Enforced by | Status |
+|---|-----------|-------------|--------|
+| I1 | No side effect occurs without a kernel-verified capability token | Kernel; runtime has no other path | IMPLEMENTED for every effect that exists (M4, M5); the runtime that must have no other path is M9 |
+| I2 | `child_capabilities ⊑ parent_capabilities` — delegation only attenuates | Capability Broker lattice check | IMPLEMENTED (M3b); subagents M14 |
+| I3 | The Cognition Plane never receives plaintext long-lived credentials | Secret Broker | IMPLEMENTED for secret handles (M4e); model keys M7 |
+| I4 | Every authority decision is explainable: rule id, file, line | Policy Engine | IMPLEMENTED (M3c) |
+| I5 | Untrusted provenance cannot be laundered into durable memory without a human | Kernel-held provenance + promotion gate; **backstopped by I9** | PLANNED (M13) |
+| I6 | Approvals bind to canonical actions and are single-use by default | Approval Registry | PLANNED (M6); until then an approval-requiring action is denied |
+| I7 | Default-deny network, default-deny filesystem, default-deny execution | Kernel defaults | IMPLEMENTED for filesystem and execution (M4) and for the two network paths that exist: a `PROXY_ONLY` environment reaches only its run's granted HTTPS origins (M5b), and `net.http` only a granted host (M5c) |
+| I8 | Budgets are reservations debited from a parent, never per-agent grants | Budget Ledger | PLANNED (M6) |
+| I9 | Memory and context can never alter authority — they are not terms in any capability or policy expression | Structural: the mint formula and rule files do not read them | IMPLEMENTED structurally (M3); memory itself M13 |
+| I10 | Every policy input is derived and stored kernel-side | Kernel; `runtime.db` copies are caches | IMPLEMENTED (M3d) |
+
+## Documentation
+
+### Read in this order
 
 | # | Document | What it answers |
 |---|----------|-----------------|
@@ -188,62 +304,18 @@ campaigns also need Linux and a Docker-compatible runtime.
 
 **Review**
 [PHASE0_REVIEW](docs/PHASE0_REVIEW.md) — 62 findings from three independent adversarial review tracks, with dispositions ·
-[M5D5_IMPLEMENTATION_HANDOFF](docs/M5D5_IMPLEMENTATION_HANDOFF.md) — a checkpoint's plan, kept as it was written.
+[M5E2_FINAL_CLOSURE_REVIEW](docs/M5E2_FINAL_CLOSURE_REVIEW.md) — M5e.2's closure assessment of 2026-11-03.
 
-**Decisions**: [docs/adr/](docs/adr/) — 60 architecture decision records (0000–0059), four of them superseded and kept as history (0001, 0002, 0007, 0057), and three Proposed (0051, 0054, 0055). Start with [ADR-0000](docs/adr/0000-authority-plane-separation.md), then [ADR-0018](docs/adr/0018-authority-broker-split.md); everything else is downstream. The [index](docs/adr/README.md) says which are current.
+**Checkpoint handoffs** — each a checkpoint's plan, kept as it was written, its last status line current:
+[M5D5_IMPLEMENTATION_HANDOFF](docs/M5D5_IMPLEMENTATION_HANDOFF.md) ·
+[M5E4_IMPLEMENTATION_HANDOFF](docs/M5E4_IMPLEMENTATION_HANDOFF.md) ·
+[M5E5_PREPARATION_HANDOFF](docs/M5E5_PREPARATION_HANDOFF.md) ·
+[M5E5_IMPLEMENTATION_HANDOFF](docs/M5E5_IMPLEMENTATION_HANDOFF.md) ·
+[M5E6_PREPARATION_HANDOFF](docs/M5E6_PREPARATION_HANDOFF.md)
+
+**Decisions**: [docs/adr/](docs/adr/) — 60 architecture decision records (0000–0059): 55 accepted, four superseded and kept as history (0001, 0002, 0007, 0057), and one Proposed (0051). Start with [ADR-0000](docs/adr/0000-authority-plane-separation.md), then [ADR-0018](docs/adr/0018-authority-broker-split.md); everything else is downstream. The [index](docs/adr/README.md) says which are current.
 
 ---
-
-## The five planes
-
-```
-Presentation      CLI, Web UI, chat clients           no authority, ever
-      |
-Edge              Gateway: transport, authn, channels  can address, cannot act
-      |
-Cognition         Agent loop, context, memory,         reasons; holds nothing
-                  planner, model router, subagents     no creds / net / fs / exec
-      |  ===================== TRUST BOUNDARY =====================
-Authority         Kernel (dwkd): policy, capabilities, approvals,
-                  secrets, budgets, fs/exec/egress brokers, audit
-      |
-Execution         OCI sandboxes, browser, MCP servers, remote workers
-```
-
-The `===` line is the only boundary that matters. It is a **process and privilege
-boundary**, not a function call. Everything above it is assumed hostile.
-
-## Why the boundary is real
-
-Three properties fall out of putting credentials below the line rather than above it. All
-three are design properties whose mechanisms arrive with model egress (M7), approvals
-(M6) and the runtime's network confinement (M9); none is claimed for the current build.
-
-1. **Budgets are not advisory.** The runtime has no provider API key and no network
-   route. Model calls are performed *by the kernel*, which injects the credential and
-   meters the response. An agent cannot make an unmetered model call because it cannot
-   make a model call at all.
-2. **Privacy routing is enforced, not intended.** "This repository may not be sent to a
-   non-local provider" is checked at the egress point that holds the credential, so a
-   mis-planning or manipulated router cannot leak it.
-3. **Approval prompts cannot be phished.** What a human is asked to approve is rendered
-   from the kernel's canonicalised request — resolved paths, resolved IPs, hashed
-   argv — never from model-authored prose describing what it intends to do.
-
-## Non-negotiable invariants
-
-| # | Invariant | Enforced by | Status |
-|---|-----------|-------------|--------|
-| I1 | No side effect occurs without a kernel-verified capability token | Kernel; runtime has no other path | IMPLEMENTED for every effect that exists (M4); the runtime that must have no other path is M9 |
-| I2 | `child_capabilities ⊑ parent_capabilities` — delegation only attenuates | Capability Broker lattice check | IMPLEMENTED (M3b); subagents M14 |
-| I3 | The Cognition Plane never receives plaintext long-lived credentials | Secret Broker | IMPLEMENTED for secret handles (M4e); model keys M7 |
-| I4 | Every authority decision is explainable: rule id, file, line | Policy Engine | IMPLEMENTED (M3c) |
-| I5 | Untrusted provenance cannot be laundered into durable memory without a human | Kernel-held provenance + promotion gate; **backstopped by I9** | PLANNED (M13) |
-| I6 | Approvals bind to canonical actions and are single-use by default | Approval Registry | PLANNED (M6); until then an approval-requiring action is denied |
-| I7 | Default-deny network, default-deny filesystem, default-deny execution | Kernel defaults | IMPLEMENTED for filesystem and execution (M4) and for the two network paths that exist: a `PROXY_ONLY` environment reaches only its run's granted HTTPS origins (M5b), and `net.http` only a granted host (M5c) |
-| I8 | Budgets are reservations debited from a parent, never per-agent grants | Budget Ledger | PLANNED (M6) |
-| I9 | Memory and context can never alter authority — they are not terms in any capability or policy expression | Structural: the mint formula and rule files do not read them | IMPLEMENTED structurally (M3); memory itself M13 |
-| I10 | Every policy input is derived and stored kernel-side | Kernel; `runtime.db` copies are caches | IMPLEMENTED (M3d) |
 
 ## Licence
 

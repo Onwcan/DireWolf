@@ -307,7 +307,7 @@ later step, M5e or M5 said complete, M5e.6 begun, or `M5e` or `M5` available --
 each with a negative control; and M5e.6 said in progress only while the plan's §10
 records its implementation (2026-11-09).
 `tests/architecture/test_ci_m5e_gate.py` holds M5e.6's gate. G1 and G1b: each task of
-the gate (`M5E_GATE_TASKS`, thirteen) is one job, which right after its last evidence
+the gate (`M5E_GATE_TASKS`, fourteen since M5e.5's acceptance) is one job, which right after its last evidence
 run seals and uploads its own task's directory with the one pinned upload action, kept
 7 days, under no `if:`; a task keeps exactly what its judge passed, and its census, only
 after it returned; a bundle is sealed only on a disposable GitHub-hosted runner, for the
@@ -317,8 +317,10 @@ bundles with the one pinned download action; `m5e_gate_verdict` refuses a missin
 extra or foreign bundle, another run, commit, later attempt or runner kind, a changed
 byte, a case not reported, mis-levelled, mis-attributed or NOT EXERCISED, an unexpected
 judgement, a missing census and an incomplete inventory, over synthetic bundles; the
-M5e acceptance verdict is NOT READY today and READY only with every acceptance. G3: the
-`m5e-gate` eval is pending and runs only in that job (`evals/tests/test_m5e.py`) --
+M5e acceptance verdict is READY only with every acceptance, as it has been since
+2026-11-11. G3: the `m5e-gate` eval, pending until `M5e` was available, runs only in
+that job and passes only on READY, and `pending-kernel/sandbox-egress` reads the same
+gate's judgement of the egress and agent evidence (`evals/tests/test_m5e.py`) --
 each with a negative control.
 `tests/architecture/test_m5e_e6.py` holds E6 itself (ADR-0058): its required,
 hosted-only job and flag; the test's rows equal to the task's and covering every
@@ -506,10 +508,12 @@ What it runs there:
   and digest within the broker's 64 MiB copy bound, the image built offline `FROM scratch`,
   every version read back from inside it, any mismatch failing closed.
 - `crates/dwkd-authority/tests/sandbox_registry.rs`: a real DWKP client on the released
-  `serve --sandbox-config` runs pip, as it is today, in a fresh measured `PROXY_ONLY`
+  `serve --sandbox-config` runs pip under its accepted profile (ADR-0055, since
+  2026-11-11), started by its launcher, in a fresh measured `PROXY_ONLY`
   environment per case against the fixtures (generated with the origins' fixed ports,
   `--granted-port` and `--ungranted-port`, served by `origin.py --routes --port`), and asks
-  for `npm install` and `npm ci`, which the authority refuses before any environment.
+  for `npm install` and `npm ci` with an argument npm's accepted profile refuses
+  (ADR-0054 §3), which the authority refuses before any environment.
   Every line is attributed at `dwkp-end-to-end`.
 - `tests/sandbox/registry_inspect.py` reads what pip left inside the environment and
   holds it, on the host, to the fixture's wheels byte for byte.
@@ -523,6 +527,21 @@ What holds it, in `make test` on every platform:
   checks failing closed; and the contract refusing a dropped case, a wrong level, a missing
   or wrong attribution, and an outcome that hides what it shows — each with its negative
   control.
+
+**The hygiene evidence (M5e.5)** is evidence, and hosted only
+([ADR-0054](../docs/adr/0054-m5e-npm-hygiene-profile.md) §8,
+[ADR-0055](../docs/adr/0055-m5e-pip-hygiene-profile.md) §9). `make sandbox-hygiene-evidence`
+refuses before anything unless `DW_HYGIENE_EVIDENCE=1` on a disposable GitHub-hosted
+runner — the required `sandbox-hygiene` job — so it is NOT EXERCISED locally, never a pass.
+There it builds two images from the registry tools image's checked rootfs, one with the
+run's anchor at both trust paths and one without, each with hostile configuration of its
+own, and `crates/dwkd-authority/tests/sandbox_hygiene.rs` drives the released authority and
+broker through every case ADR-0054 and ADR-0055 require by name, each in a fresh measured
+`PROXY_ONLY` environment and workspace. `make sandbox-registry-mutations` is its mutation
+review, a manual workflow: every hosted mutant must be killed by that evidence, and only
+after the evidence passed unmutated in the same job. `tests/architecture/test_ci_sandbox_hygiene.py`
+holds the job required, every case tied to its ADR and the evidence-only option gone, each
+with a negative control.
 
 **Brokered `fs.read` tests (M4b)** are real-process evidence for the private
 channel ([ADR-0043](../docs/adr/0043-m4b-private-broker-channel-and-brokered-fs-read.md)):

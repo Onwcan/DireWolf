@@ -40,8 +40,8 @@ enum AssuranceLevel { None, ProcessIsolation, ContainerIsolation, VmIsolation }
 
 | Implementation | Assurance | Status |
 |---|---|---|
-| `oci` (Docker/Podman) | `ContainerIsolation` | **V1 default** |
-| `local` | `None` | V1, opt-in, loud |
+| `oci` (Docker/Podman) | `ContainerIsolation` | **V1 default** — built and measured (M5, complete 2026-11-11) |
+| `local` | `None` | V1, opt-in, loud — deferred to M6 ([ADR-0052](adr/0052-m5d-sandboxed-process-exec.md) OD-7) |
 | `ssh` | — | **Removed from the trait's design set.** |
 | `microvm` (Firecracker / Kata / gVisor) | — | **Removed from the trait's design set.** |
 

@@ -5422,7 +5422,7 @@ REGISTRY_CASES = tuple(
         "registry-pip-direct-route-refused",
         "registry-pip-direct-by-name-unresolved",
         "registry-pip-untrusted-issuer-refused",
-        "registry-pip-sdist-built-today",
+        "registry-pip-sdist-never-built",
         "registry-pip-pth-not-run-by-install",
         "registry-pip-pth-runs-at-a-later-start",
         "registry-intent-names-only-the-granted-registry",
@@ -5448,7 +5448,7 @@ REGISTRY_OUTCOMES = {
     "registry-pip-direct-route-refused": "refused:nothing-installed",
     "registry-pip-direct-by-name-unresolved": "refused:nothing-installed",
     "registry-pip-untrusted-issuer-refused": "refused:nothing-installed",
-    "registry-pip-sdist-built-today": "built-today:backend-marker-present",
+    "registry-pip-sdist-never-built": "not-built:backend-marker-absent",
     "registry-pip-pth-not-run-by-install": "not-run:pth-marker-absent",
     "registry-pip-pth-runs-at-a-later-start": "runs-later:pth-marker-present",
     "registry-intent-names-only-the-granted-registry": "granted:",
@@ -5508,8 +5508,10 @@ def registry_census_problems(
 
 def task_sandbox_registry_evidence() -> None:
     """M5e.4's evidence (M5E_ASSURANCE_PLAN.md §§6, 8), hosted only: pip as
-    it is today against M5e.3's fixture registries, and npm refused before
-    anything is prepared.
+    it is today -- under its profile since ADR-0055's acceptance, from an
+    image that carries its trust file -- against M5e.3's fixture
+    registries, and npm refused before anything is prepared when its
+    profile refuses an argument.
 
     Anywhere but a disposable GitHub-hosted runner this refuses before
     anything is fetched or built: NOT EXERCISED, which fails. There, the
@@ -5534,7 +5536,28 @@ def task_sandbox_registry_evidence() -> None:
     pins = load_registry_pins()
     client, socket, variables, before, networks, images = _registry_setup(pins)
     os.environ.update(variables)
+    # pip runs under its profile (ADR-0055): the run's anchor in the image
+    # at its trust path, pip by its launcher -- the hygiene evidence's image,
+    # built from the registry tools image's rootfs. The suite's origins take
+    # their certificates from the same PKI.
+    work = Path(os.environ.get("DW_REGISTRY_WORK", str(Path.home() / ".cache" / "dw-m5e4")))
+    pki = work / "registry-pki"
+    shutil.rmtree(pki, ignore_errors=True)
+    run("bash", "tests/net_http/make-pki.sh", str(pki))
+    minor = ".".join(pins["python"]["version"].split(".")[:2])
     try:
+        made, hygiene = _hygiene_images(
+            client, socket, work / "images" / "registry", pki, "linux/amd64", minor
+        )
+        images += made
+        os.environ.update(
+            {
+                "DW_REGISTRY_IMAGE": hygiene["DW_HYGIENE_IMAGE"],
+                "DW_REGISTRY_PKI": str(pki),
+                "DW_REGISTRY_PIP": hygiene["DW_HYGIENE_PIP"],
+                "DW_REGISTRY_PIP_SHA256": hygiene["DW_HYGIENE_PIP_SHA256"],
+            }
+        )
         system = _docker(client, socket, "info", "--format", "{{.OperatingSystem}}")
         if "Docker Desktop" in system:
             raise TaskError(f"NOT EXERCISED: the runtime is {system.strip()}, not a runner's")
@@ -8692,7 +8715,7 @@ ATTRIBUTION: dict[str, tuple[tuple[str, str, str | tuple[str, ...]], ...]] = {
         ("registry-pip-direct-route-refused", _DWKP, "topology-no-route"),
         ("registry-pip-direct-by-name-unresolved", _DWKP, "topology-no-resolver"),
         ("registry-pip-untrusted-issuer-refused", _DWKP, "workload-tls-verification"),
-        ("registry-pip-sdist-built-today", _DWKP, "residual-contained-by-the-environment"),
+        ("registry-pip-sdist-never-built", _DWKP, "hygiene-launcher"),
         ("registry-pip-pth-not-run-by-install", _DWKP, "workload-effects-measured"),
         ("registry-pip-pth-runs-at-a-later-start", _DWKP, "residual-contained-by-the-environment"),
         ("registry-intent-names-only-the-granted-registry", _DWKP, "authority-audit"),

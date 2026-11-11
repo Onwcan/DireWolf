@@ -1,7 +1,9 @@
 //! M5e.4's registry evidence (`docs/M5E_ASSURANCE_PLAN.md` §§6, 8; the
-//! handoff, `docs/M5E4_IMPLEMENTATION_HANDOFF.md`): **pip as it is today**
-//! against M5e.3's fixture registries, and **npm refused** before anything is
-//! prepared -- run the way a runtime runs a workload: a real DWKP client on
+//! handoff, `docs/M5E4_IMPLEMENTATION_HANDOFF.md`): **pip as it is today** --
+//! under its profile since ADR-0055's acceptance (2026-11-11) -- against
+//! M5e.3's fixture registries, and **npm refused** before anything is prepared
+//! when an argument its profile refuses is given (ADR-0054 §3) -- run the way
+//! a runtime runs a workload: a real DWKP client on
 //! the **released** `dwkd-authority serve --sandbox-config`, the **released**
 //! `dwkd-broker`, the runner's Docker Engine, and a fresh measured `PROXY_ONLY`
 //! environment for every pip case.
@@ -17,11 +19,13 @@
 //! * The **tools** are not: the registry tools image's pinned CPython, pip,
 //!   Node.js and npm, each archive checked against its recorded SHA-256 before
 //!   the image was built (`make sandbox-registry-evidence`, on the runner).
-//! * **pip's trust** is pip's own, as today: the run's anchor sits in the
-//!   workspace and pip is given it as an argument (`--cert`), as the agent
-//!   evidence's client is. No image configuration or launcher variable says
-//!   anything to pip; pip keeps its own bundled roots too, none of which any
-//!   name here reaches.
+//! * **pip's trust** is its profile's (ADR-0055 §5): the task's run anchor in
+//!   the image at `/etc/direwolf/pip-ca.pem`, the image built by the hygiene
+//!   evidence's own builder, and pip started by its launcher, which pins it.
+//!   Until the profile's acceptance (run 42908907916 caught it) this suite ran
+//!   `python -m pip` with the anchor as `--cert`, both of which the profile now
+//!   refuses. The direct-route cases still run pip inside the interpreter's own
+//!   program, with the anchor in the workspace.
 //! * The **boundary** is not a fixture: the authority's gates, obligation and
 //!   ledger, the operator's file, the environment's measurement, the namespace,
 //!   the relay, the CONNECT proxy's grant, the release's teardown.
@@ -32,9 +36,10 @@
 //! errno pip's own connection got; pip's **own** TLS verification, which is the
 //! workload's and not DireWolf's; the authority's obligation, by the decision
 //! it sent; and what pip did and did not do, measured in the workspace. Where
-//! pip runs code today -- a source distribution's build backend at install, a
-//! `.pth` file at a later interpreter's start -- the line says so: a residual
-//! the environment contains, never one neutralised.
+//! pip still runs code -- a `.pth` file at a later interpreter's start -- the
+//! line says so: a residual the environment contains, never one neutralised. A
+//! source distribution's build backend, which pip ran before its profile, it
+//! never runs now (`registry-pip-sdist-never-built`).
 //!
 //! **The proxy's count includes the boundary measuring itself.** Every
 //! measurement of a `PROXY_ONLY` environment asks its proxy for a name no
@@ -401,6 +406,9 @@ mod linux {
         pip_version: String,
         npm: String,
         npm_sha: String,
+        pip: String,
+        pip_sha: String,
+        pki: PathBuf,
     }
 
     impl Pins {
@@ -417,6 +425,9 @@ mod linux {
                 pip_version: var("DW_REGISTRY_PIP_VERSION"),
                 npm: var("DW_REGISTRY_NPM"),
                 npm_sha: var("DW_REGISTRY_NPM_SHA256"),
+                pip: var("DW_REGISTRY_PIP"),
+                pip_sha: var("DW_REGISTRY_PIP_SHA256"),
+                pki: PathBuf::from(var("DW_REGISTRY_PKI")),
             }
         }
     }
@@ -770,7 +781,7 @@ id = "{RULE}"
 effect = "ALLOW"
 when.verb = "process.exec"
 when.environment = "sandbox"
-when.executable_in = ["{python}@{python_sha}", "{npm}@{npm_sha}"]
+when.executable_in = ["{python}@{python_sha}", "{npm}@{npm_sha}", "{pip}@{pip_sha}"]
 obligations = ["workspace_exec_hygiene", "max_output_bytes=262144"]
 
 [[rule]]
@@ -796,6 +807,8 @@ reason = "NO_MATCHING_RULE"
             python_sha = pins.python_sha,
             npm = pins.npm,
             npm_sha = pins.npm_sha,
+            pip = pins.pip,
+            pip_sha = pins.pip_sha,
         )
     }
 
@@ -813,7 +826,8 @@ reason = "NO_MATCHING_RULE"
                 stores: Mutex::new(BTreeSet::new()),
             };
             let dir = TempDir::new(tag);
-            let pki = super::net_support::pki(dir.path());
+            // The task's PKI: its anchor is the image's pip trust file.
+            let pki = pins.pki.clone();
 
             // The fixtures, generated for this run's fixed ports; their
             // markers name the environment's workspace.
@@ -935,6 +949,7 @@ reason = "NO_MATCHING_RULE"
                      max_upload_bytes = {MAX_UPLOAD}\nmax_download_bytes = {MAX_DOWNLOAD}\n\
                      [budget]\nworkloads = 60\nseconds = 7200\n\
                      [executables]\n\"{python}\" = \"{python_sha}\"\n\"{npm}\" = \"{npm_sha}\"\n\
+                     \"{pip}\" = \"{pip_sha}\"\n\
                      [workspace]\nunverified_evidence = true\n",
                     runtime = pins.runtime,
                     socket = pins.socket,
@@ -945,6 +960,8 @@ reason = "NO_MATCHING_RULE"
                     python_sha = pins.python_sha,
                     npm = pins.npm,
                     npm_sha = pins.npm_sha,
+                    pip = pins.pip,
+                    pip_sha = pins.pip_sha,
                 ),
             )
             .unwrap();
@@ -1200,16 +1217,18 @@ reason = "NO_MATCHING_RULE"
             report
         }
 
-        /// pip, as it is today, installing `args` into a target of its own:
-        /// no cache, no compiled files, no retry, the run's anchor as its
-        /// trust, every connection attempt in its output. `direct` removes
-        /// its proxy variables first.
+        /// pip, as it is today -- started by its launcher under its profile
+        /// (ADR-0055), which adds its prefix and pins its trust -- installing
+        /// `args` into a target of its own: no cache, no compiled files, no
+        /// retry, every connection attempt in its output. `direct` instead
+        /// runs pip inside the interpreter's own program, which removes its
+        /// proxy variables first and is given the run's anchor itself.
         fn pip(&self, peer: &mut Peer, target: &str, direct: bool, args: &[&str]) -> Ran {
             let target = format!("{TARGETS}/{target}");
             let mut words: Vec<&str> = if direct {
                 vec!["-I", "-c", DIRECT]
             } else {
-                vec!["-I", "-m", "pip"]
+                Vec::new()
             };
             words.extend_from_slice(&[
                 "install",
@@ -1222,13 +1241,33 @@ reason = "NO_MATCHING_RULE"
                 "--timeout",
                 "30",
                 "-vv",
-                "--cert",
-                ANCHOR,
-                "--target",
-                &target,
             ]);
+            if direct {
+                words.extend_from_slice(&["--cert", ANCHOR]);
+            }
+            words.extend_from_slice(&["--target", &target]);
             words.extend_from_slice(args);
-            self.python(peer, &words)
+            if direct {
+                self.python(peer, &words)
+            } else {
+                self.profiled_pip(peer, &words)
+            }
+        }
+
+        /// pip by its own identity, under its profile: the launcher's pip,
+        /// pinned by digest in the manifest and the policy.
+        fn profiled_pip(&self, peer: &mut Peer, args: &[&str]) -> Ran {
+            let body = peer.exec(&self.pins.pip, args);
+            assert!(
+                matches!(body, DwkpBody::ToolResultV5(_)),
+                "pip did not run: {body:?}\nthe broker's last events:\n{}",
+                self.last_events()
+            );
+            let mut ran = Ran::of(&body);
+            assert_eq!(ran.image, self.pins.image);
+            assert_eq!(ran.sha256, self.pins.pip_sha);
+            ran.invocation = args.join(" ");
+            ran
         }
 
         /// What a target holds, read inside the environment (pip's files are
@@ -1779,8 +1818,10 @@ reason = "NO_MATCHING_RULE"
             "workload-tls-verification",
         );
 
-        // A source distribution: pip runs its build backend at install,
-        // today. Its marker is written; the build fails; nothing installs.
+        // A source distribution: under its profile pip installs wheels only
+        // (ADR-0055 §2), so it finds nothing it may install and never runs
+        // the build backend. Before the profile it did (this case was
+        // `registry-pip-sdist-built-today`, a gap stated, not hidden).
         let sdist = lab.project("sdist");
         let backend = lab.marker("pip-build-backend");
         assert!(!backend.exists(), "the backend's marker predates the case");
@@ -1798,20 +1839,25 @@ reason = "NO_MATCHING_RULE"
             lab.why("pip succeeded where it must fail", Some(&ran), None)
         );
         assert!(
-            backend.exists(),
+            ran.said("No matching distribution found"),
             "{}",
-            lab.why("the build backend did not run", Some(&ran), None)
+            lab.why("not pip's binary-only refusal", Some(&ran), None)
+        );
+        assert!(
+            !backend.exists(),
+            "{}",
+            lab.why("the build backend ran", Some(&ran), None)
         );
         lab.container(&a.run);
         lab.nothing(&mut a, "sdist");
         lab.release(&mut a, &ran.environment);
         evidence(
-            "registry-pip-sdist-built-today",
+            "registry-pip-sdist-never-built",
             &format!(
-                "built-today:backend-marker-present;nothing-installed;exit-{:?}",
+                "not-built:backend-marker-absent;nothing-installed;exit-{:?}",
                 ran.exit
             ),
-            "residual-contained-by-the-environment",
+            "hygiene-launcher",
         );
 
         // A wheel carrying a `.pth`: installed, not run by the install -- and
@@ -1891,7 +1937,12 @@ reason = "NO_MATCHING_RULE"
         );
     }
 
-    // ---- npm, refused ---------------------------------------------------------
+    // ---- npm, refused when its profile refuses an argument ---------------------
+    //
+    // Before ADR-0054's acceptance npm was refused outright; since, it is kept
+    // under its profile (M5e.5's suite), and these invocations are refused
+    // because they name `--prefix`, which the profile refuses (§3): still
+    // before any environment, workload, container or request.
 
     #[test]
     #[ignore = "hosted only: make sandbox-registry-evidence on a disposable GitHub-hosted runner"]

@@ -10,10 +10,12 @@ implementing M5e.5 ([the plan's §10](M5E_ASSURANCE_PLAN.md), "M5e.5's sequencin
 implemented as recommended and listed for the owner's review; §10's steps are under way behind
 the evidence-only option; nothing joins a required job before M5e.4's repair passes hosted. This
 document stays the record of the preparation.\
+**Status (2026-11-11):** **COMPLETE.** M5e.5 was implemented, evidenced on the manual workflow's third run (42879630675) and accepted with ADR-0054 and ADR-0055 ([M5E5_IMPLEMENTATION_HANDOFF.md](M5E5_IMPLEMENTATION_HANDOFF.md) §15); the status lines above are history.\
 **Authority of this document:** a technical handoff, not an ADR. It approves nothing.
 [ADR-0054](adr/0054-m5e-npm-hygiene-profile.md) and
-[ADR-0055](adr/0055-m5e-pip-hygiene-profile.md) stay **Proposed**, and npm stays
-`HYGIENE_NOT_EVIDENCED`.
+[ADR-0055](adr/0055-m5e-pip-hygiene-profile.md) stayed **Proposed**, and npm
+`HYGIENE_NOT_EVIDENCED`, until both were accepted on 2026-11-11
+([M5E_ASSURANCE_PLAN.md](M5E_ASSURANCE_PLAN.md) §10).
 
 ## 1. What is authorised, and what is not
 

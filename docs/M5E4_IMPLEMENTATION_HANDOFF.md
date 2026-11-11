@@ -20,8 +20,9 @@ accounting is repaired, unstaged; nothing in production changed.\
 **Status (2026-11-09):** **COMPLETE.** M5e.4 was accepted on runs 134–137, with the OD-E4 mechanism as built ([M5E_ASSURANCE_PLAN.md](M5E_ASSURANCE_PLAN.md) §10, "M5e.4's acceptance"); §13 records it.\
 **Authority of this document:** a technical handoff, not an ADR. It approves nothing.
 [ADR-0054](adr/0054-m5e-npm-hygiene-profile.md) and
-[ADR-0055](adr/0055-m5e-pip-hygiene-profile.md) stay **Proposed**, and npm stays
-`HYGIENE_NOT_EVIDENCED`.
+[ADR-0055](adr/0055-m5e-pip-hygiene-profile.md) stayed **Proposed**, and npm
+`HYGIENE_NOT_EVIDENCED`, until both were accepted on 2026-11-11
+([M5E_ASSURANCE_PLAN.md](M5E_ASSURANCE_PLAN.md) §10).
 
 ## 1. Before anything starts
 

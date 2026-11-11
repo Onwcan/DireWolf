@@ -12,19 +12,24 @@ claims, why the boundary is where it is, what it does not defend against — is
 
 ---
 
-## Current status: no runtime exists
+## Current status: an authority plane, no agent runtime
 
-The repository is at milestone **M1**, the repository foundation. There is no
-kernel, no policy engine, no sandbox and no agent loop; the daemons build and
-refuse to run. **There is nothing here to attack yet**, and correspondingly
-nothing here that should be trusted.
+The repository is through milestone **M5** ([ROADMAP](docs/ROADMAP.md)). The
+authority plane exists and serves on Linux: the kernel's policy engine,
+capabilities and audit chain; the filesystem, process and secret brokers; and
+the sandbox — measured `oci-strict` execution environments, `PROXY_ONLY` egress
+through the broker's CONNECT proxy, and the kernel's own `net.http`. There is
+**no agent loop, no model provider and no approval flow** yet, so nothing here
+should be trusted as an agent runtime.
 
-In particular: the architecture boundary checks in `architecture.toml` are
-static analysis over source text. They are development hygiene. They are not
-containment, and a passing check is not evidence of any security property.
+The architecture boundary checks in `architecture.toml` are static analysis
+over source text. They are development hygiene. They are not containment, and
+a passing check is not evidence of any security property; the evidence is the
+`make` campaigns and hosted CI jobs the [README](README.md) lists.
 
-Reports about the build system, CI configuration or supply chain are in scope
-now. Reports about the runtime will become meaningful from M3.
+Reports about the authority, the brokers and the sandbox are in scope now, as
+are reports about the build system, CI configuration and supply chain. Reports
+about the agent runtime will become meaningful when it exists (M9).
 
 ## In scope
 

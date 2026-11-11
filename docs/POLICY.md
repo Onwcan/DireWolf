@@ -273,7 +273,8 @@ read as "did not match".
 > decision on any reconnect — belongs to the network path, which M4 did not
 > build: M5's CONNECT proxy and kernel-performed `net.http`
 > ([ADR-0038](adr/0038-policy-evaluation-phases-and-composition.md) §7,
-> [NETWORK_SECURITY.md](NETWORK_SECURITY.md) §1). What M3d adds is the
+> [NETWORK_SECURITY.md](NETWORK_SECURITY.md) §1), both built since (M5b, M5c), each
+> pinning the address it judged for one tunnel or one request. What M3d adds is the
 > evidence M4 will need: a decision about an action carrying a destination
 > address records that address in its audit record
 > ([ADR-0039](adr/0039-durable-authority-state.md) §12). It binds nothing.

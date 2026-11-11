@@ -6,6 +6,7 @@
 **Status (as written):** Planning handoff only. M5d.5 NOT IMPLEMENTED. No M5d.5 evidence executed.  
 **Status (2026-10-23):** **Implemented on `0cc1fcc`; one-identity evidence passing locally; awaiting the owner's commit and hosted CI** -- see §11. The plan below is kept as it was written.  
 **Status (2026-10-25):** **Hosted CI green on `49bb8f8`** ([run 40134163102](https://github.com/Onwcan/DireWolf/actions/runs/40134163102), 26 of 26 jobs): the evidence is verified, the three-identity half included -- see §12. OD-5 is still the owner's; ADR-0052 stays **Proposed**.\
+**Status (2026-10-26):** **COMPLETE.** M5d closed with ADR-0052's acceptance on 2026-10-26, M5d.5's evidence among its required hosted jobs ([ROADMAP.md](ROADMAP.md), M5d); the status lines above are history.\
 **Authority of this document:** Technical plan, not an Accepted ADR; it does not approve any open owner decision.
 
 ## 1. Milestone boundary and source of truth

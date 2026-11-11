@@ -22,8 +22,10 @@ three of five and found that ADR-0054's profile kept npm from starting at all
 no run has yet passed.\
 **Authority of this document:** a technical handoff, not an ADR. It approves nothing.
 [ADR-0054](adr/0054-m5e-npm-hygiene-profile.md) and
-[ADR-0055](adr/0055-m5e-pip-hygiene-profile.md) stay **Proposed**. In every production
-configuration npm stays `HYGIENE_NOT_EVIDENCED` and pip keeps today's treatment.
+[ADR-0055](adr/0055-m5e-pip-hygiene-profile.md) stayed **Proposed** until
+2026-11-11, and until then npm stayed `HYGIENE_NOT_EVIDENCED` and pip kept its earlier
+treatment in every production configuration; both are accepted now, and the profiles
+are the obligation (§15).
 
 ## 1. What was authorised
 

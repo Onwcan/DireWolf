@@ -13,6 +13,7 @@ it starts no step of M5e.6.\
 **Status (2026-11-11, closed):** M5e.5 was accepted on manual run 42879630675, and G5 and G6
 land with that acceptance in one change (§16): the gate requires `sandbox-hygiene-evidence`,
 nothing is left not yet required, `M5e` and `M5` are available, and `pending-kernel/sandbox-egress` has its runner. **M5e.6 is COMPLETE**, on that change's CI run.\
+**Status (2026-11-11, final check):** that change's CI run, [42908907916](https://github.com/Onwcan/DireWolf/actions/runs/42908907916) (no. 156), failed in `sandbox-registry` alone, so the `m5e-gate` job did not run; the registry suite is repaired ([M5E_ASSURANCE_PLAN.md](M5E_ASSURANCE_PLAN.md) §10, "M5's final check"), and the repair's CI run is the first in which the gate judges all fourteen bundles.\
 **Authority of this document:** a technical handoff, not an ADR. It approves nothing, and every
 choice in it is a recommendation for the owner.
 
