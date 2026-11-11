@@ -156,7 +156,7 @@ below).**
 **Adversarial:** the full path-traversal set ([EVALS.md](EVALS.md) §3) including Unicode normalisation and TOCTOU swap races in a tight loop; secret-in-output detection; core-dump inspection for secret residue.
 **Deferred:** remote fs, Windows-native hardening beyond the fallback walker.
 
-### M5 · Sandbox — **COMPLETE** (2026-11-11, accepted with its closing change, whose CI run's one failure, `sandbox-registry`, is repaired, the repair's run its final hosted check; M5a complete (2026-10-04), hosted acceptance passed; M5b complete (2026-10-06), hosted acceptance passed; M5c complete (2026-10-11), ADR-0050 accepted, hosted acceptance passed; M5d complete (2026-10-26), ADR-0052 accepted, hosted acceptance passed; M5e complete (2026-11-11): M5e.1 complete (2026-10-29), hosted run 40774766063; M5e.2 complete (2026-11-09) — R8, R9 and R11 hosted-verified, ADR-0056 accepted 2026-11-01; R3's real-container level, required by R-B on ADR-0057, hosted-verified at `14405ab` (run 42525106398), ADR-0059 and ADR-0058 accepted 2026-11-09, ADR-0057 superseded; M5e.3 complete (2026-11-05); M5e.4 complete (2026-11-09), hosted-verified and accepted; M5e.5 complete (2026-11-11), ADR-0054 and ADR-0055 accepted on manual run 42879630675; M5e.6 complete (2026-11-11), the M5 gate required and `M5e` and `M5` available)
+### M5 · Sandbox — **COMPLETE** (2026-11-11, accepted with its closing change and confirmed by CI run 158 at `ecde765`, 33 of 33 jobs; M5a complete (2026-10-04), hosted acceptance passed; M5b complete (2026-10-06), hosted acceptance passed; M5c complete (2026-10-11), ADR-0050 accepted, hosted acceptance passed; M5d complete (2026-10-26), ADR-0052 accepted, hosted acceptance passed; M5e complete (2026-11-11): M5e.1 complete (2026-10-29), hosted run 40774766063; M5e.2 complete (2026-11-09) — R8, R9 and R11 hosted-verified, ADR-0056 accepted 2026-11-01; R3's real-container level, required by R-B on ADR-0057, hosted-verified at `14405ab` (run 42525106398), ADR-0059 and ADR-0058 accepted 2026-11-09, ADR-0057 superseded; M5e.3 complete (2026-11-05); M5e.4 complete (2026-11-09), hosted-verified and accepted; M5e.5 complete (2026-11-11), ADR-0054 and ADR-0055 accepted on manual run 42879630675; M5e.6 complete (2026-11-11), the M5 gate required and `M5e` and `M5` available)
 
 M5 is two products in one (a sandbox *and* an egress proxy), so it is decomposed like M4
 ([ADR-0047](adr/0047-m5a-oci-execution-environment-and-measured-assurance.md)). The
@@ -836,7 +836,13 @@ among them: the gate judged all fourteen bundles again, its acceptance verdict R
 both of its evaluations passing, so **the M5 gate is hosted-verified**. The two failures
 were `dependencies`, on RUSTSEC-2026-0486 -- an advisory against `rustix` 1.1.5 that run
 156's `dependencies` job had not reported, fixed by taking 1.1.6 -- and the `ci`
-aggregate with it, whose green waits for that fix's own run.
+aggregate with it. That fix, `ecde765`, ran as CI run
+[43024284921](https://github.com/Onwcan/DireWolf/actions/runs/43024284921) (no. 158) and passed
+**33 of 33 jobs**, `dependencies`, `sandbox-registry`, `sandbox-hygiene`, `m5e-gate` and
+the `ci` aggregate among them: the first fully green run of M5's closing state, and the
+condition M5 was accepted on, met. No manual run is needed: the hygiene evidence is the
+required `sandbox-hygiene` job, and nothing the mutation review mutates or runs has
+changed since the manual workflow's fourth run. **M5 is COMPLETE** (2026-11-11).
 
 **Deps:** M5a–M5d. **Deliverables:** the complete escape, SSRF and persistence suites as
 merge gates; weakened-profile closure for `PROXY_ONLY`; package-manager acceptance
