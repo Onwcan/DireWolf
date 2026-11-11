@@ -830,7 +830,13 @@ commit the manual workflow's fourth run, [42994561934](https://github.com/Onwcan
 passed: all 44 of M5e.5's cases, and the mutation review 36 of 36, with one equivalent
 mutant listed and not run. The repair's own CI run is M5's final hosted check, and the first
 in which the `m5e-gate` job judges all fourteen bundles (the plan's §10, "M5's final
-check").
+check"). That run, [43020312321](https://github.com/Onwcan/DireWolf/actions/runs/43020312321) (no. 157,
+`750f25f`), passed 31 of 33 jobs, `sandbox-registry`, `sandbox-hygiene` and `m5e-gate`
+among them: the gate judged all fourteen bundles again, its acceptance verdict READY and
+both of its evaluations passing, so **the M5 gate is hosted-verified**. The two failures
+were `dependencies`, on RUSTSEC-2026-0486 -- an advisory against `rustix` 1.1.5 that run
+156's `dependencies` job had not reported, fixed by taking 1.1.6 -- and the `ci`
+aggregate with it, whose green waits for that fix's own run.
 
 **Deps:** M5a–M5d. **Deliverables:** the complete escape, SSRF and persistence suites as
 merge gates; weakened-profile closure for `PROXY_ONLY`; package-manager acceptance

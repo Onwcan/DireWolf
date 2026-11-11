@@ -101,7 +101,14 @@ sha2 = { version = "=0.11.0", default-features = false }
 # RESOLVE_BENEATH | NO_SYMLINKS | NO_MAGICLINKS | NO_XDEV, `fstat`, `statat`,
 # `fstatfs`, `statx` and directory listing, all relative to held descriptors.
 # The feature is `fs = []` in rustix's manifest: it adds code, not crates.
-rustix = { version = "=1.1.5", default-features = false, features = ["std", "net", "time", "fs"] }
+#
+# 1.1.6 (2026-10-27), from the 1.1.5 ADR-0035 and ADR-0041 measured: the fix
+# for RUSTSEC-2026-0486 -- its extended-attribute functions marked bytes the
+# kernel never wrote as initialised when given a zero-length buffer. DireWolf
+# calls none of them; the fix is taken anyway: the gate is the advisory, not a
+# reachability argument. Same dependencies and features. Its `SO_PEERCRED`
+# read is 1.1.5's, a non-zero `Pid`, so ADR-0049's reason for `nix` stands.
+rustix = { version = "=1.1.6", default-features = false, features = ["std", "net", "time", "fs"] }
 
 # Unicode NFC for filesystem names (M4a, ADR-0042): whether a component is
 # already NFC, and whether a sibling directory entry normalises to the same

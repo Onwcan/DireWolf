@@ -105,12 +105,6 @@ acceptance evidence; this table summarises it.
 | M6–M18 · to V1.0 | ⏳ planned | — | Approvals and budgets (M6); model providers and egress (M7); storage and run state, the agent loop, tools, skills, context, artifacts, memory, subagents, the task graph and MCP (M8–M16); the CLI (M17); V1 hardening (M18) |
 | Post-V1 | ⏳ planned | — | Channels, a scheduler, a browser, plugins, a web UI and remote workers; interoperability with external coding agents, ACP first (M29, [ADR-0051](docs/adr/0051-external-agent-interoperability.md), Proposed) |
 
-> **M5's final check.** M5 was accepted on 2026-11-11 with its closing change. That
-> change's CI run failed in one job, `sandbox-registry`, whose M5e.4 suite still started
-> pip the way the newly accepted profile refuses; the suite has been brought under the
-> profile, and the repair's own CI run is M5's final hosted check
-> ([ROADMAP](docs/ROADMAP.md), M5e).
-
 **What that means in practice.** A client can connect to `dwkd-authority`, be admitted
 to a run, and ask the authority to read, list, search, stat, write, patch, move or delete
 files beneath an operator-bound workspace, each decided by both gates and audited. The
