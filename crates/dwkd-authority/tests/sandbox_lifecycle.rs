@@ -840,6 +840,22 @@ mod linux {
         }
     }
 
+    /// The capabilities a `run.admitted` record says were granted, as text.
+    fn granted_capabilities(admitted: &dwk_proto::json::Object) -> Vec<String> {
+        let Some(dwk_proto::json::Value::Array(grants)) = admitted.get("granted") else {
+            return Vec::new();
+        };
+        grants
+            .iter()
+            .filter_map(|grant| match grant {
+                dwk_proto::json::Value::Object(grant) => {
+                    text(grant, "capability").map(str::to_owned)
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
     #[test]
     #[ignore = "needs a real OCI runtime: make sandbox-egress-evidence"]
     fn a_proxy_only_environment_reaches_exactly_the_runs_https_hosts() {
@@ -852,6 +868,7 @@ mod linux {
         std::fs::write(
             &fixture,
             "resolve origin.example.com 127.0.0.1\nresolve api.example.com 127.0.0.1\n\
+             resolve methods.example.com 127.0.0.1\nresolve counted.example.com 127.0.0.1\n\
              allow 127.0.0.1\n",
         )
         .unwrap();
@@ -865,13 +882,21 @@ mod linux {
         let rt = lab.runtime.clone();
 
         // The run asks for one exact host on the origin's port, one exact
-        // host on 443, a wildcard, and plain HTTP.
+        // host on 443, a wildcard, and plain HTTP -- and for three grants
+        // that carry a constraint: two of hosts nothing else names, one of
+        // the destination its unconstrained grant already gives.
         let exact = format!("network.https:origin.example.com:{port}");
+        let methods = format!("network.https:methods.example.com:{port}?methods=GET");
+        let counted = format!("network.https:counted.example.com:{port}?max_requests=1");
+        let both = format!("network.https:origin.example.com:{port}?methods=GET&max_requests=1");
         let run = lab.admit_with(&[
             &exact,
             "network.https:github.com",
             "network.https:*.example.com",
             "network.http:*",
+            &methods,
+            &counted,
+            &both,
         ]);
         let (environment, container) = lab.ready(&run);
         let intent = audit_records(&lab.dir.state(), "environment.intent_recorded")
@@ -896,6 +921,25 @@ mod linux {
         egress_evidence(
             "grant-wildcard-and-plain-http-not-destinations",
             "absent",
+            "authority-grant-derivation",
+        );
+        // The three constrained grants were granted -- the admission's own
+        // record names each -- and none is a destination: an opaque tunnel
+        // could keep neither `methods` nor `max_requests` (ADR-0060). The
+        // origin's destination is there once, from its unconstrained grant.
+        let admitted = audit_records(&lab.dir.state(), "run.admitted")
+            .pop()
+            .unwrap();
+        let granted = granted_capabilities(&admitted);
+        for constrained in [&methods, &counted, &both] {
+            assert!(
+                granted.contains(constrained),
+                "{constrained} was not granted: {granted:?}"
+            );
+        }
+        egress_evidence(
+            "grant-constrained-https-not-destinations",
+            "granted-and-absent",
             "authority-grant-derivation",
         );
         egress_evidence(
@@ -942,6 +986,18 @@ mod linux {
         assert_eq!(accepted.load(Ordering::SeqCst), 1);
         egress_evidence(
             "wildcard-covered-name-not-granted",
+            "target-not-granted",
+            "connect-proxy:grant",
+        );
+        // Nor is a name only a constrained grant names: the proxy refuses it,
+        // and the origin that name resolves to is not reached.
+        for host in ["methods.example.com", "counted.example.com"] {
+            let line = exec(&["egress-connect", host, &p, host, "0"]);
+            assert!(line.contains("TARGET_NOT_GRANTED"), "{host}: {line}");
+        }
+        assert_eq!(accepted.load(Ordering::SeqCst), 1);
+        egress_evidence(
+            "constrained-grant-name-not-granted",
             "target-not-granted",
             "connect-proxy:grant",
         );

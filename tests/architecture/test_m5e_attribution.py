@@ -367,7 +367,9 @@ def test_every_required_case_is_attributed_and_every_rule_is_used() -> None:
     # manual: ADR-0054 §8's 22, ADR-0055 §9's 21, and the interpreter's way
     # around pip's profile (D4); and R3's E6 (ADR-0058), 18 on the hosted
     # runner: the control, ADR-0057 §1a's 15 rows in 16 cases, and their
-    # count. A smaller one is a lost case.
+    # count; and ADR-0060's 2, on a real runtime: a constrained grant absent
+    # from a PROXY_ONLY environment's destinations, and its name refused by
+    # the proxy. A smaller one is a lost case.
     assert len(dw.BROKER_ASSURANCE_CASES) == 20
     assert len(dw.CAPTURED_ASSURANCE_CASES) == 19
     closure = [c for s, c in dw.WORKLOAD_CASES if s == "sandbox-closure"]
@@ -387,7 +389,7 @@ def test_every_required_case_is_attributed_and_every_rule_is_used() -> None:
     assert len(dw.HYGIENE_PIP_CASES) == 21
     assert len(dw.HYGIENE_CASES) == 44
     assert len(dw.E6_CASES) == 18
-    assert len(inventory) == 645
+    assert len(inventory) == 647
 
 
 def test_the_vocabulary_is_closed_used_and_documented() -> None:

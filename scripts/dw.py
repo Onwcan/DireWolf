@@ -3098,9 +3098,11 @@ EGRESS_CASES = (
         for case in (
             "grant-from-run-exact-https",
             "grant-wildcard-and-plain-http-not-destinations",
+            "grant-constrained-https-not-destinations",
             "audit-intent-records-grant",
             "tunnel-through-authority-prepared-environment",
             "wildcard-covered-name-not-granted",
+            "constrained-grant-name-not-granted",
             "audit-measured-counters",
             "audit-destroyed-counters",
             "reconcile-helper-orphan-reaped",
@@ -8384,6 +8386,7 @@ ATTRIBUTION: dict[str, tuple[tuple[str, str, str | tuple[str, ...]], ...]] = {
         ("audit-destroyed-counters", _OCI, "authority-audit-at-destruction"),
         ("tunnel-through-authority-prepared-environment", _OCI, "relay-and-connect-proxy-grant"),
         ("wildcard-covered-name-not-granted", _OCI, "connect-proxy:grant"),
+        ("constrained-grant-name-not-granted", _OCI, "connect-proxy:grant"),
         ("reconcile-helper-orphan-reaped", _OCI, "authority-reconciliation"),
     ),
     # M5d.1-M5d.2: workloads the broker runs in its real environments.
@@ -9464,6 +9467,13 @@ AGENT_MUTATIONS = (
         "crates/dwkd-authority/src/sandbox.rs",
         "        if verb.namespace() != Namespace::Network || verb.action() != Action::Https {",
         "        if verb.namespace() != Namespace::Network {",
+    ),
+    # A constraint the opaque tunnel cannot keep (ADR-0060).
+    (
+        "a constrained network.https grant becomes a proxy destination",
+        "crates/dwkd-authority/src/sandbox.rs",
+        "        if !capability.constraints().is_empty() {",
+        "        if false && !capability.constraints().is_empty() {",
     ),
     (
         "an agent's launch is judged as a host action",

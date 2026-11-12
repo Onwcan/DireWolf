@@ -24,10 +24,12 @@
 //! [`SandboxConfig::proxy_only`]; `NO_NETWORK` remains the evidence
 //! harness's. The destinations a `PROXY_ONLY` environment may reach are not
 //! configuration: they are the run's own `network.https` grants, exactly
-//! ([`egress_targets`]).
+//! ([`egress_targets`]) -- those that carry no constraint, because an opaque
+//! tunnel can keep none ([ADR-0060], Proposed).
 //!
 //! [ADR-0047]: ../../../../docs/adr/0047-m5a-oci-execution-environment-and-measured-assurance.md
 //! [ADR-0048]: ../../../../docs/adr/0048-m5b-proxy-only-topology-and-connect-proxy.md
+//! [ADR-0060]: ../../../../docs/adr/0060-a-constrained-network-grant-gives-no-proxy-only-destination.md
 
 pub mod operator;
 
@@ -376,12 +378,26 @@ impl EgressConfig {
 }
 
 /// The destinations a run's grants give a `PROXY_ONLY` environment: every
-/// `network.https` capability whose host is **exact** — never a wildcard,
-/// never `*`, never an address literal, which the proxy could not compare
-/// with a TLS server name — on its port, or 443 when it names none. Nothing
-/// else becomes a destination: not `network.http` (no plain HTTP through the
-/// proxy), not `network.tcp` (no raw TCP). The probe's reserved name is never
-/// one.
+/// **unconstrained** `network.https` capability whose host is **exact** —
+/// never a wildcard, never `*`, never an address literal, which the proxy
+/// could not compare with a TLS server name — on its port, or 443 when it
+/// names none. Nothing else becomes a destination: not `network.http` (no
+/// plain HTTP through the proxy), not `network.tcp` (no raw TCP). The probe's
+/// reserved name is never one.
+///
+/// **A grant that carries a constraint gives nothing** ([ADR-0060],
+/// Proposed). `methods` and `max_requests` narrow what a grant allows of each
+/// request, and the proxy carries an opaque tunnel in which it sees no
+/// request: it could keep neither, so a tunnel made from such a grant would
+/// carry more than the grant allows. Each capability is judged alone — an
+/// unconstrained grant of the same destination still gives it, and nothing of
+/// one grant completes another. The test is "any constraint at all", not a
+/// list of the two a network verb can carry today, so a constraint added
+/// later gives nothing here until a decision says otherwise. Such a grant
+/// still authorises `net.http`, where the authority decides every request
+/// and keeps both.
+///
+/// [ADR-0060]: ../../../../docs/adr/0060-a-constrained-network-grant-gives-no-proxy-only-destination.md
 ///
 /// # Errors
 ///
@@ -394,6 +410,11 @@ pub fn egress_targets<'a>(
     for capability in capabilities {
         let verb = capability.verb();
         if verb.namespace() != Namespace::Network || verb.action() != Action::Https {
+            continue;
+        }
+        // No tunnel from a grant the proxy could not keep: it sees no
+        // request, so a constraint on requests would be dropped (ADR-0060).
+        if !capability.constraints().is_empty() {
             continue;
         }
         let Scope::Syntactic(SyntacticScope::Endpoint(endpoint)) = capability.scope() else {
@@ -1010,5 +1031,111 @@ mod tests {
             .map(|n| capability(&format!("network.https:h{n}.example.com")))
             .collect();
         assert_eq!(egress_targets(&many), Err("EGRESS_GRANT_TOO_LARGE"));
+    }
+
+    /// The destinations `granted` gives, as `host:port`, in order.
+    fn destinations(granted: &[crate::capability::Capability]) -> Vec<String> {
+        egress_targets(granted)
+            .unwrap()
+            .iter()
+            .map(|t| format!("{}:{}", t.host.as_str(), t.port.get()))
+            .collect()
+    }
+
+    #[test]
+    fn a_constrained_https_grant_is_no_destination() {
+        // The proxy carries an opaque tunnel and sees no request in it, so it
+        // can keep neither constraint: a grant that carries one gives nothing
+        // (ADR-0060) -- either constraint, both, on any port, however wide
+        // the constraint's own value is.
+        for text in [
+            "network.https:api.example.com?methods=GET",
+            "network.https:api.example.com?max_requests=5",
+            "network.https:api.example.com?methods=GET,HEAD&max_requests=5",
+            "network.https:api.example.com:8443?methods=GET",
+            "network.https:api.example.com:443?max_requests=1",
+            "network.https:api.example.com?methods=GET,HEAD,POST,PUT,PATCH,DELETE,OPTIONS",
+            "network.https:api.example.com?max_requests=4294967295",
+        ] {
+            let grant = capability(text);
+            // The grant is what was asked for, constraint and all.
+            assert_eq!(grant.to_canonical_string(), text);
+            assert!(!grant.constraints().is_empty(), "{text}");
+            assert!(destinations(&[grant]).is_empty(), "{text}");
+        }
+        // A run that holds only such grants has no destination at all: its
+        // environment's proxy refuses every name.
+        let only_constrained = [
+            capability("network.https:api.example.com?methods=GET"),
+            capability("network.https:files.example.com:8443?max_requests=3"),
+        ];
+        assert!(egress_targets(&only_constrained).unwrap().is_empty());
+    }
+
+    #[test]
+    fn an_unconstrained_grant_is_the_only_source_of_a_destination() {
+        // Each capability is judged alone. A constrained grant beside an
+        // unconstrained one of the same destination adds nothing and takes
+        // nothing away, in any order, and the destination is there once.
+        let unconstrained = capability("network.https:api.example.com");
+        let methods = capability("network.https:api.example.com?methods=GET");
+        let counted = capability("network.https:api.example.com:443?max_requests=5");
+        for granted in [
+            [unconstrained.clone(), methods.clone(), counted.clone()],
+            [methods.clone(), counted.clone(), unconstrained.clone()],
+            [methods.clone(), unconstrained.clone(), counted.clone()],
+        ] {
+            assert_eq!(destinations(&granted), ["api.example.com:443"]);
+        }
+        // Nothing of a constrained grant completes another: its port is not
+        // a destination because the same host is granted, unconstrained, on
+        // a different one.
+        let granted = [
+            capability("network.https:api.example.com:8443?methods=GET"),
+            capability("network.https:api.example.com:9443"),
+        ];
+        assert_eq!(destinations(&granted), ["api.example.com:9443"]);
+        // Several hosts: exactly the unconstrained ones, in the order granted.
+        let granted = [
+            capability("network.https:one.example.com"),
+            capability("network.https:two.example.com?methods=POST"),
+            capability("network.https:three.example.com:8443"),
+            capability("network.https:four.example.com:8443?max_requests=2"),
+        ];
+        assert_eq!(
+            destinations(&granted),
+            ["one.example.com:443", "three.example.com:8443"]
+        );
+    }
+
+    #[test]
+    fn a_constraint_never_makes_a_destination_of_what_was_not_one() {
+        // What gave nothing unconstrained gives nothing constrained: a
+        // wildcard, plain HTTP, raw TCP, an address literal and the probe's
+        // reserved name.
+        let granted = [
+            capability("network.https:*.example.org?methods=GET"),
+            capability("network.http:plain.example.com?methods=GET"),
+            capability("network.tcp:db.example.com:5432?max_requests=1"),
+            capability("network.https:10.0.0.1?methods=GET"),
+            capability("network.https:direwolf-probe.invalid?max_requests=1"),
+        ];
+        assert!(egress_targets(&granted).unwrap().is_empty());
+    }
+
+    #[test]
+    fn the_destination_bound_counts_destinations_not_constrained_grants() {
+        // 64 destinations are a whole grant. Constrained grants beside them
+        // are not destinations and are not counted; a 65th destination is
+        // still refused, never truncated.
+        let mut granted: Vec<_> = (0..64)
+            .map(|n| capability(&format!("network.https:h{n}.example.com")))
+            .collect();
+        granted.extend(
+            (0..8).map(|n| capability(&format!("network.https:c{n}.example.com?methods=GET"))),
+        );
+        assert_eq!(destinations(&granted).len(), 64);
+        granted.push(capability("network.https:h64.example.com"));
+        assert_eq!(egress_targets(&granted), Err("EGRESS_GRANT_TOO_LARGE"));
     }
 }

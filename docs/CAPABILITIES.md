@@ -146,6 +146,8 @@ Constraints are a **closed set of eight**, not an open key/value map:
 
 A closed enum with eight hand-written containment rules and eight named tests is strictly safer than a general typed lattice defended by property tests — **and it is the version that actually gets the Rust sum-type benefit the language decision was bought for.** An open `HashMap<Key, Value>` is precisely the shape exhaustive matching cannot protect, so the generality was the risk, not the mitigation. Adding a ninth constraint is an ADR note and a new variant; the compiler then finds every site that must handle it.
 
+**A network constraint is kept only where the authority sees the request.** `net.http` keeps `methods` and `max_requests` for every request it performs ([ADR-0050](adr/0050-m5c-kernel-performed-net-http-ssrf-redirects-and-credential-egress.md)). A `PROXY_ONLY` environment's tunnel is opaque, so a `network.https` grant that carries either gives a sandboxed workload no destination: only an unconstrained grant of an exact host does ([ADR-0060](adr/0060-a-constrained-network-grant-gives-no-proxy-only-destination.md), Proposed; [NETWORK_SECURITY.md](NETWORK_SECURITY.md) §2). A constraint narrows a grant on every path, or the path does not use the grant.
+
 Three consequences of "closed" that M3b had to decide, recorded because each is
 a real limitation rather than an implementation detail:
 
