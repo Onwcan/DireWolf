@@ -38,6 +38,7 @@ import hashlib
 import inspect
 import json
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -173,6 +174,55 @@ def test_the_task_refuses_before_anything_runs_off_a_disposable_runner(
         dw.e6_refusal({FLAG: "1", "GITHUB_ACTIONS": "true", "RUNNER_ENVIRONMENT": "github-hosted"})
         is None
     )
+
+
+def _variables_the_suite_reads() -> set[str]:
+    """Every variable the egress suite's `Evidence::load()` reads: each one it
+    finds unset fails the whole suite before anything is made."""
+    source = SUITE.read_text(encoding="utf-8")
+    load = source[source.index("        fn load() -> Self {") :]
+    load = load[: load.index("\n        }\n")]
+    names = set(re.findall(r'var\("([A-Z0-9_]+)"\)', load))
+    assert len(names) >= 8, names
+    return names
+
+
+def test_the_setup_sets_every_variable_the_egress_suite_reads(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """E6 runs the egress suite's test binary, so its own setup must set what
+    that suite reads. F-17 added the workload fixture's digest to
+    `Evidence::load()`; E6's setup did not set it, and hosted run 43431516555
+    failed before any environment was made. Held behaviourally: the setup is
+    run with its builds stubbed, and what it returns is compared."""
+    reads = _variables_the_suite_reads()
+    assert "DW_SANDBOX_FIXTURE_SHA256" in reads
+    release = tmp_path / "sandbox-static" / "x86_64-unknown-linux-gnu" / "release"
+    (release / "examples").mkdir(parents=True)
+    for rel in ("dwk-sandbox-probe", "dwk-sandbox-relay", "examples/sandbox_fixture"):
+        (release / rel).write_bytes(rel.encode("utf-8"))
+    work = tmp_path / "work"
+    work.mkdir()
+
+    class Built:
+        returncode = 0
+
+    monkeypatch.setattr(subprocess, "run", lambda *_a, **_k: Built())
+    monkeypatch.setattr(dw, "_static_elf", lambda _path: "static")
+    monkeypatch.setattr(dw, "_one_byte_changed", lambda _source, _target: 0)
+    monkeypatch.setattr(dw, "_build_image", lambda _c, _s, context, *_r: f"image-{context.name}")
+    server = {"Arch": "amd64", "Version": "test", "ApiVersion": "test"}
+    _, variables = dw._proxy_only_images(Path("docker"), "/socket", server, tmp_path, work)
+    assert reads <= set(variables), sorted(reads - set(variables))
+    fixture = (release / "examples" / "sandbox_fixture").read_bytes()
+    assert variables["DW_SANDBOX_FIXTURE_SHA256"] == hashlib.sha256(fixture).hexdigest()
+
+
+def test_the_egress_task_sets_every_variable_its_suite_reads() -> None:
+    """The other task that runs the egress suite sets them too."""
+    source = inspect.getsource(dw.task_sandbox_egress_evidence)
+    missing = sorted(n for n in _variables_the_suite_reads() if f'"{n}":' not in source)
+    assert not missing, missing
 
 
 def test_the_task_checks_where_it_is_then_its_census_then_its_lines_then_their_bytes() -> None:

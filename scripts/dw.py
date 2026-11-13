@@ -4227,6 +4227,7 @@ def _proxy_only_images(
     }
     probe_sha = hashlib.sha256(probe.read_bytes()).hexdigest()
     relay_sha = hashlib.sha256(relay.read_bytes()).hexdigest()
+    fixture_sha = hashlib.sha256(fixture.read_bytes()).hexdigest()
     changed_relay = work / "relay-changed"
     _one_byte_changed(relay, changed_relay)
     images = {
@@ -4262,6 +4263,7 @@ def _proxy_only_images(
     print(f"  runtime            {server.get('Version')} (api {server.get('ApiVersion')})")
     print(f"  probe              {linking['probe']}, sha256 {probe_sha}")
     print(f"  relay              {linking['relay']}, sha256 {relay_sha}")
+    print(f"  fixture            {linking['fixture']}, sha256 {fixture_sha}")
     for name, image in images.items():
         print(f"  image {name:<14}{image}")
     variables = {
@@ -4269,6 +4271,10 @@ def _proxy_only_images(
         "DW_SANDBOX_SOCKET": socket,
         "DW_SANDBOX_PROBE_SHA256": probe_sha,
         "DW_EGRESS_RELAY_SHA256": relay_sha,
+        # Read by the suite's `Evidence::load()` since F-17 (a held
+        # workload's executable); E6 starts none, but the suite refuses
+        # to run without it.
+        "DW_SANDBOX_FIXTURE_SHA256": fixture_sha,
         "DW_EGRESS_IMAGE": images["product"],
         "DW_EGRESS_IMAGE_FIXTURE": images["fixture"],
         "DW_EGRESS_IMAGE_TAMPERED_RELAY": images["tampered-relay"],
