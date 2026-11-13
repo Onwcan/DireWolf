@@ -2987,8 +2987,16 @@ EGRESS_BROKER_TESTS = (
     "linux::weakened_topologies_are_detected",
     "linux::crashes_and_restarts_fail_closed_and_leave_only_labelled_reapable_resources",
     "linux::a_production_broker_has_no_exception_and_no_fixture",
+    # F-17 (ADR-0061, Proposed): a workload's egress authorisation at the
+    # broker.
+    "linux::a_workloads_egress_authorisation_holds_in_the_real_topology",
 )
-EGRESS_AUTHORITY_TESTS = ("linux::a_proxy_only_environment_reaches_exactly_the_runs_https_hosts",)
+EGRESS_AUTHORITY_TESTS = (
+    "linux::a_proxy_only_environment_reaches_exactly_the_runs_https_hosts",
+    # F-17: each workload's egress decided by the real authority.
+    "linux::the_authority_decides_each_workloads_egress_by_both_gates_and_exposure",
+    "linux::ranges_refuse_at_the_address_and_an_interrupted_workload_exposes_its_root",
+)
 
 # Every (suite, case) the M5b real-topology suites must report, exercised.
 EGRESS_CASES = (
@@ -3091,6 +3099,19 @@ EGRESS_CASES = (
             "production-no-fixture-resolver",
             "production-loopback-blocked-no-exception",
             "production-proxy-only-needs-its-grant",
+            # F-17 (ADR-0061, Proposed): the workload's authorisation, held
+            # by the broker for exactly the workload's life.
+            "authorisation-none-outside-a-workload",
+            "authorisation-allowed-and-denied-same-workload",
+            "authorisation-address-range-denied",
+            "authorisation-tunnel-output-bounded",
+            "authorisation-report-per-destination",
+            "authorisation-ends-with-the-workload",
+            "authorisation-none-after-the-workload",
+            "exposure-revokes-an-open-tunnel",
+            "exposure-novel-refused-after-first-origin-byte",
+            "exposure-sibling-on-the-shared-root",
+            "exposure-other-root-untouched",
         )
     ),
     *(
@@ -3106,6 +3127,17 @@ EGRESS_CASES = (
             "audit-measured-counters",
             "audit-destroyed-counters",
             "reconcile-helper-orphan-reaped",
+            # F-17: decided by the real authority, by both gates, for every
+            # destination of the grant, at each launch.
+            "policy-denied-before-resolution",
+            "decision-recorded-with-the-intent",
+            "approval-needed-refused-unattended",
+            "tainted-novel-refused-seen-reached",
+            "exposure-durable-before-the-next-launch",
+            "exposure-from-a-sibling-run-on-the-shared-root",
+            "power-internal-ranges-refused-at-the-address",
+            "restart-settles-an-interrupted-workload-uncertain",
+            "restart-never-restores-a-pristine-root",
         )
     ),
 )
@@ -3201,6 +3233,9 @@ def task_sandbox_egress_evidence() -> None:
     }
     probe_sha = hashlib.sha256(probe.read_bytes()).hexdigest()
     relay_sha = hashlib.sha256(relay.read_bytes()).hexdigest()
+    # F-17 (ADR-0061, Proposed): every tunnel is a workload's, and a workload
+    # is started by its executable's digest.
+    fixture_sha = hashlib.sha256(fixture.read_bytes()).hexdigest()
     changed_relay = work / "relay-changed"
     offset = _one_byte_changed(relay, changed_relay)
 
@@ -3239,7 +3274,7 @@ def task_sandbox_egress_evidence() -> None:
     print(f"  runtime client     {chosen}")
     print(f"  probe              {linking['probe']}, sha256 {probe_sha}")
     print(f"  relay              {linking['relay']}, sha256 {relay_sha}")
-    print(f"  fixture            {linking['fixture']} (evidence image only)")
+    print(f"  fixture            {linking['fixture']}, sha256 {fixture_sha} (evidence image only)")
     print(f"  changed relay      one byte flipped at offset {offset}")
     for name, image in images.items():
         print(f"  image {name:<14}{image}")
@@ -3250,6 +3285,7 @@ def task_sandbox_egress_evidence() -> None:
             "DW_SANDBOX_SOCKET": socket,
             "DW_SANDBOX_PROBE_SHA256": probe_sha,
             "DW_EGRESS_RELAY_SHA256": relay_sha,
+            "DW_SANDBOX_FIXTURE_SHA256": fixture_sha,
             "DW_EGRESS_IMAGE": images["product"],
             "DW_EGRESS_IMAGE_FIXTURE": images["fixture"],
             "DW_EGRESS_IMAGE_TAMPERED_RELAY": images["tampered-relay"],
@@ -5433,6 +5469,8 @@ REGISTRY_CASES = tuple(
         "registry-npm-install-refused-before-preparation",
         "registry-npm-ci-refused-before-preparation",
         "registry-npm-nothing-prepared-or-reached",
+        # F-17's standing control (ADR-0061, Proposed).
+        "registry-pip-granted-index-denied-by-policy",
     )
 )
 # What each registry line's outcome must begin with (`outcome_problem`): an
@@ -5459,6 +5497,7 @@ REGISTRY_OUTCOMES = {
     "registry-npm-install-refused-before-preparation": "refused:OBLIGATION_UNENFORCEABLE",
     "registry-npm-ci-refused-before-preparation": "refused:OBLIGATION_UNENFORCEABLE",
     "registry-npm-nothing-prepared-or-reached": "nothing:",
+    "registry-pip-granted-index-denied-by-policy": "refused:nothing-installed",
 }
 
 
@@ -6918,6 +6957,273 @@ def task_sandbox_workload_mutations() -> None:
     )
 
 
+# F-17's mutation review (ADR-0061, Proposed; E7): each line weakens one guard
+# of a workload's egress authorisation, in the source, one at a time -- the
+# design's M1-M11, the partition's PM1-PM8 and the exposure rule's own. Each
+# mutant must compile and must fail the egress unit suites (`dwk-proto`'s
+# wire, the authority's partition and workload state, the broker's proxy) or
+# `sandbox-egress-evidence`; the file is then restored, and its SHA-256 proves
+# it byte-identical. A mutant that survives, or does not compile, fails the
+# review.
+_EGRESS_AUTHORISED = "crates/dwkd-broker/src/egress/authorised.rs"
+_EGRESS_TUNNEL = "crates/dwkd-broker/src/egress/tunnel.rs"
+_EGRESS_PROXY = "crates/dwkd-broker/src/egress/proxy.rs"
+_EGRESS_DECISION = "crates/dwkd-authority/src/state/workload_egress.rs"
+_EGRESS_PARTITION = "crates/dwkd-authority/src/policy/partition.rs"
+EGRESS_POLICY_MUTATIONS: tuple[tuple[str, str, str, str], ...] = (
+    (
+        "M1: the proxy carries a tunnel its cell does not allow",
+        _EGRESS_AUTHORISED,
+        "        if member.egress.allows_some(target, seen, member.exposed) {",
+        "        if member.egress.allows_some(target, seen, member.exposed) || true {",
+    ),
+    (
+        "M2: the authority allows what policy does not",
+        _EGRESS_DECISION,
+        "    let allowed = record.permits() && keeps;",
+        "    let allowed = keeps;",
+    ),
+    (
+        "M3: every destination is decided as already reached",
+        _EGRESS_DECISION,
+        "    Ok(if handshake || certain {\n        Reach::Seen",
+        "    Ok(if true || handshake || certain {\n        Reach::Seen",
+    ),
+    (
+        "M4: a destination is decided with no novelty",
+        _EGRESS_DECISION,
+        "\n        .with_destination_novelty(novelty);",
+        ";\n    let _ = novelty;",
+    ),
+    (
+        "M5: the pinned addresses are not judged",
+        _EGRESS_AUTHORISED,
+        "            .allows_all(target, (seen, member.exposed), &addresses);",
+        "            .allows_all(target, (seen, member.exposed), &addresses) || true;",
+    ),
+    (
+        "M6: a workload's end leaves its tunnels open",
+        _EGRESS_AUTHORISED,
+        "            open.handle.halt(EgressDisposition::WorkloadEnded);",
+        "            let _ = &open.handle;",
+    ),
+    (
+        "M7: the per-tunnel output bound is not kept",
+        _EGRESS_AUTHORISED,
+        "            cap: AtomicU64::new(cap.unwrap_or(u64::MAX)),",
+        "            cap: AtomicU64::new(cap.map_or(u64::MAX, |_| u64::MAX)),",
+    ),
+    (
+        "M8: an obligation no tunnel keeps is accepted",
+        _EGRESS_DECISION,
+        "            _ => return (false, None),",
+        "            _ => {}",
+    ),
+    (
+        "M9: the tripwire never fires",
+        _EGRESS_DECISION,
+        "    Ok(context_digest(active, &context).to_hex() == recorded)",
+        "    Ok(context_digest(active, &context).to_hex() == recorded || true)",
+    ),
+    (
+        "M10: a destination reached is never recorded",
+        _EGRESS_DECISION,
+        "                    reached(work, (&run, id), target, true)?;",
+        "                    let _ = (&run, id, target);",
+    ),
+    (
+        "M11/PM1: a range's representative is its first address, its children ignored",
+        _EGRESS_PARTITION,
+        "representatives.push(free_address(*block, &inside).and_then(Numbered::address));",
+        "let _ = &inside;\n            representatives.push(block.start.address());",
+    ),
+    (
+        "PM2: an address's piece is the first range that holds it",
+        _EGRESS_PARTITION,
+        "best.is_none_or(|(_, length)| range.prefix() > length)",
+        "best.is_none()",
+    ),
+    (
+        "PM3: a postcondition's ranges are dropped",
+        _EGRESS_PARTITION,
+        "            policy\n                .postconditions()\n                .iter()",
+        "            policy\n                .postconditions()\n                .get(..0)\n"
+        "                .unwrap_or_default()\n                .iter()",
+    ),
+    (
+        "PM4: a decision that needs the address is taken without it",
+        _EGRESS_DECISION,
+        "    match without.policy().unevaluable() {",
+        "    match None::<Unevaluable> {",
+    ),
+    (
+        "PM5: an IPv4-mapped IPv6 range is taken for IPv4",
+        _EGRESS_PARTITION,
+        "            IpAddress::V6(o) => Self {\n"
+        "                v6: true,\n"
+        "                value: u128::from_be_bytes(*o),\n"
+        "            },",
+        "            IpAddress::V6(o) if u128::from_be_bytes(*o) >> 32 == 0xffff => Self {\n"
+        "                v6: false,\n"
+        "                value: u128::from_be_bytes(*o) & 0xffff_ffff,\n"
+        "            },\n"
+        "            IpAddress::V6(o) => Self {\n"
+        "                v6: true,\n"
+        "                value: u128::from_be_bytes(*o),\n"
+        "            },",
+    ),
+    (
+        "PM6: one range more than the bound is cut",
+        _EGRESS_PARTITION,
+        "if ranges.len() >= MAX_PARTITION_RANGES {",
+        "if ranges.len() > MAX_PARTITION_RANGES {",
+    ),
+    (
+        "PM7: a cell's per-tunnel bound is the largest, not the smallest",
+        _EGRESS_DECISION,
+        "                cap = Some(cap.map_or(bound, |c| c.min(bound)));",
+        "                cap = Some(cap.map_or(bound, |c| c.max(bound)));",
+    ),
+    (
+        "PM8: the address in no range is chosen ignoring the ranges",
+        _EGRESS_PARTITION,
+        ".push(free_address(Block::whole(v6), &family).and_then(Numbered::address));",
+        ".push(free_address(Block::whole(v6), &[]).and_then(Numbered::address));",
+    ),
+    (
+        "exposure: the root's flag is never set",
+        _EGRESS_AUTHORISED,
+        "        if !state.exposed {\n            state.exposed = true;",
+        "        if false {\n            state.exposed = true;",
+    ),
+    (
+        "exposure: the first origin byte is forwarded without the root's decision",
+        _EGRESS_TUNNEL,
+        "                        && !self\n                            .context\n"
+        "                            .root\n"
+        "                            .origin_byte(&self.context.environment, self.admitted)",
+        "                        && self.context.environment.is_empty()",
+    ),
+    (
+        "exposure: the flag is kept per environment, not per root",
+        _EGRESS_PROXY,
+        "            (self.roots.of(workspace), environment.to_owned()),",
+        "            (Arc::new(Root::default()), environment.to_owned()),",
+    ),
+    (
+        "exposure: only the workload that saw the byte is switched",
+        _EGRESS_AUTHORISED,
+        "            for (name, member) in &mut state.members {\n"
+        "                member.exposed = true;",
+        "            for (name, member) in state\n"
+        "                .members\n                .iter_mut()\n"
+        "                .filter(|(_, m)| m.invocation == admitted.invocation)\n            {\n"
+        "                member.exposed = true;",
+    ),
+    (
+        "exposure: the tunnel that reached its destination is held to its novel cell",
+        _EGRESS_AUTHORISED,
+        "                    let seen = open.seen || delivering;",
+        "                    let seen = open.seen || (delivering && false);",
+    ),
+    (
+        "exposure: the exposed cells are the pristine ones",
+        _EGRESS_DECISION,
+        "        .filter(|t| *t >= context.taint())",
+        "        .filter(|t| *t == context.taint())",
+    ),
+    (
+        "exposure: a root is never exposed at launch",
+        _EGRESS_DECISION,
+        "    let exposed_at_start = exposed(work, &root)?;",
+        "    let exposed_at_start = exposed(work, &root).map(|_| false)?;",
+    ),
+    (
+        "exposure: an uncertain ending exposes nothing",
+        _EGRESS_DECISION,
+        "                exposure(work, id, false)?;",
+        "                let _ = id;",
+    ),
+)
+
+
+def _egress_policy_unit_suites() -> None:
+    """The unit suites that guard F-17's egress authorisation."""
+    run("cargo", "test", "--locked", "-p", "dwk-proto", "--lib", "egress")
+    run(
+        "cargo",
+        "test",
+        "--locked",
+        "-p",
+        "dwkd-authority",
+        "--lib",
+        "--",
+        "policy::partition",
+        "state::workload",
+    )
+    run("cargo", "test", "--locked", "-p", "dwkd-broker", "--bin", "dwkd-broker", "--", "egress")
+
+
+def task_sandbox_egress_policy_mutations() -> None:
+    """Weaken each guard of F-17's egress authorisation in turn (ADR-0061,
+    Proposed); a unit suite or the egress evidence must catch every one.
+
+    Slow: a mutant no unit suite catches runs the whole
+    sandbox-egress-evidence. Every file is restored byte-identically
+    whatever happens, and checked. Never run it beside another build.
+    """
+    killed: list[str] = []
+    for what, rel, old, new in EGRESS_POLICY_MUTATIONS:
+        path = ROOT / rel
+        original = path.read_bytes()
+        digest = hashlib.sha256(original).hexdigest()
+        text = original.decode("utf-8")
+        if text.count(old) != 1:
+            raise TaskError(f"mutation `{what}`: its target is not in {rel} exactly once")
+        print(f"{BOLD}mutant: {what}{OFF}")
+        outcome = "survived"
+        try:
+            path.write_bytes(text.replace(old, new).encode("utf-8"))
+            try:
+                run(
+                    "cargo",
+                    "test",
+                    "--locked",
+                    "--no-run",
+                    "-p",
+                    "dwk-proto",
+                    "-p",
+                    "dwkd-broker",
+                    "-p",
+                    "dwkd-authority",
+                )
+            except TaskError:
+                outcome = "did not compile"
+            else:
+                try:
+                    _egress_policy_unit_suites()
+                except TaskError as exc:
+                    outcome = f"killed by a unit suite: {str(exc)[:160]}"
+                else:
+                    try:
+                        task_sandbox_egress_evidence()
+                    except TaskError as exc:
+                        outcome = f"killed by the evidence: {str(exc)[:160]}"
+        finally:
+            path.write_bytes(original)
+        if hashlib.sha256(path.read_bytes()).hexdigest() != digest:
+            raise TaskError(f"{rel} was not restored byte-identically")
+        print(f"{DIM}restored {rel} (sha256 {digest[:16]}...){OFF}")
+        if not outcome.startswith("killed"):
+            raise TaskError(f"mutant `{what}` {outcome}: nothing guards it")
+        killed.append(what)
+        print(f"{GREEN}mutant {outcome[:60]}: {what}{OFF}")
+    print(
+        f"{GREEN}sandbox egress-policy mutation review: {len(killed)} of "
+        f"{len(EGRESS_POLICY_MUTATIONS)} killed{OFF}"
+    )
+
+
 # M5d.3 (ADR-0052 §7): a sandboxed `process.exec` that consumes a credential.
 SECRET_SANDBOX_BROKER_TESTS = (
     "linux::a_descriptor_secret_reaches_the_program_on_descriptor_three_and_nowhere_else",
@@ -7303,8 +7609,9 @@ SECRET_SANDBOX_MUTATIONS = (
     (
         "a missing redaction count is believed",
         "crates/dwkd-authority/src/state/workload_ops.rs",
-        "        ) if done.redactions.is_some() != started.intent.secret.is_some() => {",
-        "        ) if false && done.redactions.is_some() != started.intent.secret.is_some() => {",
+        "        )) if done.redactions.is_some() != started.intent.secret.is_some() => Some((",
+        "        )) if false && done.redactions.is_some() != started.intent.secret.is_some()"
+        " => Some((",
     ),
 )
 
@@ -8164,6 +8471,16 @@ ATTRIBUTION_MECHANISMS = frozenset(
         "connect-proxy:upload-budget",
         "connect-proxy:download-budget",
         "connect-proxy:tunnel-limit",
+        # F-17 (ADR-0061, Proposed): the workload's egress authorisation the
+        # proxy holds -- each destination's cell, the address's piece, the
+        # per-tunnel bound, the workspace root's exposure, the workload's
+        # life -- and what its supervisor reports.
+        "connect-proxy:workload-authorisation",
+        "connect-proxy:workload-authorisation-address",
+        "connect-proxy:tunnel-output-bound",
+        "connect-proxy:workspace-exposure",
+        "connect-proxy:workload-lifetime",
+        "workload-supervisor-report",
         # The broker's own lifecycle, launch and judgement.
         "exact-label-ownership",
         "exact-label-cleanup",
@@ -8206,6 +8523,7 @@ ATTRIBUTION_MECHANISMS = frozenset(
         "authority-environment-decision",
         "authority-environment-judgement",
         "authority-grant-derivation",
+        "authority-egress-decision",
         "authority-workspace-contract",
         "authority-workspace-exclusion",
         "authority-ledger",
@@ -8377,6 +8695,18 @@ ATTRIBUTION: dict[str, tuple[tuple[str, str, str | tuple[str, ...]], ...]] = {
         ("production-no-fixture-resolver", _OCI, "connect-proxy:resolver"),
         ("production-loopback-blocked-no-exception", _OCI, "connect-proxy:address-guard"),
         ("production-proxy-only-needs-its-grant", _OCI, "broker-admission"),
+        # F-17 (ADR-0061, Proposed): every tunnel above is a held workload's,
+        # its authorisation the whole grant; these are the authorisation's own.
+        (
+            "authorisation-address-range-denied",
+            _OCI,
+            "connect-proxy:workload-authorisation-address",
+        ),
+        ("authorisation-tunnel-output-bounded", _OCI, "connect-proxy:tunnel-output-bound"),
+        ("authorisation-report-per-destination", _OCI, "workload-supervisor-report"),
+        ("authorisation-ends-with-the-workload", _OCI, "connect-proxy:workload-lifetime"),
+        ("authorisation-*", _OCI, "connect-proxy:workload-authorisation"),
+        ("exposure-*", _OCI, "connect-proxy:workspace-exposure"),
     ),
     # M5b: the grant the real authority derives, through its own API.
     "sandbox-authority-egress": (
@@ -8388,6 +8718,17 @@ ATTRIBUTION: dict[str, tuple[tuple[str, str, str | tuple[str, ...]], ...]] = {
         ("wildcard-covered-name-not-granted", _OCI, "connect-proxy:grant"),
         ("constrained-grant-name-not-granted", _OCI, "connect-proxy:grant"),
         ("reconcile-helper-orphan-reaped", _OCI, "authority-reconciliation"),
+        # F-17: the authority decides, the proxy holds the decision.
+        ("policy-denied-before-resolution", _OCI, "connect-proxy:workload-authorisation"),
+        ("decision-recorded-with-the-intent", _OCI, "authority-audit"),
+        ("exposure-durable-before-the-next-launch", _OCI, "authority-ledger"),
+        (
+            "power-internal-ranges-refused-at-the-address",
+            _OCI,
+            "connect-proxy:workload-authorisation-address",
+        ),
+        ("restart-*", _OCI, "authority-reconciliation"),
+        ("*", _OCI, "authority-egress-decision"),
     ),
     # M5d.1-M5d.2: workloads the broker runs in its real environments.
     "sandbox-workload": (
@@ -8726,6 +9067,11 @@ ATTRIBUTION: dict[str, tuple[tuple[str, str, str | tuple[str, ...]], ...]] = {
         ("registry-census-clean", _DWKP, "exact-label-cleanup"),
         ("registry-npm-*-refused-before-preparation", _DWKP, "authority-obligation"),
         ("registry-npm-nothing-prepared-or-reached", _DWKP, "authority-environment-decision"),
+        (
+            "registry-pip-granted-index-denied-by-policy",
+            _DWKP,
+            "connect-proxy:workload-authorisation",
+        ),
     ),
     # M5e.5 (ADR-0054 §8, ADR-0055 §9): npm and pip under their profiles,
     # accepted 2026-11-11; hosted only, in the required `sandbox-hygiene` job.
@@ -9053,6 +9399,8 @@ AGENT_CASES = tuple(
         "a04-origin-host-not-granted",
         "a04-origin-port-not-granted",
         "a04-granted-name-blocked-by-the-address-guard",
+        # F-17's standing control (ADR-0061, Proposed).
+        "a04-granted-name-denied-by-policy",
         "a05-connect-absolute-form-refused",
         "a05-connect-address-literal-refused",
         "a05-connect-host-not-canonical-refused",
@@ -9458,8 +9806,8 @@ AGENT_MUTATIONS = (
     (
         "the proxy holds four times the tunnels the operator allowed",
         "crates/dwkd-broker/src/egress/tunnel.rs",
-        "    let Some(_held) = Held::take(&context.tunnels, most) else {",
-        "    let Some(_held) = Held::take(&context.tunnels, most.saturating_mul(4)) else {",
+        "    let held = Held::take(&context.tunnels, most)",
+        "    let held = Held::take(&context.tunnels, most.saturating_mul(4))",
     ),
     # Policy and the grant (ADR-0052 §§2, 11).
     (
@@ -12254,6 +12602,7 @@ TASKS = {
     "net-http-evidence": task_net_http_evidence,
     "net-http-mutations": task_net_http_mutations,
     "sandbox-workload-mutations": task_sandbox_workload_mutations,
+    "sandbox-egress-policy-mutations": task_sandbox_egress_policy_mutations,
     "sandbox-neighbour-mutations": task_sandbox_neighbour_mutations,
     "sandbox-secret-evidence": task_sandbox_secret_evidence,
     "sandbox-secret-mutations": task_sandbox_secret_mutations,

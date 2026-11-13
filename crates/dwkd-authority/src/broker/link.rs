@@ -608,13 +608,15 @@ fn environment(common: Common, operation: Operation) -> Result<Prepared, BrokerF
             container,
             runtime,
             workload,
+            egress,
         } => {
             let (runtime, fds) = runtime_of(runtime)?;
             (
                 Authorisation::WorkloadStart(
                     dwk_proto::brokerp::workload::WorkloadStartAuthorisation::new(
                         common, spec, container, runtime, workload,
-                    ),
+                    )
+                    .with_egress(egress),
                 ),
                 fds,
                 Sent::WorkloadStart,
@@ -637,6 +639,7 @@ fn secret_start(common: Common, operation: Operation) -> Result<Prepared, Broker
         workload,
         secret,
         pipe,
+        egress,
     } = operation
     else {
         return Err(BrokerFailure::Protocol("not a secret-bearing start"));
@@ -651,7 +654,8 @@ fn secret_start(common: Common, operation: Operation) -> Result<Prepared, Broker
                 (container, runtime),
                 workload,
                 secret,
-            ),
+            )
+            .with_egress(egress),
         ),
         fds,
         Sent::WorkloadSecretStart,
@@ -807,13 +811,14 @@ fn workload_delivery(
     use super::Collected;
     dwk_proto::brokerp::workload::check_collect(&collected)
         .map_err(|_| BrokerFailure::Protocol("a workload's answer contradicts itself"))?;
+    let egress = collected.egress.map(Box::new);
     let at = match (collected.result, collected.never_ran) {
         (Some(done), None) => {
             stream(&done.stdout, stream_limit)?;
             stream(&done.stderr, stream_limit)?;
-            Collected::Ended(Box::new(done))
+            Collected::Ended(Box::new(done), egress)
         }
-        (None, Some(refusal)) => Collected::NeverRan(refusal),
+        (None, Some(refusal)) => Collected::NeverRan(refusal, egress),
         _ => Collected::Running,
     };
     Ok(BrokerDelivery::WorkloadCollected(at))

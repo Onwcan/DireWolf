@@ -396,6 +396,11 @@ pub(super) struct ActiveAuthority {
     /// session's root (ADR-0043 §8).
     pub(super) ceiling: Vec<CapabilitySpec>,
     pub(super) compiled: CompiledPolicy,
+    /// The compiled policy's network ranges, cut into the pieces a tunnel's
+    /// address is decided over (F-17, ADR-0061, Proposed) -- or `TooFine`,
+    /// when a decision that needs the address is refused instead.
+    pub(super) partition:
+        Result<crate::policy::partition::NetworkPartition, crate::policy::partition::TooFine>,
 }
 
 /// Parse a ceiling. Every entry must parse. Its entries are kept as declared:

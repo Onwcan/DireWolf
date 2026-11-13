@@ -235,6 +235,8 @@ pub enum Operation {
         runtime: RuntimeHandoff,
         /// The workload.
         workload: dwk_proto::brokerp::workload::WorkloadSpec,
+        /// In a `PROXY_ONLY` environment, its egress authorisation (F-17).
+        egress: Option<dwk_proto::brokerp::egress::WorkloadEgress>,
     },
     /// Start one workload that consumes a credential (M5d.3, ADR-0052 §7):
     /// everything [`Operation::WorkloadStart`] carries, what the launcher is
@@ -253,6 +255,8 @@ pub enum Operation {
         secret: dwk_proto::brokerp::workload::WorkloadSecret,
         /// The value: a pipe's read end, at end of file after it.
         pipe: crate::secret::handoff::SecretPipe,
+        /// In a `PROXY_ONLY` environment, its egress authorisation (F-17).
+        egress: Option<dwk_proto::brokerp::egress::WorkloadEgress>,
     },
     /// Collect a started workload (M5d.2): its invocation is the order's,
     /// the generation its start's. No descriptor.
@@ -581,10 +585,18 @@ pub enum BrokerDelivery {
 pub enum Collected {
     /// It has not ended.
     Running,
-    /// It ran and ended: how, its output, and what was left.
-    Ended(Box<dwk_proto::brokerp::workload::WorkloadRunDone>),
+    /// It ran and ended: how, its output, and what was left -- and, for a
+    /// workload started with an egress authorisation, what its tunnels did
+    /// (F-17).
+    Ended(
+        Box<dwk_proto::brokerp::workload::WorkloadRunDone>,
+        Option<Box<dwk_proto::brokerp::egress::WorkloadEgressReport>>,
+    ),
     /// Its run never began after its start was answered: nothing ran.
-    NeverRan(dwk_proto::brokerp::BrokerRefusal),
+    NeverRan(
+        dwk_proto::brokerp::BrokerRefusal,
+        Option<Box<dwk_proto::brokerp::egress::WorkloadEgressReport>>,
+    ),
 }
 
 /// Why no connection could be used.

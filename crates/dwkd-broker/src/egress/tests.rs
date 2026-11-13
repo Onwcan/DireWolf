@@ -7,6 +7,11 @@
 //! Every tunnel names `origin.test`, which the fixture resolves to the
 //! loopback origin; `127.0.0.1` is the fixture's one exception, so the guard
 //! is still the real guard for every other address.
+//!
+//! Since F-17 (ADR-0061, Proposed) a CONNECT is carried only while a
+//! workload's egress authorisation is in force: [`env`] installs one that
+//! allows every granted destination, so each test here exercises its own
+//! check; the tests at the end exercise the authorisation itself.
 
 #![allow(
     clippy::unwrap_used,
@@ -25,13 +30,15 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use dwk_proto::brokerp::egress::{
-    EgressByteBudget, EgressDisposition as D, EgressGrant, EgressHost, EgressPort, EgressTarget,
-    EgressTargets, EgressTunnelLimit,
+    EgressBits, EgressByteBudget, EgressCell, EgressDisposition as D, EgressGrant, EgressHost,
+    EgressPort, EgressPrefix, EgressPrefixes, EgressTarget, EgressTargets, EgressTunnelLimit,
+    WorkloadEgress, WorkloadEgressTarget, WorkloadEgressTargets,
 };
+use dwk_proto::wire::id::InvocationId;
 use dwk_sandbox_profile::{EGRESS_SOCKET_NAME, RELAY_UID};
 
 use super::hello::build;
-use super::proxy::{Proxies, relay_only_acl};
+use super::proxy::{Authorised, Proxies, relay_only_acl};
 use super::resolve::{FixtureResolver, Resolver as _, Shared};
 use super::{HELLO_MAX_BUFFERED, Limits};
 
@@ -125,26 +132,57 @@ fn own_uid() -> u32 {
     rustix::process::geteuid().as_raw()
 }
 
-/// A proxy for one environment, `e1`, with this fixture.
+/// A proxy for one environment, `e1`, with this fixture, and a workload's
+/// authorisation in force that allows every granted destination.
 struct Env {
     proxies: Proxies,
     dir: PathBuf,
     resolver: Arc<FixtureResolver>,
+    authorised: Option<Authorised>,
     _scratch: Scratch,
 }
 
 const ENV: &str = "e1";
+
+/// The workspace root every environment here is on, unless a test says.
+const ROOT: (u64, u64) = (7, 7);
+
+fn invocation(n: u8) -> InvocationId {
+    InvocationId::parse(&format!("inv_01M24BB8G3E0A851TRWE3M8F{n:02}")).unwrap()
+}
+
+/// The destinations `grant` names.
+fn destinations(grant: &EgressGrant) -> Vec<(String, u16)> {
+    grant
+        .targets
+        .iter()
+        .map(|t| (t.host.as_str().to_owned(), t.port.get()))
+        .collect()
+}
+
+/// An authorisation for `destinations` allowing every address in every cell.
+fn open_to(destinations: &[(String, u16)]) -> WorkloadEgress {
+    let refs: Vec<(&str, u16)> = destinations.iter().map(|(h, p)| (h.as_str(), *p)).collect();
+    WorkloadEgress::uniform(&refs, true, false).unwrap()
+}
 
 fn env_with(fixture: &str, grant: EgressGrant, limits: Limits) -> Env {
     let scratch = Scratch::new();
     let resolver = Arc::new(FixtureResolver::parse(fixture).unwrap());
     let shared: Shared = Arc::<FixtureResolver>::clone(&resolver);
     let proxies = Proxies::new(scratch.0.join("egress"), own_uid(), shared, limits).unwrap();
-    let dir = proxies.start(ENV, grant).unwrap();
+    let granted = destinations(&grant);
+    let dir = proxies.start(ENV, grant, ROOT).unwrap();
+    let authorised = Some(
+        proxies
+            .authorise(ENV, &invocation(1), open_to(&granted))
+            .unwrap(),
+    );
     Env {
         proxies,
         dir,
         resolver,
+        authorised,
         _scratch: scratch,
     }
 }
@@ -397,7 +435,7 @@ fn metadata_names_are_refused_by_name_even_when_granted() {
         .unwrap(),
         ..grant(443, 1, 1, 1)
     };
-    let dir = proxies.start(ENV, grant).unwrap();
+    let dir = proxies.start(ENV, grant, ROOT).unwrap();
     let mut client = dial(&dir);
     let head = ask(
         &mut client,
@@ -723,7 +761,7 @@ fn a_restarted_broker_removes_only_its_own_stale_directories() {
     let shared: Shared = Arc::new(FixtureResolver::parse("").unwrap());
     {
         let proxies = Proxies::new(root.clone(), own_uid(), Arc::clone(&shared), limits()).unwrap();
-        proxies.start("e1", grant(443, 1, 1, 1)).unwrap();
+        proxies.start("e1", grant(443, 1, 1, 1), ROOT).unwrap();
         // The broker dies: its listener is gone, its directory is not.
         std::mem::drop(proxies);
     }
@@ -866,4 +904,586 @@ fn a_registry_origin_on_loopback_is_refused_without_the_evidence_exception() {
     );
     counted(&env, D::AddressBlocked, 1);
     assert_eq!(granted.accepted.load(Ordering::SeqCst), 0);
+}
+
+// ===========================================================================
+// F-17 (ADR-0061, Proposed): a workload's egress authorisation, in force.
+// ===========================================================================
+
+/// A destination and its cells: host, port, the four cells' bits, and a
+/// per-tunnel bound for every cell.
+type Destination<'a> = (&'a str, u16, [&'a [bool]; 4], Option<u64>);
+
+/// An authorisation whose cells are given: per destination, the four cells'
+/// bits -- novel/pristine, novel/exposed, seen/pristine, seen/exposed -- over
+/// the pieces `prefixes` make, and a per-tunnel bound for every cell.
+fn authorisation(prefixes: &[&str], targets: &[Destination<'_>]) -> WorkloadEgress {
+    let cell = |bits: &[bool], bound: Option<u64>| EgressCell {
+        allowed: EgressBits::from_pieces(bits).unwrap(),
+        max_tunnel_download_bytes: bound.map(|b| EgressByteBudget::new(b).unwrap()),
+    };
+    let egress = WorkloadEgress {
+        exposed: false,
+        prefixes: EgressPrefixes::new(
+            prefixes
+                .iter()
+                .map(|p| EgressPrefix::new(*p).unwrap())
+                .collect(),
+        )
+        .unwrap(),
+        targets: WorkloadEgressTargets::new(
+            targets
+                .iter()
+                .map(|(host, port, cells, bound)| WorkloadEgressTarget {
+                    host: EgressHost::new(*host).unwrap(),
+                    port: EgressPort::new(*port).unwrap(),
+                    seen: false,
+                    novel_pristine: cell(cells[0], *bound),
+                    novel_exposed: cell(cells[1], *bound),
+                    seen_pristine: cell(cells[2], *bound),
+                    seen_exposed: cell(cells[3], *bound),
+                })
+                .collect(),
+        )
+        .unwrap(),
+    };
+    assert_eq!(egress.check(), Ok(()));
+    egress
+}
+
+/// A grant of these destinations, roomy budgets.
+fn grant_of(destinations: &[(&str, u16)]) -> EgressGrant {
+    EgressGrant {
+        targets: EgressTargets::new(
+            destinations
+                .iter()
+                .map(|(host, port)| EgressTarget {
+                    host: EgressHost::new(*host).unwrap(),
+                    port: EgressPort::new(*port).unwrap(),
+                })
+                .collect(),
+        )
+        .unwrap(),
+        ..grant(443, 8, 1 << 20, 1 << 20)
+    }
+}
+
+/// A loopback origin that answers only when told: it takes the client
+/// hello, waits for the word, then sends `reply` bytes.
+fn gated_origin(reply: usize) -> (Origin, std::sync::mpsc::Sender<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let accepted = Arc::new(AtomicUsize::new(0));
+    let received = Arc::new(Mutex::new(Vec::new()));
+    let (word, wait) = std::sync::mpsc::channel::<()>();
+    let (count, keep) = (Arc::clone(&accepted), Arc::clone(&received));
+    std::thread::spawn(move || {
+        let Some(Ok(mut stream)) = listener.incoming().next() else {
+            return;
+        };
+        count.fetch_add(1, Ordering::SeqCst);
+        let mut buffer = [0u8; 4096];
+        if let Ok(n) = stream.read(&mut buffer) {
+            keep.lock().unwrap().extend_from_slice(&buffer[..n]);
+        }
+        if wait.recv_timeout(Duration::from_secs(20)).is_ok() {
+            let _ = stream.write_all(&vec![b'r'; reply]);
+        }
+        while let Ok(n) = stream.read(&mut buffer) {
+            if n == 0 {
+                break;
+            }
+            keep.lock().unwrap().extend_from_slice(&buffer[..n]);
+        }
+    });
+    (
+        Origin {
+            port,
+            accepted,
+            received,
+        },
+        word,
+    )
+}
+
+/// Wait until `origin` has received something.
+fn received_something(origin: &Origin) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while origin.received.lock().unwrap().is_empty() {
+        assert!(Instant::now() < deadline, "the origin heard nothing");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// Wait until `environment`'s proxy has counted `disposition` `n` times.
+fn counted_in(proxies: &Proxies, environment: &str, disposition: D, n: u64) {
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let now = proxies
+            .counters(environment)
+            .map_or(0, |c| c.count(disposition));
+        if now >= n {
+            assert_eq!(now, n, "{disposition:?}");
+            return;
+        }
+        assert!(Instant::now() < deadline, "{disposition:?} never counted");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// Open a tunnel to `host:port` through `dir` and send its client hello.
+fn tunnel_to(dir: &Path, host: &str, port: u16) -> UnixStream {
+    let mut client = dial(dir);
+    let head = connect_to(&mut client, host, port);
+    assert_eq!(
+        head, "HTTP/1.1 200 Connection Established\r\n\r\n",
+        "{host}"
+    );
+    client.write_all(&build::hello(host)).unwrap();
+    client
+}
+
+const OTHER: &str = "other.test";
+
+fn two_names() -> String {
+    format!("resolve {HOST} 127.0.0.1\nresolve {OTHER} 127.0.0.1\nallow 127.0.0.1\n")
+}
+
+#[test]
+fn nothing_is_carried_without_a_workloads_authorisation() {
+    let origin = origin(5);
+    let env = env(&loopback(), grant(origin.port, 4, 1 << 20, 1 << 20));
+    let Env {
+        proxies,
+        dir,
+        resolver,
+        authorised,
+        _scratch,
+    } = env;
+    // The workload ends: its authorisation goes, and a granted destination
+    // is refused before anything is resolved or dialled.
+    let report = authorised.unwrap().finish().unwrap();
+    assert!(!report.exposed);
+    let mut client = dial(&dir);
+    refused_with(
+        &connect(&mut client, origin.port),
+        "403 Forbidden",
+        D::NotAuthorised,
+    );
+    counted_in(&proxies, ENV, D::NotAuthorised, 1);
+    assert_eq!(resolver.queries(HOST), 0);
+    assert_eq!(origin.accepted.load(Ordering::SeqCst), 0);
+    // The probe's reserved name is still the ceiling's: TARGET_NOT_GRANTED,
+    // whatever is in force.
+    let mut probe = dial(&dir);
+    refused_with(
+        &ask(
+            &mut probe,
+            "CONNECT direwolf-probe.invalid:443 HTTP/1.1\r\n\r\n",
+        ),
+        "403 Forbidden",
+        D::TargetNotGranted,
+    );
+}
+
+#[test]
+fn a_cell_that_allows_nothing_refuses_before_resolution() {
+    let origin = origin(5);
+    let scratch = Scratch::new();
+    let resolver = Arc::new(FixtureResolver::parse(&loopback()).unwrap());
+    let shared: Shared = Arc::<FixtureResolver>::clone(&resolver);
+    let proxies = Proxies::new(scratch.0.join("egress"), own_uid(), shared, limits()).unwrap();
+    let dir = proxies
+        .start(ENV, grant_of(&[(HOST, origin.port)]), ROOT)
+        .unwrap();
+    let denied = WorkloadEgress::uniform(&[(HOST, origin.port)], false, false).unwrap();
+    let authorised = proxies.authorise(ENV, &invocation(2), denied).unwrap();
+    let mut client = dial(&dir);
+    refused_with(
+        &connect(&mut client, origin.port),
+        "403 Forbidden",
+        D::PolicyDenied,
+    );
+    counted_in(&proxies, ENV, D::PolicyDenied, 1);
+    assert_eq!(
+        resolver.queries(HOST),
+        0,
+        "resolved for a denied destination"
+    );
+    assert_eq!(origin.accepted.load(Ordering::SeqCst), 0);
+    let report = authorised.finish().unwrap();
+    assert_eq!(
+        report.targets.as_slice()[0].dispositions.as_slice()[0].disposition,
+        D::PolicyDenied
+    );
+    assert!(!report.targets.as_slice()[0].reached);
+}
+
+#[test]
+fn an_address_outside_the_cell_is_refused_whole_and_one_inside_is_reached() {
+    // Pieces: IPv4 in no range, IPv6 in no range, 127.0.0.0/8. The guard's
+    // evidence exception lets the loopback origin through; policy's range
+    // decides.
+    for (cells, expected) in [
+        ([true, true, false], None),
+        ([false, false, true], Some(5usize)),
+    ] {
+        let origin = origin(5);
+        let scratch = Scratch::new();
+        let resolver = Arc::new(FixtureResolver::parse(&loopback()).unwrap());
+        let shared: Shared = Arc::<FixtureResolver>::clone(&resolver);
+        let proxies = Proxies::new(scratch.0.join("egress"), own_uid(), shared, limits()).unwrap();
+        let dir = proxies
+            .start(ENV, grant_of(&[(HOST, origin.port)]), ROOT)
+            .unwrap();
+        let egress = authorisation(
+            &["127.0.0.0/8"],
+            &[(HOST, origin.port, [&cells, &cells, &cells, &cells], None)],
+        );
+        let authorised = proxies
+            .authorise(ENV, &invocation(3), egress.clone())
+            .unwrap();
+        let mut client = dial(&dir);
+        let head = connect(&mut client, origin.port);
+        match expected {
+            None => {
+                refused_with(&head, "403 Forbidden", D::PolicyAddressDenied);
+                assert_eq!(origin.accepted.load(Ordering::SeqCst), 0);
+            }
+            Some(n) => {
+                assert_eq!(head, "HTTP/1.1 200 Connection Established\r\n\r\n");
+                client.write_all(&build::hello(HOST)).unwrap();
+                let mut reply = vec![0u8; n];
+                client.read_exact(&mut reply).unwrap();
+                client.shutdown(std::net::Shutdown::Write).unwrap();
+                counted_in(&proxies, ENV, D::Closed, 1);
+            }
+        }
+        assert_eq!(resolver.queries(HOST), 1);
+        let report = authorised.finish().unwrap();
+        assert!(report.consistent_with(&egress));
+        let target = &report.targets.as_slice()[0];
+        assert_eq!(target.reached, expected.is_some());
+        let address = &target.addresses.as_slice()[0];
+        assert_eq!(address.address.as_str(), "127.0.0.1");
+        assert_eq!(
+            (address.allowed.get(), address.refused.get()),
+            if expected.is_some() { (1, 0) } else { (0, 1) }
+        );
+    }
+}
+
+#[test]
+fn a_destination_reached_is_decided_by_its_seen_cell() {
+    // Novel: allowed. Seen: refused. The first tunnel reaches it: its first
+    // byte makes the destination reached and exposes the root, and the
+    // tunnel, held to the seen cell from then on, is shut before that byte
+    // is forwarded. The next is decided as reached, and refused before
+    // resolution.
+    let origin = origin(3);
+    let scratch = Scratch::new();
+    let resolver = Arc::new(FixtureResolver::parse(&loopback()).unwrap());
+    let shared: Shared = Arc::<FixtureResolver>::clone(&resolver);
+    let proxies = Proxies::new(scratch.0.join("egress"), own_uid(), shared, limits()).unwrap();
+    let dir = proxies
+        .start(ENV, grant_of(&[(HOST, origin.port)]), ROOT)
+        .unwrap();
+    let yes: &[bool] = &[true, true];
+    let no: &[bool] = &[false, false];
+    let egress = authorisation(&[], &[(HOST, origin.port, [yes, yes, no, no], None)]);
+    let authorised = proxies.authorise(ENV, &invocation(4), egress).unwrap();
+    let mut first = tunnel_to(&dir, HOST, origin.port);
+    assert_eq!(drain(&mut first), b"");
+    counted_in(&proxies, ENV, D::ExposureRevoked, 1);
+    let mut second = dial(&dir);
+    refused_with(
+        &connect(&mut second, origin.port),
+        "403 Forbidden",
+        D::PolicyDenied,
+    );
+    assert_eq!(resolver.queries(HOST), 1);
+    let report = authorised.finish().unwrap();
+    assert!(report.exposed && report.targets.as_slice()[0].reached);
+    assert_eq!(report.targets.as_slice()[0].bytes_downstream.get(), 0);
+}
+
+#[test]
+fn a_tunnel_carries_back_no_more_than_its_cell_allows() {
+    let origin = origin(10);
+    let scratch = Scratch::new();
+    let resolver = Arc::new(FixtureResolver::parse(&loopback()).unwrap());
+    let shared: Shared = Arc::<FixtureResolver>::clone(&resolver);
+    let proxies = Proxies::new(scratch.0.join("egress"), own_uid(), shared, limits()).unwrap();
+    let dir = proxies
+        .start(ENV, grant_of(&[(HOST, origin.port)]), ROOT)
+        .unwrap();
+    let yes: &[bool] = &[true, true];
+    let egress = authorisation(&[], &[(HOST, origin.port, [yes, yes, yes, yes], Some(3))]);
+    let authorised = proxies.authorise(ENV, &invocation(5), egress).unwrap();
+    let mut client = tunnel_to(&dir, HOST, origin.port);
+    let got = drain(&mut client);
+    assert_eq!(got, b"rrr");
+    counted_in(&proxies, ENV, D::TunnelOutputLimit, 1);
+    assert_eq!(proxies.counters(ENV).unwrap().bytes_downstream.get(), 3);
+    let report = authorised.finish().unwrap();
+    assert_eq!(report.targets.as_slice()[0].bytes_downstream.get(), 3);
+}
+
+#[test]
+fn a_workloads_end_stops_its_tunnels_and_nothing_follows() {
+    let (origin, word) = gated_origin(5);
+    let env = env(&loopback(), grant(origin.port, 4, 1 << 20, 1 << 20));
+    let mut client = tunnel_to(&env.dir, HOST, origin.port);
+    received_something(&origin);
+    let Env {
+        proxies,
+        dir,
+        authorised,
+        _scratch,
+        ..
+    } = env;
+    let report = authorised.unwrap().finish().unwrap();
+    // Its tunnel is shut at once, both ways: what the client sends after the
+    // end never reaches the origin, and the origin's late reply never
+    // reaches the client.
+    counted_in(&proxies, ENV, D::WorkloadEnded, 1);
+    let _ = client.write_all(b"after the end");
+    std::thread::sleep(Duration::from_millis(200));
+    let _ = word.send(());
+    assert_eq!(drain(&mut client), b"");
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(
+        *origin.received.lock().unwrap(),
+        build::hello(HOST),
+        "nothing after the workload's end reached the origin"
+    );
+    let target = &report.targets.as_slice()[0];
+    assert!(!target.reached && !report.exposed);
+    assert_eq!(
+        target.dispositions.as_slice()[0].disposition,
+        D::WorkloadEnded
+    );
+    let mut after = dial(&dir);
+    refused_with(
+        &connect(&mut after, origin.port),
+        "403 Forbidden",
+        D::NotAuthorised,
+    );
+}
+
+#[test]
+fn exposure_revokes_what_it_no_longer_allows_on_the_whole_root_before_the_byte_arrives() {
+    // Three environments: e1 and e2 on one workspace root, e3 on another.
+    // Each holds a tunnel open to `other.test`, whose cells allow it while
+    // the workspace is pristine and refuse it once exposed. When e1's
+    // tunnel to `origin.test` receives its first byte, e2's tunnel -- same
+    // root -- is shut before that byte is forwarded, and never receives
+    // its origin's reply; e3's, on another root, is untouched by it -- and
+    // shut, in turn, by the first byte its own origin sends, which exposes
+    // its own root.
+    let (exposer, open_exposer) = gated_origin(5);
+    let (e2_origin, open_e2) = gated_origin(4);
+    let (e3_origin, open_e3) = gated_origin(4);
+    let scratch = Scratch::new();
+    let resolver = Arc::new(FixtureResolver::parse(&two_names()).unwrap());
+    let shared: Shared = Arc::<FixtureResolver>::clone(&resolver);
+    let proxies = Proxies::new(scratch.0.join("egress"), own_uid(), shared, limits()).unwrap();
+    let yes: &[bool] = &[true, true];
+    let no: &[bool] = &[false, false];
+    let mut held = Vec::new();
+    let mut dirs = Vec::new();
+    for (index, (environment, root, other)) in [
+        ("e1", ROOT, e2_origin.port),
+        ("e2", ROOT, e2_origin.port),
+        ("e3", (8, 8), e3_origin.port),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let dir = proxies
+            .start(
+                environment,
+                grant_of(&[(HOST, exposer.port), (OTHER, other)]),
+                root,
+            )
+            .unwrap();
+        let egress = authorisation(
+            &[],
+            &[
+                (HOST, exposer.port, [yes, yes, yes, yes], None),
+                (OTHER, other, [yes, no, yes, no], None),
+            ],
+        );
+        let n = u8::try_from(10 + index).unwrap();
+        held.push((
+            egress.clone(),
+            proxies
+                .authorise(environment, &invocation(n), egress)
+                .unwrap(),
+        ));
+        dirs.push(dir);
+    }
+    let mut e2_tunnel = tunnel_to(&dirs[1], OTHER, e2_origin.port);
+    let mut e3_tunnel = tunnel_to(&dirs[2], OTHER, e3_origin.port);
+    received_something(&e2_origin);
+    received_something(&e3_origin);
+    // e1 reaches an origin: the root is exposed.
+    let mut e1_tunnel = tunnel_to(&dirs[0], HOST, exposer.port);
+    received_something(&exposer);
+    let _ = open_exposer.send(());
+    let mut reply = [0u8; 5];
+    e1_tunnel.read_exact(&mut reply).unwrap();
+    counted_in(&proxies, "e2", D::ExposureRevoked, 1);
+    // e2's origin answers now; nothing of it reaches e2's client.
+    let _ = open_e2.send(());
+    assert_eq!(drain(&mut e2_tunnel), b"");
+    // e3, on another root, is not exposed by e1: a new tunnel there to
+    // `other.test` is still decided pristine -- admitted, not refused.
+    let mut fresh = dial(&dirs[2]);
+    assert_eq!(
+        connect_to(&mut fresh, OTHER, e3_origin.port),
+        "HTTP/1.1 200 Connection Established\r\n\r\n"
+    );
+    drop(fresh);
+    counted_in(&proxies, "e3", D::ClientHelloMalformed, 1);
+    assert_eq!(proxies.counters("e3").unwrap().count(D::ExposureRevoked), 0);
+    // When e3's own origin answers, that byte exposes e3's root, whose
+    // exposed cell refuses `other.test`: the tunnel is shut before the byte
+    // reaches it.
+    let _ = open_e3.send(());
+    assert_eq!(drain(&mut e3_tunnel), b"");
+    counted_in(&proxies, "e3", D::ExposureRevoked, 1);
+    // On the exposed root a new tunnel to `other.test` is decided exposed:
+    // refused before anything is resolved, in e1 and e2 alike.
+    let before = resolver.queries(OTHER);
+    for dir in &dirs[..2] {
+        let mut client = dial(dir);
+        refused_with(
+            &connect_to(&mut client, OTHER, e2_origin.port),
+            "403 Forbidden",
+            D::PolicyDenied,
+        );
+    }
+    assert_eq!(resolver.queries(OTHER), before);
+    // A workload installed on the exposed root starts exposed, whatever the
+    // authority said: e2's next workload is refused `other.test` too.
+    let (egress_e2, authorised_e2) = held.remove(1);
+    let report = authorised_e2.finish().unwrap();
+    assert!(report.consistent_with(&egress_e2));
+    assert!(!report.exposed);
+    assert_eq!(
+        report.targets.as_slice()[1].dispositions.as_slice()[0].disposition,
+        D::ExposureRevoked
+    );
+    let next = proxies
+        .authorise("e2", &invocation(20), egress_e2.clone())
+        .unwrap();
+    let mut client = dial(&dirs[1]);
+    refused_with(
+        &connect_to(&mut client, OTHER, e2_origin.port),
+        "403 Forbidden",
+        D::PolicyDenied,
+    );
+    drop(next);
+    let (egress_e1, authorised_e1) = held.remove(0);
+    let report = authorised_e1.finish().unwrap();
+    assert!(report.exposed && report.consistent_with(&egress_e1));
+    assert_eq!(report.targets.as_slice()[0].bytes_downstream.get(), 5);
+}
+
+#[test]
+fn the_tunnel_whose_byte_exposes_the_root_is_held_to_its_seen_cell() {
+    // ADR-0061 (EG-7, EG-8): the first byte a tunnel carries back is its
+    // destination reached. That tunnel is then held to the destination's
+    // seen-and-exposed cell -- under the shipped packs, the cell a tainted
+    // run keeps for a destination it has reached -- and carries its reply.
+    // Another tunnel already open, admitted while its destination was novel,
+    // keeps that novelty, and is shut by the novel-and-exposed cell.
+    let (reached, open_reached) = gated_origin(5);
+    let (waiting, open_waiting) = gated_origin(4);
+    let scratch = Scratch::new();
+    let shared: Shared = Arc::new(FixtureResolver::parse(&two_names()).unwrap());
+    let proxies = Proxies::new(scratch.0.join("egress"), own_uid(), shared, limits()).unwrap();
+    let yes: &[bool] = &[true, true];
+    let no: &[bool] = &[false, false];
+    let dir = proxies
+        .start(
+            "e1",
+            grant_of(&[(HOST, reached.port), (OTHER, waiting.port)]),
+            ROOT,
+        )
+        .unwrap();
+    // Novel: allowed pristine, refused exposed. Seen: allowed either way.
+    let egress = authorisation(
+        &[],
+        &[
+            (HOST, reached.port, [yes, no, yes, yes], None),
+            (OTHER, waiting.port, [yes, no, yes, yes], None),
+        ],
+    );
+    let authorised = proxies
+        .authorise("e1", &invocation(30), egress.clone())
+        .unwrap();
+    let mut waiting_tunnel = tunnel_to(&dir, OTHER, waiting.port);
+    received_something(&waiting);
+    let mut tunnel = tunnel_to(&dir, HOST, reached.port);
+    received_something(&reached);
+    let _ = open_reached.send(());
+    let mut reply = [0u8; 5];
+    tunnel.read_exact(&mut reply).unwrap();
+    assert_eq!(&reply, b"rrrrr");
+    counted_in(&proxies, "e1", D::ExposureRevoked, 1);
+    let _ = open_waiting.send(());
+    assert_eq!(drain(&mut waiting_tunnel), b"");
+    drop(tunnel);
+    let report = authorised.finish().unwrap();
+    assert!(report.exposed && report.consistent_with(&egress));
+    let targets = report.targets.as_slice();
+    assert!(targets[0].reached && !targets[1].reached);
+    assert_eq!(targets[0].bytes_downstream.get(), 5);
+    assert_eq!(targets[1].bytes_downstream.get(), 0);
+}
+
+#[test]
+fn an_authorisation_is_refused_without_a_proxy_beyond_the_grant_or_twice() {
+    use dwk_proto::brokerp::BrokerRefusal;
+    let scratch = Scratch::new();
+    let shared: Shared = Arc::new(FixtureResolver::parse(&loopback()).unwrap());
+    let proxies = Proxies::new(scratch.0.join("egress"), own_uid(), shared, limits()).unwrap();
+    let open = |pairs: &[(&str, u16)]| WorkloadEgress::uniform(pairs, true, false).unwrap();
+    assert_eq!(
+        proxies
+            .authorise(ENV, &invocation(30), open(&[(HOST, 443)]))
+            .err(),
+        Some(BrokerRefusal::ProxyUnavailable)
+    );
+    proxies.start(ENV, grant_of(&[(HOST, 443)]), ROOT).unwrap();
+    assert_eq!(
+        proxies
+            .authorise(ENV, &invocation(31), open(&[(HOST, 443), (OTHER, 443)]))
+            .err(),
+        Some(BrokerRefusal::EgressNotGranted)
+    );
+    assert_eq!(
+        proxies
+            .authorise(ENV, &invocation(32), open(&[(HOST, 8443)]))
+            .err(),
+        Some(BrokerRefusal::EgressNotGranted)
+    );
+    let first = proxies
+        .authorise(ENV, &invocation(33), open(&[(HOST, 443)]))
+        .unwrap();
+    assert_eq!(
+        proxies
+            .authorise(ENV, &invocation(34), open(&[(HOST, 443)]))
+            .err(),
+        Some(BrokerRefusal::WorkloadInUse)
+    );
+    // Dropped unfinished -- its thread gone -- it is removed all the same.
+    drop(first);
+    assert!(
+        proxies
+            .authorise(ENV, &invocation(35), open(&[(HOST, 443)]))
+            .is_ok()
+    );
 }

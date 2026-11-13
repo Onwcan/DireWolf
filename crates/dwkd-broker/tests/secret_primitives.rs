@@ -813,7 +813,7 @@ mod linux {
         for (case, edit) in [
             (
                 "old-private-version",
-                ("\"protocol\":11", "\"protocol\":10"),
+                ("\"protocol\":12", "\"protocol\":11"),
             ),
             (
                 "unknown-kind",

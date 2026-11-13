@@ -20,7 +20,17 @@
 //! * The **workload** is a fixture: the evidence image carries the test-only
 //!   `sandbox-fixture` beside the real probe and relay, and this test runs it
 //!   in the environment with the runtime's own `exec` — as the environment's
-//!   user, under its profile. Nothing in the product runs a workload (M5d).
+//!   user, under its profile.
+//! * The **authorisation** is played by this test (F-17, ADR-0061,
+//!   Proposed): since F-17 the proxy carries a tunnel only while a workload
+//!   the broker supervises holds an egress authorisation in the
+//!   environment. Every tunnel of M5b's cases is opened while a held
+//!   workload (`workload-sleep`, started through the broker's real
+//!   `workload_start`) carries an authorisation allowing the environment's
+//!   whole grant, so each case is still decided by the mechanism it always
+//!   was; the same CONNECT with no workload held is refused
+//!   (`authorisation-none-outside-a-workload`), and the F-17 cases hold
+//!   narrower authorisations built here.
 //! * The **boundary** is not: the namespace, the setup, the relay, the
 //!   broker's socket, its proxy, guard, resolver deadline, server-name check
 //!   and budgets are the real ones. Weakened topologies are built here, in
@@ -73,24 +83,30 @@ mod linux {
     use std::time::{Duration, Instant};
 
     use dwk_proto::brokerp::egress::{
-        EgressByteBudget, EgressCounters, EgressDisposition as D, EgressGrant, EgressHost,
-        EgressPort, EgressTarget, EgressTargets, EgressTunnelLimit,
+        EgressBits, EgressByteBudget, EgressCell, EgressCounters, EgressDisposition as D,
+        EgressGrant, EgressHost, EgressPort, EgressPrefix, EgressPrefixes, EgressTarget,
+        EgressTargets, EgressTunnelLimit, WorkloadEgress, WorkloadEgressTarget,
+        WorkloadEgressTargets,
     };
     use dwk_proto::brokerp::sandbox::{
         ContainerRef, ContainerRole, EnvironmentProfile, ImageId, NetworkTopology,
         SandboxInvariant as I, StoreInstance, Verdict, WorkspaceContract, required_invariants,
     };
+    use dwk_proto::brokerp::workload::{
+        ImagePath, WorkloadCollectAuthorisation, WorkloadCollectDone, WorkloadLaunch,
+        WorkloadProgress, WorkloadSeconds, WorkloadSpec, WorkloadStartAuthorisation,
+    };
     use dwk_proto::brokerp::{
-        Authorisation, BrokerDone, BrokerHello, BrokerOutcome, BrokerRefusal, Common,
-        ContainerState, DestroyState, EnvironmentDestroyAuthorisation, EnvironmentDestroyDone,
-        EnvironmentListAuthorisation, EnvironmentMeasureAuthorisation, EnvironmentMeasurement,
-        EnvironmentPrepareAuthorisation, EnvironmentSpec, OutcomeResult, OwnedEnvironment,
-        RuntimeSpec,
+        Authorisation, BrokerDone, BrokerGeneration, BrokerHello, BrokerOutcome, BrokerRefusal,
+        Common, ContainerState, DestroyState, EnvironmentDestroyAuthorisation,
+        EnvironmentDestroyDone, EnvironmentListAuthorisation, EnvironmentMeasureAuthorisation,
+        EnvironmentMeasurement, EnvironmentPrepareAuthorisation, EnvironmentSpec, OutcomeResult,
+        OwnedEnvironment, ProcessArgs, RuntimeSpec, StreamLimit,
     };
     use dwk_proto::frame::FrameDecoder;
     use dwk_proto::json::{Object, Value, to_canonical_string};
     use dwk_proto::wire::id::{EnvironmentId, InvocationId, RunId};
-    use dwk_proto::wire::scalar::{ContentDigest, HostPath};
+    use dwk_proto::wire::scalar::{ContentDigest, HostPath, ProcessArg};
     use dwk_sandbox_profile as profile;
     use rustix::net::{SendAncillaryBuffer, SendAncillaryMessage, SendFlags};
     use sha2::{Digest as _, Sha256};
@@ -164,6 +180,9 @@ mod linux {
         tampered_relay: String,
         probe_sha256: String,
         relay_sha256: String,
+        /// The workload fixture's digest: what a held workload is started
+        /// with (F-17).
+        fixture_sha256: String,
     }
 
     fn var(name: &str) -> String {
@@ -185,6 +204,7 @@ mod linux {
                 tampered_relay: var("DW_EGRESS_IMAGE_TAMPERED_RELAY"),
                 probe_sha256: var("DW_SANDBOX_PROBE_SHA256"),
                 relay_sha256: var("DW_EGRESS_RELAY_SHA256"),
+                fixture_sha256: var("DW_SANDBOX_FIXTURE_SHA256"),
             }
         }
 
@@ -478,6 +498,16 @@ mod linux {
 
     impl Origin {
         fn start(reply: usize, eager: bool) -> Self {
+            Self::serve(reply, eager, Duration::ZERO)
+        }
+
+        /// An origin that answers only `after` it first heard from a
+        /// connection: time for the proxy to end the tunnel first (F-17).
+        fn late(reply: usize, after: Duration) -> Self {
+            Self::serve(reply, false, after)
+        }
+
+        fn serve(reply: usize, eager: bool, after: Duration) -> Self {
             let listener = TcpListener::bind("127.0.0.1:0").unwrap();
             let port = listener.local_addr().unwrap().port();
             let accepted = Arc::new(AtomicUsize::new(0));
@@ -502,6 +532,7 @@ mod linux {
                             }
                             keep.lock().unwrap().extend_from_slice(&buffer[..n]);
                             if !replied {
+                                std::thread::sleep(after);
                                 let _ = stream.write_all(&vec![b'r'; reply]);
                                 replied = true;
                             }
@@ -635,6 +666,17 @@ mod linux {
         make: impl FnOnce(Common) -> Authorisation,
         fds: (OwnedFd, OwnedFd),
     ) -> Option<OutcomeResult> {
+        try_exchange_as(socket, invocation(), make, Some(fds))
+    }
+
+    /// One exchange for `invocation`, carrying the runtime's descriptors or
+    /// none (a workload's collection carries none).
+    fn try_exchange_as(
+        socket: &Path,
+        invocation: InvocationId,
+        make: impl FnOnce(Common) -> Authorisation,
+        fds: Option<(OwnedFd, OwnedFd)>,
+    ) -> Option<OutcomeResult> {
         let mut stream = UnixStream::connect(socket).unwrap();
         stream.set_read_timeout(Some(PEER_WAIT)).unwrap();
         let mut decoder = FrameDecoder::new();
@@ -656,21 +698,25 @@ mod linux {
             }
         };
         let hello = BrokerHello::decode_frame_body(&frame(&mut stream)?).unwrap();
-        let authorisation = make(Common::new(hello.channel.clone(), invocation()));
+        let authorisation = make(Common::new(hello.channel.clone(), invocation));
         let bytes = authorisation.encode_frame().unwrap();
-        let descriptors = [fds.0.as_fd(), fds.1.as_fd()];
-        let mut space = [MaybeUninit::<u8>::uninit(); rustix::cmsg_space!(ScmRights(2))];
-        let mut control = SendAncillaryBuffer::new(&mut space);
-        assert!(control.push(SendAncillaryMessage::ScmRights(&descriptors)));
-        let sent = rustix::net::sendmsg(
-            &stream,
-            &[IoSlice::new(&bytes)],
-            &mut control,
-            SendFlags::NOSIGNAL,
-        )
-        .unwrap();
-        stream.write_all(&bytes[sent..]).unwrap();
-        drop(fds);
+        if let Some(fds) = fds {
+            let descriptors = [fds.0.as_fd(), fds.1.as_fd()];
+            let mut space = [MaybeUninit::<u8>::uninit(); rustix::cmsg_space!(ScmRights(2))];
+            let mut control = SendAncillaryBuffer::new(&mut space);
+            assert!(control.push(SendAncillaryMessage::ScmRights(&descriptors)));
+            let sent = rustix::net::sendmsg(
+                &stream,
+                &[IoSlice::new(&bytes)],
+                &mut control,
+                SendFlags::NOSIGNAL,
+            )
+            .unwrap();
+            stream.write_all(&bytes[sent..]).unwrap();
+            drop(fds);
+        } else {
+            stream.write_all(&bytes).unwrap();
+        }
         let outcome = BrokerOutcome::decode_frame_body(&frame(&mut stream)?).unwrap();
         assert_eq!(outcome.channel, hello.channel);
         Some(outcome.result())
@@ -829,6 +875,173 @@ mod linux {
         assert_eq!(measurement.checks.len(), I::ALL.len());
         assert!(not_passing(&measurement).is_empty());
         (prepared.container.unwrap(), measurement)
+    }
+
+    // ---- F-17: the workload whose authorisation the proxy holds -----------
+
+    /// A workload this test holds in an environment through the broker's
+    /// real `workload_start` (F-17, ADR-0061, Proposed): the fixture's
+    /// `workload-sleep`, its egress authorisation in force on the
+    /// environment's proxy until it ends.
+    struct Held {
+        invocation: InvocationId,
+        generation: BrokerGeneration,
+    }
+
+    /// Start `workload-sleep seconds` in `container`, carrying `egress`.
+    fn hold(
+        socket: &Path,
+        ev: &Evidence,
+        (spec, container): (&EnvironmentSpec, &ContainerRef),
+        seconds: u32,
+        egress: WorkloadEgress,
+    ) -> Held {
+        let invocation = invocation();
+        let (runtime, exe, cwd) = runtime(ev);
+        let (spec, container) = (spec.clone(), container.clone());
+        let seconds_text = seconds.to_string();
+        let work = WorkloadSpec {
+            executable: ImagePath::new(FIXTURE).unwrap(),
+            executable_sha256: ContentDigest::new(ev.fixture_sha256.clone()).unwrap(),
+            args: ProcessArgs::new(
+                ["workload-sleep", seconds_text.as_str()]
+                    .iter()
+                    .map(|a| ProcessArg::new(*a).unwrap())
+                    .collect(),
+            )
+            .unwrap(),
+            stream_limit: StreamLimit::new(4096).unwrap(),
+            wall_clock: WorkloadSeconds::new(seconds.saturating_add(30).min(600)).unwrap(),
+            launch: WorkloadLaunch::Direct,
+        };
+        let answer = try_exchange_as(
+            socket,
+            invocation.clone(),
+            move |common| {
+                Authorisation::WorkloadStart(
+                    WorkloadStartAuthorisation::new(common, spec, container, runtime, work)
+                        .with_egress(Some(egress)),
+                )
+            },
+            Some((exe, cwd)),
+        )
+        .expect("no answer to a held workload's start");
+        let generation = done(answer).workload_start.unwrap().generation;
+        Held {
+            invocation,
+            generation,
+        }
+    }
+
+    /// One collection of a held workload.
+    fn collect(socket: &Path, held: &Held) -> WorkloadCollectDone {
+        let generation = held.generation.clone();
+        let answer = try_exchange_as(
+            socket,
+            held.invocation.clone(),
+            move |common| {
+                Authorisation::WorkloadCollect(WorkloadCollectAuthorisation::new(
+                    common, generation,
+                ))
+            },
+            None,
+        )
+        .expect("no answer to a collection");
+        done(answer).workload_collect.unwrap()
+    }
+
+    /// Collections until the held workload has ended: its last.
+    fn ended(socket: &Path, held: &Held) -> WorkloadCollectDone {
+        let deadline = Instant::now() + PEER_WAIT;
+        loop {
+            let collected = collect(socket, held);
+            if collected.progress != WorkloadProgress::Running {
+                return collected;
+            }
+            assert!(Instant::now() < deadline, "the held workload never ended");
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+
+    /// An authorisation allowing every address of every destination of
+    /// `spec`'s grant, in every cell: M5b's cases decided exactly as before.
+    fn the_whole_grant(spec: &EnvironmentSpec) -> WorkloadEgress {
+        let grant = spec.egress.as_ref().unwrap();
+        let destinations: Vec<(&str, u16)> = grant
+            .targets
+            .iter()
+            .map(|t| (t.host.as_str(), t.port.get()))
+            .collect();
+        WorkloadEgress::uniform(&destinations, true, false).unwrap()
+    }
+
+    /// A clean `PROXY_ONLY` preparation's container, a workload held in it
+    /// whose authorisation allows the whole grant (E6).
+    fn prepared_held(
+        socket: &Path,
+        ev: &Evidence,
+        spec: &EnvironmentSpec,
+        broker: &Broker,
+    ) -> (ContainerRef, EnvironmentMeasurement) {
+        let (container, measurement) = prepared_clean(socket, ev, spec, broker);
+        let _held = hold(
+            socket,
+            ev,
+            (spec, &container),
+            WORKLOAD_HOLD_SECONDS,
+            the_whole_grant(spec),
+        );
+        (container, measurement)
+    }
+
+    /// How long a held workload sleeps: past any case; the environment's
+    /// destruction ends it first.
+    const WORKLOAD_HOLD_SECONDS: u32 = 540;
+
+    /// A cell allowing exactly the pieces `allowed` names, with an optional
+    /// per-tunnel download bound.
+    fn cell(allowed: &[bool], cap: Option<u64>) -> EgressCell {
+        EgressCell {
+            allowed: EgressBits::from_pieces(allowed).unwrap(),
+            max_tunnel_download_bytes: cap.map(|c| EgressByteBudget::new(c).unwrap()),
+        }
+    }
+
+    /// One destination's four cells: `novel` before the workspace is
+    /// exposed, `exposed` after, whether reached or not unless `seen` says.
+    fn destination(
+        (host, port): (&str, u16),
+        seen: bool,
+        pristine: &EgressCell,
+        exposed: &EgressCell,
+    ) -> WorkloadEgressTarget {
+        WorkloadEgressTarget {
+            host: EgressHost::new(host.to_owned()).unwrap(),
+            port: EgressPort::new(port).unwrap(),
+            seen,
+            novel_pristine: pristine.clone(),
+            novel_exposed: exposed.clone(),
+            seen_pristine: pristine.clone(),
+            seen_exposed: exposed.clone(),
+        }
+    }
+
+    /// An authorisation over `prefixes` and `targets`, checked as the broker
+    /// will check it.
+    fn authorisation(prefixes: &[&str], targets: Vec<WorkloadEgressTarget>) -> WorkloadEgress {
+        let egress = WorkloadEgress {
+            exposed: false,
+            prefixes: EgressPrefixes::new(
+                prefixes
+                    .iter()
+                    .map(|p| EgressPrefix::new((*p).to_owned()).unwrap())
+                    .collect(),
+            )
+            .unwrap(),
+            targets: WorkloadEgressTargets::new(targets).unwrap(),
+        };
+        egress.check().unwrap();
+        egress
     }
 
     fn count(counters: &EgressCounters, disposition: D) -> u64 {
@@ -1155,6 +1368,33 @@ mod linux {
         let (container, _) = prepared_clean(&socket, &ev, &s, &broker);
         let run_fixture = |args: &[&str]| ev.workload(&container, args);
 
+        // F-17 (E6): with no workload held, no authorisation is in force and
+        // the proxy refuses a granted destination before it resolves the
+        // name -- a name that would fail resolution is refused the same way
+        // -- and the origin is never dialled.
+        for host in [ORIGIN, "fail.test"] {
+            let line = run_fixture(&["egress-connect", host, &p, host, "0"]);
+            assert!(line.contains("403"), "{line}");
+            assert_eq!(
+                field(&line, "decision"),
+                Some(D::NotAuthorised.as_str()),
+                "{line}"
+            );
+        }
+        assert_eq!(origin.accepted(), 0);
+        evidence(
+            "authorisation-none-outside-a-workload",
+            "403-NOT_AUTHORISED-before-resolution",
+            "connect-proxy:workload-authorisation",
+        );
+        let _held = hold(
+            &socket,
+            &ev,
+            (&s, &container),
+            WORKLOAD_HOLD_SECONDS,
+            the_whole_grant(&s),
+        );
+
         // A granted host, its own name in the hello: carried both ways.
         let line = run_fixture(&["egress-connect", ORIGIN, &p, ORIGIN, "1000"]);
         assert!(
@@ -1372,7 +1612,7 @@ mod linux {
             grant(vec![target(ORIGIN, origin.port)], 4, 8192, 1 << 20),
             &ev,
         );
-        let (container, _) = prepared_clean(&socket, &ev, &s, &broker);
+        let (container, _) = prepared_held(&socket, &ev, &s, &broker);
         let line = ev.workload(&container, &["egress-connect", ORIGIN, &p, ORIGIN, "65536"]);
         std::thread::sleep(Duration::from_millis(300));
         assert!(
@@ -1417,7 +1657,7 @@ mod linux {
             grant(vec![target(ORIGIN, origin.port)], 4, 1 << 20, 4096),
             &ev,
         );
-        let (container, _) = prepared_clean(&socket, &ev, &s, &broker);
+        let (container, _) = prepared_held(&socket, &ev, &s, &broker);
         let line = ev.workload(&container, &["egress-connect", ORIGIN, &p, ORIGIN, "0"]);
         let received: usize = field(&line, "received").unwrap().parse().unwrap();
         assert!(received <= 4096, "{line}");
@@ -1444,7 +1684,7 @@ mod linux {
             grant(vec![target(ORIGIN, origin.port)], 1, 1 << 20, 1 << 20),
             &ev,
         );
-        let (container, _) = prepared_clean(&socket, &ev, &s, &broker);
+        let (container, _) = prepared_held(&socket, &ev, &s, &broker);
         // The first tunnel holds the one slot: the origin never closes it.
         let holder = {
             let mut words: Vec<String> = ["container", "exec", container.as_str(), FIXTURE]
@@ -1493,7 +1733,7 @@ mod linux {
             grant(vec![target(ORIGIN, origin.port)], 4, 4096, 1 << 20),
             &ev,
         );
-        let (container, _) = prepared_clean(&socket, &ev, &s, &broker);
+        let (container, _) = prepared_held(&socket, &ev, &s, &broker);
         let line = ev.workload(
             &container,
             &["egress-connect", ORIGIN, &p, ORIGIN, "65536", "front"],
@@ -1515,6 +1755,426 @@ mod linux {
             &format!("carried-unseen-bounded-{}-of-4096", received.len()),
             "connect-proxy:upload-budget",
         );
+        drop(broker);
+    }
+
+    // ---- F-17: a workload's egress authorisation in the real topology ----
+
+    /// The fixture started in `container` in the background; its line is
+    /// read when it ends ([`line_of`]).
+    fn spawned(ev: &Evidence, container: &ContainerRef, args: &[&str]) -> Child {
+        Command::new(&ev.runtime)
+            .env_clear()
+            .env("HOME", std::env::temp_dir())
+            .arg("--host")
+            .arg(format!("unix://{}", ev.socket))
+            .args(["container", "exec", container.as_str(), FIXTURE])
+            .args(args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap()
+    }
+
+    fn line_of(child: Child) -> String {
+        let out = child.wait_with_output().unwrap();
+        String::from_utf8(out.stdout).unwrap().trim().to_owned()
+    }
+
+    /// Until `origin` has accepted `n` connections: the tunnel was dialled.
+    fn dialled(origin: &Origin, n: usize) {
+        let wait = Instant::now() + Duration::from_secs(10);
+        while origin.accepted() < n {
+            assert!(Instant::now() < wait, "the tunnel was never dialled");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// How many of a held workload's CONNECTs for its `target`th destination
+    /// ended `disposition`, as its supervisor reported them.
+    fn reported(collected: &WorkloadCollectDone, target: usize, disposition: D) -> u64 {
+        collected
+            .egress
+            .as_ref()
+            .unwrap()
+            .targets
+            .iter()
+            .nth(target)
+            .unwrap()
+            .dispositions
+            .iter()
+            .find(|c| c.disposition == disposition)
+            .map_or(0, |c| c.count.get())
+    }
+
+    /// A specification granting `origins`, on `workspace`.
+    fn spec_to(workspace: &Path, ev: &Evidence, origins: &[(&str, u16)]) -> EnvironmentSpec {
+        let (e, r) = (environment(), run());
+        spec(
+            (&e, &r),
+            workspace,
+            &ev.fixture_image,
+            &ev.relay_sha256,
+            grant(
+                origins.iter().map(|(h, p)| target(h, *p)).collect(),
+                8,
+                1 << 20,
+                1 << 20,
+            ),
+            ev,
+        )
+    }
+
+    /// Destroy `container`: its proxy's counters.
+    fn destroyed(
+        socket: &Path,
+        ev: &Evidence,
+        s: &EnvironmentSpec,
+        container: &ContainerRef,
+    ) -> EgressCounters {
+        destroy(socket, ev, (&s.environment_id, &s.run_id), Some(container))
+            .egress
+            .unwrap()
+    }
+
+    /// F-17 (ADR-0061, Proposed) at the broker, in the real topology: a
+    /// workload's authorisation decides each tunnel by its destination, its
+    /// address and the workspace's exposure, bounds what one tunnel carries
+    /// back, and lives exactly as long as the workload.
+    #[test]
+    #[ignore = "needs a real OCI runtime: make sandbox-egress-evidence"]
+    fn a_workloads_egress_authorisation_holds_in_the_real_topology() {
+        let ev = Evidence::load();
+        let _reaper = Reaper(ev.clone());
+        let dir = Scratch::new("authorised");
+        let socket = dir.socket();
+        let broker = Broker::evidence(&socket, &dir.resolver_fixture());
+
+        // One workload, four destinations: one allowed, one denied whole, one
+        // denied at the address its name resolves to, one bounded per tunnel.
+        // Pieces over one range (127.0.0.0/8): IPv4 in no range, IPv6, the
+        // range's.
+        let every = cell(&[true, true, true], None);
+        let nothing = cell(&[false, false, false], None);
+        let no_loopback = cell(&[true, true, false], None);
+        let bounded = cell(&[true, true, true], Some(100));
+        let allowed = Origin::start(5, false);
+        let ranged = Origin::start(5, false);
+        let capped = Origin::start(4096, true);
+        let s = spec_to(
+            &dir.workspace("one"),
+            &ev,
+            &[
+                (ORIGIN, allowed.port),
+                ("fail.test", allowed.port),
+                (ORIGIN, ranged.port),
+                (ORIGIN, capped.port),
+            ],
+        );
+        let (container, _) = prepared_clean(&socket, &ev, &s, &broker);
+        let held = hold(
+            &socket,
+            &ev,
+            (&s, &container),
+            12,
+            authorisation(
+                &["127.0.0.0/8"],
+                vec![
+                    destination((ORIGIN, allowed.port), false, &every, &every),
+                    destination(("fail.test", allowed.port), false, &nothing, &nothing),
+                    destination((ORIGIN, ranged.port), false, &no_loopback, &no_loopback),
+                    destination((ORIGIN, capped.port), false, &bounded, &bounded),
+                ],
+            ),
+        );
+        let pa = allowed.port.to_string();
+        let reached = ev.workload(&container, &["egress-connect", ORIGIN, &pa, ORIGIN, "10"]);
+        assert!(reached.contains("HTTP/1.1 200"), "{reached}");
+        assert_eq!(field(&reached, "received"), Some("5"), "{reached}");
+        // Denied before the name is resolved: the resolver would have failed
+        // it (`RESOLUTION_FAILED`), and nothing is dialled.
+        let denied = ev.workload(
+            &container,
+            &["egress-connect", "fail.test", &pa, "fail.test", "0"],
+        );
+        assert!(denied.contains("403"), "{denied}");
+        assert_eq!(
+            field(&denied, "decision"),
+            Some(D::PolicyDenied.as_str()),
+            "{denied}"
+        );
+        assert_eq!(allowed.accepted(), 1);
+        evidence(
+            "authorisation-allowed-and-denied-same-workload",
+            "200-reached+403-POLICY_DENIED-before-resolution",
+            "connect-proxy:workload-authorisation",
+        );
+        let pr = ranged.port.to_string();
+        let line = ev.workload(&container, &["egress-connect", ORIGIN, &pr, ORIGIN, "0"]);
+        assert!(line.contains("403"), "{line}");
+        assert_eq!(
+            field(&line, "decision"),
+            Some(D::PolicyAddressDenied.as_str()),
+            "{line}"
+        );
+        assert_eq!(ranged.accepted(), 0, "a denied address was dialled");
+        evidence(
+            "authorisation-address-range-denied",
+            &line,
+            "connect-proxy:workload-authorisation-address",
+        );
+        let pc = capped.port.to_string();
+        let line = ev.workload(&container, &["egress-connect", ORIGIN, &pc, ORIGIN, "0"]);
+        assert!(line.contains("HTTP/1.1 200"), "{line}");
+        assert_eq!(field(&line, "received"), Some("100"), "{line}");
+        assert_eq!(capped.accepted(), 1);
+        evidence(
+            "authorisation-tunnel-output-bounded",
+            &line,
+            "connect-proxy:tunnel-output-bound",
+        );
+        // What the workload's tunnels did, as its supervisor reports it when
+        // it ends: per destination, no payload.
+        let report = ended(&socket, &held);
+        let egress = report.egress.as_ref().unwrap();
+        assert!(egress.exposed, "{egress:?}");
+        let reach: Vec<bool> = egress.targets.iter().map(|t| t.reached).collect();
+        assert_eq!(reach, [true, false, false, true], "{egress:?}");
+        assert_eq!(reported(&report, 1, D::PolicyDenied), 1, "{egress:?}");
+        assert_eq!(
+            reported(&report, 2, D::PolicyAddressDenied),
+            1,
+            "{egress:?}"
+        );
+        assert_eq!(reported(&report, 3, D::TunnelOutputLimit), 1, "{egress:?}");
+        assert_eq!(
+            egress.targets.iter().nth(3).unwrap().bytes_downstream.get(),
+            100
+        );
+        assert!(
+            egress
+                .targets
+                .iter()
+                .nth(2)
+                .unwrap()
+                .addresses
+                .iter()
+                .any(|a| a.address.as_str() == "127.0.0.1" && a.refused.get() == 1),
+            "{egress:?}"
+        );
+        assert!(!format!("{egress:?}").contains(ORIGIN));
+        evidence(
+            "authorisation-report-per-destination",
+            "reached-1+0+0+1;POLICY_DENIED;POLICY_ADDRESS_DENIED;TUNNEL_OUTPUT_LIMIT",
+            "workload-supervisor-report",
+        );
+
+        // A tunnel open when its workload ends is ended with it, before the
+        // origin's answer comes back; a CONNECT after it is refused. The
+        // environment's init ends what the workload left -- the client here
+        // with it (ADR-0052) -- so what the tunnel carried is read from the
+        // supervisor's report, the broker's own vantage.
+        let late = Origin::late(64, Duration::from_secs(20));
+        let s2 = spec_to(&dir.workspace("two"), &ev, &[(ORIGIN, late.port)]);
+        let (container2, _) = prepared_clean(&socket, &ev, &s2, &broker);
+        let short = hold(&socket, &ev, (&s2, &container2), 5, the_whole_grant(&s2));
+        let pl = late.port.to_string();
+        let open = spawned(
+            &ev,
+            &container2,
+            &["egress-connect", ORIGIN, &pl, ORIGIN, "0"],
+        );
+        dialled(&late, 1);
+        let last = ended(&socket, &short);
+        let _ = line_of(open);
+        let tunnel = last.egress.as_ref().unwrap().targets.iter().next().unwrap();
+        assert_eq!(reported(&last, 0, D::WorkloadEnded), 1, "{last:?}");
+        assert_eq!(tunnel.bytes_downstream.get(), 0, "{last:?}");
+        assert!(!tunnel.reached, "{last:?}");
+        evidence(
+            "authorisation-ends-with-the-workload",
+            "WORKLOAD_ENDED=1;bytes-back-0;not-reached",
+            "connect-proxy:workload-lifetime",
+        );
+        let after = ev.workload(&container2, &["egress-connect", ORIGIN, &pl, ORIGIN, "0"]);
+        assert_eq!(
+            field(&after, "decision"),
+            Some(D::NotAuthorised.as_str()),
+            "{after}"
+        );
+        assert_eq!(late.accepted(), 1);
+        evidence(
+            "authorisation-none-after-the-workload",
+            &after,
+            "connect-proxy:workload-authorisation",
+        );
+
+        // Exposure inside one workload: a tunnel to a destination whose
+        // exposed cell denies it is open, waiting for its origin; the first
+        // byte another tunnel carries back exposes the workspace, and the
+        // open tunnel is ended before its origin answers -- its client gets
+        // nothing -- and a novel destination is refused from then on.
+        let all = cell(&[true, true], None);
+        let none = cell(&[false, false], None);
+        let first = Origin::start(5, false);
+        let slow = Origin::late(64, Duration::from_secs(6));
+        let other = Origin::start(5, false);
+        let s3 = spec_to(
+            &dir.workspace("three"),
+            &ev,
+            &[
+                (ORIGIN, first.port),
+                (ORIGIN, slow.port),
+                (ORIGIN, other.port),
+            ],
+        );
+        let (container3, _) = prepared_clean(&socket, &ev, &s3, &broker);
+        let _exposing = hold(
+            &socket,
+            &ev,
+            (&s3, &container3),
+            WORKLOAD_HOLD_SECONDS,
+            authorisation(
+                &[],
+                vec![
+                    destination((ORIGIN, first.port), false, &all, &all),
+                    destination((ORIGIN, slow.port), false, &all, &none),
+                    destination((ORIGIN, other.port), false, &all, &none),
+                ],
+            ),
+        );
+        let ps = slow.port.to_string();
+        let waiting = spawned(
+            &ev,
+            &container3,
+            &["egress-connect", ORIGIN, &ps, ORIGIN, "0"],
+        );
+        dialled(&slow, 1);
+        let pf = first.port.to_string();
+        let line = ev.workload(&container3, &["egress-connect", ORIGIN, &pf, ORIGIN, "0"]);
+        assert_eq!(field(&line, "received"), Some("5"), "{line}");
+        let revoked = line_of(waiting);
+        assert!(revoked.contains("HTTP/1.1 200"), "{revoked}");
+        assert_eq!(field(&revoked, "received"), Some("0"), "{revoked}");
+        evidence(
+            "exposure-revokes-an-open-tunnel",
+            &revoked,
+            "connect-proxy:workspace-exposure",
+        );
+        let po = other.port.to_string();
+        let line = ev.workload(&container3, &["egress-connect", ORIGIN, &po, ORIGIN, "0"]);
+        assert_eq!(
+            field(&line, "decision"),
+            Some(D::PolicyDenied.as_str()),
+            "{line}"
+        );
+        assert_eq!(other.accepted(), 0);
+        evidence(
+            "exposure-novel-refused-after-first-origin-byte",
+            &line,
+            "connect-proxy:workspace-exposure",
+        );
+
+        // Exposure from a sibling: two environments on one workspace root,
+        // a third on another, the second and third refusing a novel
+        // destination once their root is exposed and allowing a reached one.
+        // The first one's origin byte exposes the root it shares, so the
+        // sibling's novel destination is refused; the other root is
+        // untouched -- its tunnel admitted -- and that tunnel, whose own first
+        // byte then exposes its root, is held to its destination's seen cell
+        // and carries the answer.
+        let origin = Origin::start(5, false);
+        let shared = dir.workspace("shared");
+        let apart = dir.workspace("apart");
+        let reached_one = [(ORIGIN, origin.port)];
+        let (s4, s5, s6) = (
+            spec_to(&shared, &ev, &reached_one),
+            spec_to(&shared, &ev, &reached_one),
+            spec_to(&apart, &ev, &reached_one),
+        );
+        let (c4, _) = prepared_clean(&socket, &ev, &s4, &broker);
+        let (c5, _) = prepared_clean(&socket, &ev, &s5, &broker);
+        let (c6, _) = prepared_clean(&socket, &ev, &s6, &broker);
+        let narrow = || {
+            let (host, port) = reached_one[0];
+            authorisation(
+                &[],
+                vec![WorkloadEgressTarget {
+                    host: EgressHost::new(host.to_owned()).unwrap(),
+                    port: EgressPort::new(port).unwrap(),
+                    seen: false,
+                    novel_pristine: all.clone(),
+                    novel_exposed: none.clone(),
+                    seen_pristine: all.clone(),
+                    seen_exposed: all.clone(),
+                }],
+            )
+        };
+        let _h4 = hold(
+            &socket,
+            &ev,
+            (&s4, &c4),
+            WORKLOAD_HOLD_SECONDS,
+            the_whole_grant(&s4),
+        );
+        let _h5 = hold(&socket, &ev, (&s5, &c5), WORKLOAD_HOLD_SECONDS, narrow());
+        let _h6 = hold(&socket, &ev, (&s6, &c6), WORKLOAD_HOLD_SECONDS, narrow());
+        let p = origin.port.to_string();
+        let line = ev.workload(&c4, &["egress-connect", ORIGIN, &p, ORIGIN, "0"]);
+        assert_eq!(field(&line, "received"), Some("5"), "{line}");
+        let line = ev.workload(&c5, &["egress-connect", ORIGIN, &p, ORIGIN, "0"]);
+        assert_eq!(
+            field(&line, "decision"),
+            Some(D::PolicyDenied.as_str()),
+            "{line}"
+        );
+        assert_eq!(origin.accepted(), 1);
+        evidence(
+            "exposure-sibling-on-the-shared-root",
+            &line,
+            "connect-proxy:workspace-exposure",
+        );
+        let line = ev.workload(&c6, &["egress-connect", ORIGIN, &p, ORIGIN, "0"]);
+        assert_eq!(field(&line, "received"), Some("5"), "{line}");
+        assert_eq!(origin.accepted(), 2);
+        evidence(
+            "exposure-other-root-untouched",
+            &line,
+            "connect-proxy:workspace-exposure",
+        );
+
+        // Every ending counted by its disposition at destruction.
+        let mut seen = std::collections::BTreeMap::new();
+        for (spec, container) in [
+            (&s, &container),
+            (&s2, &container2),
+            (&s3, &container3),
+            (&s4, &c4),
+            (&s5, &c5),
+            (&s6, &c6),
+        ] {
+            let counters = destroyed(&socket, &ev, spec, container);
+            for disposition in [
+                D::PolicyDenied,
+                D::PolicyAddressDenied,
+                D::TunnelOutputLimit,
+                D::WorkloadEnded,
+                D::NotAuthorised,
+                D::ExposureRevoked,
+            ] {
+                *seen.entry(disposition.as_str()).or_insert(0) += count(&counters, disposition);
+            }
+        }
+        for (disposition, at_least) in [
+            (D::PolicyDenied, 3),
+            (D::PolicyAddressDenied, 1),
+            (D::TunnelOutputLimit, 1),
+            (D::WorkloadEnded, 1),
+            (D::NotAuthorised, 1),
+            (D::ExposureRevoked, 1),
+        ] {
+            assert!(seen[disposition.as_str()] >= at_least, "{seen:?}");
+        }
         drop(broker);
     }
 
@@ -2394,7 +3054,7 @@ mod linux {
             &ev,
         );
         // PROXY_ONLY needs no evidence flag: it is the product's topology.
-        let (container, _) = prepared_clean(&socket, &ev, &s, &broker);
+        let (container, _) = prepared_held(&socket, &ev, &s, &broker);
         evidence("production-proxy-only-prepared", "clean", "measured-both");
         // The fixture's names do not exist for the host's resolver …
         let line = ev.workload(&container, &["egress-connect", ORIGIN, &p, ORIGIN, "0"]);

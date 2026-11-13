@@ -177,14 +177,19 @@ fn judgement(failure: EnvFailure) -> OutcomeResult {
     }
 }
 
-/// A run's ending as every collection answers it.
-fn ending(ran: Result<Ran, EnvFailure>) -> OutcomeResult {
+/// A run's ending as every collection answers it, with what its tunnels did
+/// when it held an egress authorisation (F-17).
+fn ending(
+    ran: Result<Ran, EnvFailure>,
+    egress: Option<dwk_proto::brokerp::egress::WorkloadEgressReport>,
+) -> OutcomeResult {
     match ran {
         Ok(ran) => match ran_done(&ran) {
             Some(done) => OutcomeResult::done(BrokerDone::workload_collect(WorkloadCollectDone {
                 progress: WorkloadProgress::Ended,
                 result: Some(done),
                 never_ran: None,
+                egress,
             })),
             // It ran and its answer cannot be stated: nothing proves how it
             // ended.
@@ -198,6 +203,7 @@ fn ending(ran: Result<Ran, EnvFailure>) -> OutcomeResult {
                 progress: WorkloadProgress::Ended,
                 result: None,
                 never_ran: Some(why),
+                egress,
             }))
         }
         Err(EnvFailure::Unconfirmed) => {
@@ -240,6 +246,12 @@ struct Workload {
     spec: EnvironmentSpec,
     program: WorkloadSpec,
     runtime: RuntimeSpec,
+    /// The invocation, and -- `PROXY_ONLY` -- its egress authorisation
+    /// (F-17), held only while it runs.
+    egress: (
+        dwk_proto::wire::id::InvocationId,
+        Option<dwk_proto::brokerp::egress::WorkloadEgress>,
+    ),
     /// A secret-bearing workload's secret (M5d.3), and the descriptor that
     /// holds its value -- read only after the judgement.
     secret: Option<(WorkloadSecret, OwnedFd)>,
@@ -274,6 +286,22 @@ fn secret_run(
     }))
 }
 
+/// Hold `work`'s egress authorisation on its environment's proxy (F-17):
+/// `None` for a workload without one.
+fn authorise(
+    parts: &Parts,
+    work: &Workload,
+) -> Result<Option<crate::egress::proxy::Authorised>, BrokerRefusal> {
+    let (invocation, egress) = &work.egress;
+    match egress {
+        None => Ok(None),
+        Some(egress) => parts
+            .proxies
+            .authorise(work.handle.environment.as_str(), invocation, egress.clone())
+            .map(Some),
+    }
+}
+
 /// A workload's thread (ADR-0052 §§5, 8): re-prove the runtime, re-judge
 /// the environment and prove the executable; for a secret-bearing workload
 /// (M5d.3), only then read its value; report it through `gate`; and only on
@@ -296,11 +324,27 @@ fn supervise(
             Ok(secret) => (Ok(()), secret),
             Err(refused) => (Err(refused), None),
         };
+        // F-17: its egress authorisation is in force before it can run --
+        // before the start is answered -- and only until it ends. Refused,
+        // nothing runs; dropped unfinished, it is removed.
+        let (judged, authorised) = match judged {
+            Ok(()) => match authorise(parts, work) {
+                Ok(authorised) => (Ok(()), authorised),
+                Err(refusal) => (Err(OutcomeResult::Refused(refusal)), None),
+            },
+            Err(refused) => (Err(refused), None),
+        };
         let go = gate.take().is_some_and(|gate| gate.judged(judged));
-        go.then(|| env.exec_workload(&work.handle, &work.program, until, secret))
+        go.then(|| {
+            let ran = env.exec_workload(&work.handle, &work.program, until, secret);
+            (
+                ran,
+                authorised.and_then(crate::egress::proxy::Authorised::finish),
+            )
+        })
     });
     match ran {
-        Ok(ran) => ran.map(ending),
+        Ok(ran) => ran.map(|(ran, egress)| ending(ran, egress)),
         Err(refusal) => {
             if let Some(gate) = gate {
                 let _ = gate.judged(Err(OutcomeResult::Refused(refusal)));
@@ -581,6 +625,10 @@ impl Sandbox {
             },
             program: authorisation.workload(),
             runtime: authorisation.runtime(),
+            egress: (
+                authorisation.invocation_id.clone(),
+                authorisation.egress.clone(),
+            ),
             spec,
             secret,
         };

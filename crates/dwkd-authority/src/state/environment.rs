@@ -670,6 +670,16 @@ pub(super) fn record_destroyed(
             }
             if let Some(counters) = egress {
                 fields = egress_fields(fields, counters);
+                // F-17 (ADR-0061's A8): the proxy's counts against what the
+                // environment's workloads reported.
+                let (reports, within) = super::workload_egress::reconciled(
+                    work,
+                    record.environment.as_str(),
+                    counters,
+                )?;
+                fields = fields
+                    .int("egress_workload_reports", reports)
+                    .flag("egress_reports_within_counters", within);
             }
             fields.extend(timing);
             work.audit(AuditEvent::EnvironmentDestroyed, fields)

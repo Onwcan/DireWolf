@@ -447,6 +447,15 @@ impl PolicyContext {
         self
     }
 
+    /// The same context with its taint raised to at least `at_least` --
+    /// never lowered: the more restrictive of the two (F-17, a workload's
+    /// decision once its workspace may hold what an origin sent).
+    #[must_use]
+    pub fn with_taint_at_least(mut self, at_least: TaintLevel) -> Self {
+        self.taint = self.taint.max(at_least);
+        self
+    }
+
     /// What started the run.
     #[must_use]
     pub const fn origin(&self) -> Origin {

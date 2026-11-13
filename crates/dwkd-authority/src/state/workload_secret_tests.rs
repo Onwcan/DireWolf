@@ -880,6 +880,7 @@ fn a_credential_that_cannot_be_read_or_carried_fails_the_launch_before_anything_
     fx.fake
         .then_collect(Ok(BrokerDelivery::WorkloadCollected(Collected::Ended(
             ran(WorkloadEnding::Exited, b"ok", Verdict::Pass),
+            None,
         ))));
     let body = fx.launch6(
         &run,

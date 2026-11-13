@@ -73,6 +73,8 @@ An `ALLOW` may carry requirements the kernel then enforces:
 
 Obligations let policy say "yes, but under these conditions" without inventing new effects.
 
+**On a sandboxed workload's tunnels** (F-17, [ADR-0061](adr/0061-workload-egress-decided-by-policy-novelty-and-exposure.md), Proposed) only `max_output_bytes` and `audit_level` can be kept: the first bounds what one tunnel carries back -- the smallest bound across the address pieces a cell allows -- and the second is recorded. A rule whose `ALLOW` carries any other obligation allows no tunnel.
+
 ## 3. Rule format
 
 TOML. Ordered. First match wins. A `[[rule]]` with `id = "default"` is mandatory and must be last; loading fails otherwise.
@@ -349,6 +351,8 @@ Rego/Cedar/CEL are all capable and all add: a new evaluator to secure, a new lan
 Until then, the constraint is a feature: **a policy you cannot read is a policy you cannot trust.**
 
 ## 4. Evaluation
+
+**A sandboxed workload's egress is evaluated ahead of its tunnels** (F-17, [ADR-0061](adr/0061-workload-egress-decided-by-policy-novelty-and-exposure.md), Proposed). At each launch in a `PROXY_ONLY` environment the authority evaluates `network.https:<host>:<port>` in `sandbox`, exactly as below, for every destination of the environment's grant: once per novelty (`destination_novel`), once per taint from the run's own to `EXTERNAL_UNTRUSTED` (the cells a workspace exposed by a downloaded byte is held to, the strictest of them kept), and once per piece of the address space the `ip_in` ranges of the rules and postconditions that can match `network.https` cut -- a representative address per piece, so first-match order, postconditions and the default decide as for any action. A decision that needs no address holds for every address. More than 256 such ranges refuse every address-dependent decision (`EGRESS_POLICY_TOO_FINE`). `REQUIRE_APPROVAL` is a refusal: every admitted run is unattended, and no approval path for a tunnel exists before M6. The rule that decided each cell is recorded with the workload's intent.
 
 ```
 evaluate(action, context) -> Decision

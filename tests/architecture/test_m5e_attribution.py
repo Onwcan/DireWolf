@@ -369,7 +369,9 @@ def test_every_required_case_is_attributed_and_every_rule_is_used() -> None:
     # runner: the control, ADR-0057 §1a's 15 rows in 16 cases, and their
     # count; and ADR-0060's 2, on a real runtime: a constrained grant absent
     # from a PROXY_ONLY environment's destinations, and its name refused by
-    # the proxy. A smaller one is a lost case.
+    # the proxy; and F-17's 21 (ADR-0061, Proposed): 11 at the broker and 9
+    # through the authority on a real runtime, and the registry's standing
+    # control, hosted only. A smaller one is a lost case.
     assert len(dw.BROKER_ASSURANCE_CASES) == 20
     assert len(dw.CAPTURED_ASSURANCE_CASES) == 19
     closure = [c for s, c in dw.WORKLOAD_CASES if s == "sandbox-closure"]
@@ -384,12 +386,35 @@ def test_every_required_case_is_attributed_and_every_rule_is_used() -> None:
     assert ("sandbox-broker", "weakened-host-uts") in dw.SANDBOX_CASES
     assert len(dw.RESTART_CASES) == 7
     assert len(dw.CAPACITY_CASES) == 4
-    assert len(dw.REGISTRY_CASES) == 19
+    assert len(dw.REGISTRY_CASES) == 20
     assert len(dw.HYGIENE_NPM_CASES) == 22
     assert len(dw.HYGIENE_PIP_CASES) == 21
     assert len(dw.HYGIENE_CASES) == 44
     assert len(dw.E6_CASES) == 18
-    assert len(inventory) == 647
+    assert len(inventory) == 668
+
+
+BEFORE_F17 = Path(__file__).with_name("m5e_cases_before_f17.txt")
+
+
+def test_no_case_before_f17_is_lost_renamed_or_reattributed() -> None:
+    """F-17 (ADR-0061, Proposed; E1) re-baselined the M5 evidence by adding
+    cases: every case attributed before it is still required, at the level
+    and with the mechanisms it had -- its identity pinned, not only the
+    total."""
+    pinned = [
+        line.split(" ")
+        for line in BEFORE_F17.read_text(encoding="utf-8").splitlines()
+        if line and not line.startswith("#")
+    ]
+    assert len(pinned) == 647
+    for suite, case, level, mechanisms in pinned:
+        assert (suite, case) in dw.ATTRIBUTED_CASES, f"{suite}/{case} is no longer required"
+        attributed = dw.attribution(suite, case)
+        assert attributed is not None, f"{suite}/{case}"
+        assert attributed == (level, frozenset(mechanisms.split(","))), (
+            f"{suite}/{case} was re-attributed: {attributed}"
+        )
 
 
 def test_the_vocabulary_is_closed_used_and_documented() -> None:

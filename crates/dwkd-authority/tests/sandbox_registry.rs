@@ -134,6 +134,10 @@ mod linux {
     /// issuer pip must not trust.
     const GRANTED: &str = "granted-registry.test";
     const UNGRANTED: &str = "ungranted-registry.test";
+    /// F-17's standing control (ADR-0061, Proposed): a registry a run may be
+    /// granted that no rule of the policy allows -- and a name the resolver
+    /// does not hold, so had the proxy asked, it would have failed.
+    const REFUSED: &str = "refused-registry.test";
     const GRANTED_PORT: u16 = 18443;
     const UNGRANTED_PORT: u16 = 18444;
     const ROGUE_PORT: u16 = 18445;
@@ -288,6 +292,17 @@ mod linux {
                  question(s) the environment's own probe asked: {dispositions:?}"
             )
         })
+    }
+
+    /// The tunnels an environment's workloads had refused by policy (F-17,
+    /// ADR-0061, Proposed). Never the probe's: its one question names a host
+    /// no grant can hold, which the ceiling refuses before any policy is
+    /// consulted (`TARGET_NOT_GRANTED`), so no probe question is taken away.
+    fn policy_refusals(dispositions: &[String]) -> u64 {
+        dispositions
+            .iter()
+            .find_map(|d| d.strip_prefix("POLICY_DENIED="))
+            .map_or(0, |n| n.parse::<u64>().unwrap())
     }
 
     /// The accounting every registry case relies on, needing no runtime: the
@@ -767,8 +782,11 @@ mod linux {
     /// Python and npm, by path and digest, in a sandbox, under the shipped
     /// packs' own obligation (`allow-known-tools`) but without their
     /// `argv_safe`, which keeps `pip install` out of the shipped packs' reach
-    /// (`docs/M5E_ASSURANCE_PLAN.md` §3, R14). Reads in the workspace; nothing
-    /// on the host; everything else denied.
+    /// (`docs/M5E_ASSURANCE_PLAN.md` §3, R14). Reads in the workspace; HTTPS
+    /// from a sandbox to exactly the two evidence registries (F-17, ADR-0061,
+    /// Proposed: every tunnel is decided by policy), so each case is still
+    /// refused by the mechanism it always was; nothing on the host;
+    /// everything else denied -- the standing control among it.
     fn policy_text(pins: &Pins) -> String {
         format!(
             r#"schema_version = 1
@@ -790,6 +808,13 @@ effect = "ALLOW"
 when.verb = "fs.read"
 when.path_under = "${{WORKSPACE}}"
 when.max_bytes = 65536
+
+[[rule]]
+id = "https-to-the-evidence-registries"
+effect = "ALLOW"
+when.verb = "network.https"
+when.environment = "sandbox"
+when.host_matches = ["{GRANTED}", "{UNGRANTED}"]
 
 [[rule]]
 id = "never-on-the-host"
@@ -1571,6 +1596,63 @@ reason = "NO_MATCHING_RULE"
             "relay-and-connect-proxy-grant",
         );
         let ungranted_served = lab.ungranted.requests().len();
+
+        // F-17's standing control (ADR-0061, Proposed): a registry granted to
+        // the run that no rule of the policy allows. The proxy refuses it on
+        // the workload's authorisation, before resolving its name, and
+        // nothing is dialled.
+        n += 1;
+        let granted_served = lab.granted.requests().len();
+        let mut a = lab.peer(n, &[format!("network.https:{REFUSED}:{GRANTED_PORT}")]);
+        let ran = lab.pip(
+            &mut a,
+            "policy-denied",
+            false,
+            &[
+                "--index-url",
+                &Lab::index(REFUSED, GRANTED_PORT),
+                &base.name,
+            ],
+        );
+        assert!(
+            ran.failed(),
+            "{}",
+            lab.why("pip succeeded where it must fail", Some(&ran), None)
+        );
+        assert!(
+            ran.said("403"),
+            "{}",
+            lab.why("pip never saw the proxy refusal", Some(&ran), None)
+        );
+        lab.container(&a.run);
+        lab.nothing(&mut a, "policy-denied");
+        assert_eq!(lab.granted.requests().len(), granted_served);
+        let destroyed = lab.release(&mut a, &ran.environment);
+        let denied = policy_refusals(&texts(&destroyed, "egress_dispositions"));
+        assert!(
+            denied >= 1,
+            "{}",
+            lab.why(
+                "the proxy did not refuse the registry on policy",
+                Some(&ran),
+                Some(&destroyed)
+            )
+        );
+        assert_eq!(
+            lab.refused_by_proxy(&destroyed, &ran.environment),
+            0,
+            "{}",
+            lab.why(
+                "the ceiling refused a registry the run was granted",
+                Some(&ran),
+                Some(&destroyed)
+            )
+        );
+        evidence(
+            "registry-pip-granted-index-denied-by-policy",
+            &format!("refused:nothing-installed;connect-403;POLICY_DENIED={denied}"),
+            "connect-proxy:workload-authorisation",
+        );
 
         // A granted page whose one file is on the ungranted host.
         let offsite = lab.project("offsite");

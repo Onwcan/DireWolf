@@ -30,6 +30,7 @@
 use std::time::{Duration, Instant};
 
 use dwk_proto::brokerp::BrokerGeneration;
+use dwk_proto::brokerp::egress::{WorkloadEgress, WorkloadEgressReport};
 use dwk_proto::brokerp::workload::{
     WORKLOAD_SUPERVISION_SECONDS, WorkloadEnding, WorkloadRunDone, WorkloadSpec,
 };
@@ -50,6 +51,7 @@ use super::environment_ops::{Attached, EnvironmentReply, runtime, specification}
 use super::error::AuthorityError;
 use super::secret_use::spawn::{self, SpawnAuthorised};
 use super::workload::{self, Begun, Ending, WorkloadRecord, WorkloadRequest};
+use super::workload_egress::Seen;
 
 /// How often the in-process API collects a running workload.
 const COLLECT_EVERY: Duration = Duration::from_millis(200);
@@ -152,7 +154,7 @@ pub(super) struct Started {
 pub(super) enum Launched {
     /// It ended before it was supervised: refused, or not known to have
     /// been started.
-    Ended(Box<workload::Intent>, Ending),
+    Ended(Box<workload::Intent>, Ending, Seen),
     /// The broker supervises it.
     Running(Box<Started>),
 }
@@ -262,31 +264,63 @@ fn ending_of_start(error: &BrokerError) -> Ending {
 /// collection is `UNKNOWN`**: a collection changes nothing, so even one the
 /// broker refused or never heard says nothing of the workload, which it
 /// started and may still be running.
-fn ending_of_collection(result: Result<BrokerDelivery, BrokerError>) -> Option<Ending> {
+fn ending_of_collection(
+    result: Result<BrokerDelivery, BrokerError>,
+    egress: Option<&WorkloadEgress>,
+) -> Option<(Ending, Seen)> {
+    let unknown = |reason| {
+        (
+            Ending::Unknown { reason, done: None },
+            Seen::Uncertain(reason),
+        )
+    };
     match result {
         Ok(BrokerDelivery::WorkloadCollected(Collected::Running)) => None,
-        Ok(BrokerDelivery::WorkloadCollected(Collected::Ended(done))) => Some(ending_of_run(done)),
+        Ok(BrokerDelivery::WorkloadCollected(Collected::Ended(done, report))) => {
+            match seen(report, egress) {
+                Some(seen) => Some((ending_of_run(done), seen)),
+                // A report that contradicts the authorisation is a broker
+                // that does not keep the protocol: nothing proves what ran.
+                None => Some(unknown("BROKER_PROTOCOL_ERROR")),
+            }
+        }
         // The supervisor never began the run: the runtime's client could not
         // be started after the start was answered. Provably nothing ran.
-        Ok(BrokerDelivery::WorkloadCollected(Collected::NeverRan(refusal))) => {
-            Some(Ending::Failed {
-                reason: refusal_class(refusal),
-            })
+        Ok(BrokerDelivery::WorkloadCollected(Collected::NeverRan(refusal, report))) => {
+            match seen(report, egress) {
+                Some(seen) => Some((
+                    Ending::Failed {
+                        reason: refusal_class(refusal),
+                    },
+                    seen,
+                )),
+                None => Some(unknown("BROKER_PROTOCOL_ERROR")),
+            }
         }
-        Ok(_) => Some(Ending::Unknown {
-            reason: "BROKER_PROTOCOL_ERROR",
-            done: None,
-        }),
-        Err(error) => Some(Ending::Unknown {
-            reason: match error.failure {
-                BrokerFailure::Indeterminate(_) | BrokerFailure::Refused(_) => {
-                    "WORKLOAD_UNCONFIRMED"
-                }
-                BrokerFailure::Protocol(_) => "BROKER_PROTOCOL_ERROR",
-                _ => "BROKER_UNAVAILABLE",
-            },
-            done: None,
-        }),
+        Ok(_) => Some(unknown("BROKER_PROTOCOL_ERROR")),
+        Err(error) => Some(unknown(match error.failure {
+            BrokerFailure::Indeterminate(_) | BrokerFailure::Refused(_) => "WORKLOAD_UNCONFIRMED",
+            BrokerFailure::Protocol(_) => "BROKER_PROTOCOL_ERROR",
+            _ => "BROKER_UNAVAILABLE",
+        })),
+    }
+}
+
+/// What an ending's report says of a workload's tunnels (F-17): nothing to
+/// settle without an authorisation; uncertain when the broker said nothing;
+/// `None` -- a broker that does not keep the protocol -- for a report of a
+/// workload that had no authorisation, or one that contradicts it.
+fn seen(
+    report: Option<Box<WorkloadEgressReport>>,
+    egress: Option<&WorkloadEgress>,
+) -> Option<Seen> {
+    match (report, egress) {
+        (None, None) => Some(Seen::NothingRan),
+        (Some(_), None) => None,
+        (None, Some(_)) => Some(Seen::Uncertain("EGRESS_UNREPORTED")),
+        (Some(report), Some(egress)) => report
+            .consistent_with(egress)
+            .then_some(Seen::Reported(report)),
     }
 }
 
@@ -312,7 +346,11 @@ pub(super) fn start(
     });
     let (spec, handoff) = match order {
         Err(reason) => {
-            return Ok(Launched::Ended(Box::new(intent), Ending::Failed { reason }));
+            return Ok(Launched::Ended(
+                Box::new(intent),
+                Ending::Failed { reason },
+                Seen::NothingRan,
+            ));
         }
         Ok(order) => order,
     };
@@ -328,17 +366,21 @@ pub(super) fn start(
                     Ending::Failed {
                         reason: "CREDENTIAL_FAILED",
                     },
+                    Seen::NothingRan,
                 ));
             }
         },
     };
     let container = intent.environment.container.clone();
+    // F-17: the workload's egress authorisation, exactly as recorded.
+    let egress = intent.egress.clone();
     let operation = match secret {
         None => Operation::WorkloadStart {
             spec,
             container,
             runtime: handoff,
             workload,
+            egress,
         },
         Some((secret, pipe)) => Operation::WorkloadSecretStart {
             spec,
@@ -347,6 +389,7 @@ pub(super) fn start(
             workload,
             secret,
             pipe,
+            egress,
         },
     };
     let since = Instant::now();
@@ -357,7 +400,7 @@ pub(super) fn start(
         // The broker answered: it may have read the value (R8).
         attached.shared.crash(CrashPoint::SecretAfterBroker)?;
     }
-    let ending = match result {
+    let (ending, seen) = match result {
         Ok(BrokerDelivery::WorkloadStarted(generation)) => {
             attached.shared.crash(CrashPoint::WorkloadAfterStart)?;
             return Ok(Launched::Running(Box::new(Started {
@@ -368,15 +411,27 @@ pub(super) fn start(
             })));
         }
         // Answered as something else: nothing proves what the broker did.
-        Ok(_) => Ending::Unknown {
-            reason: "BROKER_PROTOCOL_ERROR",
-            done: None,
-        },
-        Err(error) => ending_of_start(&error),
+        Ok(_) => (
+            Ending::Unknown {
+                reason: "BROKER_PROTOCOL_ERROR",
+                done: None,
+            },
+            Seen::Uncertain("BROKER_PROTOCOL_ERROR"),
+        ),
+        Err(error) => (
+            ending_of_start(&error),
+            // A start refused before anything ran opened no tunnel: the
+            // broker holds an authorisation only for a workload it runs.
+            if error.provably_without_effect() {
+                Seen::NothingRan
+            } else {
+                Seen::Uncertain("WORKLOAD_UNCONFIRMED")
+            },
+        ),
     };
     // The broker's answer, and not a start: W10 as much as a collection's.
     attached.shared.crash(CrashPoint::WorkloadAfterBroker)?;
-    Ok(Launched::Ended(Box::new(intent), ending))
+    Ok(Launched::Ended(Box::new(intent), ending, seen))
 }
 
 /// One collection of `started`: its ending, or `None` while it runs. A
@@ -385,7 +440,7 @@ pub(super) fn start(
 pub(super) fn collect(
     attached: &Attached,
     started: &Started,
-) -> Result<Option<Ending>, AuthorityError> {
+) -> Result<Option<(Ending, Seen)>, AuthorityError> {
     let stream_limit = started.intent.stream_limit;
     let result = attached.broker.perform(BrokerOrder::new(
         started.intent.invocation.clone(),
@@ -394,25 +449,30 @@ pub(super) fn collect(
             stream_limit,
         },
     ));
-    let ending = match ending_of_collection(result) {
-        None if Instant::now() > started.overdue => Some(Ending::Unknown {
-            reason: "WORKLOAD_OVERDUE",
-            done: None,
-        }),
+    let ending = match ending_of_collection(result, started.intent.egress.as_ref()) {
+        None if Instant::now() > started.overdue => Some((
+            Ending::Unknown {
+                reason: "WORKLOAD_OVERDUE",
+                done: None,
+            },
+            Seen::Uncertain("WORKLOAD_OVERDUE"),
+        )),
         // A redaction count exactly for a workload that was handed a
         // credential (M5d.3): anything else is a broker that does not keep
         // the protocol, and nothing proves what it ran.
-        Some(
+        Some((
             Ending::Completed(done)
             | Ending::Unknown {
                 done: Some(done), ..
             },
-        ) if done.redactions.is_some() != started.intent.secret.is_some() => {
-            Some(Ending::Unknown {
+            _,
+        )) if done.redactions.is_some() != started.intent.secret.is_some() => Some((
+            Ending::Unknown {
                 reason: "BROKER_PROTOCOL_ERROR",
                 done: None,
-            })
-        }
+            },
+            Seen::Uncertain("BROKER_PROTOCOL_ERROR"),
+        )),
         ending => ending,
     };
     if ending.is_some() {
@@ -460,7 +520,11 @@ impl Authority {
                 run,
                 (&checked, None),
                 (budget, active, &image),
-                (&workload::Binding::Run, workload::Missing::Refuse),
+                (
+                    &workload::Binding::Run,
+                    workload::Missing::Refuse,
+                    attached.config.egress().is_some(),
+                ),
             )
         })?;
         let intent = match begun {
@@ -476,19 +540,60 @@ impl Authority {
         };
         shared.crash(CrashPoint::WorkloadAfterIntent)?;
         let spec = workload::spec(&checked, &intent)?;
-        let (intent, ending) = match start(&attached, run, intent, spec)? {
+        let (intent, ending, seen) = match start(&attached, run, intent, spec)? {
             Launched::Running(started) => {
-                let ending = loop {
-                    if let Some(ending) = collect(&attached, &started)? {
-                        break ending;
+                let (ending, seen) = loop {
+                    // F-17: the context its egress was decided in holds.
+                    self.egress_tripwire(run, &started.intent)?;
+                    if let Some(ended) = collect(&attached, &started)? {
+                        break ended;
                     }
                     std::thread::sleep(COLLECT_EVERY);
                 };
-                (started.intent, ending)
+                (started.intent, ending, seen)
             }
-            Launched::Ended(intent, ending) => (*intent, ending),
+            Launched::Ended(intent, ending, seen) => (*intent, ending, seen),
         };
-        self.settle_workload(run, &intent, ending)
+        self.settle_workload(run, &intent, ending, &seen)
+    }
+
+    /// The tripwire of ADR-0061 (F-17): a workload's egress was decided in
+    /// one policy revision and one run context, which nothing can change
+    /// while it runs -- its run's one connection is waiting on it, and a
+    /// revision changes only with a restart that reaps it. A collection that
+    /// finds otherwise is drift: the environment is destroyed, which ends
+    /// the workload's tunnels and the workload, uncertainly.
+    ///
+    /// # Errors
+    ///
+    /// [`AuthorityError`] when the authority cannot answer.
+    pub(super) fn egress_tripwire(
+        &mut self,
+        run: &RunId,
+        intent: &workload::Intent,
+    ) -> Result<(), AuthorityError> {
+        if intent.egress.is_none() {
+            return Ok(());
+        }
+        let shared = std::sync::Arc::clone(&self.shared);
+        let active = shared.active()?;
+        let holds = self.transact(|work| {
+            super::workload_egress::context_holds(work, (run, &intent.invocation), active)
+        })?;
+        if holds {
+            return Ok(());
+        }
+        let environment = intent.environment.environment.clone();
+        let begun = self.transact(|work| {
+            if let Some(record) = super::environment::record(work, &environment)? {
+                super::environment::record_drifted(work, &record, "EGRESS_CONTEXT_DRIFT", None)?;
+            }
+            super::environment::begin_destroy(work, &environment, "EGRESS_CONTEXT_DRIFT")
+        })?;
+        if let DestroyBegun::Pending { record, invocation } = begun {
+            self.perform_destroy(record, invocation)?;
+        }
+        Ok(())
     }
 
     /// Step 5: record how `intent` ended — redacted output, taint, and the
@@ -503,6 +608,7 @@ impl Authority {
         run: &RunId,
         intent: &workload::Intent,
         ending: Ending,
+        egress: &Seen,
     ) -> Result<WorkloadReply, AuthorityError> {
         let Some(attached) = self.attached() else {
             return Err(AuthorityError::Invariant(
@@ -529,7 +635,7 @@ impl Authority {
         }
         // The workload's outcome and its credential's, in one transaction.
         let recorded = self.transact(|work| {
-            let recorded = workload::record_outcome(work, run, intent, &ending, sizes)?;
+            let recorded = workload::record_outcome(work, run, intent, (&ending, egress), sizes)?;
             if let Some(authorised) = &intent.secret {
                 spawn::record_outcome(
                     work,

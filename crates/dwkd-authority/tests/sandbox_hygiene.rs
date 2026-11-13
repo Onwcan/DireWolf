@@ -773,6 +773,9 @@ mod linux {
         before: BTreeSet<String>,
     }
 
+    /// HTTPS from a sandbox reaches exactly the two evidence registries
+    /// (F-17, ADR-0061, Proposed: every tunnel is decided by policy); the
+    /// suite's own negative controls are refused as they always were.
     fn policy_text(pins: &Pins) -> String {
         format!(
             r#"schema_version = 1
@@ -794,6 +797,13 @@ effect = "ALLOW"
 when.verb = "fs.read"
 when.path_under = "${{WORKSPACE}}"
 when.max_bytes = 65536
+
+[[rule]]
+id = "https-to-the-evidence-registries"
+effect = "ALLOW"
+when.verb = "network.https"
+when.environment = "sandbox"
+when.host_matches = ["{GRANTED}", "{UNGRANTED}"]
 
 [[rule]]
 id = "never-on-the-host"

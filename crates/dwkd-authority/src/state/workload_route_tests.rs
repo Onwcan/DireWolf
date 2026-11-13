@@ -43,6 +43,10 @@ use dwk_proto::wire::scalar::{
     StreamContent,
 };
 
+use dwk_proto::brokerp::egress::{
+    EgressCountList, EgressCountValue, WorkloadEgress, WorkloadEgressReport,
+    WorkloadEgressTargetReport, WorkloadEgressTargetReports,
+};
 use sha2::Digest as _;
 
 use super::{Dispatched, Parked};
@@ -238,6 +242,8 @@ struct Fake {
     /// Done once while the next preparation is in the broker's hands (M5d.6):
     /// what another handle onto the store does meanwhile.
     during_prepare: Mutex<Option<Meanwhile>>,
+    /// Every start's egress authorisation, in order (F-17).
+    egresses: Mutex<Vec<(InvocationId, Option<WorkloadEgress>)>>,
 }
 
 /// One destruction the fake was ordered to perform (M5d.6).
@@ -354,6 +360,26 @@ impl Fake {
 
     fn then_collect(&self, answer: Answer) {
         self.collects.lock().unwrap().push_back(answer);
+    }
+
+    /// The egress authorisation `invocation` was started with (F-17).
+    fn egress_of(&self, invocation: &InvocationId) -> Option<WorkloadEgress> {
+        self.egresses
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(i, _)| i == invocation)
+            .and_then(|(_, e)| e.clone())
+    }
+
+    /// Every start's egress authorisation, in order (F-17).
+    fn egresses(&self) -> Vec<Option<WorkloadEgress>> {
+        self.egresses
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(_, e)| e.clone())
+            .collect()
     }
 
     fn running(&self, times: usize) {
@@ -475,7 +501,13 @@ impl EffectBroker for Fake {
                     },
                 ))
             }
-            Operation::WorkloadStart { workload, .. } => {
+            Operation::WorkloadStart {
+                workload, egress, ..
+            } => {
+                self.egresses
+                    .lock()
+                    .unwrap()
+                    .push((invocation.clone(), egress));
                 self.record("workload.start", invocation, (Some(workload), None));
                 self.starts
                     .lock()
@@ -514,6 +546,10 @@ impl EffectBroker for Fake {
             }
             Operation::WorkloadCollect { generation, .. } => {
                 let secret_bearing = self.secret_bearing(&invocation);
+                // What its tunnels did: nothing, by default (F-17).
+                let report = self
+                    .egress_of(&invocation)
+                    .map(|egress| Box::new(egress_report(&egress, &[])));
                 self.record("workload.collect", invocation, (None, Some(generation)));
                 self.collects
                     .lock()
@@ -524,7 +560,9 @@ impl EffectBroker for Fake {
                         if secret_bearing {
                             done.redactions = dwk_proto::brokerp::workload::RedactionCount::new(0);
                         }
-                        Ok(BrokerDelivery::WorkloadCollected(Collected::Ended(done)))
+                        Ok(BrokerDelivery::WorkloadCollected(Collected::Ended(
+                            done, report,
+                        )))
                     })
             }
             // A file operation's, for the shared key namespace's tests.
@@ -1634,11 +1672,10 @@ fn an_uncertain_collection_is_unknown_and_costs_the_environment() {
         ),
         (
             "environment-gone",
-            Ok(BrokerDelivery::WorkloadCollected(Collected::Ended(ran(
-                WorkloadEnding::EnvironmentGone,
-                b"",
-                Verdict::Unobservable,
-            )))),
+            Ok(BrokerDelivery::WorkloadCollected(Collected::Ended(
+                ran(WorkloadEnding::EnvironmentGone, b"", Verdict::Unobservable),
+                None,
+            ))),
         ),
     ] {
         let mut fx = fixture();
@@ -1679,6 +1716,7 @@ fn a_run_that_never_began_or_a_refused_start_fails_and_runs_nothing() {
     fx.fake
         .then_collect(Ok(BrokerDelivery::WorkloadCollected(Collected::NeverRan(
             BrokerRefusal::ExecSetupFailed,
+            None,
         ))));
     let body = fx.ran(&run, "n1", &call(FIXTURE, &[]));
     let (reason, destroyed) = failed(&body);
@@ -1727,6 +1765,7 @@ fn a_residue_not_proved_clean_is_answered_and_takes_the_environment_down() {
     fx.fake
         .then_collect(Ok(BrokerDelivery::WorkloadCollected(Collected::Ended(
             ran(WorkloadEnding::TimedOut, b"partial", Verdict::Fail),
+            None,
         ))));
     let body = fx.ran(&run, "r1", &call(FIXTURE, &[]));
     let (_, out) = result(&body);
@@ -1868,3 +1907,554 @@ mod workspace;
 /// M5d.6: a run's release ends its environment.
 #[path = "release_route_tests.rs"]
 mod release;
+
+// ===========================================================================
+// F-17 (ADR-0061, Proposed): a workload's egress, decided by both gates at
+// its launch, recorded with its intent, settled with its outcome.
+// ===========================================================================
+
+/// What a fake broker's report says: the destinations named reached, with
+/// these bytes back; nothing else. Consistent with `egress` whenever every
+/// destination named is one some cell allows.
+fn egress_report(egress: &WorkloadEgress, reached: &[(&str, u64)]) -> WorkloadEgressReport {
+    let none = || EgressCountList::new(Vec::new()).unwrap();
+    let targets = egress
+        .targets
+        .iter()
+        .map(|t| {
+            let down = reached
+                .iter()
+                .find(|(host, _)| *host == t.host.as_str())
+                .map(|(_, down)| *down);
+            WorkloadEgressTargetReport {
+                reached: down.is_some(),
+                dispositions: none(),
+                bytes_upstream: ByteCount::new(0).unwrap(),
+                bytes_downstream: ByteCount::new(down.unwrap_or(0)).unwrap(),
+                addresses: dwk_proto::brokerp::egress::EgressAddressUses::new(Vec::new()).unwrap(),
+                addresses_omitted: EgressCountValue::new(0).unwrap(),
+            }
+        })
+        .collect();
+    WorkloadEgressReport {
+        exposed: !reached.is_empty(),
+        targets: WorkloadEgressTargetReports::new(targets).unwrap(),
+        unattributed: none(),
+    }
+}
+
+const EGRESS_POLICY: &str = r#"schema_version = 1
+
+[meta]
+name = "f17"
+
+[[rule]]
+id = "allow-sandbox-exec"
+effect = "ALLOW"
+when.verb = "process.exec"
+when.environment = "sandbox"
+
+[[rule]]
+id = "deny-blocked-host"
+effect = "DENY"
+reason = "PROFILE_CEILING"
+when.verb = ["network.https"]
+when.host_matches = ["blocked.example.com"]
+
+[[rule]]
+id = "allow-captured-host"
+effect = "ALLOW"
+when.verb = ["network.https"]
+when.host_matches = ["captured.example.com"]
+obligations = ["require_artifact_capture"]
+
+[[rule]]
+id = "approve-egress-when-tainted"
+effect = "REQUIRE_APPROVAL"
+reason = "UNTRUSTED_CONTENT_IN_RUN"
+when.verb = ["network.https"]
+when.taint_level = ["EXTERNAL_UNTRUSTED"]
+when.destination_novel = true
+approval.scope = "exact_action"
+approval.ttl = "10m"
+approval.max_uses = 1
+
+[[rule]]
+id = "deny-internal-ranges"
+effect = "DENY"
+reason = "SANDBOX_ESCAPE_VECTOR"
+when.verb = ["network.https"]
+when.ip_in = ["10.0.0.0/8"]
+
+[[rule]]
+id = "allow-https-egress"
+effect = "ALLOW"
+when.verb = ["network.https"]
+when.environment = "sandbox"
+obligations = ["max_output_bytes=4096"]
+
+[[rule]]
+id = "allow-fs"
+effect = "ALLOW"
+when.verb = ["fs.read", "fs.stat"]
+
+[[rule]]
+id = "default"
+effect = "DENY"
+reason = "NO_MATCHING_RULE"
+
+[[postcondition]]
+id = "deny-approval-needed-when-unattended"
+effect = "DENY"
+reason = "NO_HUMAN_AVAILABLE"
+when.provisional_effect = ["REQUIRE_APPROVAL"]
+when.origin = ["scheduled", "channel", "subagent", "api"]
+unless.standing_grant = true
+"#;
+
+const ALLOWED: &str = "network.https:allowed.example.com";
+const BLOCKED: &str = "network.https:blocked.example.com";
+/// A host whose one allowing rule asks what no tunnel can keep.
+const CAPTURED: &str = "network.https:captured.example.com";
+
+fn egress_policy() -> PolicySet {
+    PolicySet {
+        profile: "f17".to_owned(),
+        sources: vec![PolicySource {
+            name: "f17.toml".to_owned(),
+            text: EGRESS_POLICY.to_owned(),
+        }],
+    }
+}
+
+fn proxy_sandbox(image: &str) -> SandboxConfig {
+    SandboxConfig::proxy_only(
+        TRUE,
+        "/run/dw-fake-runtime.sock",
+        image,
+        PROBE,
+        crate::sandbox::EgressConfig::new(&"c".repeat(64), 8, 1 << 30, 1 << 30).unwrap(),
+        WorkspaceSetting::UnverifiedEvidence,
+    )
+    .unwrap()
+    .with_workloads(&manifest(), WorkloadBudget::default())
+    .unwrap()
+}
+
+/// A `PROXY_ONLY` fixture under the F-17 policy, its profile declaring HTTPS.
+fn proxy_fixture_with(hook: Option<CrashHook>) -> Fixture {
+    let mut declared = DECLARED.to_vec();
+    declared.push("network.https:*");
+    let mut fx = Fixture::with_declared(egress_policy(), hook, &declared);
+    fx.authority().attach_sandbox(proxy_sandbox(IMAGE)).unwrap();
+    fx
+}
+
+fn proxy_fixture() -> Fixture {
+    proxy_fixture_with(None)
+}
+
+/// The cell's allowed pieces: v4 in no range, v6 in no range, 10.0.0.0/8.
+fn pieces(cell: &dwk_proto::brokerp::egress::EgressCell) -> [bool; 3] {
+    [
+        cell.allowed.get(0),
+        cell.allowed.get(1),
+        cell.allowed.get(2),
+    ]
+}
+
+fn destination<'a>(
+    egress: &'a WorkloadEgress,
+    host: &str,
+) -> &'a dwk_proto::brokerp::egress::WorkloadEgressTarget {
+    egress
+        .targets
+        .iter()
+        .find(|t| t.host.as_str() == host)
+        .unwrap()
+}
+
+#[test]
+fn f17_a_launch_carries_both_gates_decision_for_every_granted_destination() {
+    let mut fx = proxy_fixture();
+    let run = fx.run(
+        "r1",
+        &[
+            GRANT,
+            ALLOWED,
+            BLOCKED,
+            CAPTURED,
+            "network.https:counted.example.com?max_requests=1",
+            "network.https:*.example.com",
+        ],
+    );
+    fx.ready(&run);
+    let body = fx.ran(&run, "k1", &call(FIXTURE, &[]));
+    let (_, out) = result(&body);
+    assert_eq!(out.ending, SandboxEnding::Exited);
+    let egresses = fx.fake.egresses();
+    assert_eq!(egresses.len(), 1);
+    let egress = egresses[0].clone().unwrap();
+    // The ceiling: exact, unconstrained grants only -- the constrained and
+    // the wildcard grant give no destination.
+    let named: Vec<String> = egress
+        .targets
+        .iter()
+        .map(|t| format!("{}:{}", t.host.as_str(), t.port.get()))
+        .collect();
+    assert_eq!(
+        named,
+        [
+            "allowed.example.com:443",
+            "blocked.example.com:443",
+            "captured.example.com:443"
+        ]
+    );
+    // The policy's own range is the partition.
+    let prefixes: Vec<&str> = egress
+        .prefixes
+        .iter()
+        .map(dwk_proto::brokerp::egress::EgressPrefix::as_str)
+        .collect();
+    assert_eq!(prefixes, ["10.0.0.0/8"]);
+    assert!(!egress.exposed);
+    let allowed = destination(&egress, "allowed.example.com");
+    assert!(!allowed.seen);
+    // Untainted: allowed outside 10/8, at the policy's per-tunnel bound.
+    assert_eq!(pieces(&allowed.novel_pristine), [true, true, false]);
+    assert_eq!(pieces(&allowed.seen_pristine), [true, true, false]);
+    assert_eq!(
+        allowed
+            .novel_pristine
+            .max_tunnel_download_bytes
+            .map(dwk_proto::brokerp::egress::EgressByteBudget::get),
+        Some(4096)
+    );
+    // Exposed: every taint the run could then have. Novel and tainted asks
+    // approval, which an unattended run (every admission is `api`) cannot
+    // have: nothing. Seen and tainted: as before.
+    assert_eq!(pieces(&allowed.novel_exposed), [false, false, false]);
+    assert_eq!(pieces(&allowed.seen_exposed), [true, true, false]);
+    // A host policy denies: every cell refuses everything.
+    let blocked = destination(&egress, "blocked.example.com");
+    for (seen, exposed) in [(false, false), (false, true), (true, false), (true, true)] {
+        assert_eq!(pieces(blocked.cell(seen, exposed)), [false, false, false]);
+    }
+    // An allowing rule whose obligation a tunnel cannot keep allows nothing.
+    let captured = destination(&egress, "captured.example.com");
+    for (seen, exposed) in [(false, false), (false, true), (true, false), (true, true)] {
+        assert_eq!(pieces(captured.cell(seen, exposed)), [false, false, false]);
+    }
+    // Durable with the intent; settled from the report; every rule that
+    // decided recorded.
+    assert_eq!(fx.one("SELECT settled FROM workload_egress"), "REPORTED");
+    assert_eq!(fx.count("SELECT exposed FROM workload_egress"), 0);
+    assert_eq!(fx.count("SELECT allows_anything FROM workload_egress"), 1);
+    let decisions = fx.one("SELECT decisions FROM workload_egress");
+    for rule in [
+        "deny-blocked-host",
+        "allow-captured-host:OBLIGATION_UNENFORCEABLE",
+        "deny-internal-ranges",
+        "allow-https-egress",
+        "deny-approval-needed-when-unattended",
+    ] {
+        assert!(decisions.contains(rule), "{rule} in {decisions}");
+    }
+    assert_eq!(
+        fx.count("SELECT count(*) FROM tunnel_reach")
+            + fx.count("SELECT count(*) FROM workspace_exposure"),
+        0,
+        "nothing reached, nothing exposed"
+    );
+    let intent = crate::state::read_audit_log(&fx.state().join("audit.log"))
+        .unwrap()
+        .into_iter()
+        .find(|r| r.event() == "workload.intent_recorded")
+        .unwrap();
+    assert_eq!(intent.text("egress_sha256").map(str::len), Some(64));
+    assert_eq!(intent.text("egress_partition"), Some("RANGES:1"));
+    evidence("egress-decided-at-launch-both-gates", "recorded");
+}
+
+/// ADR-0061's A8: the authorisation is a pure function of the inputs the
+/// intent records. Two runs whose recorded inputs are the same -- the policy
+/// revision, origin, taint, privacy, grants, no reach and no exposure --
+/// decide the same authorisation, to its digest, in the same context; what
+/// the store holds is what the broker was sent, and the digest the audit
+/// names is that of what the store holds. (One run's next launch is not the
+/// same inputs: its first workload's outcome raises its taint.)
+#[test]
+fn f17_an_authorisation_recomputes_to_its_recorded_digest() {
+    use dwk_proto::wire::WireType as _;
+    let mut fx = proxy_fixture();
+    for (name, key) in [("r1", "k1"), ("r2", "k2")] {
+        let run = fx.run(name, &[GRANT, ALLOWED, BLOCKED]);
+        fx.ready(&run);
+        fx.ran(&run, key, &call(FIXTURE, &[]));
+    }
+    let sent = fx.fake.egresses();
+    assert_eq!(sent.len(), 2);
+    let digests: Vec<String> = sent
+        .iter()
+        .map(|egress| {
+            let encoded =
+                dwk_proto::json::to_canonical_string(&egress.as_ref().unwrap().encode().unwrap());
+            crate::state::digest::plain(encoded.as_bytes()).to_hex()
+        })
+        .collect();
+    assert_eq!(digests[0], digests[1], "the same inputs decide the same");
+    assert_eq!(
+        fx.count("SELECT count(DISTINCT authorisation_sha256) FROM workload_egress"),
+        1
+    );
+    assert_eq!(
+        fx.count("SELECT count(DISTINCT context_sha256) FROM workload_egress"),
+        1
+    );
+    assert_eq!(
+        fx.one("SELECT authorisation_sha256 FROM workload_egress LIMIT 1"),
+        digests[0]
+    );
+    let stored = fx.one("SELECT authorisation FROM workload_egress LIMIT 1");
+    assert_eq!(
+        crate::state::digest::plain(stored.as_bytes()).to_hex(),
+        digests[0],
+        "what the store holds is what the broker was sent"
+    );
+    let intents: Vec<String> = crate::state::read_audit_log(&fx.state().join("audit.log"))
+        .unwrap()
+        .into_iter()
+        .filter(|r| r.event() == "workload.intent_recorded")
+        .map(|r| r.text("egress_sha256").unwrap().to_owned())
+        .collect();
+    assert_eq!(intents, [digests[0].clone(), digests[0].clone()]);
+    evidence("egress-recomputed-to-its-digest", "same-digest");
+}
+
+#[test]
+fn f17_a_tainted_run_reaches_no_new_destination_and_a_reached_one_is_seen() {
+    let mut fx = proxy_fixture();
+    let run = fx.run("r1", &[GRANT, ALLOWED]);
+    fx.ready(&run);
+    // The first workload reaches `allowed.example.com`: certain reach, and
+    // the workspace exposed.
+    fx.fake.running(1);
+    let Dispatched::Parked(parked) = fx.exec(&run, "k1", &call(FIXTURE, &[])) else {
+        panic!("parked")
+    };
+    let first = fx.fake.egresses()[0].clone().unwrap();
+    fx.fake
+        .then_collect(Ok(BrokerDelivery::WorkloadCollected(Collected::Ended(
+            ran(WorkloadEnding::Exited, b"ok", Verdict::Pass),
+            Some(Box::new(egress_report(
+                &first,
+                &[("allowed.example.com", 10)],
+            ))),
+        ))));
+    fx.settle(parked);
+    assert_eq!(fx.count("SELECT certain FROM tunnel_reach"), 1);
+    assert_eq!(fx.count("SELECT certain FROM workspace_exposure"), 1);
+    // The run is then tainted by other content.
+    fx.authority()
+        .raise_taint(
+            &run,
+            crate::policy::TaintLevel::ExternalUntrusted,
+            crate::state::TaintCause::ToolResult,
+        )
+        .unwrap();
+    fx.ran(&run, "k2", &call(FIXTURE, &[]));
+    let second = fx.fake.egresses()[1].clone().unwrap();
+    assert!(second.exposed, "the root was exposed");
+    let allowed = destination(&second, "allowed.example.com");
+    assert!(allowed.seen, "reached by the run's first workload");
+    // Tainted: a novel destination asks approval -- refused; the reached
+    // one is allowed outside 10/8.
+    assert_eq!(pieces(&allowed.novel_pristine), [false, false, false]);
+    assert_eq!(pieces(&allowed.seen_pristine), [true, true, false]);
+    evidence("egress-tainted-novel-refused-seen-allowed", "cells");
+}
+
+#[test]
+fn f17_an_uncertain_ending_exposes_the_root_and_its_reach_is_the_stricter_of_both() {
+    let mut fx = proxy_fixture();
+    let run = fx.run("r1", &[GRANT, ALLOWED, BLOCKED]);
+    fx.ready(&run);
+    // The collection cannot say how it ended.
+    fx.fake.then_collect(Err(BrokerError::after_sending(
+        BrokerFailure::Indeterminate(Indeterminate::WorkloadUnconfirmed),
+    )));
+    fx.ran(&run, "k1", &call(FIXTURE, &[]));
+    assert_eq!(fx.one("SELECT settled FROM workload_egress"), "UNCERTAIN");
+    assert_eq!(fx.count("SELECT certain FROM workspace_exposure"), 0);
+    // Uncertain reach only for what some cell allowed.
+    assert_eq!(
+        fx.one("SELECT group_concat(host || ':' || certain) FROM tunnel_reach"),
+        "allowed.example.com:0"
+    );
+    // The next launch, in a new environment: exposed, and the uncertain
+    // destination decided both ways.
+    fx.ready(&run);
+    fx.ran(&run, "k2", &call(FIXTURE, &[]));
+    let next = fx.fake.egresses()[1].clone().unwrap();
+    assert!(next.exposed);
+    let allowed = destination(&next, "allowed.example.com");
+    assert!(!allowed.seen);
+    assert_eq!(allowed.novel_pristine, allowed.seen_pristine);
+    assert_eq!(allowed.novel_exposed, allowed.seen_exposed);
+    evidence("egress-uncertain-exposes-and-meets", "fail-closed");
+}
+
+#[test]
+fn f17_a_report_that_contradicts_the_authorisation_is_not_believed() {
+    let mut fx = proxy_fixture();
+    let run = fx.run("r1", &[GRANT, ALLOWED, BLOCKED]);
+    fx.ready(&run);
+    fx.fake.running(1);
+    let Dispatched::Parked(parked) = fx.exec(&run, "k1", &call(FIXTURE, &[])) else {
+        panic!("parked")
+    };
+    let egress = fx.fake.egresses()[0].clone().unwrap();
+    // `blocked.example.com` allows nothing: a report that it was reached is
+    // a broker that does not keep the protocol.
+    fx.fake
+        .then_collect(Ok(BrokerDelivery::WorkloadCollected(Collected::Ended(
+            ran(WorkloadEnding::Exited, b"ok", Verdict::Pass),
+            Some(Box::new(egress_report(
+                &egress,
+                &[("blocked.example.com", 5)],
+            ))),
+        ))));
+    fx.settle(parked);
+    assert_eq!(
+        fx.one("SELECT failure FROM workload WHERE idempotency_key = 'k1'"),
+        "BROKER_PROTOCOL_ERROR"
+    );
+    assert_eq!(fx.one("SELECT settled FROM workload_egress"), "UNCERTAIN");
+    assert_eq!(fx.count("SELECT count(*) FROM workspace_exposure"), 1);
+    evidence("egress-inconsistent-report-unknown", "uncertain");
+}
+
+#[test]
+fn f17_a_workload_launched_beside_an_unsettled_one_on_its_root_starts_exposed() {
+    let mut fx = proxy_fixture();
+    let first = fx.run("r1", &[GRANT, ALLOWED]);
+    let second = fx.run("r2", &[GRANT, ALLOWED]);
+    fx.ready(&first);
+    fx.ready(&second);
+    fx.fake.running(2);
+    let Dispatched::Parked(parked) = fx.exec(&first, "k1", &call(FIXTURE, &[])) else {
+        panic!("parked")
+    };
+    // The second run shares the session's workspace root, and the first
+    // run's workload may reach an origin and has not settled.
+    let Dispatched::Parked(beside) = fx.exec(&second, "k2", &call(FIXTURE, &[])) else {
+        panic!("parked")
+    };
+    let egresses = fx.fake.egresses();
+    assert!(!egresses[0].clone().unwrap().exposed);
+    assert!(egresses[1].clone().unwrap().exposed);
+    fx.settle(parked);
+    fx.settle(beside);
+    // Both settled with nothing reached: the root is not exposed, and a
+    // later launch starts pristine.
+    assert_eq!(fx.count("SELECT count(*) FROM workspace_exposure"), 0);
+    fx.ran(&first, "k3", &call(FIXTURE, &[]));
+    assert!(!fx.fake.egresses()[2].clone().unwrap().exposed);
+    evidence("egress-sibling-in-flight-exposed", "exposed");
+}
+
+#[test]
+fn f17_a_restart_settles_an_interrupted_workload_uncertainly() {
+    let mut fx = proxy_fixture_with(Some(stop_at(CrashPoint::WorkloadAfterStart)));
+    let run = fx.run("r1", &[GRANT, ALLOWED]);
+    fx.ready(&run);
+    let caller = fx.caller.unwrap();
+    let message = fx.message(
+        &run,
+        5,
+        "direwolf.tool.invoke",
+        Some("k1"),
+        &format!(r#"{{"process_exec":{}}}"#, call(FIXTURE, &[])),
+    );
+    assert!(fx.authority().dispatch_parkable(&caller, &message).is_err());
+    assert!(
+        fx.db()
+            .query_row("SELECT settled FROM workload_egress", [], |row| row
+                .get::<_, Option<String>>(0))
+            .unwrap()
+            .is_none()
+    );
+    fx.start(None);
+    fx.authority().attach_sandbox(proxy_sandbox(IMAGE)).unwrap();
+    assert_eq!(fx.one("SELECT settled FROM workload_egress"), "UNCERTAIN");
+    assert_eq!(fx.count("SELECT certain FROM workspace_exposure"), 0);
+    assert_eq!(fx.count("SELECT certain FROM tunnel_reach"), 0);
+    evidence("egress-restart-settles-uncertain", "exposed");
+}
+
+#[test]
+fn f17_a_context_that_changes_under_a_running_workload_costs_its_environment() {
+    let mut fx = proxy_fixture();
+    let run = fx.run("r1", &[GRANT, ALLOWED]);
+    let environment = fx.ready(&run);
+    fx.fake.running(5);
+    let Dispatched::Parked(mut parked) = fx.exec(&run, "k1", &call(FIXTURE, &[])) else {
+        panic!("parked")
+    };
+    assert_eq!(fx.authority().resume(&mut parked).unwrap(), None);
+    // Impossible in production -- the run's one connection is waiting on
+    // the workload -- and done here through the in-process API: the run's
+    // taint rises while it runs.
+    fx.authority()
+        .raise_taint(
+            &run,
+            crate::policy::TaintLevel::ExternalUntrusted,
+            crate::state::TaintCause::ToolResult,
+        )
+        .unwrap();
+    let _ = fx.authority().resume(&mut parked).unwrap();
+    let destroyed = fx.fake.destroyed.lock().unwrap().clone();
+    assert!(destroyed.iter().any(|d| d.environment == environment));
+    assert_eq!(
+        fx.one(&format!(
+            "SELECT failure FROM environment WHERE environment_id = '{}'",
+            environment.as_str()
+        )),
+        "EGRESS_CONTEXT_DRIFT"
+    );
+    assert!(fx.events().iter().any(|e| e == "environment.drifted"));
+    evidence("egress-context-drift-destroys", "destroyed");
+}
+
+#[test]
+fn f17_a_settled_authorisation_and_the_facts_it_left_never_change() {
+    let mut fx = proxy_fixture();
+    let run = fx.run("r1", &[GRANT, ALLOWED]);
+    fx.ready(&run);
+    fx.fake.running(1);
+    let Dispatched::Parked(parked) = fx.exec(&run, "k1", &call(FIXTURE, &[])) else {
+        panic!("parked")
+    };
+    let egress = fx.fake.egresses()[0].clone().unwrap();
+    fx.fake
+        .then_collect(Ok(BrokerDelivery::WorkloadCollected(Collected::Ended(
+            ran(WorkloadEnding::Exited, b"ok", Verdict::Pass),
+            Some(Box::new(egress_report(
+                &egress,
+                &[("allowed.example.com", 1)],
+            ))),
+        ))));
+    fx.settle(parked);
+    let db = fx.db();
+    for sql in [
+        "UPDATE workload_egress SET settled = 'UNCERTAIN'",
+        "UPDATE workload_egress SET exposed = 0",
+        "DELETE FROM workload_egress",
+        "UPDATE tunnel_reach SET certain = 0",
+        "DELETE FROM tunnel_reach",
+        "UPDATE workspace_exposure SET certain = 0",
+        "DELETE FROM workspace_exposure",
+    ] {
+        assert!(db.execute(sql, []).is_err(), "{sql}");
+    }
+}

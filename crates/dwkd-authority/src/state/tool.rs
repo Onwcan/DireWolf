@@ -432,6 +432,7 @@ pub(super) const fn failure_reason(failure: BrokerFailure) -> FsFailureReason {
             | BrokerRefusal::EnvironmentAmbiguous
             | BrokerRefusal::ForeignEnvironment
             | BrokerRefusal::ProxyUnavailable
+            | BrokerRefusal::EgressNotGranted
             // The network refusals (M5c) answer a network exchange, which no
             // filesystem or process tool sends.
             | BrokerRefusal::HttpAddressBlocked

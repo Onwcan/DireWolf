@@ -123,10 +123,13 @@ use sandbox::{
 /// contract -- a bounded workspace's quota, capacity and owner on every
 /// environment operation and workload start, the probe's workspace facts,
 /// and the refusals of a full filesystem and of a directory outside the
-/// workspace group's convention. The daemons ship together, so 11 is the
-/// only version either accepts: an older peer is refused by its hello, never
+/// workspace group's convention; version 12 (F-17, ADR-0061, Proposed) a
+/// workload's egress authorisation on its start in a `PROXY_ONLY`
+/// environment, what its tunnels did on its ending, and the proxy's
+/// dispositions for both. The daemons ship together, so 12 is the only
+/// version either accepts: an older peer is refused by its hello, never
 /// half-understood.
-pub const PROTOCOL: u16 = 11;
+pub const PROTOCOL: u16 = 12;
 
 /// The largest authorisation body the broker reads: one DWKP frame, because an
 /// `fs.write` carries its content and an `fs.patch` its edits. Read from the
@@ -354,7 +357,7 @@ pub const PROCESS_BASE_ENVIRONMENT: &[(&str, &str)] = &[
 
 wire_int! {
     /// The private protocol's version.
-    ProtocolVersion(u16), min = 11, max = 11
+    ProtocolVersion(u16), min = 12, max = 12
 }
 
 const _: () = assert!(ProtocolVersion::MIN == PROTOCOL && ProtocolVersion::MAX == PROTOCOL);
@@ -810,6 +813,9 @@ wire_enum! {
         /// A `PROXY_ONLY` environment's proxy could not be opened, or its
         /// grant does not fit the topology: nothing was created (ADR-0048).
         ProxyUnavailable = "PROXY_UNAVAILABLE",
+        /// A workload's egress authorisation names a destination the
+        /// environment was not granted (F-17): nothing ran.
+        EgressNotGranted = "EGRESS_NOT_GRANTED",
         /// The broker's own guard refused a pinned address, or the host is a
         /// metadata name: nothing was dialled (ADR-0050 §6).
         HttpAddressBlocked = "HTTP_ADDRESS_BLOCKED",

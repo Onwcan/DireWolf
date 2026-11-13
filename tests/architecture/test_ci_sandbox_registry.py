@@ -334,7 +334,7 @@ def test_the_suite_is_hosted_only_checks_first_and_prints_every_required_case() 
     # A fresh environment for every pip case: each run released, and its
     # environment, relay and setup containers gone when it is.
     pip_body = _test_body("pip_as_it_is_today_reaches_only_the_granted_fixture_registry")[1]
-    assert pip_body.count("lab.peer(") == pip_body.count("lab.release(") == 12
+    assert pip_body.count("lab.peer(") == pip_body.count("lab.release(") == 13
     assert '["environment", "relay", "setup"]' in text
 
 
@@ -387,12 +387,12 @@ def _complete(**change_at: dict[str, object]) -> str:
 
 
 def test_every_case_is_end_to_end_attributed_and_shows_its_outcome() -> None:
-    assert len(dw.REGISTRY_CASES) == 19
+    assert len(dw.REGISTRY_CASES) == 20
     assert set(dw.REGISTRY_OUTCOMES) == {case for _, case in dw.REGISTRY_CASES}
     levels = {dw.attribution(s, c)[0] for s, c in dw.REGISTRY_CASES}  # type: ignore[index]
     assert levels == {"dwkp-end-to-end"}
     records = dw.require_attributed_evidence(_complete(), dw.REGISTRY_CASES)
-    assert len(records) == 19
+    assert len(records) == 20
     # Named apart from the cases ADR-0054 §8 and ADR-0055 §9 propose.
     assert all(case.startswith("registry-") for _, case in dw.REGISTRY_CASES)
     # The pip cases the handoff names, and npm's.
@@ -413,7 +413,7 @@ def test_every_case_is_end_to_end_attributed_and_shows_its_outcome() -> None:
         assert (dw.REGISTRY_SUITE, case) in dw.REGISTRY_CASES, case
 
 
-@pytest.mark.parametrize("dropped", range(19))
+@pytest.mark.parametrize("dropped", range(20))
 def test_a_dropped_case_fails(dropped: int) -> None:
     lines = _complete().splitlines()
     suite, case = dw.REGISTRY_CASES[dropped]
@@ -928,7 +928,10 @@ def test_a_tool_that_reports_another_version_fails_closed(
 # workload that reaches only what it was granted, or no proxy at all, caused
 # none; a refused one caused at least one. Hosted run 42296614431 failed the
 # granted install on the probe's own question (`beyond_the_probe`).
-EXACTLY_NONE = 6
+# F-17's standing control (ADR-0061, Proposed) is one more of the first: its
+# registry is granted, so the ceiling refuses none of its tunnels, and the
+# policy's refusals are counted apart (`policy_refusals`).
+EXACTLY_NONE = 7
 AT_LEAST_ONE = 3
 ACCOUNTING_TEST = "a_probes_own_question_is_never_counted_as_a_workloads_refusal"
 
@@ -952,6 +955,13 @@ def _accounting_problems(text: str) -> list[str]:
     ]
     if raw:
         problems.append(f"{len(raw)} raw count(s) of a disposition outside beyond_the_probe")
+    # A policy refusal is never the probe's (its question is the ceiling's), so
+    # it is counted apart -- and only it.
+    if "    fn policy_refusals(" in text:
+        policy = text[text.index("    fn policy_refusals(") :]
+        policy = policy[: policy.index("\n    }\n")]
+        if re.findall(r'"[A-Z_]+="', policy) != ['"POLICY_DENIED="']:
+            problems.append("policy_refusals counts a disposition other than POLICY_DENIED")
     if not re.search(r"#\[test\]\n    fn " + ACCOUNTING_TEST + r"\(\)", text):
         problems.append(f"{ACCOUNTING_TEST} is gone, or is not run everywhere")
     if "Ok(0)" not in text[text.find(ACCOUNTING_TEST) :][:2400]:

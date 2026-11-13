@@ -12,12 +12,15 @@
 //! |---|---|---|
 //! | request | one `CONNECT host:port HTTP/1.1`, bounded, strict ([`request`]) | `MALFORMED`, `NOT_CONNECT`, `TARGET_NOT_CANONICAL`, `REQUEST_TIMEOUT` |
 //! | grant | exactly a granted `(host, port)`, by canonical bytes | `TARGET_NOT_GRANTED` |
+//! | name | not a metadata name | `ADDRESS_BLOCKED` |
+//! | authorisation | a workload's authorisation is in force, and its cell for the destination allows some address ([`authorised`], F-17) -- before anything is resolved | `NOT_AUTHORISED`, `POLICY_DENIED` |
 //! | budget | fewer tunnels open than the grant allows | `TUNNEL_LIMIT` |
 //! | resolve | the trusted resolver, once, with a deadline ([`resolve`]) | `RESOLUTION_FAILED`, `RESOLUTION_TIMEOUT` |
 //! | IP guard | the whole answer: none blocked, no mixture ([`guard`]) | `ADDRESS_BLOCKED`, `ADDRESS_MIXED` |
+//! | policy's addresses | every pinned address in the cell that applies now; the tunnel registered ([`authorised`]) | `POLICY_ADDRESS_DENIED` |
 //! | server name | the TLS `ClientHello` names exactly the CONNECT host, without ECH ([`hello`]) | `CLIENT_HELLO_*`, `SNI_*`, `ECH_REFUSED` |
 //! | connect | the **pinned** address — never the name again | `CONNECT_FAILED` |
-//! | tunnel | bytes each way within the grant's budgets, at the socket ([`tunnel`]) | `UPLOAD_BUDGET`, `DOWNLOAD_BUDGET`, `IDLE_TIMEOUT`, `LIFETIME_EXCEEDED` |
+//! | tunnel | bytes each way within the grant's budgets, at the socket ([`tunnel`]); back within the cell's per-tunnel bound; the first origin byte reaches the destination and exposes the workspace before it is forwarded | `UPLOAD_BUDGET`, `DOWNLOAD_BUDGET`, `TUNNEL_OUTPUT_LIMIT`, `IDLE_TIMEOUT`, `LIFETIME_EXCEEDED`, `EXPOSURE_REVOKED`, `WORKLOAD_ENDED` |
 //!
 //! **It does not terminate TLS.** There is no certificate, no CA, no trust
 //! store and no decryption here: after the server name agrees, the bytes are
@@ -29,6 +32,7 @@
 //!
 //! [ADR-0048]: ../../../../docs/adr/0048-m5b-proxy-only-topology-and-connect-proxy.md
 
+pub(crate) mod authorised;
 pub(crate) mod guard;
 pub(crate) mod hello;
 pub(crate) mod proxy;

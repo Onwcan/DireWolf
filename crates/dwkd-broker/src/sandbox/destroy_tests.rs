@@ -52,6 +52,11 @@ impl Drop for Scratch {
 }
 
 /// A proxy that refuses every target before resolving any name.
+/// Open `environment`'s proxy with an empty grant, on one workspace root.
+fn open(proxies: &Proxies, environment: &str) -> PathBuf {
+    proxies.start(environment, empty_grant(), (1, 1)).unwrap()
+}
+
 fn empty_grant() -> EgressGrant {
     EgressGrant {
         targets: EgressTargets::new(Vec::new()).unwrap(),
@@ -83,8 +88,8 @@ fn destruction_closes_only_its_proxy_even_when_the_runtime_cannot_be_reproved() 
         let neighbour = "env_01M24BB8G3E0A851TRWE3M8FZG";
         // Empty grants refuse before resolving any name: neither listener
         // has an outbound destination, and the test needs no network peer.
-        let target_dir = proxies.start(environment.as_str(), empty_grant()).unwrap();
-        let neighbour_dir = proxies.start(neighbour, empty_grant()).unwrap();
+        let target_dir = open(&proxies, environment.as_str());
+        let neighbour_dir = open(&proxies, neighbour);
         let neighbour_socket = neighbour_dir.join(EGRESS_SOCKET_NAME);
         let before = fs::symlink_metadata(&neighbour_socket).unwrap();
         assert!(proxies.is_open(environment.as_str()) && proxies.is_open(neighbour));

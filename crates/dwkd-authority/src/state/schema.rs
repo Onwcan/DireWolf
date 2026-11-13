@@ -51,7 +51,7 @@ use rusqlite::Connection;
 pub(super) const APPLICATION_ID: i64 = 0x4457_4B44;
 
 /// The schema version this build creates and understands.
-pub(super) const CURRENT_VERSION: i64 = 11;
+pub(super) const CURRENT_VERSION: i64 = 12;
 
 /// Schema version 1, the first. Static text: nothing in it is assembled from a
 /// value, and every value the authority stores is bound as a parameter.
@@ -1364,6 +1364,96 @@ WHEN NOT EXISTS (SELECT 1 FROM workload WHERE invocation_id = NEW.workload_invoc
 BEGIN SELECT RAISE(ABORT, 'a workload''s secret is a spawn use, linked at both intents'); END;
 ";
 
+/// Schema version 12 (F-17, ADR-0061, Proposed): a workload's egress.
+///
+/// `workload_egress` is a sandboxed workload's egress authorisation --
+/// decided by both gates in its intent's transaction, recorded there, and
+/// settled once with its outcome (or by the restart that finds it
+/// interrupted): `REPORTED` from the broker's report, `NOTHING_RAN`, or
+/// `UNCERTAIN`. Nothing in it is changed after it is settled, and nothing is
+/// deleted. `tunnel_reach` is a run's tunnels' reach (certain or not), which
+/// later tunnel decisions read as novelty; `workspace_exposure` a workspace
+/// root's exposure to what an origin sent (certain or not), which every later
+/// workload on the root starts with. Neither is ever updated or deleted: no
+/// recovery restores a less restrictive decision.
+pub(super) const SCHEMA_V12: &str = r"
+CREATE TABLE workload_egress (
+    invocation_id         TEXT    PRIMARY KEY REFERENCES workload(invocation_id)
+                                              ON DELETE RESTRICT,
+    run_id                TEXT    NOT NULL REFERENCES run(run_id) ON DELETE RESTRICT,
+    root_device           TEXT    NOT NULL CHECK (length(root_device) BETWEEN 1 AND 20
+                                                  AND root_device NOT GLOB '*[^0-9]*'),
+    root_inode            TEXT    NOT NULL CHECK (length(root_inode) BETWEEN 1 AND 20
+                                                  AND root_inode NOT GLOB '*[^0-9]*'),
+    authorisation         TEXT    NOT NULL CHECK (length(authorisation) BETWEEN 2 AND 131072),
+    authorisation_sha256  TEXT    NOT NULL CHECK (length(authorisation_sha256) = 64
+                                                  AND authorisation_sha256 NOT GLOB '*[^0-9a-f]*'),
+    decisions             TEXT    NOT NULL,
+    context_sha256        TEXT    NOT NULL CHECK (length(context_sha256) = 64
+                                                  AND context_sha256 NOT GLOB '*[^0-9a-f]*'),
+    allows_anything       INTEGER NOT NULL CHECK (allows_anything IN (0, 1)),
+    exposed_at_start      INTEGER NOT NULL CHECK (exposed_at_start IN (0, 1)),
+    settled               TEXT    CHECK (settled IS NULL
+                                         OR settled IN ('REPORTED', 'NOTHING_RAN', 'UNCERTAIN')),
+    exposed               INTEGER CHECK (exposed IS NULL OR exposed IN (0, 1)),
+    report                TEXT,
+    recorded_ms           INTEGER NOT NULL,
+    settled_ms            INTEGER,
+    CHECK ((settled IS NULL) = (exposed IS NULL) AND (settled IS NULL) = (settled_ms IS NULL)),
+    CHECK (report IS NULL OR settled = 'REPORTED')
+) STRICT;
+CREATE INDEX workload_egress_by_root ON workload_egress(root_device, root_inode);
+CREATE TRIGGER workload_egress_at_its_intent BEFORE INSERT ON workload_egress
+WHEN NOT EXISTS (SELECT 1 FROM workload WHERE invocation_id = NEW.invocation_id
+                 AND run_id = NEW.run_id AND state = 'LAUNCHING')
+     OR NEW.settled IS NOT NULL
+BEGIN SELECT RAISE(ABORT, 'a workload''s egress is decided at its intent, unsettled'); END;
+CREATE TRIGGER workload_egress_settled_once BEFORE UPDATE ON workload_egress
+WHEN OLD.settled IS NOT NULL OR NEW.settled IS NULL
+     OR NEW.invocation_id IS NOT OLD.invocation_id OR NEW.run_id IS NOT OLD.run_id
+     OR NEW.root_device IS NOT OLD.root_device OR NEW.root_inode IS NOT OLD.root_inode
+     OR NEW.authorisation IS NOT OLD.authorisation
+     OR NEW.authorisation_sha256 IS NOT OLD.authorisation_sha256
+     OR NEW.decisions IS NOT OLD.decisions OR NEW.context_sha256 IS NOT OLD.context_sha256
+     OR NEW.allows_anything IS NOT OLD.allows_anything
+     OR NEW.exposed_at_start IS NOT OLD.exposed_at_start
+     OR NEW.recorded_ms IS NOT OLD.recorded_ms
+BEGIN SELECT RAISE(ABORT, 'a workload''s egress is fixed, and settled once'); END;
+CREATE TRIGGER workload_egress_no_delete BEFORE DELETE ON workload_egress
+BEGIN SELECT RAISE(ABORT, 'a workload''s egress is never deleted'); END;
+
+CREATE TABLE tunnel_reach (
+    run_id          TEXT    NOT NULL REFERENCES run(run_id) ON DELETE RESTRICT,
+    host            TEXT    NOT NULL CHECK (length(host) BETWEEN 1 AND 253),
+    port            INTEGER NOT NULL CHECK (port BETWEEN 1 AND 65535),
+    invocation_id   TEXT    NOT NULL REFERENCES workload_egress(invocation_id)
+                                        ON DELETE RESTRICT,
+    certain         INTEGER NOT NULL CHECK (certain IN (0, 1)),
+    recorded_ms     INTEGER NOT NULL,
+    PRIMARY KEY (run_id, host, port, invocation_id)
+) STRICT;
+CREATE TRIGGER tunnel_reach_no_update BEFORE UPDATE ON tunnel_reach
+BEGIN SELECT RAISE(ABORT, 'a tunnel''s reach is a fact'); END;
+CREATE TRIGGER tunnel_reach_no_delete BEFORE DELETE ON tunnel_reach
+BEGIN SELECT RAISE(ABORT, 'a tunnel''s reach is never forgotten'); END;
+
+CREATE TABLE workspace_exposure (
+    root_device     TEXT    NOT NULL CHECK (length(root_device) BETWEEN 1 AND 20
+                                            AND root_device NOT GLOB '*[^0-9]*'),
+    root_inode      TEXT    NOT NULL CHECK (length(root_inode) BETWEEN 1 AND 20
+                                            AND root_inode NOT GLOB '*[^0-9]*'),
+    invocation_id   TEXT    NOT NULL REFERENCES workload_egress(invocation_id)
+                                        ON DELETE RESTRICT,
+    certain         INTEGER NOT NULL CHECK (certain IN (0, 1)),
+    recorded_ms     INTEGER NOT NULL,
+    PRIMARY KEY (root_device, root_inode, invocation_id)
+) STRICT;
+CREATE TRIGGER workspace_exposure_no_update BEFORE UPDATE ON workspace_exposure
+BEGIN SELECT RAISE(ABORT, 'a workspace''s exposure is a fact'); END;
+CREATE TRIGGER workspace_exposure_no_delete BEFORE DELETE ON workspace_exposure
+BEGIN SELECT RAISE(ABORT, 'a workspace''s exposure is never forgotten'); END;
+";
+
 /// One step from a version to the next.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct Migration {
@@ -1418,6 +1508,10 @@ pub(super) const MIGRATIONS: &[Migration] = &[
     Migration {
         to: 11,
         sql: SCHEMA_V11,
+    },
+    Migration {
+        to: 12,
+        sql: SCHEMA_V12,
     },
 ];
 
@@ -1574,7 +1668,7 @@ mod tests {
     use super::{
         APPLICATION_ID, CURRENT_VERSION, MIGRATIONS, Migration, SCHEMA_V1, SCHEMA_V2, SCHEMA_V3,
         SCHEMA_V4, SCHEMA_V5, SCHEMA_V6, SCHEMA_V7, SCHEMA_V8, SCHEMA_V9, SCHEMA_V10, SCHEMA_V11,
-        Shape, ShapeError, decide, migrate, verify_exact,
+        SCHEMA_V12, Shape, ShapeError, decide, migrate, verify_exact,
     };
     use rusqlite::Connection;
 
@@ -1644,6 +1738,7 @@ mod tests {
         assert!(conn.execute_batch(SCHEMA_V9).is_ok());
         assert!(conn.execute_batch(SCHEMA_V10).is_ok());
         assert!(conn.execute_batch(SCHEMA_V11).is_ok());
+        assert!(conn.execute_batch(SCHEMA_V12).is_ok());
         assert!(
             conn.execute_batch("DROP TRIGGER run_never_resurrects")
                 .is_ok()
@@ -1670,6 +1765,7 @@ mod tests {
         assert!(conn.execute_batch(SCHEMA_V9).is_ok());
         assert!(conn.execute_batch(SCHEMA_V10).is_ok());
         assert!(conn.execute_batch(SCHEMA_V11).is_ok());
+        assert!(conn.execute_batch(SCHEMA_V12).is_ok());
         assert!(
             conn.execute_batch("CREATE TABLE backdoor (x INTEGER)")
                 .is_ok()

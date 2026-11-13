@@ -16,6 +16,16 @@
 //! `PROXY_ONLY` environment whose grant the authority derives from the run's
 //! own `network.https` grants, used through the real relay and proxy, and
 //! reconciled with its helper containers.
+//!
+//! F-17 (ADR-0061, Proposed) adds two, run by the same task: since F-17 a
+//! tunnel is carried only while a workload holds the egress authorisation
+//! the authority decided for it -- by both gates, the run's novelty and the
+//! workspace's exposure -- so every tunnel here is opened by a workload the
+//! real authority runs (`workload_run`), under an evidence policy whose one
+//! `network.https` allow rule names exactly the hosts the cases need
+//! (`when.environment = "sandbox"`, `when.host_matches`); a granted host no
+//! rule allows is the standing control, refused by the proxy before its name
+//! is resolved.
 
 #![allow(
     clippy::panic,
@@ -68,21 +78,24 @@ mod linux {
     use dwk_proto::json::{Object, Value, to_canonical_string};
     use dwk_proto::wire::id::{EnvironmentId, RunId};
     use dwkd_authority::broker::{EffectBroker, UnixBroker};
-    use dwkd_authority::sandbox::{EgressConfig, SandboxConfig, WorkspaceSetting};
+    use dwkd_authority::capability::PrivacyClass;
+    use dwkd_authority::sandbox::{EgressConfig, SandboxConfig, WorkloadBudget, WorkspaceSetting};
     use dwkd_authority::state::{
         Authority, AuthorityError, CrashHook, CrashPoint, EnvironmentReply, EnvironmentState,
-        HookAction, ManualClock, ReconcileReport, Reply, StartOptions, StartupConfig, WorkspaceId,
-        WorkspaceSensitivity,
+        HookAction, ManualClock, Mode, ReconcileReport, Reply, StartOptions, StartupConfig,
+        WorkloadReply, WorkloadRequest, WorkspaceId, WorkspaceSensitivity,
     };
 
     use super::broker_support::Broker;
     use super::state_support::{
-        START_MS, TempDir, admit_msg, audit_events, audit_records, balanced, install_fixtures, int,
-        raw, session, spawn_guard, subject, text,
+        START_MS, TempDir, admit_msg, audit_events, audit_records, balanced, ceiling,
+        install_fixtures, int, policy, profile, raw, session, spawn_guard, subject, text,
     };
     use super::transport_support::own_uid;
 
     const SUITE: &str = "sandbox-authority";
+    /// Where the evidence image carries the test-only workload fixture.
+    const FIXTURE: &str = "/usr/libexec/direwolf/sandbox-fixture";
     /// What every line of this file is (M5e.1): the real authority's own
     /// environment API -- it has no DWKP route (ADR-0047 §3) -- over the
     /// released broker and a real runtime.
@@ -274,6 +287,10 @@ mod linux {
         next_session: u64,
         runtime: Runtime,
         reaper: Reaper,
+        /// The profile every run is admitted under.
+        profile: &'static str,
+        /// Workloads run so far: each its own idempotency key.
+        workloads: u64,
     }
 
     fn stop_at(point: CrashPoint) -> CrashHook {
@@ -305,12 +322,21 @@ mod linux {
                     "--allow-unverified-workspace",
                 ],
                 sandbox,
+                balanced(),
             )
         }
 
         /// A lab whose sandbox is `PROXY_ONLY` (M5b), its broker resolving
-        /// egress names from `fixture` — the evidence's, never production's.
-        fn proxy_only(tag: &str, image: &str, probe: &str, relay: &str, fixture: &str) -> Self {
+        /// egress names from `fixture` — the evidence's, never production's —
+        /// its workloads the fixture by digest, and its policy `policy_text`
+        /// (F-17: every tunnel is a workload's, decided by that policy).
+        fn proxy_only(
+            tag: &str,
+            (image, probe, relay): (&str, &str, &str),
+            fixture: &str,
+            policy_text: &str,
+        ) -> Self {
+            let fixture_sha = var("DW_SANDBOX_FIXTURE_SHA256");
             let sandbox = SandboxConfig::proxy_only(
                 &var("DW_SANDBOX_RUNTIME"),
                 &var("DW_SANDBOX_SOCKET"),
@@ -319,8 +345,17 @@ mod linux {
                 EgressConfig::new(relay, 4, 1 << 20, 1 << 20).unwrap(),
                 WorkspaceSetting::UnverifiedEvidence,
             )
+            .unwrap()
+            .with_workloads(
+                &[(FIXTURE, fixture_sha.as_str())],
+                WorkloadBudget::default(),
+            )
             .unwrap();
-            Self::with(
+            let mut ceiling = ceiling();
+            ceiling.push("process.exec:*".to_owned());
+            let config =
+                StartupConfig::new(policy("m5b-egress", policy_text), Mode::Balanced, ceiling);
+            let mut lab = Self::with(
                 tag,
                 &[
                     "--allow-shared-authority-uid",
@@ -330,10 +365,54 @@ mod linux {
                     "--allow-unverified-workspace",
                 ],
                 sandbox,
-            )
+                config,
+            );
+            // The researcher's grants, and the fixture as a workload.
+            lab.authority()
+                .operator()
+                .install_agent_profile(&profile(
+                    "egress-agent",
+                    &[
+                        "process.exec:*",
+                        "network.https:*.example.com",
+                        "network.https:github.com",
+                        "network.http:*",
+                    ],
+                    &[],
+                    PrivacyClass::Any,
+                ))
+                .unwrap();
+            lab.profile = "egress-agent";
+            lab
         }
 
-        fn with(tag: &str, broker_args: &[&str], sandbox: SandboxConfig) -> Self {
+        /// Run the fixture with `args` as one of `run`'s workloads, decided
+        /// by the real authority (F-17): its line.
+        fn fixture(&mut self, run: &RunId, args: &[&str]) -> String {
+            let request = WorkloadRequest {
+                executable: FIXTURE.to_owned(),
+                args: args.iter().map(|a| (*a).to_owned()).collect(),
+                stream_limit: 65_536,
+                wall_clock_seconds: 60,
+                key: format!("f17-{}", self.workloads),
+            };
+            self.workloads += 1;
+            let reply = self.authority().workload_run(run, &request).unwrap();
+            let WorkloadReply::Completed(outcome) = reply else {
+                panic!("{args:?} did not complete: {reply:?}")
+            };
+            String::from_utf8(outcome.stdout.clone())
+                .unwrap()
+                .trim()
+                .to_owned()
+        }
+
+        fn with(
+            tag: &str,
+            broker_args: &[&str],
+            sandbox: SandboxConfig,
+            config: StartupConfig,
+        ) -> Self {
             let runtime = Runtime::load();
             let reaper = Reaper {
                 runtime: runtime.clone(),
@@ -350,7 +429,7 @@ mod linux {
             let mut lab = Self {
                 dir,
                 clock: Arc::new(ManualClock::new(START_MS)),
-                config: balanced(),
+                config,
                 broker_socket,
                 _broker: broker,
                 authority: None,
@@ -359,6 +438,8 @@ mod linux {
                 next_session: 1,
                 runtime,
                 reaper,
+                profile: "researcher",
+                workloads: 0,
             };
             lab.start(None);
             let authority = lab.authority();
@@ -414,6 +495,7 @@ mod linux {
             let n = self.next_session;
             self.next_session += 1;
             let workspace = self.workspace.clone();
+            let profile = self.profile;
             let authority = self.authority();
             authority
                 .operator()
@@ -430,7 +512,7 @@ mod linux {
                         &session(n),
                         epoch,
                         &format!("k{n}"),
-                        "researcher",
+                        profile,
                         &[],
                         capabilities,
                         n,
@@ -874,10 +956,9 @@ mod linux {
         .unwrap();
         let mut lab = Lab::proxy_only(
             "m5b-egress",
-            &image,
-            &probe,
-            &relay,
+            (&image, &probe, &relay),
             fixture.to_str().unwrap(),
+            &egress_policy(),
         );
         let rt = lab.runtime.clone();
 
@@ -897,8 +978,10 @@ mod linux {
             &methods,
             &counted,
             &both,
+            // F-17: the tunnels are workloads' (ADR-0061, Proposed).
+            "process.exec:*",
         ]);
-        let (environment, container) = lab.ready(&run);
+        let (environment, _container) = lab.ready(&run);
         let intent = audit_records(&lab.dir.state(), "environment.intent_recorded")
             .pop()
             .unwrap();
@@ -948,26 +1031,20 @@ mod linux {
             "authority-audit",
         );
 
-        // Through the real relay and proxy: the exact host is reached; a name
-        // the wildcard covers, but no exact grant names, is not.
-        let exec = |args: &[&str]| {
-            let mut words = vec![
-                "container",
-                "exec",
-                container.as_str(),
-                "/usr/libexec/direwolf/sandbox-fixture",
-            ];
-            words.extend_from_slice(args);
-            rt.ok(&words).trim().to_owned()
-        };
+        // Through the real relay and proxy, from workloads the authority runs
+        // and decides (F-17): the exact host is reached; a name the wildcard
+        // covers, but no exact grant names, is not.
         let p = port.to_string();
-        let line = exec(&[
-            "egress-connect",
-            "origin.example.com",
-            &p,
-            "origin.example.com",
-            "100",
-        ]);
+        let line = lab.fixture(
+            &run,
+            &[
+                "egress-connect",
+                "origin.example.com",
+                &p,
+                "origin.example.com",
+                "100",
+            ],
+        );
         assert!(line.contains("HTTP/1.1 200"), "{line}");
         assert_eq!(accepted.load(Ordering::SeqCst), 1);
         egress_evidence(
@@ -975,13 +1052,16 @@ mod linux {
             "200-and-reached",
             "relay-and-connect-proxy-grant",
         );
-        let line = exec(&[
-            "egress-connect",
-            "api.example.com",
-            &p,
-            "api.example.com",
-            "0",
-        ]);
+        let line = lab.fixture(
+            &run,
+            &[
+                "egress-connect",
+                "api.example.com",
+                &p,
+                "api.example.com",
+                "0",
+            ],
+        );
         assert!(line.contains("TARGET_NOT_GRANTED"), "{line}");
         assert_eq!(accepted.load(Ordering::SeqCst), 1);
         egress_evidence(
@@ -992,7 +1072,7 @@ mod linux {
         // Nor is a name only a constrained grant names: the proxy refuses it,
         // and the origin that name resolves to is not reached.
         for host in ["methods.example.com", "counted.example.com"] {
-            let line = exec(&["egress-connect", host, &p, host, "0"]);
+            let line = lab.fixture(&run, &["egress-connect", host, &p, host, "0"]);
             assert!(line.contains("TARGET_NOT_GRANTED"), "{host}: {line}");
         }
         assert_eq!(accepted.load(Ordering::SeqCst), 1);
@@ -1071,6 +1151,455 @@ mod linux {
         egress_evidence(
             "reconcile-helper-orphan-reaped",
             "removed-exactly",
+            "authority-reconciliation",
+        );
+    }
+
+    // ---- F-17: each workload's egress, decided by the real authority ------
+
+    /// The F-17 evidence policy (ADR-0061, Proposed): the fixture as a
+    /// sandbox workload; HTTPS in a sandbox to exactly the hosts the cases
+    /// reach; a tainted run's novel destination for approval and one host
+    /// always for approval -- each refused, nobody being there to approve
+    /// (the shipped `balanced` rule and postcondition, verbatim); any other
+    /// granted host, the standing control, denied by the default.
+    fn egress_policy() -> String {
+        format!(
+            r#"schema_version = 1
+
+[meta]
+name = "m5b-egress"
+
+[[rule]]
+id = "the-fixture-in-a-sandbox"
+effect = "ALLOW"
+when.verb = "process.exec"
+when.environment = "sandbox"
+when.executable_in = ["{FIXTURE}@{fixture}"]
+obligations = ["max_output_bytes=65536"]
+
+[[rule]]
+id = "never-on-the-host"
+effect = "DENY"
+reason = "HOST_EXECUTION_DISABLED"
+when.verb = "process.exec"
+when.environment = "host"
+
+{tainted}
+[[rule]]
+id = "approve-the-review-origin"
+effect = "REQUIRE_APPROVAL"
+reason = "UNTRUSTED_CONTENT_IN_RUN"
+when.verb = "network.https"
+when.environment = "sandbox"
+when.host_matches = "review.example.com"
+approval.scope    = "exact_action"
+approval.ttl      = "10m"
+approval.max_uses = 1
+
+[[rule]]
+id = "https-to-the-evidence-origins"
+effect = "ALLOW"
+when.verb = "network.https"
+when.environment = "sandbox"
+when.host_matches = ["origin.example.com", "second.example.com"]
+
+[[rule]]
+id = "default"
+effect = "DENY"
+reason = "NO_MATCHING_RULE"
+
+{unattended}"#,
+            fixture = var("DW_SANDBOX_FIXTURE_SHA256"),
+            tainted = shipped("balanced", TAINTED_RULE),
+            unattended = shipped("balanced", UNATTENDED_POSTCONDITION),
+        )
+    }
+
+    /// `balanced`'s rule for a tainted run's novel destination.
+    const TAINTED_RULE: &str = r#"[[rule]]
+id     = "approve-egress-when-tainted"
+effect = "REQUIRE_APPROVAL"
+reason = "UNTRUSTED_CONTENT_IN_RUN"
+when.verb              = ["network.http", "network.https", "channel.send"]
+when.taint_level       = ["EXTERNAL_UNTRUSTED"]
+when.destination_novel = true
+approval.scope    = "exact_action"
+approval.ttl      = "10m"
+approval.max_uses = 1
+"#;
+
+    /// `balanced`'s unattended postcondition.
+    const UNATTENDED_POSTCONDITION: &str = r#"[[postcondition]]
+id     = "deny-approval-needed-when-unattended"
+effect = "DENY"
+reason = "NO_HUMAN_AVAILABLE"
+when.provisional_effect = ["REQUIRE_APPROVAL"]
+when.origin             = ["scheduled", "channel", "subagent", "api"]
+unless.standing_grant   = true
+"#;
+
+    /// `power`'s address rule.
+    const POWER_INTERNAL_RANGES: &str = r#"[[rule]]
+id     = "deny-internal-ranges"
+effect = "DENY"
+reason = "SANDBOX_ESCAPE_VECTOR"
+when.verb  = ["network.http", "network.https", "network.tcp"]
+when.ip_in = ["127.0.0.0/8", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16",
+              "169.254.0.0/16", "0.0.0.0/8",
+              "0000:0000:0000:0000:0000:0000:0000:0001/128",
+              "fc00:0000:0000:0000:0000:0000:0000:0000/7",
+              "fe80:0000:0000:0000:0000:0000:0000:0000/10"]
+"#;
+
+    /// `block`, proved to be the shipped pack `pack`'s own text, verbatim.
+    fn shipped(pack: &str, block: &str) -> String {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../policy")
+            .join(format!("{pack}.toml"));
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            text.contains(block),
+            "not verbatim from {}:\n{block}",
+            path.display()
+        );
+        block.to_owned()
+    }
+
+    /// The POWER evidence policy: `power`'s address rule verbatim before the
+    /// same narrow allow rule -- every evidence origin is the host's
+    /// loopback, which that rule denies.
+    fn power_policy() -> String {
+        format!(
+            r#"schema_version = 1
+
+[meta]
+name = "m5b-egress"
+
+[[rule]]
+id = "the-fixture-in-a-sandbox"
+effect = "ALLOW"
+when.verb = "process.exec"
+when.environment = "sandbox"
+when.executable_in = ["{FIXTURE}@{fixture}"]
+obligations = ["max_output_bytes=65536"]
+
+[[rule]]
+id = "never-on-the-host"
+effect = "DENY"
+reason = "HOST_EXECUTION_DISABLED"
+when.verb = "process.exec"
+when.environment = "host"
+
+{ranges}
+[[rule]]
+id = "https-to-the-evidence-origins"
+effect = "ALLOW"
+when.verb = "network.https"
+when.environment = "sandbox"
+when.host_matches = ["origin.example.com"]
+
+[[rule]]
+id = "default"
+effect = "DENY"
+reason = "NO_MATCHING_RULE"
+"#,
+            fixture = var("DW_SANDBOX_FIXTURE_SHA256"),
+            ranges = shipped("power", POWER_INTERNAL_RANGES),
+        )
+    }
+
+    /// A PROXY_ONLY lab under `policy_text`, its resolver naming `names`.
+    fn egress_lab(tag: &str, names: &[&str], policy_text: &str) -> (Lab, TempDir) {
+        let fixture_dir = TempDir::new(&format!("{tag}-fixture"));
+        let fixture = fixture_dir.path().join("egress-fixture.txt");
+        let mut lines: String = names
+            .iter()
+            .map(|n| format!("resolve {n} 127.0.0.1\n"))
+            .collect();
+        lines.push_str("allow 127.0.0.1\n");
+        std::fs::write(&fixture, lines).unwrap();
+        let lab = Lab::proxy_only(
+            tag,
+            (
+                &var("DW_EGRESS_IMAGE_FIXTURE"),
+                &var("DW_SANDBOX_PROBE_SHA256"),
+                &var("DW_EGRESS_RELAY_SHA256"),
+            ),
+            fixture.to_str().unwrap(),
+            policy_text,
+        );
+        (lab, fixture_dir)
+    }
+
+    /// `host`:`port` through the run's next workload: the fixture's line.
+    fn tunnel(lab: &mut Lab, run: &RunId, host: &str, port: u16) -> String {
+        let p = port.to_string();
+        lab.fixture(run, &["egress-connect", host, &p, host, "0"])
+    }
+
+    /// The `key=value` field of a fixture's line.
+    fn field<'a>(line: &'a str, key: &str) -> &'a str {
+        line.split_whitespace()
+            .find_map(|w| w.strip_prefix(&format!("{key}=")))
+            .unwrap_or_else(|| panic!("no {key} in {line}"))
+    }
+
+    /// The last workload intent's record.
+    fn last_intent(lab: &Lab) -> Object {
+        audit_records(&lab.dir.state(), "workload.intent_recorded")
+            .pop()
+            .unwrap()
+    }
+
+    /// The last intent's decision line for `destination`.
+    fn decision(lab: &Lab, destination: &str) -> String {
+        let intent = last_intent(lab);
+        strings(&intent, "egress_decisions")
+            .into_iter()
+            .find(|line| line.starts_with(&format!("{destination} ")))
+            .unwrap_or_else(|| panic!("no decision for {destination}: {intent:?}"))
+    }
+
+    fn exposed_at_start(intent: &Object) -> bool {
+        matches!(
+            intent.get("egress_exposed_at_start"),
+            Some(Value::Bool(true))
+        )
+    }
+
+    fn count_rows(lab: &Lab, sql: &str) -> i64 {
+        raw(&lab.dir.state())
+            .query_row(sql, [], |row| row.get(0))
+            .unwrap()
+    }
+
+    /// F-17 through the real authority: each workload's egress decided by
+    /// both gates for every destination of its environment's grant -- the
+    /// standing control refused before resolution, a host the policy wants
+    /// approved refused with nobody there to approve, a tainted run's novel
+    /// destination refused while a destination it has reached is reached
+    /// again, and a sibling run on the same workspace root launched exposed.
+    #[test]
+    #[ignore = "needs a real OCI runtime: make sandbox-egress-evidence"]
+    fn the_authority_decides_each_workloads_egress_by_both_gates_and_exposure() {
+        let (port, accepted) = origin();
+        let (mut lab, _fixture) = egress_lab(
+            "f17-egress",
+            // The standing control, `refused.example.com`, is not in the
+            // file: had the proxy asked its resolver, it would have failed.
+            &[
+                "origin.example.com",
+                "second.example.com",
+                "review.example.com",
+            ],
+            &egress_policy(),
+        );
+        let grants: Vec<String> = ["origin", "second", "review", "refused"]
+            .iter()
+            .map(|h| format!("network.https:{h}.example.com:{port}"))
+            .collect();
+        let mut asked: Vec<&str> = grants.iter().map(String::as_str).collect();
+        asked.push("process.exec:*");
+        let run = lab.admit_with(&asked);
+        let (environment, _container) = lab.ready(&run);
+
+        // The standing control: granted, no rule allows it.
+        let line = tunnel(&mut lab, &run, "refused.example.com", port);
+        assert!(line.contains("403"), "{line}");
+        assert_eq!(field(&line, "decision"), "POLICY_DENIED", "{line}");
+        assert_eq!(accepted.load(Ordering::SeqCst), 0);
+        let control = decision(&lab, &format!("refused.example.com:{port}"));
+        assert!(control.contains("np=0/2[default]"), "{control}");
+        egress_evidence(
+            "policy-denied-before-resolution",
+            "403-POLICY_DENIED-no-resolution-no-origin",
+            "connect-proxy:workload-authorisation",
+        );
+        let intent = last_intent(&lab);
+        assert!(text(&intent, "egress_sha256").is_some(), "{intent:?}");
+        assert!(
+            text(&intent, "egress_context_sha256").is_some(),
+            "{intent:?}"
+        );
+        assert_eq!(strings(&intent, "egress_decisions").len(), 4, "{intent:?}");
+        assert!(!exposed_at_start(&intent));
+        egress_evidence(
+            "decision-recorded-with-the-intent",
+            "4-destinations-4-cells-digests",
+            "authority-audit",
+        );
+
+        // Unattended: the policy wants a human to approve, and every run
+        // admitted here is unattended -- refused in every cell.
+        let line = tunnel(&mut lab, &run, "review.example.com", port);
+        assert_eq!(field(&line, "decision"), "POLICY_DENIED", "{line}");
+        assert_eq!(accepted.load(Ordering::SeqCst), 0);
+        let review = decision(&lab, &format!("review.example.com:{port}"));
+        assert!(
+            review.contains("np=0/2[deny-approval-needed-when-unattended]"),
+            "{review}"
+        );
+        egress_evidence(
+            "approval-needed-refused-unattended",
+            &review,
+            "authority-egress-decision",
+        );
+
+        // Reached: the first origin byte exposes the workspace, durably.
+        let line = tunnel(&mut lab, &run, "origin.example.com", port);
+        assert_eq!(field(&line, "received"), "5", "{line}");
+        assert_eq!(accepted.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            count_rows(&lab, "SELECT count(*) FROM workspace_exposure"),
+            1
+        );
+        assert_eq!(
+            count_rows(&lab, "SELECT count(*) FROM tunnel_reach WHERE certain = 1"),
+            1
+        );
+        // The next workload starts exposed: what it has reached it reaches
+        // again; a novel destination is a tainted run's, for approval, and
+        // refused.
+        let line = tunnel(&mut lab, &run, "origin.example.com", port);
+        assert_eq!(field(&line, "received"), "5", "{line}");
+        assert!(exposed_at_start(&last_intent(&lab)));
+        let seen = decision(&lab, &format!("origin.example.com:{port}"));
+        assert!(seen.contains(" SEEN "), "{seen}");
+        let line = tunnel(&mut lab, &run, "second.example.com", port);
+        assert_eq!(field(&line, "decision"), "POLICY_DENIED", "{line}");
+        assert_eq!(accepted.load(Ordering::SeqCst), 2);
+        let novel = decision(&lab, &format!("second.example.com:{port}"));
+        assert!(
+            novel.contains("ne=0/2[deny-approval-needed-when-unattended]"),
+            "{novel}"
+        );
+        assert!(
+            novel.contains("np=2/2[https-to-the-evidence-origins]"),
+            "{novel}"
+        );
+        egress_evidence(
+            "tainted-novel-refused-seen-reached",
+            "seen-200+novel-POLICY_DENIED",
+            "authority-egress-decision",
+        );
+        egress_evidence(
+            "exposure-durable-before-the-next-launch",
+            "exposure-row+certain-reach+exposed-at-start",
+            "authority-ledger",
+        );
+
+        // A sibling run on the same root: novel everywhere, launched
+        // exposed, so even the host its sibling reached is refused it.
+        match lab.authority().environment_destroy(&environment).unwrap() {
+            EnvironmentReply::Destroyed { .. } => {}
+            other => panic!("not destroyed: {other:?}"),
+        }
+        // ADR-0061's A8: the proxy's counts hold every workload's report.
+        let destroyed = audit_records(&lab.dir.state(), "environment.destroyed")
+            .pop()
+            .unwrap();
+        assert_eq!(
+            destroyed.get("egress_reports_within_counters"),
+            Some(&Value::Bool(true)),
+            "{destroyed:?}"
+        );
+        assert_eq!(int(&destroyed, "egress_workload_reports"), Some(5));
+        let sibling = lab.admit_with(&asked);
+        let (sibling_environment, _) = lab.ready(&sibling);
+        let line = tunnel(&mut lab, &sibling, "origin.example.com", port);
+        assert_eq!(field(&line, "decision"), "POLICY_DENIED", "{line}");
+        assert!(exposed_at_start(&last_intent(&lab)));
+        assert_eq!(accepted.load(Ordering::SeqCst), 2);
+        egress_evidence(
+            "exposure-from-a-sibling-run-on-the-shared-root",
+            &line,
+            "authority-egress-decision",
+        );
+        lab.authority()
+            .environment_destroy(&sibling_environment)
+            .unwrap();
+    }
+
+    /// F-17 through the real authority: `power`'s internal ranges, verbatim,
+    /// refuse a granted host at the address it resolves to; and a workload
+    /// interrupted by the authority's crash is settled uncertain and exposed
+    /// on restart -- no recovery restores a less restrictive authorisation.
+    #[test]
+    #[ignore = "needs a real OCI runtime: make sandbox-egress-evidence"]
+    fn ranges_refuse_at_the_address_and_an_interrupted_workload_exposes_its_root() {
+        let (port, accepted) = origin();
+        let (mut lab, _fixture) =
+            egress_lab("f17-ranges", &["origin.example.com"], &power_policy());
+        let grant = format!("network.https:origin.example.com:{port}");
+        let asked = [grant.as_str(), "process.exec:*"];
+        let run = lab.admit_with(&asked);
+        lab.ready(&run);
+        let line = tunnel(&mut lab, &run, "origin.example.com", port);
+        assert!(line.contains("403"), "{line}");
+        assert_eq!(field(&line, "decision"), "POLICY_ADDRESS_DENIED", "{line}");
+        assert_eq!(accepted.load(Ordering::SeqCst), 0);
+        let ranged = decision(&lab, &format!("origin.example.com:{port}"));
+        assert!(ranged.contains("deny-internal-ranges"), "{ranged}");
+        assert!(ranged.contains("https-to-the-evidence-origins"), "{ranged}");
+        egress_evidence(
+            "power-internal-ranges-refused-at-the-address",
+            &line,
+            "connect-proxy:workload-authorisation-address",
+        );
+        assert_eq!(
+            count_rows(&lab, "SELECT count(*) FROM workspace_exposure"),
+            0
+        );
+
+        // The authority dies while a workload runs: on restart its egress is
+        // settled UNCERTAIN, the root exposed and its destinations' reach
+        // uncertain -- never back to pristine.
+        lab.start(Some(stop_at(CrashPoint::WorkloadAfterStart)));
+        let interrupted = lab.admit_with(&asked);
+        lab.ready(&interrupted);
+        let request = WorkloadRequest {
+            executable: FIXTURE.to_owned(),
+            args: vec!["workload-sleep".to_owned(), "300".to_owned()],
+            stream_limit: 65_536,
+            wall_clock_seconds: 300,
+            key: "f17-interrupted".to_owned(),
+        };
+        let crashed = lab.authority().workload_run(&interrupted, &request);
+        assert!(
+            matches!(crashed, Err(AuthorityError::Poisoned(_))),
+            "{crashed:?}"
+        );
+        lab.start(None);
+        let settled: (String, i64) = raw(&lab.dir.state())
+            .query_row(
+                "SELECT e.settled, e.exposed FROM workload_egress e \
+                 JOIN workload w ON w.invocation_id = e.invocation_id \
+                 WHERE w.idempotency_key = 'f17-interrupted'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(settled, ("UNCERTAIN".to_owned(), 1));
+        assert_eq!(
+            count_rows(&lab, "SELECT count(*) FROM workspace_exposure"),
+            1
+        );
+        assert!(count_rows(&lab, "SELECT count(*) FROM tunnel_reach WHERE certain = 0") >= 1);
+        egress_evidence(
+            "restart-settles-an-interrupted-workload-uncertain",
+            "UNCERTAIN+exposed+uncertain-reach",
+            "authority-reconciliation",
+        );
+        let next = lab.admit_with(&asked);
+        lab.ready(&next);
+        let line = tunnel(&mut lab, &next, "origin.example.com", port);
+        assert_eq!(field(&line, "decision"), "POLICY_ADDRESS_DENIED", "{line}");
+        assert!(exposed_at_start(&last_intent(&lab)));
+        assert_eq!(accepted.load(Ordering::SeqCst), 0);
+        egress_evidence(
+            "restart-never-restores-a-pristine-root",
+            "exposed-at-start-after-restart",
             "authority-reconciliation",
         );
     }

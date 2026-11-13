@@ -807,6 +807,9 @@ pub(super) struct Intent {
     pub(super) plan: WorkloadPlan,
     /// Its credential's use, when it names one (M5d.3): durable with it.
     pub(super) secret: Option<SpawnAuthorised>,
+    /// Its egress authorisation, in a `PROXY_ONLY` environment (F-17,
+    /// ADR-0061, Proposed): durable with it, and what the broker is given.
+    pub(super) egress: Option<dwk_proto::brokerp::egress::WorkloadEgress>,
 }
 
 const fn resolution_class(refused: &ResolutionRefused) -> &'static str {
@@ -1208,7 +1211,7 @@ pub(super) fn begin(
     run: &RunId,
     (checked, secret): (&Checked, Option<(&SpawnAsked<'_>, &SpawnPrepared)>),
     (budget, active, image): (WorkloadBudget, &ActiveAuthority, &ImageBinding),
-    (binding_key, missing): (&Binding<'_>, Missing),
+    (binding_key, missing, proxy_only): (&Binding<'_>, Missing, bool),
 ) -> Result<Begun, AuthorityError> {
     let executable = checked.executable.as_str();
     let binding = match resolution::run_root(work, run.as_str())? {
@@ -1283,10 +1286,17 @@ pub(super) fn begin(
             "a permitted workload was decided without its environment",
         ));
     };
-    let invocation = record_intent(
+    // F-17 (ADR-0061, Proposed): in `PROXY_ONLY`, both gates for every
+    // destination the grants allow, before anything is recorded; a launch
+    // whose egress cannot be decided is refused.
+    let egress = match super::workload_egress::for_launch(work, run, active, proxy_only)? {
+        Ok(egress) => egress,
+        Err(reason) => return refuse(work, run, executable, reason),
+    };
+    let (invocation, recorded) = record_intent(
         work,
         (run, checked, &digest),
-        (&environment, &plan),
+        (&environment, &plan, egress.as_ref()),
         binding_key,
     )?;
     fields.extend(
@@ -1296,6 +1306,7 @@ pub(super) fn begin(
             .text("request_digest", digest.to_hex())
             .text("container", environment.container.as_str()),
     );
+    fields.extend(recorded);
     work.audit(AuditEvent::WorkloadIntentRecorded, fields)?;
     let secret = secret_intent(work, secret, (active, &plan), &invocation)?;
     Ok(Begun::Intent(Box::new(Intent {
@@ -1305,6 +1316,7 @@ pub(super) fn begin(
         binding,
         plan,
         secret,
+        egress: egress.map(|decided| decided.egress),
     })))
 }
 
@@ -1336,9 +1348,13 @@ fn secret_intent(
 fn record_intent(
     work: &mut Work<'_>,
     (run, checked, digest): (&RunId, &Checked, &Sha256Hash),
-    (environment, plan): (&ReadyEnvironment, &WorkloadPlan),
+    (environment, plan, egress): (
+        &ReadyEnvironment,
+        &WorkloadPlan,
+        Option<&super::workload_egress::Decided>,
+    ),
     binding_key: &Binding<'_>,
-) -> Result<InvocationId, AuthorityError> {
+) -> Result<(InvocationId, Fields), AuthorityError> {
     let invocation = work.invocation_id()?;
     work.db(work.tx.execute(
         "INSERT INTO workload (invocation_id, run_id, environment_id, idempotency_key, \
@@ -1380,7 +1396,12 @@ fn record_intent(
             ],
         ))?;
     }
-    Ok(invocation)
+    // F-17: the egress authorisation, durable with the intent.
+    let recorded = match egress {
+        Some(decided) => super::workload_egress::record(work, (run, &invocation), decided)?,
+        None => Fields::new(),
+    };
+    Ok((invocation, recorded))
 }
 
 /// How a workload ended, before it is recorded.
@@ -1454,7 +1475,7 @@ pub(super) fn record_outcome(
     work: &mut Work<'_>,
     run: &RunId,
     intent: &Intent,
-    ending: &Ending,
+    (ending, egress): (&Ending, &super::workload_egress::Seen),
     output: Option<(u64, u64, bool)>,
 ) -> Result<Recorded, AuthorityError> {
     let now = to_sql(work.now)?;
@@ -1531,6 +1552,12 @@ pub(super) fn record_outcome(
         )?;
         fields = fields.text("taint", taint.as_str());
     }
+    // What its tunnels did, settled before anything is answered (F-17).
+    fields.extend(super::workload_egress::settle(
+        work,
+        &intent.invocation,
+        egress,
+    )?);
     fields = fields.text("state", state.as_str());
     let destroy = match destroy_reason {
         Some(reason) => {
@@ -1590,19 +1617,23 @@ pub(super) fn reconcile_open(work: &mut Work<'_>) -> Result<u64, AuthorityError>
         let id = EnvironmentId::parse(environment)
             .ok_or(AuthorityError::Invariant("a stored workload is malformed"))?;
         let begun = environment::begin_destroy(work, &id, "WORKLOAD_INTERRUPTED")?;
-        work.audit(
-            AuditEvent::WorkloadOutcome,
-            Fields::new()
-                .text("run_id", run.as_str())
-                .text("invocation_id", invocation.as_str())
-                .text("environment_id", environment.as_str())
-                .text("state", "UNKNOWN")
-                .text("reason", "INTERRUPTED")
-                .flag(
-                    "environment_destroy_pending",
-                    matches!(begun, DestroyBegun::Pending { .. }),
-                ),
-        )?;
+        // Whatever its tunnels did is not known (F-17): every destination
+        // it allowed may have been reached, and its root may be exposed.
+        let invocation_id = InvocationId::parse(invocation)
+            .ok_or(AuthorityError::Invariant("a stored workload is malformed"))?;
+        let egress = super::workload_egress::settle_interrupted(work, &invocation_id)?;
+        let mut fields = Fields::new()
+            .text("run_id", run.as_str())
+            .text("invocation_id", invocation.as_str())
+            .text("environment_id", environment.as_str())
+            .text("state", "UNKNOWN")
+            .text("reason", "INTERRUPTED")
+            .flag(
+                "environment_destroy_pending",
+                matches!(begun, DestroyBegun::Pending { .. }),
+            );
+        fields.extend(egress);
+        work.audit(AuditEvent::WorkloadOutcome, fields)?;
     }
     Ok(u64::try_from(found.len()).unwrap_or(u64::MAX))
 }

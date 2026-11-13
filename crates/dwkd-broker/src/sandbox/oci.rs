@@ -1148,7 +1148,7 @@ impl ExecutionEnvironment for Oci<'_> {
             Some(grant) => {
                 let dir = self
                     .proxies
-                    .start(spec.environment_id.as_str(), grant)
+                    .start(spec.environment_id.as_str(), grant, spec.workspace)
                     .map_err(|_| EnvFailure::Refused(BrokerRefusal::ProxyUnavailable))?;
                 let Some(dir) = dir.to_str() else {
                     let _ = self.proxies.close(spec.environment_id.as_str());

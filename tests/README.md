@@ -196,7 +196,7 @@ real authority with the real broker: decided, recorded, run and never run twice;
 every gate refusing before anything runs; the budget; crash windows W8–W11; and
 uncertain endings destroying the environment. Both are `#[ignore]`d unless the
 task selects them by name, every case must print its `SANDBOX-EVIDENCE` line, and
-no container may be left behind. `make sandbox-workload-mutations` weakens each
+no container may be left behind. F-17 ([ADR-0061](../docs/adr/0061-workload-egress-decided-by-policy-novelty-and-exposure.md), Proposed) adds `make sandbox-egress-policy-mutations`, which weakens each guard of a workload's egress authorisation in turn -- the broker's cells, address pieces, per-tunnel bound and lifetime, the authority's decision, novelty, tripwire and settlement, the partition, and the exposure rule -- each of which a unit suite or `make sandbox-egress-evidence` must catch. `make sandbox-workload-mutations` weakens each
 guard in turn and requires a unit suite or the evidence to fail; it is slow, runs
 locally, and is not part of the hosted workflow.
 

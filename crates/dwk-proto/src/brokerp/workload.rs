@@ -23,7 +23,14 @@
 //! generation -- one that restarted -- supervises nothing of an earlier
 //! one: its collection is indeterminate, and the authority ends the
 //! workload `UNKNOWN` and destroys its environment.
+//!
+//! **Egress** (F-17, ADR-0061, Proposed, protocol version 12). A start in a
+//! `PROXY_ONLY` environment carries the workload's egress authorisation --
+//! exactly there, and nowhere else -- which the broker holds only while it
+//! supervises the workload; the ending carries what the workload's tunnels
+//! did ([`WorkloadEgressReport`]).
 
+use crate::brokerp::egress::{WorkloadEgress, WorkloadEgressReport};
 use crate::brokerp::sandbox::{
     ContainerRef, EnvironmentProfile, ImageId, Milliseconds, NetworkTopology, StoreInstance,
     Verdict, WorkspaceBound,
@@ -262,6 +269,9 @@ wire_struct! {
         required wall_clock: WorkloadSeconds,
         /// How it is started: directly, or by the trusted launcher.
         required launch: WorkloadLaunch,
+        /// `PROXY_ONLY` only, and always there: what the workload's
+        /// processes may reach while it runs (F-17).
+        optional egress: WorkloadEgress,
         /// Two: the runtime executable, then the working directory.
         required descriptors: DescriptorCount,
     }
@@ -318,6 +328,9 @@ wire_struct! {
         optional result: WorkloadRunDone,
         /// For `ENDED` without a result: why it never began. Nothing ran.
         optional never_ran: BrokerRefusal,
+        /// For `ENDED`, of a workload started with an egress authorisation:
+        /// what its tunnels did (F-17).
+        optional egress: WorkloadEgressReport,
     }
 }
 
@@ -460,6 +473,9 @@ wire_struct! {
         required delivery: SecretDelivery,
         /// For mode B: the variable. Absent for mode C.
         optional env_name: SecretEnvName,
+        /// `PROXY_ONLY` only, and always there: what the workload's
+        /// processes may reach while it runs (F-17).
+        optional egress: WorkloadEgress,
         /// Three: the runtime executable, the working directory, the secret
         /// pipe.
         required descriptors: DescriptorCount,
@@ -513,8 +529,16 @@ impl WorkloadSecretStartAuthorisation {
             handle: secret.handle,
             delivery: secret.delivery,
             env_name: secret.env_name,
+            egress: start.egress,
             descriptors: DescriptorCount(3),
         }
+    }
+
+    /// The same start, carrying `egress` (F-17).
+    #[must_use]
+    pub fn with_egress(mut self, egress: Option<WorkloadEgress>) -> Self {
+        self.egress = egress;
+        self
     }
 
     /// The workload's start, without its secret: the environment, the
@@ -553,6 +577,7 @@ impl WorkloadSecretStartAuthorisation {
             stream_limit: self.stream_limit,
             wall_clock: self.wall_clock,
             launch: self.launch,
+            egress: self.egress.clone(),
             descriptors: DescriptorCount(2),
         }
     }
@@ -609,12 +634,21 @@ impl WorkloadStartAuthorisation {
             stream_limit: workload.stream_limit,
             wall_clock: workload.wall_clock,
             launch: workload.launch,
+            egress: None,
             descriptors: DescriptorCount(2),
         }
     }
 
+    /// The same start, carrying `egress` (F-17).
+    #[must_use]
+    pub fn with_egress(mut self, egress: Option<WorkloadEgress>) -> Self {
+        self.egress = egress;
+        self
+    }
+
     /// The environment it names. A workload carries no grant: the proxy
-    /// already holds the one the environment was prepared with.
+    /// already holds the one the environment was prepared with, and the
+    /// start's own `egress` only narrows it for the workload's life.
     #[must_use]
     pub fn environment(&self) -> EnvironmentSpec {
         EnvironmentSpec {
@@ -682,6 +716,18 @@ pub(super) fn check_start(run: &WorkloadStartAuthorisation) -> Result<(), Protoc
             "/relay_sha256",
             "a PROXY_ONLY environment names its relay, and only it does",
         ));
+    }
+    // An egress authorisation exactly for `PROXY_ONLY` (F-17), and one that
+    // agrees with itself.
+    match (run.network == NetworkTopology::ProxyOnly, &run.egress) {
+        (true, Some(egress)) => egress.check().map_err(|why| inconsistent("/egress", why))?,
+        (false, None) => {}
+        _ => {
+            return Err(inconsistent(
+                "/egress",
+                "a PROXY_ONLY workload carries its egress authorisation, and only it does",
+            ));
+        }
     }
     Ok(())
 }
@@ -770,6 +816,12 @@ pub fn check_done(done: &WorkloadRunDone) -> Result<(), ProtocolError> {
 ///
 /// The first inconsistency.
 pub fn check_collect(done: &WorkloadCollectDone) -> Result<(), ProtocolError> {
+    if done.egress.is_some() && done.progress != WorkloadProgress::Ended {
+        return Err(inconsistent(
+            "/egress",
+            "what a workload's tunnels did is said once it has ended",
+        ));
+    }
     match (done.progress, &done.result, done.never_ran) {
         (WorkloadProgress::Ended, Some(result), None) => check_done(result),
         (WorkloadProgress::Ended, None, Some(_)) | (WorkloadProgress::Running, None, None) => {

@@ -60,6 +60,7 @@ use std::time::{Duration, Instant};
 use dwk_proto::brokerp::egress::{EgressCounters, EgressDisposition, EgressGrant};
 use dwk_sandbox_profile::{EGRESS_SOCKET_NAME, RELAY_MAX_CONNECTIONS, RELAY_UID};
 
+use super::authorised::{Root, RootKey, Roots};
 use super::tunnel::{self, Context};
 use super::{Counters, Limits, resolve};
 
@@ -108,6 +109,36 @@ pub(crate) struct Proxies {
     resolver: resolve::Shared,
     limits: Limits,
     open: Mutex<BTreeMap<String, Open>>,
+    /// Every workspace root's egress state (F-17): shared by every
+    /// environment on the root.
+    roots: Roots,
+}
+
+/// A workload's egress authorisation in force (F-17): removed, and its
+/// tunnels stopped, when this is finished or dropped -- whatever ends the
+/// workload's thread.
+#[derive(Debug)]
+pub(crate) struct Authorised {
+    root: Arc<Root>,
+    environment: String,
+    invocation: dwk_proto::wire::id::InvocationId,
+    finished: bool,
+}
+
+impl Authorised {
+    /// The workload has ended: what its tunnels did.
+    pub(crate) fn finish(mut self) -> Option<dwk_proto::brokerp::egress::WorkloadEgressReport> {
+        self.finished = true;
+        self.root.finish(&self.environment, &self.invocation)
+    }
+}
+
+impl Drop for Authorised {
+    fn drop(&mut self) {
+        if !self.finished {
+            let _ = self.root.finish(&self.environment, &self.invocation);
+        }
+    }
 }
 
 /// Why a proxy could not be opened.
@@ -229,6 +260,7 @@ impl Proxies {
             resolver,
             limits,
             open: Mutex::new(BTreeMap::new()),
+            roots: Roots::default(),
         };
         proxies.clear_stale();
         Ok(proxies)
@@ -245,6 +277,7 @@ impl Proxies {
             resolver,
             limits,
             open: Mutex::new(BTreeMap::new()),
+            roots: Roots::default(),
         }
     }
 
@@ -287,6 +320,7 @@ impl Proxies {
         &self,
         environment: &str,
         grant: EgressGrant,
+        workspace: RootKey,
     ) -> Result<PathBuf, ProxyError> {
         if !plain(environment) {
             return Err(ProxyError("not an environment name".to_owned()));
@@ -308,7 +342,7 @@ impl Proxies {
             identity,
             listener,
             context,
-        } = match self.listen(&dir, grant) {
+        } = match self.listen(&dir, grant, (environment, workspace)) {
             Ok(listening) => listening,
             Err(error) => {
                 let _ = fs::remove_file(dir.join(EGRESS_SOCKET_NAME));
@@ -347,7 +381,12 @@ impl Proxies {
     }
 
     /// Bind the socket in a fresh environment directory.
-    fn listen(&self, dir: &Path, grant: EgressGrant) -> Result<Listening, ProxyError> {
+    fn listen(
+        &self,
+        dir: &Path,
+        grant: EgressGrant,
+        (environment, workspace): (&str, RootKey),
+    ) -> Result<Listening, ProxyError> {
         let socket = dir.join(EGRESS_SOCKET_NAME);
         let listener = UnixListener::bind(&socket).map_err(|e| io("binding", &socket, &e))?;
         let meta = fs::symlink_metadata(&socket).map_err(|e| io("inspecting", &socket, &e))?;
@@ -361,6 +400,7 @@ impl Proxies {
             Arc::new(Counters::default()),
             Arc::clone(&self.resolver),
             self.limits,
+            (self.roots.of(workspace), environment.to_owned()),
         ));
         Ok(Listening {
             socket,
@@ -387,6 +427,44 @@ impl Proxies {
     pub(crate) fn dir(&self, environment: &str) -> Option<PathBuf> {
         let open = self.open.lock().ok()?;
         open.get(environment).map(|o| o.dir.clone())
+    }
+
+    /// Hold `egress` for `environment`'s workload `invocation` while it runs
+    /// (F-17): its proxy must be open, and every destination it names one
+    /// the environment was granted.
+    ///
+    /// # Errors
+    ///
+    /// `PROXY_UNAVAILABLE` without a proxy, `EGRESS_NOT_GRANTED` for a
+    /// destination outside the grant, `WORKLOAD_IN_USE` when the
+    /// environment's workload holds one already.
+    pub(crate) fn authorise(
+        &self,
+        environment: &str,
+        invocation: &dwk_proto::wire::id::InvocationId,
+        egress: dwk_proto::brokerp::egress::WorkloadEgress,
+    ) -> Result<Authorised, dwk_proto::brokerp::BrokerRefusal> {
+        use dwk_proto::brokerp::BrokerRefusal;
+        let context = self
+            .open
+            .lock()
+            .ok()
+            .and_then(|open| open.get(environment).map(|o| Arc::clone(&o.context)))
+            .ok_or(BrokerRefusal::ProxyUnavailable)?;
+        if !egress
+            .targets
+            .iter()
+            .all(|t| context.grant.permits(t.host.as_str(), t.port.get()))
+        {
+            return Err(BrokerRefusal::EgressNotGranted);
+        }
+        context.root.install(environment, invocation, egress)?;
+        Ok(Authorised {
+            root: Arc::clone(&context.root),
+            environment: environment.to_owned(),
+            invocation: invocation.clone(),
+            finished: false,
+        })
     }
 
     /// What `environment`'s proxy has done so far.

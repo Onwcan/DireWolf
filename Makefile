@@ -18,7 +18,8 @@ DW := $(PY) scripts/dw.py
         authority-state-evidence filesystem-canonicalization-evidence \
         authority-transport-evidence authority-write-probe broker-fs-read-evidence \
         filesystem-operations-evidence process-broker-evidence secret-broker-evidence \
-        sandbox-foundation-evidence sandbox-egress-evidence sandbox-workload-evidence \
+        sandbox-foundation-evidence sandbox-egress-evidence sandbox-egress-policy-mutations \
+        sandbox-workload-evidence \
         net-http-evidence net-http-mutations sandbox-workload-mutations sandbox-secret-evidence \
         sandbox-secret-mutations sandbox-workspace-evidence sandbox-workspace-mutations \
         sandbox-agent-evidence sandbox-agent-mutations sandbox-release-evidence \
@@ -106,8 +107,11 @@ secret-broker-evidence: ## M4e secrets: backends, mode A, the injection primitiv
 sandbox-foundation-evidence: ## M5a real OCI containers: strict profile measured, weakened profiles, probe tamper, lifecycle, foreign safety; M5e.2 every hard rule judged in process, PROXY_ONLY included
 	@$(DW) sandbox-foundation-evidence
 
-sandbox-egress-evidence: ## M5b PROXY_ONLY on real OCI containers: relay, CONNECT proxy, guard, pinning, SNI, budgets, bypasses, weakened topologies
+sandbox-egress-evidence: ## M5b PROXY_ONLY on real OCI containers: relay, CONNECT proxy, guard, pinning, SNI, budgets, bypasses, weakened topologies; F-17 each workload's egress authorisation, decided by policy, the run's novelty and the workspace's exposure
 	@$(DW) sandbox-egress-evidence
+
+sandbox-egress-policy-mutations: ## F-17 mutation review (ADR-0061, Proposed): each guard of a workload's egress authorisation weakened in turn must fail a unit suite or sandbox-egress-evidence (slow)
+	@$(DW) sandbox-egress-policy-mutations
 
 sandbox-workload-evidence: ## M5d.1-M5d.2 workloads in real OCI environments: identity, bounds, wall clock, process trees ended, digests, drift, escapes, an agent-shaped workload, the authority's gates, ledger and crash windows; the public process.exec over real DWKP, serve --sandbox-config, the hygiene launcher with real git/Python/pytest; M5e.2 cross-run isolation
 	@$(DW) sandbox-workload-evidence

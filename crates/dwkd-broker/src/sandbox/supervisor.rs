@@ -322,6 +322,7 @@ impl Workloads {
                     progress: WorkloadProgress::Running,
                     result: None,
                     never_ran: None,
+                    egress: None,
                 }))
             }
             State::Ended { result, .. } => result,

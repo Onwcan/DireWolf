@@ -145,6 +145,10 @@ mod linux {
     const SECOND: &str = "second.test";
     const BLOCKED: &str = "blocked.test";
     const SINK: &str = "sink.test";
+    /// F-17's standing control (ADR-0061, Proposed): a granted name no rule
+    /// of the policy allows -- and no name the resolver holds, so had the
+    /// proxy asked, it would have failed resolution.
+    const REFUSED: &str = "refused.test";
     /// The operator's egress budgets for every environment.
     const MAX_TUNNELS: usize = 4;
     const MAX_UPLOAD: usize = 64 * 1024;
@@ -778,8 +782,11 @@ mod linux {
     }
 
     /// The operator's policy: the fixture and the image's Python in a
-    /// sandbox, by path and digest; reads in the workspace; nothing on the
-    /// host; everything else denied.
+    /// sandbox, by path and digest; reads in the workspace; HTTPS from a
+    /// sandbox to exactly the names the cases need (F-17, ADR-0061,
+    /// Proposed: every tunnel is decided by policy), so each case is still
+    /// refused by the mechanism it always was; nothing on the host;
+    /// everything else denied -- the standing control among it.
     fn policy_text(pins: &Pins) -> String {
         format!(
             r#"schema_version = 1
@@ -801,6 +808,13 @@ effect = "ALLOW"
 when.verb = "fs.read"
 when.path_under = "${{WORKSPACE}}"
 when.max_bytes = 65536
+
+[[rule]]
+id = "https-to-the-evidence-origins"
+effect = "ALLOW"
+when.verb = "network.https"
+when.environment = "sandbox"
+when.host_matches = ["{ORIGIN}", "{ALT}", "{BLOCKED}", "{SINK}"]
 
 [[rule]]
 id = "never-on-the-host"
@@ -1148,6 +1162,7 @@ reason = "NO_MATCHING_RULE"
                 format!("network.https:{ORIGIN}:{}", self.rogue.port),
                 format!("network.https:{BLOCKED}:{}", self.good.port),
                 format!("network.https:{SINK}:{}", self.sink.port),
+                format!("network.https:{REFUSED}:{}", self.good.port),
             ]
         }
 
@@ -1729,6 +1744,13 @@ reason = "NO_MATCHING_RULE"
                 "ADDRESS_BLOCKED",
                 "connect-proxy:address-guard",
             ),
+            (
+                "a04-granted-name-denied-by-policy",
+                REFUSED,
+                lab.good.port,
+                "POLICY_DENIED",
+                "connect-proxy:workload-authorisation",
+            ),
         ] {
             let report = lab.tool(
                 &mut a,
@@ -2060,7 +2082,7 @@ reason = "NO_MATCHING_RULE"
             targets.contains(&format!("{ORIGIN}:{}", lab.good.port)),
             "{targets:?}"
         );
-        assert_eq!(targets.len(), 5, "{targets:?}");
+        assert_eq!(targets.len(), 6, "{targets:?}");
         evidence(
             SUITE,
             "audit-environment-intent-names-the-grant",

@@ -175,21 +175,22 @@ fn an_outcome_carries_exactly_one_answer() {
     let mut both = BrokerOutcome::new(channel(), invocation(), OutcomeResult::done(done));
     both.refused = Some(BrokerRefusal::ReadFailed);
     assert!(encode_frame(&both).is_err());
-    let none = r#"{"channel":"0123456789abcdef0123456789abcdef","invocation_id":"inv_01M24BB8G3E0A851TRWE3M8FZF","kind":"broker.outcome","protocol":11}"#;
+    let none = r#"{"channel":"0123456789abcdef0123456789abcdef","invocation_id":"inv_01M24BB8G3E0A851TRWE3M8FZF","kind":"broker.outcome","protocol":12}"#;
     assert!(BrokerOutcome::decode_frame_body(none.as_bytes()).is_err());
     // A done names exactly one operation.
-    let two = r#"{"channel":"0123456789abcdef0123456789abcdef","done":{"fs_move":{},"fs_delete":{"debris":false}},"invocation_id":"inv_01M24BB8G3E0A851TRWE3M8FZF","kind":"broker.outcome","protocol":11}"#;
+    let two = r#"{"channel":"0123456789abcdef0123456789abcdef","done":{"fs_move":{},"fs_delete":{"debris":false}},"invocation_id":"inv_01M24BB8G3E0A851TRWE3M8FZF","kind":"broker.outcome","protocol":12}"#;
     assert!(BrokerOutcome::decode_frame_body(two.as_bytes()).is_err());
 }
 
 #[test]
 fn unknown_members_old_versions_and_second_spellings_are_refused() {
     for text in [
-        r#"{"channel":"0123456789abcdef0123456789abcdef","kind":"broker.hello","protocol":11,"extra":1}"#,
-        r#"{"channel":"0123456789ABCDEF0123456789ABCDEF","kind":"broker.hello","protocol":11}"#,
-        // Versions 1 to 10 are not half-understood (M5d.4's workspace
-        // contract made it 11, ADR-0052 §§6, 10), and a later one is not
-        // guessed at.
+        r#"{"channel":"0123456789abcdef0123456789abcdef","kind":"broker.hello","protocol":12,"extra":1}"#,
+        r#"{"channel":"0123456789ABCDEF0123456789ABCDEF","kind":"broker.hello","protocol":12}"#,
+        // Versions 1 to 11 are not half-understood (F-17's workload egress
+        // authorisation made it 12, ADR-0061, Proposed), and a later one is
+        // not guessed at.
+        r#"{"channel":"0123456789abcdef0123456789abcdef","kind":"broker.hello","protocol":11}"#,
         r#"{"channel":"0123456789abcdef0123456789abcdef","kind":"broker.hello","protocol":1}"#,
         r#"{"channel":"0123456789abcdef0123456789abcdef","kind":"broker.hello","protocol":2}"#,
         r#"{"channel":"0123456789abcdef0123456789abcdef","kind":"broker.hello","protocol":3}"#,
@@ -200,8 +201,8 @@ fn unknown_members_old_versions_and_second_spellings_are_refused() {
         r#"{"channel":"0123456789abcdef0123456789abcdef","kind":"broker.hello","protocol":8}"#,
         r#"{"channel":"0123456789abcdef0123456789abcdef","kind":"broker.hello","protocol":9}"#,
         r#"{"channel":"0123456789abcdef0123456789abcdef","kind":"broker.hello","protocol":10}"#,
-        r#"{"channel":"0123456789abcdef0123456789abcdef","kind":"broker.hello","protocol":12}"#,
-        r#"{"channel":"0123456789abcdef0123456789abcdef","kind":"broker.hello","kind":"broker.hello","protocol":11}"#,
+        r#"{"channel":"0123456789abcdef0123456789abcdef","kind":"broker.hello","protocol":13}"#,
+        r#"{"channel":"0123456789abcdef0123456789abcdef","kind":"broker.hello","kind":"broker.hello","protocol":12}"#,
     ] {
         assert!(
             BrokerHello::decode_frame_body(text.as_bytes()).is_err(),
@@ -210,10 +211,10 @@ fn unknown_members_old_versions_and_second_spellings_are_refused() {
     }
     // The current version is.
     let current =
-        r#"{"channel":"0123456789abcdef0123456789abcdef","kind":"broker.hello","protocol":11}"#;
+        r#"{"channel":"0123456789abcdef0123456789abcdef","kind":"broker.hello","protocol":12}"#;
     assert!(BrokerHello::decode_frame_body(current.as_bytes()).is_ok());
     // An unknown kind is not an authorisation.
-    let unknown = r#"{"kind":"broker.fs_chmod","protocol":11}"#;
+    let unknown = r#"{"kind":"broker.fs_chmod","protocol":12}"#;
     assert!(Authorisation::decode_frame_body(unknown.as_bytes()).is_err());
     for (text, ok) in [
         ("0", true),
@@ -682,7 +683,7 @@ fn a_secret_result_names_its_own_operation_and_says_nothing_of_the_value() {
         r#"{"secret_egress":{"length":8}}"#,
     ] {
         let text = format!(
-            r#"{{"channel":"0123456789abcdef0123456789abcdef","done":{done},"invocation_id":"inv_01M24BB8G3E0A851TRWE3M8FZF","kind":"broker.outcome","protocol":11}}"#
+            r#"{{"channel":"0123456789abcdef0123456789abcdef","done":{done},"invocation_id":"inv_01M24BB8G3E0A851TRWE3M8FZF","kind":"broker.outcome","protocol":12}}"#
         );
         assert!(
             BrokerOutcome::decode_frame_body(text.as_bytes()).is_err(),
@@ -1027,6 +1028,11 @@ fn workload_start(
     args: &[&str],
 ) -> super::workload::WorkloadStartAuthorisation {
     use super::sandbox::ContainerRef;
+    // A `PROXY_ONLY` start carries its egress authorisation (F-17).
+    let egress = (spec.network == super::sandbox::NetworkTopology::ProxyOnly).then(|| {
+        super::egress::WorkloadEgress::uniform(&[("api.example.com", 443)], true, false)
+            .unwrap_or_else(|| unreachable!())
+    });
     super::workload::WorkloadStartAuthorisation::new(
         common(),
         spec,
@@ -1034,6 +1040,7 @@ fn workload_start(
         runtime_spec(),
         workload(args),
     )
+    .with_egress(egress)
 }
 
 #[test]
@@ -1292,6 +1299,7 @@ fn a_workload_collection_carries_nothing_but_its_name_and_answers_consistently()
         progress: WorkloadProgress::Running,
         result: None,
         never_ran: None,
+        egress: None,
     };
     assert_eq!(check_collect(&running), Ok(()));
     assert!(
@@ -1299,6 +1307,7 @@ fn a_workload_collection_carries_nothing_but_its_name_and_answers_consistently()
             progress: WorkloadProgress::Ended,
             result: None,
             never_ran: None,
+            egress: None,
         })
         .is_err()
     );
@@ -1307,12 +1316,36 @@ fn a_workload_collection_carries_nothing_but_its_name_and_answers_consistently()
         progress: WorkloadProgress::Ended,
         result: None,
         never_ran: Some(super::BrokerRefusal::DigestMismatch),
+        egress: None,
     };
     assert_eq!(check_collect(&never), Ok(()));
     assert!(
         check_collect(&WorkloadCollectDone {
             progress: WorkloadProgress::Running,
-            ..never
+            ..never.clone()
+        })
+        .is_err()
+    );
+    // What a workload's tunnels did is said once it has ended, never while
+    // it runs (F-17).
+    let report = super::egress::WorkloadEgressReport {
+        exposed: false,
+        targets: super::egress::WorkloadEgressTargetReports::new(Vec::new())
+            .unwrap_or_else(|| unreachable!()),
+        unattributed: super::egress::EgressCountList::new(Vec::new())
+            .unwrap_or_else(|| unreachable!()),
+    };
+    assert_eq!(
+        check_collect(&WorkloadCollectDone {
+            egress: Some(report.clone()),
+            ..never.clone()
+        }),
+        Ok(())
+    );
+    assert!(
+        check_collect(&WorkloadCollectDone {
+            egress: Some(report),
+            ..running
         })
         .is_err()
     );
@@ -1350,6 +1383,60 @@ fn a_workload_names_its_relay_exactly_for_proxy_only_and_its_bounds_hold() {
             "{to}"
         );
     }
+}
+
+#[test]
+fn a_workload_carries_its_egress_authorisation_exactly_for_proxy_only() {
+    use super::egress::WorkloadEgress;
+    let open = || WorkloadEgress::uniform(&[("api.example.com", 443)], true, false);
+    // PROXY_ONLY with its authorisation round-trips, through the secret
+    // start too; the authorisation comes back whole.
+    let start = workload_start(proxy_spec(), &[]);
+    assert_eq!(start.egress, open());
+    let bytes = body(
+        &Authorisation::WorkloadStart(start.clone())
+            .encode_frame()
+            .unwrap_or_default(),
+    );
+    assert_eq!(
+        Authorisation::decode_frame_body(&bytes),
+        Ok(Authorisation::WorkloadStart(start.clone()))
+    );
+    // PROXY_ONLY without one, NO_NETWORK with one: inconsistent, whoever
+    // built it (F-17).
+    for bad in [
+        start.clone().with_egress(None),
+        workload_start(environment_spec(), &[]).with_egress(open()),
+    ] {
+        assert!(
+            Authorisation::WorkloadStart(bad).encode_frame().is_err(),
+            "an egress authorisation exactly for PROXY_ONLY"
+        );
+    }
+    // One that contradicts itself is refused on the wire too: an exposed
+    // cell wider than its pristine one.
+    let Some(mut wider) = open() else {
+        unreachable!()
+    };
+    let shut =
+        super::egress::EgressBits::from_pieces(&[false, false]).unwrap_or_else(|| unreachable!());
+    wider.targets = super::egress::WorkloadEgressTargets::new(
+        wider
+            .targets
+            .iter()
+            .map(|t| {
+                let mut t = t.clone();
+                t.novel_pristine.allowed = shut.clone();
+                t
+            })
+            .collect(),
+    )
+    .unwrap_or_else(|| unreachable!());
+    assert!(
+        Authorisation::WorkloadStart(start.with_egress(Some(wider)))
+            .encode_frame()
+            .is_err()
+    );
 }
 
 #[test]
@@ -1424,6 +1511,7 @@ fn a_workload_result_is_consistent_and_its_largest_fits_one_frame() {
         progress: WorkloadProgress::Ended,
         result: Some(done.clone()),
         never_ran: None,
+        egress: None,
     };
     assert_eq!(check_collect(&collected), Ok(()));
     // A RUNNING collection never carries a result; an ending is a result or
@@ -1437,6 +1525,7 @@ fn a_workload_result_is_consistent_and_its_largest_fits_one_frame() {
                 progress,
                 result: Some(done.clone()),
                 never_ran,
+                egress: None,
             })
             .is_err()
         );

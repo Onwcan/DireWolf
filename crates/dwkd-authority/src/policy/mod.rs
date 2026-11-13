@@ -65,6 +65,7 @@ pub mod eval;
 pub mod limits;
 pub mod load;
 pub mod obligation;
+pub mod partition;
 pub mod predicate;
 pub mod profiles;
 pub mod reason;

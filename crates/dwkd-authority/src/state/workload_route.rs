@@ -442,7 +442,7 @@ fn route(
                 secret.as_ref().map(|(asked, prepared)| (asked, prepared)),
             ),
             (budget, active, image),
-            (&binding, missing),
+            (&binding, missing, attached.config.egress().is_some()),
         )? {
             Begun::Refused(reason) => Route::Refused(refusal(reason)?),
             Begun::Denied(decided) => Route::Denied(decided, Box::new(checked)),
@@ -775,12 +775,14 @@ impl Authority {
                 "a parked launch's sandbox is no longer attached",
             ));
         };
-        let Some(ending) = workload_ops::collect(&attached, &parked.started)? else {
+        let run = parked.started.run.clone();
+        // F-17: the context its egress was decided in still holds.
+        self.egress_tripwire(&run, &parked.started.intent)?;
+        let Some((ending, egress)) = workload_ops::collect(&attached, &parked.started)? else {
             parked.next = Instant::now() + COLLECT_EVERY;
             return Ok(None);
         };
-        let run = parked.started.run.clone();
-        let reply = self.settle_workload(&run, &parked.started.intent, ending)?;
+        let reply = self.settle_workload(&run, &parked.started.intent, ending, &egress)?;
         answered(&parked.answer, &reply)
             .map(Some)
             .map_err(unrepresentable)
@@ -1093,8 +1095,8 @@ impl Authority {
                 answer,
                 next: Instant::now() + COLLECT_EVERY,
             }))),
-            Launched::Ended(intent, ending) => {
-                let reply = self.settle_workload(asked.run, &intent, ending)?;
+            Launched::Ended(intent, ending, egress) => {
+                let reply = self.settle_workload(asked.run, &intent, ending, &egress)?;
                 answered(&answer, &reply)
                     .map(Dispatched::Answer)
                     .map_err(unrepresentable)

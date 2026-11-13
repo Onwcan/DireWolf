@@ -86,6 +86,7 @@ mod tool;
 mod transport;
 pub mod wire;
 mod workload;
+mod workload_egress;
 mod workload_ops;
 mod workload_route;
 mod workspace;
@@ -670,12 +671,14 @@ impl Authority {
         // workspace is judged now; nothing is performed again.
         let staging = authority.reclaim_staging(None, MAX_RECLAIMS_PER_SWEEP)?;
         let revision = prepared.revision;
+        let partition = crate::policy::partition::NetworkPartition::of(&prepared.compiled);
         let _ = authority.shared.active.set(ActiveAuthority {
             activation_id,
             revision,
             mode: config.mode,
             flags: config.flags,
             ceiling: ceiling_set,
+            partition,
             compiled: prepared.compiled,
         });
 

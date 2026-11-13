@@ -59,6 +59,7 @@ fn running() -> OutcomeResult {
         progress: WorkloadProgress::Running,
         result: None,
         never_ran: None,
+        egress: None,
     }))
 }
 
