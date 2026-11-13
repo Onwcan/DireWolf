@@ -68,7 +68,7 @@ use crate::policy::{
     TaintLevel,
 };
 
-use super::admission::{self, Admission, taint_from_rank, taint_rank};
+use super::admission::{self, Admission, taint_from_rank};
 use super::audit::{AuditEvent, Fields};
 use super::error::AuthorityError;
 use super::identity::CallerContext;
@@ -216,8 +216,8 @@ impl AuthorityAnswer {
     }
 }
 
-/// What caused taint to rise. Closed; each variant names the future producer
-/// that will call [`raise_taint`], none of which exists in M3d.
+/// What caused taint to rise. Closed: the producers M4 and M5 built, F-01's
+/// (ADR-0062, Proposed), and the future ones of M12 and M13.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TaintCause {
     /// A tool result the kernel delivered (M4 onward).
@@ -226,6 +226,16 @@ pub enum TaintCause {
     ArtifactRead,
     /// A memory item retrieved into the run (M13).
     MemoryRetrieval,
+    /// A workload whose broker report says an origin byte reached it (F-01).
+    WorkloadReached,
+    /// A workload whose settlement cannot say what its tunnels did, and whose
+    /// authorisation allowed something (F-01).
+    WorkloadUncertain,
+    /// Something delivered from a workspace root that may hold external
+    /// content (F-01).
+    RootExposed,
+    /// A workload a restart found interrupted (F-01).
+    WorkloadInterrupted,
 }
 
 impl TaintCause {
@@ -236,6 +246,10 @@ impl TaintCause {
             Self::ToolResult => "tool_result",
             Self::ArtifactRead => "artifact_read",
             Self::MemoryRetrieval => "memory_retrieval",
+            Self::WorkloadReached => "workload_reached",
+            Self::WorkloadUncertain => "workload_uncertain",
+            Self::RootExposed => "root_exposed",
+            Self::WorkloadInterrupted => "workload_interrupted",
         }
     }
 }
@@ -391,7 +405,12 @@ pub(super) fn query(
 
     let context = policy_context(work, run.as_str(), active)?;
     let record = decide(action, &admission, &context, active);
-    audit_decision(work, caller, session, run, epoch, active, &record)?;
+    audit_decision(
+        work,
+        (caller, session, run, epoch),
+        (active, context.taint()),
+        &record,
+    )?;
     Ok(Reply::Done(AuthorityAnswer {
         admission,
         decision: Some(record),
@@ -421,11 +440,8 @@ pub(super) fn decide(
 
 fn audit_decision(
     work: &mut Work<'_>,
-    caller: &CallerContext,
-    session: &SessionId,
-    run: &RunId,
-    epoch: Epoch,
-    active: &ActiveAuthority,
+    (caller, session, run, epoch): (&CallerContext, &SessionId, &RunId, Epoch),
+    (active, taint): (&ActiveAuthority, TaintLevel),
     record: &DecisionRecord,
 ) -> Result<(), AuthorityError> {
     let fields = Fields::new()
@@ -435,6 +451,7 @@ fn audit_decision(
         .text("run_id", run.as_str())
         .int("epoch", epoch.get())
         .text("policy_revision", active.revision.to_hex())
+        .text("taint_at_decision", taint.as_str())
         .text("required_capability", record.required.to_canonical_string())
         .flag("capability_satisfied", record.capability_satisfied())
         .maybe_text(
@@ -456,46 +473,4 @@ fn audit_decision(
         )
         .text("effect", if record.permits() { "ALLOW" } else { "DENY" });
     work.audit(AuditEvent::AuthorityDecision, fields)
-}
-
-/// Raise a run's taint to at least `observed`. Never lowers it: the result is
-/// the more restrictive of the two, and a trigger refuses any write that
-/// would decrease it. There is no clear, reset or set operation.
-pub(super) fn raise_taint(
-    work: &mut Work<'_>,
-    run: &RunId,
-    observed: TaintLevel,
-    cause: TaintCause,
-) -> Result<TaintLevel, AuthorityError> {
-    let current: i64 = work
-        .db(work
-            .tx
-            .query_row(
-                "SELECT taint FROM run_policy_input WHERE run_id = ?1",
-                [run.as_str()],
-                |row| row.get(0),
-            )
-            .optional())?
-        .ok_or(AuthorityError::Rejected(format!(
-            "no run {} has policy inputs",
-            run.as_str()
-        )))?;
-    let current =
-        taint_from_rank(current).ok_or(AuthorityError::Invariant("a stored taint is malformed"))?;
-    let raised = core::cmp::max(current, observed);
-    if raised != current {
-        work.db(work.tx.execute(
-            "UPDATE run_policy_input SET taint = ?2 WHERE run_id = ?1",
-            rusqlite::params![run.as_str(), taint_rank(raised)],
-        ))?;
-        work.audit(
-            AuditEvent::TaintRaised,
-            Fields::new()
-                .text("run_id", run.as_str())
-                .text("from", current.as_str())
-                .text("to", raised.as_str())
-                .text("cause", cause.as_str()),
-        )?;
-    }
-    Ok(raised)
 }

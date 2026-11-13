@@ -210,6 +210,9 @@ struct Asked {
     /// Workload rows `LAUNCHING` when the order arrived: a start's intent
     /// is durable before it is sent.
     launching: i64,
+    /// Workspace taint marks when the order arrived (F-01): a tainted run's
+    /// mark is durable before its effect is sent.
+    marks: i64,
 }
 
 #[derive(Debug, Default)]
@@ -297,6 +300,16 @@ impl Fake {
         })
     }
 
+    /// Workspace taint marks the store holds now (F-01).
+    fn marks(&self) -> i64 {
+        self.store.lock().unwrap().as_ref().map_or(0, |db| {
+            rusqlite::Connection::open(db)
+                .unwrap()
+                .query_row("SELECT count(*) FROM workspace_taint", [], |row| row.get(0))
+                .unwrap()
+        })
+    }
+
     fn intents(&self) -> i64 {
         self.store.lock().unwrap().as_ref().map_or(0, |db| {
             rusqlite::Connection::open(db)
@@ -326,12 +339,14 @@ impl Fake {
         (workload, generation): (Option<WorkloadSpec>, Option<BrokerGeneration>),
     ) {
         let launching = self.launching();
+        let marks = self.marks();
         self.asked.lock().unwrap().push(Asked {
             operation,
             invocation,
             workload,
             generation,
             launching,
+            marks,
         });
     }
 
@@ -1907,6 +1922,10 @@ mod workspace;
 /// M5d.6: a run's release ends its environment.
 #[path = "release_route_tests.rs"]
 mod release;
+
+/// F-01: taint that follows the content a run receives.
+#[path = "taint_route_tests.rs"]
+mod taint;
 
 // ===========================================================================
 // F-17 (ADR-0061, Proposed): a workload's egress, decided by both gates at

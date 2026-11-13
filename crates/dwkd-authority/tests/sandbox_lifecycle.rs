@@ -70,25 +70,28 @@ mod linux {
     use std::os::unix::fs::PermissionsExt as _;
     use std::path::PathBuf;
     use std::process::{Command, Output};
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
     use dwk_proto::brokerp::egress::EgressDisposition;
     use dwk_proto::brokerp::sandbox::{AssuranceLevel, NetworkTopology};
+    use dwk_proto::dwkp::DwkpBody;
     use dwk_proto::json::{Object, Value, to_canonical_string};
-    use dwk_proto::wire::id::{EnvironmentId, RunId};
+    use dwk_proto::wire::id::{EnvironmentId, RunId, SessionId};
+    use dwk_proto::wire::scalar::{Epoch, IdempotencyKey};
     use dwkd_authority::broker::{EffectBroker, UnixBroker};
     use dwkd_authority::capability::PrivacyClass;
     use dwkd_authority::sandbox::{EgressConfig, SandboxConfig, WorkloadBudget, WorkspaceSetting};
     use dwkd_authority::state::{
-        Authority, AuthorityError, CrashHook, CrashPoint, EnvironmentReply, EnvironmentState,
-        HookAction, ManualClock, Mode, ReconcileReport, Reply, StartOptions, StartupConfig,
-        WorkloadReply, WorkloadRequest, WorkspaceId, WorkspaceSensitivity,
+        Authority, AuthorityError, CallerContext, CrashHook, CrashPoint, EnvironmentReply,
+        EnvironmentState, HookAction, ManualClock, Mode, ReconcileReport, Reply, StartOptions,
+        StartupConfig, ToolReply, ToolRequest, WorkloadReply, WorkloadRequest, WorkspaceId,
+        WorkspaceSensitivity,
     };
 
     use super::broker_support::Broker;
     use super::state_support::{
-        START_MS, TempDir, admit_msg, audit_events, audit_records, balanced, ceiling,
+        START_MS, TempDir, admit_msg, audit_events, audit_records, balanced, ceiling, decode, id,
         install_fixtures, int, policy, profile, raw, session, spawn_guard, subject, text,
     };
     use super::transport_support::own_uid;
@@ -353,6 +356,9 @@ mod linux {
             .unwrap();
             let mut ceiling = ceiling();
             ceiling.push("process.exec:*".to_owned());
+            // F-01: a run holding external content writes the workspace.
+            ceiling.push("fs.write:*".to_owned());
+            ceiling.push("fs.create:*".to_owned());
             let config =
                 StartupConfig::new(policy("m5b-egress", policy_text), Mode::Balanced, ceiling);
             let mut lab = Self::with(
@@ -1458,6 +1464,18 @@ reason = "NO_MATCHING_RULE"
             count_rows(&lab, "SELECT count(*) FROM tunnel_reach WHERE certain = 1"),
             1
         );
+        // F-01 (ADR-0062, Proposed): the run received what the origin sent;
+        // its taint follows, from the broker's report of its workload.
+        assert_eq!(
+            taint_of(&lab, &run),
+            (
+                2,
+                vec![
+                    "tool_result:LOCAL_CONTENT:0>1".to_owned(),
+                    "workload_reached:ORIGIN_BYTES:1>2".to_owned()
+                ]
+            )
+        );
         // The next workload starts exposed: what it has reached it reaches
         // again; a novel destination is a tainted run's, for approval, and
         // refused.
@@ -1474,8 +1492,13 @@ reason = "NO_MATCHING_RULE"
             novel.contains("ne=0/2[deny-approval-needed-when-unattended]"),
             "{novel}"
         );
+        // F-01: the run itself now holds what an origin sent, so its own
+        // cells are its exposed ones -- the novel destination is refused by
+        // both (stricter than F-17 alone). That the exposed cell, not the
+        // run's taint, decides on an exposed root is shown below, at a
+        // fresh run's first launch (`taint-fresh-run-decided-by-the-exposed-cell`).
         assert!(
-            novel.contains("np=2/2[https-to-the-evidence-origins]"),
+            novel.contains("np=0/2[deny-approval-needed-when-unattended]"),
             "{novel}"
         );
         egress_evidence(
@@ -1514,6 +1537,36 @@ reason = "NO_MATCHING_RULE"
         egress_evidence(
             "exposure-from-a-sibling-run-on-the-shared-root",
             &line,
+            "authority-egress-decision",
+        );
+        // F-01: F-17's guarantee the same-run case no longer shows, shown
+        // where it still holds -- a fresh run on the exposed root, its own
+        // taint NONE when it launched: its pristine cell for a novel
+        // destination allows, its exposed cell refuses, and the broker held
+        // it to the exposed one. Its outcome, from the exposed root, is then
+        // external.
+        let intent = last_intent(&lab);
+        assert_eq!(
+            text(&intent, "taint_at_decision"),
+            Some("NONE"),
+            "{intent:?}"
+        );
+        let fresh = decision(&lab, &format!("second.example.com:{port}"));
+        assert!(
+            fresh.contains("np=2/2[https-to-the-evidence-origins]"),
+            "{fresh}"
+        );
+        assert!(
+            fresh.contains("ne=0/2[deny-approval-needed-when-unattended]"),
+            "{fresh}"
+        );
+        assert_eq!(
+            taint_of(&lab, &sibling),
+            (2, vec!["root_exposed:ORIGIN_BYTES:0>2".to_owned()])
+        );
+        egress_evidence(
+            "taint-fresh-run-decided-by-the-exposed-cell",
+            &fresh,
             "authority-egress-decision",
         );
         lab.authority()
@@ -1586,6 +1639,12 @@ reason = "NO_MATCHING_RULE"
             1
         );
         assert!(count_rows(&lab, "SELECT count(*) FROM tunnel_reach WHERE certain = 0") >= 1);
+        // F-01: the run the restart reaped holds, in its history, what its
+        // workload may have brought -- uncertainly, never as received.
+        assert_eq!(
+            taint_of(&lab, &interrupted),
+            (2, vec!["workload_interrupted:UNCERTAIN:0>2".to_owned()])
+        );
         egress_evidence(
             "restart-settles-an-interrupted-workload-uncertain",
             "UNCERTAIN+exposed+uncertain-reach",
@@ -1601,6 +1660,351 @@ reason = "NO_MATCHING_RULE"
             "restart-never-restores-a-pristine-root",
             "exposed-at-start-after-restart",
             "authority-reconciliation",
+        );
+        // F-01: what the next run receives from that root is external, on
+        // an uncertain basis -- said as such.
+        assert_eq!(
+            taint_of(&lab, &next),
+            (2, vec!["root_exposed:UNCERTAIN:0>2".to_owned()])
+        );
+        egress_evidence(
+            "taint-interrupted-workload-on-restart",
+            "reaped-run-uncertain+next-run-uncertain",
+            "authority-taint",
+        );
+    }
+
+    // ---- F-01: taint that follows what each run receives ------------------
+
+    /// `run`'s stored taint, and its evidence rows, `cause:basis:from>to`.
+    fn taint_of(lab: &Lab, run: &RunId) -> (i64, Vec<String>) {
+        let conn = raw(&lab.dir.state());
+        let taint: i64 = conn
+            .query_row(
+                "SELECT taint FROM run_policy_input WHERE run_id = ?1",
+                [run.as_str()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let mut statement = conn
+            .prepare(
+                "SELECT cause || ':' || basis || ':' || from_taint || '>' || to_taint \
+                 FROM run_taint_evidence WHERE run_id = ?1 ORDER BY seq",
+            )
+            .unwrap();
+        let rows = statement
+            .query_map([run.as_str()], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<Vec<String>, _>>()
+            .unwrap();
+        (taint, rows)
+    }
+
+    /// The F-01 evidence policy: F-17's, with one destination whose
+    /// per-tunnel bound is three bytes, and the workspace's files readable and
+    /// writable.
+    fn taint_policy() -> String {
+        let marker = "[[rule]]\nid = \"default\"";
+        let base = egress_policy();
+        assert!(base.contains(marker));
+        base.replace(
+            marker,
+            &format!(
+                r#"[[rule]]
+id = "capped-origin"
+effect = "ALLOW"
+when.verb = "network.https"
+when.environment = "sandbox"
+when.host_matches = "capped.example.com"
+obligations = ["max_output_bytes=3"]
+
+[[rule]]
+id = "workspace-files"
+effect = "ALLOW"
+when.verb = ["fs.read", "fs.write", "fs.create"]
+
+{marker}"#
+            ),
+        )
+    }
+
+    /// A run that calls tools in process, and what a call needs.
+    struct Held {
+        caller: CallerContext,
+        session: SessionId,
+        epoch: Epoch,
+        run: RunId,
+    }
+
+    static NEXT_TOOL_MESSAGE: AtomicU64 = AtomicU64::new(0);
+
+    impl Lab {
+        /// A new active run that requested `capabilities`, and its caller.
+        fn admit_holding(&mut self, capabilities: &[&str]) -> Held {
+            let n = self.next_session;
+            self.next_session += 1;
+            let workspace = self.workspace.clone();
+            let profile = self.profile;
+            let authority = self.authority();
+            authority
+                .operator()
+                .bind_session_workspace(&session(n), &workspace)
+                .unwrap();
+            let caller = authority.connect(subject(1000));
+            let Reply::Done(epoch) = authority.acquire_lease(&caller, &session(n)).unwrap() else {
+                panic!("a lease")
+            };
+            let admitted = authority
+                .admit_run(
+                    &caller,
+                    &admit_msg(
+                        &session(n),
+                        epoch,
+                        &format!("k{n}"),
+                        profile,
+                        &[],
+                        capabilities,
+                        n,
+                    ),
+                )
+                .unwrap();
+            let Reply::Done(admission) = admitted else {
+                panic!("admitted: {admitted:?}")
+            };
+            Held {
+                caller,
+                session: session(n),
+                epoch,
+                run: admission.run_id().clone(),
+            }
+        }
+
+        /// A version-2 tool call in `held`'s run, in process.
+        fn tool(&mut self, held: &Held, payload: &str, key: &str) -> ToolReply {
+            let text = format!(
+                r#"{{"v":1,"id":"{id}","type":"request","schema":"direwolf.tool.invoke","schema_version":2,"ts":"2026-10-20T10:00:00.000Z","session_id":"{session}","run_id":"{run}","epoch":{epoch},"idempotency_key":"{key}","payload":{payload}}}"#,
+                id = id(
+                    "msg",
+                    90_000 + NEXT_TOOL_MESSAGE.fetch_add(1, Ordering::SeqCst)
+                ),
+                session = held.session.as_str(),
+                run = held.run.as_str(),
+                epoch = held.epoch.get(),
+            );
+            let DwkpBody::ToolInvokeV2(call) = decode(&text).body else {
+                panic!("not a tool call: {text}")
+            };
+            let request = ToolRequest::v2(call, Some(IdempotencyKey::new(key).unwrap()));
+            self.authority()
+                .tool_invoke(&held.caller, &held.session, &held.run, held.epoch, &request)
+                .expect("the authority answers")
+        }
+    }
+
+    fn read_file(path: &str) -> String {
+        format!(r#"{{"fs_read":{{"path":"{path}","max_bytes":65536}}}}"#)
+    }
+
+    fn write_file(path: &str, content: &[u8]) -> String {
+        let hex: String = content.iter().map(|b| format!("{b:02x}")).collect();
+        format!(r#"{{"fs_write":{{"path":"{path}","content":"{hex}"}}}}"#)
+    }
+
+    fn read_back(reply: &ToolReply) -> Vec<u8> {
+        match reply {
+            ToolReply::Done { output, .. } => output.fs_read.as_ref().unwrap().content.to_bytes(),
+            other => panic!("not read: {other:?}"),
+        }
+    }
+
+    fn written(reply: &ToolReply) {
+        assert!(
+            matches!(reply, ToolReply::Done { output, .. } if output.fs_write.is_some()),
+            "not written: {reply:?}"
+        );
+    }
+
+    /// F-01 through the real authority, the released broker and a real
+    /// runtime: a run's taint follows what it receives. Permission, a refused
+    /// CONNECT and a failed dial bring no external content; an output-less,
+    /// incomplete download does, and so does the file it left -- to the run
+    /// that fetched it and to another run on the same root, read through the
+    /// brokered `fs.read`; and a run holding external content marks the root
+    /// it writes, so that even a run that received nothing else reads what
+    /// it wrote as external.
+    #[test]
+    #[ignore = "needs a real OCI runtime: make sandbox-egress-evidence"]
+    fn the_taint_follows_what_each_run_receives() {
+        let (port, accepted) = origin();
+        // A port nothing listens on: the dial fails after the proxy's 200.
+        let closed = {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.local_addr().unwrap().port()
+        };
+        let (mut lab, _fixture) = egress_lab(
+            "f01-taint",
+            &["origin.example.com", "capped.example.com"],
+            &taint_policy(),
+        );
+        lab.authority()
+            .operator()
+            .install_agent_profile(&profile(
+                "taint-agent",
+                &[
+                    "process.exec:*",
+                    "network.https:*.example.com",
+                    "fs.read:*",
+                    "fs.write:*",
+                    "fs.create:*",
+                ],
+                &[],
+                PrivacyClass::Any,
+            ))
+            .unwrap();
+        lab.profile = "taint-agent";
+        let grants = [
+            format!("network.https:origin.example.com:{port}"),
+            format!("network.https:origin.example.com:{closed}"),
+            format!("network.https:capped.example.com:{port}"),
+            format!("network.https:refused.example.com:{port}"),
+        ];
+        let mut asked: Vec<&str> = grants.iter().map(String::as_str).collect();
+        asked.extend(["process.exec:*", "fs.read:*", "fs.write:*", "fs.create:*"]);
+
+        // Permission, a refusal and a failed dial, on a pristine root: no
+        // origin byte reached anything -- never external.
+        let permitted = lab.admit_holding(&asked);
+        lab.ready(&permitted.run);
+        let line = lab.fixture(&permitted.run, &["workload-exit", "0"]);
+        assert_eq!(line, "");
+        assert_eq!(
+            taint_of(&lab, &permitted.run),
+            (0, Vec::new()),
+            "network permission is not content"
+        );
+        let line = tunnel(&mut lab, &permitted.run, "refused.example.com", port);
+        assert_eq!(field(&line, "decision"), "POLICY_DENIED", "{line}");
+        let line = tunnel(&mut lab, &permitted.run, "origin.example.com", closed);
+        assert!(line.contains("200"), "{line}");
+        assert_eq!(field(&line, "received"), "0", "{line}");
+        assert_eq!(accepted.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            taint_of(&lab, &permitted.run),
+            (1, vec!["tool_result:LOCAL_CONTENT:0>1".to_owned()])
+        );
+        assert_eq!(
+            count_rows(&lab, "SELECT count(*) FROM workspace_exposure"),
+            0
+        );
+        egress_evidence(
+            "taint-permission-refusal-failed-dial-not-external",
+            "none+POLICY_DENIED+dial-failed:local-only",
+            "authority-taint",
+        );
+
+        // An output-less, incomplete download: the origin sends five bytes,
+        // the tunnel carries three and is cut at its bound, and the workload
+        // keeps them in a file and prints nothing.
+        let fetcher = lab.admit_holding(&asked);
+        lab.ready(&fetcher.run);
+        let p = port.to_string();
+        let line = lab.fixture(
+            &fetcher.run,
+            &[
+                "egress-quiet",
+                "capped.example.com",
+                &p,
+                "capped.example.com",
+                "/workspace/downloaded.bin",
+            ],
+        );
+        assert_eq!(line, "", "nothing printed");
+        assert_eq!(accepted.load(Ordering::SeqCst), 1);
+        let kept = std::fs::read(lab.dir.path().join("workspace").join("downloaded.bin")).unwrap();
+        assert_eq!(
+            kept, b"rrr",
+            "three of five bytes: cut at the tunnel's bound"
+        );
+        assert_eq!(
+            taint_of(&lab, &fetcher.run),
+            (2, vec!["workload_reached:ORIGIN_BYTES:0>2".to_owned()])
+        );
+        let outcome = audit_records(&lab.dir.state(), "workload.outcome")
+            .pop()
+            .unwrap();
+        assert_eq!(text(&outcome, "taint_basis"), Some("ORIGIN_BYTES"));
+        assert_eq!(int(&outcome, "stdout_bytes"), Some(0));
+        egress_evidence(
+            "taint-download-no-output-external",
+            "stdout-0+external:workload_reached:ORIGIN_BYTES",
+            "authority-taint",
+        );
+        egress_evidence(
+            "taint-partial-transfer-external",
+            "3-of-5-bytes+external",
+            "authority-taint",
+        );
+
+        // The run reads what it kept: external already, and said so.
+        let reply = lab.tool(&fetcher, &read_file("/workspace/downloaded.bin"), "f01-r1");
+        assert_eq!(read_back(&reply), b"rrr");
+        assert_eq!(taint_of(&lab, &fetcher.run).0, 2);
+
+        // Another run on the same root, which received nothing yet: its
+        // first read of the downloaded file is external.
+        let reader = lab.admit_holding(&asked);
+        assert_eq!(taint_of(&lab, &reader.run), (0, Vec::new()));
+        let reply = lab.tool(&reader, &read_file("/workspace/downloaded.bin"), "f01-r2");
+        assert_eq!(read_back(&reply), b"rrr");
+        assert_eq!(
+            taint_of(&lab, &reader.run),
+            (2, vec!["root_exposed:ORIGIN_BYTES:0>2".to_owned()])
+        );
+        let completed = audit_records(&lab.dir.state(), "tool.completed")
+            .pop()
+            .unwrap();
+        assert_eq!(text(&completed, "taint_basis"), Some("ORIGIN_BYTES"));
+        egress_evidence(
+            "taint-downloaded-file-read-by-another-run",
+            "external:root_exposed:ORIGIN_BYTES",
+            "authority-taint",
+        );
+
+        // That run, holding external content, writes the workspace: the root
+        // is marked, before the broker writes; and the earlier run, which
+        // received nothing external, reads what it wrote as external. (The
+        // broker changes no name in a directory others can write -- the
+        // evidence's root is open to the workload's uid -- so the write goes
+        // to a directory of the root that only the broker's uid writes.)
+        std::fs::create_dir(lab.dir.path().join("workspace").join("notes")).unwrap();
+        let reply = lab.tool(
+            &reader,
+            &write_file("/workspace/notes/notes.txt", b"n"),
+            "f01-w1",
+        );
+        written(&reply);
+        assert_eq!(
+            count_rows(
+                &lab,
+                "SELECT count(*) FROM workspace_taint WHERE tool = 'fs.write'"
+            ),
+            1
+        );
+        assert_eq!(
+            audit_records(&lab.dir.state(), "workspace.tainted").len(),
+            1
+        );
+        let reply = lab.tool(
+            &permitted,
+            &read_file("/workspace/notes/notes.txt"),
+            "f01-r3",
+        );
+        assert_eq!(read_back(&reply), b"n");
+        assert_eq!(taint_of(&lab, &permitted.run).0, 2);
+        egress_evidence(
+            "taint-tainted-writer-marks-root",
+            "workspace_taint+external-read",
+            "authority-taint",
         );
     }
 }

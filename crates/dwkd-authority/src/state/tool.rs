@@ -83,7 +83,6 @@ use crate::broker::{
     RawListEntry, SearchDelivery, StatDelivery,
 };
 use crate::capability::DeclaredPath;
-use crate::policy::TaintLevel;
 use crate::resource::fs::{
     Access, Expect, PathError, PinnedRoot, ResolveError, ResolvedResource, RootError, Target,
     VacantResource,
@@ -99,9 +98,10 @@ use super::identity::CallerContext;
 use super::lease::{self, to_sql};
 use super::plan::{self, Call, PlannedAction, ToolPlan, ToolVersion};
 use super::policy_state::ActiveAuthority;
-use super::query::{self, TaintCause};
+use super::query;
 use super::resolution::{self, ResolutionRefused};
 use super::staging;
+use super::taint::{self, Delivery, OwnReach};
 
 /// A tool request, as the state layer takes it: the call, the version it
 /// arrived in, and — for a version-2 invocation — its idempotency key.
@@ -865,6 +865,7 @@ pub(super) fn decide(
     let plan = plan::decide(call, &targets.resolved(), &admission, &context, active)?;
     let mut fields = base_fields(asked, plan.tool());
     fields.extend(plan_fields(active, &plan));
+    fields.extend(Fields::new().text("taint_at_decision", context.taint().as_str()));
     if asked.operation == ToolOperation::CanonicalPreview {
         work.audit(AuditEvent::ToolPreviewed, fields)?;
         return Ok(Decided::Previewed(plan));
@@ -1666,15 +1667,21 @@ pub(super) fn record_outcome(
             if plan::taints(tool) {
                 // Workspace content — bytes, names, offsets, metadata — is
                 // content the operator pointed the run at: LOCAL_UNVERIFIED,
-                // never lower (CONTEXT.md). Raised before it can reach
+                // never lower (CONTEXT.md); and EXTERNAL_UNTRUSTED when the
+                // root may hold what an origin sent or a run holding external
+                // content wrote (F-01, ADR-0062). Raised before it can reach
                 // cognition; a crash after this is over-taint, the safe way.
-                let taint = query::raise_taint(
+                fields.extend(taint::deliver(
                     work,
                     run,
-                    TaintLevel::LocalUnverified,
-                    TaintCause::ToolResult,
-                )?;
-                fields.extend(Fields::new().text("taint", taint.as_str()));
+                    &Delivery {
+                        invocation,
+                        local: true,
+                        from_root: true,
+                        own: OwnReach::Nothing,
+                        interrupted: false,
+                    },
+                )?);
             }
             work.audit(AuditEvent::ToolCompleted, fields)
         }

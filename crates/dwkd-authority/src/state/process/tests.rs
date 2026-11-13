@@ -1342,3 +1342,50 @@ fn every_crash_point_of_a_launch_a_kill_and_a_status_is_recorded_and_nothing_is_
         );
     }
 }
+
+/// F-01 (ADR-0062, Proposed), on the host floor (unreachable in production
+/// before M6): a launch by a run holding external content marks the root it
+/// runs in, in the launch's intent; and what another run's process returns
+/// from that root -- its output, its ending -- is external.
+#[test]
+fn f01_a_host_launch_by_an_external_run_marks_its_root_and_what_returns_from_it_is_external() {
+    let mut f = fixture(true);
+    let tainted = f.run("k1", &universal());
+    let other = f.run("k2", &universal());
+    f.authority()
+        .raise_taint(
+            &tainted,
+            crate::policy::TaintLevel::ExternalUntrusted,
+            crate::state::TaintCause::ToolResult,
+        )
+        .unwrap();
+    let tool = f.tool("tool");
+    let reply = with_test_approval(|| f.invoke(&tainted, exec(&tool, &["status"]), "x1"));
+    launched(&reply);
+    assert_eq!(f.rows("SELECT tool FROM workspace_taint"), ["process.exec"]);
+    // Another run's process on the same root.
+    let reply = with_test_approval(|| f.invoke(&other, exec(&tool, &["status"]), "x2"));
+    let process = launched(&reply);
+    assert!(matches!(
+        f.invoke(&other, status(&process), "x3"),
+        ProcessReply::Done { .. }
+    ));
+    assert_eq!(
+        f.rows(&format!(
+            "SELECT CAST(taint AS TEXT) FROM run_policy_input WHERE run_id = '{}'",
+            other.as_str()
+        )),
+        ["2"]
+    );
+    assert_eq!(
+        f.rows(&format!(
+            "SELECT cause || ':' || basis FROM run_taint_evidence WHERE run_id = '{}'",
+            other.as_str()
+        )),
+        ["root_exposed:EXTERNAL_RUN_EFFECT"]
+    );
+    evidence(
+        "f01-host-launch-marks-and-reads-external",
+        "EXTERNAL_RUN_EFFECT",
+    );
+}

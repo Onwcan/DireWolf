@@ -371,7 +371,8 @@ def test_every_required_case_is_attributed_and_every_rule_is_used() -> None:
     # from a PROXY_ONLY environment's destinations, and its name refused by
     # the proxy; and F-17's 21 (ADR-0061, Proposed): 11 at the broker and 9
     # through the authority on a real runtime, and the registry's standing
-    # control, hosted only. A smaller one is a lost case.
+    # control, hosted only; and F-01's 7 (ADR-0062, Proposed), through the
+    # authority on a real runtime. A smaller one is a lost case.
     assert len(dw.BROKER_ASSURANCE_CASES) == 20
     assert len(dw.CAPTURED_ASSURANCE_CASES) == 19
     closure = [c for s, c in dw.WORKLOAD_CASES if s == "sandbox-closure"]
@@ -391,10 +392,11 @@ def test_every_required_case_is_attributed_and_every_rule_is_used() -> None:
     assert len(dw.HYGIENE_PIP_CASES) == 21
     assert len(dw.HYGIENE_CASES) == 44
     assert len(dw.E6_CASES) == 18
-    assert len(inventory) == 668
+    assert len(inventory) == 675
 
 
 BEFORE_F17 = Path(__file__).with_name("m5e_cases_before_f17.txt")
+BEFORE_F01 = Path(__file__).with_name("m5e_cases_before_f01.txt")
 
 
 def test_no_case_before_f17_is_lost_renamed_or_reattributed() -> None:
@@ -415,6 +417,30 @@ def test_no_case_before_f17_is_lost_renamed_or_reattributed() -> None:
         assert attributed == (level, frozenset(mechanisms.split(","))), (
             f"{suite}/{case} was re-attributed: {attributed}"
         )
+
+
+def test_no_case_before_f01_is_lost_renamed_or_reattributed() -> None:
+    """F-01 (ADR-0062, Proposed) adds cases too: every case attributed before
+    it -- F-17's included -- is still required, at the level and with the
+    mechanisms it had. One F-17 case's assertion is made stricter by F-01 and
+    keeps its identity, level and mechanism; the guarantee it no longer shows
+    is a case of its own."""
+    pinned = [
+        line.split(" ")
+        for line in BEFORE_F01.read_text(encoding="utf-8").splitlines()
+        if line and not line.startswith("#")
+    ]
+    assert len(pinned) == 668
+    for suite, case, level, mechanisms in pinned:
+        assert (suite, case) in dw.ATTRIBUTED_CASES, f"{suite}/{case} is no longer required"
+        attributed = dw.attribution(suite, case)
+        assert attributed is not None, f"{suite}/{case}"
+        assert attributed == (level, frozenset(mechanisms.split(","))), (
+            f"{suite}/{case} was re-attributed: {attributed}"
+        )
+    added = sorted(set(dw.ATTRIBUTED_CASES) - {(s, c) for s, c, _, _ in pinned})
+    assert all(suite == "sandbox-authority-egress" for suite, _ in added), added
+    assert len(added) == 7, added
 
 
 def test_the_vocabulary_is_closed_used_and_documented() -> None:

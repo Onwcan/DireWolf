@@ -21,9 +21,12 @@
 //!   could then have, from its own up to `EXTERNAL_UNTRUSTED`. The broker
 //!   switches every workload on the workspace's root to them before the first
 //!   byte from any origin reaches any of them. A workload starts exposed when
-//!   the root was exposed before (`workspace_exposure`), or another workload
-//!   on the same root that may reach an origin has not settled. This decides
-//!   no taint (F-01): the run's own taint is not changed.
+//!   the root was exposed before (`workspace_exposure`), a run holding
+//!   external content changed it (`workspace_taint`, F-01), another workload
+//!   on the same root that may reach an origin has not settled, or its own
+//!   run holds external content. What a run receives from an exposed root
+//!   raises its taint where it is delivered (F-01, ADR-0062,
+//!   `state::taint`); nothing here changes it.
 //! * **The address.** Exactly, over the active policy's own ranges
 //!   (`crate::policy::partition`): one evaluation per piece, by the
 //!   production evaluator.
@@ -123,32 +126,14 @@ pub(super) struct Decided {
     partition: String,
 }
 
-/// The root of the run's workspace, as the store records it.
-fn root_of(work: &Work<'_>, run: &str) -> Result<Option<(String, String)>, AuthorityError> {
-    work.db(work
-        .tx
-        .query_row(
-            "SELECT r.root_device, r.root_inode FROM run_policy_input p \
-             JOIN workspace_root r ON r.workspace_id = p.workspace_id WHERE p.run_id = ?1",
-            [run],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .optional())
-}
-
-/// Whether a workload on `root` starts exposed: the root was exposed, or a
-/// workload on it that may reach an origin has not settled.
-fn exposed(work: &Work<'_>, root: &(String, String)) -> Result<bool, AuthorityError> {
-    work.db(work.tx.query_row(
-        "SELECT EXISTS (SELECT 1 FROM workspace_exposure \
-                        WHERE root_device = ?1 AND root_inode = ?2) \
-             OR EXISTS (SELECT 1 FROM workload_egress e \
-                        JOIN workload w ON w.invocation_id = e.invocation_id \
-                        WHERE e.root_device = ?1 AND e.root_inode = ?2 \
-                        AND e.allows_anything = 1 AND w.state = 'LAUNCHING')",
-        rusqlite::params![root.0, root.1],
-        |row| row.get(0),
-    ))
+/// Whether a workload of `run` on `root` starts exposed: the root is exposed
+/// -- an ADR-0061 exposure, a run holding external content changed it
+/// (F-01), or a workload on it that may reach an origin has not settled --
+/// or `run` itself holds external content, which its workload can write
+/// there. For such a run its own cells are already its exposed ones.
+fn exposed(work: &Work<'_>, run: &RunId, root: &(String, String)) -> Result<bool, AuthorityError> {
+    Ok(super::taint::exposed(work, root)?
+        || super::taint::holds_external_content(work, run.as_str())?)
 }
 
 /// Whether the run has reached `host:port`.
@@ -489,7 +474,7 @@ pub(super) fn decide(
     run: &RunId,
     (admission, context, active): (&Admission, &PolicyContext, &ActiveAuthority),
 ) -> Result<Result<Decided, &'static str>, AuthorityError> {
-    let Some(root) = root_of(work, run.as_str())? else {
+    let Some(root) = super::taint::root_of(work, run.as_str())? else {
         return Ok(Err("NO_WORKSPACE_ROOT"));
     };
     let ceiling = match crate::sandbox::egress_targets(
@@ -501,7 +486,7 @@ pub(super) fn decide(
         Ok(ceiling) => ceiling,
         Err(reason) => return Ok(Err(reason)),
     };
-    let exposed_at_start = exposed(work, &root)?;
+    let exposed_at_start = exposed(work, run, &root)?;
     let prefixes = prefixes(&active.partition)?;
     let pieces = prefixes.len().saturating_add(2);
     let nonempty: Vec<bool> = match &active.partition {
@@ -582,6 +567,14 @@ pub(super) fn for_launch(
 ) -> Result<Result<Option<Decided>, &'static str>, AuthorityError> {
     if !proxy_only {
         return Ok(Ok(None));
+    }
+    // F-01's R4 (ADR-0062, Proposed): a launch of a run holding external
+    // content would mark the root; it waits while another run's workload
+    // on the root may reach an origin and started pristine -- that
+    // workload's cells could not follow the mark. Only `PROXY_ONLY` has
+    // such workloads.
+    if super::taint::exposure_pending(work, run)? {
+        return Ok(Err("WORKSPACE_EXPOSURE_PENDING"));
     }
     let admission = super::admission::load(work, run.as_str())?;
     let context = query::policy_context(work, run.as_str(), active)?;

@@ -53,7 +53,7 @@ use rusqlite::OptionalExtension as _;
 use crate::capability::{
     Action, ArgvAllowlist, ArgvToken, Capability, ConstraintSet, Namespace, Scope, Verb,
 };
-use crate::policy::{ArgvSafety, CanonicalAction, Effect, Environment, Obligation, TaintLevel};
+use crate::policy::{ArgvSafety, CanonicalAction, Effect, Environment, Obligation};
 use crate::resource::ExecutableIdentity;
 use crate::resource::exec::argv::{self, ArgvClass};
 use crate::resource::exec::hygiene::{self, Hygiene, Profile};
@@ -68,9 +68,10 @@ use super::environment::{self, DestroyBegun};
 use super::error::AuthorityError;
 use super::lease::to_sql;
 use super::policy_state::ActiveAuthority;
-use super::query::{self, DecisionRecord, TaintCause};
+use super::query::{self, DecisionRecord};
 use super::resolution::{self, ResolutionRefused};
 use super::secret_use::spawn::{self, SpawnAsked, SpawnAuthorised, SpawnPrepared};
+use super::taint::{self, Delivery};
 
 /// Where a workload is in its lifecycle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1200,8 +1201,18 @@ pub(super) fn preview(
         );
     fields.extend(caller_fields(binding_key));
     fields.extend(plan_fields(active, checked, &decided.plan));
+    fields.extend(decision_taint(work, run)?);
     work.audit(AuditEvent::ToolPreviewed, fields)?;
     Ok(Previewed::Decided(Box::new(decided)))
+}
+
+/// The taint a decision of `run`'s was made in, for its record (F-01's
+/// decision attribution, ADR-0062).
+fn decision_taint(work: &Work<'_>, run: &RunId) -> Result<Fields, AuthorityError> {
+    Ok(Fields::new().text(
+        "taint_at_decision",
+        taint::run_taint(work, run.as_str())?.as_str(),
+    ))
 }
 
 /// Step 2: decide the workload -- and its credential's use, when it names
@@ -1269,6 +1280,7 @@ pub(super) fn begin(
     );
     fields.extend(caller_fields(binding_key));
     fields.extend(plan_fields(active, checked, &plan));
+    fields.extend(decision_taint(work, run)?);
     if !plan.permits() {
         // A denied use is the secret side's to record too, as an egress one is.
         if let (Some((asked, _)), Some(gate)) = (secret, &plan.injection) {
@@ -1288,7 +1300,8 @@ pub(super) fn begin(
     };
     // F-17 (ADR-0061, Proposed): in `PROXY_ONLY`, both gates for every
     // destination the grants allow, before anything is recorded; a launch
-    // whose egress cannot be decided is refused.
+    // whose egress cannot be decided, or that must wait (F-01's R4), is
+    // refused.
     let egress = match super::workload_egress::for_launch(work, run, active, proxy_only)? {
         Ok(egress) => egress,
         Err(reason) => return refuse(work, run, executable, reason),
@@ -1397,10 +1410,15 @@ fn record_intent(
         ))?;
     }
     // F-17: the egress authorisation, durable with the intent.
-    let recorded = match egress {
+    let mut recorded = match egress {
         Some(decided) => super::workload_egress::record(work, (run, &invocation), decided)?,
         None => Fields::new(),
     };
+    // F-01's R3: a run holding external content marks the root the workload
+    // can write, before the broker hears of it.
+    if taint::mark_effect(work, run, &invocation, "workload")? == taint::Marked::Marked {
+        recorded.extend(Fields::new().flag("workspace_tainted", true));
+    }
     Ok((invocation, recorded))
 }
 
@@ -1540,23 +1558,29 @@ pub(super) fn record_outcome(
             (destroy_reason(ending), WorkloadState::Failed)
         }
     };
-    if output.is_some_and(|(stdout, stderr, _)| stdout > 0 || stderr > 0) {
-        // A workload's output is content the environment produced:
-        // LOCAL_UNVERIFIED, never lower, raised before it can reach
-        // cognition.
-        let taint = query::raise_taint(
-            work,
-            run,
-            TaintLevel::LocalUnverified,
-            TaintCause::ToolResult,
-        )?;
-        fields = fields.text("taint", taint.as_str());
-    }
     // What its tunnels did, settled before anything is answered (F-17).
     fields.extend(super::workload_egress::settle(
         work,
         &intent.invocation,
         egress,
+    )?);
+    // Then the taint its outcome brings (F-01, ADR-0062), before it can reach
+    // cognition: EXTERNAL_UNTRUSTED when an origin byte reached it, when
+    // nothing says what its tunnels did, or when its root may hold external
+    // content -- whatever it printed; otherwise LOCAL_UNVERIFIED for output
+    // the environment produced. A workload provably never started brings
+    // nothing from its root.
+    let own = taint::own_reach(work, &intent.invocation)?;
+    fields.extend(taint::deliver(
+        work,
+        run,
+        &Delivery {
+            invocation: &intent.invocation,
+            local: output.is_some_and(|(stdout, stderr, _)| stdout > 0 || stderr > 0),
+            from_root: !matches!(ending, Ending::Failed { .. }),
+            own,
+            interrupted: false,
+        },
     )?);
     fields = fields.text("state", state.as_str());
     let destroy = match destroy_reason {
@@ -1622,6 +1646,23 @@ pub(super) fn reconcile_open(work: &mut Work<'_>) -> Result<u64, AuthorityError>
         let invocation_id = InvocationId::parse(invocation)
             .ok_or(AuthorityError::Invariant("a stored workload is malformed"))?;
         let egress = super::workload_egress::settle_interrupted(work, &invocation_id)?;
+        // F-01's R5: the run the restart reaped may have received what its
+        // workload's tunnels fetched, or what its root held: recorded, so
+        // that its history says so.
+        let reaped =
+            RunId::parse(run).ok_or(AuthorityError::Invariant("a stored workload is malformed"))?;
+        let own = taint::own_reach(work, &invocation_id)?;
+        let delivered = taint::deliver(
+            work,
+            &reaped,
+            &Delivery {
+                invocation: &invocation_id,
+                local: false,
+                from_root: true,
+                own,
+                interrupted: true,
+            },
+        )?;
         let mut fields = Fields::new()
             .text("run_id", run.as_str())
             .text("invocation_id", invocation.as_str())
@@ -1633,6 +1674,7 @@ pub(super) fn reconcile_open(work: &mut Work<'_>) -> Result<u64, AuthorityError>
                 matches!(begun, DestroyBegun::Pending { .. }),
             );
         fields.extend(egress);
+        fields.extend(delivered);
         work.audit(AuditEvent::WorkloadOutcome, fields)?;
     }
     Ok(u64::try_from(found.len()).unwrap_or(u64::MAX))

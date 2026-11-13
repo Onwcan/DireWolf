@@ -2996,6 +2996,8 @@ EGRESS_AUTHORITY_TESTS = (
     # F-17: each workload's egress decided by the real authority.
     "linux::the_authority_decides_each_workloads_egress_by_both_gates_and_exposure",
     "linux::ranges_refuse_at_the_address_and_an_interrupted_workload_exposes_its_root",
+    # F-01: a run's taint follows what it receives (ADR-0062, Proposed).
+    "linux::the_taint_follows_what_each_run_receives",
 )
 
 # Every (suite, case) the M5b real-topology suites must report, exercised.
@@ -3138,6 +3140,15 @@ EGRESS_CASES = (
             "power-internal-ranges-refused-at-the-address",
             "restart-settles-an-interrupted-workload-uncertain",
             "restart-never-restores-a-pristine-root",
+            # F-01 (ADR-0062, Proposed): a run's taint follows what it
+            # receives -- from a workload's tunnels, and from its root.
+            "taint-permission-refusal-failed-dial-not-external",
+            "taint-download-no-output-external",
+            "taint-partial-transfer-external",
+            "taint-downloaded-file-read-by-another-run",
+            "taint-tainted-writer-marks-root",
+            "taint-fresh-run-decided-by-the-exposed-cell",
+            "taint-interrupted-workload-on-restart",
         )
     ),
 )
@@ -7141,8 +7152,8 @@ EGRESS_POLICY_MUTATIONS: tuple[tuple[str, str, str, str], ...] = (
     (
         "exposure: a root is never exposed at launch",
         _EGRESS_DECISION,
-        "    let exposed_at_start = exposed(work, &root)?;",
-        "    let exposed_at_start = exposed(work, &root).map(|_| false)?;",
+        "    let exposed_at_start = exposed(work, run, &root)?;",
+        "    let exposed_at_start = exposed(work, run, &root).map(|_| false)?;",
     ),
     (
         "exposure: an uncertain ending exposes nothing",
@@ -7227,6 +7238,193 @@ def task_sandbox_egress_policy_mutations() -> None:
     print(
         f"{GREEN}sandbox egress-policy mutation review: {len(killed)} of "
         f"{len(EGRESS_POLICY_MUTATIONS)} killed{OFF}"
+    )
+
+
+# F-01's mutation review (ADR-0062, Proposed; E-M): each line weakens one guard
+# of taint that follows the content a run receives, in the source, one at a
+# time -- the workload's own reach (R1), what a run receives from an exposed
+# root (R2), a tainted run's marks (R3), the concurrent launch (R4), the
+# restart (R5), the evidence (R7) and the rule that a possibility is never
+# taken for content. Each mutant must compile and must fail the authority's
+# unit suites or `sandbox-egress-evidence`; the file is then restored, and its
+# SHA-256 proves it byte-identical. A mutant that survives, or does not
+# compile, fails the review.
+_TAINT = "crates/dwkd-authority/src/state/taint.rs"
+_TAINT_WORKLOAD = "crates/dwkd-authority/src/state/workload.rs"
+_TAINT_SCHEMA = "crates/dwkd-authority/src/state/schema.rs"
+TAINT_MUTATIONS: tuple[tuple[str, str, str, str], ...] = (
+    (
+        "TM1: a workload's own reach is not its own evidence",
+        _TAINT,
+        "        OwnReach::Reached => Some((TaintCause::WorkloadReached, Basis::OriginBytes)),",
+        "        OwnReach::Reached => exposure.basis().map(|b| (TaintCause::RootExposed, b)),",
+    ),
+    (
+        "TM2: an uncertain settlement is taken for nothing reached",
+        _TAINT,
+        '        Some((Some(settled), Some(1))) if settled == "UNCERTAIN" => OwnReach::Uncertain,',
+        '        Some((Some(settled), Some(1))) if settled == "UNCERTAIN" => OwnReach::Nothing,',
+    ),
+    (
+        "TM3: a workload's outcome does not come from its root",
+        _TAINT_WORKLOAD,
+        "            from_root: !matches!(ending, Ending::Failed { .. }),",
+        "            from_root: false,",
+    ),
+    (
+        "TM4: a workload in flight on the root is no possibility",
+        _TAINT,
+        "        } else if !self.in_flight.is_empty() {",
+        "        } else if false && !self.in_flight.is_empty() {",
+    ),
+    (
+        "TM5: a tainted run's mark does not expose the root",
+        _TAINT,
+        "        } else if self.effects.count > 0 {",
+        "        } else if false && self.effects.count > 0 {",
+    ),
+    (
+        "TM6: a read-family result never comes from the root",
+        "crates/dwkd-authority/src/state/tool.rs",
+        "                        from_root: true,",
+        "                        from_root: false,",
+    ),
+    (
+        "TM7: a tainted run's fs mutation marks nothing",
+        "crates/dwkd-authority/src/state/mod.rs",
+        "                taint::mark_effect(work, run, invocation, plan.tool().as_str())?;",
+        "                let _ = (run, invocation);",
+    ),
+    (
+        "TM8: a tainted run's workload marks nothing",
+        _TAINT_WORKLOAD,
+        '    if taint::mark_effect(work, run, &invocation, "workload")? == taint::Marked::Marked {',
+        "    if false {",
+    ),
+    (
+        "TM9: a tainted launch never waits for a pristine one",
+        "crates/dwkd-authority/src/state/workload_egress.rs",
+        "    if super::taint::exposure_pending(work, run)? {",
+        "    if super::taint::exposure_pending(work, run).map(|_| false)? {",
+    ),
+    (
+        "TM10: a restart records nothing of an interrupted workload",
+        _TAINT_WORKLOAD,
+        "                from_root: true,\n                own,\n"
+        "                interrupted: true,",
+        "                from_root: false,\n                own: taint::OwnReach::Nothing,\n"
+        "                interrupted: true,",
+    ),
+    (
+        "TM11: a possibility is taken for content",
+        _TAINT,
+        "                        AND to_taint = 2 AND basis <> 'IN_FLIGHT')",
+        "                        AND to_taint = 2)",
+    ),
+    (
+        "TM12: a possibility that settled exposed is still none",
+        _TAINT,
+        "WHERE f.run_id = ?1 AND (w.state = 'LAUNCHING' OR e.exposed = 1))",
+        "WHERE f.run_id = ?1 AND (w.state = 'LAUNCHING'))",
+    ),
+    (
+        "TM13: a later receipt adds nothing to what a taint rests on",
+        _TAINT,
+        "    let adds = !rises\n",
+        "    let adds = false && !rises\n",
+    ),
+    (
+        "TM14: a run's taint rises without its evidence",
+        _TAINT_SCHEMA,
+        "WHEN NEW.taint IS NOT (SELECT max(to_taint) FROM run_taint_evidence "
+        "WHERE run_id = NEW.run_id)",
+        "WHEN 0",
+    ),
+    (
+        "TM15: a workspace's taint can be forgotten",
+        _TAINT_SCHEMA,
+        "BEGIN SELECT RAISE(ABORT, 'a workspace''s taint is never forgotten'); END;",
+        "BEGIN SELECT 1; END;",
+    ),
+    (
+        "TM16: a run holding no external content marks a workspace",
+        _TAINT_SCHEMA,
+        "WHEN (SELECT taint FROM run_policy_input WHERE run_id = NEW.run_id) IS NOT 2",
+        "WHEN 0",
+    ),
+    (
+        "TM17: a host process's output never comes from its root",
+        "crates/dwkd-authority/src/state/process.rs",
+        "                            from_root: output || ended,",
+        "                            from_root: false,",
+    ),
+    (
+        "TM18: a tainted run's host launch marks nothing",
+        "crates/dwkd-authority/src/state/process.rs",
+        '        if taint::mark_effect(work, asked.run, &invocation, "process.exec")?',
+        '        if false && taint::mark_effect(work, asked.run, &invocation, "process.exec")?',
+    ),
+    (
+        "TM19: a tainted run's own workload starts pristine",
+        "crates/dwkd-authority/src/state/workload_egress.rs",
+        "        || super::taint::holds_external_content(work, run.as_str())?)",
+        "        || false)",
+    ),
+    (
+        "TM20: a run holding external content is never one",
+        _TAINT,
+        "    if run_taint(work, run)? != TaintLevel::ExternalUntrusted {",
+        "    if run_taint(work, run)? != TaintLevel::ExternalUntrusted || true {",
+    ),
+)
+
+
+def task_sandbox_taint_mutations() -> None:
+    """Weaken each guard of F-01's taint in turn (ADR-0062, Proposed); the
+    authority's unit suites or the egress evidence must catch every one.
+
+    Slow: a mutant no unit suite catches runs the whole
+    sandbox-egress-evidence. Every file is restored byte-identically
+    whatever happens, and checked. Never run it beside another build.
+    """
+    killed: list[str] = []
+    for what, rel, old, new in TAINT_MUTATIONS:
+        path = ROOT / rel
+        original = path.read_bytes()
+        digest = hashlib.sha256(original).hexdigest()
+        text = original.decode("utf-8")
+        if text.count(old) != 1:
+            raise TaskError(f"mutation `{what}`: its target is not in {rel} exactly once")
+        print(f"{BOLD}mutant: {what}{OFF}")
+        outcome = "survived"
+        try:
+            path.write_bytes(text.replace(old, new).encode("utf-8"))
+            try:
+                run("cargo", "test", "--locked", "--no-run", "-p", "dwkd-authority")
+            except TaskError:
+                outcome = "did not compile"
+            else:
+                try:
+                    run("cargo", "test", "--locked", "-p", "dwkd-authority", "--lib")
+                except TaskError as exc:
+                    outcome = f"killed by a unit suite: {str(exc)[:160]}"
+                else:
+                    try:
+                        task_sandbox_egress_evidence()
+                    except TaskError as exc:
+                        outcome = f"killed by the evidence: {str(exc)[:160]}"
+        finally:
+            path.write_bytes(original)
+        if hashlib.sha256(path.read_bytes()).hexdigest() != digest:
+            raise TaskError(f"{rel} was not restored byte-identically")
+        print(f"{DIM}restored {rel} (sha256 {digest[:16]}...){OFF}")
+        if not outcome.startswith("killed"):
+            raise TaskError(f"mutant `{what}` {outcome}: nothing guards it")
+        killed.append(what)
+        print(f"{GREEN}mutant {outcome[:60]}: {what}{OFF}")
+    print(
+        f"{GREEN}sandbox taint mutation review: {len(killed)} of {len(TAINT_MUTATIONS)} killed{OFF}"
     )
 
 
@@ -8734,6 +8932,10 @@ ATTRIBUTION: dict[str, tuple[tuple[str, str, str | tuple[str, ...]], ...]] = {
             "connect-proxy:workload-authorisation-address",
         ),
         ("restart-*", _OCI, "authority-reconciliation"),
+        # F-01: the taint a run's deliveries raise; the one case that shows
+        # F-17's exposed cell deciding a fresh run is the egress decision's.
+        ("taint-fresh-run-decided-by-the-exposed-cell", _OCI, "authority-egress-decision"),
+        ("taint-*", _OCI, "authority-taint"),
         ("*", _OCI, "authority-egress-decision"),
     ),
     # M5d.1-M5d.2: workloads the broker runs in its real environments.
@@ -12609,6 +12811,7 @@ TASKS = {
     "net-http-mutations": task_net_http_mutations,
     "sandbox-workload-mutations": task_sandbox_workload_mutations,
     "sandbox-egress-policy-mutations": task_sandbox_egress_policy_mutations,
+    "sandbox-taint-mutations": task_sandbox_taint_mutations,
     "sandbox-neighbour-mutations": task_sandbox_neighbour_mutations,
     "sandbox-secret-evidence": task_sandbox_secret_evidence,
     "sandbox-secret-mutations": task_sandbox_secret_mutations,

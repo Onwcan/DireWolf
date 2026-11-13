@@ -432,6 +432,44 @@ mod egress {
         String::from_utf8_lossy(&head).into_owned()
     }
 
+    /// `egress-quiet <host> <port> <server> <path>`: what `egress-connect`
+    /// does through the proxy -- a CONNECT, a TLS client hello, and every
+    /// byte the origin sends back -- but printing nothing: what came back is
+    /// kept in `path`, and how it went is the exit code alone (F-01, an
+    /// output-less download). 0: kept; 2: no proxy or no request; 3: the
+    /// proxy refused; 4: no hello; 5: not kept.
+    fn quiet(proxy: SocketAddr, host: &str, port: &str, server: &str, path: &str) -> ExitCode {
+        let Ok(mut stream) = TcpStream::connect_timeout(&proxy, WAIT) else {
+            return ExitCode::from(2);
+        };
+        let _ = stream.set_read_timeout(Some(WAIT));
+        let _ = stream.set_write_timeout(Some(WAIT));
+        let request = format!("CONNECT {host}:{port} HTTP/1.1\r\nHost: {host}:{port}\r\n\r\n");
+        if stream.write_all(request.as_bytes()).is_err() {
+            return ExitCode::from(2);
+        }
+        if !head(&mut stream).starts_with("HTTP/1.1 200 ") {
+            return ExitCode::from(3);
+        }
+        if stream.write_all(&hello(Some(server), false)).is_err() {
+            return ExitCode::from(4);
+        }
+        let _ = stream.shutdown(Shutdown::Write);
+        let mut received = Vec::new();
+        // A timeout or a reset ends the read: what arrived before it is kept.
+        let _ = stream.read_to_end(&mut received);
+        // Readable by the broker of the evidence's unverified workspace,
+        // which is not of the workload's group.
+        let kept = std::fs::write(path, &received).and_then(|()| {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o644))
+        });
+        match kept {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(_) => ExitCode::from(5),
+        }
+    }
+
     fn connect_via(
         proxy: SocketAddr,
         host: &str,
@@ -678,6 +716,7 @@ mod egress {
                 };
                 connect_via(proxy, arg(2), arg(3), Some(arg(2)), 0, "tls")
             }
+            "egress-quiet" => quiet(proxy, arg(2), arg(3), arg(4), arg(5)),
             "egress-direct" => direct(arg(2), arg(3), arg(4)),
             "egress-dns" => dns(arg(2)),
             "egress-raw" => raw(),

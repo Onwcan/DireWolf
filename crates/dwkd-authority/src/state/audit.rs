@@ -264,11 +264,14 @@ pub enum AuditEvent {
     /// its output's size, what `reap` found — never its output, never run
     /// again.
     WorkloadOutcome,
+    /// A run holding external content changed a workspace root (F-01): the
+    /// root's mark, recorded before the effect.
+    WorkspaceTainted,
 }
 
 impl AuditEvent {
     /// Every kind, in declaration order.
-    pub const ALL: [Self; 66] = [
+    pub const ALL: [Self; 67] = [
         Self::StoreCreated,
         Self::StoreOpened,
         Self::PolicyInstalled,
@@ -335,6 +338,7 @@ impl AuditEvent {
         Self::WorkloadRefused,
         Self::WorkloadDenied,
         Self::WorkloadOutcome,
+        Self::WorkspaceTainted,
     ];
 
     /// The spelling in a record's `event` field.
@@ -407,6 +411,7 @@ impl AuditEvent {
             Self::WorkloadRefused => "workload.refused",
             Self::WorkloadDenied => "workload.denied",
             Self::WorkloadOutcome => "workload.outcome",
+            Self::WorkspaceTainted => "workspace.tainted",
         }
     }
 }

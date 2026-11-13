@@ -73,6 +73,8 @@ An `ALLOW` may carry requirements the kernel then enforces:
 
 Obligations let policy say "yes, but under these conditions" without inventing new effects.
 
+**What raises `taint_level`** (F-01, [ADR-0062](adr/0062-taint-follows-delivered-content.md), Proposed). The kernel raises a run's taint where it delivers content, before the run is answered, and never lowers it: `net.http`'s response head, and a workload whose broker report says an origin byte reached it (or whose settlement cannot say), to `EXTERNAL_UNTRUSTED`; anything delivered from a workspace root that may hold network content or content a tainted run wrote, to `EXTERNAL_UNTRUSTED`; other workspace content and output, to `LOCAL_UNVERIFIED`. Network permission alone raises nothing. A rule on `taint_level` therefore sees a run that read what a workload downloaded as `EXTERNAL_UNTRUSTED`, in that run and in every other run on the same workspace root.
+
 **On a sandboxed workload's tunnels** (F-17, [ADR-0061](adr/0061-workload-egress-decided-by-policy-novelty-and-exposure.md), Proposed) only `max_output_bytes` and `audit_level` can be kept: the first bounds what one tunnel carries back -- the smallest bound across the address pieces a cell allows -- and the second is recorded. A rule whose `ALLOW` carries any other obligation allows no tunnel.
 
 ## 3. Rule format

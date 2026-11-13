@@ -71,7 +71,7 @@ use crate::capability::{
     Action, ArgvAllowlist, ArgvToken, Capability, ConstraintSet, DeclaredPath, Namespace, Scope,
     Verb,
 };
-use crate::policy::{ArgvSafety, CanonicalAction, Effect, Environment, Obligation, TaintLevel};
+use crate::policy::{ArgvSafety, CanonicalAction, Effect, Environment, Obligation};
 use crate::resource::exec::argv::{self, ArgvClass};
 use crate::resource::exec::{self, ExecError, ResolvedExecutable};
 use crate::resource::fs::{Access, Expect, PinnedRoot, ResolvedResource};
@@ -87,9 +87,10 @@ use super::identity::CallerContext;
 use super::lease::{self, to_sql};
 use super::plan::RetryClass;
 use super::policy_state::ActiveAuthority;
-use super::query::{self, DecisionRecord, TaintCause};
+use super::query::{self, DecisionRecord};
 use super::resolution::{self, ResolutionRefused};
 use super::scopes;
+use super::taint::{self, Delivery, OwnReach};
 use super::tool;
 
 // ---------------------------------------------------------------------------
@@ -1371,6 +1372,7 @@ pub(super) fn decide(
     let plan = decide_plan(asked.request.tool(), &planned, &admission, &context, active)?;
     let mut fields = base_fields(asked, plan.tool());
     fields.extend(plan_fields(active, &plan));
+    fields.extend(Fields::new().text("taint_at_decision", context.taint().as_str()));
     if asked.operation == ToolOperation::CanonicalPreview {
         work.audit(AuditEvent::ToolPreviewed, fields)?;
         return Ok(Decided::Previewed(plan));
@@ -1401,6 +1403,13 @@ pub(super) fn decide(
     ))?;
     if let Some(launch) = plan.action().launch() {
         record_launching(work, asked.run, (&invocation, &process), &plan, launch)?;
+        // A launch writes where it runs: a run holding external content marks
+        // its root before anything can launch (F-01's R3).
+        if taint::mark_effect(work, asked.run, &invocation, "process.exec")?
+            == taint::Marked::Marked
+        {
+            fields.extend(Fields::new().flag("workspace_tainted", true));
+        }
     }
     if let Some(key) = asked.binding_key() {
         let digest = request_digest(asked)?;
@@ -1963,18 +1972,24 @@ pub(super) fn record_outcome(
                             )
                             .int("stderr_observed", stderr.observed),
                     );
-                    if !stdout.content.is_empty() || !stderr.content.is_empty() {
-                        // A host process's output is content the operator's
-                        // machine produced: LOCAL_UNVERIFIED, never lower.
-                        // Raised before it can reach cognition.
-                        let taint = query::raise_taint(
-                            work,
-                            run,
-                            TaintLevel::LocalUnverified,
-                            TaintCause::ToolResult,
-                        )?;
-                        fields.extend(Fields::new().text("taint", taint.as_str()));
-                    }
+                    // A host process's output is content the operator's
+                    // machine produced: LOCAL_UNVERIFIED, never lower; and,
+                    // like its ending, EXTERNAL_UNTRUSTED when the workspace
+                    // root it ran in may hold external content (F-01,
+                    // ADR-0062). Raised before it can reach cognition.
+                    let output = !stdout.content.is_empty() || !stderr.content.is_empty();
+                    let ended = matches!(state, ProcessState::Exited | ProcessState::Signaled);
+                    fields.extend(taint::deliver(
+                        work,
+                        run,
+                        &Delivery {
+                            invocation,
+                            local: output,
+                            from_root: output || ended,
+                            own: OwnReach::Nothing,
+                            interrupted: false,
+                        },
+                    )?);
                 }
                 ProcessOutput::Killed { outcome, .. } => {
                     fields.extend(Fields::new().text("kill_outcome", outcome.as_str()));

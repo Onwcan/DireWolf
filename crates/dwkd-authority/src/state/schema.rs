@@ -51,7 +51,7 @@ use rusqlite::Connection;
 pub(super) const APPLICATION_ID: i64 = 0x4457_4B44;
 
 /// The schema version this build creates and understands.
-pub(super) const CURRENT_VERSION: i64 = 12;
+pub(super) const CURRENT_VERSION: i64 = 13;
 
 /// Schema version 1, the first. Static text: nothing in it is assembled from a
 /// value, and every value the authority stores is bound as a parameter.
@@ -1454,6 +1454,112 @@ CREATE TRIGGER workspace_exposure_no_delete BEFORE DELETE ON workspace_exposure
 BEGIN SELECT RAISE(ABORT, 'a workspace''s exposure is never forgotten'); END;
 ";
 
+/// Schema version 13 (F-01, ADR-0062, Proposed): taint that follows the
+/// content a run receives.
+///
+/// `workspace_taint` marks a workspace root that a run holding external
+/// content changed -- an fs mutation, a workload or a host process it
+/// launched there -- recorded before the effect, and only by a run whose
+/// taint is `EXTERNAL_UNTRUSTED`. With ADR-0061's `workspace_exposure` it is
+/// what makes a root exposed: whatever a run receives from such a root is
+/// `EXTERNAL_UNTRUSTED`. `run_taint_evidence` is each run's taint history:
+/// one row per rise, and one per external receipt that adds to what the run's
+/// taint rests on -- each with its cause, its basis (confirmed origin bytes,
+/// a network response, a tainted run's effect, an uncertain settlement, a
+/// workload still running, local content) and its sources. A run's taint
+/// rises only with a row that says why (`run_policy_input_taint_has_evidence`),
+/// and the rows chain in order. `run_taint_in_flight` names the workloads a
+/// possible-exposure row rested on, so that a possibility later settled
+/// without exposure is never taken for content received. A run whose taint
+/// rose before this version has one `BEFORE_EVIDENCE` row. Nothing here is
+/// updated or deleted.
+pub(super) const SCHEMA_V13: &str = r"
+CREATE TABLE workspace_taint (
+    root_device     TEXT    NOT NULL CHECK (length(root_device) BETWEEN 1 AND 20
+                                            AND root_device NOT GLOB '*[^0-9]*'),
+    root_inode      TEXT    NOT NULL CHECK (length(root_inode) BETWEEN 1 AND 20
+                                            AND root_inode NOT GLOB '*[^0-9]*'),
+    invocation_id   TEXT    NOT NULL CHECK (length(invocation_id) = 30
+                                            AND substr(invocation_id, 1, 4) = 'inv_'),
+    run_id          TEXT    NOT NULL REFERENCES run(run_id) ON DELETE RESTRICT,
+    tool            TEXT    NOT NULL CHECK (tool IN ('fs.write', 'fs.patch', 'fs.move',
+                                                     'fs.delete', 'process.exec', 'workload')),
+    recorded_ms     INTEGER NOT NULL,
+    PRIMARY KEY (root_device, root_inode, invocation_id)
+) STRICT;
+CREATE TRIGGER workspace_taint_by_an_external_run BEFORE INSERT ON workspace_taint
+WHEN (SELECT taint FROM run_policy_input WHERE run_id = NEW.run_id) IS NOT 2
+BEGIN SELECT RAISE(ABORT, 'only a run holding external content taints a workspace'); END;
+CREATE TRIGGER workspace_taint_no_update BEFORE UPDATE ON workspace_taint
+BEGIN SELECT RAISE(ABORT, 'a workspace''s taint is a fact'); END;
+CREATE TRIGGER workspace_taint_no_delete BEFORE DELETE ON workspace_taint
+BEGIN SELECT RAISE(ABORT, 'a workspace''s taint is never forgotten'); END;
+
+CREATE TABLE run_taint_evidence (
+    run_id          TEXT    NOT NULL REFERENCES run(run_id) ON DELETE RESTRICT,
+    seq             INTEGER NOT NULL CHECK (seq >= 1),
+    from_taint      INTEGER NOT NULL CHECK (from_taint IN (0, 1, 2)),
+    to_taint        INTEGER NOT NULL CHECK (to_taint IN (1, 2)),
+    cause           TEXT    NOT NULL CHECK (cause IN ('tool_result', 'artifact_read',
+                                'memory_retrieval', 'workload_reached', 'workload_uncertain',
+                                'root_exposed', 'workload_interrupted', 'before_evidence')),
+    basis           TEXT    NOT NULL CHECK (basis IN ('NETWORK_RESPONSE', 'ORIGIN_BYTES',
+                                'EXTERNAL_RUN_EFFECT', 'UNCERTAIN', 'IN_FLIGHT',
+                                'LOCAL_CONTENT', 'TRUSTED_CALLER', 'BEFORE_EVIDENCE')),
+    invocation_id   TEXT    CHECK (invocation_id IS NULL OR (length(invocation_id) = 30
+                                   AND substr(invocation_id, 1, 4) = 'inv_')),
+    root_device     TEXT    CHECK (root_device IS NULL OR (length(root_device) BETWEEN 1 AND 20
+                                   AND root_device NOT GLOB '*[^0-9]*')),
+    root_inode      TEXT    CHECK (root_inode IS NULL OR (length(root_inode) BETWEEN 1 AND 20
+                                   AND root_inode NOT GLOB '*[^0-9]*')),
+    sources         TEXT    NOT NULL CHECK (length(sources) BETWEEN 2 AND 4096),
+    recorded_ms     INTEGER NOT NULL,
+    PRIMARY KEY (run_id, seq),
+    CHECK (to_taint > from_taint OR to_taint = 2),
+    CHECK ((root_device IS NULL) = (root_inode IS NULL)),
+    CHECK ((basis = 'LOCAL_CONTENT') = (to_taint = 1)
+           OR basis IN ('TRUSTED_CALLER', 'BEFORE_EVIDENCE')),
+    CHECK ((basis = 'BEFORE_EVIDENCE') = (cause = 'before_evidence'))
+) STRICT;
+CREATE TRIGGER run_taint_evidence_in_order BEFORE INSERT ON run_taint_evidence
+WHEN NEW.seq IS NOT (SELECT COALESCE(max(seq), 0) + 1 FROM run_taint_evidence
+                     WHERE run_id = NEW.run_id)
+     OR NOT EXISTS (SELECT 1 FROM run_policy_input WHERE run_id = NEW.run_id)
+     OR (NEW.basis IS NOT 'BEFORE_EVIDENCE'
+         AND NEW.from_taint IS NOT (SELECT taint FROM run_policy_input
+                                    WHERE run_id = NEW.run_id))
+BEGIN SELECT RAISE(ABORT, 'a run''s taint evidence is its taint''s history, in order'); END;
+CREATE TRIGGER run_taint_evidence_no_update BEFORE UPDATE ON run_taint_evidence
+BEGIN SELECT RAISE(ABORT, 'a run''s taint evidence is a fact'); END;
+CREATE TRIGGER run_taint_evidence_no_delete BEFORE DELETE ON run_taint_evidence
+BEGIN SELECT RAISE(ABORT, 'a run''s taint evidence is never forgotten'); END;
+CREATE TRIGGER run_policy_input_taint_has_evidence BEFORE UPDATE OF taint ON run_policy_input
+WHEN NEW.taint IS NOT (SELECT max(to_taint) FROM run_taint_evidence WHERE run_id = NEW.run_id)
+BEGIN SELECT RAISE(ABORT, 'a run''s taint rises only with the evidence that raised it'); END;
+
+CREATE TABLE run_taint_in_flight (
+    run_id          TEXT    NOT NULL,
+    seq             INTEGER NOT NULL,
+    invocation_id   TEXT    NOT NULL REFERENCES workload_egress(invocation_id)
+                                        ON DELETE RESTRICT,
+    PRIMARY KEY (run_id, seq, invocation_id),
+    FOREIGN KEY (run_id, seq) REFERENCES run_taint_evidence(run_id, seq) ON DELETE RESTRICT
+) STRICT;
+CREATE TRIGGER run_taint_in_flight_of_a_possibility BEFORE INSERT ON run_taint_in_flight
+WHEN NOT EXISTS (SELECT 1 FROM run_taint_evidence WHERE run_id = NEW.run_id
+                 AND seq = NEW.seq AND basis = 'IN_FLIGHT')
+BEGIN SELECT RAISE(ABORT, 'a workload in flight is the source of a possibility only'); END;
+CREATE TRIGGER run_taint_in_flight_no_update BEFORE UPDATE ON run_taint_in_flight
+BEGIN SELECT RAISE(ABORT, 'a possibility''s source is a fact'); END;
+CREATE TRIGGER run_taint_in_flight_no_delete BEFORE DELETE ON run_taint_in_flight
+BEGIN SELECT RAISE(ABORT, 'a possibility''s source is never forgotten'); END;
+
+INSERT INTO run_taint_evidence (run_id, seq, from_taint, to_taint, cause, basis,
+    invocation_id, root_device, root_inode, sources, recorded_ms)
+SELECT run_id, 1, 0, taint, 'before_evidence', 'BEFORE_EVIDENCE', NULL, NULL, NULL, '{}', 0
+FROM run_policy_input WHERE taint > 0;
+";
+
 /// One step from a version to the next.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct Migration {
@@ -1512,6 +1618,10 @@ pub(super) const MIGRATIONS: &[Migration] = &[
     Migration {
         to: 12,
         sql: SCHEMA_V12,
+    },
+    Migration {
+        to: 13,
+        sql: SCHEMA_V13,
     },
 ];
 
@@ -1668,7 +1778,7 @@ mod tests {
     use super::{
         APPLICATION_ID, CURRENT_VERSION, MIGRATIONS, Migration, SCHEMA_V1, SCHEMA_V2, SCHEMA_V3,
         SCHEMA_V4, SCHEMA_V5, SCHEMA_V6, SCHEMA_V7, SCHEMA_V8, SCHEMA_V9, SCHEMA_V10, SCHEMA_V11,
-        SCHEMA_V12, Shape, ShapeError, decide, migrate, verify_exact,
+        SCHEMA_V12, SCHEMA_V13, Shape, ShapeError, decide, migrate, verify_exact,
     };
     use rusqlite::Connection;
 
@@ -1739,6 +1849,7 @@ mod tests {
         assert!(conn.execute_batch(SCHEMA_V10).is_ok());
         assert!(conn.execute_batch(SCHEMA_V11).is_ok());
         assert!(conn.execute_batch(SCHEMA_V12).is_ok());
+        assert!(conn.execute_batch(SCHEMA_V13).is_ok());
         assert!(
             conn.execute_batch("DROP TRIGGER run_never_resurrects")
                 .is_ok()
@@ -1766,6 +1877,7 @@ mod tests {
         assert!(conn.execute_batch(SCHEMA_V10).is_ok());
         assert!(conn.execute_batch(SCHEMA_V11).is_ok());
         assert!(conn.execute_batch(SCHEMA_V12).is_ok());
+        assert!(conn.execute_batch(SCHEMA_V13).is_ok());
         assert!(
             conn.execute_batch("CREATE TABLE backdoor (x INTEGER)")
                 .is_ok()
@@ -3007,5 +3119,117 @@ mod tests {
             "a process's key is not free for a request"
         );
         assert!(bind("net", "k4", 7).is_ok());
+    }
+
+    #[test]
+    fn a_version_twelve_store_migrates_to_thirteen_and_taint_rises_only_with_its_evidence() {
+        // F-01 (ADR-0062, Proposed): v13 adds a workspace's taint marks and
+        // each run's taint evidence. A v12 store's rows survive; a run whose
+        // taint rose before has exactly one `BEFORE_EVIDENCE` row; nothing
+        // new is updated or deleted; a run's taint rises only with the row
+        // that says why, in order; and only a run holding external content
+        // marks a workspace.
+        let conn = store_at(12);
+        let input = |run: &str, taint: i64| {
+            conn.execute(
+                "INSERT INTO run_policy_input (run_id, origin, taint, privacy, workspace_id, \
+                 workspace_sensitivity) VALUES (?1, 'api', ?2, 'ANY', NULL, NULL)",
+                rusqlite::params![run, taint],
+            )
+        };
+        assert!(input("run_a", 2).is_ok());
+        assert!(input("run_b", 0).is_ok());
+        assert!(input("run_c", 1).is_ok());
+        {
+            let Ok(tx) = conn.unchecked_transaction() else {
+                unreachable!("a transaction")
+            };
+            assert_eq!(migrate(&tx, 12, MIGRATIONS).ok(), Some(CURRENT_VERSION));
+            assert!(tx.commit().is_ok());
+        }
+        const { assert!(CURRENT_VERSION >= 13) };
+        assert_eq!(verify_exact(&conn).ok(), Some(Ok(())));
+        let text = |sql: &str| conn.query_row(sql, [], |row| row.get::<_, String>(0)).ok();
+        assert_eq!(
+            text(
+                "SELECT group_concat(run_id || ':' || from_taint || '>' || to_taint || ':' \
+                 || basis, ' ') FROM (SELECT * FROM run_taint_evidence ORDER BY run_id)"
+            )
+            .as_deref(),
+            Some("run_a:0>2:BEFORE_EVIDENCE run_c:0>1:BEFORE_EVIDENCE"),
+            "one row for each run whose taint rose before"
+        );
+        let evidence = |run: &str, seq: i64, (from, to): (i64, i64), basis: &str| {
+            let cause = if basis == "LOCAL_CONTENT" {
+                "tool_result"
+            } else {
+                "root_exposed"
+            };
+            conn.execute(
+                "INSERT INTO run_taint_evidence (run_id, seq, from_taint, to_taint, cause, \
+                 basis, invocation_id, root_device, root_inode, sources, recorded_ms) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, '7', '9', '{}', 1)",
+                rusqlite::params![run, seq, from, to, cause, basis],
+            )
+        };
+        let taint = |run: &str, to: i64| {
+            conn.execute(
+                "UPDATE run_policy_input SET taint = ?2 WHERE run_id = ?1",
+                rusqlite::params![run, to],
+            )
+        };
+        // No rise without its evidence.
+        assert!(taint("run_b", 2).is_err(), "a rise with no evidence");
+        // Out of order, from a taint the run does not have, or a local basis
+        // for an external taint: refused.
+        assert!(evidence("run_b", 2, (0, 2), "ORIGIN_BYTES").is_err());
+        assert!(evidence("run_b", 1, (1, 2), "ORIGIN_BYTES").is_err());
+        assert!(evidence("run_b", 1, (0, 2), "LOCAL_CONTENT").is_err());
+        assert!(evidence("run_b", 1, (0, 1), "ORIGIN_BYTES").is_err());
+        assert!(evidence("run_b", 1, (0, 2), "ORIGIN_BYTES").is_ok());
+        assert!(
+            taint("run_b", 1).is_err(),
+            "not the taint the evidence says"
+        );
+        assert!(taint("run_b", 2).is_ok());
+        // A receipt that adds to an external run's basis, without a rise.
+        assert!(evidence("run_a", 2, (2, 2), "IN_FLIGHT").is_ok());
+        assert!(
+            evidence("run_c", 2, (1, 1), "LOCAL_CONTENT").is_err(),
+            "a local receipt with no rise is not evidence"
+        );
+        // The workloads a possibility rested on: an `IN_FLIGHT` row's only.
+        let in_flight = |run: &str, seq: i64| {
+            conn.execute(
+                "INSERT INTO run_taint_in_flight (run_id, seq, invocation_id) \
+                 VALUES (?1, ?2, ?3)",
+                rusqlite::params![run, seq, inv(0)],
+            )
+        };
+        assert!(in_flight("run_b", 1).is_err(), "not a possibility");
+        assert!(in_flight("run_a", 2).is_ok());
+        // Only a run holding external content marks a workspace.
+        let mark = |run: &str, n: u8| {
+            conn.execute(
+                "INSERT INTO workspace_taint (root_device, root_inode, invocation_id, run_id, \
+                 tool, recorded_ms) VALUES ('7', '9', ?1, ?2, 'fs.write', 1)",
+                rusqlite::params![inv(n), run],
+            )
+        };
+        assert!(mark("run_c", 1).is_err(), "a local run marks nothing");
+        assert!(mark("run_b", 2).is_ok());
+        assert!(mark("run_a", 3).is_ok());
+        // Facts: never updated, never deleted; taint still never falls.
+        for bad in [
+            "UPDATE workspace_taint SET tool = 'fs.delete'",
+            "DELETE FROM workspace_taint",
+            "UPDATE run_taint_evidence SET basis = 'UNCERTAIN'",
+            "DELETE FROM run_taint_evidence",
+            "UPDATE run_taint_in_flight SET seq = 1",
+            "DELETE FROM run_taint_in_flight",
+            "UPDATE run_policy_input SET taint = 0 WHERE run_id = 'run_b'",
+        ] {
+            assert!(conn.execute(bad, []).is_err(), "{bad}");
+        }
     }
 }

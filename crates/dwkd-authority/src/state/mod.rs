@@ -82,6 +82,7 @@ mod scopes;
 mod secret_use;
 pub(crate) mod secrets;
 mod staging;
+mod taint;
 mod tool;
 mod transport;
 pub mod wire;
@@ -1121,9 +1122,11 @@ impl Authority {
         self.transact(|work| query::query(work, caller, session, run, epoch, proposal, active))
     }
 
-    /// Raise a run's taint. The trusted interface the tool-result, artifact
-    /// and memory paths of M4, M12 and M13 will call; nothing in M3d does, and
-    /// nothing on the wire can.
+    /// Raise a run's taint. The trusted, in-process interface: the artifact
+    /// and memory paths of M12 and M13 will call it; nothing on the wire
+    /// can. The kernel's own deliveries raise taint where they are recorded
+    /// (`state::taint`, F-01); a rise through here is recorded as the trusted
+    /// caller's, with its own evidence row.
     ///
     /// # Errors
     ///
@@ -1135,7 +1138,14 @@ impl Authority {
         observed: TaintLevel,
         cause: TaintCause,
     ) -> Result<TaintLevel, AuthorityError> {
-        self.transact(|work| query::raise_taint(work, run, observed, cause))
+        self.transact(|work| {
+            taint::raise(
+                work,
+                run,
+                &taint::Evidence::plain(observed, (cause, taint::Basis::TrustedCaller), None),
+            )
+            .map(|raised| raised.taint)
+        })
     }
 
     /// The `PolicyContext` the kernel builds for `run` from `kernel.db` — the
@@ -1333,7 +1343,9 @@ impl Authority {
     /// (M5d.4): a writer outside the trusted set, which the broker's checks
     /// exclude rather than defend against (ADR-0044 §3). Nothing is handed
     /// over; the invocation ends as a shared directory's change does, and
-    /// its failure is returned. `None` when nothing excludes it.
+    /// its failure is returned. `None` when nothing excludes it -- and then,
+    /// in the same transaction, before anything is handed over, a run holding
+    /// external content marks the root it is about to change (F-01's R3).
     fn excluded(
         &mut self,
         run: &RunId,
@@ -1347,6 +1359,7 @@ impl Authority {
             if workspace::in_use(work, run.as_str())? {
                 tool::record_exclusion(work, run, invocation).map(Some)
             } else {
+                taint::mark_effect(work, run, invocation, plan.tool().as_str())?;
                 Ok(None)
             }
         })

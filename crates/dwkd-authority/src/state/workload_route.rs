@@ -203,7 +203,9 @@ fn refusal(reason: &str) -> Result<ToolRefusalReasonV5, AuthorityError> {
         "ENVIRONMENT_NOT_READY" => R::EnvironmentNotReady,
         "ENVIRONMENT_UNAVAILABLE" => R::EnvironmentUnavailable,
         "ASSURANCE_INSUFFICIENT" => R::AssuranceInsufficient,
-        "ENVIRONMENT_BUSY" => R::EnvironmentBusy,
+        // F-01's R4 (ADR-0062): the run's workload waits while another
+        // run's on the same root may reach an origin and started pristine.
+        "ENVIRONMENT_BUSY" | "WORKSPACE_EXPOSURE_PENDING" => R::EnvironmentBusy,
         "IMAGE_CHANGED" => R::ImageChanged,
         "CREDENTIAL_UNAVAILABLE" => R::CredentialUnavailable,
         "BUDGET_EXHAUSTED" | "ENVIRONMENT_BUDGET_EXHAUSTED" | "LIVE_ENVIRONMENTS_EXHAUSTED" => {

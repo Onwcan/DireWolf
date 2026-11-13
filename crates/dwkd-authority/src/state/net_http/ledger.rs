@@ -30,6 +30,7 @@ use super::super::lease::{self, to_sql};
 use super::super::query::{self, TaintCause};
 use super::super::secret_use::{self, Ending as SecretEnding, Prepared};
 use super::super::secrets::{self, Hits};
+use super::super::taint;
 use super::super::tool;
 use super::canon::{self, Canonical};
 use super::plan::{self, Facts, Gate, NetPlan};
@@ -265,10 +266,18 @@ fn gate_fields(gate: &Gate, resolved: bool) -> Field {
 
 /// A plan's audit fields: every gate of the network action, the injection's,
 /// and the effect.
-pub(super) fn plan_fields(ctx: &Ctx<'_>, plan: &NetPlan) -> Fields {
+pub(super) fn plan_fields(
+    work: &Work<'_>,
+    ctx: &Ctx<'_>,
+    plan: &NetPlan,
+) -> Result<Fields, AuthorityError> {
     let net = &plan.net;
     let mut fields = Fields::new()
         .text("policy_revision", ctx.active.revision.to_hex())
+        .text(
+            "taint_at_decision",
+            taint::run_taint(work, ctx.asked.run.as_str())?.as_str(),
+        )
         .list(
             "net_gates",
             net.gates
@@ -283,7 +292,7 @@ pub(super) fn plan_fields(ctx: &Ctx<'_>, plan: &NetPlan) -> Fields {
             vec![gate_fields(&injection.gate, net.resolved)],
         );
     }
-    fields.text("effect", if plan.permits() { "ALLOW" } else { "DENY" })
+    Ok(fields.text("effect", if plan.permits() { "ALLOW" } else { "DENY" }))
 }
 
 /// Record a refusal and return it.
@@ -474,7 +483,7 @@ pub(super) fn locate(
                 .map(Located::Refused);
         }
         let mut fields = base_fields(ctx, Some(&hop));
-        fields.extend(plan_fields(ctx, &plan));
+        fields.extend(plan_fields(work, ctx, &plan)?);
         work.audit(AuditEvent::ToolPreviewed, fields)?;
         return Ok(Located::Previewed(plan));
     }
@@ -505,7 +514,7 @@ fn deny(
         secret_use::refused_by_gates(work, &secret, ctx.active, injection.gate.record())?;
     }
     let mut fields = base_fields(ctx, Some(hop));
-    fields.extend(plan_fields(ctx, plan));
+    fields.extend(plan_fields(work, ctx, plan)?);
     work.audit(AuditEvent::ToolDenied, fields)
 }
 
@@ -524,7 +533,7 @@ pub(super) fn precheck(
     };
     if !resolvable(&assessed.plan) {
         let mut fields = base_fields(ctx, Some(hop));
-        fields.extend(plan_fields(ctx, &assessed.plan));
+        fields.extend(plan_fields(work, ctx, &assessed.plan)?);
         work.audit(AuditEvent::ToolDenied, fields)?;
         return Ok(Some(RedirectEnd::HopDenied));
     }
@@ -827,7 +836,7 @@ fn record_hop(
             "injection_id",
             injection.map(|a| a.invocation.as_str().to_owned()),
         );
-    fields.extend(plan_fields(ctx, plan));
+    fields.extend(plan_fields(work, ctx, plan)?);
     work.audit(AuditEvent::NetIntentRecorded, fields)
 }
 
@@ -883,11 +892,14 @@ pub(super) fn end_hop(
     // A response head arrived: what the network says is untrusted from here
     // on, before any of it is followed or answered (ADR-0050 §14).
     if ending.status.is_some() {
-        query::raise_taint(
+        taint::raise(
             work,
             ctx.asked.run,
-            TaintLevel::ExternalUntrusted,
-            TaintCause::ToolResult,
+            &taint::Evidence::plain(
+                TaintLevel::ExternalUntrusted,
+                (TaintCause::ToolResult, taint::Basis::NetworkResponse),
+                Some(invocation),
+            ),
         )?;
     }
     work.audit(

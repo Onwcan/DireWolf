@@ -533,11 +533,16 @@ mod linux {
         // schema 9 (M5d.1) adds the workload ledger, which references the
         // environment ledger and so goes first -- after schema 10's (M5d.2)
         // shared key namespace and run-image binding, whose triggers sit on
-        // the older idempotency ledgers and the workload ledger.
+        // the older idempotency ledgers and the workload ledger. Schema 13's
+        // (F-01) taint tables go first, and its trigger on the run's policy
+        // inputs, which no table drop removes, with them.
         {
             let conn = raw(&h.state());
             conn.execute_batch(
-                "DROP TABLE tunnel_reach; DROP TABLE workspace_exposure; DROP TABLE workload_egress; \
+                "DROP TABLE run_taint_in_flight; DROP TABLE run_taint_evidence; \
+                 DROP TABLE workspace_taint; \
+                 DROP TRIGGER run_policy_input_taint_has_evidence; \
+                 DROP TABLE tunnel_reach; DROP TABLE workspace_exposure; DROP TABLE workload_egress; \
                  DROP TABLE workload_secret; DROP TABLE workload_idempotency; DROP TABLE run_image; \
                  DROP TABLE workload; \
                  DROP TABLE net_idempotency; DROP TABLE net_hop; DROP TABLE net_request; \
@@ -586,7 +591,10 @@ mod linux {
         {
             let conn = raw(&h.state());
             conn.execute_batch(
-                "DROP TABLE tunnel_reach; DROP TABLE workspace_exposure; DROP TABLE workload_egress; \
+                "DROP TABLE run_taint_in_flight; DROP TABLE run_taint_evidence; \
+                 DROP TABLE workspace_taint; \
+                 DROP TRIGGER run_policy_input_taint_has_evidence; \
+                 DROP TABLE tunnel_reach; DROP TABLE workspace_exposure; DROP TABLE workload_egress; \
                  DROP TABLE workload_secret; DROP TABLE workload_idempotency; DROP TABLE run_image; DROP TABLE workload; DROP TABLE net_idempotency; DROP TABLE net_hop; DROP TABLE net_request;                  DROP TABLE environment; DROP TABLE secret_use; DROP TABLE secret_injection; DROP TABLE secret_run_binding;                  DROP TABLE secret_revision; DROP TABLE process_idempotency; DROP TABLE tool_process;                  DROP TABLE process_invocation; DROP TABLE tool_staging;                  DROP TABLE tool_idempotency; DROP TABLE tool_invocation;                  PRAGMA user_version = 2;",
             )
             .unwrap();

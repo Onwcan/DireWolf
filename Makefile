@@ -19,6 +19,7 @@ DW := $(PY) scripts/dw.py
         authority-transport-evidence authority-write-probe broker-fs-read-evidence \
         filesystem-operations-evidence process-broker-evidence secret-broker-evidence \
         sandbox-foundation-evidence sandbox-egress-evidence sandbox-egress-policy-mutations \
+        sandbox-taint-mutations \
         sandbox-workload-evidence \
         net-http-evidence net-http-mutations sandbox-workload-mutations sandbox-secret-evidence \
         sandbox-secret-mutations sandbox-workspace-evidence sandbox-workspace-mutations \
@@ -112,6 +113,9 @@ sandbox-egress-evidence: ## M5b PROXY_ONLY on real OCI containers: relay, CONNEC
 
 sandbox-egress-policy-mutations: ## F-17 mutation review (ADR-0061, Proposed): each guard of a workload's egress authorisation weakened in turn must fail a unit suite or sandbox-egress-evidence (slow)
 	@$(DW) sandbox-egress-policy-mutations
+
+sandbox-taint-mutations: ## F-01 mutation review (ADR-0062, Proposed): each guard of taint that follows the content a run receives weakened in turn must fail the authority's unit suites or sandbox-egress-evidence (slow)
+	@$(DW) sandbox-taint-mutations
 
 sandbox-workload-evidence: ## M5d.1-M5d.2 workloads in real OCI environments: identity, bounds, wall clock, process trees ended, digests, drift, escapes, an agent-shaped workload, the authority's gates, ledger and crash windows; the public process.exec over real DWKP, serve --sandbox-config, the hygiene launcher with real git/Python/pytest; M5e.2 cross-run isolation
 	@$(DW) sandbox-workload-evidence
