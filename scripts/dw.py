@@ -772,13 +772,16 @@ def require_filesystem_evidence(output: str) -> None:
 
 TRANSPORT_SUITES = ("transport_server", "transport_hostile", "transport_stress")
 
-# The cross-uid suite: both tests are `#[ignore]`d, so that a plain `cargo test`
+# The cross-uid suite: every test is `#[ignore]`d, so that a plain `cargo test`
 # stays runnable on a one-user machine, and this task selects them BY NAME.
 # `--ignored` with a filter that matched nothing would be a green "0 passed";
 # `_require_foreign_evidence` makes that a failure.
 FOREIGN_TESTS = (
     "linux::a_real_foreign_uid_is_refused_by_the_identity_the_kernel_reports",
     "linux::a_foreign_uid_cannot_remove_replace_or_shadow_the_socket",
+    # F-18 (ADR-0063): a second uid the operator lets speak still holds
+    # nothing another principal owns.
+    "linux::a_foreign_uid_allowed_to_connect_holds_no_other_principals_session_or_profile",
 )
 # Every case those tests report, one evidence line each, printed only after
 # the case's assertions held. The same set as the peer-credential-check eval's.
@@ -787,6 +790,9 @@ FOREIGN_CASES = (
     "foreign-uid-malformed-payload",
     "foreign-uid-flood",
     "foreign-uid-impersonation",
+    "foreign-uid-session-takeover",
+    "foreign-uid-profile-escalation",
+    "foreign-uid-owned-session-held",
 )
 
 
@@ -944,7 +950,7 @@ def run_captured(*command: str, fresh_keyring: bool = False) -> str:
 
 
 def require_foreign_evidence(output: str) -> None:
-    """The cross-uid suite counts only if both tests ran and every case reported.
+    """The cross-uid suite counts only if every test ran and every case reported.
 
     libtest exits 0 when a filter selects nothing, so a renamed test, a changed
     `cfg` or a lost `--ignored` would otherwise be a green run that proved
@@ -954,7 +960,7 @@ def require_foreign_evidence(output: str) -> None:
     expected = f"test result: ok. {len(FOREIGN_TESTS)} passed; 0 failed; 0 ignored"
     if len(summaries) != 1 or not summaries[0].startswith(expected):
         raise TaskError(
-            f"the cross-uid suite did not run both of its tests: expected `{expected}`, "
+            f"the cross-uid suite did not run every one of its tests: expected `{expected}`, "
             f"got {summaries or 'no summary'}"
         )
     reported: set[str] = set()
@@ -7428,6 +7434,278 @@ def task_sandbox_taint_mutations() -> None:
     )
 
 
+# F-18's mutation review (ADR-0063, Proposed): each line weakens one guard of
+# principal ownership, in the source, one at a time -- who may hold a session
+# (the acquisition, the first acquirer, the fence's own check, a delegate, a
+# retired owner, the workspace), who may run under a profile, what binding,
+# granting and sharing need, what a migration and an adoption may take from
+# history, and both phases of a revocation and what its report and a parked
+# launch's answer say. Each mutant must compile and must fail the ownership
+# suites or the authority's unit suites; the file is then restored, and its
+# SHA-256 proves it byte-identical. A mutant that survives, or does not
+# compile, fails the review.
+_OWN = "crates/dwkd-authority/src/state/ownership.rs"
+_OWN_LEASE = "crates/dwkd-authority/src/state/lease.rs"
+_OWN_MOD = "crates/dwkd-authority/src/state/mod.rs"
+OWNERSHIP_SUITES = (
+    "state_ownership",
+    "state_lease",
+    "state_admission",
+    "state_restart",
+    "resource_workspace",
+)
+OWNERSHIP_MUTATIONS: tuple[tuple[str, str, str, str], ...] = (
+    (
+        "OM1: a subject that may not hold a session is not refused",
+        _OWN_LEASE,
+        "    if let Standing::Refused(why) = standing {",
+        "    if let Standing::Refused(why) = standing\n        && false\n    {",
+    ),
+    (
+        "OM2: a new session's first acquirer is not recorded its owner",
+        _OWN_LEASE,
+        "        if standing == Standing::Claimable {",
+        "        if standing == Standing::Claimable && false {",
+    ),
+    (
+        "OM3: the fence trusts the lease alone",
+        _OWN_LEASE,
+        "    Ok(ownership::standing(work, caller.subject(), session)? == Standing::Permitted)",
+        "    Ok(true)",
+    ),
+    (
+        "OM4: a session seen before is claimed by its first acquirer",
+        _OWN,
+        "        return Ok(if seen {",
+        "        return Ok(if seen && false {",
+    ),
+    (
+        "OM5: a revoked delegate still holds the session",
+        _OWN,
+        "        || work.db(work.tx.query_row(\n"
+        '            "SELECT EXISTS (SELECT 1 FROM session_delegate WHERE session_id = ?1 \\\n'
+        '             AND subject = ?2 AND revoked_ms IS NULL)",',
+        "        || work.db(work.tx.query_row(\n"
+        '            "SELECT EXISTS (SELECT 1 FROM session_delegate WHERE session_id = ?1 \\\n'
+        '             AND subject = ?2)",',
+    ),
+    (
+        "OM6: a bound session is held outside its workspace",
+        _OWN,
+        "        Standing::Refused(Refusal::WorkspaceNotPermitted)",
+        "        Standing::Permitted",
+    ),
+    (
+        "OM7: a retired session's owner still holds it",
+        _OWN,
+        "    if revoked.is_some() {\n        return Ok(Standing::Refused(Refusal::Retired));",
+        "    if revoked.is_some() && false {\n"
+        "        return Ok(Standing::Refused(Refusal::Retired));",
+    ),
+    (
+        "OM8: a revoked profile principal still runs under it",
+        _OWN,
+        '        "SELECT EXISTS (SELECT 1 FROM profile_principal WHERE profile = ?1 '
+        'AND subject = ?2 \\\n         AND revoked_ms IS NULL)",',
+        '        "SELECT EXISTS (SELECT 1 FROM profile_principal WHERE profile = ?1 '
+        'AND subject = ?2 \\\n         AND 1)",',
+    ),
+    (
+        "OM9: admission names any profile",
+        "crates/dwkd-authority/src/state/admission.rs",
+        "    if super::ownership::profile_permitted(work, attempt.caller.subject(), "
+        "attempt.agent_profile)? {",
+        "    if true\n"
+        "        || super::ownership::profile_permitted(work, attempt.caller.subject(), "
+        "attempt.agent_profile)?\n    {",
+    ),
+    (
+        "OM10: a session is bound without its owner's check",
+        "crates/dwkd-authority/src/state/config.rs",
+        "    super::ownership::check_binding(tx, session, id)?;",
+        "    let _ = super::ownership::check_binding(tx, session, id);",
+    ),
+    (
+        "OM11: a root is bound without its sharing's check",
+        "crates/dwkd-authority/src/state/config.rs",
+        "    super::ownership::check_root_sharing(tx, id)?;",
+        "    let _ = super::ownership::check_root_sharing(tx, id);",
+    ),
+    (
+        "OM12: a grant is made without the root's sharing check",
+        _OWN,
+        "    check_root_sharing(tx, workspace)?;",
+        "    let _ = check_root_sharing(tx, workspace);",
+    ),
+    (
+        "OM13: a second principal of a workspace needs no acknowledgement",
+        _OWN,
+        "    if others && !acknowledged {",
+        "    if others && !acknowledged && false {",
+    ),
+    (
+        "OM14: a session is bound to a workspace its owner is not a principal of",
+        _OWN,
+        "    if !is_workspace_principal(tx, workspace.as_str(), &owner)? {",
+        "    if false {",
+    ),
+    (
+        "OM15: a bound session's owner is declared outside its workspace",
+        _OWN,
+        "        None => {}\n    }\n"
+        "    if let Some(workspace) = bound_workspace(tx, session.as_str())?\n"
+        "        && !is_workspace_principal(tx, &workspace, &key)?",
+        "        None => {}\n    }\n"
+        "    if let Some(workspace) = bound_workspace(tx, session.as_str())?\n"
+        "        && false",
+    ),
+    (
+        "OM16: a bound session's delegate is added outside its workspace",
+        _OWN,
+        "            session.as_str()\n        )));\n    }\n"
+        "    if let Some(workspace) = bound_workspace(tx, session.as_str())?\n"
+        "        && !is_workspace_principal(tx, &workspace, &key)?\n    {\n"
+        "        return Err(ConfigError::Invalid(format!(\n"
+        '            "session {} is bound to workspace `{workspace}`, of which {key} is not a '
+        'principal",\n            session.as_str()\n        )));\n    }\n    let active: bool',
+        "            session.as_str()\n        )));\n    }\n"
+        "    if let Some(workspace) = bound_workspace(tx, session.as_str())?\n"
+        "        && false\n    {\n"
+        "        return Err(ConfigError::Invalid(format!(\n"
+        '            "session {} is bound to workspace `{workspace}`, of which {key} is not a '
+        'principal",\n            session.as_str()\n        )));\n    }\n    let active: bool',
+    ),
+    (
+        "OM17: a revocation leaves the holder's lease live",
+        _OWN,
+        "        if let Some((holder, epoch)) = lease::invalidate_held(work, session, "
+        "holder.as_deref())? {",
+        "        if let Some((holder, epoch)) = None::<(String, u64)> {",
+    ),
+    (
+        "OM18: a revocation reaps no run",
+        _OWN,
+        "             WHERE session_id = ?1 AND state = 'ACTIVE' "
+        "AND (?2 IS NULL OR subject = ?2) \\",
+        "             WHERE session_id = ?1 AND state = 'ACTIVE' AND 0 AND (?2 IS NULL OR subject "
+        "= ?2) \\",
+    ),
+    (
+        "OM19: a revoked run's environment is not destroyed",
+        _OWN,
+        '        teardown.extend(environment::begin_run_end(work, &id, "REVOKED")?);',
+        "        let _ = &id;",
+    ),
+    (
+        "OM20: a retired session's delegates stand",
+        _OWN,
+        '        "UPDATE session_delegate SET revoked_ms = ?2 \\\n'
+        '             WHERE session_id = ?1 AND revoked_ms IS NULL",',
+        '        "UPDATE session_delegate SET revoked_ms = ?2 \\\n'
+        '             WHERE session_id = ?1 AND revoked_ms IS NULL AND 0",',
+    ),
+    (
+        "OM21: a revocation is complete while a workload still runs",
+        _OWN,
+        "            let ended = environments == 0 && workloads == 0 && processes == 0;",
+        "            let ended = environments == 0 && processes == 0;",
+    ),
+    (
+        "OM22: a revocation is complete while an environment is not gone",
+        _OWN,
+        "            let ended = environments == 0 && workloads == 0 && processes == 0;",
+        "            let ended = workloads == 0 && processes == 0;",
+    ),
+    (
+        "OM23: a revocation's second phase is skipped",
+        _OWN_MOD,
+        "                self.perform_destroy(record, invocation)?;\n            }\n        }\n"
+        "        self.revocation_status(revoked.id)?",
+        "                let _ = (record, invocation);\n            }\n        }\n"
+        "        self.revocation_status(revoked.id)?",
+    ),
+    (
+        "OM24: a revoked run is answered with what its parked workload produced",
+        "crates/dwkd-authority/src/state/workload_route.rs",
+        "            withheld(reply)\n        } else {",
+        "            reply\n        } else {",
+    ),
+    (
+        "OM25: the migration makes the last lease holder an owner",
+        "crates/dwkd-authority/src/state/schema.rs",
+        "CREATE TRIGGER session_workspace_bound_with_its_owner BEFORE INSERT ON session_workspace",
+        "INSERT INTO session_owner (session_id, subject, basis, recorded_ms)\n"
+        "SELECT session_id, holder_subject, 'OPERATOR', 0 FROM session_lease\n"
+        "WHERE holder_subject IS NOT NULL;\n"
+        "CREATE TRIGGER session_workspace_bound_with_its_owner BEFORE INSERT ON session_workspace",
+    ),
+    (
+        "OM26: the adoption overlooks another subject in the history",
+        "crates/dwkd-authority/src/state/adoption.rs",
+        "    if history > 0 {",
+        "    if history > 0 && false {",
+    ),
+    (
+        "OM27: the adoption overlooks a declaration naming another subject",
+        "crates/dwkd-authority/src/state/adoption.rs",
+        "    if records > 0 {",
+        "    if records > 0 && false {",
+    ),
+)
+
+
+def task_authority_ownership_mutations() -> None:
+    """Weaken each guard of F-18's principal ownership in turn (ADR-0063,
+    Proposed); the ownership suites or the authority's unit suites must catch
+    every one.
+
+    Every file is restored byte-identically whatever happens, and checked.
+    Never run it beside another build.
+    """
+    killed: list[str] = []
+    suites: list[str] = []
+    for suite in OWNERSHIP_SUITES:
+        suites += ["--test", suite]
+    for what, rel, old, new in OWNERSHIP_MUTATIONS:
+        path = ROOT / rel
+        original = path.read_bytes()
+        digest = hashlib.sha256(original).hexdigest()
+        text = original.decode("utf-8")
+        if text.count(old) != 1:
+            raise TaskError(f"mutation `{what}`: its target is not in {rel} exactly once")
+        print(f"{BOLD}mutant: {what}{OFF}")
+        outcome = "survived"
+        try:
+            path.write_bytes(text.replace(old, new).encode("utf-8"))
+            try:
+                run("cargo", "test", "--locked", "--no-run", "-p", "dwkd-authority")
+            except TaskError:
+                outcome = "did not compile"
+            else:
+                try:
+                    run("cargo", "test", "--locked", "-p", "dwkd-authority", *suites)
+                except TaskError as exc:
+                    outcome = f"killed by an ownership suite: {str(exc)[:160]}"
+                else:
+                    try:
+                        run("cargo", "test", "--locked", "-p", "dwkd-authority", "--lib")
+                    except TaskError as exc:
+                        outcome = f"killed by a unit suite: {str(exc)[:160]}"
+        finally:
+            path.write_bytes(original)
+        if hashlib.sha256(path.read_bytes()).hexdigest() != digest:
+            raise TaskError(f"{rel} was not restored byte-identically")
+        print(f"{DIM}restored {rel} (sha256 {digest[:16]}...){OFF}")
+        if not outcome.startswith("killed"):
+            raise TaskError(f"mutant `{what}` {outcome}: nothing guards it")
+        killed.append(what)
+        print(f"{GREEN}mutant {outcome[:60]}: {what}{OFF}")
+    print(
+        f"{GREEN}authority ownership mutation review: {len(killed)} of "
+        f"{len(OWNERSHIP_MUTATIONS)} killed{OFF}"
+    )
+
+
 # M5d.3 (ADR-0052 §7): a sandboxed `process.exec` that consumes a credential.
 SECRET_SANDBOX_BROKER_TESTS = (
     "linux::a_descriptor_secret_reaches_the_program_on_descriptor_three_and_nowhere_else",
@@ -9649,7 +9927,7 @@ AGENT_CASES = tuple(
         "audit-egress-counted-by-disposition-not-per-attempt",
     )
 )
-# Every (suite, case) the three-identity suite must report: I01-I08, A09,
+# Every (suite, case) the three-identity suite must report: I01-I09, A09,
 # and A03 again as three users.
 AGENT_IDENTITY_CASES = tuple(
     ("sandbox-agent-identity", case)
@@ -9677,6 +9955,8 @@ AGENT_IDENTITY_CASES = tuple(
         "i08-authority-crash-unknown-environment-destroyed",
         "i08-broker-crash-unknown-environment-destroyed",
         "i08-never-replayed",
+        # F-18 (ADR-0063): the runtime holds only what the operator declared.
+        "i09-runtime-holds-only-what-the-operator-declared",
         "a03-https-granted-origin-three-identities",
         "a09-agent-and-broker-share-the-bounded-workspace",
     )
@@ -12812,6 +13092,7 @@ TASKS = {
     "sandbox-workload-mutations": task_sandbox_workload_mutations,
     "sandbox-egress-policy-mutations": task_sandbox_egress_policy_mutations,
     "sandbox-taint-mutations": task_sandbox_taint_mutations,
+    "authority-ownership-mutations": task_authority_ownership_mutations,
     "sandbox-neighbour-mutations": task_sandbox_neighbour_mutations,
     "sandbox-secret-evidence": task_sandbox_secret_evidence,
     "sandbox-secret-mutations": task_sandbox_secret_mutations,

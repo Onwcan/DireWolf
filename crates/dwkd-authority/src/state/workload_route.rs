@@ -681,6 +681,22 @@ fn result(answer: &Answer, done: &WorkloadOutcome) -> Result<SandboxedExecResult
     })
 }
 
+/// What a revoked run is answered for its parked launch (F-18): a completed
+/// workload's output is withheld, and the answer says only that the outcome
+/// is not the run's to know (`OUTCOME_UNKNOWN`) -- its environment is being
+/// destroyed by the revocation. A failure or an unknown outcome carries no
+/// output and is answered as it is.
+fn withheld(reply: WorkloadReply) -> WorkloadReply {
+    match reply {
+        WorkloadReply::Completed(done) => WorkloadReply::Unknown {
+            invocation: done.invocation,
+            reason: "RUN_REVOKED",
+            environment_destroyed: true,
+        },
+        other => other,
+    }
+}
+
 /// A settled launch's answer, in the version it was asked at.
 fn answered(answer: &Answer, reply: &WorkloadReply) -> Result<DwkpBody, WireGap> {
     in_version(answered_v6(answer, reply)?, answer.version)
@@ -785,6 +801,15 @@ impl Authority {
             return Ok(None);
         };
         let reply = self.settle_workload(&run, &parked.started.intent, ending, &egress)?;
+        // F-18 (ADR-0063): a run a revocation reaped while its launch was
+        // parked is told nothing its workload produced. The outcome is
+        // settled and recorded above exactly as for any run -- its egress,
+        // its exposure, its taint -- and only the answer withholds it.
+        let reply = if self.transact(|work| super::ownership::revoked_run(work, &run))? {
+            withheld(reply)
+        } else {
+            reply
+        };
         answered(&parked.answer, &reply)
             .map(Some)
             .map_err(unrepresentable)

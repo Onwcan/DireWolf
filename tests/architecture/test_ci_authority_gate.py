@@ -326,7 +326,7 @@ def test_the_foreign_tests_are_ignored_by_default_and_selected_by_name() -> None
     """`cargo test` may skip them; the evidence task may not. Every name the
     task selects is an `#[ignore]`d test that exists."""
     source = FOREIGN_SUITE.read_text(encoding="utf-8")
-    assert len(dw.FOREIGN_TESTS) == 2
+    assert len(dw.FOREIGN_TESTS) == 3
     for name in dw.FOREIGN_TESTS:
         module, function = name.split("::")
         assert module == "linux"
@@ -356,8 +356,11 @@ def test_the_eval_gate_fails_closed(environ: dict[str, str], strict: bool) -> No
     assert dw.eval_gate_is_strict(environ) is strict
 
 
+FOREIGN_RUN = len(dw.FOREIGN_TESTS)
+
+
 def _libtest(passed: int, cases: tuple[str, ...]) -> str:
-    lines = ["running 2 tests"]
+    lines = [f"running {FOREIGN_RUN} tests"]
     lines += [
         f'test linux::x ... DWKP-EVIDENCE {{"suite":"peer","case":"{c}","layer":"peer-gate",'
         f'"contained":true,"audited":true,"server":"/t/dwkd-authority"}}'
@@ -365,27 +368,27 @@ def _libtest(passed: int, cases: tuple[str, ...]) -> str:
     ]
     lines.append(
         f"test result: ok. {passed} passed; 0 failed; 0 ignored; 0 measured; "
-        f"{2 - passed} filtered out; finished in 1.00s"
+        f"{FOREIGN_RUN - passed} filtered out; finished in 1.00s"
     )
     return "\n".join(lines)
 
 
 def test_a_cross_uid_run_that_selected_nothing_is_not_evidence() -> None:
-    with pytest.raises(dw.TaskError, match="did not run both"):
+    with pytest.raises(dw.TaskError, match="did not run every"):
         dw.require_foreign_evidence(_libtest(0, ()))
-    with pytest.raises(dw.TaskError, match="did not run both"):
-        dw.require_foreign_evidence(_libtest(1, dw.FOREIGN_CASES))
+    with pytest.raises(dw.TaskError, match="did not run every"):
+        dw.require_foreign_evidence(_libtest(FOREIGN_RUN - 1, dw.FOREIGN_CASES))
     with pytest.raises(dw.TaskError, match="did not report: foreign-uid-flood"):
         dw.require_foreign_evidence(
-            _libtest(2, tuple(c for c in dw.FOREIGN_CASES if c != "foreign-uid-flood"))
+            _libtest(FOREIGN_RUN, tuple(c for c in dw.FOREIGN_CASES if c != "foreign-uid-flood"))
         )
-    uncontained = _libtest(2, dw.FOREIGN_CASES).replace(
+    uncontained = _libtest(FOREIGN_RUN, dw.FOREIGN_CASES).replace(
         '"case":"foreign-uid-impersonation","layer":"peer-gate","contained":true',
         '"case":"foreign-uid-impersonation","layer":"peer-gate","contained":false',
     )
     with pytest.raises(dw.TaskError, match="foreign-uid-impersonation"):
         dw.require_foreign_evidence(uncontained)
-    dw.require_foreign_evidence(_libtest(2, dw.FOREIGN_CASES))
+    dw.require_foreign_evidence(_libtest(FOREIGN_RUN, dw.FOREIGN_CASES))
 
 
 class _Recorder:
@@ -397,7 +400,7 @@ class _Recorder:
 
     def captured(self, *command: str) -> str:
         self.commands.append(command)
-        return _libtest(2, dw.FOREIGN_CASES)
+        return _libtest(FOREIGN_RUN, dw.FOREIGN_CASES)
 
     def uvrun(self, module: str, *args: str) -> None:
         self.commands.append(("uv", module, *args))

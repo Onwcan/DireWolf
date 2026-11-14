@@ -5,7 +5,8 @@ The cross-uid half of the M3e evidence (ADR-0041). The Rust harness
 `dwkd-authority serve`, then runs this script through `sudo -n -u
 $DW_PEER_AS` -- the harness switches users, never the authority. Whatever this
 process sends, the kernel reports ITS uid to the server, and the server must
-refuse it before reading a byte.
+refuse it before reading a byte -- or, when the operator lets that uid speak
+(F-18, ADR-0063), answer it as that uid and no other.
 
 Cases:
 
@@ -13,6 +14,8 @@ Cases:
     garbage <socket>                    send a malformed frame
     flood <socket> <n> <hex-frame>      connect n times, each sending the frame
     impersonate <socket>                try to remove, replace or shadow the socket
+    converse <socket> <hex-frame>...    on one connection, send each frame and
+                                        read one answer frame after it
 
 It prints one JSON object on stdout: what it is (uid, euid, pid) and what it
 observed. It asserts nothing; the harness does, against the audit log.
@@ -71,6 +74,49 @@ def _exchange(path: str, frame: bytes) -> dict[str, object]:
         result["error"] = errno.errorcode.get(exc.errno or 0, str(exc.errno))
     finally:
         client.close()
+    return result
+
+
+def _read_exactly(client: socket.socket, count: int) -> bytes | None:
+    """`count` bytes, or None if the server closed the connection first."""
+    data = b""
+    while len(data) < count:
+        chunk = client.recv(count - len(data))
+        if not chunk:
+            return None
+        data += chunk
+    return data
+
+
+def _converse(path: str, frames: list[bytes]) -> dict[str, object]:
+    """One connection: each frame sent, then one answer frame read -- its
+    five-byte header (big-endian body length, content type) and its body --
+    returned as hex for the harness to decode. Stops at end of stream."""
+    result: dict[str, object] = {"connected": False, "replies": [], "eof": False, "error": None}
+    replies: list[str] = []
+    client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    client.settimeout(TIMEOUT_S)
+    try:
+        client.connect(path)
+        result["connected"] = True
+        for frame in frames:
+            client.sendall(frame)
+            header = _read_exactly(client, 5)
+            if header is None:
+                result["eof"] = True
+                break
+            body = _read_exactly(client, int.from_bytes(header[:4], "big"))
+            if body is None:
+                result["eof"] = True
+                break
+            replies.append((header + body).hex())
+    except TimeoutError:
+        result["error"] = "timeout"
+    except OSError as exc:
+        result["error"] = errno.errorcode.get(exc.errno or 0, str(exc.errno))
+    finally:
+        client.close()
+    result["replies"] = replies
     return result
 
 
@@ -152,6 +198,8 @@ def main(argv: list[str]) -> int:
             else:
                 outcomes.append({"attempt": name, "refused": False, "errno": None})
         report["attempts"] = outcomes
+    elif case == "converse" and len(argv) >= 4:
+        report.update(_converse(path, [bytes.fromhex(frame) for frame in argv[3:]]))
     else:
         print(__doc__, file=sys.stderr)
         return 2

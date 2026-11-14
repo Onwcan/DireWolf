@@ -250,10 +250,15 @@ fn a_fenced_or_foreign_release_ends_no_environment() {
     // Another session's run, with an environment of its own.
     let workspace = WorkspaceId::new("ws").unwrap();
     let other_session = SessionId::from_uuid(uuid(2)).unwrap();
-    fx.authority()
-        .operator()
-        .bind_session_workspace(&other_session, &workspace)
-        .unwrap();
+    {
+        let mut operator = fx.authority().operator();
+        operator
+            .declare_session_owner(&other_session, AuthenticatedSubject::unix_uid(1000))
+            .unwrap();
+        operator
+            .bind_session_workspace(&other_session, &workspace)
+            .unwrap();
+    }
     fx.session = other_session.clone();
     fx.lease();
     let foreign = fx.run("f1", &[GRANT]);
@@ -616,10 +621,15 @@ fn ran_in(fx: &mut Fixture, name: &str, key: &str) -> (RunId, EnvironmentId) {
 fn foreign_run(fx: &mut Fixture) -> (RunId, EnvironmentId) {
     let (caller, session, epoch) = holder(fx);
     let other = SessionId::from_uuid(uuid(3)).unwrap();
-    fx.authority()
-        .operator()
-        .bind_session_workspace(&other, &WorkspaceId::new("ws").unwrap())
-        .unwrap();
+    {
+        let mut operator = fx.authority().operator();
+        operator
+            .declare_session_owner(&other, AuthenticatedSubject::unix_uid(1000))
+            .unwrap();
+        operator
+            .bind_session_workspace(&other, &WorkspaceId::new("ws").unwrap())
+            .unwrap();
+    }
     fx.session = other;
     fx.lease();
     let found = ran_in(fx, "fo", "fo1");

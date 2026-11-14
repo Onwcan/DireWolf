@@ -773,6 +773,102 @@ mod linux {
         );
         let _ = a.stream().flush();
     }
+
+    /// The `pipe:[inode]` or path a descriptor of `pid` names.
+    fn descriptor_targets(pid: u32) -> Vec<String> {
+        std::fs::read_dir(format!("/proc/{pid}/fd"))
+            .expect("a dumpable server's descriptors are readable")
+            .filter_map(|entry| std::fs::read_link(entry.ok()?.path()).ok())
+            .map(|target| target.display().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn a_descriptor_a_runtime_passes_is_never_installed_in_the_authority() {
+        // F-18 (ADR-0063, Proposed): the runtime's DWKP endpoint reads bytes.
+        // A descriptor a runtime attaches -- a pipe it holds, a terminal it
+        // controls -- is discarded by the kernel with the bytes it rode on:
+        // never installed in the authority, so it can never become an
+        // approver's terminal or anything else. M6's approver endpoint is a
+        // separate one (APPROVALS.md, ADR-0063).
+        use std::io::{IoSlice, Read as _};
+        use std::mem::MaybeUninit;
+        use std::os::fd::AsFd as _;
+
+        use rustix::net::{SendAncillaryBuffer, SendAncillaryMessage, SendFlags};
+
+        let fx = Fixture::new("h-fd");
+        // Dumpable, so that this harness may read the server's descriptors.
+        let server = Server::start(&fx.args(&["--allow-dumpable"]));
+        let (mut reader, writer) = std::io::pipe().unwrap();
+        let pipe = std::fs::read_link(format!("/proc/self/fd/{}", {
+            use std::os::fd::AsRawFd as _;
+            reader.as_raw_fd()
+        }))
+        .unwrap()
+        .display()
+        .to_string();
+        assert!(pipe.starts_with("pipe:["), "{pipe}");
+        let terminal = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open("/dev/ptmx")
+            .expect("a terminal this process controls");
+        let mut client = Client::connect(&fx.socket());
+        let frame = handshake(1, 1, 1).to_frame().unwrap();
+        {
+            let fds = [writer.as_fd(), terminal.as_fd()];
+            let mut space = [MaybeUninit::<u8>::uninit(); rustix::cmsg_space!(ScmRights(2))];
+            let mut control = SendAncillaryBuffer::new(&mut space);
+            assert!(control.push(SendAncillaryMessage::ScmRights(&fds)));
+            let sent = rustix::net::sendmsg(
+                client.stream(),
+                &[IoSlice::new(&frame)],
+                &mut control,
+                SendFlags::NOSIGNAL,
+            )
+            .unwrap();
+            assert_eq!(sent, frame.len());
+        }
+        drop(writer);
+        drop(terminal);
+        // The bytes are a handshake like any other, and answered as one.
+        let answer = client.recv(PROMPT).message();
+        assert!(
+            matches!(answer.body, DwkpBody::HandshakeAccepted(_)),
+            "{answer:?}"
+        );
+        // The pipe's write end went with the bytes: this process dropped its
+        // own, so if the authority held one the read end would never end.
+        let (done, ended) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut rest = Vec::new();
+            let _ = done.send(reader.read_to_end(&mut rest).map(|n| n == 0));
+        });
+        assert!(
+            matches!(ended.recv_timeout(PROMPT), Ok(Ok(true))),
+            "the passed pipe end is held somewhere"
+        );
+        // And the server holds neither the pipe nor a terminal master.
+        let held = descriptor_targets(server.pid);
+        assert!(!held.contains(&pipe), "{held:?}");
+        assert!(
+            !held
+                .iter()
+                .any(|t| t == "/dev/ptmx" || t.starts_with("/dev/pts/")),
+            "{held:?}"
+        );
+        // The connection is still the runtime's, and only bytes count.
+        let s = session(8);
+        let _ = lease(&mut client, &s);
+        evidence(
+            "hostile",
+            "runtime-descriptor-discarded",
+            "connection-protocol",
+            true,
+            false,
+        );
+    }
 }
 
 /// The harness reads `audit.log` while the authority appends to it

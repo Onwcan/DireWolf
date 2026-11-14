@@ -859,6 +859,52 @@ def test_the_hygiene_profiles_have_no_switch(violation_rules: list[str]) -> None
     assert {line for _, line, _ in _findings(rule)} == {3, 7, 10}
 
 
+def test_the_runtime_endpoint_receives_no_descriptor(violation_rules: list[str]) -> None:
+    """F-18 (ADR-0063, Proposed): the runtime's DWKP endpoint reads bytes; a
+    way to receive a descriptor -- `recvmsg`, an ancillary buffer, an owned
+    control message, `SCM_RIGHTS` -- in the server is caught on every line, and
+    the doc comment naming the terminal it would let through is not."""
+    rule = "TX061-the-runtime-endpoint-receives-no-descriptor"
+    assert rule in violation_rules
+    assert _paths(rule) == {"crates/dwkd-authority/src/server/descriptor_receive.rs"}
+    assert {line for _, line, _ in _findings(rule)} == {4, 5, 6, 7}
+
+
+def test_the_runtime_path_selects_no_origin_and_records_no_approval(
+    violation_rules: list[str],
+) -> None:
+    """F-18 (ADR-0063, Proposed): an attended origin, or an insert into an
+    approval record, in the runtime's state or server path is caught; the
+    production `Origin::Api` and `Origin::parse` are not."""
+    rule = "TX062-the-runtime-path-selects-no-origin-and-records-no-approval"
+    assert rule in violation_rules
+    assert _paths(rule) == {"crates/dwkd-authority/src/state/origin_select.rs"}
+    assert {line for _, line, _ in _findings(rule)} == {5, 8}
+
+
+def test_the_runtime_endpoint_takes_its_subject_from_the_kernel(
+    violation_rules: list[str],
+) -> None:
+    """F-18 (ADR-0063, Proposed): in the server a subject is made only as
+    `unix_uid(peer.uid)`, from the kernel's report; one made from anything
+    else is caught."""
+    rule = "TX063-the-runtime-endpoint-takes-its-subject-from-the-kernel"
+    assert rule in violation_rules
+    assert _paths(rule) == {"crates/dwkd-authority/src/server/subject_claim.rs"}
+    assert {line for _, line, _ in _findings(rule)} == {5}
+
+
+def test_history_is_never_read_as_authority(violation_rules: list[str]) -> None:
+    """F-18 (ADR-0063, Proposed): only the schema and the single-principal
+    adoption name `ownership_observation`; a decision that reads it -- the
+    fixture makes a session's last observed subject its owner -- is caught,
+    and its doc comment is not."""
+    rule = "TX064-history-is-never-read-as-authority"
+    assert rule in violation_rules
+    assert _paths(rule) == {"crates/dwkd-authority/src/state/history_grant.rs"}
+    assert {line for _, line, _ in _findings(rule)} == {4}
+
+
 def test_the_server_seam_is_named_only_by_the_server(violation_rules: list[str]) -> None:
     """M5d.2 (ADR-0052 §17): `serve_authority` and `Served::operate` -- the
     evidence's door -- are named by the server module alone; the CLI fixture
@@ -1107,6 +1153,10 @@ def test_the_required_boundary_rules_are_all_declared() -> None:
         "TX058-the-workspace-modes-are-spelled-once",
         "TX059-the-unverified-workspace-is-acknowledged-in-one-place",
         "TX060-the-hygiene-profiles-have-no-switch",
+        "TX061-the-runtime-endpoint-receives-no-descriptor",
+        "TX062-the-runtime-path-selects-no-origin-and-records-no-approval",
+        "TX063-the-runtime-endpoint-takes-its-subject-from-the-kernel",
+        "TX064-history-is-never-read-as-authority",
         "DEP001-no-agent-framework-dependency",
         "DEP002-runtime-has-no-transport-dependency",
         "RS001-authority-depends-on-nothing-in-tree",

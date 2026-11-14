@@ -56,6 +56,7 @@
 //! [`db`]: self::db
 
 mod admission;
+mod adoption;
 mod audit;
 mod clock;
 mod config;
@@ -72,6 +73,7 @@ mod lease;
 #[cfg(all(test, target_os = "linux"))]
 mod lookup_tests;
 mod net_http;
+mod ownership;
 mod plan;
 mod policy_state;
 mod process;
@@ -114,6 +116,7 @@ use crate::policy::{PolicyContext, TaintLevel};
 /// the state API is self-contained for its callers (the DWKP server).
 pub use crate::policy::ConfigFlags;
 pub use admission::{Admission, Grant, Withheld, WithheldCause, request_digest};
+pub use adoption::Adoption;
 pub use audit::{
     AUDIT_FORMAT_VERSION, AuditEvent, AuditLogFault, AuditLogSummary, AuditRecord,
     MAX_RECORD_BYTES, RecordFault, StoreAuditFault, StoreComparison, read_audit_log,
@@ -137,6 +140,7 @@ pub use files::{AUDIT_LOG, KERNEL_DB, LOCK_FILE, QUARANTINE_MARKER};
 pub use identity::{AuthenticatedSubject, CallerContext, LeaseHolder};
 pub use lease::{DEFAULT_LEASE_TTL_MS, MAX_EPOCH, MAX_LEASE_TTL_MS, MIN_LEASE_TTL_MS};
 pub use net_http::NetBudget;
+pub use ownership::{OwnershipGaps, RevocationReport, RevocationStatus};
 pub use plan::{PlannedAction, RetryClass, ToolPlan, ToolVersion};
 pub use policy_state::{MAX_CEILING_CAPABILITIES, MAX_POLICY_SOURCES, PolicySet, PolicySource};
 pub use process::{
@@ -270,6 +274,10 @@ pub struct StartReport {
     pub policy_revision: Sha256Hash,
     /// The active activation.
     pub activation_id: i64,
+    /// What ownership is missing (F-18, OD-11): the authority starts, and
+    /// whatever is missing refuses per request until the operator declares
+    /// it. Recorded once, as `ownership.incomplete`, when anything is.
+    pub ownership: OwnershipGaps,
 }
 
 /// How many staging records the sweep after an invocation with an effect
@@ -671,6 +679,9 @@ impl Authority {
         // What a previous incarnation's invocations may have left in a
         // workspace is judged now; nothing is performed again.
         let staging = authority.reclaim_staging(None, MAX_RECLAIMS_PER_SWEEP)?;
+        // F-18 (OD-11): what ownership is missing, recorded once; the start
+        // goes on, and each request it touches refuses.
+        let ownership = authority.transact(ownership::report_gaps)?;
         let revision = prepared.revision;
         let partition = crate::policy::partition::NetworkPartition::of(&prepared.compiled);
         let _ = authority.shared.active.set(ActiveAuthority {
@@ -697,6 +708,7 @@ impl Authority {
             audit_torn_tail_bytes: recovered.torn_tail_bytes,
             policy_revision: revision,
             activation_id,
+            ownership,
         };
         Ok((authority, report))
     }
@@ -1972,6 +1984,54 @@ impl Authority {
     pub fn operator(&mut self) -> OperatorBootstrap<'_> {
         OperatorBootstrap { authority: self }
     }
+
+    /// What ownership is missing now (F-18): what refuses until the
+    /// operator declares it. Read-only.
+    ///
+    /// # Errors
+    ///
+    /// [`AuthorityError`] when the authority cannot answer.
+    pub fn ownership_gaps(&mut self) -> Result<OwnershipGaps, AuthorityError> {
+        self.transact(|work| ownership::gaps(work))
+    }
+
+    /// Whether a revocation is complete (F-18, ADR-0063): `REVOKED` from its
+    /// commit, `COMPLETE` only once every environment of every run it reaped
+    /// is gone and none of their workloads or host processes is still
+    /// running. Read-only; `None` for a revocation that does not exist.
+    ///
+    /// # Errors
+    ///
+    /// [`AuthorityError`] when the authority cannot answer.
+    pub fn revocation_status(
+        &mut self,
+        revocation: i64,
+    ) -> Result<Option<RevocationReport>, AuthorityError> {
+        self.transact(|work| ownership::report(work, revocation))
+    }
+
+    /// A revocation's second phase: the broker removes each environment
+    /// whose destruction its first phase recorded -- every one, since an
+    /// operator's revocation holds no runtime's request. One it cannot
+    /// remove stays `DESTROYING`, is audited, and is tried again by the next
+    /// destruction, reclamation or start; the report then says `REVOKED`.
+    fn finish_revocation(
+        &mut self,
+        revoked: ownership::Revoked,
+    ) -> Result<RevocationReport, AuthorityError> {
+        if !revoked.teardown.is_empty() {
+            self.shared.crash(CrashPoint::ReapAfterIntent)?;
+        }
+        for begun in revoked.teardown {
+            if let environment::DestroyBegun::Pending { record, invocation } = begun {
+                self.perform_destroy(record, invocation)?;
+            }
+        }
+        self.revocation_status(revoked.id)?
+            .ok_or(AuthorityError::Invariant(
+                "a revocation just recorded is missing",
+            ))
+    }
 }
 
 /// What step 3 of a process call decides from.
@@ -1990,12 +2050,16 @@ fn located_ref<'a>(
 }
 
 /// Installs kernel-owned configuration: agent profiles, skills, workspaces and
-/// session bindings.
+/// session bindings -- and, since F-18 (ADR-0063, Proposed), who holds them:
+/// workspace and profile principals, session owners and delegates, root-share
+/// acknowledgements, the single-principal adoption, and their revocation.
 ///
 /// This is how an operator's own tooling — and, in M3d, the tests standing in
 /// for it — puts authority configuration into `kernel.db`. It is **not** a
 /// runtime authority path: nothing on the wire reaches it, and a runtime can
-/// only *name* the records it creates. Every change is audited.
+/// only *name* the records it creates. Every change is audited. The
+/// bootstrap's order: workspace principals, profile principals, session
+/// owners (and bindings), delegates.
 pub struct OperatorBootstrap<'a> {
     authority: &'a mut Authority,
 }
@@ -2111,12 +2175,15 @@ impl OperatorBootstrap<'_> {
         self.run(|tx, now, audit| config::install_workspace_root(tx, now, id, &binding, audit))
     }
 
-    /// Bind a session to a workspace, for the session's life.
+    /// Bind a session to a workspace, for the session's life -- with its
+    /// owner (F-18): the session's standing owner, and each of its active
+    /// delegates, must already be principals of the workspace.
     ///
     /// # Errors
     ///
-    /// [`ConfigError::Invalid`] for an unknown workspace or a session already
-    /// bound elsewhere.
+    /// [`ConfigError::Invalid`] for an unknown workspace, a session already
+    /// bound elsewhere, a session with no declared owner, or an owner or
+    /// delegate that is not a principal of the workspace.
     pub fn bind_session_workspace(
         &mut self,
         session: &SessionId,
@@ -2125,6 +2192,198 @@ impl OperatorBootstrap<'_> {
         self.run(|tx, now, audit| {
             config::bind_session_workspace(tx, now, session.as_str(), id, audit)
         })
+    }
+
+    /// Grant `subject` the workspace (F-18): its sessions may be bound to
+    /// it, and held while they are. A workspace already granted to another
+    /// subject needs [`acknowledge_root_share`](Self::acknowledge_root_share)
+    /// first, as does a root another workspace's principals reach.
+    /// Idempotent for an active grant.
+    ///
+    /// # Errors
+    ///
+    /// [`ConfigError::Invalid`] for an unknown workspace or an
+    /// unacknowledged share; nothing is written.
+    pub fn grant_workspace_principal(
+        &mut self,
+        id: &WorkspaceId,
+        subject: AuthenticatedSubject,
+    ) -> Result<(), ConfigError> {
+        self.run(|tx, now, audit| ownership::grant_workspace_principal(tx, now, id, subject, audit))
+    }
+
+    /// Acknowledge that the workspace's root is shared by more than one
+    /// principal (F-18). F-17's exposure and F-01's taint follow the root
+    /// whoever reaches it; this makes the sharing the operator's statement.
+    ///
+    /// # Errors
+    ///
+    /// [`ConfigError::Invalid`] for an unknown workspace.
+    pub fn acknowledge_root_share(&mut self, id: &WorkspaceId) -> Result<(), ConfigError> {
+        self.run(|tx, now, audit| ownership::acknowledge_root_share(tx, now, id, audit))
+    }
+
+    /// Grant `subject` the agent profile (F-18): it may name the profile in
+    /// `AdmitRun`. Idempotent for an active grant.
+    ///
+    /// # Errors
+    ///
+    /// [`ConfigError::Invalid`] for a profile not installed.
+    pub fn grant_profile_principal(
+        &mut self,
+        profile: &dwk_proto::wire::scalar::AgentProfileName,
+        subject: AuthenticatedSubject,
+    ) -> Result<(), ConfigError> {
+        self.run(|tx, now, audit| {
+            ownership::grant_profile_principal(tx, now, profile, subject, audit)
+        })
+    }
+
+    /// Declare `subject` the owner of `session` (F-18): a session the store
+    /// held before ownership, or one not yet acquired. A bound session's
+    /// owner must be a principal of its workspace. An owner is fixed for the
+    /// session's life; declaring the same one again is a no-op.
+    ///
+    /// # Errors
+    ///
+    /// [`ConfigError::Invalid`] for a session with another owner, a retired
+    /// session, or an owner outside the bound workspace.
+    pub fn declare_session_owner(
+        &mut self,
+        session: &SessionId,
+        subject: AuthenticatedSubject,
+    ) -> Result<(), ConfigError> {
+        self.run(|tx, now, audit| {
+            ownership::declare_session_owner(tx, now, session, subject, audit)
+        })
+    }
+
+    /// Let `subject` hold `session` beside its owner (F-18). A bound
+    /// session's delegate must be a principal of its workspace.
+    ///
+    /// # Errors
+    ///
+    /// [`ConfigError::Invalid`] for a session without a standing owner, the
+    /// owner itself, or a delegate outside the bound workspace.
+    pub fn add_session_delegate(
+        &mut self,
+        session: &SessionId,
+        subject: AuthenticatedSubject,
+    ) -> Result<(), ConfigError> {
+        self.run(|tx, now, audit| ownership::add_session_delegate(tx, now, session, subject, audit))
+    }
+
+    /// Declare a store's one runtime principal (F-18): every legacy session,
+    /// workspace and agent profile becomes `subject`'s. For a deployment
+    /// with one runtime identity, in one audited act; never automatic.
+    ///
+    /// # Errors
+    ///
+    /// [`ConfigError::Invalid`] -- and nothing written -- when the store's
+    /// history shows any other subject or any conflict, or an ownership
+    /// record names another subject.
+    pub fn adopt_single_principal(
+        &mut self,
+        subject: AuthenticatedSubject,
+    ) -> Result<Adoption, ConfigError> {
+        self.run(|tx, now, audit| adoption::adopt_single_principal(tx, now, subject, audit))
+    }
+
+    /// Retire `session` (F-18): revoke its owner, and its delegates with it.
+    /// Two-phase -- see [`revoke_session_delegate`](Self::revoke_session_delegate).
+    ///
+    /// # Errors
+    ///
+    /// [`ConfigError::Invalid`] for a session without a standing owner.
+    pub fn revoke_session_owner(
+        &mut self,
+        session: &SessionId,
+    ) -> Result<RevocationReport, ConfigError> {
+        self.revoke(&ownership::Target::SessionOwner(session.clone()))
+    }
+
+    /// Revoke one delegate of `session` (F-18). In one transaction its live
+    /// lease on the session is invalidated, its active runs there are reaped
+    /// and the destruction of their environments recorded: from that commit
+    /// nothing it sends passes the fence. Then the broker removes the
+    /// environments. The report is `REVOKED` until every one is gone and
+    /// nothing of the runs still runs, `COMPLETE` after; a running workload
+    /// keeps what its launch was granted until its environment is removed.
+    ///
+    /// # Errors
+    ///
+    /// [`ConfigError::Invalid`] for a subject that is not an active delegate;
+    /// [`ConfigError::Authority`] when the authority cannot answer.
+    pub fn revoke_session_delegate(
+        &mut self,
+        session: &SessionId,
+        subject: AuthenticatedSubject,
+    ) -> Result<RevocationReport, ConfigError> {
+        self.revoke(&ownership::Target::SessionDelegate(
+            session.clone(),
+            subject,
+        ))
+    }
+
+    /// Revoke `subject`'s grant of a workspace (F-18): every session bound
+    /// to it, as [`revoke_session_delegate`](Self::revoke_session_delegate)
+    /// does for one.
+    ///
+    /// # Errors
+    ///
+    /// [`ConfigError::Invalid`] for a subject that is not an active principal.
+    pub fn revoke_workspace_principal(
+        &mut self,
+        id: &WorkspaceId,
+        subject: AuthenticatedSubject,
+    ) -> Result<RevocationReport, ConfigError> {
+        self.revoke(&ownership::Target::WorkspacePrincipal(id.clone(), subject))
+    }
+
+    /// Revoke `subject`'s grant of an agent profile (F-18): its active runs
+    /// under the profile are reaped, as
+    /// [`revoke_session_delegate`](Self::revoke_session_delegate) does.
+    ///
+    /// # Errors
+    ///
+    /// [`ConfigError::Invalid`] for a subject that is not an active principal.
+    pub fn revoke_profile_principal(
+        &mut self,
+        profile: &dwk_proto::wire::scalar::AgentProfileName,
+        subject: AuthenticatedSubject,
+    ) -> Result<RevocationReport, ConfigError> {
+        self.revoke(&ownership::Target::ProfilePrincipal(
+            profile.clone(),
+            subject,
+        ))
+    }
+
+    /// Both phases of a revocation.
+    fn revoke(&mut self, target: &ownership::Target) -> Result<RevocationReport, ConfigError> {
+        let mut invalid = None;
+        let outcome = self
+            .authority
+            .transact(|work| match ownership::revoke(work, target)? {
+                Ok(revoked) => Ok(Some(revoked)),
+                Err(why) => {
+                    invalid = Some(why);
+                    // Roll the transaction back: nothing to revoke writes nothing.
+                    Err(AuthorityError::Rejected("invalid configuration".to_owned()))
+                }
+            });
+        let revoked = match (outcome, invalid) {
+            (_, Some(why)) => return Err(ConfigError::Invalid(why)),
+            (Ok(Some(revoked)), None) => revoked,
+            (Ok(None), None) => {
+                return Err(ConfigError::Authority(AuthorityError::Invariant(
+                    "a revocation transaction produced nothing",
+                )));
+            }
+            (Err(error), None) => return Err(ConfigError::Authority(error)),
+        };
+        self.authority
+            .finish_revocation(revoked)
+            .map_err(ConfigError::Authority)
     }
 }
 

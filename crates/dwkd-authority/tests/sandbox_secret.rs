@@ -494,6 +494,14 @@ reason = "NO_MATCHING_RULE"
                     workspace.to_str().unwrap(),
                 )
                 .unwrap();
+            // F-18: the in-process caller and the wire client (this
+            // process's uid) are the lab's principals.
+            crate::state_support::grant_lab(
+                authority,
+                &WorkspaceId::new("ws").unwrap(),
+                &["researcher", "coder", "operator"],
+                &[1000, crate::transport_support::own_uid()],
+            );
             lab
         }
 
@@ -723,10 +731,12 @@ reason = "NO_MATCHING_RULE"
         move |session| {
             served
                 .operate(move |authority| {
-                    authority
-                        .operator()
-                        .bind_session_workspace(&session, &WorkspaceId::new("ws").unwrap())
-                        .unwrap();
+                    crate::state_support::bind_owned(
+                        authority,
+                        crate::transport_support::own_uid(),
+                        &session,
+                        &WorkspaceId::new("ws").unwrap(),
+                    );
                 })
                 .unwrap();
         }
@@ -1051,10 +1061,12 @@ reason = "NO_MATCHING_RULE"
         n: u64,
     ) -> (CallerContext, Epoch, RunId) {
         let authority = lab.authority();
-        authority
-            .operator()
-            .bind_session_workspace(session_id, &WorkspaceId::new("ws").unwrap())
-            .unwrap();
+        crate::state_support::bind_owned(
+            authority,
+            1000,
+            session_id,
+            &WorkspaceId::new("ws").unwrap(),
+        );
         let caller = authority.connect(subject(1000));
         let Reply::Done(epoch) = authority.acquire_lease(&caller, session_id).unwrap() else {
             panic!("a lease")
@@ -1119,10 +1131,12 @@ reason = "NO_MATCHING_RULE"
         let mut lab = Lab::new("m5d3-serve", None);
         let fixture = var("DW_SANDBOX_FIXTURE_SHA256");
         let probe = var("DW_SANDBOX_PROBE_SHA256");
-        lab.authority()
-            .operator()
-            .bind_session_workspace(&session(1), &WorkspaceId::new("ws").unwrap())
-            .unwrap();
+        crate::state_support::bind_owned(
+            lab.authority(),
+            crate::transport_support::own_uid(),
+            &session(1),
+            &WorkspaceId::new("ws").unwrap(),
+        );
         lab.authority = None;
         let private = |path: &Path, text: &str| {
             std::fs::write(path, text).unwrap();

@@ -51,7 +51,7 @@ use rusqlite::Connection;
 pub(super) const APPLICATION_ID: i64 = 0x4457_4B44;
 
 /// The schema version this build creates and understands.
-pub(super) const CURRENT_VERSION: i64 = 13;
+pub(super) const CURRENT_VERSION: i64 = 14;
 
 /// Schema version 1, the first. Static text: nothing in it is assembled from a
 /// value, and every value the authority stores is bound as a parameter.
@@ -1560,6 +1560,246 @@ SELECT run_id, 1, 0, taint, 'before_evidence', 'BEFORE_EVIDENCE', NULL, NULL, NU
 FROM run_policy_input WHERE taint > 0;
 ";
 
+/// Schema version 14 (F-18, ADR-0063, Proposed): who may hold a session,
+/// use a workspace and run under an agent profile.
+///
+/// **The migration grants nothing.** `session_owner`, `session_delegate`,
+/// `workspace_principal` and `profile_principal` start empty: a lease holder,
+/// a run's subject or a profile's past use is never evidence of authority,
+/// because any of them may be the takeover this version exists to stop.
+/// What a store's history shows is copied, once, into
+/// `ownership_observation` -- per session, profile and workspace, every
+/// subject seen and whether more than one was (`ambiguous`) -- and no
+/// authorization decision reads it. `legacy_session` names every session the
+/// store held before this version; such a session is never its first
+/// acquirer's, and only an operator's declaration (or the single-principal
+/// adoption) gives it an owner. Both tables are closed by their own triggers
+/// once the migration has filled them.
+///
+/// A grant is revoked once and never deleted; a re-grant is a new row. A
+/// session's owner is fixed. A session is bound to a workspace only with its
+/// owner, a principal of that workspace; a delegate of a bound session is one
+/// too. A workspace has a second principal only once the operator has
+/// acknowledged that its root is shared. `ownership_revocation` records each
+/// revocation and the runs it reaped, from which its completion is read.
+pub(super) const SCHEMA_V14: &str = r"
+CREATE TABLE legacy_session (
+    session_id    TEXT    PRIMARY KEY,
+    workspace_id  TEXT
+) STRICT;
+INSERT INTO legacy_session (session_id, workspace_id)
+SELECT s.session_id,
+       (SELECT w.workspace_id FROM session_workspace w WHERE w.session_id = s.session_id)
+FROM (SELECT session_id FROM session_lease UNION SELECT session_id FROM session_workspace) s;
+CREATE TRIGGER legacy_session_closed BEFORE INSERT ON legacy_session
+BEGIN SELECT RAISE(ABORT, 'the sessions before ownership are the migration''s to name'); END;
+CREATE TRIGGER legacy_session_no_update BEFORE UPDATE ON legacy_session
+BEGIN SELECT RAISE(ABORT, 'a legacy session is a fact'); END;
+CREATE TRIGGER legacy_session_no_delete BEFORE DELETE ON legacy_session
+BEGIN SELECT RAISE(ABORT, 'a legacy session is never forgotten'); END;
+
+CREATE TABLE ownership_observation (
+    resource_kind  TEXT    NOT NULL CHECK (resource_kind IN ('SESSION', 'PROFILE', 'WORKSPACE')),
+    resource       TEXT    NOT NULL,
+    subject        TEXT    NOT NULL,
+    source         TEXT    NOT NULL CHECK (source IN ('LEASE_HOLDER', 'RUN_SUBJECT')),
+    occurrences    INTEGER NOT NULL CHECK (occurrences >= 1),
+    first_ms       INTEGER,
+    last_ms        INTEGER,
+    ambiguous      INTEGER NOT NULL CHECK (ambiguous IN (0, 1)),
+    PRIMARY KEY (resource_kind, resource, subject, source)
+) STRICT;
+INSERT INTO ownership_observation (resource_kind, resource, subject, source, occurrences,
+    first_ms, last_ms, ambiguous)
+SELECT 'SESSION', session_id, holder_subject, 'LEASE_HOLDER', 1, NULL, NULL, 0
+FROM session_lease WHERE holder_subject IS NOT NULL;
+INSERT INTO ownership_observation (resource_kind, resource, subject, source, occurrences,
+    first_ms, last_ms, ambiguous)
+SELECT 'SESSION', session_id, subject, 'RUN_SUBJECT', count(*), min(admitted_ms),
+       max(admitted_ms), 0
+FROM run GROUP BY session_id, subject;
+INSERT INTO ownership_observation (resource_kind, resource, subject, source, occurrences,
+    first_ms, last_ms, ambiguous)
+SELECT 'PROFILE', agent_profile, subject, 'RUN_SUBJECT', count(*), min(admitted_ms),
+       max(admitted_ms), 0
+FROM run GROUP BY agent_profile, subject;
+INSERT INTO ownership_observation (resource_kind, resource, subject, source, occurrences,
+    first_ms, last_ms, ambiguous)
+SELECT 'WORKSPACE', p.workspace_id, r.subject, 'RUN_SUBJECT', count(*), min(r.admitted_ms),
+       max(r.admitted_ms), 0
+FROM run r JOIN run_policy_input p ON p.run_id = r.run_id WHERE p.workspace_id IS NOT NULL
+GROUP BY p.workspace_id, r.subject;
+UPDATE ownership_observation SET ambiguous = 1
+WHERE (resource_kind, resource) IN (SELECT resource_kind, resource FROM ownership_observation
+                                    GROUP BY resource_kind, resource
+                                    HAVING count(DISTINCT subject) > 1);
+CREATE TRIGGER ownership_observation_closed BEFORE INSERT ON ownership_observation
+BEGIN SELECT RAISE(ABORT, 'what history showed is the migration''s to record'); END;
+CREATE TRIGGER ownership_observation_no_update BEFORE UPDATE ON ownership_observation
+BEGIN SELECT RAISE(ABORT, 'an observation is a fact, and never authority'); END;
+CREATE TRIGGER ownership_observation_no_delete BEFORE DELETE ON ownership_observation
+BEGIN SELECT RAISE(ABORT, 'an observation is never forgotten'); END;
+
+CREATE TABLE workspace_root_share (
+    workspace_id     TEXT    PRIMARY KEY REFERENCES workspace(workspace_id) ON DELETE RESTRICT,
+    acknowledged_ms  INTEGER NOT NULL
+) STRICT;
+CREATE TRIGGER workspace_root_share_no_update BEFORE UPDATE ON workspace_root_share
+BEGIN SELECT RAISE(ABORT, 'an acknowledgement is a fact'); END;
+CREATE TRIGGER workspace_root_share_no_delete BEFORE DELETE ON workspace_root_share
+BEGIN SELECT RAISE(ABORT, 'an acknowledgement is never withdrawn'); END;
+
+CREATE TABLE workspace_principal (
+    grant_id      INTEGER PRIMARY KEY CHECK (grant_id >= 1),
+    workspace_id  TEXT    NOT NULL REFERENCES workspace(workspace_id) ON DELETE RESTRICT,
+    subject       TEXT    NOT NULL CHECK (length(subject) BETWEEN 5 AND 14
+                                          AND substr(subject, 1, 4) = 'uid:'
+                                          AND substr(subject, 5) NOT GLOB '*[^0-9]*'),
+    granted_ms    INTEGER NOT NULL,
+    revoked_ms    INTEGER,
+    CHECK (revoked_ms IS NULL OR revoked_ms >= granted_ms)
+) STRICT;
+CREATE UNIQUE INDEX workspace_principal_active ON workspace_principal(workspace_id, subject)
+WHERE revoked_ms IS NULL;
+CREATE TRIGGER workspace_principal_shared_once_acknowledged BEFORE INSERT ON workspace_principal
+WHEN NEW.revoked_ms IS NOT NULL
+  OR (EXISTS (SELECT 1 FROM workspace_principal WHERE workspace_id = NEW.workspace_id
+              AND revoked_ms IS NULL AND subject IS NOT NEW.subject)
+      AND NOT EXISTS (SELECT 1 FROM workspace_root_share WHERE workspace_id = NEW.workspace_id))
+BEGIN SELECT RAISE(ABORT, 'a workspace has a second principal only once its sharing is acknowledged'); END;
+CREATE TRIGGER workspace_principal_revoked_once BEFORE UPDATE ON workspace_principal
+WHEN OLD.revoked_ms IS NOT NULL OR NEW.revoked_ms IS NULL
+  OR NEW.grant_id IS NOT OLD.grant_id OR NEW.workspace_id IS NOT OLD.workspace_id
+  OR NEW.subject IS NOT OLD.subject OR NEW.granted_ms IS NOT OLD.granted_ms
+BEGIN SELECT RAISE(ABORT, 'a grant is fixed; it is only ever revoked, once'); END;
+CREATE TRIGGER workspace_principal_no_delete BEFORE DELETE ON workspace_principal
+BEGIN SELECT RAISE(ABORT, 'a grant is never deleted'); END;
+
+CREATE TABLE profile_principal (
+    grant_id     INTEGER PRIMARY KEY CHECK (grant_id >= 1),
+    profile      TEXT    NOT NULL CHECK (length(profile) BETWEEN 1 AND 64),
+    subject      TEXT    NOT NULL CHECK (length(subject) BETWEEN 5 AND 14
+                                         AND substr(subject, 1, 4) = 'uid:'
+                                         AND substr(subject, 5) NOT GLOB '*[^0-9]*'),
+    granted_ms   INTEGER NOT NULL,
+    revoked_ms   INTEGER,
+    CHECK (revoked_ms IS NULL OR revoked_ms >= granted_ms)
+) STRICT;
+CREATE UNIQUE INDEX profile_principal_active ON profile_principal(profile, subject)
+WHERE revoked_ms IS NULL;
+CREATE TRIGGER profile_principal_of_an_installed_profile BEFORE INSERT ON profile_principal
+WHEN NEW.revoked_ms IS NOT NULL
+  OR NOT EXISTS (SELECT 1 FROM agent_profile WHERE name = NEW.profile)
+BEGIN SELECT RAISE(ABORT, 'a profile principal names an installed profile'); END;
+CREATE TRIGGER profile_principal_revoked_once BEFORE UPDATE ON profile_principal
+WHEN OLD.revoked_ms IS NOT NULL OR NEW.revoked_ms IS NULL
+  OR NEW.grant_id IS NOT OLD.grant_id OR NEW.profile IS NOT OLD.profile
+  OR NEW.subject IS NOT OLD.subject OR NEW.granted_ms IS NOT OLD.granted_ms
+BEGIN SELECT RAISE(ABORT, 'a grant is fixed; it is only ever revoked, once'); END;
+CREATE TRIGGER profile_principal_no_delete BEFORE DELETE ON profile_principal
+BEGIN SELECT RAISE(ABORT, 'a grant is never deleted'); END;
+
+CREATE TABLE session_owner (
+    session_id   TEXT    PRIMARY KEY CHECK (length(session_id) = 30
+                                            AND substr(session_id, 1, 4) = 'ses_'),
+    subject      TEXT    NOT NULL CHECK (length(subject) BETWEEN 5 AND 14
+                                         AND substr(subject, 1, 4) = 'uid:'
+                                         AND substr(subject, 5) NOT GLOB '*[^0-9]*'),
+    basis        TEXT    NOT NULL CHECK (basis IN ('OPERATOR', 'FIRST_ACQUIRER', 'ADOPTED')),
+    recorded_ms  INTEGER NOT NULL,
+    revoked_ms   INTEGER,
+    CHECK (revoked_ms IS NULL OR revoked_ms >= recorded_ms)
+) STRICT;
+CREATE TRIGGER session_owner_by_its_basis BEFORE INSERT ON session_owner
+WHEN NEW.revoked_ms IS NOT NULL
+  OR (NEW.basis = 'FIRST_ACQUIRER'
+      AND (EXISTS (SELECT 1 FROM legacy_session WHERE session_id = NEW.session_id)
+           OR EXISTS (SELECT 1 FROM session_workspace WHERE session_id = NEW.session_id)
+           OR EXISTS (SELECT 1 FROM session_lease WHERE session_id = NEW.session_id)))
+  OR (NEW.basis = 'ADOPTED'
+      AND NOT EXISTS (SELECT 1 FROM legacy_session WHERE session_id = NEW.session_id))
+BEGIN SELECT RAISE(ABORT, 'only a new, unbound session is its first acquirer''s; a legacy one is declared'); END;
+CREATE TRIGGER session_owner_a_principal_of_its_workspace BEFORE INSERT ON session_owner
+WHEN EXISTS (SELECT 1 FROM session_workspace w WHERE w.session_id = NEW.session_id
+             AND NOT EXISTS (SELECT 1 FROM workspace_principal p
+                             WHERE p.workspace_id = w.workspace_id AND p.subject = NEW.subject
+                               AND p.revoked_ms IS NULL))
+BEGIN SELECT RAISE(ABORT, 'a bound session''s owner is a principal of its workspace'); END;
+CREATE TRIGGER session_owner_fixed BEFORE UPDATE ON session_owner
+WHEN OLD.revoked_ms IS NOT NULL OR NEW.revoked_ms IS NULL
+  OR NEW.session_id IS NOT OLD.session_id OR NEW.subject IS NOT OLD.subject
+  OR NEW.basis IS NOT OLD.basis OR NEW.recorded_ms IS NOT OLD.recorded_ms
+BEGIN SELECT RAISE(ABORT, 'a session''s owner is fixed; it is only ever revoked, once'); END;
+CREATE TRIGGER session_owner_no_delete BEFORE DELETE ON session_owner
+BEGIN SELECT RAISE(ABORT, 'a session''s owner is never deleted'); END;
+CREATE TRIGGER session_workspace_bound_with_its_owner BEFORE INSERT ON session_workspace
+WHEN NOT EXISTS (SELECT 1 FROM session_owner o JOIN workspace_principal p ON p.subject = o.subject
+                 WHERE o.session_id = NEW.session_id AND o.revoked_ms IS NULL
+                   AND p.workspace_id = NEW.workspace_id AND p.revoked_ms IS NULL)
+BEGIN SELECT RAISE(ABORT, 'a session is bound with its owner, a principal of the workspace'); END;
+
+CREATE TABLE session_delegate (
+    grant_id     INTEGER PRIMARY KEY CHECK (grant_id >= 1),
+    session_id   TEXT    NOT NULL REFERENCES session_owner(session_id) ON DELETE RESTRICT,
+    subject      TEXT    NOT NULL CHECK (length(subject) BETWEEN 5 AND 14
+                                         AND substr(subject, 1, 4) = 'uid:'
+                                         AND substr(subject, 5) NOT GLOB '*[^0-9]*'),
+    granted_ms   INTEGER NOT NULL,
+    revoked_ms   INTEGER,
+    CHECK (revoked_ms IS NULL OR revoked_ms >= granted_ms)
+) STRICT;
+CREATE UNIQUE INDEX session_delegate_active ON session_delegate(session_id, subject)
+WHERE revoked_ms IS NULL;
+CREATE TRIGGER session_delegate_of_a_standing_owner BEFORE INSERT ON session_delegate
+WHEN NEW.revoked_ms IS NOT NULL
+  OR NOT EXISTS (SELECT 1 FROM session_owner WHERE session_id = NEW.session_id
+                 AND revoked_ms IS NULL AND subject IS NOT NEW.subject)
+  OR EXISTS (SELECT 1 FROM session_workspace w WHERE w.session_id = NEW.session_id
+             AND NOT EXISTS (SELECT 1 FROM workspace_principal p
+                             WHERE p.workspace_id = w.workspace_id AND p.subject = NEW.subject
+                               AND p.revoked_ms IS NULL))
+BEGIN SELECT RAISE(ABORT, 'a delegate is another principal of a session whose owner stands'); END;
+CREATE TRIGGER session_delegate_revoked_once BEFORE UPDATE ON session_delegate
+WHEN OLD.revoked_ms IS NOT NULL OR NEW.revoked_ms IS NULL
+  OR NEW.grant_id IS NOT OLD.grant_id OR NEW.session_id IS NOT OLD.session_id
+  OR NEW.subject IS NOT OLD.subject OR NEW.granted_ms IS NOT OLD.granted_ms
+BEGIN SELECT RAISE(ABORT, 'a grant is fixed; it is only ever revoked, once'); END;
+CREATE TRIGGER session_delegate_no_delete BEFORE DELETE ON session_delegate
+BEGIN SELECT RAISE(ABORT, 'a grant is never deleted'); END;
+
+CREATE TABLE ownership_revocation (
+    revocation_id       INTEGER PRIMARY KEY CHECK (revocation_id >= 1),
+    kind                TEXT    NOT NULL CHECK (kind IN ('SESSION_OWNER', 'SESSION_DELEGATE',
+                                                         'WORKSPACE_PRINCIPAL',
+                                                         'PROFILE_PRINCIPAL')),
+    resource            TEXT    NOT NULL CHECK (length(resource) BETWEEN 1 AND 64),
+    subject             TEXT    NOT NULL CHECK (length(subject) BETWEEN 5 AND 14
+                                                AND substr(subject, 1, 4) = 'uid:'
+                                                AND substr(subject, 5) NOT GLOB '*[^0-9]*'),
+    leases_invalidated  INTEGER NOT NULL CHECK (leases_invalidated >= 0),
+    runs_reaped         INTEGER NOT NULL CHECK (runs_reaped >= 0),
+    revoked_ms          INTEGER NOT NULL
+) STRICT;
+CREATE TRIGGER ownership_revocation_no_update BEFORE UPDATE ON ownership_revocation
+BEGIN SELECT RAISE(ABORT, 'a revocation is a fact'); END;
+CREATE TRIGGER ownership_revocation_no_delete BEFORE DELETE ON ownership_revocation
+BEGIN SELECT RAISE(ABORT, 'a revocation is never forgotten'); END;
+
+CREATE TABLE ownership_revocation_run (
+    revocation_id  INTEGER NOT NULL REFERENCES ownership_revocation(revocation_id)
+                                       ON DELETE RESTRICT,
+    run_id         TEXT    NOT NULL REFERENCES run(run_id) ON DELETE RESTRICT,
+    PRIMARY KEY (revocation_id, run_id)
+) STRICT;
+CREATE TRIGGER ownership_revocation_run_reaped BEFORE INSERT ON ownership_revocation_run
+WHEN (SELECT state FROM run WHERE run_id = NEW.run_id) IS NOT 'REAPED'
+BEGIN SELECT RAISE(ABORT, 'a revocation names the runs it reaped'); END;
+CREATE TRIGGER ownership_revocation_run_no_update BEFORE UPDATE ON ownership_revocation_run
+BEGIN SELECT RAISE(ABORT, 'a revocation''s runs are a fact'); END;
+CREATE TRIGGER ownership_revocation_run_no_delete BEFORE DELETE ON ownership_revocation_run
+BEGIN SELECT RAISE(ABORT, 'a revocation''s runs are never forgotten'); END;
+";
+
 /// One step from a version to the next.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct Migration {
@@ -1622,6 +1862,10 @@ pub(super) const MIGRATIONS: &[Migration] = &[
     Migration {
         to: 13,
         sql: SCHEMA_V13,
+    },
+    Migration {
+        to: 14,
+        sql: SCHEMA_V14,
     },
 ];
 
@@ -1778,7 +2022,7 @@ mod tests {
     use super::{
         APPLICATION_ID, CURRENT_VERSION, MIGRATIONS, Migration, SCHEMA_V1, SCHEMA_V2, SCHEMA_V3,
         SCHEMA_V4, SCHEMA_V5, SCHEMA_V6, SCHEMA_V7, SCHEMA_V8, SCHEMA_V9, SCHEMA_V10, SCHEMA_V11,
-        SCHEMA_V12, SCHEMA_V13, Shape, ShapeError, decide, migrate, verify_exact,
+        SCHEMA_V12, SCHEMA_V13, SCHEMA_V14, Shape, ShapeError, decide, migrate, verify_exact,
     };
     use rusqlite::Connection;
 
@@ -1850,6 +2094,7 @@ mod tests {
         assert!(conn.execute_batch(SCHEMA_V11).is_ok());
         assert!(conn.execute_batch(SCHEMA_V12).is_ok());
         assert!(conn.execute_batch(SCHEMA_V13).is_ok());
+        assert!(conn.execute_batch(SCHEMA_V14).is_ok());
         assert!(
             conn.execute_batch("DROP TRIGGER run_never_resurrects")
                 .is_ok()
@@ -1878,6 +2123,7 @@ mod tests {
         assert!(conn.execute_batch(SCHEMA_V11).is_ok());
         assert!(conn.execute_batch(SCHEMA_V12).is_ok());
         assert!(conn.execute_batch(SCHEMA_V13).is_ok());
+        assert!(conn.execute_batch(SCHEMA_V14).is_ok());
         assert!(
             conn.execute_batch("CREATE TABLE backdoor (x INTEGER)")
                 .is_ok()
@@ -3228,6 +3474,217 @@ mod tests {
             "UPDATE run_taint_in_flight SET seq = 1",
             "DELETE FROM run_taint_in_flight",
             "UPDATE run_policy_input SET taint = 0 WHERE run_id = 'run_b'",
+        ] {
+            assert!(conn.execute(bad, []).is_err(), "{bad}");
+        }
+    }
+
+    /// A session id the schema accepts: `ses_` and 26 characters.
+    fn ses(c: char) -> String {
+        format!("ses_{}", String::from(c).repeat(26))
+    }
+
+    #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one migration, then every rule its version adds, in the order they apply"
+    )]
+    fn a_version_thirteen_store_migrates_to_fourteen_and_its_history_grants_nothing() {
+        // F-18 (ADR-0063, Proposed): v14's ownership records start empty.
+        // What a v13 store's history shows -- a lease holder, the subjects
+        // of its runs, the profiles and workspaces they used, and where two
+        // subjects met -- is copied once into `ownership_observation`; the
+        // sessions it held are legacy, never their first acquirer's.
+        let conn = store_at(13);
+        let (a, b, c) = (ses('a'), ses('b'), ses('c'));
+        let run = |id: &str, session: &str, subject: &str, profile: &str, ms: i64| {
+            conn.execute(
+                "INSERT INTO run (run_id, session_id, subject, epoch, agent_profile, \
+                 agent_profile_revision, activation_id, state, admitted_ms, ended_ms) \
+                 VALUES (?1, ?2, ?3, 1, ?4, 1, 1, 'REAPED', ?5, ?5)",
+                rusqlite::params![id, session, subject, profile, ms],
+            )
+        };
+        assert!(
+            conn.execute_batch(&format!(
+                "INSERT INTO workspace (workspace_id, sensitivity, installed_ms) VALUES ('ws', 1, 0);
+                 INSERT INTO session_lease (session_id, epoch, state, holder_subject,
+                     holder_incarnation, holder_connection, expires_ms)
+                     VALUES ('{a}', 3, 'HELD', 'uid:1000', 1, 1, 99);
+                 INSERT INTO session_lease (session_id, epoch, state) VALUES ('{b}', 7, 'RELEASED');
+                 INSERT INTO session_workspace (session_id, workspace_id, bound_ms)
+                     VALUES ('{c}', 'ws', 0);"
+            ))
+            .is_ok()
+        );
+        assert!(run("run_1", &a, "uid:1000", "researcher", 10).is_ok());
+        assert!(run("run_2", &b, "uid:1000", "researcher", 20).is_ok());
+        assert!(run("run_3", &b, "uid:2000", "coder", 30).is_ok());
+        assert!(
+            conn.execute(
+                "INSERT INTO run_policy_input (run_id, origin, taint, privacy, workspace_id, \
+                 workspace_sensitivity) VALUES ('run_3', 'api', 0, 'ANY', 'ws', 1)",
+                [],
+            )
+            .is_ok()
+        );
+        {
+            let Ok(tx) = conn.unchecked_transaction() else {
+                unreachable!("a transaction")
+            };
+            assert_eq!(migrate(&tx, 13, MIGRATIONS).ok(), Some(CURRENT_VERSION));
+            assert!(tx.commit().is_ok());
+        }
+        const { assert!(CURRENT_VERSION >= 14) };
+        assert_eq!(verify_exact(&conn).ok(), Some(Ok(())));
+        let count = |sql: &str| conn.query_row(sql, [], |row| row.get::<_, i64>(0)).ok();
+        let text = |sql: &str| conn.query_row(sql, [], |row| row.get::<_, String>(0)).ok();
+        // Nothing is granted.
+        for table in [
+            "SELECT count(*) FROM session_owner",
+            "SELECT count(*) FROM session_delegate",
+            "SELECT count(*) FROM workspace_principal",
+            "SELECT count(*) FROM profile_principal",
+            "SELECT count(*) FROM workspace_root_share",
+            "SELECT count(*) FROM ownership_revocation",
+        ] {
+            assert_eq!(count(table), Some(0), "{table}");
+        }
+        // Every session the store held is legacy; the bound one says where.
+        assert_eq!(
+            text(
+                "SELECT group_concat(substr(session_id, 5, 1) || ':' || \
+                 coalesce(workspace_id, '-'), ' ') FROM \
+                 (SELECT * FROM legacy_session ORDER BY session_id)"
+            )
+            .as_deref(),
+            Some("a:- b:- c:ws")
+        );
+        // What history showed, and where two subjects met.
+        assert_eq!(
+            text(
+                "SELECT group_concat(resource_kind || '/' || resource || '/' || subject || '/' \
+                 || source || '/' || occurrences || '/' || ambiguous, ' ') FROM \
+                 (SELECT * FROM ownership_observation \
+                  ORDER BY resource_kind, resource, subject, source)"
+            )
+            .map(|t| t.replace(&a, "A").replace(&b, "B")),
+            Some(
+                "PROFILE/coder/uid:2000/RUN_SUBJECT/1/0 \
+                 PROFILE/researcher/uid:1000/RUN_SUBJECT/2/0 \
+                 SESSION/A/uid:1000/LEASE_HOLDER/1/0 SESSION/A/uid:1000/RUN_SUBJECT/1/0 \
+                 SESSION/B/uid:1000/RUN_SUBJECT/1/1 SESSION/B/uid:2000/RUN_SUBJECT/1/1 \
+                 WORKSPACE/ws/uid:2000/RUN_SUBJECT/1/0"
+                    .to_owned()
+            )
+        );
+        // Both are closed: the migration named them, and nothing else may.
+        assert!(
+            conn.execute(
+                "INSERT INTO legacy_session (session_id) VALUES (?1)",
+                [ses('d')]
+            )
+            .is_err()
+        );
+        for bad in [
+            "UPDATE legacy_session SET workspace_id = NULL",
+            "DELETE FROM legacy_session",
+            "INSERT INTO ownership_observation (resource_kind, resource, subject, source, \
+             occurrences, ambiguous) VALUES ('SESSION', 'x', 'uid:1', 'RUN_SUBJECT', 1, 0)",
+            "UPDATE ownership_observation SET ambiguous = 0",
+            "DELETE FROM ownership_observation",
+        ] {
+            assert!(conn.execute(bad, []).is_err(), "{bad}");
+        }
+        let owner = |session: &str, subject: &str, basis: &str| {
+            conn.execute(
+                "INSERT INTO session_owner (session_id, subject, basis, recorded_ms) \
+                 VALUES (?1, ?2, ?3, 5)",
+                rusqlite::params![session, subject, basis],
+            )
+        };
+        // A legacy session is never its first acquirer's; adoption is for
+        // legacy sessions only; a new, unbound one with no lease row is.
+        assert!(owner(&a, "uid:1000", "FIRST_ACQUIRER").is_err());
+        assert!(owner(&ses('d'), "uid:1000", "ADOPTED").is_err());
+        assert!(owner(&ses('d'), "uid:1000", "FIRST_ACQUIRER").is_ok());
+        assert!(owner(&ses('e'), "root", "OPERATOR").is_err(), "a uid key");
+        // A bound session's owner is a principal of its workspace.
+        assert!(owner(&c, "uid:1000", "OPERATOR").is_err());
+        let principal = |subject: &str| {
+            conn.execute(
+                "INSERT INTO workspace_principal (workspace_id, subject, granted_ms) \
+                 VALUES ('ws', ?1, 1)",
+                [subject],
+            )
+        };
+        assert!(principal("uid:1000").is_ok());
+        assert!(owner(&c, "uid:1000", "OPERATOR").is_ok());
+        // A second principal of a workspace only once its sharing is
+        // acknowledged; one active grant per subject.
+        assert!(principal("uid:2000").is_err());
+        assert!(
+            conn.execute(
+                "INSERT INTO workspace_root_share (workspace_id, acknowledged_ms) \
+                 VALUES ('ws', 2)",
+                [],
+            )
+            .is_ok()
+        );
+        assert!(principal("uid:2000").is_ok());
+        assert!(principal("uid:2000").is_err(), "one active grant");
+        // A session is bound only with its owner, a principal there.
+        let bind = |session: &str| {
+            conn.execute(
+                "INSERT INTO session_workspace (session_id, workspace_id, bound_ms) \
+                 VALUES (?1, 'ws', 3)",
+                [session],
+            )
+        };
+        assert!(bind(&ses('f')).is_err(), "no owner");
+        assert!(bind(&ses('d')).is_ok());
+        // A delegate: another principal, of a standing owner.
+        let delegate = |session: &str, subject: &str| {
+            conn.execute(
+                "INSERT INTO session_delegate (session_id, subject, granted_ms) \
+                 VALUES (?1, ?2, 4)",
+                rusqlite::params![session, subject],
+            )
+        };
+        assert!(delegate(&ses('d'), "uid:1000").is_err(), "the owner");
+        assert!(delegate(&ses('d'), "uid:3000").is_err(), "not a principal");
+        assert!(delegate(&ses('d'), "uid:2000").is_ok());
+        // A profile principal names an installed profile.
+        assert!(
+            conn.execute(
+                "INSERT INTO profile_principal (profile, subject, granted_ms) \
+                 VALUES ('nobody-installed', 'uid:1000', 1)",
+                [],
+            )
+            .is_err()
+        );
+        // Revoked once, fixed otherwise, never deleted.
+        assert!(
+            conn.execute(
+                "UPDATE session_delegate SET revoked_ms = 9 WHERE subject = 'uid:2000'",
+                []
+            )
+            .is_ok()
+        );
+        assert!(
+            delegate(&ses('d'), "uid:2000").is_ok(),
+            "a re-grant is a new row"
+        );
+        for bad in [
+            "UPDATE session_delegate SET revoked_ms = 10 WHERE revoked_ms = 9",
+            "UPDATE session_delegate SET revoked_ms = NULL WHERE revoked_ms = 9",
+            "UPDATE session_owner SET subject = 'uid:2000'",
+            "DELETE FROM session_owner",
+            "DELETE FROM session_delegate",
+            "UPDATE workspace_principal SET subject = 'uid:4000'",
+            "DELETE FROM workspace_principal",
+            "DELETE FROM workspace_root_share",
+            "INSERT INTO ownership_revocation_run (revocation_id, run_id) VALUES (1, 'run_x')",
         ] {
             assert!(conn.execute(bad, []).is_err(), "{bad}");
         }

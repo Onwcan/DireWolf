@@ -298,6 +298,10 @@ fn another_subject_with_the_same_key_neither_replays_nor_collides() {
     );
     h.authority().release_lease(&a, &s, ea).unwrap();
 
+    // F-18: B holds A's session only by the operator's delegation; without
+    // it B is refused (`state_ownership.rs`). What this test is about -- the
+    // key's scope is the subject's -- holds the same either way.
+    state_support::delegate(h.authority(), &s, 2000);
     let b = h.connect(2000);
     let eb = h.lease(&b, &s);
     let mine = admitted(
@@ -778,11 +782,10 @@ fn the_kernel_derives_every_policy_input_itself() {
         operator
             .install_workspace(&secret, WorkspaceSensitivity::Secret)
             .unwrap();
-        operator.bind_session_workspace(&s2, &public).unwrap();
-        operator
-            .bind_session_workspace(&session(3), &secret)
-            .unwrap();
     }
+    // F-18: the caller owns both sessions and is a principal of both.
+    state_support::own_and_bind(h.authority(), 1000, &s2, &public);
+    state_support::own_and_bind(h.authority(), 1000, &session(3), &secret);
     let e2 = h.lease(&b, &s2);
     let researcher = admitted(
         h.authority()

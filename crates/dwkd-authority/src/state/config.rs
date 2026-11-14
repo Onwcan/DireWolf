@@ -524,6 +524,9 @@ pub(super) fn install_workspace_root(
         ],
     )
     .map_err(sql)?;
+    // F-18: a root another workspace is bound to is shared by both
+    // workspaces' principals -- acknowledged, or refused.
+    super::ownership::check_root_sharing(tx, id)?;
     audit(
         AuditEvent::WorkspaceRootInstalled,
         Fields::new()
@@ -582,7 +585,9 @@ pub(super) fn workspace_root(
     }))
 }
 
-/// Bind a session to a workspace, once.
+/// Bind a session to a workspace, once -- with its owner (F-18): the
+/// session must have a standing owner who is an active principal of the
+/// workspace, and so must each of its active delegates be.
 pub(super) fn bind_session_workspace(
     tx: &Connection,
     now_ms: i64,
@@ -620,6 +625,7 @@ pub(super) fn bind_session_workspace(
             "no workspace `{id}` is installed"
         )));
     }
+    super::ownership::check_binding(tx, session, id)?;
     tx.execute(
         "INSERT INTO session_workspace (session_id, workspace_id, bound_ms) VALUES (?1, ?2, ?3)",
         rusqlite::params![session, id.as_str(), now_ms],

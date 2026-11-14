@@ -9,12 +9,20 @@
 //!
 //! # `AcquireLease`
 //!
+//! First, **who may hold it** (F-18, ADR-0063, Proposed;
+//! [`super::ownership::standing`]): a subject that is not the session's
+//! owner or an active delegate -- or, for a session bound to a workspace,
+//! not an active principal of it -- is refused `LEASE_HELD` before anything
+//! else of the session is looked at, and nothing is taken over or reaped. A
+//! session nobody owns is claimed by its first acquirer only when it is new;
+//! a legacy or bound one waits for the operator's declaration. Then:
+//!
 //! | found | outcome |
 //! |---|---|
 //! | no row | epoch 1, held by the caller |
 //! | held, unexpired, by **another** holder | `LEASE_HELD` |
 //! | held, unexpired, by **this** holder | re-issued at `epoch + 1` |
-//! | held and expired, released, or invalidated by a restart | `epoch + 1`, held by the caller |
+//! | held and expired, released, or invalidated by a restart or a revocation | `epoch + 1`, held by the caller |
 //!
 //! Every successful acquire therefore moves to an epoch **strictly greater**
 //! than any the session has had, and a `BEFORE UPDATE` trigger refuses any
@@ -40,8 +48,11 @@
 //!
 //! 1. the session has a live lease,
 //! 2. the presented epoch equals the current epoch,
-//! 3. the caller is the lease's holder, and
-//! 4. the lease has not expired.
+//! 3. the caller is the lease's holder,
+//! 4. the lease has not expired, and
+//! 5. the caller's subject may still hold the session (F-18) -- the second,
+//!    independent statement of what a revocation already ensures by
+//!    invalidating the lease in its own transaction.
 //!
 //! Any failure is `STALE_EPOCH`, one answer for all four, carrying nothing: the
 //! refusal never distinguishes "wrong holder" from "no lease" from "expired",
@@ -80,6 +91,7 @@ use super::audit::{AuditEvent, Fields};
 use super::environment::{self, DestroyBegun};
 use super::error::AuthorityError;
 use super::identity::CallerContext;
+use super::ownership::{self, Standing};
 use super::{Reply, Work};
 
 /// What a lease's end left to the broker: the destruction, durable already,
@@ -185,7 +197,10 @@ pub(super) fn fence(
     session: &SessionId,
     epoch: Epoch,
 ) -> Result<bool, AuthorityError> {
-    Ok(load(work, session)?.is_some_and(|lease| fenced_ok(&lease, caller, epoch.get(), work.now)))
+    if !load(work, session)?.is_some_and(|lease| fenced_ok(&lease, caller, epoch.get(), work.now)) {
+        return Ok(false);
+    }
+    Ok(ownership::standing(work, caller.subject(), session)? == Standing::Permitted)
 }
 
 /// The audit record of a refusal: who asked, for what, and why. The presented
@@ -221,6 +236,22 @@ pub(super) fn acquire(
     let now = work.now;
     let expires = now.saturating_add(ttl_ms);
     let (inc, conn) = holder_pair(caller);
+    // F-18: who may hold the session, before anything of it is taken over.
+    let standing = ownership::standing(work, caller.subject(), session)?;
+    if let Standing::Refused(why) = standing {
+        work.audit(
+            AuditEvent::LeaseRefused,
+            refusal_fields(
+                caller,
+                RefusedOperation::AcquireLease,
+                RefusalReason::LeaseHeld,
+                session,
+                None,
+            )
+            .text("ownership", why.as_str()),
+        )?;
+        return Ok((Reply::Refused(RefusalReason::LeaseHeld), Vec::new()));
+    }
     let current = load(work, session)?;
 
     let (epoch, prior) = match &current {
@@ -256,6 +287,9 @@ pub(super) fn acquire(
     let subject = caller.subject().storage_key();
     let mut teardown = Vec::new();
     if current.is_none() {
+        if standing == Standing::Claimable {
+            ownership::record_first_acquirer(work, caller.subject(), session)?;
+        }
         work.db(work.tx.execute(
             "INSERT INTO session_lease (session_id, epoch, state, holder_subject, \
              holder_incarnation, holder_connection, expires_ms) \
@@ -424,6 +458,40 @@ fn reap(
         teardown.extend(environment::begin_run_end(work, &id, "REAPED")?);
     }
     Ok(teardown)
+}
+
+/// A revocation's fence (F-18): invalidate `session`'s lease if it is held
+/// -- by `subject`, or by anyone when `subject` is `None` -- and return the
+/// holder's subject and the epoch it held. The epoch is untouched: the next
+/// acquire moves strictly past it, and the holder's every request is fenced
+/// from this transaction's commit.
+pub(super) fn invalidate_held(
+    work: &Work<'_>,
+    session: &str,
+    subject: Option<&str>,
+) -> Result<Option<(String, u64)>, AuthorityError> {
+    let held: Option<(String, i64)> = work.db(work
+        .tx
+        .query_row(
+            "SELECT holder_subject, epoch FROM session_lease WHERE session_id = ?1 \
+             AND state = 'HELD' AND (?2 IS NULL OR holder_subject = ?2)",
+            rusqlite::params![session, subject],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional())?;
+    let Some((holder, epoch)) = held else {
+        return Ok(None);
+    };
+    work.db(work.tx.execute(
+        "UPDATE session_lease SET state = 'INVALIDATED', \
+         last_holder_incarnation = holder_incarnation, last_holder_connection = holder_connection, \
+         holder_subject = NULL, holder_incarnation = NULL, holder_connection = NULL, \
+         expires_ms = NULL WHERE session_id = ?1 AND state = 'HELD'",
+        [session],
+    ))?;
+    let epoch = u64::try_from(epoch)
+        .map_err(|_| AuthorityError::Invariant("a stored epoch is negative"))?;
+    Ok(Some((holder, epoch)))
 }
 
 /// At startup: every live holder belonged to the previous process, so every

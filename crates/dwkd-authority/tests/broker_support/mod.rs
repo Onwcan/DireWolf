@@ -35,8 +35,8 @@ use dwk_proto::wire::id::{RunId, SessionId};
 use dwkd_authority::state::{AuditRecord, WorkspaceId, WorkspaceSensitivity};
 
 use super::state_support::{
-    START_MS, TempDir, acquire_msg, admit_msg, ceiling, decode, id, install_fixtures, session,
-    start,
+    START_MS, TempDir, acquire_msg, admit_msg, bind_owned, ceiling, decode, id,
+    install_fixture_records, session, start,
 };
 use super::transport_support::{BIN, Client, PROMPT, Server, live_audit, own_uid};
 
@@ -542,7 +542,7 @@ impl Setup {
             None,
         )
         .expect("the fixture store starts");
-        install_fixtures(&mut authority);
+        install_fixture_records(&mut authority);
         extra(&mut authority);
         {
             let workspace = WorkspaceId::new(WORKSPACE).unwrap();
@@ -553,10 +553,17 @@ impl Setup {
             operator
                 .install_workspace_root(&workspace, root.to_str().unwrap())
                 .unwrap();
+            // F-18: the deployment has one runtime principal -- this
+            // process's uid, the only one `serve` allows -- and the operator
+            // says so in one audited act: every workspace and profile is its.
+            let adopted = operator
+                .adopt_single_principal(dwkd_authority::state::AuthenticatedSubject::unix_uid(
+                    own_uid(),
+                ))
+                .unwrap();
+            assert_eq!((adopted.sessions, adopted.workspaces), (0, 1));
             for n in 1..=4 {
-                operator
-                    .bind_session_workspace(&session(n), &workspace)
-                    .unwrap();
+                bind_owned(&mut authority, own_uid(), &session(n), &workspace);
             }
         }
         drop(authority);

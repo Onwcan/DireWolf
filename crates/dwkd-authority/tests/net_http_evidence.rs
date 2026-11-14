@@ -411,10 +411,10 @@ exit 1"#,
             operator
                 .install_workspace_root(&workspace, dir.join("ws").to_str().unwrap())
                 .unwrap();
-            operator
-                .bind_session_workspace(&session(1), &workspace)
-                .unwrap();
         }
+        // F-18: the in-process caller is the evidence's one principal.
+        crate::state_support::grant_lab(&mut authority, &workspace, &["operator"], &[1000]);
+        crate::state_support::bind_owned(&mut authority, 1000, &session(1), &workspace);
         let caller = authority.connect(dwkd_authority::state::AuthenticatedSubject::unix_uid(1000));
         let Reply::Done(epoch) = authority.acquire_lease(&caller, &session(1)).unwrap() else {
             panic!("a lease")

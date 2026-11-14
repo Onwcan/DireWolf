@@ -194,6 +194,8 @@ Design rules for this surface:
 >
 > While an approval is being drawn, the kernel takes the terminal to raw mode and the runtime's output stream to that TTY is suspended. This is what closes the terminal-control phishing path: an agent emitting cursor-positioning or scroll-region escape sequences cannot overdraw or scroll away a prompt it is not permitted to write during. Agent-authored output is additionally ANSI-stripped on the `ChannelSend` path, not merely on the way in.
 
+> **Not to be built as written (F-18, [ADR-0063](adr/0063-principal-ownership-of-sessions-workspaces-and-profiles.md), Proposed).** The terminal passed over the DWKP socket arrives on the **runtime's** endpoint, which the runtime connects to as the same uid as the CLI: a runtime could pass a pseudo-terminal it controls and answer its own prompt. The runtime's endpoint therefore receives no descriptor at all (a descriptor a runtime attaches is discarded unread; TX061). M6 decides approvals only on an **approver endpoint** of its own, whose identities the operator keeps disjoint from the runtime's, the authority's and the broker's uids; renders what the human approves from canonical data; binds every approval and standing grant to a principal, records who granted it and refuses one whose approver is its requester; and accepts a terminal, if at all, only on that endpoint and only once proved to be the approver's.
+
 Remote approval is off by default because it weakens the binding between "the operator" and "the account."  When enabled, high-risk classes (`DESTRUCTIVE`, `secret.use`, host execution) can be configured to require local approval regardless.
 
 ## 8. Threats and defences

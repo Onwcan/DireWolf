@@ -955,8 +955,42 @@ reason = "NO_MATCHING_RULE"
                 operator
                     .install_workspace_root(&ws, root.to_str().unwrap())
                     .unwrap();
+                // F-18: the runtime is the lab's one principal -- this
+                // process's uid, or `DW_PEER_AS` with three identities, the
+                // uid the kernel reports for the relay -- and owns its
+                // sessions; nobody else may hold them.
+                let runtime = ids.as_ref().map_or_else(own_uid, |ids| ids.runtime_uid);
+                crate::state_support::grant_lab(
+                    &mut authority,
+                    &ws,
+                    &["researcher", "coder", "agent"],
+                    &[runtime],
+                );
                 for n in 1..=16 {
-                    operator.bind_session_workspace(&session(n), &ws).unwrap();
+                    crate::state_support::bind_owned(&mut authority, runtime, &session(n), &ws);
+                }
+                if let Some(ids) = &ids {
+                    // I09 (F-18): another principal's session and profile,
+                    // which the runtime's uid must never hold -- declared the
+                    // broker's uid's, an identity that never speaks DWKP.
+                    let other =
+                        dwkd_authority::state::AuthenticatedSubject::unix_uid(ids.broker_uid);
+                    let mut operator = authority.operator();
+                    operator
+                        .install_agent_profile(&profile(
+                            "agent-other",
+                            &["process.exec:*"],
+                            &[],
+                            PrivacyClass::Any,
+                        ))
+                        .unwrap();
+                    operator
+                        .grant_profile_principal(
+                            &dwk_proto::wire::scalar::AgentProfileName::new("agent-other").unwrap(),
+                            other,
+                        )
+                        .unwrap();
+                    operator.declare_session_owner(&session(17), other).unwrap();
                 }
             }
             let policy_file = dir.path().join("m5d5.toml");
@@ -2606,6 +2640,70 @@ reason = "NO_MATCHING_RULE"
         }
         // The runtime keeps its lease while the other identities are probed,
         // each probe a process started through `sudo`.
+        peer.renew();
+
+        // I09 (F-18, ADR-0063, Proposed): the runtime's uid, as the kernel
+        // reports it for its relay, holds only what the operator declared its
+        // own -- not session 17, declared the broker's uid's, and not
+        // `agent-other`, granted to the broker's uid alone -- and a session it
+        // creates is its own.
+        {
+            let mut wire = lab.wire();
+            wire.handshake();
+            let taken = wire.call(&acquire_msg(&session(17)));
+            assert!(
+                matches!(&taken.body, DwkpBody::AuthorityRefused(r)
+                    if r.reason == dwk_proto::wire::scalar::RefusalReason::LeaseHeld),
+                "{taken:?}"
+            );
+            let created = wire.call(&acquire_msg(&session(18)));
+            let DwkpBody::LeaseGrant(own) = created.body else {
+                panic!("its own new session: {created:?}")
+            };
+            let n = next();
+            let escalated = wire.call(&admit_msg(
+                &session(18),
+                own.epoch,
+                &format!("other-{n}"),
+                "agent-other",
+                &[],
+                &["process.exec:*"],
+                n,
+            ));
+            assert!(
+                matches!(&escalated.body, DwkpBody::AuthorityRefused(r)
+                    if r.reason == dwk_proto::wire::scalar::RefusalReason::UnknownAgentProfile),
+                "{escalated:?}"
+            );
+            let lease = audit_records(&lab.dir.state(), "lease.refused");
+            let lease = lease.last().unwrap();
+            let runtime = format!("uid:{c_uid}");
+            assert_eq!(
+                super::state_support::text(lease, "subject"),
+                Some(runtime.as_str())
+            );
+            assert_eq!(
+                super::state_support::text(lease, "ownership"),
+                Some("SESSION_NOT_PERMITTED")
+            );
+            let admit = audit_records(&lab.dir.state(), "run.admit_refused");
+            let admit = admit.last().unwrap();
+            assert_eq!(
+                super::state_support::text(admit, "subject"),
+                Some(runtime.as_str())
+            );
+            assert_eq!(
+                super::state_support::text(admit, "ownership"),
+                Some("PROFILE_NOT_PERMITTED")
+            );
+            evidence(
+                IDENTITY_SUITE,
+                "i09-runtime-holds-only-what-the-operator-declared",
+                "LEASE_HELD,UNKNOWN_AGENT_PROFILE",
+                HOSTED,
+                "authority-ownership",
+            );
+        }
         peer.renew();
 
         // I03: the broker's private channel reads nothing from the runtime.

@@ -541,6 +541,18 @@ reason = "NO_MATCHING_RULE"
                     workspace.to_str().unwrap(),
                 )
                 .unwrap();
+            // F-18: the in-process caller and the wire client (this
+            // process's uid) are the lab's principals.
+            let mut profiles = vec!["researcher", "coder", "operator"];
+            if provision.writes {
+                profiles.push("maintainer");
+            }
+            crate::state_support::grant_lab(
+                authority,
+                &WorkspaceId::new("ws").unwrap(),
+                &profiles,
+                &[1000, crate::transport_support::own_uid()],
+            );
             lab
         }
 
@@ -602,10 +614,12 @@ reason = "NO_MATCHING_RULE"
             let n = self.next_session;
             self.next_session += 1;
             let authority = self.authority();
-            authority
-                .operator()
-                .bind_session_workspace(&session(n), &WorkspaceId::new("ws").unwrap())
-                .unwrap();
+            crate::state_support::bind_owned(
+                authority,
+                1000,
+                &session(n),
+                &WorkspaceId::new("ws").unwrap(),
+            );
             let caller = authority.connect(subject(1000));
             let Reply::Done(epoch) = authority.acquire_lease(&caller, &session(n)).unwrap() else {
                 panic!("a lease")
@@ -1417,10 +1431,12 @@ reason = "NO_MATCHING_RULE"
         move |session| {
             served
                 .operate(move |authority| {
-                    authority
-                        .operator()
-                        .bind_session_workspace(&session, &WorkspaceId::new("ws").unwrap())
-                        .unwrap();
+                    crate::state_support::bind_owned(
+                        authority,
+                        crate::transport_support::own_uid(),
+                        &session,
+                        &WorkspaceId::new("ws").unwrap(),
+                    );
                 })
                 .unwrap();
         }
@@ -1907,10 +1923,12 @@ reason = "NO_MATCHING_RULE"
         let host_run = {
             let n = 7;
             let authority = lab.authority();
-            authority
-                .operator()
-                .bind_session_workspace(&session(n), &WorkspaceId::new("ws").unwrap())
-                .unwrap();
+            crate::state_support::bind_owned(
+                authority,
+                1000,
+                &session(n),
+                &WorkspaceId::new("ws").unwrap(),
+            );
             let caller = authority.connect(subject(1000));
             let Reply::Done(epoch) = authority.acquire_lease(&caller, &session(n)).unwrap() else {
                 panic!("a lease")
@@ -2135,10 +2153,12 @@ reason = "NO_MATCHING_RULE"
         let mut lab = Lab::new("m5d2-serve", WorkloadBudget::default());
         let fixture = var("DW_SANDBOX_FIXTURE_SHA256");
         let probe = var("DW_SANDBOX_PROBE_SHA256");
-        lab.authority()
-            .operator()
-            .bind_session_workspace(&session(1), &WorkspaceId::new("ws").unwrap())
-            .unwrap();
+        crate::state_support::bind_owned(
+            lab.authority(),
+            crate::transport_support::own_uid(),
+            &session(1),
+            &WorkspaceId::new("ws").unwrap(),
+        );
         lab.authority = None;
         let config = lab.dir.path().join("sandbox.toml");
         std::fs::write(
@@ -2611,10 +2631,12 @@ reason = "NO_MATCHING_RULE"
             let n = lab.next_session;
             lab.next_session += 1;
             let authority = lab.authority();
-            authority
-                .operator()
-                .bind_session_workspace(&session(n), &WorkspaceId::new(workspace).unwrap())
-                .unwrap();
+            crate::state_support::bind_owned(
+                authority,
+                1000,
+                &session(n),
+                &WorkspaceId::new(workspace).unwrap(),
+            );
             let caller = authority.connect(subject(1000));
             let Reply::Done(epoch) = authority.acquire_lease(&caller, &session(n)).unwrap() else {
                 panic!("a lease")
@@ -2646,14 +2668,20 @@ reason = "NO_MATCHING_RULE"
 
         /// A second workspace, `ws2`, bound to `root`.
         fn second_workspace(lab: &mut Lab, root: &Path) {
-            let mut operator = lab.authority().operator();
             let id = WorkspaceId::new("ws2").unwrap();
-            operator
-                .install_workspace(&id, WorkspaceSensitivity::Private)
-                .unwrap();
-            operator
-                .install_workspace_root(&id, root.to_str().unwrap())
-                .unwrap();
+            {
+                let mut operator = lab.authority().operator();
+                operator
+                    .install_workspace(&id, WorkspaceSensitivity::Private)
+                    .unwrap();
+                // F-18: it may share its root with `ws`, which the lab's two
+                // subjects reach: acknowledged before the root is bound.
+                operator.acknowledge_root_share(&id).unwrap();
+                operator
+                    .install_workspace_root(&id, root.to_str().unwrap())
+                    .unwrap();
+            }
+            crate::state_support::grant_lab(lab.authority(), &id, &[], &[1000]);
         }
 
         /// A version-2 tool call in `l`'s run, in process.
@@ -2866,10 +2894,12 @@ reason = "NO_MATCHING_RULE"
                     writes: false,
                 },
             );
-            lab.authority()
-                .operator()
-                .bind_session_workspace(&session(1), &WorkspaceId::new("ws").unwrap())
-                .unwrap();
+            crate::state_support::bind_owned(
+                lab.authority(),
+                crate::transport_support::own_uid(),
+                &session(1),
+                &WorkspaceId::new("ws").unwrap(),
+            );
             lab.authority = None;
             let socket = lab.dir.path().join("ipc").join("kernel.sock");
             let mut server = super::super::transport_support::Server::start(&serve_args(
@@ -3671,10 +3701,12 @@ reason = "NO_MATCHING_RULE"
                     writes: false,
                 },
             );
-            lab.authority()
-                .operator()
-                .bind_session_workspace(&session(1), &WorkspaceId::new("ws").unwrap())
-                .unwrap();
+            crate::state_support::bind_owned(
+                lab.authority(),
+                crate::transport_support::own_uid(),
+                &session(1),
+                &WorkspaceId::new("ws").unwrap(),
+            );
             lab.authority = None;
             let socket = lab.dir.path().join("ipc").join("kernel.sock");
             let mut server = super::super::transport_support::Server::start(&serve_args(
@@ -4154,10 +4186,12 @@ reason = "NO_MATCHING_RULE"
             let n = lab.next_session;
             lab.next_session += 1;
             let authority = lab.authority();
-            authority
-                .operator()
-                .bind_session_workspace(&session(n), &WorkspaceId::new("ws").unwrap())
-                .unwrap();
+            crate::state_support::bind_owned(
+                authority,
+                1000,
+                &session(n),
+                &WorkspaceId::new("ws").unwrap(),
+            );
             let caller = authority.connect(subject(1000));
             let Reply::Done(epoch) = authority.acquire_lease(&caller, &session(n)).unwrap() else {
                 panic!("a lease")

@@ -222,8 +222,11 @@ fn after_a_restart_the_same_key_with_a_changed_payload_is_a_conflict() {
 fn after_a_restart_another_subject_with_the_same_key_has_a_scope_of_its_own() {
     let mut h = after_a_dead_authority("other-subject", "admitted");
     let original = run_ids(&h.state());
-    let b = h.connect(2000);
     let s = session(1);
+    // F-18: B holds A's session only by the operator's delegation; without
+    // it B is refused, before and after a restart (`state_ownership.rs`).
+    state_support::delegate(h.authority(), &s, 2000);
+    let b = h.connect(2000);
     let e = h.lease(&b, &s);
     // Neither a replay of the dead admission nor a collision with it: a first
     // admission in B's own scope.

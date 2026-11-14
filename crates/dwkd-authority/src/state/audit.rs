@@ -267,11 +267,27 @@ pub enum AuditEvent {
     /// A run holding external content changed a workspace root (F-01): the
     /// root's mark, recorded before the effect.
     WorkspaceTainted,
+    /// An ownership record was made (F-18): a session's owner -- declared
+    /// by the operator, adopted, or its first acquirer's -- a delegate, a
+    /// workspace or profile principal, or a root-share acknowledgement.
+    OwnershipDeclared,
+    /// A grant was revoked (F-18): what it ended -- leases, runs and the
+    /// destruction of their environments -- in the same transaction.
+    OwnershipRevoked,
+    /// The operator adopted one principal for a store's legacy sessions,
+    /// workspaces and profiles (F-18), after its history showed no other.
+    OwnershipAdopted,
+    /// The authority started with ownership missing (F-18): what refuses
+    /// until it is declared.
+    OwnershipIncomplete,
+    /// A live lease was invalidated because its holder's grant was revoked
+    /// (F-18).
+    LeaseRevoked,
 }
 
 impl AuditEvent {
     /// Every kind, in declaration order.
-    pub const ALL: [Self; 67] = [
+    pub const ALL: [Self; 72] = [
         Self::StoreCreated,
         Self::StoreOpened,
         Self::PolicyInstalled,
@@ -339,6 +355,11 @@ impl AuditEvent {
         Self::WorkloadDenied,
         Self::WorkloadOutcome,
         Self::WorkspaceTainted,
+        Self::OwnershipDeclared,
+        Self::OwnershipRevoked,
+        Self::OwnershipAdopted,
+        Self::OwnershipIncomplete,
+        Self::LeaseRevoked,
     ];
 
     /// The spelling in a record's `event` field.
@@ -412,6 +433,11 @@ impl AuditEvent {
             Self::WorkloadDenied => "workload.denied",
             Self::WorkloadOutcome => "workload.outcome",
             Self::WorkspaceTainted => "workspace.tainted",
+            Self::OwnershipDeclared => "ownership.declared",
+            Self::OwnershipRevoked => "ownership.revoked",
+            Self::OwnershipAdopted => "ownership.adopted",
+            Self::OwnershipIncomplete => "ownership.incomplete",
+            Self::LeaseRevoked => "lease.revoked",
         }
     }
 }

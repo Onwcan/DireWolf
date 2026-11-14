@@ -2374,6 +2374,89 @@ of them again would be a switch for profiles that have none: a way to run npm
 or pip without the profile, or to bring back a profile nobody accepted.
 """
 
+[[text_rules]]
+id = "TX061-the-runtime-endpoint-receives-no-descriptor"
+paths = ["crates/dwkd-authority/src/server"]
+exempt_paths = []
+suffixes = [".rs"]
+patterns = [
+    '^(?!\s*//).*\brecvmsg\b',
+    '^(?!\s*//).*\bRecvAncillary\w*\b',
+    '^(?!\s*//).*\bControlMessageOwned\b',
+    '^(?!\s*//).*\bSCM_RIGHTS\b',
+    '^(?!\s*//).*\brecv_with_fd\w*\b',
+    '^(?!\s*//).*\bcmsg\w*',
+]
+reason = """
+F-18 (ADR-0063, Proposed): the runtime's DWKP endpoint reads bytes and
+nothing else. A descriptor a runtime attaches to its message -- a pipe it
+holds, a terminal it controls -- is discarded by the kernel with the bytes,
+never installed in the authority (`transport_hostile.rs`,
+`a_descriptor_a_runtime_passes_is_never_installed_in_the_authority`). A way to
+receive one would let a same-uid runtime hand the authority a terminal it
+controls and answer a prompt there itself: the self-approval M6 must never
+allow. M6's approver endpoint is a separate endpoint with its own, disjoint
+operator identities; it is not this module, and this rule stays.
+"""
+
+[[text_rules]]
+id = "TX062-the-runtime-path-selects-no-origin-and-records-no-approval"
+paths = ["crates/dwkd-authority/src/state", "crates/dwkd-authority/src/server"]
+exempt_paths = []
+suffixes = [".rs"]
+patterns = [
+    '^(?!\s*//).*\bOrigin::(Interactive|Scheduled|Channel|Subagent)\b',
+    '^(?!\s*//).*INSERT\s+INTO\s+\w*approv',
+]
+reason = """
+F-18 (ADR-0063, Proposed): every run a runtime admits has origin `api`
+(`state/admission.rs`); an attended origin -- a human at a terminal -- is not
+a runtime's to select, and nothing a runtime sends reaches the origin. No
+runtime operation records an approval: M6 adds them, decided only on an
+approver endpoint whose identities the operator keeps disjoint from the
+runtime's. A spelling of an attended origin, or an insert into an approval
+record, in the runtime's state or server path would be a requester approving
+itself.
+"""
+
+[[text_rules]]
+id = "TX063-the-runtime-endpoint-takes-its-subject-from-the-kernel"
+paths = ["crates/dwkd-authority/src/server"]
+exempt_paths = []
+suffixes = [".rs"]
+patterns = ['^(?!\s*//).*\bunix_uid\((?!peer\.uid\))']
+reason = """
+F-18 (ADR-0063, Proposed): the subject every authority decision is scoped to
+-- whose session, whose workspace, whose profile -- is the uid the kernel
+reported for the socket (`SO_PEERCRED`, read in `server/peer.rs`), made into
+a subject once per connection in `server/connection.rs` as
+`unix_uid(peer.uid)`. A subject made from anything else in the server --
+a field of a message, a configuration value, a constant -- would let a
+runtime say who it is.
+"""
+
+[[text_rules]]
+id = "TX064-history-is-never-read-as-authority"
+paths = ["crates/dwkd-authority/src"]
+exempt_paths = [
+    # The table's definition and its migration.
+    "crates/dwkd-authority/src/state/schema.rs",
+    # The single-principal adoption: it reads history only to refuse.
+    "crates/dwkd-authority/src/state/adoption.rs",
+]
+suffixes = [".rs"]
+patterns = ['^(?!\s*//).*\bownership_observation\b']
+reason = """
+F-18 (ADR-0063, Proposed): schema 14's migration grants nothing from a
+store's history. What the history showed -- lease holders, the subjects of
+runs, the profiles and workspaces they used, where two subjects met -- is
+kept in `ownership_observation` for the operator to read, and the
+single-principal adoption reads it only to refuse. An authorization decision
+that read it would make a past takeover, or the last subject to hold a
+lease, an owner: the outcome the migration exists to prevent. Every other
+source file is kept from naming it.
+"""
+
 # ===========================================================================
 # Documentation
 # ===========================================================================

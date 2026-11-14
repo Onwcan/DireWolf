@@ -738,6 +738,19 @@ impl Fixture {
             operator
                 .install_workspace_root(&workspace, root.to_str().unwrap())
                 .unwrap();
+            // F-18: the operator's explicit declarations, in order.
+            operator
+                .grant_workspace_principal(&workspace, AuthenticatedSubject::unix_uid(1000))
+                .unwrap();
+            operator
+                .grant_profile_principal(
+                    &AgentProfileName::new("operator").unwrap(),
+                    AuthenticatedSubject::unix_uid(1000),
+                )
+                .unwrap();
+            operator
+                .declare_session_owner(&session, AuthenticatedSubject::unix_uid(1000))
+                .unwrap();
             operator
                 .bind_session_workspace(&session, &workspace)
                 .unwrap();
@@ -1926,6 +1939,10 @@ mod release;
 /// F-01: taint that follows the content a run receives.
 #[path = "taint_route_tests.rs"]
 mod taint;
+
+/// F-18: a revocation's two phases.
+#[path = "ownership_route_tests.rs"]
+mod ownership;
 
 // ===========================================================================
 // F-17 (ADR-0061, Proposed): a workload's egress, decided by both gates at

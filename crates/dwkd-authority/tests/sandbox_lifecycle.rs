@@ -388,6 +388,12 @@ mod linux {
                     PrivacyClass::Any,
                 ))
                 .unwrap();
+            crate::state_support::grant_lab(
+                lab.authority(),
+                &WorkspaceId::new("ws").unwrap(),
+                &["egress-agent"],
+                &[1000],
+            );
             lab.profile = "egress-agent";
             lab
         }
@@ -460,6 +466,13 @@ mod linux {
             operator
                 .install_workspace_root(&WorkspaceId::new("ws").unwrap(), root.to_str().unwrap())
                 .unwrap();
+            // F-18: the in-process caller is the lab's one principal.
+            crate::state_support::grant_lab(
+                authority,
+                &WorkspaceId::new("ws").unwrap(),
+                &[],
+                &[1000],
+            );
             lab
         }
 
@@ -503,10 +516,7 @@ mod linux {
             let workspace = self.workspace.clone();
             let profile = self.profile;
             let authority = self.authority();
-            authority
-                .operator()
-                .bind_session_workspace(&session(n), &workspace)
-                .unwrap();
+            crate::state_support::bind_owned(authority, 1000, &session(n), &workspace);
             let caller = authority.connect(subject(1000));
             let Reply::Done(epoch) = authority.acquire_lease(&caller, &session(n)).unwrap() else {
                 panic!("a lease")
@@ -1746,10 +1756,7 @@ when.verb = ["fs.read", "fs.write", "fs.create"]
             let workspace = self.workspace.clone();
             let profile = self.profile;
             let authority = self.authority();
-            authority
-                .operator()
-                .bind_session_workspace(&session(n), &workspace)
-                .unwrap();
+            crate::state_support::bind_owned(authority, 1000, &session(n), &workspace);
             let caller = authority.connect(subject(1000));
             let Reply::Done(epoch) = authority.acquire_lease(&caller, &session(n)).unwrap() else {
                 panic!("a lease")
@@ -1861,6 +1868,12 @@ when.verb = ["fs.read", "fs.write", "fs.create"]
                 PrivacyClass::Any,
             ))
             .unwrap();
+        crate::state_support::grant_lab(
+            lab.authority(),
+            &WorkspaceId::new("ws").unwrap(),
+            &["taint-agent"],
+            &[1000],
+        );
         lab.profile = "taint-agent";
         let grants = [
             format!("network.https:origin.example.com:{port}"),

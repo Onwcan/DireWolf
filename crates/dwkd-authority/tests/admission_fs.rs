@@ -138,6 +138,14 @@ mod linux {
                         PrivacyClass::Any,
                     ))
                     .unwrap();
+                // F-18: the in-process caller may run under it.
+                let caller = dwkd_authority::state::AuthenticatedSubject::unix_uid(1000);
+                operator
+                    .grant_profile_principal(
+                        &dwk_proto::wire::scalar::AgentProfileName::new("reader").unwrap(),
+                        caller,
+                    )
+                    .unwrap();
                 if bind {
                     let id = WorkspaceId::new("proj").unwrap();
                     operator
@@ -146,6 +154,8 @@ mod linux {
                     operator
                         .install_workspace_root(&id, root.to_str().unwrap())
                         .unwrap();
+                    operator.grant_workspace_principal(&id, caller).unwrap();
+                    operator.declare_session_owner(&session, caller).unwrap();
                     operator.bind_session_workspace(&session, &id).unwrap();
                 }
             }

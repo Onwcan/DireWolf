@@ -117,8 +117,9 @@ mod linux {
                 .install_workspace(&id, WorkspaceSensitivity::Private)
                 .unwrap();
             operator.install_workspace_root(&id, host(&root)).unwrap();
-            operator.bind_session_workspace(&session, &id).unwrap();
         }
+        // F-18: the in-process caller owns the session, a principal there.
+        crate::state_support::own_and_bind(h.authority(), 1000, &session, &id);
         let caller = h.connect(1000);
         let epoch = h.lease(&caller, &session);
         let admission = admitted(
@@ -360,8 +361,9 @@ mod linux {
             operator
                 .install_workspace(&bare, WorkspaceSensitivity::Public)
                 .unwrap();
-            operator.bind_session_workspace(&s1, &bare).unwrap();
         }
+        // F-18: the in-process caller owns the session, a principal there.
+        crate::state_support::own_and_bind(h.authority(), 1000, &s1, &bare);
         let caller = h.connect(1000);
         let e1 = h.lease(&caller, &s1);
         let run = admitted(
@@ -535,11 +537,19 @@ mod linux {
         // shared key namespace and run-image binding, whose triggers sit on
         // the older idempotency ledgers and the workload ledger. Schema 13's
         // (F-01) taint tables go first, and its trigger on the run's policy
-        // inputs, which no table drop removes, with them.
+        // inputs, which no table drop removes, with them -- and before
+        // them schema 14's (F-18) ownership tables, children first, and
+        // its trigger on the session binding table.
         {
             let conn = raw(&h.state());
             conn.execute_batch(
-                "DROP TABLE run_taint_in_flight; DROP TABLE run_taint_evidence; \
+                "DROP TABLE ownership_revocation_run; DROP TABLE ownership_revocation; \
+                 DROP TABLE session_delegate; \
+                 DROP TRIGGER session_workspace_bound_with_its_owner; \
+                 DROP TABLE session_owner; DROP TABLE profile_principal; \
+                 DROP TABLE workspace_principal; DROP TABLE workspace_root_share; \
+                 DROP TABLE ownership_observation; DROP TABLE legacy_session; \
+                 DROP TABLE run_taint_in_flight; DROP TABLE run_taint_evidence; \
                  DROP TABLE workspace_taint; \
                  DROP TRIGGER run_policy_input_taint_has_evidence; \
                  DROP TABLE tunnel_reach; DROP TABLE workspace_exposure; DROP TABLE workload_egress; \
@@ -591,7 +601,13 @@ mod linux {
         {
             let conn = raw(&h.state());
             conn.execute_batch(
-                "DROP TABLE run_taint_in_flight; DROP TABLE run_taint_evidence; \
+                "DROP TABLE ownership_revocation_run; DROP TABLE ownership_revocation; \
+                 DROP TABLE session_delegate; \
+                 DROP TRIGGER session_workspace_bound_with_its_owner; \
+                 DROP TABLE session_owner; DROP TABLE profile_principal; \
+                 DROP TABLE workspace_principal; DROP TABLE workspace_root_share; \
+                 DROP TABLE ownership_observation; DROP TABLE legacy_session; \
+                 DROP TABLE run_taint_in_flight; DROP TABLE run_taint_evidence; \
                  DROP TABLE workspace_taint; \
                  DROP TRIGGER run_policy_input_taint_has_evidence; \
                  DROP TABLE tunnel_reach; DROP TABLE workspace_exposure; DROP TABLE workload_egress; \

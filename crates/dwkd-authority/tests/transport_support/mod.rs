@@ -40,7 +40,9 @@ use dwk_proto::dwkp::{self, DwkpBody, DwkpMessage};
 use dwk_proto::frame::{ContentType, FrameDecoder, encode};
 use dwkd_authority::state::{AuditLogFault, AuditRecord, read_audit_log};
 
-use super::state_support::{TempDir, balanced, ceiling, decode, id, install_fixtures, start};
+use super::state_support::{
+    TempDir, balanced, ceiling, decode, grant_fixture_profiles, id, install_fixtures, start,
+};
 
 /// The binary under test: the one `cargo build` produces and an operator runs.
 pub(crate) const BIN: &str = env!("CARGO_BIN_EXE_dwkd-authority");
@@ -145,6 +147,9 @@ impl Fixture {
         let (mut authority, _) =
             start(&dir.state(), &balanced(), &clock, None).expect("the fixture store starts");
         install_fixtures(&mut authority);
+        // F-18: the server sees this process's uid; the operator grants it
+        // the fixture profiles, and nobody else.
+        grant_fixture_profiles(&mut authority, own_uid());
         drop(authority);
         Self { dir }
     }

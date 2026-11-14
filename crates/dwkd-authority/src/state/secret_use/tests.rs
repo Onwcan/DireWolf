@@ -453,6 +453,19 @@ fn fixture_with(tag: &str, policy: Policy, hook: Option<CrashHook>) -> Option<Fi
         operator
             .install_workspace_root(&workspace, root.to_str().unwrap())
             .unwrap();
+        // F-18: the operator's explicit declarations, in order.
+        operator
+            .grant_workspace_principal(&workspace, AuthenticatedSubject::unix_uid(1000))
+            .unwrap();
+        operator
+            .grant_profile_principal(
+                &AgentProfileName::new("operator").unwrap(),
+                AuthenticatedSubject::unix_uid(1000),
+            )
+            .unwrap();
+        operator
+            .declare_session_owner(&session, AuthenticatedSubject::unix_uid(1000))
+            .unwrap();
         operator
             .bind_session_workspace(&session, &workspace)
             .unwrap();

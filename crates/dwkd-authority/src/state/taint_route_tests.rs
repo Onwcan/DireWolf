@@ -290,6 +290,11 @@ fn f01_two_workspaces_bound_to_one_directory_are_one_root() {
         operator
             .install_workspace_root(&other, directory.to_str().unwrap())
             .unwrap();
+        // F-18: one principal holds both workspaces, so the root is not
+        // shared across principals and needs no acknowledgement.
+        let uid = AuthenticatedSubject::unix_uid(1000);
+        operator.grant_workspace_principal(&other, uid).unwrap();
+        operator.declare_session_owner(&session, uid).unwrap();
         operator.bind_session_workspace(&session, &other).unwrap();
     }
     fx.session = session;
@@ -629,4 +634,53 @@ fn f01_a_later_receipt_makes_a_run_whose_taint_was_a_possibility_hold_content() 
     assert_eq!(fx.count("SELECT count(*) FROM workspace_taint"), 1);
     fx.history_holds();
     taint_evidence("taint-later-receipt-is-content", "marked");
+}
+
+#[test]
+fn f18_exposure_and_taint_follow_the_root_whichever_principal_reaches_it() {
+    // F-18 (ADR-0063): ownership decides who may hold a session; it never
+    // narrows what F-17's exposure and F-01's taint follow, which is the
+    // root. A second principal, on the operator's acknowledged share of the
+    // root, receives what the first principal's workload brought.
+    let mut fx = taint_fixture();
+    let first = fx.run("r1", ASKED);
+    fx.ready(&first);
+    fx.reporting(&first, "k1", b"", &[("allowed.example.com", 4)]);
+    assert_eq!(fx.taint(&first), 2);
+    let ws = WorkspaceId::new("ws").unwrap();
+    let two = AuthenticatedSubject::unix_uid(2000);
+    let other = SessionId::from_uuid(uuid(2)).unwrap();
+    {
+        let mut operator = fx.authority().operator();
+        operator.acknowledge_root_share(&ws).unwrap();
+        operator.grant_workspace_principal(&ws, two).unwrap();
+        operator
+            .grant_profile_principal(&AgentProfileName::new("operator").unwrap(), two)
+            .unwrap();
+        operator.declare_session_owner(&other, two).unwrap();
+        operator.bind_session_workspace(&other, &ws).unwrap();
+    }
+    let caller = fx.authority().connect(two);
+    let Reply::Done(epoch) = fx.authority().acquire_lease(&caller, &other).unwrap() else {
+        panic!("the second principal's lease")
+    };
+    fx.session = other;
+    fx.caller = Some(caller);
+    fx.epoch = epoch;
+    let second = fx.run("r2", ASKED);
+    assert_eq!(fx.taint(&second), 0);
+    assert!(matches!(fx.stat(&second, "s2"), DwkpBody::ToolResultV2(_)));
+    assert_eq!(fx.taint(&second), 2, "the root decides, not the principal");
+    assert_eq!(fx.evidence_of(&second), ["root_exposed:ORIGIN_BYTES:0>2"]);
+    // Its own workload's egress is decided on the exposed root (F-17).
+    fx.ready(&second);
+    fx.reporting(&second, "k2", b"", &[]);
+    assert_eq!(
+        fx.count(&format!(
+            "SELECT count(*) FROM workload_egress WHERE run_id = '{}' AND exposed_at_start = 1",
+            second.as_str()
+        )),
+        1
+    );
+    fx.history_holds();
 }

@@ -353,7 +353,13 @@ pub(crate) fn skill(name: &str, trust: SkillTrust, declared: &[&str]) -> SkillSp
     }
 }
 
-/// The fixture configuration: two profiles and four skills.
+/// The subject the fixtures' runtime connects as, unless a test says
+/// otherwise: the operator grants it both fixture profiles (F-18).
+pub(crate) const RUNTIME_UID: u32 = 1000;
+
+/// The fixture configuration: two profiles and four skills, both profiles
+/// granted to [`RUNTIME_UID`] by the operator (F-18, ADR-0063) -- the one
+/// subject that may name them unless a test grants another.
 ///
 /// * `researcher` — no baseline skill; may call models, read memory, reach
 ///   `*.example.com` and `github.com` over HTTPS, schedule, promote memory,
@@ -361,6 +367,108 @@ pub(crate) fn skill(name: &str, trust: SkillTrust, declared: &[&str]) -> SkillSp
 /// * `coder` — mandates the `house-rules` skill, which permits only model
 ///   calls and memory reads.
 pub(crate) fn install_fixtures(authority: &mut Authority) {
+    install_fixture_records(authority);
+    grant_fixture_profiles(authority, RUNTIME_UID);
+}
+
+/// The operator's grant of both fixture profiles to `uid` (F-18).
+pub(crate) fn grant_fixture_profiles(authority: &mut Authority, uid: u32) {
+    let mut operator = authority.operator();
+    for name in ["researcher", "coder"] {
+        operator
+            .grant_profile_principal(
+                &AgentProfileName::new(name).expect("a profile name"),
+                subject(uid),
+            )
+            .expect("the profile is granted");
+    }
+}
+
+/// The operator's delegation of `session` to `uid`, and its grant of the
+/// fixture profiles (F-18): what lets a second subject hold a session
+/// another owns. Without it the second subject is refused `LEASE_HELD`.
+pub(crate) fn delegate(authority: &mut Authority, session: &SessionId, uid: u32) {
+    authority
+        .operator()
+        .add_session_delegate(session, subject(uid))
+        .expect("the delegate is added");
+    grant_fixture_profiles(authority, uid);
+}
+
+/// The operator's declaration that `uid` owns `session` and is a principal
+/// of `workspace`, and the session's binding to it (F-18): the explicit
+/// statements a bound session needs, in the bootstrap's order.
+pub(crate) fn own_and_bind(
+    authority: &mut Authority,
+    uid: u32,
+    session: &SessionId,
+    workspace: &dwkd_authority::state::WorkspaceId,
+) {
+    let mut operator = authority.operator();
+    operator
+        .grant_workspace_principal(workspace, subject(uid))
+        .expect("the workspace is granted");
+    operator
+        .declare_session_owner(session, subject(uid))
+        .expect("the owner is declared");
+    operator
+        .bind_session_workspace(session, workspace)
+        .expect("the session binds");
+}
+
+/// The operator's declaration that `uid` owns `session`, and the session's
+/// binding to `workspace` (F-18): `uid` must already be a principal of it.
+pub(crate) fn bind_owned(
+    authority: &mut Authority,
+    uid: u32,
+    session: &SessionId,
+    workspace: &dwkd_authority::state::WorkspaceId,
+) {
+    let mut operator = authority.operator();
+    operator
+        .declare_session_owner(session, subject(uid))
+        .expect("the owner is declared");
+    operator
+        .bind_session_workspace(session, workspace)
+        .expect("the session binds");
+}
+
+/// An evidence lab's operator declarations (F-18): each of `uids` a
+/// principal of `workspace` and granted `profiles`. A lab whose in-process
+/// caller and wire client are two subjects -- this process's uid is not
+/// always the fixtures' -- acknowledges first that the workspace's root is
+/// shared by them: F-17's exposure and F-01's taint follow the root whoever
+/// reaches it.
+pub(crate) fn grant_lab(
+    authority: &mut Authority,
+    workspace: &dwkd_authority::state::WorkspaceId,
+    profiles: &[&str],
+    uids: &[u32],
+) {
+    let distinct: std::collections::BTreeSet<u32> = uids.iter().copied().collect();
+    let mut operator = authority.operator();
+    if distinct.len() > 1 {
+        operator
+            .acknowledge_root_share(workspace)
+            .expect("the share is acknowledged");
+    }
+    for uid in distinct {
+        operator
+            .grant_workspace_principal(workspace, subject(uid))
+            .expect("the workspace is granted");
+        for name in profiles {
+            operator
+                .grant_profile_principal(
+                    &AgentProfileName::new(*name).expect("a profile name"),
+                    subject(uid),
+                )
+                .expect("the profile is granted");
+        }
+    }
+}
+
+/// The fixture profiles and skills, granted to nobody.
+pub(crate) fn install_fixture_records(authority: &mut Authority) {
     let mut operator = authority.operator();
     operator
         .install_agent_profile(&profile(

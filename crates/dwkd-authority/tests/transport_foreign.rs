@@ -61,10 +61,17 @@ mod linux {
     use std::process::Command;
     use std::time::{Duration, Instant};
 
+    use std::sync::Arc;
+
     use dwk_proto::dwkp::DwkpBody;
     use dwk_proto::json::{self, ParseOptions, Value};
+    use dwk_proto::wire::scalar::{RefusalReason, RefusedOperation};
+    use dwkd_authority::state::{AuthenticatedSubject, ManualClock};
 
-    use super::state_support::{TempDir, acquire_msg, heartbeat_msg, session};
+    use super::state_support::{
+        START_MS, TempDir, acquire_msg, admit_msg, balanced, epoch, heartbeat_msg,
+        release_lease_msg, session, start,
+    };
     use super::transport_support::{
         BIN, Client, Fixture, PROMPT, Server, evidence, handshake, own_uid,
     };
@@ -411,6 +418,172 @@ mod linux {
             "filesystem",
             true,
             false,
+        );
+    }
+
+    /// One answer frame the foreign client read, decoded by the real decoder.
+    fn reply(report: &json::Object, index: usize) -> DwkpBody {
+        let Some(Value::Array(replies)) = report.get("replies") else {
+            panic!("replies: {report:?}")
+        };
+        let Some(Value::String(hex)) = replies.get(index) else {
+            panic!("reply {index}: {report:?}")
+        };
+        let bytes: Vec<u8> = (0..hex.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap())
+            .collect();
+        dwk_proto::dwkp::decode_body(&bytes[5..]).unwrap().body
+    }
+
+    fn refused(body: &DwkpBody) -> (RefusedOperation, RefusalReason) {
+        match body {
+            DwkpBody::AuthorityRefused(refusal) => (refusal.operation, refusal.reason),
+            other => panic!("not refused: {other:?}"),
+        }
+    }
+
+    #[test]
+    #[ignore = "needs a second OS identity (DW_PEER_AS); run by `make authority-transport-evidence`"]
+    fn a_foreign_uid_allowed_to_connect_holds_no_other_principals_session_or_profile() {
+        // F-18 (ADR-0063, Proposed): the peer gate lets a uid speak; it no
+        // longer lets it act on what another principal owns. Both uids are
+        // allowed here, so the boundary is the ownership the operator
+        // declared, decided on the uid the kernel reports for each socket.
+        let (user, peer_uid) = peer_user();
+        let fx = Fixture::new("f-owner");
+        {
+            // The operator's own statement, offline, before `serve`: this
+            // process's uid owns session 1. The fixture granted it, and
+            // nobody else, the fixture profiles.
+            let clock = Arc::new(ManualClock::new(START_MS));
+            let (mut authority, _) = start(&fx.state(), &balanced(), &clock, None).unwrap();
+            authority
+                .operator()
+                .declare_session_owner(&session(1), AuthenticatedSubject::unix_uid(own_uid()))
+                .unwrap();
+        }
+        traversable_only(fx.dir.path());
+        let staging = TempDir::new("f-client-owner");
+        traversable_only(staging.path());
+        let script = staged_client(&staging);
+        let mut server =
+            Server::start(&fx.args_for(&[own_uid(), peer_uid], &["--allow-authority-uid"]));
+        assert_authority_state_still_private(&fx);
+        // The owner holds session 1 and releases it: its lease is not live.
+        let mut owner = Client::connect(&fx.socket());
+        owner.handshake();
+        let s1 = session(1);
+        let DwkpBody::LeaseGrant(grant) = owner.call(&acquire_msg(&s1)).body else {
+            panic!("the owner's lease")
+        };
+        assert!(matches!(
+            owner.call(&release_lease_msg(&s1, grant.epoch)).body,
+            DwkpBody::Ack(_)
+        ));
+
+        // The foreign uid, on one connection: the owner's session, a new
+        // session of its own, and a run under a profile it was not granted.
+        let s2 = session(2);
+        let frames: Vec<String> = [
+            handshake(1, 1, 1),
+            acquire_msg(&s1),
+            acquire_msg(&s2),
+            admit_msg(&s2, epoch(1), "k1", "researcher", &[], &["model.call:*"], 1),
+        ]
+        .iter()
+        .map(|m| hex(&m.to_frame().unwrap()))
+        .collect();
+        let mut args = vec!["converse".to_owned(), fx.socket().display().to_string()];
+        args.extend(frames);
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        let report = run_as(&user, &script, &args);
+        assert_eq!(
+            u32::try_from(int(&report, "euid")).unwrap(),
+            peer_uid,
+            "the client ran as the second identity"
+        );
+        assert!(matches!(reply(&report, 0), DwkpBody::HandshakeAccepted(_)));
+        assert_eq!(
+            refused(&reply(&report, 1)),
+            (RefusedOperation::AcquireLease, RefusalReason::LeaseHeld),
+            "the owner's released session is not the foreign uid's"
+        );
+        let DwkpBody::LeaseGrant(own) = reply(&report, 2) else {
+            panic!("its own new session: {report:?}")
+        };
+        assert_eq!(own.epoch.get(), 1);
+        assert_eq!(
+            refused(&reply(&report, 3)),
+            (
+                RefusedOperation::AdmitRun,
+                RefusalReason::UnknownAgentProfile
+            ),
+            "a profile granted to another uid is unknown to this one"
+        );
+
+        // The audit, as the operator reads it: each refusal names the uid
+        // the kernel reported, and why.
+        let foreign = format!("uid:{peer_uid}");
+        await_count(&fx, "lease.refused", 1);
+        let refusal = &fx.events("lease.refused")[0];
+        assert_eq!(refusal.text("subject"), Some(foreign.as_str()));
+        assert_eq!(refusal.text("ownership"), Some("SESSION_NOT_PERMITTED"));
+        await_count(&fx, "run.admit_refused", 1);
+        let admit = &fx.events("run.admit_refused")[0];
+        assert_eq!(admit.text("subject"), Some(foreign.as_str()));
+        assert_eq!(admit.text("ownership"), Some("PROFILE_NOT_PERMITTED"));
+        assert!(
+            fx.events("ownership.declared").iter().any(|r| {
+                r.text("resource") == Some(s2.as_str())
+                    && r.text("subject") == Some(foreign.as_str())
+                    && r.text("basis") == Some("FIRST_ACQUIRER")
+            }),
+            "session 2 is the foreign uid's, its first acquirer"
+        );
+        assert!(fx.events("run.admitted").is_empty(), "no run for anyone");
+        assert!(fx.events("run.reaped").is_empty(), "nothing taken over");
+        evidence(
+            "peer",
+            "foreign-uid-session-takeover",
+            "state-fence",
+            true,
+            true,
+        );
+        evidence(
+            "peer",
+            "foreign-uid-profile-escalation",
+            "state-fence",
+            true,
+            true,
+        );
+
+        // And this process's uid cannot take the foreign uid's session.
+        assert_eq!(
+            refused(&owner.call(&acquire_msg(&s2)).body),
+            (RefusedOperation::AcquireLease, RefusalReason::LeaseHeld)
+        );
+        await_count(&fx, "lease.refused", 2);
+        assert_eq!(
+            fx.events("lease.refused")[1].text("ownership"),
+            Some("SESSION_NOT_PERMITTED")
+        );
+        assert_authority_state_still_private(&fx);
+        server.kill();
+        let verified =
+            super::state_support::output(Command::new(BIN).arg("verify-audit").arg(fx.state()))
+                .expect("verify-audit runs");
+        assert!(
+            verified.status.success(),
+            "{}",
+            String::from_utf8_lossy(&verified.stderr)
+        );
+        evidence(
+            "peer",
+            "foreign-uid-owned-session-held",
+            "state-fence",
+            true,
+            true,
         );
     }
 }

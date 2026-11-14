@@ -938,7 +938,23 @@ reason = "NO_MATCHING_RULE"
                     operator
                         .install_workspace_root(&ws, root.to_str().unwrap())
                         .unwrap();
+                    // F-18: the runtime -- this process's uid, the one
+                    // `serve` allows -- is each workspace's principal and
+                    // owns its session.
+                    let runtime = dwkd_authority::state::AuthenticatedSubject::unix_uid(own_uid());
+                    operator.grant_workspace_principal(&ws, runtime).unwrap();
+                    operator
+                        .declare_session_owner(&session(n), runtime)
+                        .unwrap();
                     operator.bind_session_workspace(&session(n), &ws).unwrap();
+                }
+                for name in ["researcher", "coder", "agent"] {
+                    operator
+                        .grant_profile_principal(
+                            &dwk_proto::wire::scalar::AgentProfileName::new(name).unwrap(),
+                            dwkd_authority::state::AuthenticatedSubject::unix_uid(own_uid()),
+                        )
+                        .unwrap();
                 }
             }
             let policy_file = dir.path().join("m5e5.toml");

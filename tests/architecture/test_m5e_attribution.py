@@ -397,6 +397,7 @@ def test_every_required_case_is_attributed_and_every_rule_is_used() -> None:
 
 BEFORE_F17 = Path(__file__).with_name("m5e_cases_before_f17.txt")
 BEFORE_F01 = Path(__file__).with_name("m5e_cases_before_f01.txt")
+BEFORE_F18 = Path(__file__).with_name("m5e_cases_before_f18.txt")
 
 
 def test_no_case_before_f17_is_lost_renamed_or_reattributed() -> None:
@@ -441,6 +442,29 @@ def test_no_case_before_f01_is_lost_renamed_or_reattributed() -> None:
     added = sorted(set(dw.ATTRIBUTED_CASES) - {(s, c) for s, c, _, _ in pinned})
     assert all(suite == "sandbox-authority-egress" for suite, _ in added), added
     assert len(added) == 7, added
+
+
+def test_no_case_before_f18_is_lost_renamed_or_reattributed() -> None:
+    """F-18 (ADR-0063, Proposed) re-attributes nothing and adds no attributed
+    case: every case required before it is required still, at the level and
+    with the mechanisms it had. Its own evidence is the cross-uid transport
+    suite's, the agent's three-identity suite's and the in-process suites';
+    the harnesses' setup only declares, explicitly, what each lab's
+    principals hold."""
+    pinned = [
+        line.split(" ")
+        for line in BEFORE_F18.read_text(encoding="utf-8").splitlines()
+        if line and not line.startswith("#")
+    ]
+    assert len(pinned) == 675
+    for suite, case, level, mechanisms in pinned:
+        assert (suite, case) in dw.ATTRIBUTED_CASES, f"{suite}/{case} is no longer required"
+        attributed = dw.attribution(suite, case)
+        assert attributed is not None, f"{suite}/{case}"
+        assert attributed == (level, frozenset(mechanisms.split(","))), (
+            f"{suite}/{case} was re-attributed: {attributed}"
+        )
+    assert set(dw.ATTRIBUTED_CASES) == {(s, c) for s, c, _, _ in pinned}
 
 
 def test_the_vocabulary_is_closed_used_and_documented() -> None:

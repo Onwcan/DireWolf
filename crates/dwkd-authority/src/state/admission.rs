@@ -445,6 +445,27 @@ fn refuse(
     Ok(Reply::Refused(reason))
 }
 
+/// F-18: `None` when the profile is the subject's to run under -- an
+/// operator's grant -- else the refusal, answered as for a profile the kernel
+/// does not hold, and audited as what it is.
+fn not_the_subjects(
+    work: &mut Work<'_>,
+    attempt: &Attempt<'_>,
+) -> Result<Option<Reply<Admission>>, AuthorityError> {
+    if super::ownership::profile_permitted(work, attempt.caller.subject(), attempt.agent_profile)? {
+        return Ok(None);
+    }
+    refuse(
+        work,
+        attempt,
+        RefusalReason::UnknownAgentProfile,
+        Fields::new()
+            .text("agent_profile", attempt.agent_profile)
+            .text("ownership", "PROFILE_NOT_PERMITTED"),
+    )
+    .map(Some)
+}
+
 /// The envelope facts one `AdmitRun` is decided on.
 struct Attempt<'m> {
     caller: &'m CallerContext,
@@ -549,6 +570,13 @@ pub(super) fn admit(
         )
         .map(Pass::Answered);
     };
+    //    And the subject's to run under (F-18, ADR-0063, Proposed): only an
+    //    operator's grant makes it so. A profile this subject may not name
+    //    is answered as one the kernel does not hold -- whether it exists is
+    //    not this subject's to learn -- and the audit says why.
+    if let Some(refused) = not_the_subjects(work, &attempt)? {
+        return Ok(Pass::Answered(refused));
+    }
 
     // 4. The active skills: the baseline, always; then what was named.
     let skills = active_skills(work, &profile, request)?;

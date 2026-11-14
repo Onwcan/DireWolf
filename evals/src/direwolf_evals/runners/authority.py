@@ -127,6 +127,8 @@ HOSTILE_CASES: Final = frozenset(
         "correlation-causation-reuse",
         "same-uid-inherit-lease",
         "connection-close-reconnect",
+        # F-18 (ADR-0063): a descriptor a runtime passes is never installed.
+        "runtime-descriptor-discarded",
         # resources
         "connection-limit",
         "slowloris-silent",
@@ -144,6 +146,10 @@ PEER_CASES: Final = frozenset(
         "foreign-uid-malformed-payload",
         "foreign-uid-flood",
         "foreign-uid-impersonation",
+        # F-18 (ADR-0063): an allowed second uid holds nothing another owns.
+        "foreign-uid-session-takeover",
+        "foreign-uid-profile-escalation",
+        "foreign-uid-owned-session-held",
     }
 )
 

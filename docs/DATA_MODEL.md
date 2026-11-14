@@ -94,6 +94,8 @@ Deleting a profile with historical runs **soft-deletes**: runs must remain expli
 
 > **`lease_epoch` here is a cache.** The authoritative monotonic epoch per session lives in `kernel.db` and is issued by the kernel's `AcquireLease`. A value in a runtime-writable table cannot be the thing that fences a compromised runtime.
 
+> **Who may hold it is the kernel's** (F-18, [ADR-0063](adr/0063-principal-ownership-of-sessions-workspaces-and-profiles.md), Proposed): `kernel.db` records each session's owner -- the operator's declaration, or a new session's first acquirer -- and its delegates, each workspace's principals and each agent profile's; the runtime's copy of a session names no owner it could assert.
+
 `(channel_ref, thread_ref)` is uniquely indexed — the idempotent addressing key. `lease_*` implement single-writer ([ARCHITECTURE.md](ARCHITECTURE.md) §15). `revision` guards optimistic updates.
 
 ### Run

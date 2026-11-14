@@ -142,7 +142,13 @@ Each message declares every optional envelope field as required, optional or **f
     recovered by acquiring again: the tenure whose epoch was lost holds no run,
     because a run is admitted only under an epoch its caller presents. A live
     lease held by another connection is `LEASE_HELD`, and an exhausted epoch
-    counter fails closed.
+    counter fails closed. So is a session the caller's subject may not hold
+    (F-18, [ADR-0063](adr/0063-principal-ownership-of-sessions-workspaces-and-profiles.md), Proposed):
+    one owned by another subject that has not delegated it, a legacy or bound
+    session no owner has been declared for, a retired one, or one bound to a
+    workspace the subject is not a principal of -- decided before anything of
+    the session is looked at, so nothing is taken over or reaped. A new
+    session is its first acquirer's.
   - `Heartbeat` only renews a live lease, by one TTL from now; a repeat grants
     nothing new. `QueryAuthority` and `CanonicalPreview` are pure, and
     `Handshake` precedes any authority state.
@@ -212,7 +218,7 @@ A Unix-domain stream socket, and nothing else — no TCP or loopback fallback ([
 
 **Framing (implemented, M2):** a 4-byte big-endian body length, a 1-byte content type (`0x01` = UTF-8 JSON, the only one defined), then the body. Body length 1 B – 1 MiB. The limit is enforced from the 5-byte header before any body byte is buffered; any framing error poisons the decoder and is connection-fatal, because a length-prefixed stream has no safe resynchronisation point. Encoders emit RFC 8785 canonical JSON; decoders do not require it (§7).
 
-**Peer verification on connect (implemented, M3e, Linux):** `SO_PEERCRED`, through `nix`'s safe wrapper since [ADR-0049](adr/0049-peer-credentials-read-soundly-through-nix.md) (`rustix`'s until then), reports the connecting process's effective uid; the operator's closed `--allow-uid` list decides whether that uid may speak DWKP, with no wildcard and no exception for root. A connection from any other uid is closed **before a byte is read** — unanswered, so it learns nothing — and audited (`transport.peer_refused`, with the kernel's uid and pid — no pid for a peer in a pid namespace the authority cannot see, which the kernel reports as 0). This is what stops another local process from impersonating the runtime, and it is proven with a real second OS user in CI. macOS (`LOCAL_PEERCRED`) has no safe API this build can use and native Windows has no design, so neither serves ([ADR-0041](adr/0041-m3e-authenticated-dwkp-transport.md) §13).
+**Peer verification on connect (implemented, M3e, Linux):** `SO_PEERCRED`, through `nix`'s safe wrapper since [ADR-0049](adr/0049-peer-credentials-read-soundly-through-nix.md) (`rustix`'s until then), reports the connecting process's effective uid; the operator's closed `--allow-uid` list decides whether that uid may speak DWKP, with no wildcard and no exception for root. A connection from any other uid is closed **before a byte is read** — unanswered, so it learns nothing — and audited (`transport.peer_refused`, with the kernel's uid and pid — no pid for a peer in a pid namespace the authority cannot see, which the kernel reports as 0). This is what stops another local process from impersonating the runtime, and it is proven with a real second OS user in CI. The list decides who may **speak**; what an allowed uid may act on -- a session, a workspace, an agent profile -- is decided by the operator's ownership records (F-18, [ADR-0063](adr/0063-principal-ownership-of-sessions-workspaces-and-profiles.md), Proposed), and an allowed second uid is refused another principal's session (`LEASE_HELD`) and profile (`UNKNOWN_AGENT_PROFILE`), also proven with a real second OS user in CI. The endpoint reads bytes only: a descriptor a client attaches is discarded unread. macOS (`LOCAL_PEERCRED`) has no safe API this build can use and native Windows has no design, so neither serves ([ADR-0041](adr/0041-m3e-authenticated-dwkp-transport.md) §13).
 
 **The connection protocol (implemented, M3e).** One accepted connection is one fresh lease holder, minted once and never shared; the first message must be `Handshake` — anything else, a second handshake, or a response sent to the authority closes the connection unanswered (no wire code says "out of order" truthfully); one request is in flight at a time, answered in order; every protocol error is answered with `direwolf.protocol.error` and closes the connection; an authority refusal does not. Disconnecting ends nothing in the state machine — the lease stays until release, expiry or restart. The full close/continue matrix is [ADR-0041](adr/0041-m3e-authenticated-dwkp-transport.md) §8.
 

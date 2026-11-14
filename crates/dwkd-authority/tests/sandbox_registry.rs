@@ -957,8 +957,16 @@ reason = "NO_MATCHING_RULE"
                 operator
                     .install_workspace_root(&ws, workspace.to_str().unwrap())
                     .unwrap();
+                // F-18: the runtime -- this process's uid, the one `serve`
+                // allows -- is the lab's principal and owns its sessions.
+                crate::state_support::grant_lab(
+                    &mut authority,
+                    &ws,
+                    &["researcher", "coder", "agent"],
+                    &[own_uid()],
+                );
                 for n in 1..=32 {
-                    operator.bind_session_workspace(&session(n), &ws).unwrap();
+                    crate::state_support::bind_owned(&mut authority, own_uid(), &session(n), &ws);
                 }
             }
             let policy_file = dir.path().join("m5e4.toml");

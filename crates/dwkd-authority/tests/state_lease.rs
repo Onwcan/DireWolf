@@ -44,6 +44,10 @@ fn the_first_acquire_issues_epoch_one_and_a_second_holder_is_refused() {
     let s = session(1);
     let a = h.connect(1000);
     assert_eq!(h.lease(&a, &s).get(), 1);
+    // F-18: B may hold the session -- the operator delegated it -- so what
+    // decides here is the lease, as this test is about; an undelegated
+    // subject is refused before the lease is looked at (`state_ownership.rs`).
+    state_support::delegate(h.authority(), &s, 2000);
     let b = h.connect(2000);
     assert_eq!(
         h.authority().acquire_lease(&b, &s).unwrap(),
@@ -162,6 +166,10 @@ fn an_expired_lease_goes_to_the_next_acquirer_at_a_new_epoch() {
     let s = session(1);
     let a = h.connect(1000);
     let old = h.lease(&a, &s);
+    // F-18: B may hold the session -- the operator delegated it -- so what
+    // decides here is the lease, as this test is about; an undelegated
+    // subject is refused before the lease is looked at (`state_ownership.rs`).
+    state_support::delegate(h.authority(), &s, 2000);
     let b = h.connect(2000);
     h.clock.advance(TTL);
     let new = h.lease(&b, &s);
@@ -180,6 +188,10 @@ fn a_backwards_clock_jump_prolongs_a_lease_but_never_makes_two_holders() {
     let a = h.connect(1000);
     let e = h.lease(&a, &s);
     h.clock.set(state_support::START_MS - 3_600_000);
+    // F-18: B may hold the session -- the operator delegated it -- so what
+    // decides here is the lease, as this test is about; an undelegated
+    // subject is refused before the lease is looked at (`state_ownership.rs`).
+    state_support::delegate(h.authority(), &s, 2000);
     let b = h.connect(2000);
     assert_eq!(
         h.authority().acquire_lease(&b, &s).unwrap(),
@@ -204,6 +216,10 @@ fn release_surrenders_the_lease_and_a_retry_by_the_same_holder_is_acknowledged()
         Reply::Done(()),
         "a retry of a release that happened is indistinguishable from success"
     );
+    // F-18: B may hold the session -- the operator delegated it -- so what
+    // decides here is the lease, as this test is about; an undelegated
+    // subject is refused before the lease is looked at (`state_ownership.rs`).
+    state_support::delegate(h.authority(), &s, 2000);
     let b = h.connect(2000);
     assert_eq!(
         h.authority().release_lease(&b, &s, e).unwrap(),
@@ -297,6 +313,10 @@ fn the_wire_answers_are_the_committed_shapes() {
     };
     assert_eq!(grant.session_id, s);
     let e = grant.epoch;
+    // F-18: B may hold the session -- the operator delegated it -- so what
+    // decides here is the lease, as this test is about; an undelegated
+    // subject is refused before the lease is looked at (`state_ownership.rs`).
+    state_support::delegate(h.authority(), &s, 2000);
     let b = h.connect(2000);
     let DwkpBody::AuthorityRefused(refusal) = h.authority().dispatch(&b, &acquire_msg(&s)).unwrap()
     else {
@@ -379,6 +399,10 @@ proptest! {
     ) {
         let mut h = Harness::new("prop-epoch");
         let s = session(7);
+        // F-18: both subjects may hold the session -- 1 owns it, 2 is its
+        // delegate -- so every hand-off between them is the lease's.
+        h.authority().operator().declare_session_owner(&s, state_support::subject(1)).unwrap();
+        h.authority().operator().add_session_delegate(&s, state_support::subject(2)).unwrap();
         // Three connections, each with the last epoch it was granted.
         let mut callers = vec![h.connect(1), h.connect(1), h.connect(2)];
         let mut held: Vec<Option<dwk_proto::wire::scalar::Epoch>> = vec![None; 3];
