@@ -39,7 +39,7 @@ import urllib.parse
 from collections import deque
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
-from typing import IO
+from typing import IO, NamedTuple
 
 ROOT = Path(__file__).resolve().parent.parent
 FUZZ_DIR = ROOT / "fuzz"
@@ -12886,12 +12886,229 @@ def task_fuzz_report() -> None:
         )
 
 
+# --- GitHub Actions pins (F-11) ----------------------------------------------
+
+# Never searched for action files: version-control data, build output, caches
+# and fuzzing state. Everything else is, so a composite action added anywhere
+# is found without anyone remembering to list it.
+_ACTION_SEARCH_PRUNE = frozenset(
+    {
+        ".git",
+        "target",
+        ".venv",
+        "node_modules",
+        "__pycache__",
+        ".mypy_cache",
+        ".pytest_cache",
+        ".ruff_cache",
+    }
+)
+_ACTION_SEARCH_PRUNE_PATHS = frozenset({"fuzz/corpus", "fuzz/artifacts", "fuzz/evidence"})
+
+# `uses:` the checker can read: on its own line, optionally a list item.
+_USES_LINE = re.compile(r"^\s*(?:-\s+)?uses:\s*(?P<value>.*?)\s*$")
+# Any mention of the key outside a comment, however it is written: a `uses:`
+# the strict form above cannot read is a problem, never something skipped.
+_USES_ANYWHERE = re.compile(r"(?<![\w-])uses\s*:")
+# owner/repo[/path]@<40-hex commit> # vMAJOR.MINOR.PATCH -- the commit is what
+# runs; the comment says which release it is, and `make action-pins` checks
+# that the release's tag upstream names that very commit.
+_PINNED_ACTION = re.compile(
+    r"(?P<action>(?P<repo>[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?/[A-Za-z0-9._-]+)"
+    r"(?:/[A-Za-z0-9._-]+)*)"
+    r"@(?P<sha>[0-9a-f]{40})"
+    r" # (?P<version>v[0-9]+\.[0-9]+\.[0-9]+)"
+)
+
+
+class ActionPin(NamedTuple):
+    """One `uses:` of an action hosted outside this repository."""
+
+    path: str  # relative to the repository root, POSIX separators
+    line: int
+    action: str  # owner/repo[/path]
+    repo: str  # owner/repo
+    sha: str
+    version: str
+
+
+def action_files(root: Path = ROOT) -> list[Path]:
+    """Every file GitHub Actions reads `uses:` from: each workflow, and each
+    `action.yml` / `action.yaml` anywhere in the tree (composite actions)."""
+    found: set[Path] = set()
+    workflows = root / ".github" / "workflows"
+    if workflows.is_dir():
+        found.update(
+            p for p in workflows.iterdir() if p.is_file() and p.suffix in (".yml", ".yaml")
+        )
+    for directory, subdirectories, files in os.walk(root):
+        relative = Path(directory).relative_to(root).as_posix()
+        subdirectories[:] = [
+            d
+            for d in subdirectories
+            if d not in _ACTION_SEARCH_PRUNE
+            and (d if relative == "." else f"{relative}/{d}") not in _ACTION_SEARCH_PRUNE_PATHS
+        ]
+        found.update(Path(directory) / f for f in files if f in ("action.yml", "action.yaml"))
+    return sorted(found)
+
+
+def action_pins(root: Path = ROOT) -> tuple[list[ActionPin], list[str]]:
+    """Every external action pin, and every `uses:` that is not one.
+
+    A local action (`./...`) is this repository's own code and carries no pin.
+    Anything else must be exactly `owner/repo[/path]@<40-hex commit> # vX.Y.Z`:
+    a tag or branch is mutable, a `docker://` image is not an action this
+    project reviews, and a pin without its release comment cannot be checked
+    against upstream.
+    """
+    pins: list[ActionPin] = []
+    problems: list[str] = []
+    for path in action_files(root):
+        name = path.relative_to(root).as_posix()
+        lines = path.read_text(encoding="utf-8").splitlines()
+        for number, line in enumerate(lines, start=1):
+            if line.lstrip().startswith("#"):
+                continue
+            code = re.split(r"\s#", line, maxsplit=1)[0]
+            if not _USES_ANYWHERE.search(code):
+                continue
+            match = _USES_LINE.fullmatch(line)
+            if match is None:
+                problems.append(
+                    f"{name}:{number}: a `uses:` this checker cannot read; write it on its "
+                    f"own line as `uses: owner/repo@<commit> # vX.Y.Z`"
+                )
+                continue
+            value = match.group("value")
+            if value.startswith("./"):
+                if "@" in value or "#" in value:
+                    problems.append(f"{name}:{number}: a local action takes no version: `{value}`")
+                continue
+            pinned = _PINNED_ACTION.fullmatch(value)
+            if pinned is None:
+                problems.append(
+                    f"{name}:{number}: `{value}` is not `owner/repo@<40-hex commit> # vX.Y.Z`; "
+                    f"a tag or branch is mutable, and a pin without its release cannot be "
+                    f"checked against upstream"
+                )
+                continue
+            pins.append(
+                ActionPin(
+                    name,
+                    number,
+                    pinned.group("action"),
+                    pinned.group("repo"),
+                    pinned.group("sha"),
+                    pinned.group("version"),
+                )
+            )
+    return pins, problems
+
+
+def action_pin_problems(pins: Sequence[ActionPin]) -> list[str]:
+    """One commit per upstream repository, and one release per commit.
+
+    Two commits of one action mean a bump reached some files and not others --
+    the drift a Dependabot configuration that cannot see a file produces. Two
+    releases for one commit mean at least one comment is wrong.
+    """
+    problems = []
+    commits: dict[str, set[str]] = {}
+    releases: dict[tuple[str, str], set[str]] = {}
+    for pin in pins:
+        commits.setdefault(pin.repo, set()).add(pin.sha)
+        releases.setdefault((pin.repo, pin.sha), set()).add(pin.version)
+    for repo, shas in sorted(commits.items()):
+        if len(shas) > 1:
+            where = sorted(
+                f"{p.path}:{p.line} {p.sha[:12]} {p.version}" for p in pins if p.repo == repo
+            )
+            problems.append(f"{repo} is pinned to {len(shas)} commits: " + "; ".join(where))
+    for (repo, sha), versions in sorted(releases.items()):
+        if len(versions) > 1:
+            problems.append(f"{repo}@{sha} is labelled as {sorted(versions)}; at most one is true")
+    return problems
+
+
+def _upstream_tag_commit(repo: str, tag: str) -> str | None:
+    """The commit `tag` names in github.com/<repo>, through an annotated tag.
+
+    `git ls-remote` over HTTPS: no token, no API rate limit, nothing cloned.
+    Credential helpers are switched off -- a public repository needs none,
+    and a prompt would hang CI.
+    """
+    ref = f"refs/tags/{tag}"
+    try:
+        result = subprocess.run(
+            [
+                "git",
+                "-c",
+                "credential.helper=",
+                "ls-remote",
+                "--tags",
+                f"https://github.com/{repo}.git",
+                ref,
+                f"{ref}^{{}}",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+            env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise TaskError(f"could not ask github.com/{repo} for {tag}: {exc}") from exc
+    if result.returncode != 0:
+        raise TaskError(
+            f"`git ls-remote` for github.com/{repo} failed with exit code "
+            f"{result.returncode}: {result.stderr.strip()[:300]}"
+        )
+    refs: dict[str, str] = {}
+    for row in result.stdout.splitlines():
+        sha, _, name = row.partition("\t")
+        refs[name.strip()] = sha.strip()
+    return refs.get(f"{ref}^{{}}") or refs.get(ref)
+
+
+def task_action_pins() -> None:
+    """Check every GitHub Actions pin against its upstream release tag."""
+    pins, problems = action_pins()
+    problems += action_pin_problems(pins)
+    if not pins:
+        problems.append("no pinned action was found; the checker or the tree is wrong")
+    if problems:
+        raise TaskError("action pins are not in order:\n  " + "\n  ".join(problems))
+    wrong = []
+    for repo, sha, version in sorted({(p.repo, p.sha, p.version) for p in pins}):
+        uses = sum(1 for p in pins if p.repo == repo)
+        try:
+            upstream = _upstream_tag_commit(repo, version)
+        except TaskError as exc:
+            wrong.append(str(exc))
+            continue
+        if upstream is None:
+            wrong.append(f"{repo}: upstream has no tag {version}, so `# {version}` names nothing")
+        elif upstream != sha:
+            wrong.append(
+                f"{repo}@{sha} is labelled {version}, but upstream {version} is {upstream}: "
+                f"the comment or the pin is wrong"
+            )
+        else:
+            print(f"{GREEN}ok{OFF} {repo}@{sha[:12]} is {version} upstream ({uses} uses)")
+    if wrong:
+        raise TaskError(
+            "action pins do not match their upstream releases:\n  " + "\n  ".join(wrong)
+        )
+
+
 def task_security() -> None:
     """Dependency and supply-chain policy.
 
-    Both halves run even if one is unavailable, and the failures are reported
-    together: a missing cargo-deny must not be able to hide a pip-audit
-    finding by aborting first.
+    Every part runs even if another is unavailable, and the failures are
+    reported together: a missing cargo-deny must not be able to hide a
+    pip-audit finding, or an action pin that names the wrong release, by
+    aborting first.
     """
     failures = []
 
@@ -12927,6 +13144,11 @@ def task_security() -> None:
             str(requirements),
         )
         uvrun("pip_audit", "-r", str(requirements), "--strict", "--progress-spinner", "off")
+    except TaskError as exc:
+        failures.append(str(exc))
+
+    try:
+        task_action_pins()
     except TaskError as exc:
         failures.append(str(exc))
 
@@ -13733,6 +13955,7 @@ TASKS = {
     "fuzz-plan": task_fuzz_plan,
     "fuzz-report": task_fuzz_report,
     "security": task_security,
+    "action-pins": task_action_pins,
     "check": task_check,
     "docs": task_docs,
     "clean": task_clean,

@@ -45,6 +45,23 @@ byte, so they are driven by shared data rather than written twice:
   nesting of the time limits; and, driven with stand-in child processes,
   that a crash fails, a time limit is TIMEOUT, a cancellation is CANCELLED,
   and nothing but this run's record of a whole libFuzzer run passes.
+- CI supply chain: `tests/architecture/test_ci_supply_chain.py` holds F-11.
+  - **Action pins.** Every action file in the tree is found. Each external
+    `uses:` is `owner/repo@<commit> # vX.Y.Z`, with one commit per action and
+    one release per commit. `make action-pins` compares each pin with the
+    upstream tag; the test drives that check with a stand-in for
+    `git ls-remote`.
+  - **Dependabot.** It covers every file that pins an action.
+  - **uv.** The uv requirement is pinned by version and SHA-256. The setup
+    action installs it in pip's hash-checking mode, and real pip, offline,
+    refuses each of these:
+    - a mismatched digest;
+    - a missing digest;
+    - a malformed digest;
+    - an sdist-only release.
+  - **uv.lock.** Every registry distribution in it carries a hash.
+  - **Triggers and permissions.** Workflows use only allow-listed triggers
+    and grant no write permission in any form.
 
 **Rust integration tests** run the real binary. `crates/direwolf-cli/tests/cli.rs`
 asserts the exit codes and output a user actually sees, which is the contract a

@@ -72,7 +72,8 @@ Windows does and does not give you.
 | `make fuzz` | Coverage-guided libFuzzer, every target, or `DW_FUZZ_TARGET` alone (nightly + cargo-fuzz; `DW_FUZZ_SECONDS`, 1 to 3600, default 60). Each target leaves a record in `fuzz/evidence/` |
 | `make fuzz-report` | Each target's recorded outcome — PASS only for a libFuzzer run that lasted its whole budget; FAIL, TIMEOUT, CANCELLED or NOT EXERCISED otherwise |
 | `make fuzz-plan` | The coverage-guided budget and time limits per CI trigger: what the Fuzz workflow gives each target's job |
-| `make security` | `cargo-deny`, `pip-audit` |
+| `make security` | `cargo-deny`, `pip-audit`, `make action-pins` (needs the network) |
+| `make action-pins` | Every GitHub Actions pin checked against its upstream release tag, with `git ls-remote` |
 | `make docs` | Relative links and ADR citations |
 | `make help` | All of them |
 
@@ -620,12 +621,79 @@ in that order, because the secret is compromised the moment it is pushed.
 
 ## CI security
 
-CI has a read-only token, no secrets, uses `pull_request` rather than
-`pull_request_target`, and pins its two third-party-hosted actions — both
-GitHub's own — by commit SHA. Nothing is installed by piping a URL into a
-shell. The scheduled fuzz workflow follows the same rules and needs no secret,
-so it cannot fail for want of one; its tools (a date-pinned nightly, cargo-fuzz)
-are installed pinned and `--locked`.
+CI has a read-only token, no secrets, and uses `pull_request` rather than
+`pull_request_target`. Nothing is installed by piping a URL into a shell. The
+scheduled fuzz workflow follows the same rules and needs no secret, so it
+cannot fail for want of one; its tools (a date-pinned nightly, cargo-fuzz) are
+installed pinned and `--locked`.
+
+**Actions.** The only externally hosted actions are GitHub's own:
+`actions/checkout`, `actions/cache`, `actions/upload-artifact` and
+`actions/download-artifact`. Each is pinned by a full commit SHA, followed by
+its release in a `# vX.Y.Z` comment. The comment is checked rather than
+trusted. `make action-pins` runs as part of `make security`, so CI's
+`dependencies` job runs it too. It asks GitHub for each release tag with
+`git ls-remote` and fails unless that tag names the pinned commit. It also
+fails in three other cases:
+
+- one action is pinned to two commits anywhere in the tree;
+- a `uses:` names a tag, a branch or a `docker://` image;
+- a pin lacks its comment.
+
+So a wrong label fails, a commit that is not upstream's release fails, and a
+tag moved upstream after the pin was written fails. In every case someone has
+to look. The pinned commit, not the tag, is what runs.
+
+**Dependabot.** Updates arrive weekly as pull requests on Dependabot's own
+branches. Nothing merges them automatically, and no workflow grants write
+access.
+
+- **Actions.** `directory: "/"` alone covers only `.github/workflows` and a
+  root `action.yml`. The configuration therefore also lists
+  `/.github/actions/*`, so the composite setup action's pins are proposed as
+  well. `group-by: dependency-name` makes one pull request per action, which
+  updates every file that pins it.
+- **uv.** A separate `pip` entry proposes a new uv version.
+
+`tests/architecture/test_ci_supply_chain.py` fails if a file that pins an
+action falls outside the configured directories.
+
+**uv.** CI installs uv with pip in hash-checking mode
+(`--require-hashes --only-binary :all: --no-deps`), from
+`.github/actions/setup/uv-requirements.txt`. That file pins the version and
+the SHA-256 of every file PyPI publishes for it.
+
+What this guarantees:
+
+- The installed file is byte-for-byte one of the files whose digests are
+  listed. A different file under the same name, from PyPI or any other index,
+  fails the step.
+- A requirement without a digest fails.
+- uv is never built from source, and nothing else is resolved.
+
+What it does not establish:
+
+- **Who built the files.** The digests were taken from PyPI's metadata when
+  the pin was written (2026-11-14; the files were uploaded on 2026-09-10).
+  PyPI publishes no provenance attestation for this release.
+- **The by-hand cross-check is not repeated by CI.** It was made once:
+  - The three wheels CI uses (manylinux x86_64, win_amd64, macOS arm64) were
+    downloaded and matched their digests.
+  - The Linux wheel's `uv` and `uvx` are byte-identical to the binaries in
+    Astral's GitHub release archive for 0.12.13.
+
+A new version is a reviewed diff of that file, digests included.
+
+**Locked environments.**
+
+- **Python.** `uv sync --frozen` installs the Python environment from
+  `uv.lock`. It refuses a distribution whose bytes do not match the hash
+  recorded there, but it installs an entry that has no hash at all.
+  `test_ci_supply_chain.py` therefore requires a hash on every registry
+  distribution in the lock.
+- **Rust.** Cargo checks crates against the checksums in `Cargo.lock`, and
+  rustup checks toolchain components against the SHA-256 in the channel
+  manifest it fetches over HTTPS.
 
 Keeping it that way is a review matter: the first `permissions: write` is the
 one nobody notices. A change under `.github/` is a security-sensitive change.

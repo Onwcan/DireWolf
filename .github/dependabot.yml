@@ -28,8 +28,33 @@ updates:
         patterns: ["*"]
     labels: ["dependencies", "python"]
 
+  # Every action pin: the workflows AND this repository's composite actions.
+  # `directory: "/"` alone reads only .github/workflows and a root action.yml
+  # (GitHub's Dependabot options reference), so the setup action's pins were
+  # never proposed: actions/cache stayed at v4.3.0 there after ci.yml took
+  # v6.1.0. `group-by: dependency-name` keeps one pull request per action, now
+  # covering every file that pins it, so a merged bump leaves no second pin.
+  # tests/architecture/test_ci_supply_chain.py fails if a file that pins an
+  # action falls outside these directories.
   - package-ecosystem: github-actions
-    directory: "/"
+    directories:
+      - "/"
+      - "/.github/actions/*"
     schedule:
       interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      github-actions:
+        patterns: ["*"]
+        group-by: dependency-name
+    labels: ["dependencies", "ci"]
+
+  # The uv CI installs, pinned by version and SHA-256 in
+  # .github/actions/setup/uv-requirements.txt. A new uv arrives as one pull
+  # request carrying the new version's digests; one open at a time.
+  - package-ecosystem: pip
+    directory: "/.github/actions/setup"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 1
     labels: ["dependencies", "ci"]

@@ -242,7 +242,7 @@ def _gate_job_problems(text: str, table: dict[str, str]) -> list[str]:
     steps = _steps(job)
     firsts = [step[0].strip() for step in steps]
     expected = [
-        f"- uses: {CHECKOUT} # v5.0.1",
+        f"- uses: {CHECKOUT} # v7.0.1",
         "- uses: ./.github/actions/setup",
         f"- uses: {DOWNLOAD} # v8.0.2",
         f"- run: {GATE}",

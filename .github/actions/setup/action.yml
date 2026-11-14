@@ -1,8 +1,9 @@
 name: Set up the DireWolf toolchain
 description: >-
-  Installs a pinned uv, restores the cargo and uv caches, and reports the Rust
-  toolchain. Deliberately uses no third-party actions: every extra action is a
-  third party with write access to a build that produces our release artifacts.
+  Installs uv pinned by version and SHA-256, restores the cargo and uv caches,
+  and reports the Rust toolchain. Uses no action but GitHub's own actions/cache,
+  pinned by commit: every extra action is a third party with write access to a
+  build that produces our release artifacts.
 
 inputs:
   rust:
@@ -13,13 +14,25 @@ inputs:
 runs:
   using: composite
   steps:
-    # uv is installed from PyPI at a pinned version rather than through the
-    # vendor's `curl | sh` installer. Piping a remote script into a shell in CI
-    # is the pattern this project's own threat model exists to argue against,
-    # and pip gives us a version and a hash-checked wheel.
-    - name: Install uv (pinned)
+    # uv is installed from PyPI with pip, not through the vendor's `curl | sh`
+    # installer: piping a remote script into a shell in CI is the pattern this
+    # project's own threat model exists to argue against.
+    #
+    # A version pin alone does not make the download verified: pip would accept
+    # whatever file the index served under that name, checked only against the
+    # digest the same index sent with it. uv-requirements.txt holds the version
+    # AND the SHA-256 of every file PyPI publishes for it, and pip installs it
+    # in hash-checking mode. With --require-hashes a file whose digest is not
+    # listed is refused, from whatever index it came, and so is a requirement
+    # with no digest; with `--only-binary :all:` uv is never built from source;
+    # with --no-deps nothing else is resolved. A mismatch fails this step, and
+    # the job with it. What the digests rest on is in CONTRIBUTING.md.
+    - name: Install uv (pinned by version and SHA-256)
       shell: bash
-      run: python -m pip install --disable-pip-version-check --quiet "uv==0.12.13"
+      run: >-
+        python -m pip install --disable-pip-version-check --quiet
+        --require-hashes --only-binary :all: --no-deps
+        --requirement "$GITHUB_ACTION_PATH/uv-requirements.txt"
 
     - name: Show Rust toolchain
       if: inputs.rust == 'true'
@@ -32,9 +45,13 @@ runs:
         rustc --version
         cargo --version
 
+    # The same actions/cache commit as every other use in this repository
+    # (v6.1.0, Node 24). The v4.3.0 pin it replaces stayed here only because
+    # Dependabot did not read this file; v4.3.0 declares the Node 20 runtime,
+    # which GitHub-hosted runners no longer ship, so they forced it onto Node 24.
     - name: Cache cargo registry and build output
       if: inputs.rust == 'true'
-      uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: |
           ~/.cargo/registry/index
@@ -45,7 +62,7 @@ runs:
         restore-keys: cargo-${{ runner.os }}-
 
     - name: Cache uv downloads
-      uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: ~/.cache/uv
         key: uv-${{ runner.os }}-${{ hashFiles('uv.lock') }}

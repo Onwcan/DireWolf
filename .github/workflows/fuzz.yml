@@ -74,7 +74,7 @@ jobs:
     name: stable mutation fuzzing (make fuzz-smoke)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v5.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/setup
       - name: make fuzz-smoke
         env:
@@ -91,7 +91,7 @@ jobs:
       step_timeout_minutes: ${{ steps.plan.outputs.step_timeout_minutes }}
       job_timeout_minutes: ${{ steps.plan.outputs.job_timeout_minutes }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v5.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: make fuzz-plan
         id: plan
         env:
@@ -123,7 +123,7 @@ jobs:
           - policy_loader
           - policy_evaluate
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v5.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/setup
       - name: Install the pinned nightly and cargo-fuzz
         # Versions match scripts/dw.py; test_dev_surface.py asserts they agree.

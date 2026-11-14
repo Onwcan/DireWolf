@@ -27,7 +27,7 @@ DW := $(PY) scripts/dw.py
         sandbox-release-mutations sandbox-restart-evidence sandbox-capacity-evidence \
         sandbox-proxy-weakened-evidence sandbox-proxy-weakened-review \
         sandbox-registry-evidence sandbox-hygiene-evidence sandbox-registry-mutations m5e-evidence-bundle m5e-gate-check \
-        sandbox-neighbour-mutations d11-hardening-evidence d11-hardening-mutations d11-posture fuzz-smoke fuzz fuzz-plan fuzz-report security docs \
+        sandbox-neighbour-mutations d11-hardening-evidence d11-hardening-mutations d11-posture fuzz-smoke fuzz fuzz-plan fuzz-report security action-pins docs \
         preflight tools hooks clean
 
 help:            ## List available commands
@@ -207,8 +207,11 @@ fuzz-plan:       ## The coverage-guided budget and time limits per trigger (the 
 fuzz-report:     ## Each coverage-guided target's recorded outcome (fuzz/evidence/); fails unless PASS
 	@$(DW) fuzz-report
 
-security:        ## cargo-deny and pip-audit
+security:        ## cargo-deny, pip-audit and the action pins (needs the network)
 	@$(DW) security
+
+action-pins:     ## Every GitHub Actions pin against its upstream release tag (network)
+	@$(DW) action-pins
 
 docs:            ## Check relative links and ADR citations
 	@$(DW) docs
