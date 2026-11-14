@@ -37,8 +37,14 @@ byte, so they are driven by shared data rather than written twice:
   columns of `valid.json`. Nothing in CI runs Node.
 - Property tests: `proptest` in `crates/dwk-proto/tests/properties.rs`; seeded
   standard-library generators in `runtime/tests/proto/test_properties.py`.
-- Fuzzing: the same four target bodies run under libFuzzer (`make fuzz`) and a
+- Fuzzing: the same target bodies run under libFuzzer (`make fuzz`) and a
   stable mutation loop (`make fuzz-smoke`, and briefly in every `cargo test`).
+  `tests/architecture/test_ci_fuzz.py` holds the coverage-guided campaign
+  (F-07): FUZZ_TARGETS, `fuzz/fuzz_targets/`, `fuzz/Cargo.toml` and the Fuzz
+  workflow's one-job-per-target matrix agree; each trigger's budget and the
+  nesting of the time limits; and, driven with stand-in child processes,
+  that a crash fails, a time limit is TIMEOUT, a cancellation is CANCELLED,
+  and nothing but this run's record of a whole libFuzzer run passes.
 
 **Rust integration tests** run the real binary. `crates/direwolf-cli/tests/cli.rs`
 asserts the exit codes and output a user actually sees, which is the contract a

@@ -4,3 +4,6 @@ coverage/
 # `make fuzz` seeds corpus/<target>/ from tests/protocol/vectors/ and libFuzzer
 # grows it during a run. None of it is tracked: the vectors are the seeds.
 corpus/
+# `make fuzz` records each target's run here (F-07); CI keeps the record as an
+# artifact. A record belongs to one run and is never tracked.
+evidence/

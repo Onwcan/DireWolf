@@ -69,7 +69,9 @@ Windows does and does not give you.
 | `make schema` | Regenerate `schemas/`, `docs/DWKP_OPERATIONS.md` and the Python bindings from `dwk-proto` |
 | `make schema-check` | Fail if any of those is stale or hand-edited (part of `make check`) |
 | `make fuzz-smoke` | Type-check the cargo-fuzz targets; stable mutation fuzzing (`DWK_FUZZ_SECONDS`) |
-| `make fuzz` | Coverage-guided libFuzzer, every target (nightly + cargo-fuzz; `DW_FUZZ_SECONDS`) |
+| `make fuzz` | Coverage-guided libFuzzer, every target, or `DW_FUZZ_TARGET` alone (nightly + cargo-fuzz; `DW_FUZZ_SECONDS`, 1 to 3600, default 60). Each target leaves a record in `fuzz/evidence/` |
+| `make fuzz-report` | Each target's recorded outcome — PASS only for a libFuzzer run that lasted its whole budget; FAIL, TIMEOUT, CANCELLED or NOT EXERCISED otherwise |
+| `make fuzz-plan` | The coverage-guided budget and time limits per CI trigger: what the Fuzz workflow gives each target's job |
 | `make security` | `cargo-deny`, `pip-audit` |
 | `make docs` | Relative links and ADR citations |
 | `make help` | All of them |
@@ -399,7 +401,9 @@ crates/dwk-proto  ──tools/protogen──▶  schemas/ + docs/DWKP_OPERATIONS
   needs Node; nothing in CI does.
 - Fuzz with `make fuzz-smoke` (stable, any platform) or `make fuzz`
   (libFuzzer: Linux or WSL2, a nightly toolchain, cargo-fuzz and a C++
-  compiler). CI runs both weekly and on pull requests that touch the protocol.
+  compiler). CI runs both weekly and on pull requests that touch a fuzzed
+  surface, its seeds or the runner; the coverage-guided run is one job per
+  target (F-07), each with its own budget and result.
   Report what actually ran — targets, duration, executions, crashes — never
   "fuzzed" on its own.
 

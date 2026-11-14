@@ -1,7 +1,8 @@
 name: Fuzz
 
-# Fuzzing of dwk-proto's hostile-input surface: framing, the strict lexer,
-# canonical JSON and envelope/version handling.
+# Fuzzing of the hostile-input surfaces: dwk-proto's framing, strict lexer,
+# canonical JSON, envelope/version handling, URL canonicaliser and `Location`
+# resolver, and the authority's policy loader and evaluator.
 #
 # Two engines, reported separately and never conflated:
 #   * `make fuzz-smoke` -- stable Rust, a deterministic mutation loop. NOT
@@ -9,10 +10,21 @@ name: Fuzz
 #   * `make fuzz`       -- libFuzzer through cargo-fuzz, coverage-guided, on a
 #     date-pinned nightly (scripts/dw.py FUZZ_NIGHTLY).
 #
+# F-07: one coverage-guided job per target, so every target gets its whole
+# budget and its own result. Run sequentially in one job, eight 900 s budgets
+# could never fit the job's limit: every scheduled run from 2026-09-21 to
+# 2026-11-09 was cancelled at 90 minutes, part-way through the targets. The
+# plan job sets each job's budget and time limits from scripts/dw.py
+# (`make fuzz-plan`), so the runner's own limits expire before the step's
+# and the step's before the job's. A target passes only on its own record
+# of a libFuzzer run that lasted its whole budget (`make fuzz-report`); the
+# `Fuzz` job at the end fails unless every job succeeded.
+#
 # SECURITY POSTURE: read-only token; no secrets, so the scheduled run cannot
 # fail for want of one and a fork's pull request cannot reach one; actions
 # pinned by commit SHA; tools installed pinned and --locked, never piped from a
-# URL. Crash inputs are printed to the job log by libFuzzer; nothing is uploaded.
+# URL. A failing target's reproducer is kept for 7 days as an artifact; it is
+# what libFuzzer already prints to the job log.
 
 on:
   schedule:
@@ -22,23 +34,36 @@ on:
   workflow_dispatch:
     inputs:
       seconds:
-        description: Seconds per target for the coverage-guided run
-        required: false
+        description: Seconds per coverage-guided target, 1 to 3600 (scripts/dw.py FUZZ_MAX_SECONDS)
+        required: true
         default: "900"
   pull_request:
-    # A short run on changes that can affect what the fuzzers exercise.
+    # A short run on changes that can affect what the fuzzers exercise: the
+    # fuzzed code, the target bodies, their seeds, and the runner, workflow
+    # and setup that run them. Not documentation.
     paths:
       - "crates/dwk-proto/**"
+      - "crates/dwkd-authority/src/policy/**"
+      - "crates/dwkd-authority/src/capability/**"
+      - "crates/dwkd-authority/tests/fuzz_targets/**"
+      - "crates/dwkd-authority/tests/fuzz_smoke.rs"
+      - "policy/**"
       - "fuzz/**"
       - "tests/protocol/vectors/**"
+      - "scripts/dw.py"
+      - "Makefile"
       - ".github/workflows/fuzz.yml"
+      - ".github/actions/setup/**"
 
 permissions:
   contents: read
 
 concurrency:
-  group: fuzz-${{ github.ref }}
-  cancel-in-progress: true
+  # A newer push supersedes a pull request's run. A scheduled or manual
+  # campaign is never cancelled by another run: a later one waits, and a run
+  # cancelled for any reason ends `cancelled`, which the `Fuzz` job fails.
+  group: fuzz-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 defaults:
   run:
@@ -57,10 +82,46 @@ jobs:
           DWK_FUZZ_SECONDS: ${{ github.event_name == 'pull_request' && '60' || '600' }}
         run: make fuzz-smoke
 
-  libfuzzer:
-    name: coverage-guided (make fuzz)
+  plan:
+    name: coverage-guided budget (make fuzz-plan)
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 5
+    outputs:
+      seconds: ${{ steps.plan.outputs.seconds }}
+      step_timeout_minutes: ${{ steps.plan.outputs.step_timeout_minutes }}
+      job_timeout_minutes: ${{ steps.plan.outputs.job_timeout_minutes }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v5.0.1
+      - name: make fuzz-plan
+        id: plan
+        env:
+          # Data through the environment, never interpolated into the script;
+          # scripts/dw.py accepts only 1 to 3600 for a manual run, and fixes
+          # the pull-request and scheduled budgets itself.
+          DW_FUZZ_REQUESTED: ${{ inputs.seconds }}
+        run: make fuzz-plan
+
+  libfuzzer:
+    name: coverage-guided ${{ matrix.target }} (make fuzz)
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ fromJSON(needs.plan.outputs.job_timeout_minutes) }}
+    strategy:
+      # One target's failure never hides another's result.
+      fail-fast: false
+      matrix:
+        # Every coverage-guided target, one job each. scripts/dw.py
+        # FUZZ_TARGETS, fuzz/fuzz_targets/*.rs, fuzz/Cargo.toml and this list
+        # must agree: tests/architecture/test_ci_fuzz.py fails otherwise.
+        target:
+          - frame_decoder
+          - dwkp_decode
+          - canonical_roundtrip
+          - envelope_version
+          - url_parse
+          - location_resolve
+          - policy_loader
+          - policy_evaluate
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v5.0.1
       - uses: ./.github/actions/setup
@@ -70,8 +131,70 @@ jobs:
           rustup toolchain install nightly-2026-09-01 --profile minimal
           cargo install cargo-fuzz --version 0.13.2 --locked
       - name: make fuzz
+        id: fuzz
+        timeout-minutes: ${{ fromJSON(needs.plan.outputs.step_timeout_minutes) }}
         env:
-          # Passed as data through the environment, never interpolated into the
-          # script; scripts/dw.py rejects anything but a positive integer.
-          DW_FUZZ_SECONDS: ${{ github.event_name == 'pull_request' && '30' || inputs.seconds || '900' }}
+          # Data through the environment, never interpolated into the script;
+          # scripts/dw.py accepts only a name in FUZZ_TARGETS and 1 to 3600 s.
+          DW_FUZZ_TARGET: ${{ matrix.target }}
+          DW_FUZZ_SECONDS: ${{ needs.plan.outputs.seconds }}
         run: make fuzz
+      - name: make fuzz-report
+        # Always: a crash, a time limit or a cancellation is reported as such,
+        # and only this run's record of a whole budget passes.
+        if: always()
+        env:
+          DW_FUZZ_TARGET: ${{ matrix.target }}
+          DW_FUZZ_SECONDS: ${{ needs.plan.outputs.seconds }}
+          DW_FUZZ_STEP_OUTCOME: ${{ steps.fuzz.outcome }}
+        run: make fuzz-report
+      - name: Keep this target's evidence record
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: fuzz-evidence-${{ matrix.target }}
+          path: fuzz/evidence/${{ matrix.target }}.json
+          if-no-files-found: warn
+          retention-days: 7
+      - name: Keep the reproducer of a failing target
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: fuzz-artifacts-${{ matrix.target }}
+          # libFuzzer stops at its first finding: at most one input per target.
+          path: fuzz/artifacts/${{ matrix.target }}/
+          if-no-files-found: ignore
+          retention-days: 7
+
+  fuzz:
+    name: Fuzz
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: [smoke, plan, libfuzzer]
+    if: always()
+    steps:
+      - name: Fail unless every fuzz job succeeded
+        env:
+          # Through the environment, not interpolated into the script.
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          python3 - <<'PY'
+          import json, os, sys
+          needs = json.loads(os.environ["NEEDS"])
+          engines = {
+              "plan": "coverage-guided budget",
+              "libfuzzer": "coverage-guided libFuzzer, one job per target",
+              "smoke": "stable mutation smoke, NOT coverage-guided",
+          }
+          if set(needs) != set(engines):
+              print(f"::error::the Fuzz job depends on {sorted(needs)}, not {sorted(engines)}")
+              sys.exit(1)
+          failed = False
+          for name, what in engines.items():
+              result = needs[name].get("result")
+              print(f"{what}: {result}")
+              if result != "success":
+                  print(f"::error::{what} finished {result!r}; only 'success' counts")
+                  failed = True
+          sys.exit(1 if failed else 0)
+          PY

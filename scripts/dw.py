@@ -29,14 +29,20 @@ import os
 import platform
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import urllib.parse
+from collections import deque
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
+from typing import IO
 
 ROOT = Path(__file__).resolve().parent.parent
+FUZZ_DIR = ROOT / "fuzz"
 
 # Minimum versions. Rust's real floor is `rust-toolchain.toml`, which rustup
 # honours automatically; this is only for a clear message when rustup is absent.
@@ -68,6 +74,33 @@ FUZZ_TARGETS = PROTO_FUZZ_TARGETS + POLICY_FUZZ_TARGETS
 # is a reviewed change, exactly like rust-toolchain.toml.
 FUZZ_NIGHTLY = "nightly-2026-09-01"
 CARGO_FUZZ_VERSION = "0.13.2"
+# F-07: the coverage-guided campaign runs one GitHub Actions job per target
+# (.github/workflows/fuzz.yml), each with its own budget and time limits, all
+# derived here. libFuzzer seconds per target, by trigger; a manual run names
+# its own, from 1 to FUZZ_MAX_SECONDS. `make fuzz` locally defaults to 60.
+FUZZ_BUDGETS = {"pull_request": 30, "schedule": 900}
+FUZZ_MAX_SECONDS = 3600
+FUZZ_LOCAL_SECONDS = 60
+# libFuzzer's own per-input limit (`-timeout`): an input that runs longer is a
+# finding -- a hang -- reported with its reproducer, not a job killed from
+# outside with nothing to show.
+FUZZ_INPUT_TIMEOUT = 60
+# The runner's own limits, so that an overrun is recorded as such by the
+# runner rather than inferred from a killed job: the build, and libFuzzer past
+# its budget plus one input's limit plus FUZZ_RUN_GRACE. A cold `cargo fuzz
+# build` took 139 s on four CPUs (2026-11-14); the limit leaves a slower
+# hosted runner eight times that.
+FUZZ_BUILD_LIMIT = 1200
+FUZZ_RUN_GRACE = 120
+# Around the runner inside the `make fuzz` step (seeding, records, versions),
+# and around that step in its job (checkout, setup, the pinned installs, the
+# report, the uploads).
+FUZZ_STEP_MARGIN = 120
+FUZZ_JOB_OVERHEAD_MINUTES = 15
+# One record per target per run (fuzz/evidence/<target>.json): what ran, from
+# what, for how long, and how it ended. Outside `target/`, which CI caches: a
+# record restored from another run must never stand in for this one.
+FUZZ_EVIDENCE_SCHEMA = "direwolf.fuzz-evidence/1"
 
 GREEN, RED, DIM, BOLD, OFF = "\033[32m", "\033[31m", "\033[2m", "\033[1m", "\033[0m"
 if os.environ.get("NO_COLOR") or not sys.stdout.isatty():
@@ -12226,40 +12259,630 @@ def task_authority_write_probe() -> None:
     )
 
 
-def task_fuzz() -> None:
-    """Coverage-guided libFuzzer run of every target (nightly, cargo-fuzz).
-
-    Two surfaces: the DWKP decoder and the M3c policy loader.
-    """
-    seconds = os.environ.get("DW_FUZZ_SECONDS", "60")
-    if not seconds.isdigit() or int(seconds) < 1:
-        raise TaskError("DW_FUZZ_SECONDS must be a positive whole number of seconds")
-    if shutil.which("cargo-fuzz") is None:
+def fuzz_selected_targets(environ: Mapping[str, str]) -> tuple[str, ...]:
+    """The coverage-guided targets a run covers: every one, or exactly the one
+    `DW_FUZZ_TARGET` names (F-07: one CI job per target). Anything else --
+    an unknown name, a list, an empty value -- is refused before anything runs."""
+    if "DW_FUZZ_TARGET" not in environ:
+        return FUZZ_TARGETS
+    name = environ["DW_FUZZ_TARGET"]
+    if name not in FUZZ_TARGETS:
         raise TaskError(
-            "cargo-fuzz is not installed:\n"
+            f"DW_FUZZ_TARGET={name[:60]!r} is not a coverage-guided target; name one of "
+            f"{', '.join(FUZZ_TARGETS)}, or leave it unset for every one"
+        )
+    return (name,)
+
+
+def _fuzz_budget(what: str, value: str) -> int:
+    if re.fullmatch(r"[1-9][0-9]{0,5}", value) is None or int(value) > FUZZ_MAX_SECONDS:
+        raise TaskError(
+            f"{what} must be a whole number of seconds from 1 to {FUZZ_MAX_SECONDS}, "
+            f"not {value[:40]!r}"
+        )
+    return int(value)
+
+
+def fuzz_seconds(environ: Mapping[str, str]) -> int:
+    """libFuzzer's budget per target: `DW_FUZZ_SECONDS`, from 1 to
+    FUZZ_MAX_SECONDS; FUZZ_LOCAL_SECONDS when unset, never when set but empty."""
+    if "DW_FUZZ_SECONDS" not in environ:
+        return FUZZ_LOCAL_SECONDS
+    return _fuzz_budget("DW_FUZZ_SECONDS", environ["DW_FUZZ_SECONDS"])
+
+
+def fuzz_plan(event: str, requested: str) -> dict[str, int]:
+    """One coverage-guided CI job's budget and time limits for a trigger.
+
+    The `make fuzz` step's limit covers the runner's own build limit, the
+    budget, one input's limit, the runner's grace and its margin; the job's
+    adds the steps around it. Each limit therefore expires only after the one
+    inside it, so an overrun is recorded by the runner (TIMEOUT) before the
+    step is killed, and the step is killed before the job.
+    """
+    if event == "workflow_dispatch":
+        seconds = _fuzz_budget("the workflow's `seconds` input", requested)
+    elif event in FUZZ_BUDGETS:
+        seconds = FUZZ_BUDGETS[event]
+    else:
+        raise TaskError(
+            f"the Fuzz workflow has no budget for the trigger {event[:40]!r}; "
+            f"it runs on {', '.join(sorted([*FUZZ_BUDGETS, 'workflow_dispatch']))}"
+        )
+    inner = FUZZ_BUILD_LIMIT + seconds + FUZZ_INPUT_TIMEOUT + FUZZ_RUN_GRACE + FUZZ_STEP_MARGIN
+    step_minutes = -(-inner // 60)
+    return {
+        "seconds": seconds,
+        "step_timeout_minutes": step_minutes,
+        "job_timeout_minutes": step_minutes + FUZZ_JOB_OVERHEAD_MINUTES,
+    }
+
+
+def task_fuzz_plan() -> None:
+    """The coverage-guided budget and time limits for this trigger (the Fuzz workflow's plan)."""
+    event = os.environ.get("GITHUB_EVENT_NAME")
+    if event is None:
+        # Locally: what each trigger gets, a manual run at its maximum.
+        for name, requested in (
+            ("pull_request", ""),
+            ("schedule", ""),
+            ("workflow_dispatch", str(FUZZ_MAX_SECONDS)),
+        ):
+            plan = fuzz_plan(name, requested)
+            print(
+                f"{name:<18} {plan['seconds']:>5} s per target; `make fuzz` step "
+                f"{plan['step_timeout_minutes']} min; job {plan['job_timeout_minutes']} min"
+            )
+        return
+    plan = fuzz_plan(event, os.environ.get("DW_FUZZ_REQUESTED", ""))
+    lines = [f"{key}={value}" for key, value in plan.items()]
+    print("\n".join(lines))
+    output = os.environ.get("GITHUB_OUTPUT")
+    if output:
+        with Path(output).open("a", encoding="utf-8") as handle:
+            handle.write("\n".join(lines) + "\n")
+    summary = os.environ.get("GITHUB_STEP_SUMMARY")
+    if summary:
+        with Path(summary).open("a", encoding="utf-8") as handle:
+            handle.write(
+                f"Coverage-guided budget ({event}): {plan['seconds']} s of libFuzzer per "
+                f"target, one job per target; the `make fuzz` step is stopped after "
+                f"{plan['step_timeout_minutes']} min, the job after "
+                f"{plan['job_timeout_minutes']} min.\n"
+            )
+
+
+def fuzz_seeds_for(target: str) -> list[bytes]:
+    """The seeds of a target's surface: DWKP vectors are the wrong corpus for a
+    TOML parser, and the policy packs the wrong one for a frame decoder."""
+    if target in PROTO_FUZZ_TARGETS:
+        return _fuzz_seeds()
+    if target in POLICY_FUZZ_TARGETS:
+        return _policy_fuzz_seeds()
+    raise TaskError(f"{target!r} belongs to no fuzzed surface")
+
+
+class LibFuzzerLog:
+    """What libFuzzer reported about a run, read line by line as it runs.
+
+    Only libFuzzer's own lines count: the coverage counters it loaded, its
+    INITED and progress lines, its final `Done N runs in T second(s)`, and an
+    `ERROR:` report with the reproducer it wrote. A stable mutation harness
+    prints none of them, so its output can never read as a coverage-guided run.
+    """
+
+    _COUNTERS = re.compile(r"INFO: Loaded \d+ modules?\s+\((\d+) inline 8-bit counters\)")
+    _INITED = re.compile(r"^#(\d+)\s+INITED\b.*?\bcov: (\d+)")
+    _PROGRESS = re.compile(r"^#(\d+)\s+\S+\s+cov: (\d+)")
+    _DONE = re.compile(r"^Done (\d+) runs in (\d+) second\(s\)")
+    _ERROR = re.compile(r"==\d+==\s*ERROR: (\w+): (.*)")
+    _ARTIFACT = re.compile(r"Test unit written to (\S+)")
+    _PANIC = re.compile(r"panicked at (.*)")
+
+    def __init__(self) -> None:
+        self.counters = 0
+        self.inited_cov: int | None = None
+        self.final_cov: int | None = None
+        self.runs: int | None = None
+        self.reported_seconds: int | None = None
+        self.error: tuple[str, str] | None = None
+        self.artifact: str | None = None
+        self.panic: str | None = None
+        self.tail: deque[str] = deque(maxlen=40)
+
+    def feed(self, line: str) -> None:
+        self.tail.append(line)
+        if (m := self._COUNTERS.search(line)) is not None:
+            self.counters += int(m.group(1))
+        if (m := self._INITED.search(line)) is not None:
+            self.inited_cov = int(m.group(2))
+        if (m := self._PROGRESS.search(line)) is not None:
+            self.runs, self.final_cov = int(m.group(1)), int(m.group(2))
+        if (m := self._DONE.search(line)) is not None:
+            self.runs, self.reported_seconds = int(m.group(1)), int(m.group(2))
+        if self.error is None and (m := self._ERROR.search(line)) is not None:
+            self.error = (m.group(1), m.group(2).strip())
+        if self.artifact is None and (m := self._ARTIFACT.search(line)) is not None:
+            self.artifact = m.group(1)
+        if self.panic is None and (m := self._PANIC.search(line)) is not None:
+            self.panic = m.group(1).strip()
+
+    @property
+    def coverage_guided(self) -> bool:
+        """libFuzzer loaded coverage counters and finished reading its corpus."""
+        return self.counters > 0 and self.inited_cov is not None
+
+
+def _fuzz_failure_kind(engine: str, message: str) -> str:
+    if engine == "libFuzzer":
+        if message.startswith("timeout"):
+            return "INPUT TIMEOUT"
+        if "out-of-memory" in message or "malloc" in message:
+            return "OUT OF MEMORY"
+        return "CRASH"
+    if engine == "LeakSanitizer":
+        return "LEAK"
+    return "SANITIZER"
+
+
+def classify_libfuzzer(exit_code: int, log: LibFuzzerLog, requested: int) -> tuple[str, str]:
+    """PASS only for a coverage-guided run that libFuzzer itself reports as
+    having lasted the whole budget; anything else names what it was."""
+    if log.error is not None:
+        engine, message = log.error
+        detail = f"{_fuzz_failure_kind(engine, message)}: {engine}: {message}"
+        if log.panic is not None:
+            detail += f" (panicked at {log.panic})"
+        return "FAIL", detail
+    if not log.coverage_guided:
+        return "NOT EXERCISED", (
+            f"exit {exit_code} without libFuzzer's coverage counters and INITED report: "
+            "not a coverage-guided run"
+        )
+    if exit_code != 0:
+        return "FAIL", f"libFuzzer exited {exit_code} without an error report"
+    if log.reported_seconds is None:
+        return "FAIL", "libFuzzer exited without reporting a finished run (`Done N runs in T s`)"
+    if log.reported_seconds < requested:
+        return "FAIL", f"libFuzzer stopped after {log.reported_seconds} s of {requested} s"
+    return "PASS", (
+        f"{log.runs} runs in {log.reported_seconds} s; coverage {log.inited_cov} -> "
+        f"{log.final_cov}; no crash, sanitizer report, input timeout or leak"
+    )
+
+
+def _fuzz_build_argv(target: str) -> list[str]:
+    return ["cargo", f"+{FUZZ_NIGHTLY}", "fuzz", "build", target]
+
+
+def _fuzz_run_argv(target: str, seconds: int) -> list[str]:
+    # The corpus is cargo-fuzz's own fuzz/corpus/<target>, seeded above.
+    return [
+        "cargo",
+        f"+{FUZZ_NIGHTLY}",
+        "fuzz",
+        "run",
+        target,
+        "--",
+        f"-max_total_time={seconds}",
+        f"-timeout={FUZZ_INPUT_TIMEOUT}",
+    ]
+
+
+def _stop_tree(process: subprocess.Popen[bytes]) -> None:
+    """Stop a process and everything it started (cargo runs the fuzzer as its child)."""
+    if process.poll() is not None:
+        return
+    if sys.platform != "win32":
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            return
+    else:
+        process.kill()
+
+
+def _pump(stream: IO[bytes], log: LibFuzzerLog) -> None:
+    for raw in iter(stream.readline, b""):
+        line = raw.decode("utf-8", "replace").rstrip("\r\n")
+        print(line, flush=True)
+        log.feed(line)
+
+
+def _supervised(argv: list[str], limit: float, log: LibFuzzerLog | None = None) -> int | None:
+    """Run `argv` in ROOT for at most `limit` seconds, echoing its output (and
+    reading it into `log`). Its exit code, or None if the runner stopped it.
+    Whatever happens to the runner, the process tree does not outlive it."""
+    print(f"{DIM}$ {' '.join(argv)}{OFF}", flush=True)
+    process = subprocess.Popen(
+        argv,
+        cwd=str(ROOT),
+        stdout=subprocess.PIPE if log is not None else None,
+        stderr=subprocess.STDOUT if log is not None else None,
+        start_new_session=sys.platform != "win32",
+    )
+    reader = None
+    if log is not None and process.stdout is not None:
+        reader = threading.Thread(target=_pump, args=(process.stdout, log), daemon=True)
+        reader.start()
+    try:
+        try:
+            code = process.wait(timeout=limit)
+        except subprocess.TimeoutExpired:
+            _stop_tree(process)
+            process.wait()
+            if reader is not None:
+                reader.join(timeout=10)
+            return None
+        if reader is not None:
+            reader.join(timeout=30)
+        return code
+    except BaseException:
+        _stop_tree(process)
+        raise
+
+
+def _interrupted(_signum: int, _frame: object) -> None:
+    raise KeyboardInterrupt
+
+
+def _fuzz_evidence_path(target: str) -> Path:
+    return FUZZ_DIR / "evidence" / f"{target}.json"
+
+
+def _write_fuzz_record(record: Mapping[str, object]) -> None:
+    path = _fuzz_evidence_path(str(record["target"]))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    partial = path.with_name(path.name + ".partial")
+    partial.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    partial.replace(path)
+
+
+def _read_fuzz_record(target: str) -> dict[str, object] | None:
+    try:
+        loaded = json.loads(_fuzz_evidence_path(target).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return loaded if isinstance(loaded, dict) else None
+
+
+def _fuzz_sanitised(text: str) -> str:
+    """Repository and home paths out of evidence: `.` and `~`, never the runner's layout."""
+    text = text.replace(str(ROOT), ".")
+    home = str(Path.home())
+    if len(home) > 1:
+        text = text.replace(home, "~")
+    return text[:400]
+
+
+def _fuzz_identity(environ: Mapping[str, str]) -> dict[str, str | None]:
+    """Which run and commit a record belongs to; a record of another never counts."""
+    commit = environ.get("GITHUB_SHA")
+    if not commit:
+        commit = (
+            subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=str(ROOT),
+                capture_output=True,
+                text=True,
+                check=False,
+            ).stdout.strip()
+            or "unknown"
+        )
+    return {
+        "commit": commit,
+        "trigger": environ.get("GITHUB_EVENT_NAME", "local"),
+        "run_id": environ.get("GITHUB_RUN_ID"),
+        "run_attempt": environ.get("GITHUB_RUN_ATTEMPT"),
+    }
+
+
+def _first_line(argv: list[str]) -> str:
+    try:
+        out = subprocess.run(argv, capture_output=True, text=True, check=False, timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        return "unavailable"
+    lines = (out.stdout or out.stderr).strip().splitlines()
+    return lines[0] if out.returncode == 0 and lines else "unavailable"
+
+
+def _fuzz_tool_versions() -> dict[str, str]:
+    return {
+        "toolchain": FUZZ_NIGHTLY,
+        "rustc": _first_line(["rustc", f"+{FUZZ_NIGHTLY}", "--version"]),
+        "cargo_fuzz": _first_line(["cargo", f"+{FUZZ_NIGHTLY}", "fuzz", "--version"]),
+    }
+
+
+def _fuzz_crash(log: LibFuzzerLog) -> dict[str, object] | None:
+    """The reproducer libFuzzer wrote, by path, size and digest."""
+    if log.artifact is None:
+        return None
+    path = Path(log.artifact)
+    if not path.is_absolute():
+        path = ROOT / path
+    crash: dict[str, object] = {"artifact": _fuzz_sanitised(str(path))}
+    try:
+        data = path.read_bytes()
+    except OSError:
+        crash["readable"] = False
+        return crash
+    crash.update(readable=True, bytes=len(data), sha256=hashlib.sha256(data).hexdigest())
+    return crash
+
+
+def _fuzz_one(
+    target: str, seconds: int, environ: Mapping[str, str], versions: Mapping[str, str]
+) -> dict[str, object]:
+    """Build one target, fuzz it for its budget, and record how it ended.
+
+    The record is written before the build and again before libFuzzer starts,
+    so a run stopped from outside leaves RUNNING behind -- which no report
+    reads as a pass.
+    """
+    seeds = fuzz_seeds_for(target)
+    corpus = FUZZ_DIR / "corpus" / target
+    corpus.mkdir(parents=True, exist_ok=True)
+    for seed in seeds:
+        (corpus / f"vector-{hashlib.sha256(seed).hexdigest()[:16]}").write_bytes(seed)
+    print(f"{DIM}seeded fuzz/corpus/{target} with {len(seeds)} vectors{OFF}")
+    record: dict[str, object] = {
+        "schema": FUZZ_EVIDENCE_SCHEMA,
+        "engine": "libfuzzer",
+        "target": target,
+        **_fuzz_identity(environ),
+        **versions,
+        "requested_seconds": seconds,
+        "input_timeout_seconds": FUZZ_INPUT_TIMEOUT,
+        "corpus": f"fuzz/corpus/{target}",
+        "seeds": len(seeds),
+        "corpus_files_before": sum(1 for p in corpus.iterdir() if p.is_file()),
+        "status": "RUNNING",
+        "phase": "build",
+        "started_at": int(time.time()),
+    }
+    _write_fuzz_record(record)
+    built = _supervised(_fuzz_build_argv(target), FUZZ_BUILD_LIMIT)
+    if built != 0:
+        record.update(
+            status="NOT EXERCISED",
+            detail=(
+                f"the build did not finish within {FUZZ_BUILD_LIMIT} s"
+                if built is None
+                else f"the build failed (exit {built})"
+            )
+            + "; libFuzzer never ran",
+            finished_at=int(time.time()),
+        )
+        _write_fuzz_record(record)
+        return record
+    record.update(phase="fuzz", fuzz_started_at=int(time.time()))
+    _write_fuzz_record(record)
+    log = LibFuzzerLog()
+    limit = seconds + FUZZ_INPUT_TIMEOUT + FUZZ_RUN_GRACE
+    code = _supervised(_fuzz_run_argv(target, seconds), limit, log)
+    if code is None:
+        status, detail = (
+            "TIMEOUT",
+            (
+                f"libFuzzer was still running {limit} s after it started (budget {seconds} s, "
+                f"one input's limit {FUZZ_INPUT_TIMEOUT} s, grace {FUZZ_RUN_GRACE} s); stopped"
+            ),
+        )
+    else:
+        status, detail = classify_libfuzzer(code, log, seconds)
+    record.update(
+        status=status,
+        detail=_fuzz_sanitised(detail),
+        exit_code=code,
+        coverage_guided=log.coverage_guided,
+        libfuzzer={
+            "coverage_counters": log.counters,
+            "initial_coverage": log.inited_cov,
+            "final_coverage": log.final_cov,
+            "runs": log.runs,
+            "reported_seconds": log.reported_seconds,
+        },
+        crash=_fuzz_crash(log),
+        corpus_files_after=sum(1 for p in corpus.iterdir() if p.is_file()),
+        finished_at=int(time.time()),
+        log_tail=[_fuzz_sanitised(line) for line in log.tail],
+    )
+    _write_fuzz_record(record)
+    return record
+
+
+def task_fuzz() -> None:
+    """Coverage-guided libFuzzer: every target, or DW_FUZZ_TARGET alone (nightly; DW_FUZZ_SECONDS).
+
+    Two surfaces: the DWKP decoder and the M3c policy loader. Every selected
+    target runs, whatever an earlier one did, and each leaves a record in
+    fuzz/evidence/; the task fails unless every one passed. Never falls back to
+    the stable harness: without cargo-fuzz the targets are NOT EXERCISED.
+    """
+    environ = os.environ
+    targets = fuzz_selected_targets(environ)
+    seconds = fuzz_seconds(environ)
+    for target in targets:
+        # A record left by an earlier run never stands in for this one.
+        _fuzz_evidence_path(target).unlink(missing_ok=True)
+    if sys.platform == "win32":
+        _fuzz_all(targets, seconds, environ)
+        return
+    # A cancelled CI step is sent SIGINT, then SIGTERM: both unwind through
+    # `_supervised`, which stops libFuzzer's process group on the way out.
+    previous = signal.signal(signal.SIGTERM, _interrupted)
+    try:
+        _fuzz_all(targets, seconds, environ)
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+
+
+def _fuzz_all(targets: tuple[str, ...], seconds: int, environ: Mapping[str, str]) -> None:
+    if shutil.which("cargo-fuzz") is None:
+        for target in targets:
+            _write_fuzz_record(
+                {
+                    "schema": FUZZ_EVIDENCE_SCHEMA,
+                    "engine": "libfuzzer",
+                    "target": target,
+                    **_fuzz_identity(environ),
+                    "requested_seconds": seconds,
+                    "status": "NOT EXERCISED",
+                    "detail": "cargo-fuzz is not installed; libFuzzer never ran",
+                }
+            )
+        raise TaskError(
+            "NOT EXERCISED: cargo-fuzz is not installed:\n"
             f"  rustup toolchain install {FUZZ_NIGHTLY} --profile minimal\n"
             f"  cargo install cargo-fuzz --version {CARGO_FUZZ_VERSION} --locked\n"
-            "libFuzzer also needs a C++ compiler. `make fuzz-smoke` runs on stable without one."
+            "libFuzzer also needs a C++ compiler. `make fuzz-smoke` runs on stable without one, "
+            "and is not coverage-guided."
         )
-    by_surface = {
-        **{t: _fuzz_seeds() for t in PROTO_FUZZ_TARGETS},
-        **{t: _policy_fuzz_seeds() for t in POLICY_FUZZ_TARGETS},
-    }
-    for target in FUZZ_TARGETS:
-        seeds = by_surface[target]
-        corpus = ROOT / "fuzz" / "corpus" / target
-        corpus.mkdir(parents=True, exist_ok=True)
-        for seed in seeds:
-            (corpus / f"vector-{hashlib.sha256(seed).hexdigest()[:16]}").write_bytes(seed)
-        print(f"{DIM}seeded fuzz/corpus/{target} with {len(seeds)} vectors{OFF}")
-        run(
-            "cargo",
-            f"+{FUZZ_NIGHTLY}",
-            "fuzz",
-            "run",
-            target,
-            "--",
-            f"-max_total_time={seconds}",
+    versions = _fuzz_tool_versions()
+    results = [_fuzz_one(target, seconds, environ, versions) for target in targets]
+    print(f"\n{BOLD}coverage-guided fuzzing, {seconds} s per target{OFF}")
+    for result in results:
+        print(f"  {result['target']!s:<20} {result['status']!s:<14} {result.get('detail', '')}")
+    failed = [r for r in results if r["status"] != "PASS"]
+    if failed:
+        raise TaskError(
+            f"{len(failed)} of {len(results)} coverage-guided target(s) did not pass: "
+            + ", ".join(f"{r['target']} {r['status']}" for r in failed)
+        )
+    print(f"{GREEN}{len(results)} target(s) fuzzed for their full {seconds} s, none failed{OFF}")
+
+
+FUZZ_VERDICTS = ("PASS", "FAIL", "TIMEOUT", "CANCELLED", "NOT EXERCISED")
+
+
+def _fuzz_record_is_this_runs(
+    record: Mapping[str, object], target: str, environ: Mapping[str, str]
+) -> bool:
+    if record.get("target") != target:
+        return False
+    if not environ.get("GITHUB_RUN_ID"):
+        return True
+    return (
+        record.get("run_id") == environ.get("GITHUB_RUN_ID")
+        and record.get("run_attempt") == environ.get("GITHUB_RUN_ATTEMPT")
+        and record.get("commit") == environ.get("GITHUB_SHA")
+    )
+
+
+def fuzz_verdict(
+    target: str,
+    record: Mapping[str, object] | None,
+    step_outcome: str,
+    environ: Mapping[str, str],
+) -> tuple[str, str]:
+    """One target's outcome from its record and how the `make fuzz` step ended.
+
+    PASS needs this run's own record of a coverage-guided libFuzzer run that
+    lasted its whole budget. No record, another run's record, or a record the
+    runner never finished is never a pass: CANCELLED if the step was
+    cancelled, TIMEOUT if the step was stopped by its time limit, NOT
+    EXERCISED if nothing ran at all.
+    """
+    if record is not None and not _fuzz_record_is_this_runs(record, target, environ):
+        record = None
+    if record is None:
+        if step_outcome == "cancelled":
+            return "CANCELLED", "cancelled before this target's run was recorded"
+        return "NOT EXERCISED", "no record of a coverage-guided run of this target in this run"
+    status = record.get("status")
+    phase = record.get("phase", "start")
+    if status == "RUNNING":
+        if step_outcome == "failure":
+            return "TIMEOUT", (
+                f"stopped from outside during its {phase} -- the step's time limit -- before "
+                "it recorded an outcome; its budget is not evidenced"
+            )
+        if step_outcome == "success":
+            return "FAIL", "the runner exited without recording an outcome"
+        return "CANCELLED", f"interrupted during its {phase}; its budget is not evidenced"
+    if record.get("engine") != "libfuzzer" or record.get("schema") != FUZZ_EVIDENCE_SCHEMA:
+        return "NOT EXERCISED", "the record is not a coverage-guided libFuzzer run's"
+    detail = str(record.get("detail", ""))
+    requested = record.get("requested_seconds")
+    if "DW_FUZZ_SECONDS" in environ and requested != fuzz_seconds(environ):
+        planned = fuzz_seconds(environ)
+        return "FAIL", f"the record is of a {requested} s run, not the {planned} s planned"
+    if status == "PASS":
+        libfuzzer = record.get("libfuzzer")
+        reported = libfuzzer.get("reported_seconds") if isinstance(libfuzzer, dict) else None
+        if not (
+            record.get("coverage_guided") is True
+            and isinstance(reported, int)
+            and isinstance(requested, int)
+            and reported >= requested
+        ):
+            return "FAIL", "the record says PASS without libFuzzer's own report of the whole budget"
+        return "PASS", detail
+    if status in ("FAIL", "TIMEOUT", "NOT EXERCISED"):
+        return str(status), detail
+    return "FAIL", f"the record's status {status!r} is not one a run can end in"
+
+
+def _fuzz_annotation(text: str) -> str:
+    """A workflow command's data, escaped as GitHub Actions requires."""
+    return text.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+
+
+def task_fuzz_report() -> None:
+    """Each coverage-guided target's recorded outcome; fails unless every one is PASS."""
+    environ = os.environ
+    targets = fuzz_selected_targets(environ)
+    step = environ.get("DW_FUZZ_STEP_OUTCOME", "")
+    rows = []
+    for target in targets:
+        record = _read_fuzz_record(target)
+        status, detail = fuzz_verdict(target, record, step, environ)
+        rows.append((target, status, detail, record or {}))
+    in_actions = environ.get("GITHUB_ACTIONS") == "true"
+    for target, status, detail, _ in rows:
+        print(f"  {target:<20} {status:<14} {detail}")
+        if in_actions:
+            level = "notice" if status == "PASS" else "error"
+            print(f"::{level} title=fuzz {target}::{_fuzz_annotation(f'{status}: {detail}')}")
+    summary = environ.get("GITHUB_STEP_SUMMARY")
+    if summary:
+        lines = [
+            "Coverage-guided libFuzzer (cargo-fuzz). The stable mutation smoke job is not "
+            "coverage-guided and is not counted here.",
+            "",
+            "| target | outcome | requested s | libFuzzer reported s | runs | coverage | commit "
+            "| trigger | toolchain | cargo-fuzz | detail |",
+            "|---|---|---|---|---|---|---|---|---|---|---|",
+        ]
+        for target, status, detail, record in rows:
+            libfuzzer = record.get("libfuzzer")
+            numbers = libfuzzer if isinstance(libfuzzer, dict) else {}
+            cells = [
+                target,
+                f"**{status}**",
+                record.get("requested_seconds", "-"),
+                numbers.get("reported_seconds", "-"),
+                numbers.get("runs", "-"),
+                f"{numbers.get('initial_coverage', '-')} -> {numbers.get('final_coverage', '-')}",
+                str(record.get("commit", "-"))[:12],
+                record.get("trigger", "-"),
+                record.get("rustc", record.get("toolchain", "-")),
+                record.get("cargo_fuzz", "-"),
+                detail,
+            ]
+            lines.append(
+                "| "
+                + " | ".join(str(c).replace("|", "\\|").replace("\n", " ") for c in cells)
+                + " |"
+            )
+        with Path(summary).open("a", encoding="utf-8") as handle:
+            handle.write("\n".join(lines) + "\n")
+    failed = [(target, status) for target, status, _, _ in rows if status != "PASS"]
+    if failed:
+        raise TaskError(
+            "coverage-guided fuzzing did not pass: "
+            + ", ".join(f"{target} {status}" for target, status in failed)
         )
 
 
@@ -13107,6 +13730,8 @@ TASKS = {
     "d11-posture": task_d11_posture,
     "fuzz-smoke": task_fuzz_smoke,
     "fuzz": task_fuzz,
+    "fuzz-plan": task_fuzz_plan,
+    "fuzz-report": task_fuzz_report,
     "security": task_security,
     "check": task_check,
     "docs": task_docs,

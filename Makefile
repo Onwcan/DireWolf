@@ -27,7 +27,7 @@ DW := $(PY) scripts/dw.py
         sandbox-release-mutations sandbox-restart-evidence sandbox-capacity-evidence \
         sandbox-proxy-weakened-evidence sandbox-proxy-weakened-review \
         sandbox-registry-evidence sandbox-hygiene-evidence sandbox-registry-mutations m5e-evidence-bundle m5e-gate-check \
-        sandbox-neighbour-mutations d11-hardening-evidence d11-hardening-mutations d11-posture fuzz-smoke fuzz security docs \
+        sandbox-neighbour-mutations d11-hardening-evidence d11-hardening-mutations d11-posture fuzz-smoke fuzz fuzz-plan fuzz-report security docs \
         preflight tools hooks clean
 
 help:            ## List available commands
@@ -198,8 +198,14 @@ net-http-mutations: ## M5c mutation review: each net.http safeguard weakened in 
 fuzz-smoke:      ## Stable mutation fuzzing of dwk-proto (not coverage-guided)
 	@$(DW) fuzz-smoke
 
-fuzz:            ## Coverage-guided cargo-fuzz run, every target (nightly; DW_FUZZ_SECONDS)
+fuzz:            ## Coverage-guided cargo-fuzz run, every target or DW_FUZZ_TARGET alone (nightly; DW_FUZZ_SECONDS)
 	@$(DW) fuzz
+
+fuzz-plan:       ## The coverage-guided budget and time limits per trigger (the Fuzz workflow's plan)
+	@$(DW) fuzz-plan
+
+fuzz-report:     ## Each coverage-guided target's recorded outcome (fuzz/evidence/); fails unless PASS
+	@$(DW) fuzz-report
 
 security:        ## cargo-deny and pip-audit
 	@$(DW) security
