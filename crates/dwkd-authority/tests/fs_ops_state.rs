@@ -126,7 +126,10 @@ mod linux {
     }
 
     fn live(authority: &mut Authority, n: u64) -> Live {
-        let caller = authority.connect(subject(1000));
+        // F-18: `Setup` adopts this process's uid as the store's one runtime
+        // principal, so the in-process caller is that uid -- not a literal
+        // one, which is the same uid only on a machine where it happens to be.
+        let caller = authority.connect(subject(own_uid()));
         let session = session(n);
         let Reply::Done(epoch) = authority.acquire_lease(&caller, &session).unwrap() else {
             panic!("a lease")

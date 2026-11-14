@@ -450,6 +450,14 @@ impl Setup {
         Self::build(tag, policy_text, "m4b", ceiling(), |_| {})
     }
 
+    /// The same fixture, its one runtime principal `runtime` rather than this
+    /// process (F-18): where the runtime is another identity (`DW_PEER_AS`),
+    /// the operator adopts that uid, and this process's uid -- still allowed
+    /// to connect -- holds no session, workspace or profile.
+    pub(crate) fn for_runtime(tag: &str, runtime: u32) -> Self {
+        Self::build_for(tag, POLICY, "m4b", ceiling(), runtime, |_| {})
+    }
+
     /// The M4c fixture (ADR-0044): the M4b tree, the write-enabled policy
     /// [`FSOPS_POLICY`], a `maintainer` agent profile that declares every
     /// filesystem verb M4c implements, and a mode ceiling that allows them.
@@ -509,11 +517,23 @@ impl Setup {
         })
     }
 
+    /// The fixture whose one runtime principal is this process's uid.
     fn build(
         tag: &str,
         policy_text: &str,
         profile: &'static str,
         ceiling: Vec<String>,
+        extra: impl FnOnce(&mut dwkd_authority::state::Authority),
+    ) -> Self {
+        Self::build_for(tag, policy_text, profile, ceiling, own_uid(), extra)
+    }
+
+    fn build_for(
+        tag: &str,
+        policy_text: &str,
+        profile: &'static str,
+        ceiling: Vec<String>,
+        runtime: u32,
         extra: impl FnOnce(&mut dwkd_authority::state::Authority),
     ) -> Self {
         let dir = TempDir::new(tag);
@@ -553,17 +573,18 @@ impl Setup {
             operator
                 .install_workspace_root(&workspace, root.to_str().unwrap())
                 .unwrap();
-            // F-18: the deployment has one runtime principal -- this
-            // process's uid, the only one `serve` allows -- and the operator
-            // says so in one audited act: every workspace and profile is its.
+            // F-18: the deployment has one runtime principal -- `runtime`,
+            // this process's uid unless the runtime is another identity --
+            // and the operator says so in one audited act: every workspace
+            // and profile is its. An in-process caller connects as it too.
             let adopted = operator
                 .adopt_single_principal(dwkd_authority::state::AuthenticatedSubject::unix_uid(
-                    own_uid(),
+                    runtime,
                 ))
                 .unwrap();
             assert_eq!((adopted.sessions, adopted.workspaces), (0, 1));
             for n in 1..=4 {
-                bind_owned(&mut authority, own_uid(), &session(n), &workspace);
+                bind_owned(&mut authority, runtime, &session(n), &workspace);
             }
         }
         drop(authority);

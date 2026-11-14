@@ -119,7 +119,10 @@ mod linux {
     }
 
     fn live(authority: &mut Authority, n: u64) -> Live {
-        let caller = authority.connect(subject(1000));
+        // F-18: `Setup` adopts this process's uid as the store's one runtime
+        // principal, so the in-process caller is that uid -- not a literal
+        // one, which is the same uid only on a machine where it happens to be.
+        let caller = authority.connect(subject(own_uid()));
         let session = session(n);
         let Reply::Done(epoch) = authority.acquire_lease(&caller, &session).unwrap() else {
             panic!("a lease")
@@ -611,7 +614,7 @@ mod linux {
         // the admission ended rather than handed a re-minted one.
         let setup = Setup::new("m4b-replay");
         let (mut authority, _) = start(&setup, START_MS + 10_000, None, None);
-        let caller = authority.connect(subject(1000));
+        let caller = authority.connect(subject(own_uid()));
         let session = session(1);
         let Reply::Done(epoch) = authority.acquire_lease(&caller, &session).unwrap() else {
             panic!("a lease")
@@ -669,7 +672,7 @@ mod linux {
         assert_eq!(audit_records(&setup.state(), "run.admit_replayed").len(), 1);
         drop(authority);
         let (mut authority, _) = start(&setup, START_MS + 20_000, None, None);
-        let caller = authority.connect(subject(1000));
+        let caller = authority.connect(subject(own_uid()));
         let Reply::Done(later) = authority.acquire_lease(&caller, &session).unwrap() else {
             panic!("a new tenure")
         };
@@ -709,7 +712,7 @@ mod linux {
         std::fs::write(setup.root.join("a.txt"), b"first").unwrap();
         let fake = Arc::new(Recording::default());
         let (mut authority, _) = start(&setup, START_MS + 10_000, None, Some(fake.clone()));
-        let caller = authority.connect(subject(1000));
+        let caller = authority.connect(subject(own_uid()));
         let session = session(1);
         let Reply::Done(epoch) = authority.acquire_lease(&caller, &session).unwrap() else {
             panic!("a lease")

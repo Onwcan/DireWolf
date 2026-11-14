@@ -1428,7 +1428,10 @@ M4E:DONE"
         let value = fresh("3id", 40);
         let seeded = Seeded::new("3id", &value).expect("NOT EXERCISED: no usable kernel keyring");
         let stage = staging();
-        let setup = Setup::new("m4e-3id");
+        // F-18: the runtime here is the peer identity, so the operator adopts
+        // that uid as the store's one runtime principal; this process's uid
+        // holds nothing.
+        let setup = Setup::for_runtime("m4e-3id", peer_uid);
         traversable_only(setup.dir.path());
         std::fs::set_permissions(&setup.root, std::fs::Permissions::from_mode(0o700)).unwrap();
         let secrets = secrets_file(setup.dir.path(), &seeded.0);
