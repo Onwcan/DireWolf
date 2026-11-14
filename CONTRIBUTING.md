@@ -763,6 +763,14 @@ both ran and reported every case; the eval gate there and in `evals` is strict;
 nothing around it may `continue-on-error` or `|| true`; and the `CI` aggregate
 needs every job and accepts only `success` — a *skipped* job is red.
 
+**Evidence beyond its 7 days.** Hosted evidence artifacts are kept 7 days.
+`scripts/evidence_archive.py` copies a finished run's M5 bundles or
+coverage-guided fuzz records into an archive outside the repository, with a
+manifest that verifies offline. No workflow runs it, and an archive never
+stands in for a current run. [docs/EVIDENCE_ARCHIVE.md](docs/EVIDENCE_ARCHIVE.md)
+covers how to capture, verify, back up and restore an archive, and what its
+hashes do and do not prove.
+
 ## Commits and pull requests
 
 Write the commit message for someone reading `git log` in two years and trying
