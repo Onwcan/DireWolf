@@ -102,7 +102,7 @@ Listed here rather than buried, because a security document that only lists stre
 
 **Do not open a public issue for a security report.**
 
-Use GitHub private security advisories on the repository (<https://github.com/Onwcan/DireWolf>), as described in [`SECURITY.md`](../SECURITY.md) at the repository root. We will acknowledge within 3 working days and aim to give an assessment within 10.
+Report it through GitHub's private vulnerability reporting: the repository's **Security and quality** tab, then **Advisories**, then **Report a vulnerability** (<https://github.com/Onwcan/DireWolf/security/advisories/new>). [`SECURITY.md`](../SECURITY.md) at the repository root is the reporting policy: what to include, what happens after a report, and the response targets — acknowledgement within 3 working days and an assessment within 10, targets rather than guarantees for a project with one maintainer.
 
 ### In scope
 
@@ -113,6 +113,7 @@ Use GitHub private security advisories on the repository (<https://github.com/On
 - Sandbox escape; filesystem escape from a workspace; SSRF past the egress guard.
 - Audit log tampering that is not detected by the chain.
 - Any second enforcement path — i.e. a way to cause a side effect that does not traverse the kernel's decision pipeline. **This is the highest-value class of report**, because the architecture's entire premise is that no such path exists.
+- Compromise of the build or release path: CI configuration, dependency policy, anything that would let a third party get code into an artifact.
 
 ### Out of scope
 

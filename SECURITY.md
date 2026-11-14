@@ -1,14 +1,45 @@
 # Security policy
 
-**Do not open a public issue for a security report.**
-
-Use GitHub private security advisories on this repository. We aim to
-acknowledge within 3 working days and to give an assessment within 10.
+**Do not open a public issue for a security report.** Do not put a
+vulnerability's details in a pull request, a commit message or a CI run either:
+in this public repository, all three are public.
 
 This file is the reporting policy. The security *posture* — what DireWolf
 claims, why the boundary is where it is, what it does not defend against — is
 [docs/SECURITY.md](docs/SECURITY.md), and the adversary model is
 [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md).
+
+## How to report
+
+Use GitHub's private vulnerability reporting:
+
+1. Open the repository's **Security and quality** tab, choose **Advisories**,
+   and click **Report a vulnerability** — or go straight to
+   <https://github.com/Onwcan/DireWolf/security/advisories/new>. You need to be
+   signed in to GitHub.
+2. Fill in the form: a summary, the details, a proof of concept and the
+   impact. Say which commit you tested and which part is affected — the
+   authority, a broker, the sandbox, the protocol, CI or the build — and leave
+   out real credentials and anyone else's data.
+3. Submit it. The report becomes a draft security advisory that only you, the
+   repository's maintainers and the people they add to it can see.
+
+## What happens after a report
+
+DireWolf has one maintainer, so these are targets, not guarantees:
+
+- **Acknowledgement within 3 working days**, as a comment on the report. If
+  none has arrived by then, add a comment to the report.
+- **An assessment within 10 working days**: whether the report is in scope, how
+  severe it is, and what follows — the report accepted as a draft advisory, a
+  request for more information, or the report closed with the reason.
+- **The fix is made in private**, in the advisory's temporary private fork,
+  where you can follow and test it, or on the maintainer's own machine. Nothing
+  about the vulnerability goes into a public issue, pull request or CI run
+  before the fix is merged.
+- **Disclosure is coordinated with you.** The advisory is published once the
+  fix is on `main`, with a CVE where one is warranted, and it credits you unless
+  you ask it not to.
 
 ---
 

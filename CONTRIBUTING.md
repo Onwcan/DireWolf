@@ -310,6 +310,59 @@ architecture is worth anything.
 
 Do not open a public issue for a vulnerability. See [SECURITY.md](SECURITY.md).
 
+## Handling a vulnerability report
+
+[SECURITY.md](SECURITY.md) promises reporters a private channel and response
+targets. This is what keeping that promise takes.
+
+**The channel.** Reports arrive through GitHub's private vulnerability
+reporting, as advisories with the status `Triage` under the **Security and
+quality** tab's **Advisories**. The feature is a repository setting only an
+administrator can change: Settings → *Security and quality* → **Advanced
+Security** → *Private vulnerability reporting* → **Enable**. Anyone can check
+that it is on, without a token: `GET
+https://api.github.com/repos/Onwcan/DireWolf/private-vulnerability-reporting`
+answers `{"enabled":true}`, and the **Advisories** page shows a signed-out
+visitor **Report a vulnerability**. While it is off, SECURITY.md's instructions
+lead nowhere.
+
+**Notification.** GitHub tells the repository's administrators about a new
+report only if they watch the repository with **All Activity**, or with
+**Custom** → **Security alerts**, and have notifications turned on for watched
+repositories (for email: <https://github.com/settings/notifications>,
+*Subscriptions* → *Watching*). Nothing in the repository can show that either
+holds; the administrator checks it. People with write access to the repository
+can read a report's confidential comments, so the collaborator list is part of
+who sees one.
+
+**Handling one.** The advisory is the only record. No public issue, pull
+request, branch, workflow run or commit message carries a vulnerability's
+details before its advisory is published, because every one of them is public
+here.
+
+1. Acknowledge the report with a comment on it. A comment marked
+   *Confidential* is seen only by people with write access, not the reporter;
+   notes that are not for the reporter go there.
+2. Reproduce it on a local checkout or a disposable machine with the `make`
+   targets — never by pushing a branch or dispatching a workflow.
+3. Assess it against SECURITY.md's scope: how severe it is (the advisory's
+   CVSS fields), and which commits and components it affects. Then **Accept and
+   open as draft**, ask the reporter for more, or **Close security advisory**
+   with a comment saying why.
+4. Fix it in the advisory's temporary private fork, or locally. GitHub runs no
+   CI and no status checks in that fork, and enforces no branch protection when
+   the advisory merges it, so `make check` and the evidence targets the change
+   touches, run locally, are the only verification before the merge; hosted CI
+   runs after it, on `main`. The commit message says what the change does, not
+   how to exploit what it fixes.
+5. Agree the disclosure date with the reporter. Merge, wait for hosted CI on
+   the merge, then publish the advisory — requesting a CVE from GitHub where one
+   is warranted — with the reporter credited unless they declined.
+
+A report that arrives in public is moved, not answered there: copy it into a
+new draft advisory, add the reporter to it as a collaborator, and delete the
+public issue.
+
 ## Unsafe Rust
 
 The workspace sets `unsafe_code = "forbid"` and **no workspace crate contains
