@@ -40,6 +40,7 @@ import io
 import json
 import os
 import re
+import secrets
 import shutil
 import stat
 import subprocess
@@ -1146,6 +1147,22 @@ def capture(
     return _write_archive(final, manifest, blobs, report)
 
 
+def _fresh_directory(parent: Path, prefix: str) -> Path:
+    """A new, uniquely named directory in `parent`, made as `mkdir` makes one:
+    with the parent's permissions. `tempfile.mkdtemp` gives its directory a
+    private ACL on Windows (owner, Administrators and SYSTEM only), which a
+    rename carries into the archive: one made from an elevated shell is then
+    unreadable to the same user unelevated."""
+    for _ in range(100):
+        candidate = parent / f"{prefix}{secrets.token_hex(8)}"
+        try:
+            candidate.mkdir()
+        except FileExistsError:
+            continue
+        return candidate
+    raise ArchiveError(f"no fresh directory could be made in {parent}")
+
+
 def _fsync_dir(path: Path) -> None:
     if os.name != "posix":
         return
@@ -1175,7 +1192,7 @@ def _write_archive(
     under an archive's name, and never touches another archive."""
     runs = final.parent
     runs.mkdir(parents=True, exist_ok=True)
-    scratch = Path(tempfile.mkdtemp(prefix=f".capture-{final.name}-", dir=runs))
+    scratch = _fresh_directory(runs, f".capture-{final.name}-")
     try:
         (scratch / "artifacts").mkdir()
         for name, data in sorted(blobs.items()):
@@ -1235,6 +1252,16 @@ def _read_file(path: Path, limit: int, what: str) -> bytes:
 
 
 def verify_archive(path: Path) -> Verification:
+    """`_verify_archive`, with a path the operating system will not let this
+    process read reported as a problem -- with the reason -- never a crash."""
+    try:
+        return _verify_archive(path)
+    except OSError as exc:
+        reason = exc.strerror or type(exc).__name__
+        return Verification(None, None, [f"{path} is unreadable to this process: {reason}"], {})
+
+
+def _verify_archive(path: Path) -> Verification:
     """Verify an archive offline: its layout; its manifest's form, schema and
     canonical bytes; each ZIP at its recorded and GitHub-reported digest and
     size, and safe to read; each entry at its digest; the classification; the
@@ -1552,7 +1579,7 @@ def inventory(archive_root: Path, *, deep: bool, backup_root: Path | None) -> li
                 body = _read_file(entry / "manifest.json", MAX_MANIFEST_BYTES, "manifest.json")
                 manifest = _dict(strict_json(body, "manifest.json"), "the manifest")
                 sha = sha256_hex(body)
-            except ArchiveError as exc:
+            except (ArchiveError, OSError) as exc:
                 manifest, sha, integrity = None, None, f"FAILED ({exc})"
         lines.append("  " + _inventory_line(entry, manifest, sha, integrity, backup_root))
     return lines
@@ -1643,7 +1670,7 @@ def restore(path: Path, destination: Path) -> Path:
     if manifest is None:
         raise ArchiveError("no manifest")
     run_id, attempt, sha = _run_identity(manifest["github"])
-    scratch = Path(tempfile.mkdtemp(prefix=".restore-", dir=parent))
+    scratch = _fresh_directory(parent, ".restore-")
     try:
         for name, entries in sorted(result.archived.items()):
             (scratch / name).mkdir()

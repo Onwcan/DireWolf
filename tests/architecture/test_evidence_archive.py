@@ -1400,6 +1400,43 @@ def test_a_restore_is_read_only_new_and_labelled(m5_archive: Path, tmp_path: Pat
     assert (occupied / "keep.txt").read_text(encoding="utf-8") == "mine"
 
 
+def test_an_archive_this_process_cannot_read_is_a_problem_not_a_crash(
+    m5_archive: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """An archive made from an elevated shell can be unreadable to the same
+    user unelevated: verify, inventory and the command line say so."""
+    real = Path.iterdir
+
+    def denied(self: Path) -> Iterator[Path]:
+        if self == m5_archive:
+            raise PermissionError(13, "Access is denied")
+        return real(self)
+
+    monkeypatch.setattr(Path, "iterdir", denied)
+    result = ea.verify_archive(m5_archive)
+    assert result.manifest is None
+    assert result.problems == [f"{m5_archive} is unreadable to this process: Access is denied"]
+    assert ea.main(["verify", str(m5_archive)]) == 1
+    said = capsys.readouterr()
+    assert "integrity: FAILED" in said.out and "Traceback" not in said.err
+    lines = ea.inventory(m5_archive.parent.parent, deep=True, backup_root=None)
+    assert "integrity FAILED (1)" in lines[1]
+
+
+def test_an_archive_takes_its_roots_permissions_not_a_private_temporary_directorys(
+    tmp_path: Path, bundles: dict[str, bytes]
+) -> None:
+    """Made as `mkdir` makes a directory -- never `tempfile.mkdtemp`, whose
+    directory is 0700 on POSIX and private by ACL on Windows."""
+    archive = _capture(_m5_scenario(bundles), tmp_path / "root")
+    _ok(archive)
+    sibling = tmp_path / "root" / "runs" / "a-plain-directory"
+    sibling.mkdir()
+    assert stat.S_IMODE(archive.stat().st_mode) == stat.S_IMODE(sibling.stat().st_mode)
+    restored = ea.restore(archive, tmp_path / "restored")
+    assert stat.S_IMODE(restored.stat().st_mode) == stat.S_IMODE(sibling.stat().st_mode)
+
+
 def test_a_corrupted_archive_is_neither_restored_nor_inspected(
     m5_archive: Path, tmp_path: Path
 ) -> None:
