@@ -11431,6 +11431,88 @@ def d11_reported(output: str) -> dict[str, str]:
     return reported
 
 
+# Some GitHub-hosted runners have no swap device. CI #176's D11 job (run
+# 43656395503) ran on an AWS-hosted runner (kernel 7.0.0-1016-aws) whose
+# /proc/swaps was empty; the Azure-hosted runners have a swap file. With no
+# swap device there is no swap to refuse a hop on, or to cap, so the swap cases
+# report NOT EXERCISED, which fails the task. On the disposable hosted job
+# only (`d11_privileged`), such a host gets a temporary swap file for those
+# cases, removed after them whatever happens. A developer's machine is never
+# changed: without DW_D11_PRIVILEGED=1 the cases stay NOT EXERCISED.
+# In a directory root makes 0700 for it, so nothing another user put there
+# beforehand is written to, or followed, as root.
+D11_SWAP_DIRECTORY = "/var/lib/direwolf-d11-evidence"
+D11_SWAP_FILE = D11_SWAP_DIRECTORY + "/swapfile"
+D11_SWAP_MIB = 128
+
+
+def swap_total_kib(meminfo: str) -> int | None:
+    """`SwapTotal` from /proc/meminfo's text, in KiB; None if it is not there."""
+    for line in meminfo.splitlines():
+        if line.startswith("SwapTotal:"):
+            value = line.removeprefix("SwapTotal:").strip().removesuffix("kB").strip()
+            return int(value) if value.isdigit() else None
+    return None
+
+
+def d11_provide_swap() -> bool:
+    """On a host with no swap device, and only where `d11_privileged`, add a
+    temporary swap file, so the swap cases have swap to refuse a hop on and to
+    cap. Returns whether one was added; `d11_remove_swap` undoes it."""
+    if swap_total_kib(_read("/proc/meminfo") or "") != 0 or not d11_privileged():
+        return False
+    print(
+        f"no swap device: a temporary {D11_SWAP_MIB} MiB swap file at {D11_SWAP_FILE} "
+        "for the swap cases, removed after them"
+    )
+    try:
+        run(
+            "sudo",
+            "-n",
+            "install",
+            "-d",
+            "-o",
+            "root",
+            "-g",
+            "root",
+            "-m",
+            "0700",
+            D11_SWAP_DIRECTORY,
+        )
+        run(
+            "sudo",
+            "-n",
+            "dd",
+            "if=/dev/zero",
+            f"of={D11_SWAP_FILE}",
+            "bs=1M",
+            f"count={D11_SWAP_MIB}",
+            "status=none",
+        )
+        run("sudo", "-n", "chmod", "0600", D11_SWAP_FILE)
+        run("sudo", "-n", "mkswap", D11_SWAP_FILE)
+        run("sudo", "-n", "swapon", D11_SWAP_FILE)
+        total = swap_total_kib(_read("/proc/meminfo") or "")
+        if not total:
+            raise TaskError("the temporary swap file is on, yet the host reports no swap")
+    except TaskError:
+        d11_remove_swap()
+        raise
+    print(f"SwapTotal: {total} kB, all of it the temporary swap file")
+    return True
+
+
+def d11_remove_swap() -> None:
+    """Remove the temporary swap file, in whatever state it was left, and
+    prove it gone."""
+    if D11_SWAP_FILE in (_read("/proc/swaps") or ""):
+        run("sudo", "-n", "swapoff", D11_SWAP_FILE)
+    run("sudo", "-n", "rm", "-rf", D11_SWAP_DIRECTORY)
+    if D11_SWAP_FILE in (_read("/proc/swaps") or "") or Path(D11_SWAP_DIRECTORY).exists():
+        raise TaskError(f"the temporary swap file {D11_SWAP_FILE} is still there")
+    print(f"removed the temporary swap file {D11_SWAP_FILE}")
+
+
 def d11_privileged_cases(test_binary: str, outputs: list[str]) -> list[str]:
     """The cases only root can set up, each undone whatever happens: a
     root-owned execute-only copy of the broker, and Yama at 0 for one run.
@@ -11506,8 +11588,10 @@ def task_d11_hardening_evidence() -> None:
     whose worker is closed to its uid from `execve` -- under the host's own
     `fs.suid_dumpable`, read and never changed -- and Yama at 0 for one run --
     the counterexample, restored at once; each runs whatever became of the
-    other. What the host cannot provide is NOT EXERCISED, listed, and fails
-    the task after everything else ran.
+    other. A host with no swap device is given a temporary swap file for
+    the swap cases there, removed after them (`d11_provide_swap`). What the
+    host cannot provide is NOT EXERCISED, listed, and fails the task after
+    everything else ran.
     Linux only.
     """
     if not sys.platform.startswith("linux"):
@@ -11521,44 +11605,50 @@ def task_d11_hardening_evidence() -> None:
     suites = run_captured(test_binary, "--test-threads=1", "--nocapture", *D11_SUITES)
     require_tests_ran(suites)
     outputs.append(suites)
-    outputs.append(
-        run_captured(
-            test_binary,
-            "--ignored",
-            "--exact",
-            "--nocapture",
-            "--test-threads=1",
-            HARDENING + "on_a_host_with_swap_the_production_policy_refuses_a_credential_hop",
-        )
-    )
-    capped = no_swap_scope()
-    if capped is not None:
+    provided = d11_provide_swap()
+    try:
         outputs.append(
             run_captured(
-                *capped,
                 test_binary,
                 "--ignored",
                 "--exact",
                 "--nocapture",
                 "--test-threads=1",
-                HARDENING + "a_credential_hop_runs_under_a_real_no_swap_cap",
+                HARDENING + "on_a_host_with_swap_the_production_policy_refuses_a_credential_hop",
             )
         )
-    # `OOMPolicy=continue`: the OOM killer ends the allocating process, and
-    # the transient unit -- the test with it -- carries on to read what it did.
-    pressured = no_swap_scope("MemoryMax=256M", "OOMPolicy=continue")
-    if pressured is not None:
-        outputs.append(
-            run_captured(
-                *pressured,
-                test_binary,
-                "--ignored",
-                "--exact",
-                "--nocapture",
-                "--test-threads=1",
-                HARDENING + "memory_pressure_under_the_cap_ends_in_the_oom_killer_never_in_swap",
+        capped = no_swap_scope()
+        if capped is not None:
+            outputs.append(
+                run_captured(
+                    *capped,
+                    test_binary,
+                    "--ignored",
+                    "--exact",
+                    "--nocapture",
+                    "--test-threads=1",
+                    HARDENING + "a_credential_hop_runs_under_a_real_no_swap_cap",
+                )
             )
-        )
+        # `OOMPolicy=continue`: the OOM killer ends the allocating process, and
+        # the transient unit -- the test with it -- carries on to read what it did.
+        pressured = no_swap_scope("MemoryMax=256M", "OOMPolicy=continue")
+        if pressured is not None:
+            outputs.append(
+                run_captured(
+                    *pressured,
+                    test_binary,
+                    "--ignored",
+                    "--exact",
+                    "--nocapture",
+                    "--test-threads=1",
+                    HARDENING
+                    + "memory_pressure_under_the_cap_ends_in_the_oom_killer_never_in_swap",
+                )
+            )
+    finally:
+        if provided:
+            d11_remove_swap()
     failed = d11_privileged_cases(test_binary, outputs) if d11_privileged() else []
     reported = d11_reported("\n".join(outputs))
     if failed:

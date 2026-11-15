@@ -130,4 +130,8 @@ on hosts that have it; the strict refusal is shown by
 not exercise; `DW_D11_PRIVILEGED=1` with passwordless sudo (the hosted job)
 adds a root-owned execute-only binary and the Yama-0 counterexample, each
 undone after and each run whatever became of the other; `fs.suid_dumpable`
-is read and printed there, never changed. `make d11-hardening-mutations` weakens each guard in turn.
+is read and printed there, never changed. On a host with no swap device -- some
+GitHub-hosted runners have none -- the hosted job also adds a temporary
+swap file for the swap cases, so that a hop has swap to be refused on and a
+cgroup has swap to cap, and removes it after them; without
+`DW_D11_PRIVILEGED=1` such a host reports those cases NOT EXERCISED. `make d11-hardening-mutations` weakens each guard in turn.
