@@ -97,6 +97,7 @@ use super::audit::{AuditEvent, Fields};
 use super::crash::CrashPoint;
 use super::environment_ops::Attached;
 use super::error::AuthorityError;
+use super::gate::Section;
 use super::identity::CallerContext;
 use super::lease;
 use super::policy_state::ActiveAuthority;
@@ -955,16 +956,24 @@ impl Authority {
     /// authority's own preparation of its environment (step 2a: recorded,
     /// measured and judged by the environment's lifecycle), then steps 1 and
     /// 2 again, from the fence on.
+    ///
+    /// F-02 (ADR-0064): the route comes with the effect section its last
+    /// transaction was decided in, held from before that transaction; the
+    /// caller holds it until the broker has started what it decided. A
+    /// preparation is not inside one: it is undone if its run ends meanwhile
+    /// (`environment::end_with_its_run`), and its route is decided again.
     fn routed(
         &mut self,
         asked: &Asked<'_>,
         call: &ProcessExecCallV6,
         context: (&Attached, &ActiveAuthority, &ImageBinding),
-    ) -> Result<Route, AuthorityError> {
+    ) -> Result<(Route, Section), AuthorityError> {
+        let effect = self.shared.gate.effect()?;
         let routed = self.transact(|work| route(work, asked, call, context, false))?;
         if !matches!(routed, Route::NeedsEnvironment) {
-            return Ok(routed);
+            return Ok((routed, effect));
         }
+        drop(effect);
         // Environments are bounded across runs (ADR-0052 §2a): first at most
         // one that can never run a workload again ends, then the live ones
         // are counted. Each step is one broker exchange within the
@@ -975,22 +984,28 @@ impl Authority {
             Ok(workload::live_environments(work)? >= workload::MAX_LIVE_ENVIRONMENTS)
         })?;
         if full {
-            return self.transact(|work| {
-                workload::refuse(
-                    work,
-                    asked.run,
-                    call.executable.as_str(),
-                    "LIVE_ENVIRONMENTS_EXHAUSTED",
-                )
-                .map(|_| Route::Refused(ToolRefusalReasonV5::BudgetExhausted))
-            });
+            let effect = self.shared.gate.effect()?;
+            return self
+                .transact(|work| {
+                    workload::refuse(
+                        work,
+                        asked.run,
+                        call.executable.as_str(),
+                        "LIVE_ENVIRONMENTS_EXHAUSTED",
+                    )
+                    .map(|_| Route::Refused(ToolRefusalReasonV5::BudgetExhausted))
+                })
+                .map(|routed| (routed, effect));
         }
         let usable = matches!(
             self.environment_prepare(asked.run)?,
             crate::state::EnvironmentReply::Ready { .. }
         );
+        let effect = self.shared.gate.effect()?;
         if usable {
-            return self.transact(|work| route(work, asked, call, context, true));
+            return self
+                .transact(|work| route(work, asked, call, context, true))
+                .map(|routed| (routed, effect));
         }
         self.transact(|work| {
             workload::refuse(
@@ -1001,6 +1016,7 @@ impl Authority {
             )
             .map(|_| Route::Refused(ToolRefusalReasonV5::EnvironmentUnavailable))
         })
+        .map(|routed| (routed, effect))
     }
 
     /// End at most one environment that can never run a workload again
@@ -1059,7 +1075,9 @@ impl Authority {
         if call.credential_handle.is_some() {
             shared.crash(CrashPoint::SecretBeforeMetadata)?;
         }
-        let routed = self.routed(&asked, call, (&attached, active, &image))?;
+        // F-02 (ADR-0064): the section the route was decided in, held to the
+        // end -- past the broker's start, and a settlement at once.
+        let (routed, _effect) = self.routed(&asked, call, (&attached, active, &image))?;
         let plan_of = |decided: &Decided, checked: &Checked| {
             plan(
                 decided.environment.as_ref(),
@@ -1116,6 +1134,8 @@ impl Authority {
             version,
         };
         let spec = workload::spec(&checked, &intent)?;
+        // Started, the workload is its environment's: an end of its run's
+        // authority from here destroys that (ADR-0063 §5).
         match workload_ops::start(&attached, asked.run, *intent, spec)? {
             Launched::Running(started) => Ok(Dispatched::Parked(Box::new(Parked {
                 started: *started,

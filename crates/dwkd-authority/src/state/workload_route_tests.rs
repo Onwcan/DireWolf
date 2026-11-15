@@ -213,6 +213,9 @@ struct Asked {
     /// Workspace taint marks when the order arrived (F-01): a tainted run's
     /// mark is durable before its effect is sent.
     marks: i64,
+    /// Runs `ACTIVE` when the order arrived (F-02): an effect reaches the
+    /// broker only while the run it was decided for still holds authority.
+    active_runs: i64,
 }
 
 #[derive(Debug, Default)]
@@ -310,6 +313,20 @@ impl Fake {
         })
     }
 
+    /// Runs the store holds `ACTIVE` now (F-02).
+    fn active_runs(&self) -> i64 {
+        self.store.lock().unwrap().as_ref().map_or(0, |db| {
+            rusqlite::Connection::open(db)
+                .unwrap()
+                .query_row(
+                    "SELECT count(*) FROM run WHERE state = 'ACTIVE'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap()
+        })
+    }
+
     fn intents(&self) -> i64 {
         self.store.lock().unwrap().as_ref().map_or(0, |db| {
             rusqlite::Connection::open(db)
@@ -340,6 +357,7 @@ impl Fake {
     ) {
         let launching = self.launching();
         let marks = self.marks();
+        let active_runs = self.active_runs();
         self.asked.lock().unwrap().push(Asked {
             operation,
             invocation,
@@ -347,6 +365,7 @@ impl Fake {
             generation,
             launching,
             marks,
+            active_runs,
         });
     }
 
@@ -1943,6 +1962,10 @@ mod taint;
 /// F-18: a revocation's two phases.
 #[path = "ownership_route_tests.rs"]
 mod ownership;
+
+/// F-02: an authority's end, serialised with every effect already decided.
+#[path = "concurrency_route_tests.rs"]
+mod concurrency;
 
 // ===========================================================================
 // F-17 (ADR-0061, Proposed): a workload's egress, decided by both gates at

@@ -67,8 +67,11 @@ mod environment;
 mod environment_ops;
 mod error;
 mod files;
+mod gate;
 mod identity;
 mod ids;
+#[cfg(all(test, target_os = "linux"))]
+mod interleave;
 mod lease;
 #[cfg(all(test, target_os = "linux"))]
 mod lookup_tests;
@@ -361,6 +364,9 @@ struct Shared {
     /// [`Authority::attach_net_evidence`]. No production start-up path sets
     /// it, so in production the guard has no exception (ADR-0050 §6).
     net_exceptions: OnceLock<Vec<dwk_proto::wire::guard::Address>>,
+    /// F-02 (ADR-0064, Proposed): every handle's effects and every end of
+    /// authority, ordered ([`gate`]).
+    gate: Arc<gate::Gate>,
     // Held for the life of the process; the OS releases it on exit.
     _lock: std::fs::File,
 }
@@ -663,6 +669,7 @@ impl Authority {
             sandbox: OnceLock::new(),
             net_budget: config.net_budget,
             net_exceptions: OnceLock::new(),
+            gate: Arc::new(gate::Gate::new(gate::WAIT_LIMIT)),
             _lock: lock,
         });
         let mut authority = Self { shared, conn };
@@ -806,7 +813,15 @@ impl Authority {
         })
     }
 
-    /// Another handle onto the same store, with its own SQLite connection.
+    /// The store's gate (F-02), for the route tests' interleavings.
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) fn gate(&self) -> Arc<gate::Gate> {
+        Arc::clone(&self.shared.gate)
+    }
+
+    /// Another handle onto the same store, with its own SQLite connection --
+    /// and the same gate (F-02, ADR-0064): an end of authority on any handle
+    /// waits for every effect any handle has decided and not yet recorded.
     ///
     /// # Errors
     ///
@@ -938,7 +953,11 @@ impl Authority {
         session: &SessionId,
     ) -> Result<Reply<Epoch>, AuthorityError> {
         let ttl = self.shared.lease_ttl_ms;
+        // F-02: a new tenure ends the old one's runs only once none of their
+        // effects stands between its decision and its outcome.
+        let ending = self.shared.gate.ending()?;
         let (reply, teardown) = self.transact(|work| lease::acquire(work, caller, session, ttl))?;
+        drop(ending);
         self.end_runs(teardown, CrashPoint::ReapAfterIntent)?;
         Ok(reply)
     }
@@ -976,8 +995,10 @@ impl Authority {
         session: &SessionId,
         epoch: Epoch,
     ) -> Result<Reply<()>, AuthorityError> {
+        let ending = self.shared.gate.ending()?;
         let (reply, teardown) =
             self.transact(|work| lease::release(work, caller, session, epoch))?;
+        drop(ending);
         self.end_runs(teardown, CrashPoint::ReapAfterIntent)?;
         Ok(reply)
     }
@@ -1099,6 +1120,7 @@ impl Authority {
         run: &RunId,
         epoch: Epoch,
     ) -> Result<Reply<()>, AuthorityError> {
+        let ending = self.shared.gate.ending()?;
         let (reply, teardown) = self.transact(|work| {
             let released = admission::release(work, caller, session, run, epoch)?;
             // Only the request that released the run ends its environment.
@@ -1112,6 +1134,7 @@ impl Authority {
             };
             Ok((reply, teardown))
         })?;
+        drop(ending);
         self.end_runs(teardown, CrashPoint::ReleaseAfterIntent)?;
         Ok(reply)
     }
@@ -1252,6 +1275,10 @@ impl Authority {
             Ok(found) => found,
             Err(reason) => return Ok(ToolReply::Refused(asked.operation, reason)),
         };
+        // F-02 (ADR-0064): from the decision to the outcome, no end of
+        // authority commits -- the broker never performs what was decided
+        // for a run, a tenure or a grant that has ended since.
+        let effect = shared.gate.effect()?;
         let decided = self.transact(|work| tool::decide(work, &asked, &call, &targets, active))?;
         let (plan, invocation) = match decided {
             tool::Decided::Refused(reason) => {
@@ -1330,6 +1357,7 @@ impl Authority {
                 &hits,
             )
         })?;
+        drop(effect);
         shared.crash(CrashPoint::ToolAfterOutcome)?;
         if plan::has_effect(plan.tool()) {
             // This run's staging records its invocations left EXPECTED —
@@ -1542,6 +1570,8 @@ impl Authority {
             Ok(found) => found,
             Err(reason) => return Ok(ProcessReply::Refused(asked.operation, reason)),
         };
+        // F-02 (ADR-0064): an effect section, as `tool_invoke`'s.
+        let effect = shared.gate.effect()?;
         let decided = self.transact(|work| {
             let located = located_ref(&call, resolved.as_ref(), stored.as_ref())?;
             process::decide(work, &asked, &located, active)
@@ -1615,6 +1645,7 @@ impl Authority {
                 &hits,
             )
         })?;
+        drop(effect);
         shared.crash(CrashPoint::ToolAfterOutcome)?;
         Ok(match ending {
             process::Ending::Completed(output) => ProcessReply::Done {
@@ -2358,9 +2389,18 @@ impl OperatorBootstrap<'_> {
         ))
     }
 
-    /// Both phases of a revocation.
+    /// Both phases of a revocation. The first is an ending section (F-02,
+    /// ADR-0064): it commits only once no effect of any handle stands
+    /// between its decision and its outcome, so no effect the revocation
+    /// ends reaches the broker after it. The second, the broker's, follows.
     fn revoke(&mut self, target: &ownership::Target) -> Result<RevocationReport, ConfigError> {
         let mut invalid = None;
+        let ending = self
+            .authority
+            .shared
+            .gate
+            .ending()
+            .map_err(ConfigError::Authority)?;
         let outcome = self
             .authority
             .transact(|work| match ownership::revoke(work, target)? {
@@ -2371,6 +2411,7 @@ impl OperatorBootstrap<'_> {
                     Err(AuthorityError::Rejected("invalid configuration".to_owned()))
                 }
             });
+        drop(ending);
         let revoked = match (outcome, invalid) {
             (_, Some(why)) => return Err(ConfigError::Invalid(why)),
             (Ok(Some(revoked)), None) => revoked,

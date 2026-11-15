@@ -723,6 +723,10 @@ impl Authority {
             Ok(addresses) => addresses,
             Err(step) => return Ok(step),
         };
+        // F-02 (ADR-0064): from the hop's decision -- the fence, the run and
+        // both gates, in its intent's transaction -- to its outcome, no end
+        // of authority commits; each hop is its own section.
+        let effect = shared.gate.effect()?;
         let recorded = match self.net_intent(shared, ctx, chain, hop, &addresses)? {
             Ok(recorded) => recorded,
             Err(step) => return Ok(step),
@@ -755,6 +759,7 @@ impl Authority {
             .as_ref()
             .map(|a| (a, exchanged.secret_ending(secret_failure), resolved));
         let step = self.net_settle(shared, ctx, chain, hop, exchanged, secret, limit)?;
+        drop(effect);
         shared.crash(CrashPoint::NetAfterOutcome)?;
         if injection.is_some() {
             shared.crash(CrashPoint::SecretAfterOutcome)?;

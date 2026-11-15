@@ -19,7 +19,7 @@ DW := $(PY) scripts/dw.py
         authority-transport-evidence authority-write-probe broker-fs-read-evidence \
         filesystem-operations-evidence process-broker-evidence secret-broker-evidence \
         sandbox-foundation-evidence sandbox-egress-evidence sandbox-egress-policy-mutations \
-        sandbox-taint-mutations authority-ownership-mutations \
+        sandbox-taint-mutations authority-ownership-mutations authority-concurrency-mutations \
         sandbox-workload-evidence \
         net-http-evidence net-http-mutations sandbox-workload-mutations sandbox-secret-evidence \
         sandbox-secret-mutations sandbox-workspace-evidence sandbox-workspace-mutations \
@@ -120,6 +120,9 @@ sandbox-taint-mutations: ## F-01 mutation review (ADR-0062, Proposed): each guar
 
 authority-ownership-mutations: ## F-18 mutation review (ADR-0063, Proposed): each guard of principal ownership -- sessions, profiles, workspaces, the migration, the adoption, both phases of a revocation -- weakened in turn must fail the ownership or unit suites (slow)
 	@$(DW) authority-ownership-mutations
+
+authority-concurrency-mutations: ## F-02 mutation review (ADR-0064, Proposed): each guard of the authority gate -- an end of authority serialised with every effect already decided -- weakened in turn must fail the authority's unit or contention suites (slow)
+	@$(DW) authority-concurrency-mutations
 
 sandbox-workload-evidence: ## M5d.1-M5d.2 workloads in real OCI environments: identity, bounds, wall clock, process trees ended, digests, drift, escapes, an agent-shaped workload, the authority's gates, ledger and crash windows; the public process.exec over real DWKP, serve --sandbox-config, the hygiene launcher with real git/Python/pytest; M5e.2 cross-run isolation
 	@$(DW) sandbox-workload-evidence

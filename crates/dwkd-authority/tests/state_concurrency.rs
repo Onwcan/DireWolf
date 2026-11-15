@@ -4,6 +4,13 @@
 //! file — so exclusivity comes from the database's transactions, not from a
 //! mutex in the test or in the authority. A barrier releases all threads at
 //! once, and each scenario repeats to exercise more than one interleaving.
+//!
+//! F-02 (ADR-0064, Proposed) adds an authority gate that orders an end of
+//! authority after every effect already decided; acquisitions and
+//! admissions here run no effect, so two acquirers, or an admission and a
+//! revocation, still contend through SQLite alone. The last two tests prove
+//! what that leaves: no run of a revoked principal survives a race, and
+//! racing writers leave one audit chain a restart replays.
 
 #![allow(
     clippy::panic,
@@ -36,9 +43,9 @@ mod state_support;
 use std::sync::{Arc, Barrier};
 use std::time::{Duration, Instant};
 
-use dwk_proto::wire::scalar::RefusalReason;
-use dwkd_authority::state::{Admission, AuthorityError, Reply};
-use state_support::{Harness, admit_msg, count, raw, session};
+use dwk_proto::wire::scalar::{AgentProfileName, RefusalReason};
+use dwkd_authority::state::{Admission, AuthorityError, ConfigError, Reply, read_audit_log};
+use state_support::{Harness, admit_msg, count, raw, session, subject};
 
 const THREADS: usize = 16;
 const ROUNDS: u64 = 12;
@@ -302,6 +309,187 @@ fn racing_conflicting_admissions_under_one_key_let_exactly_one_win() {
             conflicts,
             THREADS >> 1,
             "the other request's half conflicted"
+        );
+    }
+}
+
+/// Retry `work` while the store answers `Busy`, up to [`BUSY_DEADLINE`]:
+/// `Busy` is a transaction that waited past the busy timeout and did not
+/// happen; anything else is the answer.
+fn unless_busy<T>(
+    mut work: impl FnMut() -> Result<T, AuthorityError>,
+) -> Result<T, AuthorityError> {
+    let started = Instant::now();
+    loop {
+        match work() {
+            Err(AuthorityError::Busy) if started.elapsed() < BUSY_DEADLINE => {
+                std::thread::sleep(BUSY_BACKOFF);
+            }
+            other => return other,
+        }
+    }
+}
+
+/// F-02: admissions racing a revocation of their profile's principal. Each
+/// admission either committed before the revocation -- and the revocation
+/// reaped its run -- or after it, and was refused: whatever the
+/// interleaving, no run of the revoked principal is left `ACTIVE`, and the
+/// revocation's report counts exactly the runs it reaped.
+#[test]
+fn racing_admissions_and_a_profile_revocation_leave_the_revoked_subject_no_active_run() {
+    const ADMITTERS: usize = 8;
+    for round in 0..4u64 {
+        let mut h = Harness::new("race-revoke-admit");
+        let caller = h.connect(1000);
+        let s = session(1);
+        let e = h.lease(&caller, &s);
+        let barrier = Arc::new(Barrier::new(ADMITTERS + 1));
+        let admitters: Vec<_> = (0..ADMITTERS)
+            .map(|i| {
+                let mut handle = h.authority().handle().unwrap();
+                let barrier = barrier.clone();
+                let n = u64::try_from(i).unwrap();
+                let message = admit_msg(
+                    &s,
+                    e,
+                    &format!("a{i}"),
+                    "researcher",
+                    &[],
+                    &["model.call:*"],
+                    n,
+                );
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    unless_busy(|| handle.admit_run(&caller, &message))
+                })
+            })
+            .collect();
+        let revoker = {
+            let mut handle = h.authority().handle().unwrap();
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                let profile = AgentProfileName::new("researcher").unwrap();
+                let started = Instant::now();
+                loop {
+                    match handle
+                        .operator()
+                        .revoke_profile_principal(&profile, subject(1000))
+                    {
+                        Err(ConfigError::Authority(AuthorityError::Busy))
+                            if started.elapsed() < BUSY_DEADLINE =>
+                        {
+                            std::thread::sleep(BUSY_BACKOFF);
+                        }
+                        other => return other,
+                    }
+                }
+            })
+        };
+        let answers: Vec<_> = admitters.into_iter().map(|t| t.join().unwrap()).collect();
+        let report = revoker.join().unwrap().unwrap();
+        let conn = raw(&h.state());
+        let mut admitted = 0u64;
+        for answer in &answers {
+            match answer {
+                Ok(Reply::Done(admission)) => {
+                    admitted += 1;
+                    let state: String = conn
+                        .query_row(
+                            "SELECT state FROM run WHERE run_id = ?1",
+                            [admission.run_id().as_str()],
+                            |r| r.get(0),
+                        )
+                        .unwrap();
+                    assert_eq!(
+                        state, "REAPED",
+                        "round {round}: an admission before the revocation is reaped by it"
+                    );
+                }
+                Ok(Reply::Refused(RefusalReason::UnknownAgentProfile)) => {}
+                other => panic!("round {round}: {other:?}"),
+            }
+        }
+        assert_eq!(report.runs_reaped, admitted, "round {round}");
+        assert_eq!(
+            count(&conn, "SELECT count(*) FROM run WHERE state = 'ACTIVE'"),
+            0,
+            "round {round}"
+        );
+    }
+}
+
+/// F-02: many handles writing at once -- leases and admissions, each
+/// transaction's audit record flushed by the handle that committed it --
+/// leave one audit log numbered without a gap, and a restart replays it
+/// against the store without reconciling, appending or cutting anything.
+#[test]
+fn concurrent_writers_leave_one_audit_chain_that_a_restart_replays() {
+    let mut h = Harness::new("race-audit");
+    let barrier = Arc::new(Barrier::new(THREADS));
+    let workers: Vec<_> = (0..THREADS)
+        .map(|i| {
+            let mut handle = h.authority().handle().unwrap();
+            let caller = handle.connect(subject(1000));
+            let barrier = barrier.clone();
+            let n = u64::try_from(i).unwrap();
+            let s = session(500 + n);
+            std::thread::spawn(move || {
+                barrier.wait();
+                let Reply::Done(epoch) = unless_busy(|| handle.acquire_lease(&caller, &s)).unwrap()
+                else {
+                    panic!("a new session's lease")
+                };
+                for round in 0..ROUNDS {
+                    let message = admit_msg(
+                        &s,
+                        epoch,
+                        &format!("k{round}"),
+                        "researcher",
+                        &[],
+                        &["model.call:*"],
+                        n * 100 + round,
+                    );
+                    let reply = unless_busy(|| handle.admit_run(&caller, &message)).unwrap();
+                    assert!(matches!(reply, Reply::Done(_)), "{reply:?}");
+                }
+            })
+        })
+        .collect();
+    for worker in workers {
+        worker.join().unwrap();
+    }
+    let log = h.state().join("audit.log");
+    let before = read_audit_log(&log).unwrap();
+    assert!(
+        before.len() >= THREADS * usize::try_from(ROUNDS + 1).unwrap(),
+        "every lease and admission is on the record"
+    );
+    let first = before[0].seq();
+    for (offset, record) in before.iter().enumerate() {
+        assert_eq!(
+            record.seq(),
+            first + u64::try_from(offset).unwrap(),
+            "no gap and no reordering in the audit chain"
+        );
+    }
+    let report = h.restart().clone();
+    assert_eq!(
+        (
+            report.audit_reconciled,
+            report.audit_appended,
+            report.audit_torn_tail_bytes
+        ),
+        (0, 0, 0),
+        "the log and the store agreed at the restart"
+    );
+    let after = read_audit_log(&log).unwrap();
+    assert!(after.len() >= before.len());
+    for (old, new) in before.iter().zip(after.iter()) {
+        assert_eq!(
+            (old.seq(), old.event()),
+            (new.seq(), new.event()),
+            "nothing rewritten"
         );
     }
 }

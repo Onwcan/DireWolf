@@ -8109,6 +8109,331 @@ def task_authority_ownership_mutations() -> None:
     mutation_review("ownership-mutations", OWNERSHIP_MUTATIONS)
 
 
+# F-02's mutation review (ADR-0064, Proposed): each line weakens one guard of
+# the authority gate -- an end of authority serialised with every effect
+# already decided -- in the source, one at a time. The gate's own rules
+# (G1-G5), each end of authority's section -- missing (E1-E4) or left before
+# its transaction (E5-E8) -- and each effect's (C1-C7).
+# Each mutant must build the two test targets the review runs and must fail
+# one of them; a build failure or a stage stopped at its limit is never a
+# kill. Every file is restored byte-identically, and checked. The review
+# reuses C3's per-mutant judge (`_judge_mutant`) and its record helpers; it is
+# not a C3 campaign, and its record (target/f02-evidence/) is local evidence.
+_F02_GATE = "crates/dwkd-authority/src/state/gate.rs"
+_F02_STATE = "crates/dwkd-authority/src/state/mod.rs"
+_F02_NET = "crates/dwkd-authority/src/state/net_http/mod.rs"
+_F02_ROUTE = "crates/dwkd-authority/src/state/workload_route.rs"
+CONCURRENCY_MUTATIONS: tuple[tuple[str, str, str, str], ...] = (
+    (
+        "G1: an end of authority begins beside a decided effect",
+        _F02_GATE,
+        "                Kind::Ending => rooms.effects == 0,",
+        "                Kind::Ending => true,",
+    ),
+    (
+        "G2: an effect begins while an end of authority waits",
+        _F02_GATE,
+        "                Kind::Effect => rooms.endings == 0 && rooms.endings_waiting == 0,",
+        "                Kind::Effect => rooms.endings == 0,",
+    ),
+    (
+        "G3: an effect begins beside an end of authority",
+        _F02_GATE,
+        "                Kind::Effect => rooms.endings == 0 && rooms.endings_waiting == 0,",
+        "                Kind::Effect => rooms.endings_waiting == 0,",
+    ),
+    (
+        "G4: an end of authority refused at the limit keeps holding effects back",
+        _F02_GATE,
+        "                        rooms.endings_waiting = rooms.endings_waiting.saturating_sub(1);\n"
+        "                        drop(rooms);",
+        "                        drop(rooms);",
+    ),
+    (
+        "G5: an effect's end is not counted",
+        _F02_GATE,
+        "            Kind::Effect => rooms.effects = rooms.effects.saturating_sub(1),",
+        "            Kind::Effect => {}",
+    ),
+    (
+        "E1: a lease taken over takes no ending section",
+        _F02_STATE,
+        "        let ending = self.shared.gate.ending()?;\n"
+        "        let (reply, teardown) = self.transact(|work| lease::acquire(",
+        "        let ending = ();\n"
+        "        let (reply, teardown) = self.transact(|work| lease::acquire(",
+    ),
+    (
+        "E2: a lease released takes no ending section",
+        _F02_STATE,
+        "        let ending = self.shared.gate.ending()?;\n"
+        "        let (reply, teardown) =\n"
+        "            self.transact(|work| lease::release(",
+        "        let ending = ();\n"
+        "        let (reply, teardown) =\n"
+        "            self.transact(|work| lease::release(",
+    ),
+    (
+        "E3: a run released takes no ending section",
+        _F02_STATE,
+        "        let ending = self.shared.gate.ending()?;\n"
+        "        let (reply, teardown) = self.transact(|work| {\n"
+        "            let released = admission::release(",
+        "        let ending = ();\n"
+        "        let (reply, teardown) = self.transact(|work| {\n"
+        "            let released = admission::release(",
+    ),
+    (
+        "E4: a revocation's first phase takes no ending section",
+        _F02_STATE,
+        "        let ending = self\n"
+        "            .authority\n"
+        "            .shared\n"
+        "            .gate\n"
+        "            .ending()\n"
+        "            .map_err(ConfigError::Authority)?;",
+        "        let ending = ();",
+    ),
+    (
+        "E5: a lease taken over leaves its section before its transaction",
+        _F02_STATE,
+        "        let ending = self.shared.gate.ending()?;\n"
+        "        let (reply, teardown) = self.transact(|work| lease::acquire(",
+        "        let ending = drop(self.shared.gate.ending()?);\n"
+        "        let (reply, teardown) = self.transact(|work| lease::acquire(",
+    ),
+    (
+        "E6: a lease released leaves its section before its transaction",
+        _F02_STATE,
+        "        let ending = self.shared.gate.ending()?;\n"
+        "        let (reply, teardown) =\n"
+        "            self.transact(|work| lease::release(",
+        "        let ending = drop(self.shared.gate.ending()?);\n"
+        "        let (reply, teardown) =\n"
+        "            self.transact(|work| lease::release(",
+    ),
+    (
+        "E7: a run released leaves its section before its transaction",
+        _F02_STATE,
+        "        let ending = self.shared.gate.ending()?;\n"
+        "        let (reply, teardown) = self.transact(|work| {\n"
+        "            let released = admission::release(",
+        "        let ending = drop(self.shared.gate.ending()?);\n"
+        "        let (reply, teardown) = self.transact(|work| {\n"
+        "            let released = admission::release(",
+    ),
+    (
+        "E8: a revocation leaves its section before its first phase",
+        _F02_STATE,
+        "        let ending = self\n"
+        "            .authority\n"
+        "            .shared\n"
+        "            .gate\n"
+        "            .ending()\n"
+        "            .map_err(ConfigError::Authority)?;",
+        "        let ending = drop(\n"
+        "            self.authority\n"
+        "                .shared\n"
+        "                .gate\n"
+        "                .ending()\n"
+        "                .map_err(ConfigError::Authority)?,\n"
+        "        );",
+    ),
+    (
+        "C1: a file operation is decided and handed over outside any section",
+        _F02_STATE,
+        "        let effect = shared.gate.effect()?;\n"
+        "        let decided = self.transact(|work| tool::decide(",
+        "        let effect = drop(shared.gate.effect()?);\n"
+        "        let decided = self.transact(|work| tool::decide(",
+    ),
+    (
+        "C2: a file operation's section ends at its decision, before the broker",
+        _F02_STATE,
+        "        let effect = shared.gate.effect()?;\n"
+        "        let decided = self.transact(|work| tool::decide(work, &asked, &call, &targets, "
+        "active))?;\n",
+        "        let effect = shared.gate.effect()?;\n"
+        "        let decided = self.transact(|work| tool::decide(work, &asked, &call, &targets, "
+        "active))?;\n"
+        "        let effect = drop(effect);\n",
+    ),
+    (
+        "C7: a file operation takes its section only after its decision",
+        _F02_STATE,
+        "        let effect = shared.gate.effect()?;\n"
+        "        let decided = self.transact(|work| tool::decide(work, &asked, &call, &targets, "
+        "active))?;\n",
+        "        let decided = self.transact(|work| tool::decide(work, &asked, &call, &targets, "
+        "active))?;\n"
+        "        let effect = shared.gate.effect()?;\n",
+    ),
+    (
+        "C3: a host launch is decided and handed over outside any section",
+        _F02_STATE,
+        "        let effect = shared.gate.effect()?;\n"
+        "        let decided = self.transact(|work| {\n"
+        "            let located = located_ref(",
+        "        let effect = drop(shared.gate.effect()?);\n"
+        "        let decided = self.transact(|work| {\n"
+        "            let located = located_ref(",
+    ),
+    (
+        "C4: a net.http hop is decided and sent outside any section",
+        _F02_NET,
+        "        let effect = shared.gate.effect()?;\n"
+        "        let recorded = match self.net_intent(",
+        "        let effect = drop(shared.gate.effect()?);\n"
+        "        let recorded = match self.net_intent(",
+    ),
+    (
+        "C5: a sandboxed launch's section ends at its route, before the start",
+        _F02_ROUTE,
+        "        let (routed, _effect) = self.routed(&asked, call, "
+        "(&attached, active, &image))?;\n",
+        "        let (routed, _effect) = self.routed(&asked, call, "
+        "(&attached, active, &image))?;\n"
+        "        drop(_effect);\n",
+    ),
+    (
+        "C6: an environment's preparation is held inside a launch's section",
+        _F02_ROUTE,
+        "            return Ok((routed, effect));\n        }\n        drop(effect);\n",
+        "            return Ok((routed, effect));\n        }\n",
+    ),
+)
+CONCURRENCY_EVIDENCE_DIR = ROOT / "target" / "f02-evidence"
+CONCURRENCY_RECORD_SCHEMA = "direwolf.f02.mutation-review"
+
+
+def _concurrency_stages() -> tuple[MutationStage, ...]:
+    """The review's detectors: the authority's unit suites -- the gate's own,
+    the route tests' interleavings and every suite they could break -- then
+    the store's contention tests."""
+    authority = ("cargo", "test", "--locked", "-p", "dwkd-authority")
+    return (
+        MutationStage("authority-unit", (*authority, "--lib")),
+        MutationStage("state-concurrency", (*authority, "--test", "state_concurrency")),
+    )
+
+
+def concurrency_review(
+    mutations: Sequence[tuple[str, str, str, str]] = CONCURRENCY_MUTATIONS,
+    *,
+    root: Path | None = None,
+    tests: Callable[..., SuiteRun] = run_tests,
+) -> dict[str, object]:
+    """F-02's mutation review: the baseline first, then each mutant judged,
+    recorded and restored. Raises unless every mutant was KILLED and every
+    file restored; the record says why either way."""
+    directory = CONCURRENCY_EVIDENCE_DIR if root is None else root
+    for what, rel, old, _new in mutations:
+        # The bytes the mutant is made from, never a newline-translated read.
+        if (ROOT / rel).read_bytes().decode("utf-8").count(old) != 1:
+            raise TaskError(f"mutation `{what}`: its target is not in {rel} exactly once")
+    stages = _concurrency_stages()
+    build = (
+        "cargo",
+        "test",
+        "--locked",
+        "--no-run",
+        "-p",
+        "dwkd-authority",
+        "--lib",
+        "--test",
+        "state_concurrency",
+    )
+    if directory.exists():
+        shutil.rmtree(directory)
+    directory.mkdir(parents=True)
+    mutants: list[dict[str, object]] = []
+    record: dict[str, object] = {
+        "schema": CONCURRENCY_RECORD_SCHEMA,
+        "version": 1,
+        "finding": "F-02",
+        "adr": "0064",
+        "task": "authority-concurrency-mutations",
+        "provenance": _c3_provenance(os.environ),
+        "started_at": _c3_now(),
+        "finished_at": None,
+        "result": "RUNNING",
+        "reason": None,
+        "inventory": [m[0] for m in mutations],
+        "baseline": None,
+        "mutants": mutants,
+    }
+    _write_c3_record(directory, record)
+    print(f"{BOLD}F-02 concurrency mutation review: baseline{OFF}")
+    built = tests(*build)
+    stage_rows: list[dict[str, object]] = []
+    if built.exit == 0:
+        for stage in stages:
+            stage_rows.append(_stage_record(stage, tests))
+            if stage_rows[-1]["ok"] is not True:
+                break
+    passed = (
+        built.exit == 0
+        and len(stage_rows) == len(stages)
+        and all(r["ok"] is True for r in stage_rows)
+    )
+    record["baseline"] = {
+        "build_exit": built.exit,
+        "stages": stage_rows,
+        "result": "PASS" if passed else "FAIL",
+    }
+    if not passed:
+        record.update(
+            result="BLOCKED",
+            reason="the unmutated baseline failed: no mutant is judged",
+            finished_at=_c3_now(),
+        )
+        _write_c3_record(directory, record)
+        raise TaskError("BLOCKED: authority-concurrency-mutations: the baseline failed")
+    _write_c3_record(directory, record)
+    for mutation in mutations:
+        row = _judge_mutant(mutation, stages, build, tests)
+        mutants.append(row)
+        _write_c3_record(directory, record)
+        if row["restored"] is not True:
+            record.update(result="FAIL", reason=f"{mutation[1]} was not restored byte-identically")
+            record["finished_at"] = _c3_now()
+            _write_c3_record(directory, record)
+            raise TaskError(str(record["reason"]))
+        colour = GREEN if row["outcome"] == "KILLED" else RED
+        print(f"{colour}mutant {row['outcome']} ({row['stage']}): {mutation[0]}{OFF}")
+    not_killed = [row for row in mutants if row["outcome"] != "KILLED"]
+    record.update(
+        result="FAIL" if not_killed else "PASS",
+        reason=("; ".join(f"{row['name']}: {row['outcome']}" for row in not_killed)[:2000] or None),
+        finished_at=_c3_now(),
+    )
+    _write_c3_record(directory, record)
+    for row in mutants:
+        print(f"  {row['outcome']:<13} {row['stage'] or '-':<20} {row['name']}")
+    print(
+        f"{GREEN if not not_killed else RED}F-02: {len(mutants) - len(not_killed)} of "
+        f"{len(mutants)} killed; record in {directory}{OFF}"
+    )
+    if not_killed:
+        raise TaskError(
+            f"{len(not_killed)} mutant(s) of F-02 not killed: "
+            + "; ".join(f"{row['name']} {row['outcome']}" for row in not_killed)
+        )
+    return record
+
+
+def task_authority_concurrency_mutations() -> None:
+    """Weaken each guard of F-02's authority gate in turn (ADR-0064,
+    Proposed); the authority's unit suites or its contention tests must catch
+    every one.
+
+    The unmutated baseline must pass first; every file is restored
+    byte-identically whatever happens, and checked; the record is kept in
+    target/f02-evidence/. Local, and never run beside another build.
+    """
+    concurrency_review()
+
+
 # M5d.3 (ADR-0052 §7): a sandboxed `process.exec` that consumes a credential.
 SECRET_SANDBOX_BROKER_TESTS = (
     "linux::a_descriptor_secret_reaches_the_program_on_descriptor_three_and_nowhere_else",
@@ -11075,6 +11400,7 @@ RELEASE_MUTATIONS = (
         "            };\n"
         "            Ok((reply, teardown))\n"
         "        })?;\n"
+        "        drop(ending);\n"
         "        self.end_runs(teardown, CrashPoint::ReleaseAfterIntent)?;\n",
         '                Reply::Done(true) => vec![environment::DestroyBegun::Refused("LATER")],\n'
         "                Reply::Done(false) | Reply::Refused(_) => Vec::new(),\n"
@@ -11085,6 +11411,7 @@ RELEASE_MUTATIONS = (
         "            };\n"
         "            Ok((reply, teardown))\n"
         "        })?;\n"
+        "        drop(ending);\n"
         "        let teardown = if teardown.is_empty() {\n"
         "            teardown\n"
         "        } else {\n"
@@ -14687,6 +15014,7 @@ TASKS = {
     "sandbox-egress-policy-mutations": task_sandbox_egress_policy_mutations,
     "sandbox-taint-mutations": task_sandbox_taint_mutations,
     "authority-ownership-mutations": task_authority_ownership_mutations,
+    "authority-concurrency-mutations": task_authority_concurrency_mutations,
     "sandbox-neighbour-mutations": task_sandbox_neighbour_mutations,
     "sandbox-secret-evidence": task_sandbox_secret_evidence,
     "sandbox-secret-mutations": task_sandbox_secret_mutations,

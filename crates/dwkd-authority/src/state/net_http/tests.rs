@@ -163,6 +163,9 @@ struct Asked {
     /// `net_hop` rows open when the order arrived: an exchange's own intent
     /// is durable before it is sent.
     open_hops: i64,
+    /// Runs `ACTIVE` when the order arrived (F-02): a hop reaches the broker
+    /// only while the run it was decided for still holds authority.
+    active_runs: i64,
 }
 
 #[derive(Debug, Default)]
@@ -265,6 +268,16 @@ impl EffectBroker for Fake {
                 )
                 .unwrap()
         });
+        let active_runs = self.store.lock().unwrap().as_ref().map_or(0, |db| {
+            rusqlite::Connection::open(db)
+                .unwrap()
+                .query_row(
+                    "SELECT count(*) FROM run WHERE state = 'ACTIVE'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap()
+        });
         let (_, operation) = order.into_parts();
         match operation {
             Operation::HttpResolve { host } => {
@@ -280,6 +293,7 @@ impl EffectBroker for Fake {
                     body: 0,
                     response_limit: None,
                     open_hops,
+                    active_runs,
                 });
                 let mut answers = self.resolve.lock().unwrap();
                 let answer = match answers.get_mut(host.as_str()) {
@@ -311,6 +325,7 @@ impl EffectBroker for Fake {
                     body: hop.body.as_ref().map_or(0, HexContent::byte_len),
                     response_limit: Some(hop.response_limit.get()),
                     open_hops,
+                    active_runs,
                 });
                 if let Some((clock, step)) = self.clock.lock().unwrap().as_ref() {
                     clock.advance(*step);
@@ -1683,4 +1698,73 @@ fn version_four_carries_net_http_and_reshapes_the_other_tools() {
         "{body:?}"
     );
     evidence("protocol-v4-net-http", "ToolResultV4");
+}
+
+/// F-02 (ADR-0064, Proposed): a run released on another handle while a hop
+/// stands decided -- its intent durable, nothing sent -- waits at the gate
+/// until the hop's outcome is recorded; the exchange reached the broker
+/// while the run was `ACTIVE`, and nothing of the run follows the release.
+#[test]
+fn f02_a_run_release_waits_for_a_decided_hop() {
+    use crate::state::interleave::Meantime;
+
+    let meantime = Meantime::default();
+    let mut fx = fixture_with(
+        POLICY,
+        NetBudget::default(),
+        Some(meantime.hook(CrashPoint::NetAfterIntent)),
+    );
+    meantime.watch(fx.authority().gate());
+    let run = fx.run("r1", &[GRANT]);
+    let mut other = fx.authority().handle().unwrap();
+    let (caller, session, epoch, released) = (fx.caller, fx.session.clone(), fx.epoch, run.clone());
+    let (tx, rx) = std::sync::mpsc::channel();
+    meantime.then(move || {
+        tx.send(
+            other
+                .release_run(&caller, &session, &released, epoch)
+                .unwrap(),
+        )
+        .unwrap();
+    });
+    let reply = fx.invoke(
+        &run,
+        call(HttpMethod::Get, "https://api.example.com/"),
+        "n1",
+    );
+    meantime.join();
+    assert!(matches!(rx.recv().unwrap(), Reply::Done(())));
+    assert!(
+        meantime.held(),
+        "the release began while a hop stood decided"
+    );
+    assert_eq!(output(&reply).status.get(), 200);
+    let exchanges: Vec<_> = fx
+        .fake
+        .asked()
+        .into_iter()
+        .filter(|a| a.operation == "http.exchange")
+        .collect();
+    assert_eq!(exchanges.len(), 1);
+    assert_eq!(
+        exchanges[0].active_runs, 1,
+        "the exchange reached the broker after its run was released"
+    );
+    let events = fx.events();
+    let at = |name: &str| events.iter().position(|e| e == name).unwrap();
+    assert!(at("net.http.outcome") < at("run.released"));
+    let next = fx.invoke(
+        &run,
+        call(HttpMethod::Get, "https://api.example.com/"),
+        "n2",
+    );
+    assert!(matches!(next, NetReply::Refused(..)), "{next:?}");
+    assert_eq!(
+        fx.fake
+            .operations()
+            .iter()
+            .filter(|o| **o == "http.exchange")
+            .count(),
+        1
+    );
 }

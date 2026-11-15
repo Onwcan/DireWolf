@@ -64,7 +64,7 @@ pub(super) const WRITES: &[&str] = &[
 
 /// The route tests' policy, with brokered writes allowed: an operator test
 /// policy, **not** a shipped pack.
-fn writing() -> PolicySet {
+pub(super) fn writing() -> PolicySet {
     let marker = "[[rule]]\nid = \"default\"";
     assert!(POLICY.contains(marker));
     PolicySet {

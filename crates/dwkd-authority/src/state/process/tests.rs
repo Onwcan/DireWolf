@@ -131,6 +131,8 @@ struct Asked {
     /// `(process_invocation INTENT rows, tool_process LAUNCHING rows)` in the
     /// store when the order arrived.
     durable: (i64, i64),
+    /// Runs `ACTIVE` when the order arrived (F-02).
+    active_runs: i64,
 }
 
 fn generation() -> BrokerGeneration {
@@ -161,11 +163,22 @@ impl EffectBroker for Fake {
                 count("SELECT count(*) FROM tool_process WHERE state = 'LAUNCHING'"),
             )
         });
+        let active_runs = self.store.lock().unwrap().as_ref().map_or(0, |db| {
+            rusqlite::Connection::open(db)
+                .unwrap()
+                .query_row(
+                    "SELECT count(*) FROM run WHERE state = 'ACTIVE'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap()
+        });
         self.asked.lock().unwrap().push(Asked {
             operation: order.operation().name(),
             args,
             stream_limit,
             durable,
+            active_runs,
         });
         if let Some(reply) = self.script.lock().unwrap().pop_front() {
             return reply;
@@ -1401,4 +1414,52 @@ fn f01_a_host_launch_by_an_external_run_marks_its_root_and_what_returns_from_it_
         "f01-host-launch-marks-and-reads-external",
         "EXTERNAL_RUN_EFFECT",
     );
+}
+
+/// F-02 (ADR-0064, Proposed): a run released on another handle while an
+/// approved host launch stands decided waits at the gate until the launch's
+/// outcome is recorded; the start reached the broker while the run was
+/// `ACTIVE`, and nothing of the run is launched after the release.
+#[test]
+fn f02_a_run_release_waits_for_a_decided_host_launch() {
+    use crate::state::interleave::Meantime;
+
+    let meantime = Meantime::default();
+    let mut f = fixture_with(
+        true,
+        &universal(),
+        Some(meantime.hook(CrashPoint::ToolAfterIntent)),
+    );
+    meantime.watch(f.authority().gate());
+    let run = f.run("k1", &universal());
+    let tool = f.tool("tool");
+    let mut other = f.authority().handle().unwrap();
+    let (caller, session, epoch, released) = (f.caller, f.session.clone(), f.epoch, run.clone());
+    let (tx, rx) = std::sync::mpsc::channel();
+    meantime.then(move || {
+        tx.send(
+            other
+                .release_run(&caller, &session, &released, epoch)
+                .unwrap(),
+        )
+        .unwrap();
+    });
+    let reply = with_test_approval(|| f.invoke(&run, exec(&tool, &["status"]), "x1"));
+    meantime.join();
+    assert!(matches!(rx.recv().unwrap(), Reply::Done(())));
+    assert!(
+        meantime.held(),
+        "the release began while a launch stood decided"
+    );
+    let _ = launched(&reply);
+    let asked = f.fake.asked();
+    assert_eq!(asked.len(), 1);
+    assert_eq!(asked[0].operation, "process.start");
+    assert_eq!(
+        asked[0].active_runs, 1,
+        "the launch reached the broker after its run was released"
+    );
+    let next = with_test_approval(|| f.invoke(&run, exec(&tool, &["status"]), "x2"));
+    assert!(matches!(next, ProcessReply::Refused(..)), "{next:?}");
+    assert_eq!(f.fake.asked().len(), 1);
 }
