@@ -7013,6 +7013,514 @@ def task_sandbox_workload_mutations() -> None:
     )
 
 
+# ---- C3: hosted evidence for the boundary remediations (Phase 2.5) ------------
+#
+# Four mutation reviews guard Phase 1's remediations: F-19's constrained grant
+# (in the agent review, ADR-0060), F-17's egress authorisation (ADR-0061),
+# F-01's taint (ADR-0062) and F-18's ownership (ADR-0063). Until C3 each had
+# run only on a developer's machine. `mutation_review` runs each the same way,
+# locally or on a disposable GitHub-hosted runner (the hand-dispatched
+# `.github/workflows/c3-evidence.yml`):
+#
+#   * every mutant's target is checked before anything runs;
+#   * the BASELINE -- the same build and the same stages, unmutated -- must
+#     pass, and each test selection must run at least one test; otherwise no
+#     mutant is judged, and the review is BLOCKED;
+#   * each mutant is applied (its bytes read back at the expected digest),
+#     built, then judged stage by stage. It is KILLED only by a test that
+#     failed by name, or by an evidence task's refusal. A build error, a
+#     command that failed with no failing test, a selection that ran nothing,
+#     a timeout, or an evidence task's NOT EXERCISED is never a kill;
+#   * the file is restored, and its SHA-256 checked, whatever happens;
+#   * the record (`target/c3-evidence/<campaign>-<k>of<n>/record.json`) is
+#     written before the first mutant and after every one, so a review that
+#     fails or stops part-way keeps its diagnostics, and says it did not pass.
+#
+# `make c3-gate-check`, in that workflow's last job, judges this run's records
+# again: every shard of every campaign, of this run and commit, from a
+# GitHub-hosted runner; each campaign's inventory exactly its table; the
+# baseline passed; every mutant applied, killed and restored. A record of any
+# other run, an archived one included, is refused.
+C3_EVIDENCE_DIR = ROOT / "target" / "c3-evidence"
+C3_GATE_DIR = ROOT / "target" / "c3-gate"
+C3_GATE_JOB = "c3-gate"
+C3_RECORD_SCHEMA = "direwolf.c3.campaign-record"
+C3_RECORD_VERSION = 1
+# Each campaign: its finding, its ADR, the task that runs it, its mutation
+# table (None: not a mutation review), and the shards the hosted workflow runs
+# it in (`tests/architecture/test_c3_evidence.py` holds the workflow to it).
+C3_CAMPAIGNS: dict[str, tuple[str, str, str, str | None, int]] = {
+    "agent-mutations": ("F-19", "0060", "sandbox-agent-mutations", "AGENT_MUTATIONS", 2),
+    "egress-policy-mutations": (
+        "F-17",
+        "0061",
+        "sandbox-egress-policy-mutations",
+        "EGRESS_POLICY_MUTATIONS",
+        4,
+    ),
+    "taint-mutations": ("F-01", "0062", "sandbox-taint-mutations", "TAINT_MUTATIONS", 3),
+    "ownership-mutations": (
+        "F-18",
+        "0063",
+        "authority-ownership-mutations",
+        "OWNERSHIP_MUTATIONS",
+        2,
+    ),
+    "cross-uid-ownership": ("F-18", "0063", "c3-cross-uid-evidence", None, 1),
+}
+# What a mutant can come to. Only KILLED is a detection.
+C3_OUTCOMES = (
+    "KILLED",
+    "SURVIVED",
+    "COMPILE_ERROR",
+    "ERROR",
+    "NO_TESTS",
+    "TIMEOUT",
+    "BLOCKED",
+    "NOT_RUN",
+)
+# One build or test command's limit; a stage that runs longer is TIMEOUT.
+C3_STAGE_LIMIT = 45 * 60
+_LIBTEST_OK = re.compile(r"^test (\S+) \.\.\. ok$")
+_LIBTEST_FAILED = re.compile(r"^test (\S+) \.\.\. FAILED$")
+_LIBTEST_RESULT = re.compile(r"^test result: (?:ok|FAILED)\. (\d+) passed; (\d+) failed;")
+_SHARD = re.compile(r"([1-9][0-9]?)/([1-9][0-9]?)")
+_HEX64 = re.compile(r"[0-9a-f]{64}")
+
+
+class SuiteRun(NamedTuple):
+    """What one test command reported: its exit (None: stopped at its limit),
+    the tests that passed and failed by name, and how many ran."""
+
+    exit: int | None
+    passed: tuple[str, ...]
+    failed: tuple[str, ...]
+    counted: int
+    seconds: float
+
+
+class MutationStage(NamedTuple):
+    """One detector of a mutation review: a test command, or an evidence task."""
+
+    name: str
+    command: tuple[str, ...] = ()
+    evidence: Callable[[], None] | None = None
+
+
+def run_tests(*command: str, limit: float = C3_STAGE_LIMIT) -> SuiteRun:
+    """Run a test command, echoed and streamed as it runs, and read libtest's
+    report: each test that passed or failed, by name, and how many ran."""
+    print(f"{DIM}$ {' '.join(command)}{OFF}", flush=True)
+    started = time.monotonic()
+    lines: list[str] = []
+    process = subprocess.Popen(
+        list(command),
+        cwd=str(ROOT),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        start_new_session=sys.platform != "win32",
+    )
+
+    def pump() -> None:
+        if process.stdout is None:
+            return
+        for raw in iter(process.stdout.readline, b""):
+            line = raw.decode("utf-8", "replace").rstrip("\r\n")
+            print(line, flush=True)
+            lines.append(line)
+
+    reader = threading.Thread(target=pump, daemon=True)
+    reader.start()
+    try:
+        code: int | None = process.wait(timeout=limit)
+    except subprocess.TimeoutExpired:
+        _stop_tree(process)
+        process.wait()
+        code = None
+    reader.join(timeout=60)
+    passed: list[str] = []
+    failed: list[str] = []
+    counted = 0
+    for line in lines:
+        ok, bad, total = _LIBTEST_OK.match(line), _LIBTEST_FAILED.match(line), None
+        if ok:
+            passed.append(ok.group(1))
+        elif bad:
+            failed.append(bad.group(1))
+        else:
+            total = _LIBTEST_RESULT.match(line)
+        if total:
+            counted += int(total.group(1)) + int(total.group(2))
+    return SuiteRun(code, tuple(passed), tuple(failed), counted, time.monotonic() - started)
+
+
+def _c3_now() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def _c3_provenance(environ: Mapping[str, str]) -> dict[str, object]:
+    """Which run a record is of: on a disposable GitHub-hosted runner, the
+    run's id, attempt, commit and job; anywhere else, `hosted: false`, which
+    no gate accepts."""
+    hosted = _hosted(environ)
+
+    def given(name: str) -> str | None:
+        return environ.get(name) if hosted else None
+
+    return {
+        "hosted": hosted,
+        "run_id": given("GITHUB_RUN_ID"),
+        "run_attempt": given("GITHUB_RUN_ATTEMPT"),
+        "sha": given("GITHUB_SHA"),
+        "ref": given("GITHUB_REF"),
+        "job": given("GITHUB_JOB"),
+        "runner": {
+            "environment": "github-hosted" if hosted else "local",
+            "os": environ.get("RUNNER_OS", platform.system()),
+            "image": environ.get("ImageOS", ""),
+            "image_version": environ.get("ImageVersion", ""),
+        },
+    }
+
+
+def _c3_shard(environ: Mapping[str, str]) -> tuple[int, int]:
+    """`DW_MUTATION_SHARD` = k/n: this run judges every n-th mutant from the
+    k-th. Unset: every mutant (1/1)."""
+    raw = environ.get("DW_MUTATION_SHARD", "1/1")
+    match = _SHARD.fullmatch(raw)
+    if match is None or int(match.group(1)) > int(match.group(2)):
+        raise TaskError(f"DW_MUTATION_SHARD={raw[:20]!r} is not k/n with 1 <= k <= n <= 99")
+    return int(match.group(1)), int(match.group(2))
+
+
+def _c3_directory(campaign: str, shard: tuple[int, int], root: Path) -> Path:
+    directory = root / f"{campaign}-{shard[0]}of{shard[1]}"
+    if directory.exists():
+        shutil.rmtree(directory)
+    directory.mkdir(parents=True)
+    return directory
+
+
+def _c3_record(
+    campaign: str, shard: tuple[int, int], environ: Mapping[str, str]
+) -> dict[str, object]:
+    finding, adr, task, table, _ = C3_CAMPAIGNS[campaign]
+    return {
+        "schema": C3_RECORD_SCHEMA,
+        "version": C3_RECORD_VERSION,
+        "kind": "mutation" if table is not None else "cross-uid",
+        "campaign": campaign,
+        "finding": finding,
+        "adr": adr,
+        "task": task,
+        "shard": f"{shard[0]}/{shard[1]}",
+        "provenance": _c3_provenance(environ),
+        "started_at": _c3_now(),
+        "finished_at": None,
+        "result": "RUNNING",
+        "reason": None,
+    }
+
+
+def _write_c3_record(directory: Path, record: Mapping[str, object]) -> None:
+    partial = directory / "record.json.partial"
+    partial.write_text(
+        json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8", newline="\n"
+    )
+    partial.replace(directory / "record.json")
+
+
+def _c3_stages(campaign: str) -> tuple[MutationStage, ...]:
+    """Each review's detectors, in the order they run: the cheap test
+    selections first, the evidence task last."""
+    authority = ("cargo", "test", "--locked", "-p", "dwkd-authority")
+    if campaign == "agent-mutations":
+        return (
+            MutationStage(
+                "authority-guards", (*authority, "--lib", "--", "server::", "sandbox::", "state::")
+            ),
+            MutationStage(
+                "broker-unit",
+                ("cargo", "test", "--locked", "-p", "dwkd-broker", "--bin", "dwkd-broker"),
+            ),
+            MutationStage(
+                "broker-private-channel",
+                ("cargo", "test", "--locked", "-p", "dwkd-broker", "--test", "private_protocol"),
+            ),
+            MutationStage("probe", ("cargo", "test", "--locked", "-p", "dwk-sandbox-probe")),
+            MutationStage(
+                "agent-evidence-one-identity",
+                evidence=lambda: _sandbox_agent_evidence(require_privileged=False),
+            ),
+        )
+    if campaign == "egress-policy-mutations":
+        return (
+            MutationStage(
+                "proto-egress", ("cargo", "test", "--locked", "-p", "dwk-proto", "--lib", "egress")
+            ),
+            MutationStage(
+                "authority-partition-and-workload",
+                (*authority, "--lib", "--", "policy::partition", "state::workload"),
+            ),
+            MutationStage(
+                "broker-egress",
+                (
+                    "cargo",
+                    "test",
+                    "--locked",
+                    "-p",
+                    "dwkd-broker",
+                    "--bin",
+                    "dwkd-broker",
+                    "--",
+                    "egress",
+                ),
+            ),
+            MutationStage("egress-evidence", evidence=lambda: task_sandbox_egress_evidence()),
+        )
+    if campaign == "taint-mutations":
+        return (
+            MutationStage("authority-unit", (*authority, "--lib")),
+            MutationStage("egress-evidence", evidence=lambda: task_sandbox_egress_evidence()),
+        )
+    if campaign == "ownership-mutations":
+        suites = tuple(arg for suite in OWNERSHIP_SUITES for arg in ("--test", suite))
+        return (
+            MutationStage("ownership-suites", (*authority, *suites)),
+            MutationStage("authority-unit", (*authority, "--lib")),
+        )
+    raise TaskError(f"{campaign} is no mutation review of C3")
+
+
+# The packages each review builds before judging a mutant: a mutant that does
+# not build every test target of these is COMPILE_ERROR, never a kill.
+C3_BUILDS: dict[str, tuple[str, ...]] = {
+    "agent-mutations": ("dwk-sandbox-probe", "dwkd-broker", "dwkd-authority"),
+    "egress-policy-mutations": ("dwk-proto", "dwkd-broker", "dwkd-authority"),
+    "taint-mutations": ("dwkd-authority",),
+    "ownership-mutations": ("dwkd-authority",),
+}
+
+
+def _c3_build(campaign: str) -> tuple[str, ...]:
+    packages = [arg for package in C3_BUILDS[campaign] for arg in ("-p", package)]
+    return ("cargo", "test", "--locked", "--no-run", *packages)
+
+
+def _stage_record(stage: MutationStage, tests: Callable[..., SuiteRun]) -> dict[str, object]:
+    """A stage run unmutated, for the baseline: it passes only with its every
+    test passed and at least one run, or its evidence task passed."""
+    started = time.monotonic()
+    row: dict[str, object] = {
+        "stage": stage.name,
+        "kind": "evidence" if stage.evidence is not None else "tests",
+        "command": list(stage.command),
+        "exit": None,
+        "tests_run": None,
+        "passed": [],
+        "failed": [],
+        "detail": None,
+        "seconds": 0.0,
+        "ok": False,
+    }
+    if stage.evidence is not None:
+        try:
+            stage.evidence()
+        except TaskError as exc:
+            row.update(exit=1, detail=str(exc)[:500])
+        else:
+            row.update(exit=0, ok=True)
+    else:
+        result = tests(*stage.command)
+        row.update(
+            exit=result.exit,
+            tests_run=result.counted,
+            passed=list(result.passed),
+            failed=list(result.failed),
+            ok=result.exit == 0 and result.counted >= 1 and not result.failed,
+        )
+        if result.exit == 0 and result.counted < 1:
+            row["detail"] = "the selection ran no test"
+    row["seconds"] = round(time.monotonic() - started, 1)
+    return row
+
+
+def _stage_verdict(
+    stage: MutationStage, tests: Callable[..., SuiteRun]
+) -> tuple[str, str, list[str]] | None:
+    """How one stage judged a mutant: None if it passed (the mutant got
+    through), else (outcome, its signature, the tests that failed)."""
+    if stage.evidence is not None:
+        try:
+            stage.evidence()
+        except TaskError as exc:
+            first = (str(exc).strip().splitlines() or [""])[0]
+            if not first or first.startswith("NOT EXERCISED"):
+                return "BLOCKED", (first or "an evidence task failed with no message")[:300], []
+            return "KILLED", first[:300], []
+        return None
+    result = tests(*stage.command)
+    if result.exit is None:
+        return "TIMEOUT", f"stopped at its {C3_STAGE_LIMIT} s limit", []
+    if result.exit != 0:
+        if result.failed:
+            named = ", ".join(result.failed[:5])
+            return (
+                "KILLED",
+                f"{len(result.failed)} test(s) failed: {named}"[:300],
+                list(result.failed[:50]),
+            )
+        return "ERROR", f"exit {result.exit} with no failing test reported", []
+    if result.counted < 1:
+        return "NO_TESTS", "the selection ran no test", []
+    return None
+
+
+def _judge_mutant(
+    mutation: tuple[str, str, str, str],
+    stages: Sequence[MutationStage],
+    build: Sequence[str],
+    tests: Callable[..., SuiteRun],
+) -> dict[str, object]:
+    what, rel, old, new = mutation
+    path = ROOT / rel
+    original = path.read_bytes()
+    digest = hashlib.sha256(original).hexdigest()
+    mutated = original.decode("utf-8").replace(old, new, 1).encode("utf-8")
+    row: dict[str, object] = {
+        "name": what,
+        "file": rel,
+        "before_sha256": digest,
+        "mutated_sha256": hashlib.sha256(mutated).hexdigest(),
+        "applied": False,
+        "outcome": "NOT_RUN",
+        "stage": None,
+        "signature": None,
+        "failed_tests": [],
+        "restored": False,
+        "seconds": 0.0,
+    }
+    started = time.monotonic()
+    print(f"{BOLD}mutant: {what}{OFF}")
+    try:
+        path.write_bytes(mutated)
+        applied = mutated != original and path.read_bytes() == mutated
+        row["applied"] = applied
+        if not applied:
+            row.update(outcome="ERROR", signature="the mutant was not applied")
+        else:
+            built = tests(*build)
+            if built.exit != 0:
+                outcome = "TIMEOUT" if built.exit is None else "COMPILE_ERROR"
+                row.update(
+                    outcome=outcome, stage="build", signature=f"the build exited {built.exit}"
+                )
+            else:
+                row.update(outcome="SURVIVED", signature="every stage passed")
+                for stage in stages:
+                    verdict = _stage_verdict(stage, tests)
+                    if verdict is not None:
+                        outcome, signature, failed = verdict
+                        row.update(
+                            outcome=outcome,
+                            stage=stage.name,
+                            signature=signature,
+                            failed_tests=failed,
+                        )
+                        break
+    finally:
+        path.write_bytes(original)
+        row["restored"] = hashlib.sha256(path.read_bytes()).hexdigest() == digest
+        row["seconds"] = round(time.monotonic() - started, 1)
+    print(f"{DIM}restored {rel} (sha256 {digest[:16]}...): {row['restored']}{OFF}")
+    return row
+
+
+def mutation_review(
+    campaign: str,
+    mutations: Sequence[tuple[str, str, str, str]],
+    *,
+    environ: Mapping[str, str] | None = None,
+    root: Path | None = None,
+    tests: Callable[..., SuiteRun] = run_tests,
+) -> dict[str, object]:
+    """One C3 mutation review (or one shard of it): baseline first, then each
+    mutant judged, recorded and restored. Raises unless every mutant of the
+    shard was KILLED; the record says why either way."""
+    environ = os.environ if environ is None else environ
+    root = C3_EVIDENCE_DIR if root is None else root
+    for what, rel, old, _new in mutations:
+        # The bytes the mutant is made from, never a newline-translated read.
+        if (ROOT / rel).read_bytes().decode("utf-8").count(old) != 1:
+            raise TaskError(f"mutation `{what}`: its target is not in {rel} exactly once")
+    shard = _c3_shard(environ)
+    chosen = [m for index, m in enumerate(mutations) if index % shard[1] == shard[0] - 1]
+    stages = _c3_stages(campaign)
+    build = _c3_build(campaign)
+    directory = _c3_directory(campaign, shard, root)
+    record = _c3_record(campaign, shard, environ)
+    mutants: list[dict[str, object]] = []
+    record.update(inventory=[m[0] for m in chosen], baseline=None, mutants=mutants)
+    _write_c3_record(directory, record)
+    print(f"{BOLD}{campaign} shard {shard[0]} of {shard[1]}: baseline{OFF}")
+    built = tests(*build)
+    baseline: dict[str, object] = {"build_exit": built.exit, "stages": [], "result": "FAIL"}
+    stage_rows: list[dict[str, object]] = []
+    if built.exit == 0:
+        for stage in stages:
+            stage_rows.append(_stage_record(stage, tests))
+            if stage_rows[-1]["ok"] is not True:
+                break
+    baseline["stages"] = stage_rows
+    if (
+        built.exit == 0
+        and len(stage_rows) == len(stages)
+        and all(r["ok"] is True for r in stage_rows)
+    ):
+        baseline["result"] = "PASS"
+    record["baseline"] = baseline
+    if baseline["result"] != "PASS":
+        failed = next((str(r["stage"]) for r in stage_rows if r["ok"] is not True), "build")
+        record.update(
+            result="BLOCKED",
+            reason=f"the unmutated baseline failed at {failed}: no mutant is judged",
+            finished_at=_c3_now(),
+        )
+        _write_c3_record(directory, record)
+        raise TaskError(f"BLOCKED: {campaign}: {record['reason']}")
+    _write_c3_record(directory, record)
+    for mutation in chosen:
+        row = _judge_mutant(mutation, stages, build, tests)
+        mutants.append(row)
+        _write_c3_record(directory, record)
+        if row["restored"] is not True:
+            record.update(result="FAIL", reason=f"{mutation[1]} was not restored byte-identically")
+            record["finished_at"] = _c3_now()
+            _write_c3_record(directory, record)
+            raise TaskError(str(record["reason"]))
+        colour = GREEN if row["outcome"] == "KILLED" else RED
+        print(f"{colour}mutant {row['outcome']} ({row['stage']}): {mutation[0]}{OFF}")
+    not_killed = [row for row in mutants if row["outcome"] != "KILLED"]
+    record.update(
+        result="FAIL" if not_killed else "PASS",
+        reason=("; ".join(f"{row['name']}: {row['outcome']}" for row in not_killed)[:2000] or None),
+        finished_at=_c3_now(),
+    )
+    _write_c3_record(directory, record)
+    for row in mutants:
+        print(f"  {row['outcome']:<13} {row['stage'] or '-':<34} {row['name']}")
+    print(
+        f"{GREEN if not not_killed else RED}{campaign} shard {shard[0]} of {shard[1]}: "
+        f"{len(mutants) - len(not_killed)} of {len(mutants)} killed; record in {directory}{OFF}"
+    )
+    if not_killed:
+        raise TaskError(
+            f"{len(not_killed)} mutant(s) of {campaign} not killed: "
+            + "; ".join(f"{row['name']} {row['outcome']}" for row in not_killed)
+        )
+    return record
+
+
 # F-17's mutation review (ADR-0061, Proposed; E7): each line weakens one guard
 # of a workload's egress authorisation, in the source, one at a time -- the
 # design's M1-M11, the partition's PM1-PM8 and the exposure rule's own. Each
@@ -7203,81 +7711,17 @@ EGRESS_POLICY_MUTATIONS: tuple[tuple[str, str, str, str], ...] = (
 )
 
 
-def _egress_policy_unit_suites() -> None:
-    """The unit suites that guard F-17's egress authorisation."""
-    run("cargo", "test", "--locked", "-p", "dwk-proto", "--lib", "egress")
-    run(
-        "cargo",
-        "test",
-        "--locked",
-        "-p",
-        "dwkd-authority",
-        "--lib",
-        "--",
-        "policy::partition",
-        "state::workload",
-    )
-    run("cargo", "test", "--locked", "-p", "dwkd-broker", "--bin", "dwkd-broker", "--", "egress")
-
-
 def task_sandbox_egress_policy_mutations() -> None:
     """Weaken each guard of F-17's egress authorisation in turn (ADR-0061,
     Proposed); a unit suite or the egress evidence must catch every one.
 
     Slow: a mutant no unit suite catches runs the whole
-    sandbox-egress-evidence. Every file is restored byte-identically
-    whatever happens, and checked. Never run it beside another build.
+    sandbox-egress-evidence. The unmutated baseline must pass first; every
+    file is restored byte-identically whatever happens, and checked; the
+    record is kept for the C3 gate (`mutation_review`). DW_MUTATION_SHARD=k/n
+    runs one shard. Never run it beside another build.
     """
-    killed: list[str] = []
-    for what, rel, old, new in EGRESS_POLICY_MUTATIONS:
-        path = ROOT / rel
-        original = path.read_bytes()
-        digest = hashlib.sha256(original).hexdigest()
-        text = original.decode("utf-8")
-        if text.count(old) != 1:
-            raise TaskError(f"mutation `{what}`: its target is not in {rel} exactly once")
-        print(f"{BOLD}mutant: {what}{OFF}")
-        outcome = "survived"
-        try:
-            path.write_bytes(text.replace(old, new).encode("utf-8"))
-            try:
-                run(
-                    "cargo",
-                    "test",
-                    "--locked",
-                    "--no-run",
-                    "-p",
-                    "dwk-proto",
-                    "-p",
-                    "dwkd-broker",
-                    "-p",
-                    "dwkd-authority",
-                )
-            except TaskError:
-                outcome = "did not compile"
-            else:
-                try:
-                    _egress_policy_unit_suites()
-                except TaskError as exc:
-                    outcome = f"killed by a unit suite: {str(exc)[:160]}"
-                else:
-                    try:
-                        task_sandbox_egress_evidence()
-                    except TaskError as exc:
-                        outcome = f"killed by the evidence: {str(exc)[:160]}"
-        finally:
-            path.write_bytes(original)
-        if hashlib.sha256(path.read_bytes()).hexdigest() != digest:
-            raise TaskError(f"{rel} was not restored byte-identically")
-        print(f"{DIM}restored {rel} (sha256 {digest[:16]}...){OFF}")
-        if not outcome.startswith("killed"):
-            raise TaskError(f"mutant `{what}` {outcome}: nothing guards it")
-        killed.append(what)
-        print(f"{GREEN}mutant {outcome[:60]}: {what}{OFF}")
-    print(
-        f"{GREEN}sandbox egress-policy mutation review: {len(killed)} of "
-        f"{len(EGRESS_POLICY_MUTATIONS)} killed{OFF}"
-    )
+    mutation_review("egress-policy-mutations", EGRESS_POLICY_MUTATIONS)
 
 
 # F-01's mutation review (ADR-0062, Proposed; E-M): each line weakens one guard
@@ -7424,47 +7868,12 @@ def task_sandbox_taint_mutations() -> None:
     authority's unit suites or the egress evidence must catch every one.
 
     Slow: a mutant no unit suite catches runs the whole
-    sandbox-egress-evidence. Every file is restored byte-identically
-    whatever happens, and checked. Never run it beside another build.
+    sandbox-egress-evidence. The unmutated baseline must pass first; every
+    file is restored byte-identically whatever happens, and checked; the
+    record is kept for the C3 gate (`mutation_review`). DW_MUTATION_SHARD=k/n
+    runs one shard. Never run it beside another build.
     """
-    killed: list[str] = []
-    for what, rel, old, new in TAINT_MUTATIONS:
-        path = ROOT / rel
-        original = path.read_bytes()
-        digest = hashlib.sha256(original).hexdigest()
-        text = original.decode("utf-8")
-        if text.count(old) != 1:
-            raise TaskError(f"mutation `{what}`: its target is not in {rel} exactly once")
-        print(f"{BOLD}mutant: {what}{OFF}")
-        outcome = "survived"
-        try:
-            path.write_bytes(text.replace(old, new).encode("utf-8"))
-            try:
-                run("cargo", "test", "--locked", "--no-run", "-p", "dwkd-authority")
-            except TaskError:
-                outcome = "did not compile"
-            else:
-                try:
-                    run("cargo", "test", "--locked", "-p", "dwkd-authority", "--lib")
-                except TaskError as exc:
-                    outcome = f"killed by a unit suite: {str(exc)[:160]}"
-                else:
-                    try:
-                        task_sandbox_egress_evidence()
-                    except TaskError as exc:
-                        outcome = f"killed by the evidence: {str(exc)[:160]}"
-        finally:
-            path.write_bytes(original)
-        if hashlib.sha256(path.read_bytes()).hexdigest() != digest:
-            raise TaskError(f"{rel} was not restored byte-identically")
-        print(f"{DIM}restored {rel} (sha256 {digest[:16]}...){OFF}")
-        if not outcome.startswith("killed"):
-            raise TaskError(f"mutant `{what}` {outcome}: nothing guards it")
-        killed.append(what)
-        print(f"{GREEN}mutant {outcome[:60]}: {what}{OFF}")
-    print(
-        f"{GREEN}sandbox taint mutation review: {len(killed)} of {len(TAINT_MUTATIONS)} killed{OFF}"
-    )
+    mutation_review("taint-mutations", TAINT_MUTATIONS)
 
 
 # F-18's mutation review (ADR-0063, Proposed): each line weakens one guard of
@@ -7692,51 +8101,12 @@ def task_authority_ownership_mutations() -> None:
     Proposed); the ownership suites or the authority's unit suites must catch
     every one.
 
-    Every file is restored byte-identically whatever happens, and checked.
-    Never run it beside another build.
+    The unmutated baseline must pass first; every file is restored
+    byte-identically whatever happens, and checked; the record is kept for the
+    C3 gate (`mutation_review`). DW_MUTATION_SHARD=k/n runs one shard. Never
+    run it beside another build.
     """
-    killed: list[str] = []
-    suites: list[str] = []
-    for suite in OWNERSHIP_SUITES:
-        suites += ["--test", suite]
-    for what, rel, old, new in OWNERSHIP_MUTATIONS:
-        path = ROOT / rel
-        original = path.read_bytes()
-        digest = hashlib.sha256(original).hexdigest()
-        text = original.decode("utf-8")
-        if text.count(old) != 1:
-            raise TaskError(f"mutation `{what}`: its target is not in {rel} exactly once")
-        print(f"{BOLD}mutant: {what}{OFF}")
-        outcome = "survived"
-        try:
-            path.write_bytes(text.replace(old, new).encode("utf-8"))
-            try:
-                run("cargo", "test", "--locked", "--no-run", "-p", "dwkd-authority")
-            except TaskError:
-                outcome = "did not compile"
-            else:
-                try:
-                    run("cargo", "test", "--locked", "-p", "dwkd-authority", *suites)
-                except TaskError as exc:
-                    outcome = f"killed by an ownership suite: {str(exc)[:160]}"
-                else:
-                    try:
-                        run("cargo", "test", "--locked", "-p", "dwkd-authority", "--lib")
-                    except TaskError as exc:
-                        outcome = f"killed by a unit suite: {str(exc)[:160]}"
-        finally:
-            path.write_bytes(original)
-        if hashlib.sha256(path.read_bytes()).hexdigest() != digest:
-            raise TaskError(f"{rel} was not restored byte-identically")
-        print(f"{DIM}restored {rel} (sha256 {digest[:16]}...){OFF}")
-        if not outcome.startswith("killed"):
-            raise TaskError(f"mutant `{what}` {outcome}: nothing guards it")
-        killed.append(what)
-        print(f"{GREEN}mutant {outcome[:60]}: {what}{OFF}")
-    print(
-        f"{GREEN}authority ownership mutation review: {len(killed)} of "
-        f"{len(OWNERSHIP_MUTATIONS)} killed{OFF}"
-    )
+    mutation_review("ownership-mutations", OWNERSHIP_MUTATIONS)
 
 
 # M5d.3 (ADR-0052 §7): a sandboxed `process.exec` that consumes a credential.
@@ -10373,87 +10743,16 @@ AGENT_MUTATIONS = (
 )
 
 
-def _agent_guard_suites() -> None:
-    """The suites that prove the agent's guards without a runtime: the
-    authority's peer policy, sandbox configuration, grant and ledger; the
-    broker's start-up, plan, supervisor and CONNECT proxy, and its private
-    channel refusing a stranger; the probe's reap."""
-    run(
-        "cargo",
-        "test",
-        "--locked",
-        "-p",
-        "dwkd-authority",
-        "--lib",
-        "--",
-        "server::",
-        "sandbox::",
-        "state::",
-    )
-    run("cargo", "test", "--locked", "-p", "dwkd-broker", "--bin", "dwkd-broker")
-    run("cargo", "test", "--locked", "-p", "dwkd-broker", "--test", "private_protocol")
-    run("cargo", "test", "--locked", "-p", "dwk-sandbox-probe")
-
-
 def task_sandbox_agent_mutations() -> None:
     """Weaken each M5d.5 agent guard in turn; a unit suite or the agent evidence must catch it.
 
     Slow: a mutant no unit suite catches runs the one-identity agent
-    evidence. Every file is restored byte-identically whatever happens, and
-    checked. Never run it beside another build.
+    evidence. The unmutated baseline must pass first; every file is restored
+    byte-identically whatever happens, and checked; the record is kept for the
+    C3 gate (`mutation_review`). DW_MUTATION_SHARD=k/n runs one shard. Never
+    run it beside another build.
     """
-    for what, rel, old, _new in AGENT_MUTATIONS:
-        if (ROOT / rel).read_text(encoding="utf-8").count(old) != 1:
-            raise TaskError(f"mutation `{what}`: its target is not in {rel} exactly once")
-    killed: list[str] = []
-    for what, rel, old, new in AGENT_MUTATIONS:
-        path = ROOT / rel
-        original = path.read_bytes()
-        digest = hashlib.sha256(original).hexdigest()
-        text = original.decode("utf-8")
-        print(f"{BOLD}mutant: {what}{OFF}")
-        outcome = "survived"
-        try:
-            path.write_bytes(text.replace(old, new).encode("utf-8"))
-            try:
-                run(
-                    "cargo",
-                    "test",
-                    "--locked",
-                    "--no-run",
-                    "-p",
-                    "dwk-sandbox-probe",
-                    "-p",
-                    "dwkd-broker",
-                    "-p",
-                    "dwkd-authority",
-                )
-            except TaskError:
-                outcome = "did not compile"
-            else:
-                try:
-                    _agent_guard_suites()
-                except TaskError as exc:
-                    outcome = f"killed by a unit suite: {str(exc)[:160]}"
-                else:
-                    try:
-                        _sandbox_agent_evidence(require_privileged=False)
-                    except TaskError as exc:
-                        outcome = f"killed by the evidence: {str(exc)[:160]}"
-        finally:
-            path.write_bytes(original)
-        if hashlib.sha256(path.read_bytes()).hexdigest() != digest:
-            raise TaskError(f"{rel} was not restored byte-identically")
-        print(f"{DIM}restored {rel} (sha256 {digest[:16]}...){OFF}")
-        if not outcome.startswith("killed"):
-            raise TaskError(f"mutant `{what}` {outcome}: nothing guards it")
-        killed.append(f"{what}: {outcome[:60]}")
-        print(f"{GREEN}mutant {outcome[:60]}: {what}{OFF}")
-    for line in killed:
-        print(f"  {line}")
-    print(
-        f"{GREEN}sandbox agent mutation review: {len(killed)} of {len(AGENT_MUTATIONS)} killed{OFF}"
-    )
+    mutation_review("agent-mutations", AGENT_MUTATIONS)
 
 
 # --- M5d.6: a run's release ends its environment (ADR-0052 §8) -------------------
@@ -13894,6 +14193,364 @@ def task_m5e_gate_check() -> None:
         print(f"{GREEN}M5e acceptance verdict: READY{OFF}")
 
 
+# ---- C3: the cross-uid record and the C3 gate -----------------------------------
+
+
+# F-18 (ADR-0063): a descriptor a runtime passes over the real socket is never
+# installed in the authority; run beside the cross-uid suite and kept by name.
+C3_HOSTILE_FD_TEST = "linux::a_descriptor_a_runtime_passes_is_never_installed_in_the_authority"
+
+
+def task_c3_cross_uid_evidence() -> None:
+    """C3 (F-18, ADR-0063): the cross-uid ownership cases on a real second identity, kept for C3.
+
+    The `transport_foreign` suite, as `make authority-transport-evidence`
+    runs it (DW_PEER_AS, proven a second, non-root uid by number first),
+    judged by the same function; its output and both uids are kept in
+    `target/c3-evidence/cross-uid-ownership-1of1/` for the C3 gate, with the
+    hostile-client suite's passing tests by name (C3_HOSTILE_FD_TEST among
+    them). NOT EXERCISED without a second identity, which fails.
+    """
+    campaign = "cross-uid-ownership"
+    directory = _c3_directory(campaign, (1, 1), C3_EVIDENCE_DIR)
+    record = _c3_record(campaign, (1, 1), os.environ)
+    record.update(identities=None, output=None, cases=[], hostile=None)
+    _write_c3_record(directory, record)
+    try:
+        if not sys.platform.startswith("linux"):
+            raise TaskError("NOT EXERCISED: the DWKP server runs only on Linux (ADR-0041)")
+        user, own, peer = second_identity("DW_PEER_AS")
+        record["identities"] = {"user": user, "runner_uid": own, "peer_uid": peer}
+        output = run_captured(
+            "cargo",
+            "test",
+            "--locked",
+            "-p",
+            "dwkd-authority",
+            "--test",
+            "transport_foreign",
+            "--",
+            "--ignored",
+            "--exact",
+            "--nocapture",
+            *FOREIGN_TESTS,
+        )
+        data = output.encode("utf-8")
+        (directory / "output.txt").write_bytes(data)
+        record["output"] = {
+            "file": "output.txt",
+            "sha256": hashlib.sha256(data).hexdigest(),
+            "bytes": len(data),
+        }
+        require_foreign_evidence(output)
+        record["cases"] = list(FOREIGN_CASES)
+        hostile = run_tests(
+            "cargo", "test", "--locked", "-p", "dwkd-authority", "--test", "transport_hostile"
+        )
+        record["hostile"] = {
+            "exit": hostile.exit,
+            "tests_run": hostile.counted,
+            "passed": list(hostile.passed),
+            "failed": list(hostile.failed),
+        }
+        if hostile.exit != 0 or C3_HOSTILE_FD_TEST not in hostile.passed:
+            raise TaskError(f"the hostile-client suite did not pass {C3_HOSTILE_FD_TEST}")
+        record["result"] = "PASS"
+    except TaskError as exc:
+        message = str(exc)
+        record.update(
+            result="BLOCKED" if message.startswith("NOT EXERCISED") else "FAIL",
+            reason=message[:500],
+        )
+        raise
+    finally:
+        record["finished_at"] = _c3_now()
+        _write_c3_record(directory, record)
+
+
+_C3_COMMON = {
+    "schema",
+    "version",
+    "kind",
+    "campaign",
+    "finding",
+    "adr",
+    "task",
+    "shard",
+    "provenance",
+    "started_at",
+    "finished_at",
+    "result",
+    "reason",
+}
+_C3_FIELDS = {
+    "mutation": _C3_COMMON | {"inventory", "baseline", "mutants"},
+    "cross-uid": _C3_COMMON | {"identities", "output", "cases", "hostile"},
+}
+_C3_MUTANT_FIELDS = {
+    "name",
+    "file",
+    "before_sha256",
+    "mutated_sha256",
+    "applied",
+    "outcome",
+    "stage",
+    "signature",
+    "failed_tests",
+    "restored",
+    "seconds",
+}
+_C3_STAGE_FIELDS = {
+    "stage",
+    "kind",
+    "command",
+    "exit",
+    "tests_run",
+    "passed",
+    "failed",
+    "detail",
+    "seconds",
+    "ok",
+}
+
+
+def c3_expected_records() -> dict[str, tuple[str, int, int]]:
+    """Every record the C3 gate needs, by artifact name: (campaign, k, n)."""
+    return {
+        f"c3-evidence-{campaign}-{k}of{shards}": (campaign, k, shards)
+        for campaign, (_, _, _, _, shards) in C3_CAMPAIGNS.items()
+        for k in range(1, shards + 1)
+    }
+
+
+def _c3_table(campaign: str) -> tuple[tuple[str, str, str, str], ...]:
+    name = C3_CAMPAIGNS[campaign][3]
+    table = globals().get(name or "")
+    if not isinstance(table, tuple):
+        raise TaskError(f"{campaign} has no mutation table {name!r}")
+    return table
+
+
+def _judge_c3_record(
+    directory: Path, campaign: str, shard: tuple[int, int], run: tuple[str, str, str]
+) -> list[str]:
+    """One downloaded record, checked against this run and its campaign's
+    contract. Returns the mutants it judged."""
+    finding, adr, task, table_name, _ = C3_CAMPAIGNS[campaign]
+    kind = "mutation" if table_name is not None else "cross-uid"
+    files = {"record.json"} if kind == "mutation" else {"record.json", "output.txt"}
+    present = {path.name for path in directory.iterdir()}
+    if present != files:
+        raise TaskError(f"holds {sorted(present)}, not exactly {sorted(files)}")
+    record = _read_bounded_json(directory / "record.json", campaign)
+    if not isinstance(record, dict) or set(record) != _C3_FIELDS[kind]:
+        raise TaskError(f"its record does not have exactly {sorted(_C3_FIELDS[kind])}")
+    said = tuple(
+        record[key]
+        for key in ("schema", "version", "kind", "campaign", "finding", "adr", "task", "shard")
+    )
+    want = (
+        C3_RECORD_SCHEMA,
+        C3_RECORD_VERSION,
+        kind,
+        campaign,
+        finding,
+        adr,
+        task,
+        f"{shard[0]}/{shard[1]}",
+    )
+    if said != want:
+        raise TaskError(f"its record is {list(said)}, not {list(want)}")
+    provenance = record["provenance"]
+    run_id, attempt, sha = run
+    if not isinstance(provenance, dict) or provenance.get("hosted") is not True:
+        raise TaskError("its record is not from a disposable GitHub-hosted runner")
+    runner = provenance.get("runner")
+    if not isinstance(runner, dict) or runner.get("environment") != "github-hosted":
+        raise TaskError("its record's runner is not GitHub-hosted")
+    of = provenance.get("run_attempt")
+    if (
+        provenance.get("run_id") != run_id
+        or provenance.get("sha") != sha
+        or not isinstance(of, str)
+        or not _RUN_NUMBER.fullmatch(of)
+        or int(of) > int(attempt)
+    ):
+        raise TaskError(
+            f"from run {provenance.get('run_id')!r} attempt {of!r} at {provenance.get('sha')!r}: "
+            "not this run's"
+        )
+    if record["result"] != "PASS":
+        raise TaskError(f"{record['result']}: {str(record['reason'])[:600]}")
+    if kind == "cross-uid":
+        return _judge_c3_cross_uid(directory, record)
+    return _judge_c3_mutations(campaign, shard, record)
+
+
+def _judge_c3_cross_uid(directory: Path, record: Mapping[str, object]) -> list[str]:
+    identities = record["identities"]
+    if not isinstance(identities, dict) or set(identities) != {"user", "runner_uid", "peer_uid"}:
+        raise TaskError("no record of the two identities")
+    own, peer = identities["runner_uid"], identities["peer_uid"]
+    if not (type(own) is int and type(peer) is int and own > 0 and peer > 0 and own != peer):
+        raise TaskError(f"uids {own!r} and {peer!r} are not two ordinary, distinct identities")
+    output = record["output"]
+    if not isinstance(output, dict) or set(output) != {"file", "sha256", "bytes"}:
+        raise TaskError("no record of the suite's output")
+    path = directory / "output.txt"
+    size = path.stat().st_size
+    if size > M5E_GATE_MAX_FILE:
+        raise TaskError(f"output.txt is {size} bytes, over {M5E_GATE_MAX_FILE}")
+    data = path.read_bytes()
+    if output != {
+        "file": "output.txt",
+        "sha256": hashlib.sha256(data).hexdigest(),
+        "bytes": len(data),
+    }:
+        raise TaskError("output.txt is not the output the record names")
+    if record["cases"] != list(FOREIGN_CASES):
+        raise TaskError(f"its cases are not exactly {list(FOREIGN_CASES)}")
+    require_foreign_evidence(data.decode("utf-8"))
+    hostile = record["hostile"]
+    if not isinstance(hostile, dict) or set(hostile) != {"exit", "tests_run", "passed", "failed"}:
+        raise TaskError("no record of the hostile-client suite")
+    passed = hostile["passed"]
+    if (
+        hostile["exit"] != 0
+        or hostile["failed"] != []
+        or not isinstance(passed, list)
+        or C3_HOSTILE_FD_TEST not in passed
+    ):
+        raise TaskError(f"the hostile-client suite did not pass {C3_HOSTILE_FD_TEST}")
+    return []
+
+
+def _judge_c3_mutations(
+    campaign: str, shard: tuple[int, int], record: Mapping[str, object]
+) -> list[str]:
+    table = _c3_table(campaign)
+    expected = [m[0] for index, m in enumerate(table) if index % shard[1] == shard[0] - 1]
+    if record["inventory"] != expected:
+        raise TaskError(f"its inventory is not its table's shard: {expected}")
+    stages = _c3_stages(campaign)
+    names = [stage.name for stage in stages]
+    baseline = record["baseline"]
+    if not isinstance(baseline, dict) or set(baseline) != {"build_exit", "stages", "result"}:
+        raise TaskError("no baseline")
+    rows = baseline["stages"]
+    if baseline["result"] != "PASS" or baseline["build_exit"] != 0 or not isinstance(rows, list):
+        raise TaskError("its unmutated baseline did not pass")
+    if [row.get("stage") if isinstance(row, dict) else None for row in rows] != names:
+        raise TaskError(f"its baseline ran {rows!r:.200}, not the stages {names}")
+    for stage, row in zip(stages, rows, strict=True):
+        if not isinstance(row, dict) or set(row) != _C3_STAGE_FIELDS or row["ok"] is not True:
+            raise TaskError(f"baseline stage {stage.name} did not pass")
+        if stage.evidence is None:
+            ran = row["tests_run"]
+            if row["exit"] != 0 or type(ran) is not int or ran < 1 or row["failed"] != []:
+                raise TaskError(f"baseline stage {stage.name} ran no test, or one failed")
+    mutants = record["mutants"]
+    if (
+        not isinstance(mutants, list)
+        or [m.get("name") if isinstance(m, dict) else None for m in mutants] != expected
+    ):
+        raise TaskError("its mutants are not exactly its inventory, in order")
+    for mutant in mutants:
+        if set(mutant) != _C3_MUTANT_FIELDS:
+            raise TaskError(f"{mutant.get('name')}: not exactly {sorted(_C3_MUTANT_FIELDS)}")
+        what = mutant["name"]
+        if mutant["outcome"] != "KILLED":
+            raise TaskError(f"{what}: {mutant['outcome']}, not KILLED")
+        if mutant["applied"] is not True or mutant["restored"] is not True:
+            raise TaskError(f"{what}: not applied, or not restored")
+        before, after = mutant["before_sha256"], mutant["mutated_sha256"]
+        if not (
+            isinstance(before, str)
+            and isinstance(after, str)
+            and _HEX64.fullmatch(before)
+            and _HEX64.fullmatch(after)
+            and before != after
+        ):
+            raise TaskError(f"{what}: its digests do not show a change")
+        signature = mutant["signature"]
+        if mutant["stage"] not in names or not isinstance(signature, str) or not signature:
+            raise TaskError(f"{what}: killed by no stage of the review")
+        detector = stages[names.index(str(mutant["stage"]))]
+        failed = mutant["failed_tests"]
+        if detector.evidence is None and (not isinstance(failed, list) or not failed):
+            raise TaskError(f"{what}: killed by {detector.name} with no failing test named")
+    return expected
+
+
+def c3_gate_verdict(environ: Mapping[str, str], root: Path = C3_GATE_DIR) -> list[str]:
+    """The C3 gate, HOSTED ONLY, in the `c3-gate` job: every campaign
+    record of THIS run judged again. Raises with every problem named."""
+    if not _hosted(environ):
+        raise TaskError(
+            "NOT EXERCISED: the C3 gate judges only the records of a run on disposable "
+            "GitHub-hosted runners, in its own job"
+        )
+    if environ.get("GITHUB_JOB") != C3_GATE_JOB:
+        raise TaskError(
+            f"the C3 gate runs in the {C3_GATE_JOB!r} job, not {environ.get('GITHUB_JOB')!r}"
+        )
+    run = _run_identity(environ)
+    if not root.is_dir():
+        raise TaskError(f"no record under {root}: nothing was downloaded")
+    expected = c3_expected_records()
+    present = {entry.name for entry in root.iterdir()}
+    problems: list[str] = []
+    missing, unexpected = sorted(set(expected) - present), sorted(present - set(expected))
+    if missing:
+        problems.append(f"missing record(s): {missing}")
+    if unexpected:
+        problems.append(f"record(s) no campaign of C3 makes: {unexpected}")
+    judged: dict[str, list[str]] = {}
+    for artifact in sorted(set(expected) & present):
+        campaign, k, n = expected[artifact]
+        directory = root / artifact
+        try:
+            if not directory.is_dir():
+                raise TaskError("not a directory")
+            judged.setdefault(campaign, []).extend(
+                _judge_c3_record(directory, campaign, (k, n), run)
+            )
+        except (TaskError, OSError) as exc:
+            problems.append(f"{artifact}: {exc}")
+    if not problems:
+        for campaign, (_, _, _, table_name, _) in C3_CAMPAIGNS.items():
+            if table_name is None:
+                continue
+            names = [m[0] for m in _c3_table(campaign)]
+            if sorted(judged.get(campaign, [])) != sorted(names):
+                problems.append(f"{campaign}: its shards do not cover its table exactly once")
+    if problems:
+        raise TaskError(f"C3 gate: {len(problems)} problem(s): " + "; ".join(problems[:30]))
+    run_id, attempt, sha = run
+    lines = [
+        f"C3 gate: COMPLETE: {len(expected)} record(s) of run {run_id} attempt {attempt} at "
+        f"{sha[:12]}, each from its job on a GitHub-hosted runner, judged again"
+    ]
+    for campaign, (finding, adr, task, table_name, shards) in C3_CAMPAIGNS.items():
+        what = (
+            f"{len(judged.get(campaign, []))} of {len(_c3_table(campaign))} mutants killed"
+            if table_name is not None
+            else f"{len(FOREIGN_CASES)} cross-uid cases on two distinct uids"
+        )
+        lines.append(f"  {campaign} ({finding}, ADR-{adr}, make {task}, {shards} shard(s)): {what}")
+    return lines
+
+
+def task_c3_gate_check() -> None:
+    """C3, HOSTED ONLY: judge every C3 campaign record of this run again (target/c3-gate)."""
+    for line in c3_gate_verdict(os.environ):
+        print(f"{GREEN}{line}{OFF}")
+    print(
+        "C3 hosted evidence: VERIFIED for this run. ADR acceptance is a separate decision: "
+        "ADR-0060 to ADR-0063 stay Proposed until it is made."
+    )
+
+
 TASKS = {
     "preflight": task_preflight,
     "tools": task_tools,
@@ -13932,6 +14589,8 @@ TASKS = {
     "sandbox-registry-mutations": task_sandbox_registry_mutations,
     "m5e-evidence-bundle": task_m5e_evidence_bundle,
     "m5e-gate-check": task_m5e_gate_check,
+    "c3-cross-uid-evidence": task_c3_cross_uid_evidence,
+    "c3-gate-check": task_c3_gate_check,
     "net-http-evidence": task_net_http_evidence,
     "net-http-mutations": task_net_http_mutations,
     "sandbox-workload-mutations": task_sandbox_workload_mutations,

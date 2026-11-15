@@ -27,6 +27,7 @@ DW := $(PY) scripts/dw.py
         sandbox-release-mutations sandbox-restart-evidence sandbox-capacity-evidence \
         sandbox-proxy-weakened-evidence sandbox-proxy-weakened-review \
         sandbox-registry-evidence sandbox-hygiene-evidence sandbox-registry-mutations m5e-evidence-bundle m5e-gate-check \
+        c3-cross-uid-evidence c3-gate-check \
         sandbox-neighbour-mutations d11-hardening-evidence d11-hardening-mutations d11-posture fuzz-smoke fuzz fuzz-plan fuzz-report security action-pins docs \
         preflight tools hooks clean
 
@@ -173,6 +174,12 @@ m5e-evidence-bundle: ## M5e.6 (G1), HOSTED ONLY: seal what this job's M5 evidenc
 
 m5e-gate-check: ## M5e.6 (G2), HOSTED ONLY: the M5 gate -- judge again every bundle this run's evidence jobs uploaded (target/m5e-gate) and print the M5e acceptance verdict; NOT EXERCISED anywhere but its own job on a GitHub-hosted runner
 	@$(DW) m5e-gate-check
+
+c3-cross-uid-evidence: ## C3 (F-18, ADR-0063): the cross-uid ownership cases on a real second identity (DW_PEER_AS), kept with both uids for the C3 gate
+	@$(DW) c3-cross-uid-evidence
+
+c3-gate-check: ## C3, HOSTED ONLY: judge every campaign record of this run's C3 workflow again (target/c3-gate); NOT EXERCISED anywhere but its own job on a GitHub-hosted runner
+	@$(DW) c3-gate-check
 
 sandbox-registry-mutations: ## M5e.5's mutation review (ADR-0054 §9, ADR-0055 §10): unit mutants anywhere; hosted ones only in the manual job, NOT EXERCISED elsewhere
 	@$(DW) sandbox-registry-mutations

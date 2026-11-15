@@ -771,6 +771,15 @@ stands in for a current run. [docs/EVIDENCE_ARCHIVE.md](docs/EVIDENCE_ARCHIVE.md
 covers how to capture, verify, back up and restore an archive, and what its
 hashes do and do not prove.
 
+**Hosted mutation reviews (C3).** `.github/workflows/c3-evidence.yml` runs
+the four Phase 1 mutation reviews and F-18's cross-uid record on hosted
+runners. It runs only when dispatched by hand: never on a push, a pull
+request or a schedule. It is not a required check. A review counts a mutant
+killed only when a test fails by name or an evidence task refuses, and only
+after an unmutated baseline has passed. Its gate accepts only its own run's
+records. [docs/C3_HOSTED_EVIDENCE.md](docs/C3_HOSTED_EVIDENCE.md) records
+what hosted CI has shown, and not shown, for each Phase 1 finding.
+
 ## Commits and pull requests
 
 Write the commit message for someone reading `git log` in two years and trying

@@ -1,0 +1,125 @@
+name: C3 hosted evidence (manual)
+
+# Phase 2.5 / C3: the hosted half of Phase 1's evidence that no other workflow
+# produces (docs/C3_HOSTED_EVIDENCE.md). Dispatched by hand, never on a push,
+# a pull request or a schedule.
+#
+#   * The four mutation reviews that guard Phase 1's remediations -- F-19's
+#     constrained grant among the agent guards (ADR-0060), F-17's egress
+#     authorisation (ADR-0061), F-01's taint (ADR-0062) and F-18's ownership
+#     (ADR-0063) -- each in independent shards. Each shard first runs its
+#     detectors unmutated; then every mutant must be killed by a named
+#     failing test or by its evidence task's refusal. A build error, a
+#     timeout, a selection that ran no test or a NOT EXERCISED is never a
+#     kill. Every file is restored and checked.
+#   * F-18's cross-uid ownership cases on a real second identity (`nobody`),
+#     kept with both uids and the suite's output.
+#   * The `c3-gate` job judges every record of THIS run again
+#     (`make c3-gate-check`) and fails unless every campaign passed. No
+#     `run-id` is given to the download: nothing from another run, an
+#     archived one included, is read.
+#
+# SECURITY POSTURE: read-only token, no secrets, actions pinned by commit SHA
+# (the same pins as ci.yml), nothing installed as root, every artifact kept 7
+# days. No job writes to the repository, and nothing here is a required check:
+# the `CI` job and its M5 gate are unchanged.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # One campaign at a time; a second dispatch waits.
+  group: c3-evidence
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  mutations:
+    name: ${{ matrix.campaign }} ${{ matrix.shard }}/${{ matrix.shards }} (make ${{ matrix.task }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    strategy:
+      # One shard's failure never hides another's result.
+      fail-fast: false
+      matrix:
+        # scripts/dw.py C3_CAMPAIGNS and this list must agree:
+        # tests/architecture/test_c3_evidence.py fails otherwise.
+        include:
+          - { campaign: agent-mutations, task: sandbox-agent-mutations, shard: 1, shards: 2 }
+          - { campaign: agent-mutations, task: sandbox-agent-mutations, shard: 2, shards: 2 }
+          - { campaign: egress-policy-mutations, task: sandbox-egress-policy-mutations, shard: 1, shards: 4 }
+          - { campaign: egress-policy-mutations, task: sandbox-egress-policy-mutations, shard: 2, shards: 4 }
+          - { campaign: egress-policy-mutations, task: sandbox-egress-policy-mutations, shard: 3, shards: 4 }
+          - { campaign: egress-policy-mutations, task: sandbox-egress-policy-mutations, shard: 4, shards: 4 }
+          - { campaign: taint-mutations, task: sandbox-taint-mutations, shard: 1, shards: 3 }
+          - { campaign: taint-mutations, task: sandbox-taint-mutations, shard: 2, shards: 3 }
+          - { campaign: taint-mutations, task: sandbox-taint-mutations, shard: 3, shards: 3 }
+          - { campaign: ownership-mutations, task: authority-ownership-mutations, shard: 1, shards: 2 }
+          - { campaign: ownership-mutations, task: authority-ownership-mutations, shard: 2, shards: 2 }
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/setup
+      - name: Show the OCI runtime
+        run: |
+          docker version --format 'client {{.Client.Version}} server {{.Server.Version}} api {{.Server.APIVersion}} {{.Server.Os}}/{{.Server.Arch}}'
+          docker info --format '{{.OperatingSystem}} kernel {{.KernelVersion}} cgroup v{{.CgroupVersion}} runtime {{.DefaultRuntime}} {{.SecurityOptions}}'
+      - name: make ${{ matrix.task }}
+        env:
+          # Data through the environment, never interpolated into the script;
+          # scripts/dw.py accepts only k/n and a task it knows.
+          DW_C3_TASK: ${{ matrix.task }}
+          DW_MUTATION_SHARD: ${{ matrix.shard }}/${{ matrix.shards }}
+        run: make "$DW_C3_TASK"
+      - name: Keep this shard's record
+        # Always: a failed or stopped review keeps its diagnostics, and its
+        # record says it did not pass.
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: c3-evidence-${{ matrix.campaign }}-${{ matrix.shard }}of${{ matrix.shards }}
+          path: target/c3-evidence/${{ matrix.campaign }}-${{ matrix.shard }}of${{ matrix.shards }}/
+          if-no-files-found: error
+          retention-days: 7
+
+  cross-uid:
+    name: cross-uid ownership (make c3-cross-uid-evidence)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/setup
+      - run: make c3-cross-uid-evidence
+        env:
+          DW_PEER_AS: nobody
+      - name: Keep the record
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: c3-evidence-cross-uid-ownership-1of1
+          path: target/c3-evidence/cross-uid-ownership-1of1/
+          if-no-files-found: error
+          retention-days: 7
+
+  c3-gate:
+    name: C3 gate (make c3-gate-check)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: [mutations, cross-uid]
+    # Always: a campaign that failed is judged and named, never skipped.
+    if: always()
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/setup
+        with:
+          rust: "false"
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: c3-evidence-*
+          path: target/c3-gate/
+      - run: make c3-gate-check

@@ -1,0 +1,1836 @@
+{
+  "adr_status": {
+    "0060": "Proposed",
+    "0061": "Proposed",
+    "0062": "Proposed",
+    "0063": "Proposed"
+  },
+  "as_of": "2026-11-15",
+  "baseline": {
+    "ci_result": "33 of 33 jobs success",
+    "ci_run": {
+      "attempt": 1,
+      "commit": "299686c570ee93898af6a31e554010de66763cab",
+      "id": 43648487347,
+      "number": 173
+    },
+    "commit": "299686c570ee93898af6a31e554010de66763cab"
+  },
+  "milestones": {
+    "F-01": {
+      "adr_acceptance": "PENDING (Proposed)",
+      "implemented": "c2353e8",
+      "mutation_control": "NOT VERIFIED (local only)",
+      "ordinary_hosted_ci": "run 43510375285 (#164) and every run since, latest 43648487347 (#173)",
+      "property_exercised": "VERIFIED for every real-OCI case; unit-level rows per test NOT VERIFIED"
+    },
+    "F-17": {
+      "adr_acceptance": "PENDING (Proposed)",
+      "implemented": "2f5721b, d58d622",
+      "mutation_control": "NOT VERIFIED (local only)",
+      "ordinary_hosted_ci": "run 43442420561 (#163) and every run since, latest 43648487347 (#173)",
+      "property_exercised": "VERIFIED for every real-OCI case; NOT VERIFIED: the M5e.5 manual workflow on F-17's code, and unit-level rows per test"
+    },
+    "F-18": {
+      "adr_acceptance": "PENDING (Proposed)",
+      "implemented": "d8eb736, e62c597",
+      "mutation_control": "NOT VERIFIED (local only)",
+      "ordinary_hosted_ci": "run 43591381367 (#166) and every run since, latest 43648487347 (#173)",
+      "property_exercised": "VERIFIED: i09 at three identities, the foreign-uid cases by the eval's verdict; unit-level rows per test NOT VERIFIED"
+    },
+    "F-19": {
+      "adr_acceptance": "PENDING (Proposed)",
+      "implemented": "9837ddc",
+      "mutation_control": "NOT VERIFIED (local only)",
+      "ordinary_hosted_ci": "run 43238694539 (#161) and every run since, latest 43648487347 (#173)",
+      "property_exercised": "VERIFIED (F-19-1, F-19-2 at real-oci, run 43640168802)"
+    }
+  },
+  "observed_run": {
+    "archive": "43640168802-a1 (owner's archive; independently re-captured from the owner's downloads and verified, every ZIP at GitHub's digest)",
+    "attempt": 1,
+    "commit": "4aee637a26bebf31e37a4f4882dd712c63f6121b",
+    "id": 43640168802,
+    "number": 172,
+    "same_source_as_baseline": "git diff 4aee637 299686c touches only CONTRIBUTING.md, docs/EVIDENCE_ARCHIVE.md, scripts/evidence_archive.py and its test: no exercised source"
+  },
+  "rows": [
+    {
+      "adr": "0060",
+      "artifact": {
+        "digest": "sha256:339dc87baf41e95403265f64cde86e906e3c3a4df59c08e2ff2c6c53f4a0928a",
+        "name": "m5e-evidence-sandbox-egress"
+      },
+      "behaviour": "A network.https grant that carries a constraint (methods, max_requests, or both, on any port) gives a PROXY_ONLY environment no destination; a destination it shares with an unconstrained grant appears once.",
+      "ci_job": "sandbox egress (make sandbox-egress-evidence)",
+      "evidence": {
+        "case": "grant-constrained-https-not-destinations",
+        "kind": "attributed-case",
+        "suite": "sandbox-authority-egress"
+      },
+      "finding": "F-19",
+      "gap": "",
+      "id": "F-19-1",
+      "identities": 1,
+      "invariant": "ADR-0060 decision; EG-1",
+      "level": "real-oci",
+      "make_target": "sandbox-egress-evidence",
+      "mutation_control": [
+        "agent-mutations: a constrained network.https grant becomes a proxy destination"
+      ],
+      "negative_control": "three constrained grants the admission shows as granted are absent from them",
+      "observed": "granted-and-absent [enforcement authority-grant-derivation]",
+      "positive_control": "the unconstrained grant's destination is in the intent's destinations",
+      "provenance": "the case's own line in m5e-evidence-sandbox-egress/judged-0.txt, judged by the task in the run and judged again by the run's M5 gate; the ZIP is at GitHub's digest (archive 43640168802-a1, verified offline and replayed through the M5 gate: 675 of 675 attributed cases)",
+      "run": {
+        "attempt": 1,
+        "commit": "4aee637a26bebf31e37a4f4882dd712c63f6121b",
+        "id": 43640168802,
+        "number": 172
+      },
+      "status": "VERIFIED"
+    },
+    {
+      "adr": "0060",
+      "artifact": {
+        "digest": "sha256:339dc87baf41e95403265f64cde86e906e3c3a4df59c08e2ff2c6c53f4a0928a",
+        "name": "m5e-evidence-sandbox-egress"
+      },
+      "behaviour": "From inside a real environment, a CONNECT to a name only a constrained grant names is refused, and its origin is never reached.",
+      "ci_job": "sandbox egress (make sandbox-egress-evidence)",
+      "evidence": {
+        "case": "constrained-grant-name-not-granted",
+        "kind": "attributed-case",
+        "suite": "sandbox-authority-egress"
+      },
+      "finding": "F-19",
+      "gap": "",
+      "id": "F-19-2",
+      "identities": 1,
+      "invariant": "ADR-0060 decision; EG-1",
+      "level": "real-oci",
+      "make_target": "sandbox-egress-evidence",
+      "mutation_control": [
+        "agent-mutations: a constrained network.https grant becomes a proxy destination"
+      ],
+      "negative_control": "the CONNECT to the constrained-only name is refused TARGET_NOT_GRANTED",
+      "observed": "target-not-granted [enforcement connect-proxy:grant]",
+      "positive_control": "the run's unconstrained destination is reachable through the same relay and proxy",
+      "provenance": "the case's own line in m5e-evidence-sandbox-egress/judged-0.txt, judged by the task in the run and judged again by the run's M5 gate; the ZIP is at GitHub's digest (archive 43640168802-a1, verified offline and replayed through the M5 gate: 675 of 675 attributed cases)",
+      "run": {
+        "attempt": 1,
+        "commit": "4aee637a26bebf31e37a4f4882dd712c63f6121b",
+        "id": 43640168802,
+        "number": 172
+      },
+      "status": "VERIFIED"
+    },
+    {
+      "adr": "0060",
+      "artifact": null,
+      "behaviour": "The derivation: methods, max_requests and both constraints, alternative ports, mixtures and duplicates, and the destination bound counted on destinations only.",
+      "ci_job": "tests (make test) (ubuntu-latest, windows-latest, macos-latest)",
+      "evidence": {
+        "file": "crates/dwkd-authority/src/sandbox.rs",
+        "kind": "unit",
+        "tests": [
+          "only_exact_https_hosts_become_destinations",
+          "a_constrained_https_grant_is_no_destination",
+          "an_unconstrained_grant_is_the_only_source_of_a_destination",
+          "a_constraint_never_makes_a_destination_of_what_was_not_one",
+          "the_destination_bound_counts_destinations_not_constrained_grants"
+        ]
+      },
+      "finding": "F-19",
+      "gap": "a green job is not an observed test: the C3 workflow's `agent-mutations` baseline records each of these tests by name",
+      "id": "F-19-3",
+      "identities": 1,
+      "invariant": "ADR-0060 decision",
+      "level": "in-process",
+      "make_target": "test",
+      "mutation_control": [
+        "agent-mutations: a constrained network.https grant becomes a proxy destination"
+      ],
+      "negative_control": "a constrained grant alone, or beside an unconstrained one, adds no destination",
+      "observed": "the job succeeded; no per-test result of it is retained",
+      "positive_control": "an unconstrained grant is a destination, in any order",
+      "provenance": "job conclusions read from GitHub's jobs API for run 43648487347",
+      "run": {
+        "attempt": 1,
+        "commit": "299686c570ee93898af6a31e554010de66763cab",
+        "id": 43648487347,
+        "number": 173
+      },
+      "status": "NOT VERIFIED"
+    },
+    {
+      "adr": "0060",
+      "artifact": null,
+      "behaviour": "The hosted sandbox-egress, three-platform tests, boundaries and m5e-gate jobs succeed on the committed revision.",
+      "ci_job": "CI",
+      "evidence": {
+        "jobs": [
+          "sandbox egress (make sandbox-egress-evidence)",
+          "tests (make test) (ubuntu-latest)",
+          "tests (make test) (windows-latest)",
+          "tests (make test) (macos-latest)",
+          "boundaries (make arch)",
+          "M5 gate (make m5e-gate-check)"
+        ],
+        "kind": "jobs"
+      },
+      "finding": "F-19",
+      "gap": "the contract's last item, the mutation review's hosted result, is row F-19-5",
+      "id": "F-19-4",
+      "identities": 1,
+      "invariant": "ADR-0060 Evidence: acceptance contract",
+      "level": "hosted-job",
+      "make_target": "check",
+      "mutation_control": [],
+      "negative_control": "the CI aggregate accepts only success (a skipped job is red)",
+      "observed": "all six jobs: success (33 of 33 jobs of the run)",
+      "positive_control": "every one of the four job sets succeeded",
+      "provenance": "GitHub's jobs API for run 43648487347",
+      "run": {
+        "attempt": 1,
+        "commit": "299686c570ee93898af6a31e554010de66763cab",
+        "id": 43648487347,
+        "number": 173
+      },
+      "status": "VERIFIED"
+    },
+    {
+      "adr": "0060",
+      "artifact": null,
+      "behaviour": "Every guard `make sandbox-agent-mutations` weakens in turn is caught by a named failing test or by the evidence task's refusal.",
+      "ci_job": "C3 hosted evidence (manual): agent-mutations",
+      "evidence": {
+        "campaign": "agent-mutations",
+        "kind": "mutation-campaign"
+      },
+      "finding": "F-19",
+      "gap": "no hosted run has ever executed this review; the C3 workflow runs it and keeps its records for the C3 gate",
+      "id": "F-19-5",
+      "identities": 1,
+      "invariant": "mutation review",
+      "level": "hosted-mutation",
+      "make_target": "sandbox-agent-mutations",
+      "mutation_control": [],
+      "negative_control": "each mutant must be KILLED; any other outcome fails the review",
+      "observed": "local, 2026-11-12: 12 of 12 killed, the F-19 mutant by the authority's unit suite",
+      "positive_control": "the unmutated baseline passes, each selection running at least one test",
+      "provenance": "the developer's machine only; never a hosted run",
+      "run": null,
+      "status": "NOT VERIFIED"
+    },
+    {
+      "adr": "0061",
+      "artifact": {
+        "digest": "sha256:339dc87baf41e95403265f64cde86e906e3c3a4df59c08e2ff2c6c53f4a0928a",
+        "name": "m5e-evidence-sandbox-egress"
+      },
+      "behaviour": "A tunnel with no supervised workload receives no authority.",
+      "ci_job": "sandbox egress (make sandbox-egress-evidence)",
+      "evidence": {
+        "case": "authorisation-none-outside-a-workload",
+        "kind": "attributed-case",
+        "suite": "sandbox-egress"
+      },
+      "finding": "F-17",
+      "gap": "",
+      "id": "F-17-1",
+      "identities": 1,
+      "invariant": "EG-4",
+      "level": "real-oci",
+      "make_target": "sandbox-egress-evidence",
+      "mutation_control": [
+        "egress-policy-mutations: M1: the proxy carries a tunnel its cell does not allow"
+      ],
+      "negative_control": "outside one it is refused NOT_AUTHORISED before anything is resolved",
+      "observed": "403-NOT_AUTHORISED-before-resolution [enforcement connect-proxy:workload-authorisation]",
+      "positive_control": "the same CONNECT inside a held workload is carried",
+      "provenance": "the case's own line in m5e-evidence-sandbox-egress/judged-0.txt, judged by the task in the run and judged again by the run's M5 gate; the ZIP is at GitHub's digest (archive 43640168802-a1, verified offline and replayed through the M5 gate: 675 of 675 attributed cases)",
+      "run": {
+        "attempt": 1,
+        "commit": "4aee637a26bebf31e37a4f4882dd712c63f6121b",
+        "id": 43640168802,
+        "number": 172
+      },
+      "status": "VERIFIED"
+    },
+    {
+      "adr": "0061",
+      "artifact": {
+        "digest": "sha256:339dc87baf41e95403265f64cde86e906e3c3a4df59c08e2ff2c6c53f4a0928a",
+        "name": "m5e-evidence-sandbox-egress"
+      },
+      "behaviour": "Every workload has its own authorisation, decided per destination by both gates.",
+      "ci_job": "sandbox egress (make sandbox-egress-evidence)",
+      "evidence": {
+        "case": "authorisation-allowed-and-denied-same-workload",
+        "kind": "attributed-case",
+        "suite": "sandbox-egress"
+      },
+      "finding": "F-17",
+      "gap": "",
+      "id": "F-17-2",
+      "identities": 1,
+      "invariant": "EG-2",
+      "level": "real-oci",
+      "make_target": "sandbox-egress-evidence",
+      "mutation_control": [
+        "egress-policy-mutations: M2: the authority allows what policy does not"
+      ],
+      "negative_control": "the denied one in the same workload is refused POLICY_DENIED before resolution",
+      "observed": "200-reached+403-POLICY_DENIED-before-resolution [enforcement connect-proxy:workload-authorisation]",
+      "positive_control": "the allowed destination is reached (200)",
+      "provenance": "the case's own line in m5e-evidence-sandbox-egress/judged-0.txt, judged by the task in the run and judged again by the run's M5 gate; the ZIP is at GitHub's digest (archive 43640168802-a1, verified offline and replayed through the M5 gate: 675 of 675 attributed cases)",
+      "run": {
+        "attempt": 1,
+        "commit": "4aee637a26bebf31e37a4f4882dd712c63f6121b",
+        "id": 43640168802,
+        "number": 172
+      },
+      "status": "VERIFIED"
+    },
+    {
+      "adr": "0061",
+      "artifact": {
+        "digest": "sha256:339dc87baf41e95403265f64cde86e906e3c3a4df59c08e2ff2c6c53f4a0928a",
+        "name": "m5e-evidence-sandbox-egress"
+      },
+      "behaviour": "The resolved addresses are judged as well as the name.",
+      "ci_job": "sandbox egress (make sandbox-egress-evidence)",
+      "evidence": {
+        "case": "authorisation-address-range-denied",
+        "kind": "attributed-case",
+        "suite": "sandbox-egress"
+      },
+      "finding": "F-17",
+      "gap": "",
+      "id": "F-17-3",
+      "identities": 1,
+      "invariant": "EG-6",
+      "level": "real-oci",
+      "make_target": "sandbox-egress-evidence",
+      "mutation_control": [
+        "egress-policy-mutations: M5: the pinned addresses are not judged",
+        "egress-policy-mutations: M11/PM1: a range's representative is its first address, its children ignored"
+      ],
+      "negative_control": "a name resolving into a denied range is refused POLICY_ADDRESS_DENIED, nothing sent",
+      "observed": "status='HTTP/1.1 403 Forbidden' decision=POLICY_ADDRESS_DENIED sent=0 received=0 [enforcement connect-proxy:workload-authorisation-address]",
+      "positive_control": "a name whose addresses the policy allows is carried",
+      "provenance": "the case's own line in m5e-evidence-sandbox-egress/judged-0.txt, judged by the task in the run and judged again by the run's M5 gate; the ZIP is at GitHub's digest (archive 43640168802-a1, verified offline and replayed through the M5 gate: 675 of 675 attributed cases)",
+      "run": {
+        "attempt": 1,
+        "commit": "4aee637a26bebf31e37a4f4882dd712c63f6121b",
+        "id": 43640168802,
+        "number": 172
+      },
+      "status": "VERIFIED"
+    },
+    {
+      "adr": "0061",
+      "artifact": {
+        "digest": "sha256:339dc87baf41e95403265f64cde86e906e3c3a4df59c08e2ff2c6c53f4a0928a",
+        "name": "m5e-evidence-sandbox-egress"
+      },
+      "behaviour": "The power pack's internal ranges are refused at the address, through the real authority.",
+      "ci_job": "sandbox egress (make sandbox-egress-evidence)",
+      "evidence": {
+        "case": "power-internal-ranges-refused-at-the-address",
+        "kind": "attributed-case",
+        "suite": "sandbox-authority-egress"
+      },
+      "finding": "F-17",
+      "gap": "",
+      "id": "F-17-4",
+      "identities": 1,
+      "invariant": "EG-6",
+      "level": "real-oci",
+      "make_target": "sandbox-egress-evidence",
+      "mutation_control": [
+        "egress-policy-mutations: PM2: an address's piece is the first range that holds it"
+      ],
+      "negative_control": "internal-range addresses are refused POLICY_ADDRESS_DENIED",
+      "observed": "status=\"HTTP/1.1 403 Forbidden\" decision=POLICY_ADDRESS_DENIED sent=0 received=0 [enforcement connect-proxy:workload-authorisation-address]",
+      "positive_control": "public addresses of the same grant are carried",
+      "provenance": "the case's own line in m5e-evidence-sandbox-egress/judged-0.txt, judged by the task in the run and judged again by the run's M5 gate; the ZIP is at GitHub's digest (archive 43640168802-a1, verified offline and replayed through the M5 gate: 675 of 675 attributed cases)",
+      "run": {
+        "attempt": 1,
+        "commit": "4aee637a26bebf31e37a4f4882dd712c63f6121b",
+        "id": 43640168802,
+        "number": 172
+      },
+      "status": "VERIFIED"
+    },
+    {
+      "adr": "0061",
+      "artifact": {
+        "digest": "sha256:339dc87baf41e95403265f64cde86e906e3c3a4df59c08e2ff2c6c53f4a0928a",
+        "name": "m5e-evidence-sandbox-egress"
+      },
+      "behaviour": "An authorisation lives exactly as long as its workload; its tunnels end with it.",
+      "ci_job": "sandbox egress (make sandbox-egress-evidence)",
+      "evidence": {
+        "case": "authorisation-ends-with-the-workload",
+        "kind": "attributed-case",
+        "suite": "sandbox-egress"
+      },
+      "finding": "F-17",
+      "gap": "",
+      "id": "F-17-5",
+      "identities": 1,
+      "invariant": "EG-4",
+      "level": "real-oci",
+      "make_target": "sandbox-egress-evidence",
+      "mutation_control": [
+        "egress-policy-mutations: M6: a workload's end leaves its tunnels open"
+      ],
+      "negative_control": "at the workload's end it is halted WORKLOAD_ENDED, no byte comes back, nothing reached",
+      "observed": "WORKLOAD_ENDED=1;bytes-back-0;not-reached [enforcement connect-proxy:workload-lifetime]",
+      "positive_control": "the tunnel carries while the workload runs",
+      "provenance": "the case's own line in m5e-evidence-sandbox-egress/judged-0.txt, judged by the task in the run and judged again by the run's M5 gate; the ZIP is at GitHub's digest (archive 43640168802-a1, verified offline and replayed through the M5 gate: 675 of 675 attributed cases)",
+      "run": {
+        "attempt": 1,
+        "commit": "4aee637a26bebf31e37a4f4882dd712c63f6121b",
+        "id": 43640168802,
+        "number": 172
+      },
+      "status": "VERIFIED"
+    },
+    {
+      "adr": "0061",
+      "artifact": {
+        "digest": "sha256:339dc87baf41e95403265f64cde86e906e3c3a4df59c08e2ff2c6c53f4a0928a",
+        "name": "m5e-evidence-sandbox-egress"
+      },
+      "behaviour": "A workload cannot keep or lend its authorisation once it has ended.",
+      "ci_job": "sandbox egress (make sandbox-egress-evidence)",
+      "evidence": {
+        "case": "authorisation-none-after-the-workload",
+        "kind": "attributed-case",
+        "suite": "sandbox-egress"
+      },
+      "finding": "F-17",
+      "gap": "no hosted case has two concurrent workloads trying each other's authorisation; the broker's unit test `nothing_is_carried_without_a_workloads_authorisation` covers it (row F-17-19)",
+      "id": "F-17-6",
+      "identities": 1,
+      "invariant": "EG-4",
+      "level": "real-oci",
+      "make_target": "sandbox-egress-evidence",
+      "mutation_control": [
+        "egress-policy-mutations: M6: a workload's end leaves its tunnels open"
+      ],
+      "negative_control": "after it, the same CONNECT is refused NOT_AUTHORISED",
+      "observed": "status='HTTP/1.1 403 Forbidden' decision=NOT_AUTHORISED sent=0 received=0 [enforcement connect-proxy:workload-authorisation]",
+      "positive_control": "the destination was reachable during the workload",
+      "provenance": "the case's own line in m5e-evidence-sandbox-egress/judged-0.txt, judged by the task in the run and judged again by the run's M5 gate; the ZIP is at GitHub's digest (archive 43640168802-a1, verified offline and replayed through the M5 gate: 675 of 675 attributed cases)",
+      "run": {
+        "attempt": 1,
+        "commit": "4aee637a26bebf31e37a4f4882dd712c63f6121b",
+        "id": 43640168802,
+        "number": 172
+      },
+      "status": "VERIFIED"
+    },
+    {
+      "adr": "0061",
+      "artifact": {
+        "digest": "sha256:339dc87baf41e95403265f64cde86e906e3c3a4df59c08e2ff2c6c53f4a0928a",
+        "name": "m5e-evidence-sandbox-egress"
+      },
+      "behaviour": "max_output_bytes becomes a per-tunnel downstream bound.",
+      "ci_job": "sandbox egress (make sandbox-egress-evidence)",
+      "evidence": {
+        "case": "authorisation-tunnel-output-bounded",
+        "kind": "attributed-case",
+        "suite": "sandbox-egress"
+      },
+      "finding": "F-17",
+      "gap": "",
+      "id": "F-17-7",
+      "identities": 1,
+      "invariant": "EG-9",
+      "level": "real-oci",
+      "make_target": "sandbox-egress-evidence",
+      "mutation_control": [
+        "egress-policy-mutations: M7: the per-tunnel output bound is not kept",
+        "egress-policy-mutations: PM7: a cell's per-tunnel bound is the largest, not the smallest"
+      ],
+      "negative_control": "the stream stops at the bound (100 bytes received of more sent)",
+      "observed": "status='HTTP/1.1 200 Connection Established' decision=- sent=87 received=100 end=eof [enforcement connect-proxy:tunnel-output-bound]",
+      "positive_control": "bytes below the bound arrive",
+      "provenance": "the case's own line in m5e-evidence-sandbox-egress/judged-0.txt, judged by the task in the run and judged again by the run's M5 gate; the ZIP is at GitHub's digest (archive 43640168802-a1, verified offline and replayed through the M5 gate: 675 of 675 attributed cases)",
+      "run": {
+        "attempt": 1,
+        "commit": "4aee637a26bebf31e37a4f4882dd712c63f6121b",
+        "id": 43640168802,
+        "number": 172
+      },
+      "status": "VERIFIED"
+    },
+    {
+      "adr": "0061",
+      "artifact": {
+        "digest": "sha256:339dc87baf41e95403265f64cde86e906e3c3a4df59c08e2ff2c6c53f4a0928a",
+        "name": "m5e-evidence-sandbox-egress"
+      },
+      "behaviour": "The workload's ending reports, per destination, how each CONNECT ended and whether it was reached.",
+      "ci_job": "sandbox egress (make sandbox-egress-evidence)",
+      "evidence": {
+        "case": "authorisation-report-per-destination",
+        "kind": "attributed-case",
+        "suite": "sandbox-egress"
+      },
+      "finding": "F-17",
+      "gap": "",
+      "id": "F-17-8",
+      "identities": 1,
+      "invariant": "EG-12",
+      "level": "real-oci",
+      "make_target": "sandbox-egress-evidence",
+      "mutation_control": [
+        "egress-policy-mutations: M10: a destination reached is never recorded"
+      ],
+      "negative_control": "denied, address-denied and output-limited ones are reported with their reasons",
+      "observed": "reached-1+0+0+1;POLICY_DENIED;POLICY_ADDRESS_DENIED;TUNNEL_OUTPUT_LIMIT [enforcement workload-supervisor-report]",
+      "positive_control": "a reached destination is reported reached",
+      "provenance": "the case's own line in m5e-evidence-sandbox-egress/judged-0.txt, judged by the task in the run and judged again by the run's M5 gate; the ZIP is at GitHub's digest (archive 43640168802-a1, verified offline and replayed through the M5 gate: 675 of 675 attributed cases)",
+      "run": {
+        "attempt": 1,
+        "commit": "4aee637a26bebf31e37a4f4882dd712c63f6121b",
+        "id": 43640168802,
+        "number": 172
+      },
+      "status": "VERIFIED"
+    },
+    {
+      "adr": "0061",
+      "artifact": {
+        "digest": "sha256:339dc87baf41e95403265f64cde86e906e3c3a4df59c08e2ff2c6c53f4a0928a",
+        "name": "m5e-evidence-sandbox-egress"
+      },
+      "behaviour": "On the first origin byte, open tunnels the exposed cell no longer allows are ended.",
+      "ci_job": "sandbox egress (make sandbox-egress-evidence)",
+      "evidence": {
+        "case": "exposure-revokes-an-open-tunnel",
+        "kind": "attributed-case",
+        "suite": "sandbox-egress"
+      },
+      "finding": "F-17",
+      "gap": "",
+      "id": "F-17-9",
+      "identities": 1,
+      "invariant": "EG-8",
+      "level": "real-oci",
+      "make_target": "sandbox-egress-evidence",
+      "mutation_control": [
+        "egress-policy-mutations: exposure: the root's flag is never set",
+        "egress-policy-mutations: exposure: only the workload that saw the byte is switched"
+      ],
+      "negative_control": "it is ended EXPOSURE_REVOKED with nothing more received",
+      "observed": "status='HTTP/1.1 200 Connection Established' decision=- sent=87 received=0 end=eof [enforcement connect-proxy:workspace-exposure]",
+      "positive_control": "the tunnel carried before exposure",
+      "provenance": "the case's own line in m5e-evidence-sandbox-egress/judged-0.txt, judged by the task in the run and judged again by the run's M5 gate; the ZIP is at GitHub's digest (archive 43640168802-a1, verified offline and replayed through the M5 gate: 675 of 675 attributed cases)",
+      "run": {
+        "attempt": 1,
+        "commit": "4aee637a26bebf31e37a4f4882dd712c63f6121b",
+        "id": 43640168802,
+        "number": 172
+      },
+      "status": "VERIFIED"
+    },
+    {
+      "adr": "0061",
+      "artifact": {
+        "digest": "sha256:339dc87baf41e95403265f64cde86e906e3c3a4df59c08e2ff2c6c53f4a0928a",
+        "name": "m5e-evidence-sandbox-egress"
+      },
+      "behaviour": "After exposure, a novel destination is decided by the exposed cell.",
+      "ci_job": "sandbox egress (make sandbox-egress-evidence)",
+      "evidence": {
+        "case": "exposure-novel-refused-after-first-origin-byte",
+        "kind": "attributed-case",
+        "suite": "sandbox-egress"
+      },
+      "finding": "F-17",
+      "gap": "",
+      "id": "F-17-10",
+      "identities": 1,
+      "invariant": "EG-8",
+      "level": "real-oci",
+      "make_target": "sandbox-egress-evidence",
+      "mutation_control": [
+        "egress-policy-mutations: exposure: the first origin byte is forwarded without the root's decision",
+        "egress-policy-mutations: exposure: the exposed cells are the pristine ones"
+      ],
+      "negative_control": "after it, it is refused POLICY_DENIED, nothing sent",
+      "observed": "status='HTTP/1.1 403 Forbidden' decision=POLICY_DENIED sent=0 received=0 [enforcement connect-proxy:workspace-exposure]",
+      "positive_control": "before the first origin byte the novel destination was allowed",
+      "provenance": "the case's own line in m5e-evidence-sandbox-egress/judged-0.txt, judged by the task in the run and judged again by the run's M5 gate; the ZIP is at GitHub's digest (archive 43640168802-a1, verified offline and replayed through the M5 gate: 675 of 675 attributed cases)",
+      "run": {
+        "attempt": 1,
+        "commit": "4aee637a26bebf31e37a4f4882dd712c63f6121b",
+        "id": 43640168802,
+        "number": 172
+      },
+      "status": "VERIFIED"
+    },
+    {
+      "adr": "0061",
+      "artifact": {
+        "digest": "sha256:339dc87baf41e95403265f64cde86e906e3c3a4df59c08e2ff2c6c53f4a0928a",
+        "name": "m5e-evidence-sandbox-egress"
+      },
+      "behaviour": "Exposure is per workspace root: a sibling environment on the same root is switched too.",
+      "ci_job": "sandbox egress (make sandbox-egress-evidence)",
+      "evidence": {
+        "case": "exposure-sibling-on-the-shared-root",
+        "kind": "attributed-case",
+        "suite": "sandbox-egress"
+      },
+      "finding": "F-17",
+      "gap": "",
+      "id": "F-17-11",
+      "identities": 1,
+      "invariant": "EG-8",
+      "level": "real-oci",
+      "make_target": "sandbox-egress-evidence",
+      "mutation_control": [
+        "egress-policy-mutations: exposure: the flag is kept per environment, not per root"
+      ],
+      "negative_control": "after the first workload's origin byte it is refused POLICY_DENIED",
+      "observed": "status='HTTP/1.1 403 Forbidden' decision=POLICY_DENIED sent=0 received=0 [enforcement connect-proxy:workspace-exposure]",
+      "positive_control": "the sibling's destination was allowed before",
+      "provenance": "the case's own line in m5e-evidence-sandbox-egress/judged-0.txt, judged by the task in the run and judged again by the run's M5 gate; the ZIP is at GitHub's digest (archive 43640168802-a1, verified offline and replayed through the M5 gate: 675 of 675 attributed cases)",
+      "run": {
+        "attempt": 1,
+        "commit": "4aee637a26bebf31e37a4f4882dd712c63f6121b",
+        "id": 43640168802,
+        "number": 172
+      },
+      "status": "VERIFIED"
+    },
+    {
+      "adr": "0061",
+      "artifact": {
+        "digest": "sha256:339dc87baf41e95403265f64cde86e906e3c3a4df59c08e2ff2c6c53f4a0928a",
+        "name": "m5e-evidence-sandbox-egress"
+      },
+      "behaviour": "Another root's environments keep their own exposure.",
+      "ci_job": "sandbox egress (make sandbox-egress-evidence)",
+      "evidence": {
+        "case": "exposure-other-root-untouched",
+        "kind": "attributed-case",
+        "suite": "sandbox-egress"
+      },
+      "finding": "F-17",
+      "gap": "",
+      "id": "F-17-12",
+      "identities": 1,
+      "invariant": "EG-8",
+      "level": "real-oci",
+      "make_target": "sandbox-egress-evidence",
+      "mutation_control": [
+        "egress-policy-mutations: exposure: the flag is kept per environment, not per root"
+      ],
+      "negative_control": "it is not switched by this root's exposure",
+      "observed": "status='HTTP/1.1 200 Connection Established' decision=- sent=87 received=5 end=eof [enforcement connect-proxy:workspace-exposure]",
+      "positive_control": "a workload on another root is still carried (received 5 bytes)",
+      "provenance": "the case's own line in m5e-evidence-sandbox-egress/judged-0.txt, judged by the task in the run and judged again by the run's M5 gate; the ZIP is at GitHub's digest (archive 43640168802-a1, verified offline and replayed through the M5 gate: 675 of 675 attributed cases)",
+      "run": {
+        "attempt": 1,
+        "commit": "4aee637a26bebf31e37a4f4882dd712c63f6121b",
+        "id": 43640168802,
+        "number": 172
+      },
+      "status": "VERIFIED"
+    },
+    {
+      "adr": "0061",
+      "artifact": {
+        "digest": "sha256:339dc87baf41e95403265f64cde86e906e3c3a4df59c08e2ff2c6c53f4a0928a",
+        "name": "m5e-evidence-sandbox-egress"
+      },
+      "behaviour": "Exposure is durable per root before the next launch.",
+      "ci_job": "sandbox egress (make sandbox-egress-evidence)",
+      "evidence": {
+        "case": "exposure-durable-before-the-next-launch",
+        "kind": "attributed-case",
+        "suite": "sandbox-authority-egress"
+      },
+      "finding": "F-17",
+      "gap": "",
+      "id": "F-17-13",
+      "identities": 1,
+      "invariant": "EG-8",
+      "level": "real-oci",
+      "make_target": "sandbox-egress-evidence",
+      "mutation_control": [
+        "egress-policy-mutations: exposure: a root is never exposed at launch"
+      ],
+      "negative_control": "after a certain reach the next launch starts exposed, with an exposure row",
+      "observed": "exposure-row+certain-reach+exposed-at-start [enforcement authority-ledger]",
+      "positive_control": "an unexposed root's launch starts pristine",
+      "provenance": "the case's own line in m5e-evidence-sandbox-egress/judged-0.txt, judged by the task in the run and judged again by the run's M5 gate; the ZIP is at GitHub's digest (archive 43640168802-a1, verified offline and replayed through the M5 gate: 675 of 675 attributed cases)",
+      "run": {
+        "attempt": 1,
+        "commit": "4aee637a26bebf31e37a4f4882dd712c63f6121b",
+        "id": 43640168802,
+        "number": 172
+      },
+      "status": "VERIFIED"
+    },
+    {
+      "adr": "0061",
+      "artifact": {
+        "digest": "sha256:339dc87baf41e95403265f64cde86e906e3c3a4df59c08e2ff2c6c53f4a0928a",
+        "name": "m5e-evidence-sandbox-egress"
+      },
+      "behaviour": "Another run's exposure of a shared root decides this run's tunnels.",
+      "ci_job": "sandbox egress (make sandbox-egress-evidence)",
+      "evidence": {
+        "case": "exposure-from-a-sibling-run-on-the-shared-root",
+        "kind": "attributed-case",
+        "suite": "sandbox-authority-egress"
+      },
+      "finding": "F-17",
+      "gap": "",
+      "id": "F-17-14",
+      "identities": 1,
+      "invariant": "EG-8",
+      "level": "real-oci",
+      "make_target": "sandbox-egress-evidence",
+      "mutation_control": [
+        "egress-policy-mutations: exposure: the flag is kept per environment, not per root"
+      ],
+      "negative_control": "after a sibling run's origin byte it is refused POLICY_DENIED",
+      "observed": "status=\"HTTP/1.1 403 Forbidden\" decision=POLICY_DENIED sent=0 received=0 [enforcement authority-egress-decision]",
+      "positive_control": "the destination is allowed on a pristine root",
+      "provenance": "the case's own line in m5e-evidence-sandbox-egress/judged-0.txt, judged by the task in the run and judged again by the run's M5 gate; the ZIP is at GitHub's digest (archive 43640168802-a1, verified offline and replayed through the M5 gate: 675 of 675 attributed cases)",
+      "run": {
+        "attempt": 1,
+        "commit": "4aee637a26bebf31e37a4f4882dd712c63f6121b",
+        "id": 43640168802,
+        "number": 172
+      },
+      "status": "VERIFIED"
+    },
+    {
+      "adr": "0061",
+      "artifact": {
+        "digest": "sha256:339dc87baf41e95403265f64cde86e906e3c3a4df59c08e2ff2c6c53f4a0928a",
+        "name": "m5e-evidence-sandbox-egress"
+      },
+      "behaviour": "Policy refusal happens before any resolution or reach, after the fixed rules.",
+      "ci_job": "sandbox egress (make sandbox-egress-evidence)",
+      "evidence": {
+        "case": "policy-denied-before-resolution",
+        "kind": "attributed-case",
+        "suite": "sandbox-authority-egress"
+      },
+      "finding": "F-17",
+      "gap": "",
+      "id": "F-17-15",
+      "identities": 1,
+      "invariant": "EG-2; EG-10; EG-13",
+      "level": "real-oci",
+      "make_target": "sandbox-egress-evidence",
+      "mutation_control": [
+        "egress-policy-mutations: M2: the authority allows what policy does not"
+      ],
+      "negative_control": "the denied one is refused 403 POLICY_DENIED with no resolution and no origin contact",
+      "observed": "403-POLICY_DENIED-no-resolution-no-origin [enforcement connect-proxy:workload-authorisation]",
+      "positive_control": "an allowed destination of the same grant is carried",
+      "provenance": "the case's own line in m5e-evidence-sandbox-egress/judged-0.txt, judged by the task in the run and judged again by the run's M5 gate; the ZIP is at GitHub's digest (archive 43640168802-a1, verified offline and replayed through the M5 gate: 675 of 675 attributed cases)",
+      "run": {
+        "attempt": 1,
+        "commit": "4aee637a26bebf31e37a4f4882dd712c63f6121b",
+        "id": 43640168802,
+        "number": 172
+      },
+      "status": "VERIFIED"
+    },
+    {
+      "adr": "0061",
+      "artifact": {
+        "digest": "sha256:339dc87baf41e95403265f64cde86e906e3c3a4df59c08e2ff2c6c53f4a0928a",
+        "name": "m5e-evidence-sandbox-egress"
+      },
+      "behaviour": "The decision and its inputs are durable in the intent before the broker hears of the workload.",
+      "ci_job": "sandbox egress (make sandbox-egress-evidence)",
+      "evidence": {
+        "case": "decision-recorded-with-the-intent",
+        "kind": "attributed-case",
+        "suite": "sandbox-authority-egress"
+      },
+      "finding": "F-17",
+      "gap": "",
+      "id": "F-17-16",
+      "identities": 1,
+      "invariant": "EG-3; EG-12",
+      "level": "real-oci",
+      "make_target": "sandbox-egress-evidence",
+      "mutation_control": [
+        "egress-policy-mutations: M9: the tripwire never fires"
+      ],
+      "negative_control": "a recomputation that differs would fail the digest",
+      "observed": "4-destinations-4-cells-digests [enforcement authority-audit]",
+      "positive_control": "four destinations, four cells, digests recorded",
+      "provenance": "the case's own line in m5e-evidence-sandbox-egress/judged-0.txt, judged by the task in the run and judged again by the run's M5 gate; the ZIP is at GitHub's digest (archive 43640168802-a1, verified offline and replayed through the M5 gate: 675 of 675 attributed cases)",
+      "run": {
+        "attempt": 1,
+        "commit": "4aee637a26bebf31e37a4f4882dd712c63f6121b",
+        "id": 43640168802,
+        "number": 172
+      },
+      "status": "VERIFIED"
+    },
+    {
+      "adr": "0061",
+      "artifact": {
+        "digest": "sha256:339dc87baf41e95403265f64cde86e906e3c3a4df59c08e2ff2c6c53f4a0928a",
+        "name": "m5e-evidence-sandbox-egress"
+      },
+      "behaviour": "A cell that needs an approval refuses unattended.",
+      "ci_job": "sandbox egress (make sandbox-egress-evidence)",
+      "evidence": {
+        "case": "approval-needed-refused-unattended",
+        "kind": "attributed-case",
+        "suite": "sandbox-authority-egress"
+      },
+      "finding": "F-17",
+      "gap": "",
+      "id": "F-17-17",
+      "identities": 1,
+      "invariant": "EG-2",
+      "level": "real-oci",
+      "make_target": "sandbox-egress-evidence",
+      "mutation_control": [
+        "egress-policy-mutations: M8: an obligation no tunnel keeps is accepted"
+      ],
+      "negative_control": "all four cells of the destination are deny-approval-needed-when-unattended",
+      "observed": "review.example.com:34559 NOVEL np=0/2[deny-approval-needed-when-unattended] ne=0/2[deny-approval-needed-when-unattended] sp=0/2[deny-approval-needed-when-unattended] se=0/2[deny-approval-needed-when-unattended] [enforcement authority-egress-decision]",
+      "positive_control": "the run's other cells are decided normally",
+      "provenance": "the case's own line in m5e-evidence-sandbox-egress/judged-0.txt, judged by the task in the run and judged again by the run's M5 gate; the ZIP is at GitHub's digest (archive 43640168802-a1, verified offline and replayed through the M5 gate: 675 of 675 attributed cases)",
+      "run": {
+        "attempt": 1,
+        "commit": "4aee637a26bebf31e37a4f4882dd712c63f6121b",
+        "id": 43640168802,
+        "number": 172
+      },
+      "status": "VERIFIED"
+    },
+    {
+      "adr": "0061",
+      "artifact": {
+        "digest": "sha256:339dc87baf41e95403265f64cde86e906e3c3a4df59c08e2ff2c6c53f4a0928a",
+        "name": "m5e-evidence-sandbox-egress"
+      },
+      "behaviour": "A destination becomes SEEN only on an origin byte; novelty decides a tainted run.",
+      "ci_job": "sandbox egress (make sandbox-egress-evidence)",
+      "evidence": {
+        "case": "tainted-novel-refused-seen-reached",
+        "kind": "attributed-case",
+        "suite": "sandbox-authority-egress"
+      },
+      "finding": "F-17",
+      "gap": "",
+      "id": "F-17-18",
+      "identities": 1,
+      "invariant": "EG-7",
+      "level": "real-oci",
+      "make_target": "sandbox-egress-evidence",
+      "mutation_control": [
+        "egress-policy-mutations: M3: every destination is decided as already reached",
+        "egress-policy-mutations: M4: a destination is decided with no novelty"
+      ],
+      "negative_control": "a novel one is refused POLICY_DENIED",
+      "observed": "seen-200+novel-POLICY_DENIED [enforcement authority-egress-decision]",
+      "positive_control": "the seen destination is reached (200)",
+      "provenance": "the case's own line in m5e-evidence-sandbox-egress/judged-0.txt, judged by the task in the run and judged again by the run's M5 gate; the ZIP is at GitHub's digest (archive 43640168802-a1, verified offline and replayed through the M5 gate: 675 of 675 attributed cases)",
+      "run": {
+        "attempt": 1,
+        "commit": "4aee637a26bebf31e37a4f4882dd712c63f6121b",
+        "id": 43640168802,
+        "number": 172
+      },
+      "status": "VERIFIED"
+    },
+    {
+      "adr": "0061",
+      "artifact": null,
+      "behaviour": "The broker evaluates no policy; it refuses an authorisation beyond its grant (EGRESS_NOT_GRANTED), and carries nothing without a workload's authorisation.",
+      "ci_job": "tests (make test) (ubuntu-latest, windows-latest, macos-latest)",
+      "evidence": {
+        "file": "crates/dwkd-broker/src/egress/tests.rs",
+        "kind": "unit",
+        "tests": [
+          "a_target_that_is_not_granted_is_refused_before_anything_is_resolved",
+          "nothing_is_carried_without_a_workloads_authorisation",
+          "a_workloads_end_stops_its_tunnels_and_nothing_follows",
+          "an_authorisation_is_refused_without_a_proxy_beyond_the_grant_or_twice"
+        ]
+      },
+      "finding": "F-17",
+      "gap": "a green job is not an observed test: the C3 workflow's `egress-policy-mutations` baseline records each of these tests by name",
+      "id": "F-17-19",
+      "identities": 1,
+      "invariant": "EG-4; EG-11",
+      "level": "in-process",
+      "make_target": "test",
+      "mutation_control": [
+        "egress-policy-mutations: M1: the proxy carries a tunnel its cell does not allow"
+      ],
+      "negative_control": "beyond the grant, twice, or with no proxy it is refused",
+      "observed": "the job succeeded; no per-test result of it is retained",
+      "positive_control": "an authorisation within the grant is accepted once",
+      "provenance": "job conclusions read from GitHub's jobs API for run 43648487347",
+      "run": {
+        "attempt": 1,
+        "commit": "299686c570ee93898af6a31e554010de66763cab",
+        "id": 43648487347,
+        "number": 173
+      },
+      "status": "NOT VERIFIED"
+    },
+    {
+      "adr": "0061",
+      "artifact": null,
+      "behaviour": "The authority's decision, digest, drift tripwire (EGRESS_CONTEXT_DRIFT), settlement and recovery, through the real authority and store with the route tests' fake broker.",
+      "ci_job": "tests (make test) (ubuntu-latest, windows-latest, macos-latest)",
+      "evidence": {
+        "file": "crates/dwkd-authority/src/state/workload_route_tests.rs",
+        "kind": "unit",
+        "tests": [
+          "f17_a_launch_carries_both_gates_decision_for_every_granted_destination",
+          "f17_an_authorisation_recomputes_to_its_recorded_digest",
+          "f17_a_tainted_run_reaches_no_new_destination_and_a_reached_one_is_seen",
+          "f17_an_uncertain_ending_exposes_the_root_and_its_reach_is_the_stricter_of_both",
+          "f17_a_report_that_contradicts_the_authorisation_is_not_believed",
+          "f17_a_workload_launched_beside_an_unsettled_one_on_its_root_starts_exposed",
+          "f17_a_restart_settles_an_interrupted_workload_uncertainly",
+          "f17_a_context_that_changes_under_a_running_workload_costs_its_environment",
+          "f17_a_settled_authorisation_and_the_facts_it_left_never_change"
+        ]
+      },
+      "finding": "F-17",
+      "gap": "a green job is not an observed test: the C3 workflow's `egress-policy-mutations` baseline records each of these tests by name",
+      "id": "F-17-20",
+      "identities": 1,
+      "invariant": "EG-5; EG-7; EG-8",
+      "level": "in-process",
+      "make_target": "test",
+      "mutation_control": [
+        "egress-policy-mutations: M9: the tripwire never fires",
+        "egress-policy-mutations: exposure: an uncertain ending exposes nothing"
+      ],
+      "negative_control": "a changed context destroys the environment; a contradictory report is not believed",
+      "observed": "the job succeeded; no per-test result of it is retained",
+      "positive_control": "a launch's authorisation recomputes to its recorded digest",
+      "provenance": "job conclusions read from GitHub's jobs API for run 43648487347",
+      "run": {
+        "attempt": 1,
+        "commit": "299686c570ee93898af6a31e554010de66763cab",
+        "id": 43648487347,
+        "number": 173
+      },
+      "status": "NOT VERIFIED"
+    },
+    {
+      "adr": "0061",
+      "artifact": {
+        "digest": "sha256:339dc87baf41e95403265f64cde86e906e3c3a4df59c08e2ff2c6c53f4a0928a",
+        "name": "m5e-evidence-sandbox-egress"
+      },
+      "behaviour": "Restart and reconciliation never return an exposed root to pristine.",
+      "ci_job": "sandbox egress (make sandbox-egress-evidence)",
+      "evidence": {
+        "case": "restart-never-restores-a-pristine-root",
+        "kind": "attributed-case",
+        "suite": "sandbox-authority-egress"
+      },
+      "finding": "F-17",
+      "gap": "",
+      "id": "F-17-21",
+      "identities": 1,
+      "invariant": "EG-3; EG-8",
+      "level": "real-oci",
+      "make_target": "sandbox-egress-evidence",
+      "mutation_control": [
+        "egress-policy-mutations: exposure: a root is never exposed at launch"
+      ],
+      "negative_control": "an exposed root is exposed at the first launch after the restart",
+      "observed": "exposed-at-start-after-restart [enforcement authority-reconciliation]",
+      "positive_control": "a pristine root stays pristine across a restart",
+      "provenance": "the case's own line in m5e-evidence-sandbox-egress/judged-0.txt, judged by the task in the run and judged again by the run's M5 gate; the ZIP is at GitHub's digest (archive 43640168802-a1, verified offline and replayed through the M5 gate: 675 of 675 attributed cases)",
+      "run": {
+        "attempt": 1,
+        "commit": "4aee637a26bebf31e37a4f4882dd712c63f6121b",
+        "id": 43640168802,
+        "number": 172
+      },
+      "status": "VERIFIED"
+    },
+    {
+      "adr": "0061",
+      "artifact": {
+        "digest": "sha256:339dc87baf41e95403265f64cde86e906e3c3a4df59c08e2ff2c6c53f4a0928a",
+        "name": "m5e-evidence-sandbox-egress"
+      },
+      "behaviour": "An interrupted workload is settled UNCERTAIN, its root exposed, its reach uncertain (fail closed).",
+      "ci_job": "sandbox egress (make sandbox-egress-evidence)",
+      "evidence": {
+        "case": "restart-settles-an-interrupted-workload-uncertain",
+        "kind": "attributed-case",
+        "suite": "sandbox-authority-egress"
+      },
+      "finding": "F-17",
+      "gap": "",
+      "id": "F-17-22",
+      "identities": 1,
+      "invariant": "EG-7; EG-8; EG-10",
+      "level": "real-oci",
+      "make_target": "sandbox-egress-evidence",
+      "mutation_control": [
+        "egress-policy-mutations: exposure: an uncertain ending exposes nothing"
+      ],
+      "negative_control": "the interrupted one is UNCERTAIN + exposed + uncertain-reach",
+      "observed": "UNCERTAIN+exposed+uncertain-reach [enforcement authority-reconciliation]",
+      "positive_control": "a settled workload's report is kept as reported",
+      "provenance": "the case's own line in m5e-evidence-sandbox-egress/judged-0.txt, judged by the task in the run and judged again by the run's M5 gate; the ZIP is at GitHub's digest (archive 43640168802-a1, verified offline and replayed through the M5 gate: 675 of 675 attributed cases)",
+      "run": {
+        "attempt": 1,
+        "commit": "4aee637a26bebf31e37a4f4882dd712c63f6121b",
+        "id": 43640168802,
+        "number": 172
+      },
+      "status": "VERIFIED"
+    },
+    {
+      "adr": "0061",
+      "artifact": {
+        "digest": "sha256:0d047e5e70828fd99f7b381a6973725e127ff1b0205df243a07b2ce6e98a0da1",
+        "name": "m5e-evidence-sandbox-registry"
+      },
+      "behaviour": "The registry evidence exercises the production policy path: a granted index policy denies is refused.",
+      "ci_job": "sandbox registry evidence (make sandbox-registry-evidence)",
+      "evidence": {
+        "case": "registry-pip-granted-index-denied-by-policy",
+        "kind": "attributed-case",
+        "suite": "sandbox-registry"
+      },
+      "finding": "F-17",
+      "gap": "",
+      "id": "F-17-23",
+      "identities": 1,
+      "invariant": "EG-2 (registry production path)",
+      "level": "dwkp-end-to-end",
+      "make_target": "sandbox-registry-evidence",
+      "mutation_control": [
+        "egress-policy-mutations: M2: the authority allows what policy does not"
+      ],
+      "negative_control": "pip's granted index denied by policy installs nothing; CONNECT 403 POLICY_DENIED",
+      "observed": "refused:nothing-installed;connect-403;POLICY_DENIED=1 [enforcement connect-proxy:workload-authorisation]",
+      "positive_control": "the policy-allowed registry paths of the suite install",
+      "provenance": "the case's own line in m5e-evidence-sandbox-registry/judged-0.txt, judged by the task in the run and judged again by the run's M5 gate; the ZIP is at GitHub's digest (archive 43640168802-a1, verified offline and replayed through the M5 gate: 675 of 675 attributed cases)",
+      "run": {
+        "attempt": 1,
+        "commit": "4aee637a26bebf31e37a4f4882dd712c63f6121b",
+        "id": 43640168802,
+        "number": 172
+      },
+      "status": "VERIFIED"
+    },
+    {
+      "adr": "0061",
+      "artifact": null,
+      "behaviour": "Every M5 case from before F-17 is kept, unweakened, and still passes.",
+      "ci_job": "M5 gate (make m5e-gate-check)",
+      "evidence": {
+        "kind": "inventory",
+        "pinned": "tests/architecture/m5e_cases_before_f17.txt"
+      },
+      "finding": "F-17",
+      "gap": "",
+      "id": "F-17-24",
+      "identities": 1,
+      "invariant": "EG-14 Only narrows; EG-13 fixed rules first",
+      "level": "hosted-gate",
+      "make_target": "m5e-gate-check",
+      "mutation_control": [],
+      "negative_control": "the attribution test refuses a removed, renamed, re-levelled or re-attributed pinned case",
+      "observed": "the archived bundles replayed through the M5 gate: inventory COMPLETE, 675 of 675 attributed cases judged again",
+      "positive_control": "the 647 cases pinned in tests/architecture/m5e_cases_before_f17.txt are all judged again",
+      "provenance": "archive 43640168802-a1, every ZIP at GitHub's digest; replay by scripts/evidence_archive.py verify --replay-gate with this checkout's tables",
+      "run": {
+        "attempt": 1,
+        "commit": "4aee637a26bebf31e37a4f4882dd712c63f6121b",
+        "id": 43640168802,
+        "number": 172
+      },
+      "status": "VERIFIED"
+    },
+    {
+      "adr": "0061",
+      "artifact": {
+        "digest": "sha256:be619bb37015a623bcd8a48b0e1715fc01fb390fa7c66e6a941531aca361409c",
+        "name": "m5e-evidence-sandbox-agent"
+      },
+      "behaviour": "The three-identity agent half still runs the production identities and policy path under F-17's authorisation.",
+      "ci_job": "sandbox agent (make sandbox-agent-evidence)",
+      "evidence": {
+        "cases": [
+          "a03-https-granted-origin-three-identities",
+          "a09-agent-and-broker-share-the-bounded-workspace",
+          "i01-relay-runs-as-10002",
+          "i01-three-distinct-host-identities",
+          "i01-workload-runs-as-10001",
+          "i02-another-uid-refused",
+          "i02-authority-own-uid-refused",
+          "i02-broker-uid-refused",
+          "i02-configured-runtime-admitted",
+          "i03-runtime-cannot-use-the-broker-channel",
+          "i04-runtime-cannot-read-or-change-authority-state",
+          "i04-runtime-cannot-read-policy-operator-file-or-secret",
+          "i05-runtime-cannot-reach-the-oci-socket",
+          "i05-workload-cannot-reach-the-oci-socket",
+          "i06-broker-refuses-a-relay-authority",
+          "i06-broker-refuses-a-workload-authority",
+          "i06-broker-start-up-posture-production",
+          "i06-runtime-cannot-inspect-a-daemon",
+          "i06-workload-is-not-the-brokers-identity",
+          "i07-runtime-excluded-from-the-workspace",
+          "i07-workspace-group-membership",
+          "i07-workspace-root-contract-measured",
+          "i08-authority-crash-unknown-environment-destroyed",
+          "i08-broker-crash-unknown-environment-destroyed",
+          "i08-never-replayed",
+          "i09-runtime-holds-only-what-the-operator-declared"
+        ],
+        "kind": "agent-cases",
+        "suite": "sandbox-agent-identity"
+      },
+      "finding": "F-17",
+      "gap": "",
+      "id": "F-17-25",
+      "identities": 3,
+      "invariant": "multi-identity production path",
+      "level": "hosted-three-identity",
+      "make_target": "sandbox-agent-evidence",
+      "mutation_control": [],
+      "negative_control": "i02-another-uid-refused, i03-runtime-cannot-use-the-broker-channel",
+      "observed": "26 cases at hosted-three-identity; i01: authority=1001 broker=999 runtime=997 outsider=65534",
+      "positive_control": "i02-configured-runtime-admitted (uid:997)",
+      "provenance": "the cases' own lines in m5e-evidence-sandbox-agent, judged by the task's own verdict in the run and again by its M5 gate",
+      "run": {
+        "attempt": 1,
+        "commit": "4aee637a26bebf31e37a4f4882dd712c63f6121b",
+        "id": 43640168802,
+        "number": 172
+      },
+      "status": "VERIFIED"
+    },
+    {
+      "adr": "0061",
+      "artifact": null,
+      "behaviour": "The M5e.5 manual workflow (hygiene evidence and the registry mutation review's hosted mutants), whose policies gained F-17's network rule.",
+      "ci_job": "M5e.5 evidence (manual)",
+      "evidence": {
+        "kind": "workflow",
+        "workflow": ".github/workflows/m5e5-evidence.yml"
+      },
+      "finding": "F-17",
+      "gap": "no run on F-17's code: the owner dispatches the existing workflow on main",
+      "id": "F-17-26",
+      "identities": 1,
+      "invariant": "ADR-0061 Evidence: hosted only (M5e.5)",
+      "level": "hosted-mutation",
+      "make_target": "sandbox-registry-mutations",
+      "mutation_control": [],
+      "negative_control": "a hosted registry mutant must be killed",
+      "observed": "success, but on 523dc9a (2026-11-11), before F-19 (9837ddc) and F-17 (2f5721b)",
+      "positive_control": "its last run passed",
+      "provenance": "GitHub's workflow-runs API",
+      "run": {
+        "attempt": 1,
+        "commit": "523dc9a43985",
+        "id": 42994561934,
+        "number": 4
+      },
+      "status": "NOT VERIFIED"
+    },
+    {
+      "adr": "0061",
+      "artifact": null,
+      "behaviour": "Every guard `make sandbox-egress-policy-mutations` weakens in turn is caught by a named failing test or by the evidence task's refusal.",
+      "ci_job": "C3 hosted evidence (manual): egress-policy-mutations",
+      "evidence": {
+        "campaign": "egress-policy-mutations",
+        "kind": "mutation-campaign"
+      },
+      "finding": "F-17",
+      "gap": "no hosted run has ever executed this review; the C3 workflow runs it and keeps its records for the C3 gate",
+      "id": "F-17-27",
+      "identities": 1,
+      "invariant": "mutation review",
+      "level": "hosted-mutation",
+      "make_target": "sandbox-egress-policy-mutations",
+      "mutation_control": [],
+      "negative_control": "each mutant must be KILLED; any other outcome fails the review",
+      "observed": "local, 2026-11-13: 26 of 26 killed",
+      "positive_control": "the unmutated baseline passes, each selection running at least one test",
+      "provenance": "the developer's machine only; never a hosted run",
+      "run": null,
+      "status": "NOT VERIFIED"
+    },
+    {
+      "adr": "0062",
+      "artifact": {
+        "digest": "sha256:339dc87baf41e95403265f64cde86e906e3c3a4df59c08e2ff2c6c53f4a0928a",
+        "name": "m5e-evidence-sandbox-egress"
+      },
+      "behaviour": "Permission alone, a refused CONNECT and a failed dial raise no taint.",
+      "ci_job": "sandbox egress (make sandbox-egress-evidence)",
+      "evidence": {
+        "case": "taint-permission-refusal-failed-dial-not-external",
+        "kind": "attributed-case",
+        "suite": "sandbox-authority-egress"
+      },
+      "finding": "F-01",
+      "gap": "",
+      "id": "F-01-1",
+      "identities": 1,
+      "invariant": "T-11",
+      "level": "real-oci",
+      "make_target": "sandbox-egress-evidence",
+      "mutation_control": [
+        "taint-mutations: TM11: a possibility is taken for content"
+      ],
+      "negative_control": "no rise: none + POLICY_DENIED + dial-failed: local-only",
+      "observed": "none+POLICY_DENIED+dial-failed:local-only [enforcement authority-taint]",
+      "positive_control": "the run is answered, its taint stays local",
+      "provenance": "the case's own line in m5e-evidence-sandbox-egress/judged-0.txt, judged by the task in the run and judged again by the run's M5 gate; the ZIP is at GitHub's digest (archive 43640168802-a1, verified offline and replayed through the M5 gate: 675 of 675 attributed cases)",
+      "run": {
+        "attempt": 1,
+        "commit": "4aee637a26bebf31e37a4f4882dd712c63f6121b",
+        "id": 43640168802,
+        "number": 172
+      },
+      "status": "VERIFIED"
+    },
+    {
+      "adr": "0062",
+      "artifact": {
+        "digest": "sha256:339dc87baf41e95403265f64cde86e906e3c3a4df59c08e2ff2c6c53f4a0928a",
+        "name": "m5e-evidence-sandbox-egress"
+      },
+      "behaviour": "An output-less download is external receipt.",
+      "ci_job": "sandbox egress (make sandbox-egress-evidence)",
+      "evidence": {
+        "case": "taint-download-no-output-external",
+        "kind": "attributed-case",
+        "suite": "sandbox-authority-egress"
+      },
+      "finding": "F-01",
+      "gap": "",
+      "id": "F-01-2",
+      "identities": 1,
+      "invariant": "T-6",
+      "level": "real-oci",
+      "make_target": "sandbox-egress-evidence",
+      "mutation_control": [
+        "taint-mutations: TM1: a workload's own reach is not its own evidence"
+      ],
+      "negative_control": "its run is EXTERNAL_UNTRUSTED, cause workload_reached, basis ORIGIN_BYTES",
+      "observed": "stdout-0+external:workload_reached:ORIGIN_BYTES [enforcement authority-taint]",
+      "positive_control": "the workload printed nothing (stdout 0)",
+      "provenance": "the case's own line in m5e-evidence-sandbox-egress/judged-0.txt, judged by the task in the run and judged again by the run's M5 gate; the ZIP is at GitHub's digest (archive 43640168802-a1, verified offline and replayed through the M5 gate: 675 of 675 attributed cases)",
+      "run": {
+        "attempt": 1,
+        "commit": "4aee637a26bebf31e37a4f4882dd712c63f6121b",
+        "id": 43640168802,
+        "number": 172
+      },
+      "status": "VERIFIED"
+    },
+    {
+      "adr": "0062",
+      "artifact": {
+        "digest": "sha256:339dc87baf41e95403265f64cde86e906e3c3a4df59c08e2ff2c6c53f4a0928a",
+        "name": "m5e-evidence-sandbox-egress"
+      },
+      "behaviour": "An incomplete transfer is content received.",
+      "ci_job": "sandbox egress (make sandbox-egress-evidence)",
+      "evidence": {
+        "case": "taint-partial-transfer-external",
+        "kind": "attributed-case",
+        "suite": "sandbox-authority-egress"
+      },
+      "finding": "F-01",
+      "gap": "",
+      "id": "F-01-3",
+      "identities": 1,
+      "invariant": "T-7",
+      "level": "real-oci",
+      "make_target": "sandbox-egress-evidence",
+      "mutation_control": [
+        "taint-mutations: TM2: an uncertain settlement is taken for nothing reached"
+      ],
+      "negative_control": "the run is external",
+      "observed": "3-of-5-bytes+external [enforcement authority-taint]",
+      "positive_control": "3 of 5 bytes arrived",
+      "provenance": "the case's own line in m5e-evidence-sandbox-egress/judged-0.txt, judged by the task in the run and judged again by the run's M5 gate; the ZIP is at GitHub's digest (archive 43640168802-a1, verified offline and replayed through the M5 gate: 675 of 675 attributed cases)",
+      "run": {
+        "attempt": 1,
+        "commit": "4aee637a26bebf31e37a4f4882dd712c63f6121b",
+        "id": 43640168802,
+        "number": 172
+      },
+      "status": "VERIFIED"
+    },
+    {
+      "adr": "0062",
+      "artifact": {
+        "digest": "sha256:339dc87baf41e95403265f64cde86e906e3c3a4df59c08e2ff2c6c53f4a0928a",
+        "name": "m5e-evidence-sandbox-egress"
+      },
+      "behaviour": "What another run reads from an exposed root is external, whichever run brought it.",
+      "ci_job": "sandbox egress (make sandbox-egress-evidence)",
+      "evidence": {
+        "case": "taint-downloaded-file-read-by-another-run",
+        "kind": "attributed-case",
+        "suite": "sandbox-authority-egress"
+      },
+      "finding": "F-01",
+      "gap": "",
+      "id": "F-01-4",
+      "identities": 1,
+      "invariant": "T-4; T-5",
+      "level": "real-oci",
+      "make_target": "sandbox-egress-evidence",
+      "mutation_control": [
+        "taint-mutations: TM6: a read-family result never comes from the root"
+      ],
+      "negative_control": "it is external: root_exposed, ORIGIN_BYTES",
+      "observed": "external:root_exposed:ORIGIN_BYTES [enforcement authority-taint]",
+      "positive_control": "the reader's fs.read succeeds",
+      "provenance": "the case's own line in m5e-evidence-sandbox-egress/judged-0.txt, judged by the task in the run and judged again by the run's M5 gate; the ZIP is at GitHub's digest (archive 43640168802-a1, verified offline and replayed through the M5 gate: 675 of 675 attributed cases)",
+      "run": {
+        "attempt": 1,
+        "commit": "4aee637a26bebf31e37a4f4882dd712c63f6121b",
+        "id": 43640168802,
+        "number": 172
+      },
+      "status": "VERIFIED"
+    },
+    {
+      "adr": "0062",
+      "artifact": {
+        "digest": "sha256:339dc87baf41e95403265f64cde86e906e3c3a4df59c08e2ff2c6c53f4a0928a",
+        "name": "m5e-evidence-sandbox-egress"
+      },
+      "behaviour": "A tainted run's write marks the root before its effect.",
+      "ci_job": "sandbox egress (make sandbox-egress-evidence)",
+      "evidence": {
+        "case": "taint-tainted-writer-marks-root",
+        "kind": "attributed-case",
+        "suite": "sandbox-authority-egress"
+      },
+      "finding": "F-01",
+      "gap": "",
+      "id": "F-01-5",
+      "identities": 1,
+      "invariant": "T-3 (R3)",
+      "level": "real-oci",
+      "make_target": "sandbox-egress-evidence",
+      "mutation_control": [
+        "taint-mutations: TM7: a tainted run's fs mutation marks nothing"
+      ],
+      "negative_control": "workspace_taint is recorded, and a later read is external",
+      "observed": "workspace_taint+external-read [enforcement authority-taint]",
+      "positive_control": "the write is performed",
+      "provenance": "the case's own line in m5e-evidence-sandbox-egress/judged-0.txt, judged by the task in the run and judged again by the run's M5 gate; the ZIP is at GitHub's digest (archive 43640168802-a1, verified offline and replayed through the M5 gate: 675 of 675 attributed cases)",
+      "run": {
+        "attempt": 1,
+        "commit": "4aee637a26bebf31e37a4f4882dd712c63f6121b",
+        "id": 43640168802,
+        "number": 172
+      },
+      "status": "VERIFIED"
+    },
+    {
+      "adr": "0062",
+      "artifact": {
+        "digest": "sha256:339dc87baf41e95403265f64cde86e906e3c3a4df59c08e2ff2c6c53f4a0928a",
+        "name": "m5e-evidence-sandbox-egress"
+      },
+      "behaviour": "A fresh run on an exposed root is decided by the exposed cell, not its own pristine taint.",
+      "ci_job": "sandbox egress (make sandbox-egress-evidence)",
+      "evidence": {
+        "case": "taint-fresh-run-decided-by-the-exposed-cell",
+        "kind": "attributed-case",
+        "suite": "sandbox-authority-egress"
+      },
+      "finding": "F-01",
+      "gap": "",
+      "id": "F-01-6",
+      "identities": 1,
+      "invariant": "T-9 (with ADR-0061)",
+      "level": "real-oci",
+      "make_target": "sandbox-egress-evidence",
+      "mutation_control": [
+        "taint-mutations: TM19: a tainted run's own workload starts pristine"
+      ],
+      "negative_control": "the exposed cell's decision applies to the fresh run",
+      "observed": "second.example.com:34559 NOVEL np=2/2[https-to-the-evidence-origins] ne=0/2[deny-approval-needed-when-unattended] sp=2/2[https-to-the-evidence-origins] se=2/2[https-to-the-evidence-origins] [enforcement authority-egress-decision]",
+      "positive_control": "the pristine cells allow the destination",
+      "provenance": "the case's own line in m5e-evidence-sandbox-egress/judged-0.txt, judged by the task in the run and judged again by the run's M5 gate; the ZIP is at GitHub's digest (archive 43640168802-a1, verified offline and replayed through the M5 gate: 675 of 675 attributed cases)",
+      "run": {
+        "attempt": 1,
+        "commit": "4aee637a26bebf31e37a4f4882dd712c63f6121b",
+        "id": 43640168802,
+        "number": 172
+      },
+      "status": "VERIFIED"
+    },
+    {
+      "adr": "0062",
+      "artifact": {
+        "digest": "sha256:339dc87baf41e95403265f64cde86e906e3c3a4df59c08e2ff2c6c53f4a0928a",
+        "name": "m5e-evidence-sandbox-egress"
+      },
+      "behaviour": "Restart settles an interrupted workload uncertain, for the reaped run and the next.",
+      "ci_job": "sandbox egress (make sandbox-egress-evidence)",
+      "evidence": {
+        "case": "taint-interrupted-workload-on-restart",
+        "kind": "attributed-case",
+        "suite": "sandbox-authority-egress"
+      },
+      "finding": "F-01",
+      "gap": "",
+      "id": "F-01-7",
+      "identities": 1,
+      "invariant": "T-3; T-7",
+      "level": "real-oci",
+      "make_target": "sandbox-egress-evidence",
+      "mutation_control": [
+        "taint-mutations: TM10: a restart records nothing of an interrupted workload"
+      ],
+      "negative_control": "reaped run uncertain, next run uncertain",
+      "observed": "reaped-run-uncertain+next-run-uncertain [enforcement authority-taint]",
+      "positive_control": "a settled workload's run keeps its recorded taint",
+      "provenance": "the case's own line in m5e-evidence-sandbox-egress/judged-0.txt, judged by the task in the run and judged again by the run's M5 gate; the ZIP is at GitHub's digest (archive 43640168802-a1, verified offline and replayed through the M5 gate: 675 of 675 attributed cases)",
+      "run": {
+        "attempt": 1,
+        "commit": "4aee637a26bebf31e37a4f4882dd712c63f6121b",
+        "id": 43640168802,
+        "number": 172
+      },
+      "status": "VERIFIED"
+    },
+    {
+      "adr": "0062",
+      "artifact": null,
+      "behaviour": "Monotonicity, broker-derived evidence, ordering, evidence rows, replay and decision attribution, through the real authority and store with a fake broker.",
+      "ci_job": "tests (make test) (ubuntu-latest, windows-latest, macos-latest)",
+      "evidence": {
+        "file": "crates/dwkd-authority/src/state/taint_route_tests.rs",
+        "kind": "unit",
+        "tests": [
+          "f01_a_workload_whose_tunnel_received_origin_bytes_taints_its_run_even_printing_nothing",
+          "f01_permission_alone_never_taints_and_local_output_stays_local",
+          "f01_an_uncertain_ending_that_allowed_something_taints_and_says_it_is_uncertain",
+          "f01_a_report_that_contradicts_itself_is_never_taken_for_no_content",
+          "f01_downloaded_content_is_external_when_read_in_the_same_run_and_another",
+          "f01_two_workspaces_bound_to_one_directory_are_one_root",
+          "f01_a_reader_beside_a_workload_in_flight_is_tainted_by_a_possibility_that_never_marks",
+          "f01_a_possibility_that_settled_exposed_is_content_and_marks",
+          "f01_a_run_holding_external_content_marks_the_root_before_the_effect",
+          "f01_a_tainted_launch_waits_while_a_pristine_networked_workload_runs_on_the_root",
+          "f01_one_runs_taint_never_reaches_into_another_runs_running_workload",
+          "f01_a_restart_records_what_an_interrupted_workload_may_have_brought",
+          "f01_taint_never_falls_and_every_decision_says_the_taint_it_used",
+          "f01_a_pristine_root_stays_local",
+          "f01_a_later_receipt_makes_a_run_whose_taint_was_a_possibility_hold_content"
+        ]
+      },
+      "finding": "F-01",
+      "gap": "a green job is not an observed test: the C3 workflow's `taint-mutations` baseline records each of these tests by name",
+      "id": "F-01-8",
+      "identities": 1,
+      "invariant": "T-1; T-2; T-8; T-10; T-12",
+      "level": "in-process",
+      "make_target": "test",
+      "mutation_control": [
+        "taint-mutations: TM13: a later receipt adds nothing to what a taint rests on",
+        "taint-mutations: TM14: a run's taint rises without its evidence",
+        "taint-mutations: TM15: a workspace's taint can be forgotten",
+        "taint-mutations: TM16: a run holding no external content marks a workspace"
+      ],
+      "negative_control": "taint never falls; a contradictory report is never taken for no content",
+      "observed": "the job succeeded; no per-test result of it is retained",
+      "positive_control": "local output stays local; a pristine root stays local",
+      "provenance": "job conclusions read from GitHub's jobs API for run 43648487347",
+      "run": {
+        "attempt": 1,
+        "commit": "299686c570ee93898af6a31e554010de66763cab",
+        "id": 43648487347,
+        "number": 173
+      },
+      "status": "NOT VERIFIED"
+    },
+    {
+      "adr": "0062",
+      "artifact": null,
+      "behaviour": "No M5 case was removed or weakened by F-01; the 668 cases pinned before it are still judged, and the re-baselined F-17 case asserts the stricter cell.",
+      "ci_job": "M5 gate (make m5e-gate-check)",
+      "evidence": {
+        "kind": "inventory",
+        "pinned": "tests/architecture/m5e_cases_before_f01.txt"
+      },
+      "finding": "F-01",
+      "gap": "",
+      "id": "F-01-9",
+      "identities": 1,
+      "invariant": "Every earlier evidence case kept",
+      "level": "hosted-gate",
+      "make_target": "m5e-gate-check",
+      "mutation_control": [],
+      "negative_control": "the attribution test refuses a removed, renamed or re-levelled case",
+      "observed": "replayed M5 gate: 675 of 675 attributed cases; tainted-novel-refused-seen-reached observed as seen-200+novel-POLICY_DENIED",
+      "positive_control": "tests/architecture/m5e_cases_before_f01.txt (668) all judged again",
+      "provenance": "archive 43640168802-a1, every ZIP at GitHub's digest",
+      "run": {
+        "attempt": 1,
+        "commit": "4aee637a26bebf31e37a4f4882dd712c63f6121b",
+        "id": 43640168802,
+        "number": 172
+      },
+      "status": "VERIFIED"
+    },
+    {
+      "adr": "0062",
+      "artifact": null,
+      "behaviour": "Every guard `make sandbox-taint-mutations` weakens in turn is caught by a named failing test or by the evidence task's refusal.",
+      "ci_job": "C3 hosted evidence (manual): taint-mutations",
+      "evidence": {
+        "campaign": "taint-mutations",
+        "kind": "mutation-campaign"
+      },
+      "finding": "F-01",
+      "gap": "no hosted run has ever executed this review; the C3 workflow runs it and keeps its records for the C3 gate",
+      "id": "F-01-10",
+      "identities": 1,
+      "invariant": "mutation review",
+      "level": "hosted-mutation",
+      "make_target": "sandbox-taint-mutations",
+      "mutation_control": [],
+      "negative_control": "each mutant must be KILLED; any other outcome fails the review",
+      "observed": "local, 2026-11-13: 20 of 20 killed",
+      "positive_control": "the unmutated baseline passes, each selection running at least one test",
+      "provenance": "the developer's machine only; never a hosted run",
+      "run": null,
+      "status": "NOT VERIFIED"
+    },
+    {
+      "adr": "0063",
+      "artifact": {
+        "digest": "sha256:be619bb37015a623bcd8a48b0e1715fc01fb390fa7c66e6a941531aca361409c",
+        "name": "m5e-evidence-sandbox-agent"
+      },
+      "behaviour": "On three real host identities, the runtime holds only what the operator declared: another principal's session and an undeclared profile are refused.",
+      "ci_job": "sandbox agent (make sandbox-agent-evidence)",
+      "evidence": {
+        "cases": [
+          "i09-runtime-holds-only-what-the-operator-declared",
+          "i01-three-distinct-host-identities"
+        ],
+        "kind": "agent-cases",
+        "suite": "sandbox-agent-identity"
+      },
+      "finding": "F-18",
+      "gap": "",
+      "id": "F-18-1",
+      "identities": 3,
+      "invariant": "\u00a71 the principal is the kernel's uid; \u00a73; \u00a74",
+      "level": "hosted-three-identity",
+      "make_target": "sandbox-agent-evidence",
+      "mutation_control": [
+        "ownership-mutations: OM9: admission names any profile",
+        "ownership-mutations: OM3: the fence trusts the lease alone"
+      ],
+      "negative_control": "i09: LEASE_HELD for another principal's session, UNKNOWN_AGENT_PROFILE for an undeclared profile",
+      "observed": "LEASE_HELD,UNKNOWN_AGENT_PROFILE [authority-ownership]; uids authority=1001 broker=999 runtime=997 outsider=65534",
+      "positive_control": "i02-configured-runtime-admitted: the declared runtime uid is admitted",
+      "provenance": "the cases' own lines in m5e-evidence-sandbox-agent, judged in the run and again by its M5 gate; ZIP at GitHub's digest",
+      "run": {
+        "attempt": 1,
+        "commit": "4aee637a26bebf31e37a4f4882dd712c63f6121b",
+        "id": 43640168802,
+        "number": 172
+      },
+      "status": "VERIFIED"
+    },
+    {
+      "adr": "0063",
+      "artifact": {
+        "digest": "sha256:30e5ec601099f76be3151270edb17dd60afffc2b5d1fe7a52d469e95679067e3",
+        "name": "m5e-evidence-evals"
+      },
+      "behaviour": "A second uid the peer policy lets speak cannot take another principal's session, escalate to its profile, or hold its owned session.",
+      "ci_job": "evals (make eval-check)",
+      "evidence": {
+        "cases": [
+          "foreign-uid-valid-handshake",
+          "foreign-uid-malformed-payload",
+          "foreign-uid-flood",
+          "foreign-uid-impersonation",
+          "foreign-uid-session-takeover",
+          "foreign-uid-profile-escalation",
+          "foreign-uid-owned-session-held"
+        ],
+        "eval_id": "authority-security/peer-credential-check",
+        "kind": "eval"
+      },
+      "finding": "F-18",
+      "gap": "the cases' own lines and the two uids are not retained; the C3 workflow's cross-uid job keeps both",
+      "id": "F-18-2",
+      "identities": 2,
+      "invariant": "\u00a73 a foreign uid takes over nothing; \u00a74",
+      "level": "real-process-second-identity",
+      "make_target": "eval-check",
+      "mutation_control": [
+        "ownership-mutations: OM1: a subject that may not hold a session is not refused"
+      ],
+      "negative_control": "foreign-uid-session-takeover, foreign-uid-profile-escalation, foreign-uid-owned-session-held: each contained",
+      "observed": "pass, score 1.0: 7 of 7 expected cases contained, layers peer-gate=3 state-fence=3 filesystem=1, against the real dwkd-authority binary",
+      "positive_control": "the same uid's own session is held",
+      "provenance": "the eval's result line kept in m5e-evidence-evals (judged-0.txt); its runner fails unless every named case is reported contained",
+      "run": {
+        "attempt": 1,
+        "commit": "4aee637a26bebf31e37a4f4882dd712c63f6121b",
+        "id": 43640168802,
+        "number": 172
+      },
+      "status": "VERIFIED"
+    },
+    {
+      "adr": "0063",
+      "artifact": null,
+      "behaviour": "Takeover after expiry, release and restart; same-uid reconnect; first acquirer; binding, sharing, profiles, delegation and revocation; stale epochs; migration and adoption fail closed; forged subject fields.",
+      "ci_job": "tests (make test) (ubuntu-latest, windows-latest, macos-latest)",
+      "evidence": {
+        "file": "crates/dwkd-authority/tests/state_ownership.rs",
+        "kind": "unit",
+        "tests": [
+          "another_subject_cannot_take_a_session_after_its_lease_expires_and_nothing_is_reaped",
+          "another_subject_cannot_take_a_released_session_before_or_after_a_restart",
+          "the_same_uid_on_a_new_connection_holds_its_session_once_the_old_lease_ends",
+          "a_new_session_is_its_first_acquirers_and_the_record_says_so",
+          "a_session_is_bound_only_with_an_owner_who_is_a_principal_of_the_workspace",
+          "a_bound_session_is_held_only_while_its_holder_is_a_principal_of_the_workspace",
+          "an_acknowledged_shared_workspace_lets_each_principal_hold_only_its_own_session",
+          "a_profile_not_granted_to_the_subject_is_refused_as_one_the_kernel_does_not_hold",
+          "revoking_a_profile_reaps_only_that_subjects_runs_under_it",
+          "a_revoked_delegate_keeps_nothing_and_gets_nothing_back",
+          "the_fence_refuses_a_holder_whose_standing_ended_even_without_the_revocations_fence",
+          "a_retired_session_is_held_by_nobody_again",
+          "a_migrated_store_grants_nothing_its_history_shows_and_refuses_until_declared",
+          "the_single_principal_adoption_declares_a_consistent_history_and_nothing_else",
+          "an_adoption_interrupted_before_its_commit_grants_nothing",
+          "a_forged_subject_or_principal_in_a_message_is_not_a_message",
+          "an_adoption_is_refused_when_a_declaration_names_another_subject",
+          "a_root_two_workspaces_share_is_shared_by_their_principals_only_as_acknowledged"
+        ]
+      },
+      "finding": "F-18",
+      "gap": "a green job is not an observed test: the C3 workflow's `ownership-mutations` baseline records each of these tests by name",
+      "id": "F-18-3",
+      "identities": 1,
+      "invariant": "\u00a73; \u00a75; \u00a76; \u00a77",
+      "level": "in-process",
+      "make_target": "test",
+      "mutation_control": [
+        "ownership-mutations: OM1: a subject that may not hold a session is not refused",
+        "ownership-mutations: OM4: a session seen before is claimed by its first acquirer",
+        "ownership-mutations: OM25: the migration makes the last lease holder an owner",
+        "ownership-mutations: OM26: the adoption overlooks another subject in the history"
+      ],
+      "negative_control": "every other subject is refused LEASE_HELD or UNKNOWN_AGENT_PROFILE and reaps nothing",
+      "observed": "the job succeeded; no per-test result of it is retained",
+      "positive_control": "the same uid, the first acquirer, a declared principal hold their sessions",
+      "provenance": "job conclusions read from GitHub's jobs API for run 43648487347",
+      "run": {
+        "attempt": 1,
+        "commit": "299686c570ee93898af6a31e554010de66763cab",
+        "id": 43648487347,
+        "number": 173
+      },
+      "status": "NOT VERIFIED"
+    },
+    {
+      "adr": "0063",
+      "artifact": null,
+      "behaviour": "Ownership holds through workload settlement: a revoked run's parked workload is ended and answered with nothing it produced; a crash on either side completes the revocation.",
+      "ci_job": "tests (make test) (ubuntu-latest, windows-latest, macos-latest)",
+      "evidence": {
+        "file": "crates/dwkd-authority/src/state/ownership_route_tests.rs",
+        "kind": "unit",
+        "tests": [
+          "f18_a_revocation_ends_a_parked_workloads_environment_and_answers_nothing_it_produced",
+          "f18_a_revocation_the_broker_cannot_confirm_stays_revoked_until_a_start_completes_it",
+          "f18_a_crash_between_a_revocations_commit_and_the_broker_is_completed_at_the_next_start",
+          "f18_a_crash_after_the_broker_removed_an_environment_is_settled_as_gone_at_the_next_start",
+          "f18_a_revocation_of_nothing_writes_nothing"
+        ]
+      },
+      "finding": "F-18",
+      "gap": "a green job is not an observed test: the C3 workflow's `ownership-mutations` baseline records each of these tests by name",
+      "id": "F-18-4",
+      "identities": 1,
+      "invariant": "\u00a75 two-phase revocation; settlement",
+      "level": "in-process",
+      "make_target": "test",
+      "mutation_control": [
+        "ownership-mutations: OM24: a revoked run is answered with what its parked workload produced",
+        "ownership-mutations: OM23: a revocation's second phase is skipped"
+      ],
+      "negative_control": "a parked workload's output is withheld (OUTCOME_UNKNOWN)",
+      "observed": "the job succeeded; no per-test result of it is retained",
+      "positive_control": "a revocation of nothing writes nothing",
+      "provenance": "job conclusions read from GitHub's jobs API for run 43648487347",
+      "run": {
+        "attempt": 1,
+        "commit": "299686c570ee93898af6a31e554010de66763cab",
+        "id": 43648487347,
+        "number": 173
+      },
+      "status": "NOT VERIFIED"
+    },
+    {
+      "adr": "0063",
+      "artifact": null,
+      "behaviour": "A pipe end or terminal master passed over the real socket is never installed in the authority.",
+      "ci_job": "authority boundary (make authority-transport-evidence)",
+      "evidence": {
+        "file": "crates/dwkd-authority/tests/transport_hostile.rs",
+        "kind": "unit",
+        "tests": [
+          "a_descriptor_a_runtime_passes_is_never_installed_in_the_authority"
+        ]
+      },
+      "finding": "F-18",
+      "gap": "the C3 workflow's cross-uid job keeps this test's pass by name",
+      "id": "F-18-5",
+      "identities": 1,
+      "invariant": "\u00a71 (TX061): runtime-provided descriptors never become authority",
+      "level": "real-process",
+      "make_target": "authority-transport-evidence",
+      "mutation_control": [],
+      "negative_control": "no passed descriptor appears in the authority's /proc fd table",
+      "observed": "the job succeeded; no per-test result of it is retained",
+      "positive_control": "the same connection's ordinary messages are served",
+      "provenance": "job conclusions read from GitHub's jobs API for run 43648487347",
+      "run": {
+        "attempt": 1,
+        "commit": "299686c570ee93898af6a31e554010de66763cab",
+        "id": 43648487347,
+        "number": 173
+      },
+      "status": "NOT VERIFIED"
+    },
+    {
+      "adr": "0063",
+      "artifact": null,
+      "behaviour": "The server receives no descriptor (TX061), inserts no attended origin or approval (TX062), makes a subject only from the peer's uid (TX063), and only adoption reads ownership_observation (TX064).",
+      "ci_job": "boundaries (make arch)",
+      "evidence": {
+        "kind": "boundary-rules",
+        "rules": [
+          "TX061",
+          "TX062",
+          "TX063",
+          "TX064"
+        ]
+      },
+      "finding": "F-18",
+      "gap": "static hygiene, not containment (architecture.toml); no per-rule output retained",
+      "id": "F-18-6",
+      "identities": 1,
+      "invariant": "boundary rules TX061-TX064",
+      "level": "static",
+      "make_target": "arch",
+      "mutation_control": [],
+      "negative_control": "the boundary checker's own tests reject each rule's violation",
+      "observed": "the job succeeded; locally `make arch`: dwcheck ok",
+      "positive_control": "make arch passes",
+      "provenance": "job conclusions read from GitHub's jobs API for run 43648487347",
+      "run": {
+        "attempt": 1,
+        "commit": "299686c570ee93898af6a31e554010de66763cab",
+        "id": 43648487347,
+        "number": 173
+      },
+      "status": "NOT VERIFIED"
+    },
+    {
+      "adr": "0063",
+      "artifact": null,
+      "behaviour": "Every guard `make authority-ownership-mutations` weakens in turn is caught by a named failing test or by the evidence task's refusal.",
+      "ci_job": "C3 hosted evidence (manual): ownership-mutations",
+      "evidence": {
+        "campaign": "ownership-mutations",
+        "kind": "mutation-campaign"
+      },
+      "finding": "F-18",
+      "gap": "no hosted run has ever executed this review; the C3 workflow runs it and keeps its records for the C3 gate",
+      "id": "F-18-7",
+      "identities": 1,
+      "invariant": "mutation review",
+      "level": "hosted-mutation",
+      "make_target": "authority-ownership-mutations",
+      "mutation_control": [],
+      "negative_control": "each mutant must be KILLED; any other outcome fails the review",
+      "observed": "local, 2026-11-14: 27 of 27 killed",
+      "positive_control": "the unmutated baseline passes, each selection running at least one test",
+      "provenance": "the developer's machine only; never a hosted run",
+      "run": null,
+      "status": "NOT VERIFIED"
+    },
+    {
+      "adr": "0063",
+      "artifact": null,
+      "behaviour": "The cross-uid suite on a real second identity, its seven case lines and both uids kept, with the hostile-client suite's descriptor test by name.",
+      "ci_job": "C3 hosted evidence (manual): cross-uid-ownership",
+      "evidence": {
+        "campaign": "cross-uid-ownership",
+        "kind": "mutation-campaign"
+      },
+      "finding": "F-18",
+      "gap": "the owner dispatches the C3 workflow",
+      "id": "F-18-8",
+      "identities": 2,
+      "invariant": "\u00a73 a foreign uid takes over nothing (case lines and uids kept)",
+      "level": "real-process-second-identity",
+      "make_target": "c3-cross-uid-evidence",
+      "mutation_control": [],
+      "negative_control": "every one of the seven cases reported contained",
+      "observed": "never run (new in C3)",
+      "positive_control": "the second identity is proven a distinct, non-root uid by number",
+      "provenance": "",
+      "run": null,
+      "status": "NOT VERIFIED"
+    }
+  ],
+  "schema": "direwolf.c3.evidence-matrix",
+  "statuses": [
+    "VERIFIED",
+    "FAILED",
+    "NOT EXERCISED",
+    "NOT VERIFIED",
+    "BLOCKED"
+  ],
+  "version": 1
+}
