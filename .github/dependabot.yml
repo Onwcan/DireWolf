@@ -18,6 +18,22 @@ updates:
     # reviewer other than the author and a note on ADR-0019. CODEOWNERS routes
     # it; this comment is here so the reason travels with the config.
 
+  # The fuzz harness is a Cargo workspace of its own, with its own Cargo.lock,
+  # deliberately outside the root workspace (fuzz/Cargo.toml), so the entry
+  # above never proposes its updates. `make security` already checks that
+  # lock with cargo-deny (fuzz/deny.toml); this entry proposes the bumps.
+  # Ungrouped -- a libFuzzer or arbitrary bump is reviewed on its own, never
+  # carried in with unrelated ones -- and one open at a time. Like every update
+  # here it is a pull request merged by hand after review, never automatically.
+  # tests/architecture/test_ci_supply_chain.py fails if a Cargo workspace with
+  # a lockfile falls outside Dependabot.
+  - package-ecosystem: cargo
+    directory: "/fuzz"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 1
+    labels: ["dependencies", "rust"]
+
   - package-ecosystem: uv
     directory: "/"
     schedule:

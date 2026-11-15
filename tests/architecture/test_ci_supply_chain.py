@@ -13,7 +13,9 @@ stand-in for `git ls-remote`.
 **Dependabot can see every pin.** `directory: "/"` reads only
 `.github/workflows` and a root `action.yml`; a composite action elsewhere needs
 its directory listed. The coverage rule below is GitHub's documented one, and
-the test fails for a file that pins an action outside the configuration.
+the test fails for a file that pins an action outside the configuration. The
+same holds for Cargo: every workspace with a lockfile of its own -- the root
+and the fuzz harness -- has an entry of its own.
 
 **uv is installed by SHA-256, and a wrong digest fails.** The setup action's
 argv is read from the file and run -- with the real pip of the locked
@@ -489,7 +491,7 @@ def test_dependabot_stays_reviewable_and_owner_controlled() -> None:
     the actions and uv entries see; nothing in CI that merges or approves."""
     updates = dependabot_updates()
     ecosystems = sorted(str(u["package-ecosystem"]) for u in updates)
-    assert ecosystems == ["cargo", "github-actions", "pip", "uv"]
+    assert ecosystems == ["cargo", "cargo", "github-actions", "pip", "uv"]
     for update in updates:
         schedule = update.get("schedule")
         assert schedule == {"interval": "weekly"}, update
@@ -498,7 +500,7 @@ def test_dependabot_stays_reviewable_and_owner_controlled() -> None:
         labels = update.get("labels")
         assert isinstance(labels, list) and "dependencies" in labels, update
     for update in updates:
-        if update["package-ecosystem"] in ("github-actions", "pip"):
+        if update["package-ecosystem"] in ("github-actions", "pip") or _is_fuzz(update):
             assert set(update) <= {
                 "package-ecosystem",
                 "directory",
@@ -509,7 +511,7 @@ def test_dependabot_stays_reviewable_and_owner_controlled() -> None:
                 "labels",
             }, f"an option that changes what Dependabot proposes needs review: {update}"
     for update in updates:
-        if update["package-ecosystem"] in ("cargo", "uv"):
+        if update["package-ecosystem"] in ("cargo", "uv") and not _is_fuzz(update):
             groups = update.get("groups")
             assert isinstance(groups, dict) and list(groups.values()) == [{"patterns": ["*"]}]
     for workflow in WORKFLOWS:
@@ -517,6 +519,100 @@ def test_dependabot_stays_reviewable_and_owner_controlled() -> None:
         for forbidden in ("gh pr merge", "--auto", "auto-merge", "automerge", "--approve"):
             assert forbidden not in text, f"{workflow.name}: {forbidden}"
         assert "dependabot" not in text.lower(), f"{workflow.name} special-cases Dependabot"
+
+
+def _is_fuzz(update: dict[str, Yaml]) -> bool:
+    return update["package-ecosystem"] == "cargo" and _directories(update) == ["/fuzz"]
+
+
+# Directories never searched for a Cargo workspace: build output, caches, and
+# the boundary checker's fixtures -- inputs dwcheck reads, which nothing builds
+# or ships, so a Dependabot pull request against them would be noise.
+_NOT_WORKSPACES = frozenset(
+    {"target", ".git", ".venv", "node_modules", "__pycache__", ".mypy_cache", ".ruff_cache"}
+    | {".pytest_cache"}
+)
+_FIXTURES = REPO_ROOT / "tests" / "architecture" / "fixtures"
+
+
+def cargo_lock_directories(root: Path = REPO_ROOT) -> list[str]:
+    """Each Cargo workspace with a lockfile of its own, as Dependabot names
+    its directory: a `Cargo.toml` with a `Cargo.lock` beside it."""
+    found = []
+    for directory, children, files in os.walk(root):
+        here = Path(directory)
+        children[:] = sorted(
+            c for c in children if c not in _NOT_WORKSPACES and here / c != _FIXTURES
+        )
+        if "Cargo.toml" in files and "Cargo.lock" in files:
+            relative = here.relative_to(root).as_posix()
+            found.append("/" if relative == "." else "/" + relative)
+    return sorted(found)
+
+
+def cargo_uncovered(workspaces: list[str], updates: list[dict[str, Yaml]]) -> list[str]:
+    """The workspaces no cargo entry names exactly. Dependabot's cargo
+    updater reads the manifest and the lockfile in the directory it is given;
+    a workspace of its own below it is not one of them."""
+    named = [d for u in updates if u.get("package-ecosystem") == "cargo" for d in _directories(u)]
+    assert len(named) == len(set(named)), f"a directory named twice: {named}"
+    return [w for w in workspaces if w not in named]
+
+
+def test_every_cargo_workspace_with_a_lockfile_has_its_own_dependabot_entry() -> None:
+    workspaces = cargo_lock_directories()
+    assert workspaces == ["/", "/fuzz"]
+    assert cargo_uncovered(workspaces, dependabot_updates()) == []
+
+
+def test_the_fuzz_harness_is_a_workspace_of_its_own_and_its_entry_stays_narrow() -> None:
+    """The root workspace leaves `fuzz/` out and `fuzz/Cargo.toml` declares a
+    workspace of its own -- why the root entry cannot see its lock. Its entry
+    is weekly, one pull request at a time, labelled, and ungrouped, so a
+    harness bump is never carried in beside an unrelated one."""
+    root = tomllib.loads((REPO_ROOT / "Cargo.toml").read_text(encoding="utf-8"))
+    members = root["workspace"]["members"]
+    assert not any(m == "fuzz" or str(m).startswith("fuzz/") for m in members)
+    fuzz = tomllib.loads((REPO_ROOT / "fuzz" / "Cargo.toml").read_text(encoding="utf-8"))
+    assert "workspace" in fuzz
+    (entry,) = [u for u in dependabot_updates() if _is_fuzz(u)]
+    assert entry == {
+        "package-ecosystem": "cargo",
+        "directory": "/fuzz",
+        "schedule": {"interval": "weekly"},
+        "open-pull-requests-limit": 1,
+        "labels": ["dependencies", "rust"],
+    }
+    # The root entry is unchanged: grouped, five at a time.
+    (top,) = [
+        u
+        for u in dependabot_updates()
+        if u["package-ecosystem"] == "cargo" and _directories(u) == ["/"]
+    ]
+    assert top["open-pull-requests-limit"] == 5
+    assert top["groups"] == {"rust-dependencies": {"patterns": ["*"]}}
+
+
+def test_the_cargo_coverage_rule_finds_the_workspace_the_root_entry_misses(
+    tmp_path: Path,
+) -> None:
+    """Negative controls: the configuration before F-02's fix leaves the fuzz
+    lock without updates; a nested workspace is found wherever it is; the
+    fixtures and build output are not workspaces."""
+    for directory in ("", "fuzz", "tools/deep/harness", "target/debug/build/x"):
+        (tmp_path / directory).mkdir(parents=True, exist_ok=True)
+        (tmp_path / directory / "Cargo.toml").write_text("", encoding="utf-8")
+        (tmp_path / directory / "Cargo.lock").write_text("", encoding="utf-8")
+    (tmp_path / "crates" / "member").mkdir(parents=True)
+    (tmp_path / "crates" / "member" / "Cargo.toml").write_text("", encoding="utf-8")
+    assert cargo_lock_directories(tmp_path) == ["/", "/fuzz", "/tools/deep/harness"]
+    before = 'version: 2\nupdates:\n  - package-ecosystem: cargo\n    directory: "/"\n'
+    assert cargo_uncovered(["/", "/fuzz"], dependabot_updates(before)) == ["/fuzz"]
+    after = before + '  - package-ecosystem: cargo\n    directory: "/fuzz"\n'
+    assert cargo_uncovered(["/", "/fuzz"], dependabot_updates(after)) == []
+    twice = after + '  - package-ecosystem: cargo\n    directory: "/fuzz"\n'
+    with pytest.raises(AssertionError, match="named twice"):
+        cargo_uncovered(["/", "/fuzz"], dependabot_updates(twice))
 
 
 def test_the_uv_pin_has_its_own_dependabot_entry() -> None:
