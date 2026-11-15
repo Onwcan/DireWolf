@@ -1071,6 +1071,8 @@ BROKER_CASES = (
     ("private-protocol", "descriptor-pressure"),
     ("private-protocol", "stalled-peer"),
     ("private-protocol", "refuses-untrusted-configuration"),
+    # F-03: the released broker says its effective posture at start.
+    ("private-protocol", "effective-posture"),
 )
 
 # The three-identity suite: `#[ignore]`d, selected BY NAME, required to run
@@ -8326,33 +8328,59 @@ def concurrency_review(
     """F-02's mutation review: the baseline first, then each mutant judged,
     recorded and restored. Raises unless every mutant was KILLED and every
     file restored; the record says why either way."""
-    directory = CONCURRENCY_EVIDENCE_DIR if root is None else root
+    return _finding_review(
+        ("F-02", "0064", "authority-concurrency-mutations", CONCURRENCY_RECORD_SCHEMA),
+        "concurrency",
+        mutations,
+        stages=_concurrency_stages(),
+        build=(
+            "cargo",
+            "test",
+            "--locked",
+            "--no-run",
+            "-p",
+            "dwkd-authority",
+            "--lib",
+            "--test",
+            "state_concurrency",
+        ),
+        directory=CONCURRENCY_EVIDENCE_DIR if root is None else root,
+        tests=tests,
+    )
+
+
+def _finding_review(
+    identity: tuple[str, str, str, str],
+    subject: str,
+    mutations: Sequence[tuple[str, str, str, str]],
+    *,
+    stages: Sequence[MutationStage],
+    build: Sequence[str],
+    directory: Path,
+    tests: Callable[..., SuiteRun],
+) -> dict[str, object]:
+    """One finding's mutation review (F-02, F-03): `identity` is the finding,
+    its ADR, its task and its record's schema. The baseline first -- it must
+    pass, or nothing is judged -- then each mutant applied, judged by C3's
+    per-mutant judge (a named test failing is the only kill; a compile error,
+    a timeout, no test run or an infrastructure error never is), recorded and
+    restored byte-identically. Raises unless every mutant was KILLED and every
+    file restored; the record says why either way."""
+    finding, adr, task, schema = identity
     for what, rel, old, _new in mutations:
         # The bytes the mutant is made from, never a newline-translated read.
         if (ROOT / rel).read_bytes().decode("utf-8").count(old) != 1:
             raise TaskError(f"mutation `{what}`: its target is not in {rel} exactly once")
-    stages = _concurrency_stages()
-    build = (
-        "cargo",
-        "test",
-        "--locked",
-        "--no-run",
-        "-p",
-        "dwkd-authority",
-        "--lib",
-        "--test",
-        "state_concurrency",
-    )
     if directory.exists():
         shutil.rmtree(directory)
     directory.mkdir(parents=True)
     mutants: list[dict[str, object]] = []
     record: dict[str, object] = {
-        "schema": CONCURRENCY_RECORD_SCHEMA,
+        "schema": schema,
         "version": 1,
-        "finding": "F-02",
-        "adr": "0064",
-        "task": "authority-concurrency-mutations",
+        "finding": finding,
+        "adr": adr,
+        "task": task,
         "provenance": _c3_provenance(os.environ),
         "started_at": _c3_now(),
         "finished_at": None,
@@ -8363,7 +8391,7 @@ def concurrency_review(
         "mutants": mutants,
     }
     _write_c3_record(directory, record)
-    print(f"{BOLD}F-02 concurrency mutation review: baseline{OFF}")
+    print(f"{BOLD}{finding} {subject} mutation review: baseline{OFF}")
     built = tests(*build)
     stage_rows: list[dict[str, object]] = []
     if built.exit == 0:
@@ -8388,7 +8416,7 @@ def concurrency_review(
             finished_at=_c3_now(),
         )
         _write_c3_record(directory, record)
-        raise TaskError("BLOCKED: authority-concurrency-mutations: the baseline failed")
+        raise TaskError(f"BLOCKED: {task}: the baseline failed")
     _write_c3_record(directory, record)
     for mutation in mutations:
         row = _judge_mutant(mutation, stages, build, tests)
@@ -8411,12 +8439,12 @@ def concurrency_review(
     for row in mutants:
         print(f"  {row['outcome']:<13} {row['stage'] or '-':<20} {row['name']}")
     print(
-        f"{GREEN if not not_killed else RED}F-02: {len(mutants) - len(not_killed)} of "
+        f"{GREEN if not not_killed else RED}{finding}: {len(mutants) - len(not_killed)} of "
         f"{len(mutants)} killed; record in {directory}{OFF}"
     )
     if not_killed:
         raise TaskError(
-            f"{len(not_killed)} mutant(s) of F-02 not killed: "
+            f"{len(not_killed)} mutant(s) of {finding} not killed: "
             + "; ".join(f"{row['name']} {row['outcome']}" for row in not_killed)
         )
     return record
@@ -8432,6 +8460,307 @@ def task_authority_concurrency_mutations() -> None:
     target/f02-evidence/. Local, and never run beside another build.
     """
     concurrency_review()
+
+
+# F-03 (ADR-0065, Proposed): each guard of the effective posture weakened in
+# turn -- an acknowledgement reported as anything but REDUCED, an unknown
+# observation taken for a safe one, a recommendation counted as required, a
+# reduced control left out of a summary, a hop admitted by an acknowledgement
+# without a word, the authority's record never written. The broker's unit
+# suites, the authority's, the real authority (`transport_server`) and the
+# real broker (`private_protocol`) are the detectors; every mutant must be
+# KILLED by a named failing test, and every file restored byte-identically.
+_F03_EFFECTIVE = "crates/dwkd-broker/src/effective.rs"
+_F03_BROKER_POSTURE = "crates/dwkd-broker/src/posture.rs"
+_F03_HTTP = "crates/dwkd-broker/src/http/mod.rs"
+_F03_BROKER_MAIN = "crates/dwkd-broker/src/main.rs"
+_F03_BROKER_HARDENING = "crates/dwkd-broker/src/hardening.rs"
+_F03_AUTHORITY = "crates/dwkd-authority/src/posture.rs"
+_F03_SERVER = "crates/dwkd-authority/src/server/mod.rs"
+_F03_SERVER_HARDENING = "crates/dwkd-authority/src/server/hardening.rs"
+_F03_STATE = "crates/dwkd-authority/src/state/mod.rs"
+POSTURE_MUTATIONS = (
+    (
+        "P1: a traceable acknowledgement on a closed window is not reduced",
+        _F03_EFFECTIVE,
+        "        if acknowledged {\n"
+        "            Condition::Reduced\n"
+        "        } else {\n"
+        "            Condition::Enforced\n"
+        "        },\n"
+        "        Evidence::Observed,\n"
+        "        facts.posture.describe(),\n",
+        "        if acknowledged && !closed {\n"
+        "            Condition::Reduced\n"
+        "        } else {\n"
+        "            Condition::Enforced\n"
+        "        },\n"
+        "        Evidence::Observed,\n"
+        "        facts.posture.describe(),\n",
+    ),
+    (
+        "P2: a swap acknowledgement on a protected host is not reduced",
+        _F03_EFFECTIVE,
+        "            (true, _) => Condition::Reduced,\n"
+        "            // A failed read is not proof of anything.\n",
+        "            (true, _) => if protected { Condition::Enforced } "
+        "else { Condition::Reduced },\n"
+        "            // A failed read is not proof of anything.\n",
+    ),
+    (
+        "P3: an unread swap state is reported enforced",
+        _F03_EFFECTIVE,
+        "            (false, Swap::Unknown) => Condition::Unverified,\n",
+        "            (false, Swap::Unknown) => Condition::Enforced,\n",
+    ),
+    (
+        "P4: an unread swap state counts as protected",
+        _F03_BROKER_POSTURE,
+        "matches!(self, Self::NoDevice | Self::Capped(_))",
+        "matches!(self, Self::NoDevice | Self::Capped(_) | Self::Unknown)",
+    ),
+    (
+        "P5: an unread swap device count is reported as swap",
+        _F03_BROKER_POSTURE,
+        "    let unread = if total_kib.is_none() {\n        Swap::Unknown\n",
+        "    let unread = if total_kib.is_none() {\n        Swap::Possible\n",
+    ),
+    (
+        "P6: the broker's dumpable acknowledgement is not reduced",
+        _F03_EFFECTIVE,
+        "        match (config.dumpable_permitted, read) {\n"
+        "            (true, _) => Condition::Reduced,\n",
+        "        match (config.dumpable_permitted, read) {\n"
+        "            (true, _) => Condition::Enforced,\n",
+    ),
+    (
+        "P7: the broker's unread hardening is reported enforced",
+        _F03_EFFECTIVE,
+        "            (false, _) => Condition::Unverified,\n",
+        "            (false, _) => Condition::Enforced,\n",
+    ),
+    (
+        "P8: an evidence-only acknowledgement is not reduced",
+        _F03_EFFECTIVE,
+        "        if given {\n"
+        "            Condition::Reduced\n"
+        "        } else {\n"
+        "            Condition::Enforced\n"
+        "        },\n"
+        "        Evidence::Configured,\n",
+        "        if false {\n"
+        "            Condition::Reduced\n"
+        "        } else {\n"
+        "            Condition::Enforced\n"
+        "        },\n"
+        "        Evidence::Configured,\n",
+    ),
+    (
+        "P9: a recommendation is listed with the required controls",
+        _F03_EFFECTIVE,
+        ".filter(|r| r.requirement == Requirement::Required && r.condition == condition)",
+        ".filter(|r| r.condition == condition)",
+    ),
+    (
+        "P10: the summary lists what holds as reduced",
+        _F03_EFFECTIVE,
+        "        ids(records, Condition::Reduced),\n",
+        "        ids(records, Condition::Enforced),\n",
+    ),
+    (
+        "P11: an unverified architecture is reported enforced",
+        _F03_EFFECTIVE,
+        "        if facts.architecture_verified {\n"
+        "            Condition::Enforced\n"
+        "        } else {\n"
+        "            Condition::Unsupported\n"
+        "        },\n",
+        "        if facts.architecture_verified {\n"
+        "            Condition::Enforced\n"
+        "        } else {\n"
+        "            Condition::Enforced\n"
+        "        },\n",
+    ),
+    (
+        "P12: an acknowledged start-up window is not read before a hop",
+        _F03_HTTP,
+        "        // Read whether or not it was acknowledged (F-03).\n"
+        "        let posture = (self.startup)(binary);\n",
+        "        if self.traceable == TraceableWorkers::Permitted {\n"
+        "            return Ok(());\n"
+        "        }\n"
+        "        let posture = (self.startup)(binary);\n",
+    ),
+    (
+        "P13: a credential hop admitted by an acknowledgement is not reported",
+        _F03_HTTP,
+        "            (self.report)(\n"
+        '                "worker.credential_swap",\n'
+        "                crate::config::SWAPPABLE_WORKERS,\n"
+        "                &facts,\n"
+        "            );\n",
+        "            let _ = &facts;\n",
+    ),
+    (
+        "P14: the start says nothing of a traceable acknowledgement on a closed window",
+        _F03_BROKER_MAIN,
+        "    } else if config.traceable_workers == config::TraceableWorkers::Permitted {\n",
+        "    } else if false && config.traceable_workers == "
+        "config::TraceableWorkers::Permitted {\n",
+    ),
+    (
+        "P15: the start says nothing of a swap acknowledgement on a protected host",
+        _F03_BROKER_MAIN,
+        "    if config.swappable_workers == config::SwappableWorkers::Permitted {\n"
+        "        reduced.push(if swap.protected() {\n",
+        "    if !swap.protected() && config.swappable_workers == "
+        "config::SwappableWorkers::Permitted {\n"
+        "        reduced.push(if swap.protected() {\n",
+    ),
+    (
+        "P16: the broker reads its dumpable state as never dumpable",
+        _F03_BROKER_HARDENING,
+        "            .map(|behavior| behavior != DumpableBehavior::NotDumpable),\n",
+        "            .map(|_| false),\n",
+    ),
+    (
+        "P17: the broker reads its core limit as zero whatever it is",
+        _F03_BROKER_HARDENING,
+        "        no_core: core.current == Some(0) && core.maximum == Some(0),\n",
+        "        no_core: true,\n",
+    ),
+    (
+        "P18: the authority's dumpable acknowledgement is not reduced",
+        _F03_AUTHORITY,
+        "        match (facts.dumpable_permitted, read) {\n"
+        "            (true, _) => Condition::Reduced,\n",
+        "        match (facts.dumpable_permitted, read) {\n"
+        "            (true, _) => Condition::Enforced,\n",
+    ),
+    (
+        "P19: the authority's unread hardening is reported enforced",
+        _F03_AUTHORITY,
+        "            (false, _) => Condition::Unverified,\n",
+        "            (false, _) => Condition::Enforced,\n",
+    ),
+    (
+        "P20: a peer with the authority's uid is not reduced",
+        _F03_AUTHORITY,
+        "        if facts.authority_uid_admitted {\n            Condition::Reduced\n",
+        "        if false {\n            Condition::Reduced\n",
+    ),
+    (
+        "P21: a configured broker's posture is assumed enforced",
+        _F03_AUTHORITY,
+        "            Condition::NotApplicable\n"
+        "        } else {\n"
+        "            Condition::Unverified\n"
+        "        },\n",
+        "            Condition::NotApplicable\n"
+        "        } else {\n"
+        "            Condition::Enforced\n"
+        "        },\n",
+    ),
+    (
+        "P22: host execution is not reduced",
+        _F03_AUTHORITY,
+        "        if facts.host_execution {\n            Condition::Reduced\n",
+        "        if false {\n            Condition::Reduced\n",
+    ),
+    (
+        "P23: the evidence-only workspace is not reduced",
+        _F03_AUTHORITY,
+        "            Some(WorkspaceSetting::UnverifiedEvidence) => Condition::Reduced,\n",
+        "            Some(WorkspaceSetting::UnverifiedEvidence) => Condition::Enforced,\n",
+    ),
+    (
+        "P24: the authority reads its dumpable state as never dumpable",
+        _F03_SERVER_HARDENING,
+        "            .map(|behavior| behavior != DumpableBehavior::NotDumpable),\n",
+        "            .map(|_| false),\n",
+    ),
+    (
+        "P25: the served authority never records its posture",
+        _F03_SERVER,
+        "    authority\n"
+        "        .record_posture(&controls)\n"
+        '        .map_err(|error| ServeError::Io(format!("recording the effective posture: '
+        '{error}")))\n',
+        "    let _ = authority;\n    Ok(())\n",
+    ),
+    (
+        "P26: the audit record lists what holds as reduced",
+        _F03_STATE,
+        '            .list("reduced", ids(Condition::Reduced))\n',
+        '            .list("reduced", ids(Condition::Enforced))\n',
+    ),
+)
+POSTURE_EVIDENCE_DIR = ROOT / "target" / "f03-evidence"
+POSTURE_RECORD_SCHEMA = "direwolf.f03.mutation-review"
+
+
+def _posture_stages() -> tuple[MutationStage, ...]:
+    """The review's detectors: the broker's unit suites (its posture, its
+    start-up decision, the per-hop checks), the authority's, then the real
+    authority and the real broker as processes."""
+    broker = ("cargo", "test", "--locked", "-p", "dwkd-broker")
+    authority = ("cargo", "test", "--locked", "-p", "dwkd-authority")
+    return (
+        MutationStage("broker-unit", (*broker, "--bin", "dwkd-broker")),
+        MutationStage("authority-unit", (*authority, "--lib")),
+        MutationStage("authority-process", (*authority, "--test", "transport_server")),
+        MutationStage("broker-process", (*broker, "--test", "private_protocol")),
+    )
+
+
+def posture_review(
+    mutations: Sequence[tuple[str, str, str, str]] = POSTURE_MUTATIONS,
+    *,
+    root: Path | None = None,
+    tests: Callable[..., SuiteRun] = run_tests,
+) -> dict[str, object]:
+    """F-03's mutation review, as F-02's: see `_finding_review`."""
+    return _finding_review(
+        ("F-03", "0065", "posture-mutations", POSTURE_RECORD_SCHEMA),
+        "posture",
+        mutations,
+        stages=_posture_stages(),
+        build=(
+            "cargo",
+            "test",
+            "--locked",
+            "--no-run",
+            "-p",
+            "dwkd-broker",
+            "-p",
+            "dwkd-authority",
+            "--bin",
+            "dwkd-broker",
+            "--bin",
+            "dwkd-authority",
+            "--lib",
+            "--test",
+            "transport_server",
+            "--test",
+            "private_protocol",
+        ),
+        directory=POSTURE_EVIDENCE_DIR if root is None else root,
+        tests=tests,
+    )
+
+
+def task_posture_mutations() -> None:
+    """Weaken each guard of F-03's effective posture in turn (ADR-0065,
+    Proposed); the broker's and the authority's unit suites, or the real
+    daemons, must catch every one.
+
+    The unmutated baseline must pass first; every file is restored
+    byte-identically whatever happens, and checked; the record is kept in
+    target/f03-evidence/. Linux, local, and never run beside another build.
+    """
+    if not sys.platform.startswith("linux"):
+        raise TaskError("NOT EXERCISED: the daemons' posture is Linux's; run it in WSL2")
+    posture_review()
 
 
 # M5d.3 (ADR-0052 §7): a sandboxed `process.exec` that consumes a credential.
@@ -15015,6 +15344,7 @@ TASKS = {
     "sandbox-taint-mutations": task_sandbox_taint_mutations,
     "authority-ownership-mutations": task_authority_ownership_mutations,
     "authority-concurrency-mutations": task_authority_concurrency_mutations,
+    "posture-mutations": task_posture_mutations,
     "sandbox-neighbour-mutations": task_sandbox_neighbour_mutations,
     "sandbox-secret-evidence": task_sandbox_secret_evidence,
     "sandbox-secret-mutations": task_sandbox_secret_mutations,

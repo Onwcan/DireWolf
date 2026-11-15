@@ -168,6 +168,13 @@ enum Runner {
 /// the last two are refused unless the operator acknowledged them at start
 /// (`--allow-traceable-workers`, `--allow-swappable-workers`, each logged
 /// `REDUCED ASSURANCE`).
+///
+/// An acknowledgement changes the answer, never what is known (F-03): the
+/// facts are read under it too, and a hop the facts alone would have refused
+/// is admitted **and reported** (`report`, the event
+/// `posture_acknowledged`), so a host that changed after start -- swap added,
+/// Yama lowered -- is seen at the hop it affects, not hidden behind a start
+/// whose facts were safe.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct WorkerPolicy {
     /// Whether this build's architecture has kernel evidence for the
@@ -179,6 +186,16 @@ pub(crate) struct WorkerPolicy {
     pub(crate) startup: fn(&Path) -> crate::posture::Posture,
     /// Where a process's anonymous memory can go (`None`: this broker's).
     pub(crate) swap: fn(Option<u32>) -> crate::posture::Swap,
+    /// Where a hop admitted only by an acknowledgement is said: the control,
+    /// the flag, and the facts that would have refused it.
+    pub(crate) report: fn(&'static str, &'static str, &str),
+}
+
+/// The production [`WorkerPolicy::report`]: one event line, no hop content.
+fn report_acknowledged(control: &'static str, flag: &'static str, facts: &str) {
+    crate::event(&format!(
+        "posture_acknowledged control={control} condition=REDUCED flag={flag} facts=\"{facts}\""
+    ));
 }
 
 impl WorkerPolicy {
@@ -192,6 +209,7 @@ impl WorkerPolicy {
             swappable,
             startup: crate::posture::read,
             swap: crate::posture::swap_of,
+            report: report_acknowledged,
         }
     }
 
@@ -210,17 +228,21 @@ impl WorkerPolicy {
                 std::env::consts::ARCH
             ));
         }
-        // Acknowledged: nothing the host says changes the answer, so nothing
-        // is read.
-        if self.traceable == TraceableWorkers::Permitted {
-            return Ok(());
-        }
+        // Read whether or not it was acknowledged (F-03).
         let posture = (self.startup)(binary);
         if posture.startup_window_closed() {
-            Ok(())
-        } else {
-            Err(format!("startup window open: {}", posture.describe()))
+            return Ok(());
         }
+        let facts = format!("startup window open: {}", posture.describe());
+        if self.traceable == TraceableWorkers::Permitted {
+            (self.report)(
+                "worker.startup_window",
+                crate::config::TRACEABLE_WORKERS,
+                &facts,
+            );
+            return Ok(());
+        }
+        Err(facts)
     }
 
     /// Whether process `pid` -- this broker for `None` -- may hold a
@@ -230,20 +252,25 @@ impl WorkerPolicy {
     ///
     /// Its memory can be written to swap and nobody acknowledged it.
     pub(crate) fn admits_credential(&self, pid: Option<u32>) -> Result<(), String> {
-        // Acknowledged: as above.
-        if self.swappable == SwappableWorkers::Permitted {
-            return Ok(());
-        }
+        // Read whether or not it was acknowledged, as above.
         let swap = (self.swap)(pid);
         if swap.protected() {
-            Ok(())
-        } else {
-            Err(format!(
-                "a credential's memory could reach swap ({}): set memory.swap.max to 0 \
-                 (MemorySwapMax=0) or run without swap",
-                swap.describe()
-            ))
+            return Ok(());
         }
+        let facts = format!(
+            "a credential's memory could reach swap ({}): set memory.swap.max to 0 \
+             (MemorySwapMax=0) or run without swap",
+            swap.describe()
+        );
+        if self.swappable == SwappableWorkers::Permitted {
+            (self.report)(
+                "worker.credential_swap",
+                crate::config::SWAPPABLE_WORKERS,
+                &facts,
+            );
+            return Ok(());
+        }
+        Err(facts)
     }
 }
 

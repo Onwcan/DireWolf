@@ -256,6 +256,31 @@ mod linux {
             .unwrap()
     }
 
+    /// The bytes a broker reads for its swap facts before a credential hop
+    /// (`posture::swap_of`): `/proc/meminfo`, its own cgroup file, and the
+    /// `memory.swap.max` of its cgroup and each ancestor that has one. Read
+    /// under the swap acknowledgement too, since F-03 (ADR-0065): a hop the
+    /// facts would refuse is admitted and reported, never admitted unread.
+    /// The files are read here, as the broker reads them: the same lengths.
+    fn swap_facts_len(pid: u32) -> u64 {
+        let len = |path: &str| std::fs::read(path).map_or(0, |b| b.len());
+        let cgroup = std::fs::read_to_string(format!("/proc/{pid}/cgroup")).unwrap_or_default();
+        let mut total = len("/proc/meminfo") + cgroup.len();
+        let path = cgroup
+            .lines()
+            .find_map(|line| line.strip_prefix("0::"))
+            .filter(|path| path.starts_with('/') && !path.ends_with(" (deleted)"))
+            .filter(|path| !path.split('/').any(|part| part == ".."));
+        if let Some(path) = path {
+            let mut at = path.trim_end_matches('/');
+            while !at.is_empty() {
+                total += len(&format!("/sys/fs/cgroup{at}/memory.swap.max"));
+                at = at.rfind('/').map_or("", |cut| &at[..cut]);
+            }
+        }
+        u64::try_from(total).unwrap()
+    }
+
     /// A child of this test binary running `test` with `env`: its stdout
     /// lines, as they arrive, and the child.
     fn child(test: &str, env: &[(&str, String)]) -> (std::process::Child, mpsc::Receiver<String>) {
@@ -950,10 +975,10 @@ M4E:DONE"
         );
         // A second use, towards a port nothing listens on: the broker reads
         // the value once, renders it, and fails to connect. Nothing else is
-        // read but the one host fact a hop reads first -- Yama's setting, the
-        // start-up window's (D11 hardening, ADR-0053 §4); this broker runs
-        // with swap acknowledged, so swap is not read: `rchar` grows by
-        // exactly the value and that setting.
+        // read but the host facts a hop reads first -- Yama's setting, the
+        // start-up window's (D11 hardening, ADR-0053 §4), and where the
+        // broker's memory can go, read under its swap acknowledgement too
+        // since F-03: `rchar` grows by exactly the value and those facts.
         let yama = std::fs::read("/proc/sys/kernel/yama/ptrace_scope").map_or(0, |b| b.len());
         let before = rchar(broker.pid);
         host.stdin.as_mut().unwrap().write_all(b"go\n").unwrap();
@@ -961,7 +986,7 @@ M4E:DONE"
         assert_eq!(answers, ["FAILED CONNECT_FAILED"]);
         assert_eq!(
             rchar(broker.pid) - before,
-            u64::try_from(value.len() + yama).unwrap()
+            u64::try_from(value.len() + yama).unwrap() + swap_facts_len(broker.pid)
         );
         evidence("mode-a-one-shot", "rchar-exactly-one-value");
         std::thread::sleep(Duration::from_millis(100));

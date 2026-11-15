@@ -132,6 +132,8 @@ mod config;
 #[cfg(target_os = "linux")]
 mod crash;
 #[cfg(target_os = "linux")]
+mod effective;
+#[cfg(target_os = "linux")]
 mod egress;
 #[cfg(target_os = "linux")]
 mod exchange;
@@ -315,7 +317,9 @@ fn serve(config: &config::ServeConfig) -> ExitCode {
 /// reported too (ADR-0053 §7): a broker whose memory can reach swap serves,
 /// and refuses every hop that carries a credential unless the operator
 /// acknowledged it -- a refusal said at start, never discovered by a hop.
-/// The facts are read here; the decision is [`admit`]'s.
+/// The facts are read here; the decision is [`admit`]'s. Every control's
+/// effective condition is said from the same facts before the decision
+/// (F-03, `effective`), so a start that refuses says what it saw too.
 #[cfg(target_os = "linux")]
 fn deployment(config: &config::ServeConfig, own_uid: u32) -> Result<(), String> {
     let posture = std::env::current_exe().map_or(
@@ -327,12 +331,24 @@ fn deployment(config: &config::ServeConfig, own_uid: u32) -> Result<(), String> 
         |binary| posture::read(&binary),
     );
     let swap = posture::swap_of(None);
+    let page_zeroing = posture::page_zeroing_now();
     crate::event(&format!(
         "deployment_posture {} swap={} {}",
         posture.describe(),
         swap.describe(),
-        posture::page_zeroing_now()
+        page_zeroing
     ));
+    let facts = effective::Facts {
+        own_uid,
+        posture,
+        swap: swap.clone(),
+        architecture_verified: http::confine::VERIFIED_ARCHITECTURE,
+        hardened: hardening::observed(),
+        page_zeroing,
+    };
+    for line in effective::lines(&effective::of_broker(config, &facts)) {
+        crate::event(&line);
+    }
     if !http::confine::VERIFIED_ARCHITECTURE {
         log(&format!(
             "NOTICE: net.http is refused on {}: the exchange worker's syscall program has no \
@@ -401,13 +417,31 @@ fn admit(
                     .to_owned(),
             ),
         }
-    }
-    if !swap.protected() && config.swappable_workers == config::SwappableWorkers::Permitted {
+    } else if config.traceable_workers == config::TraceableWorkers::Permitted {
+        // F-03: closed now, but the acknowledgement admits a hop whatever the
+        // window becomes -- a weakened check, said at start, never silent.
         reduced.push(format!(
-            "a credential exchange's memory, the broker's and its worker's, may be written to \
-             swap ({}; --allow-swappable-workers)",
-            swap.describe()
+            "the start-up window is closed now ({}), but a hop is admitted if it opens later, \
+             reported then and never refused (--allow-traceable-workers)",
+            posture.describe()
         ));
+    }
+    if config.swappable_workers == config::SwappableWorkers::Permitted {
+        reduced.push(if swap.protected() {
+            // F-03: as above, for swap that appears after start.
+            format!(
+                "a credential exchange's memory cannot reach swap now ({}), but a credential \
+                 hop is admitted if it can later, reported then and never refused \
+                 (--allow-swappable-workers)",
+                swap.describe()
+            )
+        } else {
+            format!(
+                "a credential exchange's memory, the broker's and its worker's, may be written \
+                 to swap ({}; --allow-swappable-workers)",
+                swap.describe()
+            )
+        });
     }
     if config.unverified_workspace == config::UnverifiedWorkspace::Permitted {
         reduced.push(
@@ -726,7 +760,9 @@ mod tests {
 
     /// Memory that can reach swap never stops the broker serving: it stops
     /// credential hops (`http::WorkerPolicy`), unless acknowledged -- and the
-    /// acknowledgement is reduced assurance, said at start.
+    /// acknowledgement is reduced assurance, said at start, whatever the
+    /// host says now (F-03): a protected host today does not make the
+    /// per-hop check it turns off any less turned off.
     #[cfg(target_os = "linux")]
     #[test]
     fn swappable_memory_is_reduced_assurance_only_when_acknowledged() {
@@ -756,27 +792,90 @@ mod tests {
             suid_dumpable: None,
         };
         for protected in [Swap::NoDevice, Swap::Capped("/a".to_owned())] {
-            for flags in [&[][..], &["--allow-swappable-workers"][..]] {
-                assert_eq!(admit(&serve(flags), 1001, yama, &protected), Ok(Vec::new()));
-            }
+            assert_eq!(admit(&serve(&[]), 1001, yama, &protected), Ok(Vec::new()));
+            // Protected now, acknowledged: reduced all the same -- a swap
+            // device added later would be admitted, not refused.
+            let reduced = admit(
+                &serve(&["--allow-swappable-workers"]),
+                1001,
+                yama,
+                &protected,
+            );
+            assert!(
+                reduced.as_ref().is_ok_and(|lines| lines.len() == 1
+                    && lines.iter().all(|l| l.contains("--allow-swappable-workers")
+                        && l.contains("later")
+                        && l.contains(&protected.describe()))),
+                "{reduced:?}"
+            );
         }
-        assert_eq!(
-            admit(&serve(&[]), 1001, yama, &Swap::Possible),
-            Ok(Vec::new())
-        );
-        let reduced = admit(
-            &serve(&["--allow-swappable-workers"]),
-            1001,
-            yama,
-            &Swap::Possible,
-        );
-        assert!(
-            reduced.as_ref().is_ok_and(|lines| lines.len() == 1
-                && lines
-                    .iter()
-                    .all(|l| l.contains("--allow-swappable-workers"))),
-            "{reduced:?}"
-        );
+        for unprotected in [Swap::Possible, Swap::Unknown] {
+            assert_eq!(admit(&serve(&[]), 1001, yama, &unprotected), Ok(Vec::new()));
+            let reduced = admit(
+                &serve(&["--allow-swappable-workers"]),
+                1001,
+                yama,
+                &unprotected,
+            );
+            assert!(
+                reduced.as_ref().is_ok_and(|lines| lines.len() == 1
+                    && lines.iter().all(|l| l.contains("--allow-swappable-workers")
+                        && l.contains("may be written to swap"))),
+                "{reduced:?}"
+            );
+        }
+    }
+
+    /// F-03: the traceable-workers acknowledgement on a host whose window is
+    /// closed now is reduced assurance too: it turns the per-hop refusal into
+    /// an admission.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_traceable_acknowledgement_is_reduced_assurance_where_the_window_is_closed_now() {
+        use super::admit;
+        use super::config::{Command, parse};
+        use super::posture::{Posture, Swap};
+
+        let socket = std::env::temp_dir()
+            .join("broker.sock")
+            .display()
+            .to_string();
+        let args: Vec<String> = [
+            "serve",
+            "--socket",
+            socket.as_str(),
+            "--authority-uid",
+            "1000",
+            "--allow-traceable-workers",
+        ]
+        .iter()
+        .map(|s| (*s).to_owned())
+        .collect();
+        let Ok(Command::Serve(config)) = parse(&args) else {
+            unreachable!("a serve configuration")
+        };
+        let capped = Swap::Capped("/a".to_owned());
+        for closed in [
+            Posture {
+                scope: Some(1),
+                execute_only: false,
+                suid_dumpable: None,
+            },
+            Posture {
+                scope: Some(0),
+                execute_only: true,
+                suid_dumpable: Some(2),
+            },
+        ] {
+            let reduced = admit(&config, 1001, closed, &capped);
+            assert!(
+                reduced.as_ref().is_ok_and(|lines| lines.len() == 1
+                    && lines.iter().all(|l| l.contains("--allow-traceable-workers")
+                        && l.contains("closed now")
+                        && l.contains("startup_window_closed=true"))),
+                "{reduced:?}"
+            );
+        }
     }
 
     #[test]

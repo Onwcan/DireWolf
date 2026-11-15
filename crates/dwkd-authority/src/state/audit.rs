@@ -283,11 +283,14 @@ pub enum AuditEvent {
     /// A live lease was invalidated because its holder's grant was revoked
     /// (F-18).
     LeaseRevoked,
+    /// The effective start-up posture of a served incarnation: each control's
+    /// condition and the acknowledgement that reduced it (F-03).
+    AuthorityPosture,
 }
 
 impl AuditEvent {
     /// Every kind, in declaration order.
-    pub const ALL: [Self; 72] = [
+    pub const ALL: [Self; 73] = [
         Self::StoreCreated,
         Self::StoreOpened,
         Self::PolicyInstalled,
@@ -360,6 +363,7 @@ impl AuditEvent {
         Self::OwnershipAdopted,
         Self::OwnershipIncomplete,
         Self::LeaseRevoked,
+        Self::AuthorityPosture,
     ];
 
     /// The spelling in a record's `event` field.
@@ -438,6 +442,7 @@ impl AuditEvent {
             Self::OwnershipAdopted => "ownership.adopted",
             Self::OwnershipIncomplete => "ownership.incomplete",
             Self::LeaseRevoked => "lease.revoked",
+            Self::AuthorityPosture => "authority.posture",
         }
     }
 }
@@ -968,6 +973,22 @@ impl AuditRecord {
     pub fn flag(&self, key: &str) -> Option<bool> {
         match self.object.get(key) {
             Some(Value::Bool(value)) => Some(*value),
+            _ => None,
+        }
+    }
+
+    /// A list of text fields, if the record has one under `key` and every
+    /// item is text.
+    #[must_use]
+    pub fn texts(&self, key: &str) -> Option<Vec<&str>> {
+        match self.object.get(key) {
+            Some(Value::Array(items)) => items
+                .iter()
+                .map(|item| match item {
+                    Value::String(text) => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect(),
             _ => None,
         }
     }

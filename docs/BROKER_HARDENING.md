@@ -18,6 +18,12 @@ setting is the operator's action.
 Each refusal can be acknowledged for development only, and is logged
 `REDUCED ASSURANCE` at start: `--allow-traceable-workers`,
 `--allow-swappable-workers`. A production configuration passes neither.
+An acknowledgement is reported as reduced whatever the host says at start:
+the host is still read before every hop, and a hop it admits against the
+facts -- swap added, Yama lowered after start -- is reported at that hop
+(`event=posture_acknowledged`), never silently
+([ADR-0065](adr/0065-f03-effective-posture-is-reported-and-recorded.md),
+Proposed).
 
 ## Native Linux with systemd (production)
 
@@ -73,8 +79,16 @@ nothing. On the running broker:
 
 ```bash
 journalctl -u dwkd-broker | grep -E 'deployment_posture|REDUCED ASSURANCE|NOTICE'
+journalctl -u dwkd-broker | grep -E 'event=posture(_summary|_acknowledged)?'
 cat /sys/fs/cgroup/system.slice/dwkd-broker.service/memory.swap.max
 ```
+
+The `event=posture` lines are one record per control -- `ENFORCED`,
+`REDUCED`, `UNVERIFIED`, `UNSUPPORTED` or `NOT_APPLICABLE`, with the flag
+that reduced it and what it refuses -- and `event=posture_summary` lists
+the controls that are not enforced. A production broker's summary reads
+`reduced=- unverified=- unsupported=-` on `x86_64`
+([F03_EFFECTIVE_POSTURE.md](F03_EFFECTIVE_POSTURE.md) §6).
 
 ## A host without swap
 

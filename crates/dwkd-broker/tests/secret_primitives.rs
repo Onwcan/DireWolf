@@ -299,6 +299,31 @@ mod linux {
                 .unwrap()
         }
 
+        /// The bytes a broker reads for its swap facts before a credential hop
+        /// (`posture::swap_of`): `/proc/meminfo`, its own cgroup file, and the
+        /// `memory.swap.max` of its cgroup and each ancestor that has one. Read
+        /// under the swap acknowledgement too, since F-03 (ADR-0065): a hop the
+        /// facts would refuse is admitted and reported, never admitted unread.
+        /// The files are read here, as the broker reads them: the same lengths.
+        fn swap_facts_len(pid: u32) -> u64 {
+            let len = |path: &str| std::fs::read(path).map_or(0, |b| b.len());
+            let cgroup = std::fs::read_to_string(format!("/proc/{pid}/cgroup")).unwrap_or_default();
+            let mut total = len("/proc/meminfo") + cgroup.len();
+            let path = cgroup
+                .lines()
+                .find_map(|line| line.strip_prefix("0::"))
+                .filter(|path| path.starts_with('/') && !path.ends_with(" (deleted)"))
+                .filter(|path| !path.split('/').any(|part| part == ".."));
+            if let Some(path) = path {
+                let mut at = path.trim_end_matches('/');
+                while !at.is_empty() {
+                    total += len(&format!("/sys/fs/cgroup{at}/memory.swap.max"));
+                    at = at.rfind('/').map_or("", |cut| &at[..cut]);
+                }
+            }
+            u64::try_from(total).unwrap()
+        }
+
         fn open_fds(&self) -> usize {
             std::fs::read_dir(format!("/proc/{}/fd", self.pid))
                 .unwrap()
@@ -654,14 +679,15 @@ mod linux {
             "{result:?}"
         );
         let read = broker.rchar() - before;
-        // Besides the value, a hop reads exactly one host fact: Yama's setting,
-        // the start-up window's (D11 hardening, ADR-0053 §4). Swap is not read
-        // under the acknowledgement this broker runs with.
+        // Besides the value, a hop reads its host facts and nothing else:
+        // Yama's setting, the start-up window's (D11 hardening, ADR-0053 §4),
+        // and -- for a credential, under the acknowledgement this broker runs
+        // with too, since F-03 -- where its memory can go.
         let yama = std::fs::read("/proc/sys/kernel/yama/ptrace_scope").map_or(0, |b| b.len());
         assert_eq!(
             read,
-            u64::try_from(value.len() + yama).unwrap(),
-            "exactly the value was read, once, and Yama's setting"
+            u64::try_from(value.len() + yama).unwrap() + Broker::swap_facts_len(broker.pid),
+            "exactly the value was read, once, and the host facts"
         );
         assert!(
             !body.windows(value.len()).any(|w| w == value),

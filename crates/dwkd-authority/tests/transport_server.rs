@@ -748,6 +748,153 @@ mod linux {
         }
     }
 
+    /// The server's stderr once it holds `needle`, waited for: the reader
+    /// thread may lag the ready line.
+    fn stderr_with(server: &Server, needle: &str) -> String {
+        let deadline = std::time::Instant::now() + PROMPT;
+        loop {
+            let text = server.stderr();
+            if text.contains(needle) || std::time::Instant::now() > deadline {
+                return text;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// F-03 (ADR-0065, Proposed): every served incarnation records its
+    /// effective start-up posture in `audit.log` -- the security record --
+    /// and not only on stderr. A development start and a hardened restart of
+    /// the same store leave two records that say what changed: each
+    /// acknowledgement as the control it reduced, and the controls the
+    /// hardened start holds as enforced, read back from the kernel.
+    #[test]
+    fn each_incarnation_records_its_effective_posture_and_a_restart_records_the_change() {
+        let fx = Fixture::new("t-posture");
+        let mut server = Server::start(&fx.args(&["--allow-dumpable"]));
+        let said = stderr_with(&server, "posture_summary");
+        assert!(
+            said.contains(
+                "posture control=authority.memory.dumpable scope=authority condition=REDUCED \
+                 evidence=OBSERVED flag=--allow-dumpable"
+            ),
+            "{said}"
+        );
+        assert!(
+            said.contains(
+                "posture_summary reduced=authority.memory.dumpable,authority.peer_boundary \
+                 unverified=- unsupported=-"
+            ),
+            "{said}"
+        );
+        // A posture line names flags and ids, never a path.
+        for line in said.lines().filter(|l| l.contains(" posture")) {
+            assert!(!line.contains('/'), "{line}");
+        }
+        server.kill();
+        // The same store, hardened: no acknowledgement, and a peer that is
+        // not the authority's own uid.
+        let server = Server::start(&fx.args_for(&[own_uid().wrapping_add(1)], &[]));
+        let said = stderr_with(&server, "posture_summary");
+        assert!(
+            said.contains("posture_summary reduced=- unverified=- unsupported=-"),
+            "{said}"
+        );
+        let postures = fx.events("authority.posture");
+        assert_eq!(postures.len(), 2, "one record per served incarnation");
+        let (weakened, hardened) = (&postures[0], &postures[1]);
+        assert_eq!(
+            weakened.texts("reduced"),
+            Some(vec!["authority.memory.dumpable", "authority.peer_boundary"])
+        );
+        assert_eq!(
+            weakened.texts("acknowledged"),
+            Some(vec!["--allow-dumpable", "--allow-authority-uid"])
+        );
+        assert_eq!(hardened.texts("reduced"), Some(vec![]));
+        assert_eq!(hardened.texts("acknowledged"), Some(vec![]));
+        assert_eq!(
+            hardened.texts("enforced"),
+            Some(vec![
+                "authority.memory.dumpable",
+                "authority.memory.core_limit",
+                "authority.peer_boundary",
+                "policy.host_execution",
+            ])
+        );
+        assert_eq!(
+            hardened.texts("not_applicable"),
+            Some(vec![
+                "broker.identity",
+                "broker.posture",
+                "environment.workspace"
+            ])
+        );
+        // Each record belongs to its incarnation, and follows its opening.
+        let opened = fx.events("store.opened");
+        for posture in [weakened, hardened] {
+            let own = opened
+                .iter()
+                .rfind(|o| o.seq() < posture.seq())
+                .expect("an opening before the posture");
+            assert_eq!(posture.int("incarnation"), own.int("incarnation"));
+        }
+        assert_eq!(
+            hardened.int("incarnation"),
+            weakened.int("incarnation").map(|n| n + 1)
+        );
+        drop(server);
+        verify_audit_against_store(&fx.state()).expect("the chain verifies");
+    }
+
+    /// F-03: a broker the authority cannot see is recorded as unverified,
+    /// never assumed hardened; a shared broker uid and the host-execution
+    /// flag are each recorded as the control they reduce -- the flag in
+    /// agreement with `authority.activated`.
+    #[test]
+    fn a_configured_broker_is_unverified_and_each_acknowledgement_is_recorded() {
+        let fx = Fixture::new("t-posture-broker");
+        let broker = fx.dir.path().join("bipc").join("broker.sock");
+        let uid = own_uid().to_string();
+        let server = Server::start(&fx.args(&[
+            "--broker-socket",
+            broker.to_str().unwrap(),
+            "--broker-uid",
+            uid.as_str(),
+            "--allow-shared-broker-uid",
+            "--allow-host-execution",
+        ]));
+        let said = stderr_with(&server, "posture_summary");
+        assert!(said.contains("unverified=broker.posture"), "{said}");
+        let postures = fx.events("authority.posture");
+        assert_eq!(postures.len(), 1);
+        let posture = &postures[0];
+        assert_eq!(
+            posture.texts("reduced"),
+            Some(vec![
+                "authority.peer_boundary",
+                "broker.identity",
+                "policy.host_execution",
+            ])
+        );
+        assert_eq!(posture.texts("unverified"), Some(vec!["broker.posture"]));
+        assert_eq!(
+            posture.texts("acknowledged"),
+            Some(vec![
+                "--allow-authority-uid",
+                "--allow-shared-broker-uid",
+                "--allow-host-execution",
+            ])
+        );
+        let activated = fx.events("authority.activated");
+        assert_eq!(
+            activated
+                .last()
+                .and_then(|a| a.flag("security_allow_host_execution")),
+            Some(true)
+        );
+        drop(server);
+    }
+
     #[test]
     fn help_describes_the_server_that_exists() {
         let output =

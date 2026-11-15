@@ -148,6 +148,27 @@ impl UnverifiedWorkspace {
     }
 }
 
+// The development and evidence acknowledgements, each spelled once (F-03):
+// the parser below accepts exactly these words, and the effective posture
+// (`effective`) names the one that reduced a control.
+
+/// The authority may run as the broker's own uid.
+pub(crate) const SHARED_AUTHORITY_UID: &str = "--allow-shared-authority-uid";
+/// The process stays dumpable.
+pub(crate) const DUMPABLE: &str = "--allow-dumpable";
+/// A worker may start where its uid could trace it.
+pub(crate) const TRACEABLE_WORKERS: &str = "--allow-traceable-workers";
+/// A credential hop may run where its memory could reach swap.
+pub(crate) const SWAPPABLE_WORKERS: &str = "--allow-swappable-workers";
+/// `NO_NETWORK` environments may be prepared.
+pub(crate) const EVIDENCE_TOPOLOGY: &str = "--allow-evidence-topology";
+/// A workspace may be mounted with no proved group or bound.
+pub(crate) const UNVERIFIED_WORKSPACE: &str = "--allow-unverified-workspace";
+/// Names resolve from a fixture file.
+pub(crate) const EVIDENCE_EGRESS: &str = "--allow-evidence-egress";
+/// A test authority is trusted instead of Mozilla's roots.
+pub(crate) const EVIDENCE_TRUST: &str = "--allow-evidence-trust";
+
 /// A command line that does not describe a configuration.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct UsageError(String);
@@ -254,14 +275,14 @@ pub(crate) fn parse(args: &[String]) -> Result<Command, UsageError> {
                     return Err(UsageError::new("--authority-uid is given more than once"));
                 }
             }
-            "--allow-shared-authority-uid" => acknowledge(&mut shared, flag)?,
-            "--allow-dumpable" => acknowledge(&mut dumpable, flag)?,
-            "--allow-traceable-workers" => acknowledge(&mut traceable, flag)?,
-            "--allow-swappable-workers" => acknowledge(&mut swappable, flag)?,
-            "--allow-evidence-topology" => acknowledge(&mut evidence_topology, flag)?,
-            "--allow-unverified-workspace" => acknowledge(&mut unverified_workspace, flag)?,
-            "--allow-evidence-egress" => evidence_path(flag, value()?, &mut evidence_egress)?,
-            "--allow-evidence-trust" => evidence_path(flag, value()?, &mut evidence_trust)?,
+            SHARED_AUTHORITY_UID => acknowledge(&mut shared, flag)?,
+            DUMPABLE => acknowledge(&mut dumpable, flag)?,
+            TRACEABLE_WORKERS => acknowledge(&mut traceable, flag)?,
+            SWAPPABLE_WORKERS => acknowledge(&mut swappable, flag)?,
+            EVIDENCE_TOPOLOGY => acknowledge(&mut evidence_topology, flag)?,
+            UNVERIFIED_WORKSPACE => acknowledge(&mut unverified_workspace, flag)?,
+            EVIDENCE_EGRESS => evidence_path(flag, value()?, &mut evidence_egress)?,
+            EVIDENCE_TRUST => evidence_path(flag, value()?, &mut evidence_trust)?,
             other => {
                 return Err(UsageError::new(format!("unknown flag {}", bounded(other))));
             }

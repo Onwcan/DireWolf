@@ -779,6 +779,117 @@ fn broker_capped_worker_not(pid: Option<u32>) -> Swap {
     }
 }
 
+fn window_closed(_: &Path) -> Posture {
+    Posture {
+        scope: Some(1),
+        execute_only: false,
+        suid_dumpable: None,
+    }
+}
+
+fn unknown_swap(_: Option<u32>) -> Swap {
+    Swap::Unknown
+}
+
+/// What a test's [`WorkerPolicy::report`] heard, kept per thread: each check
+/// runs on the thread that asks it.
+type Said = Vec<(&'static str, &'static str, String)>;
+
+thread_local! {
+    static SAID: std::cell::RefCell<Said> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+fn remember(control: &'static str, flag: &'static str, facts: &str) {
+    SAID.with(|said| said.borrow_mut().push((control, flag, facts.to_owned())));
+}
+
+fn said() -> Said {
+    SAID.with(|said| std::mem::take(&mut *said.borrow_mut()))
+}
+
+/// F-03: an acknowledgement changes the answer, never what is known. The
+/// host is read under it too; where the facts hold, nothing is said; where
+/// they would have refused -- the window opened, swap appeared, or swap
+/// could not be read, after a start whose facts were safe -- the check is
+/// admitted and says so, naming the control and the flag. Without the
+/// acknowledgement the same facts refuse, and nothing is said as admitted.
+#[test]
+fn an_acknowledged_check_still_reads_the_host_and_says_what_it_admitted() {
+    let binary = Path::new("/nonexistent/dwkd-broker");
+    for (traceable, swappable) in [
+        (TraceableWorkers::Refused, SwappableWorkers::Refused),
+        (TraceableWorkers::Permitted, SwappableWorkers::Permitted),
+    ] {
+        let safe = WorkerPolicy {
+            architecture_verified: true,
+            startup: window_closed,
+            swap: capped,
+            traceable,
+            swappable,
+            report: remember,
+        };
+        assert_eq!(safe.admits_start(binary), Ok(()));
+        assert_eq!(safe.admits_credential(None), Ok(()));
+        assert_eq!(safe.admits_credential(Some(1)), Ok(()));
+        assert!(said().is_empty(), "{traceable:?} {swappable:?}");
+    }
+    let changed = WorkerPolicy {
+        architecture_verified: true,
+        startup: window_open,
+        swap: swappable,
+        traceable: TraceableWorkers::Permitted,
+        swappable: SwappableWorkers::Permitted,
+        report: remember,
+    };
+    assert_eq!(changed.admits_start(binary), Ok(()));
+    assert_eq!(changed.admits_credential(None), Ok(()));
+    assert_eq!(changed.admits_credential(Some(1)), Ok(()));
+    let reported = said();
+    assert_eq!(reported.len(), 3, "{reported:?}");
+    assert_eq!(
+        (reported[0].0, reported[0].1),
+        ("worker.startup_window", crate::config::TRACEABLE_WORKERS)
+    );
+    assert!(reported[0].2.contains("ptrace_scope=0"), "{reported:?}");
+    for (control, flag, facts) in &reported[1..] {
+        assert_eq!(
+            (*control, *flag),
+            ("worker.credential_swap", crate::config::SWAPPABLE_WORKERS)
+        );
+        assert!(facts.contains("(possible)"), "{facts}");
+    }
+    let strict = WorkerPolicy {
+        architecture_verified: true,
+        startup: window_open,
+        swap: unknown_swap,
+        traceable: TraceableWorkers::Refused,
+        swappable: SwappableWorkers::Refused,
+        report: remember,
+    };
+    assert!(
+        strict
+            .admits_start(binary)
+            .is_err_and(|why| why.contains("startup window open"))
+    );
+    assert!(
+        strict
+            .admits_credential(None)
+            .is_err_and(|why| why.contains("(unknown)")),
+        "an unread swap state is never taken for a protected one"
+    );
+    assert!(said().is_empty());
+    let unknown = WorkerPolicy {
+        swap: unknown_swap,
+        swappable: SwappableWorkers::Permitted,
+        report: remember,
+        ..strict
+    };
+    assert_eq!(unknown.admits_credential(None), Ok(()));
+    let reported = said();
+    assert_eq!(reported.len(), 1, "{reported:?}");
+    assert!(reported[0].2.contains("(unknown)"), "{reported:?}");
+}
+
 /// A client whose host facts are `policy`'s.
 #[allow(clippy::unwrap_used)]
 fn client_under(policy: WorkerPolicy) -> Client {

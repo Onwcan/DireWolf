@@ -22,10 +22,31 @@
 //! development flag, and bound to the life of the broker that started it.
 
 use rustix::process::{
-    DumpableBehavior, Pid, Resource, Rlimit, Signal, getppid, set_dumpable_behavior,
-    set_parent_process_death_signal, setrlimit,
+    DumpableBehavior, Pid, Resource, Rlimit, Signal, dumpable_behavior, getppid, getrlimit,
+    set_dumpable_behavior, set_parent_process_death_signal, setrlimit,
 };
 use rustix::thread::set_no_new_privs;
+
+/// This process's own hardening as the kernel reports it now (F-03): read
+/// back, never inferred from [`apply`] having returned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Observed {
+    /// Whether the process is dumpable; `None` when that could not be read.
+    pub(crate) dumpable: Option<bool>,
+    /// Whether `RLIMIT_CORE` is 0, soft and hard.
+    pub(crate) no_core: bool,
+}
+
+/// Read [`Observed`]: two reads of the process's own state, nothing set.
+pub(crate) fn observed() -> Observed {
+    let core = getrlimit(Resource::Core);
+    Observed {
+        dumpable: dumpable_behavior()
+            .ok()
+            .map(|behavior| behavior != DumpableBehavior::NotDumpable),
+        no_core: core.current == Some(0) && core.maximum == Some(0),
+    }
+}
 
 /// Apply the hardening. `dumpable` keeps the process dumpable (development).
 ///

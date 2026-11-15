@@ -445,7 +445,7 @@ fn start(
     };
     let (mut authority, report) =
         Authority::start(&config.state_dir, &startup, options).map_err(ServeError::Start)?;
-    sandbox::attach(
+    let workspace = sandbox::attach(
         &mut authority,
         config.sandbox_config.as_deref(),
         authority_uid,
@@ -459,7 +459,49 @@ fn start(
              {authority_uid}; one process cannot be both"
         )));
     }
+    record_posture(&mut authority, config, authority_uid, workspace)?;
     Ok((place, authority, report))
+}
+
+/// Say the effective start-up posture on stderr and record it in
+/// `audit.log` (F-03, ADR-0065, Proposed), before the socket is bound: an
+/// incarnation that served weakened is never recorded as one that did not.
+/// The facts are the configuration the start acted on, and this process's
+/// hardening read back from the kernel.
+#[cfg(unix)]
+fn record_posture(
+    authority: &mut crate::state::Authority,
+    config: &ServeConfig,
+    authority_uid: u32,
+    workspace: Option<crate::sandbox::WorkspaceSetting>,
+) -> Result<(), ServeError> {
+    use crate::posture::Broker;
+
+    #[cfg(target_os = "linux")]
+    let hardened = Some(hardening::observed());
+    #[cfg(not(target_os = "linux"))]
+    let hardened = None;
+    let broker = match &config.broker {
+        None => Broker::None,
+        Some(broker) if broker.uid == authority_uid || config.peers.allows(broker.uid) => {
+            Broker::Shared
+        }
+        Some(_) => Broker::Own,
+    };
+    let controls = crate::posture::of_authority(&crate::posture::Facts {
+        hardened,
+        dumpable_permitted: config.dumpable_permitted,
+        authority_uid_admitted: config.peers.allows(authority_uid),
+        broker,
+        host_execution: config.flags.security_allow_host_execution,
+        workspace,
+    });
+    for line in crate::posture::lines(&controls) {
+        log(&line);
+    }
+    authority
+        .record_posture(&controls)
+        .map_err(|error| ServeError::Io(format!("recording the effective posture: {error}")))
 }
 
 /// The operator's secret metadata (`--secrets-file`), read through the

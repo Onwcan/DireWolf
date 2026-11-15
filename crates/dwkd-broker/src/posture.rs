@@ -152,8 +152,13 @@ pub(crate) enum Swap {
     NoDevice,
     /// This cgroup, on the process's own path, allows it no swap.
     Capped(String),
-    /// Neither, or it could not be read: it may be written to swap.
+    /// The host has swap and no cgroup on the process's path caps it at
+    /// zero: it may be written to swap.
     Possible,
+    /// Whether the host has swap could not be read (F-03): never taken for
+    /// a host without it, so as unprotected as [`Swap::Possible`], and said
+    /// apart from it.
+    Unknown,
 }
 
 impl Swap {
@@ -170,6 +175,7 @@ impl Swap {
             Self::NoDevice => "no-device".to_owned(),
             Self::Capped(path) => format!("capped:{path}"),
             Self::Possible => "possible".to_owned(),
+            Self::Unknown => "unknown".to_owned(),
         }
     }
 }
@@ -206,15 +212,21 @@ fn ancestry(path: &str) -> Vec<&str> {
 }
 
 /// The decision, from what was read: no swap device, or the nearest cgroup
-/// whose limit is exactly `0`.
+/// whose limit is exactly `0`. A device count that could not be read is
+/// `Unknown` -- unprotected, and said so -- unless a cap holds regardless.
 fn swap_from(total_kib: Option<u64>, limits: &[(&str, Option<String>)]) -> Swap {
     if total_kib == Some(0) {
         return Swap::NoDevice;
     }
+    let unread = if total_kib.is_none() {
+        Swap::Unknown
+    } else {
+        Swap::Possible
+    };
     limits
         .iter()
         .find(|(_, limit)| limit.as_deref().map(str::trim) == Some("0"))
-        .map_or(Swap::Possible, |(path, _)| Swap::Capped((*path).to_owned()))
+        .map_or(unread, |(path, _)| Swap::Capped((*path).to_owned()))
 }
 
 /// Where process `pid`'s anonymous memory can go -- this process's for
@@ -401,7 +413,16 @@ mod tests {
         let max = Some("max\n".to_owned());
         assert_eq!(swap_from(Some(0), &[]), Swap::NoDevice);
         assert_eq!(swap_from(Some(1), &[]), Swap::Possible);
-        assert_eq!(swap_from(None, &[]), Swap::Possible, "unreadable: possible");
+        // F-03: an unread device count is unknown -- unprotected, and never
+        // reported as a host that has swap, nor as one that has none.
+        assert_eq!(swap_from(None, &[]), Swap::Unknown, "unreadable: unknown");
+        assert!(!Swap::Unknown.protected());
+        assert_eq!(Swap::Unknown.describe(), "unknown");
+        assert_eq!(
+            swap_from(None, &[("/a", Some("0\n".to_owned()))]),
+            Swap::Capped("/a".to_owned()),
+            "a zero cap holds whether or not the device count was read"
+        );
         assert_eq!(
             swap_from(Some(1), &[("/a/b", max.clone()), ("/a", zero.clone())]),
             Swap::Capped("/a".to_owned()),
@@ -506,5 +527,39 @@ mod tests {
         assert!(!execute_only(0, 0o100_755));
         assert!(!execute_only(0, 0o100_751));
         assert!(!execute_only(1001, 0o100_111));
+    }
+
+    /// F-03: what `observed` reports is what the kernel shows another way.
+    /// A dumpable process's `/proc/self/fd` is its own effective uid's, a
+    /// non-dumpable one's root's; `/proc/self/limits` prints the core limit.
+    /// This test process is not hardened, so whatever it is, the two must
+    /// agree -- a read-back that always said "not dumpable" or "no core"
+    /// would not.
+    #[test]
+    fn what_is_observed_is_what_proc_shows() {
+        let observed = crate::hardening::observed();
+        let status = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
+        let euid = status
+            .lines()
+            .find_map(|line| line.strip_prefix("Uid:"))
+            .and_then(|ids| ids.split_whitespace().nth(1))
+            .and_then(|id| id.parse::<u32>().ok());
+        let owner = std::fs::metadata("/proc/self/fd")
+            .map(|m| std::os::unix::fs::MetadataExt::uid(&m))
+            .ok();
+        assert!(euid.is_some() && owner.is_some(), "{status}");
+        assert_eq!(observed.dumpable, Some(owner == euid), "{owner:?} {euid:?}");
+        let limits = std::fs::read_to_string("/proc/self/limits").unwrap_or_default();
+        let core: Vec<&str> = limits
+            .lines()
+            .find_map(|line| line.strip_prefix("Max core file size"))
+            .map(|rest| rest.split_whitespace().take(2).collect())
+            .unwrap_or_default();
+        assert_eq!(core.len(), 2, "{limits}");
+        assert_eq!(
+            observed.no_core,
+            core.iter().all(|limit| *limit == "0"),
+            "{core:?}"
+        );
     }
 }

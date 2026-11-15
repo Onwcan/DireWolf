@@ -16,7 +16,9 @@ use crate::state::Authority;
 
 /// Read the operator's file at `path`, if one is configured, and attach it
 /// to `authority`. Without one, the authority runs no `process.exec`
-/// anywhere: version 5 is the host floor's, as version 4 is.
+/// anywhere: version 5 is the host floor's, as version 4 is. Returns the
+/// attached file's workspace setting, for the effective posture (F-03), or
+/// `None` when nothing was attached.
 ///
 /// # Errors
 ///
@@ -27,16 +29,17 @@ pub(super) fn attach(
     authority: &mut Authority,
     path: Option<&Path>,
     authority_uid: u32,
-) -> Result<(), ServeError> {
+) -> Result<Option<crate::sandbox::WorkspaceSetting>, ServeError> {
     let Some(path) = path else {
-        return Ok(());
+        return Ok(None);
     };
     let text = path.to_str().ok_or_else(|| {
         ServeError::Configuration("--sandbox-config is not a UTF-8 path".to_owned())
     })?;
     let config =
         crate::sandbox::operator::load(text, authority_uid).map_err(ServeError::Configuration)?;
-    if config.workspace() == crate::sandbox::WorkspaceSetting::UnverifiedEvidence {
+    let workspace = config.workspace();
+    if workspace == crate::sandbox::WorkspaceSetting::UnverifiedEvidence {
         log(
             "REDUCED ASSURANCE: [workspace] unverified_evidence -- no run's workspace has its \
              group or its bound proved, so a workload can fill the filesystem it is on; this is \
@@ -63,5 +66,5 @@ pub(super) fn attach(
             ""
         }
     ));
-    Ok(())
+    Ok(Some(workspace))
 }

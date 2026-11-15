@@ -547,6 +547,79 @@ mod linux {
         }
     }
 
+    /// F-03 (ADR-0065, Proposed): the released broker says each control's
+    /// effective condition at start -- one `event=posture` line per control
+    /// and a summary -- computed from the facts its `deployment_posture` line
+    /// prints. Each acknowledgement it was given is the control it reduces,
+    /// whatever this host's facts are: a swap acknowledgement on a host whose
+    /// memory cannot reach swap now is reduced all the same.
+    #[test]
+    fn the_broker_says_its_effective_posture_and_names_each_acknowledgement() {
+        let scratch = Scratch::new("posture");
+        let not_us = own_uid().wrapping_add(4242);
+        let broker = Broker::start(
+            &scratch.socket(),
+            not_us,
+            &["--allow-swappable-workers", "--allow-evidence-topology"],
+        );
+        broker.wait_for("posture_summary", 1);
+        let text = broker.stderr();
+        let posture: Vec<&str> = text
+            .lines()
+            .filter(|l| l.contains("event=posture control="))
+            .collect();
+        assert_eq!(posture.len(), 12, "{text}");
+        for expected in [
+            "control=broker.memory.dumpable scope=broker condition=REDUCED evidence=OBSERVED \
+             requirement=REQUIRED flag=--allow-dumpable",
+            "control=worker.credential_swap scope=worker condition=REDUCED evidence=OBSERVED \
+             requirement=REQUIRED flag=--allow-swappable-workers",
+            "control=environment.topology scope=environment condition=REDUCED \
+             evidence=CONFIGURED requirement=REQUIRED flag=--allow-evidence-topology",
+            "control=broker.identity.authority scope=broker condition=ENFORCED \
+             evidence=OBSERVED requirement=REQUIRED flag=-",
+            "control=broker.memory.core_limit scope=broker condition=ENFORCED evidence=OBSERVED",
+        ] {
+            assert!(
+                posture.iter().any(|l| l.contains(expected)),
+                "{expected}\n{text}"
+            );
+        }
+        let summary = text
+            .lines()
+            .find(|l| l.contains("event=posture_summary"))
+            .unwrap_or_default();
+        for reduced in [
+            "broker.memory.dumpable",
+            "worker.credential_swap",
+            "environment.topology",
+        ] {
+            assert!(summary.contains(reduced), "{summary}");
+        }
+        // The swap record states the same fact the deployment line read.
+        let swap = text
+            .lines()
+            .find(|l| l.contains("event=deployment_posture"))
+            .and_then(|l| l.split(' ').find(|w| w.starts_with("swap=")))
+            .unwrap_or_default()
+            .to_owned();
+        assert!(!swap.is_empty(), "{text}");
+        assert!(
+            posture
+                .iter()
+                .any(|l| l.contains("control=worker.credential_swap")
+                    && l.contains(&format!("facts=\"{swap}\""))),
+            "{swap}\n{text}"
+        );
+        // And the prose line the deployment guide greps for is there too.
+        assert!(
+            text.lines().any(|l| l.contains("REDUCED ASSURANCE")
+                && l.contains("--allow-swappable-workers")),
+            "{text}"
+        );
+        evidence("effective-posture", "every-acknowledgement-reduced");
+    }
+
     #[test]
     fn a_peer_that_is_not_the_authority_is_closed_before_a_byte_either_way() {
         let scratch = Scratch::new("peer");

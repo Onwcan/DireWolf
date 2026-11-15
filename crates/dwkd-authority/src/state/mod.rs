@@ -160,7 +160,7 @@ pub use workload::{WorkloadRecord, WorkloadRequest, WorkloadState};
 pub use workload_ops::{WorkloadOutcome, WorkloadReply};
 pub use workload_route::{Dispatched, MAX_PARKED, Parked};
 
-use audit::{AuditWriter, Fields, FlushFailure};
+use audit::{AuditWriter, Field, Fields, FlushFailure};
 use db::Class;
 use digest::DomainHash;
 use files::{Layout, StatePaths};
@@ -811,6 +811,68 @@ impl Authority {
                 &mut audit,
             )
         })
+    }
+
+    /// Record this incarnation's effective start-up posture (F-03, ADR-0065,
+    /// Proposed): one `authority.posture` record -- each control's
+    /// condition, where it comes from and the acknowledgement that reduced
+    /// it, and the ids by condition -- so that the security record of an
+    /// incarnation that served weakened says so. The server calls it once,
+    /// after the start and the attachment it records; nothing a peer sends
+    /// reaches it.
+    ///
+    /// # Errors
+    ///
+    /// The store refused the record; the server does not serve then.
+    pub fn record_posture(
+        &mut self,
+        controls: &[crate::posture::Control],
+    ) -> Result<(), AuthorityError> {
+        use crate::posture::Condition;
+
+        let incarnation = self.shared.incarnation.load(Ordering::SeqCst);
+        let ids = |condition: Condition| -> Vec<Field> {
+            crate::posture::ids(controls, condition)
+                .into_iter()
+                .map(|id| Field::Text(id.to_owned()))
+                .collect()
+        };
+        let records = controls
+            .iter()
+            .map(|control| {
+                let mut members = vec![
+                    ("control", Field::Text(control.id.to_owned())),
+                    ("scope", Field::Text(control.scope.to_owned())),
+                    (
+                        "condition",
+                        Field::Text(control.condition.as_str().to_owned()),
+                    ),
+                    (
+                        "evidence",
+                        Field::Text(control.evidence.as_str().to_owned()),
+                    ),
+                ];
+                if let Some(flag) = control.flag {
+                    members.push(("flag", Field::Text(flag.to_owned())));
+                }
+                Field::Object(members)
+            })
+            .collect();
+        let acknowledged = controls
+            .iter()
+            .filter_map(|control| control.flag)
+            .map(|flag| Field::Text(flag.to_owned()))
+            .collect();
+        let fields = Fields::new()
+            .int("incarnation", incarnation)
+            .list("controls", records)
+            .list("enforced", ids(Condition::Enforced))
+            .list("reduced", ids(Condition::Reduced))
+            .list("unverified", ids(Condition::Unverified))
+            .list("unsupported", ids(Condition::Unsupported))
+            .list("not_applicable", ids(Condition::NotApplicable))
+            .list("acknowledged", acknowledged);
+        self.transact(|work| work.audit(AuditEvent::AuthorityPosture, fields))
     }
 
     /// The store's gate (F-02), for the route tests' interleavings.

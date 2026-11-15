@@ -73,6 +73,8 @@
 pub mod broker;
 pub mod capability;
 pub mod policy;
+// The effective start-up posture (F-03): records, no I/O.
+pub mod posture;
 pub mod resource;
 pub mod sandbox;
 pub mod secret;
