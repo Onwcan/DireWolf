@@ -141,7 +141,14 @@ def matrix_problems(matrix: dict[str, object]) -> list[str]:
         elif kind == "mutation-campaign":
             if evidence["campaign"] not in dw.C3_CAMPAIGNS:
                 problems.append(f"{rid}: no campaign {evidence['campaign']}")
-            if status == "VERIFIED":
+            # A campaign is VERIFIED by the C3 workflow's own run and its passed
+            # gate -- never by a local run, another workflow or the matrix alone.
+            cited = row.get("run")
+            if status == "VERIFIED" and not (
+                isinstance(cited, dict)
+                and cited.get("workflow") == ".github/workflows/c3-evidence.yml"
+                and "C3 gate: COMPLETE" in str(row.get("provenance"))
+            ):
                 problems.append(f"{rid}: a campaign is VERIFIED only by a passed C3 gate")
         elif kind == "inventory":
             if not (REPO_ROOT / str(evidence["pinned"])).is_file():
@@ -294,10 +301,23 @@ def test_a_row_that_misstates_its_producer_is_found(
     assert any(said in problem for problem in matrix_problems(matrix)), matrix_problems(matrix)
 
 
-def test_a_campaign_is_never_verified_by_the_matrix_alone() -> None:
+@pytest.mark.parametrize(
+    "change",
+    [
+        # Another workflow's run, however green, is not the C3 gate's.
+        lambda row: row.update(run={**row["run"], "workflow": ".github/workflows/ci.yml"}),
+        # A run that names no passed gate.
+        lambda row: row.update(provenance="the developer's machine: 12 of 12 killed"),
+        lambda row: row.update(run=None),
+    ],
+)
+def test_a_campaign_is_verified_only_by_the_c3_gates_own_run(
+    change: Callable[[dict[str, object]], None],
+) -> None:
     matrix = copy.deepcopy(_matrix())
     row = next(r for r in _rows(matrix) if r["id"] == "F-19-5")
-    row["status"] = "VERIFIED"
+    assert row["status"] == "VERIFIED"
+    change(row)
     assert any("only by a passed C3 gate" in p for p in matrix_problems(matrix))
 
 

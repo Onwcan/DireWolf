@@ -16,34 +16,61 @@
     },
     "commit": "299686c570ee93898af6a31e554010de66763cab"
   },
+  "hosted_runs": {
+    "c3": {
+      "attempt": 1,
+      "commit": "6aa9245a8458f932c3c4f6a3b81c3a00e0a76cb2",
+      "id": 43658092468,
+      "number": 1,
+      "result": "success; C3 gate COMPLETE, 12 of 12 records",
+      "workflow": ".github/workflows/c3-evidence.yml"
+    },
+    "ci176": {
+      "attempt": 1,
+      "commit": "6aa9245a8458f932c3c4f6a3b81c3a00e0a76cb2",
+      "id": 43656395503,
+      "number": 176,
+      "result": "failure: D11 hardening only, on a runner with no swap device (fixed separately)",
+      "workflow": ".github/workflows/ci.yml"
+    },
+    "m5e5": {
+      "attempt": 1,
+      "commit": "6aa9245a8458f932c3c4f6a3b81c3a00e0a76cb2",
+      "id": 43658104419,
+      "number": 5,
+      "result": "success",
+      "workflow": ".github/workflows/m5e5-evidence.yml"
+    },
+    "same_source_as_baseline": "git diff 299686c 6aa9245 changes no file under crates/, policy/, schemas/, fuzz/, evals/, runtime/ or tools/"
+  },
   "milestones": {
     "F-01": {
       "adr_acceptance": "PENDING (Proposed)",
       "implemented": "c2353e8",
-      "mutation_control": "NOT VERIFIED (local only)",
+      "mutation_control": "VERIFIED (run 43658092468: 20 of 20 killed)",
       "ordinary_hosted_ci": "run 43510375285 (#164) and every run since, latest 43648487347 (#173)",
-      "property_exercised": "VERIFIED for every real-OCI case; unit-level rows per test NOT VERIFIED"
+      "property_exercised": "VERIFIED: every real-OCI case (run 43640168802) and the unit tests by name (run 43658092468)"
     },
     "F-17": {
       "adr_acceptance": "PENDING (Proposed)",
       "implemented": "2f5721b, d58d622",
-      "mutation_control": "NOT VERIFIED (local only)",
+      "mutation_control": "VERIFIED (run 43658092468: 26 of 26 killed)",
       "ordinary_hosted_ci": "run 43442420561 (#163) and every run since, latest 43648487347 (#173)",
-      "property_exercised": "VERIFIED for every real-OCI case; NOT VERIFIED: the M5e.5 manual workflow on F-17's code, and unit-level rows per test"
+      "property_exercised": "VERIFIED: every real-OCI case (run 43640168802), the unit tests by name and the M5e.5 manual workflow on F-17's code (runs 43658092468, 43658104419)"
     },
     "F-18": {
       "adr_acceptance": "PENDING (Proposed)",
       "implemented": "d8eb736, e62c597",
-      "mutation_control": "NOT VERIFIED (local only)",
+      "mutation_control": "VERIFIED (run 43658092468: 27 of 27 killed)",
       "ordinary_hosted_ci": "run 43591381367 (#166) and every run since, latest 43648487347 (#173)",
-      "property_exercised": "VERIFIED: i09 at three identities, the foreign-uid cases by the eval's verdict; unit-level rows per test NOT VERIFIED"
+      "property_exercised": "VERIFIED: i09 on three identities (run 43640168802); the cross-uid cases with both uids, the descriptor test and the unit tests by name (run 43658092468); TX061-TX064 (run 43656395503)"
     },
     "F-19": {
       "adr_acceptance": "PENDING (Proposed)",
       "implemented": "9837ddc",
-      "mutation_control": "NOT VERIFIED (local only)",
+      "mutation_control": "VERIFIED (run 43658092468: 12 of 12 killed)",
       "ordinary_hosted_ci": "run 43238694539 (#161) and every run since, latest 43648487347 (#173)",
-      "property_exercised": "VERIFIED (F-19-1, F-19-2 at real-oci, run 43640168802)"
+      "property_exercised": "VERIFIED (F-19-1, F-19-2 at real-oci, run 43640168802; F-19-3 by name, run 43658092468)"
     }
   },
   "observed_run": {
@@ -129,7 +156,7 @@
       "adr": "0060",
       "artifact": null,
       "behaviour": "The derivation: methods, max_requests and both constraints, alternative ports, mixtures and duplicates, and the destination bound counted on destinations only.",
-      "ci_job": "tests (make test) (ubuntu-latest, windows-latest, macos-latest)",
+      "ci_job": "C3 hosted evidence (manual): agent-mutations, the unmutated baseline's stage authority-guards",
       "evidence": {
         "file": "crates/dwkd-authority/src/sandbox.rs",
         "kind": "unit",
@@ -142,7 +169,7 @@
         ]
       },
       "finding": "F-19",
-      "gap": "a green job is not an observed test: the C3 workflow's `agent-mutations` baseline records each of these tests by name",
+      "gap": "",
       "id": "F-19-3",
       "identities": 1,
       "invariant": "ADR-0060 decision",
@@ -152,16 +179,17 @@
         "agent-mutations: a constrained network.https grant becomes a proxy destination"
       ],
       "negative_control": "a constrained grant alone, or beside an unconstrained one, adds no destination",
-      "observed": "the job succeeded; no per-test result of it is retained",
+      "observed": "each named test passed in the unmutated baseline of both agent-mutations shards, before any mutant",
       "positive_control": "an unconstrained grant is a destination, in any order",
-      "provenance": "job conclusions read from GitHub's jobs API for run 43648487347",
+      "provenance": "the shards' job logs (the baseline, before the first `mutant:` line), and the C3 gate in the same run (job 132645720181, make c3-gate-check): \"C3 gate: COMPLETE: 12 record(s) of run 43658092468 attempt 1 at 6aa9245a8458, each from its job on a GitHub-hosted runner, judged again\", which refuses a baseline that failed or ran no test",
       "run": {
         "attempt": 1,
-        "commit": "299686c570ee93898af6a31e554010de66763cab",
-        "id": 43648487347,
-        "number": 173
+        "commit": "6aa9245a8458f932c3c4f6a3b81c3a00e0a76cb2",
+        "id": 43658092468,
+        "number": 1,
+        "workflow": ".github/workflows/c3-evidence.yml"
       },
-      "status": "NOT VERIFIED"
+      "status": "VERIFIED"
     },
     {
       "adr": "0060",
@@ -209,7 +237,7 @@
         "kind": "mutation-campaign"
       },
       "finding": "F-19",
-      "gap": "no hosted run has ever executed this review; the C3 workflow runs it and keeps its records for the C3 gate",
+      "gap": "",
       "id": "F-19-5",
       "identities": 1,
       "invariant": "mutation review",
@@ -217,11 +245,17 @@
       "make_target": "sandbox-agent-mutations",
       "mutation_control": [],
       "negative_control": "each mutant must be KILLED; any other outcome fails the review",
-      "observed": "local, 2026-11-12: 12 of 12 killed, the F-19 mutant by the authority's unit suite",
+      "observed": "12 of 12 killed in 2 shards; the F-19 mutant (a constrained network.https grant becomes a proxy destination) by the authority-guards selection's named failing tests; 10 others by named tests, 2 by the one-identity agent evidence's refusal",
       "positive_control": "the unmutated baseline passes, each selection running at least one test",
-      "provenance": "the developer's machine only; never a hosted run",
-      "run": null,
-      "status": "NOT VERIFIED"
+      "provenance": "the C3 gate in the same run (job 132645720181, make c3-gate-check): \"C3 gate: COMPLETE: 12 record(s) of run 43658092468 attempt 1 at 6aa9245a8458, each from its job on a GitHub-hosted runner, judged again\"",
+      "run": {
+        "attempt": 1,
+        "commit": "6aa9245a8458f932c3c4f6a3b81c3a00e0a76cb2",
+        "id": 43658092468,
+        "number": 1,
+        "workflow": ".github/workflows/c3-evidence.yml"
+      },
+      "status": "VERIFIED"
     },
     {
       "adr": "0061",
@@ -862,7 +896,7 @@
       "adr": "0061",
       "artifact": null,
       "behaviour": "The broker evaluates no policy; it refuses an authorisation beyond its grant (EGRESS_NOT_GRANTED), and carries nothing without a workload's authorisation.",
-      "ci_job": "tests (make test) (ubuntu-latest, windows-latest, macos-latest)",
+      "ci_job": "C3 hosted evidence (manual): egress-policy-mutations, the unmutated baseline's stage broker-egress",
       "evidence": {
         "file": "crates/dwkd-broker/src/egress/tests.rs",
         "kind": "unit",
@@ -874,7 +908,7 @@
         ]
       },
       "finding": "F-17",
-      "gap": "a green job is not an observed test: the C3 workflow's `egress-policy-mutations` baseline records each of these tests by name",
+      "gap": "",
       "id": "F-17-19",
       "identities": 1,
       "invariant": "EG-4; EG-11",
@@ -884,22 +918,23 @@
         "egress-policy-mutations: M1: the proxy carries a tunnel its cell does not allow"
       ],
       "negative_control": "beyond the grant, twice, or with no proxy it is refused",
-      "observed": "the job succeeded; no per-test result of it is retained",
+      "observed": "each named test passed in the unmutated baseline of all four egress-policy shards, before any mutant",
       "positive_control": "an authorisation within the grant is accepted once",
-      "provenance": "job conclusions read from GitHub's jobs API for run 43648487347",
+      "provenance": "the shards' job logs (the baseline, before the first `mutant:` line), and the C3 gate in the same run (job 132645720181, make c3-gate-check): \"C3 gate: COMPLETE: 12 record(s) of run 43658092468 attempt 1 at 6aa9245a8458, each from its job on a GitHub-hosted runner, judged again\", which refuses a baseline that failed or ran no test",
       "run": {
         "attempt": 1,
-        "commit": "299686c570ee93898af6a31e554010de66763cab",
-        "id": 43648487347,
-        "number": 173
+        "commit": "6aa9245a8458f932c3c4f6a3b81c3a00e0a76cb2",
+        "id": 43658092468,
+        "number": 1,
+        "workflow": ".github/workflows/c3-evidence.yml"
       },
-      "status": "NOT VERIFIED"
+      "status": "VERIFIED"
     },
     {
       "adr": "0061",
       "artifact": null,
       "behaviour": "The authority's decision, digest, drift tripwire (EGRESS_CONTEXT_DRIFT), settlement and recovery, through the real authority and store with the route tests' fake broker.",
-      "ci_job": "tests (make test) (ubuntu-latest, windows-latest, macos-latest)",
+      "ci_job": "C3 hosted evidence (manual): egress-policy-mutations, the unmutated baseline's stage authority-partition-and-workload",
       "evidence": {
         "file": "crates/dwkd-authority/src/state/workload_route_tests.rs",
         "kind": "unit",
@@ -916,7 +951,7 @@
         ]
       },
       "finding": "F-17",
-      "gap": "a green job is not an observed test: the C3 workflow's `egress-policy-mutations` baseline records each of these tests by name",
+      "gap": "",
       "id": "F-17-20",
       "identities": 1,
       "invariant": "EG-5; EG-7; EG-8",
@@ -927,16 +962,17 @@
         "egress-policy-mutations: exposure: an uncertain ending exposes nothing"
       ],
       "negative_control": "a changed context destroys the environment; a contradictory report is not believed",
-      "observed": "the job succeeded; no per-test result of it is retained",
+      "observed": "each named test passed in the unmutated baseline of all four egress-policy shards, before any mutant",
       "positive_control": "a launch's authorisation recomputes to its recorded digest",
-      "provenance": "job conclusions read from GitHub's jobs API for run 43648487347",
+      "provenance": "the shards' job logs (the baseline, before the first `mutant:` line), and the C3 gate in the same run (job 132645720181, make c3-gate-check): \"C3 gate: COMPLETE: 12 record(s) of run 43658092468 attempt 1 at 6aa9245a8458, each from its job on a GitHub-hosted runner, judged again\", which refuses a baseline that failed or ran no test",
       "run": {
         "attempt": 1,
-        "commit": "299686c570ee93898af6a31e554010de66763cab",
-        "id": 43648487347,
-        "number": 173
+        "commit": "6aa9245a8458f932c3c4f6a3b81c3a00e0a76cb2",
+        "id": 43658092468,
+        "number": 1,
+        "workflow": ".github/workflows/c3-evidence.yml"
       },
-      "status": "NOT VERIFIED"
+      "status": "VERIFIED"
     },
     {
       "adr": "0061",
@@ -1142,7 +1178,7 @@
         "workflow": ".github/workflows/m5e5-evidence.yml"
       },
       "finding": "F-17",
-      "gap": "no run on F-17's code: the owner dispatches the existing workflow on main",
+      "gap": "",
       "id": "F-17-26",
       "identities": 1,
       "invariant": "ADR-0061 Evidence: hosted only (M5e.5)",
@@ -1150,16 +1186,17 @@
       "make_target": "sandbox-registry-mutations",
       "mutation_control": [],
       "negative_control": "a hosted registry mutant must be killed",
-      "observed": "success, but on 523dc9a (2026-11-11), before F-19 (9837ddc) and F-17 (2f5721b)",
+      "observed": "success on 6aa9245, F-17's code: sandbox-hygiene-evidence 44 cases at dwkp-end-to-end with a clean census; the profile mutation review 36 of 36 killed (1 equivalent, not run), its hosted mutants among them",
       "positive_control": "its last run passed",
-      "provenance": "GitHub's workflow-runs API",
+      "provenance": "the two jobs' logs of run 43658104419 and GitHub's jobs API",
       "run": {
         "attempt": 1,
-        "commit": "523dc9a43985",
-        "id": 42994561934,
-        "number": 4
+        "commit": "6aa9245a8458f932c3c4f6a3b81c3a00e0a76cb2",
+        "id": 43658104419,
+        "number": 5,
+        "workflow": ".github/workflows/m5e5-evidence.yml"
       },
-      "status": "NOT VERIFIED"
+      "status": "VERIFIED"
     },
     {
       "adr": "0061",
@@ -1171,7 +1208,7 @@
         "kind": "mutation-campaign"
       },
       "finding": "F-17",
-      "gap": "no hosted run has ever executed this review; the C3 workflow runs it and keeps its records for the C3 gate",
+      "gap": "",
       "id": "F-17-27",
       "identities": 1,
       "invariant": "mutation review",
@@ -1179,11 +1216,17 @@
       "make_target": "sandbox-egress-policy-mutations",
       "mutation_control": [],
       "negative_control": "each mutant must be KILLED; any other outcome fails the review",
-      "observed": "local, 2026-11-13: 26 of 26 killed",
+      "observed": "26 of 26 killed in 4 shards; each by a named failing test: 17 in the authority's partition and workload suites, 9 in the broker's egress suite; none needed sandbox-egress-evidence",
       "positive_control": "the unmutated baseline passes, each selection running at least one test",
-      "provenance": "the developer's machine only; never a hosted run",
-      "run": null,
-      "status": "NOT VERIFIED"
+      "provenance": "the C3 gate in the same run (job 132645720181, make c3-gate-check): \"C3 gate: COMPLETE: 12 record(s) of run 43658092468 attempt 1 at 6aa9245a8458, each from its job on a GitHub-hosted runner, judged again\"",
+      "run": {
+        "attempt": 1,
+        "commit": "6aa9245a8458f932c3c4f6a3b81c3a00e0a76cb2",
+        "id": 43658092468,
+        "number": 1,
+        "workflow": ".github/workflows/c3-evidence.yml"
+      },
+      "status": "VERIFIED"
     },
     {
       "adr": "0062",
@@ -1434,7 +1477,7 @@
       "adr": "0062",
       "artifact": null,
       "behaviour": "Monotonicity, broker-derived evidence, ordering, evidence rows, replay and decision attribution, through the real authority and store with a fake broker.",
-      "ci_job": "tests (make test) (ubuntu-latest, windows-latest, macos-latest)",
+      "ci_job": "C3 hosted evidence (manual): taint-mutations, the unmutated baseline's stage authority-unit",
       "evidence": {
         "file": "crates/dwkd-authority/src/state/taint_route_tests.rs",
         "kind": "unit",
@@ -1457,7 +1500,7 @@
         ]
       },
       "finding": "F-01",
-      "gap": "a green job is not an observed test: the C3 workflow's `taint-mutations` baseline records each of these tests by name",
+      "gap": "",
       "id": "F-01-8",
       "identities": 1,
       "invariant": "T-1; T-2; T-8; T-10; T-12",
@@ -1470,16 +1513,17 @@
         "taint-mutations: TM16: a run holding no external content marks a workspace"
       ],
       "negative_control": "taint never falls; a contradictory report is never taken for no content",
-      "observed": "the job succeeded; no per-test result of it is retained",
+      "observed": "each named test passed in the unmutated baseline of all three taint shards, before any mutant",
       "positive_control": "local output stays local; a pristine root stays local",
-      "provenance": "job conclusions read from GitHub's jobs API for run 43648487347",
+      "provenance": "the shards' job logs (the baseline, before the first `mutant:` line), and the C3 gate in the same run (job 132645720181, make c3-gate-check): \"C3 gate: COMPLETE: 12 record(s) of run 43658092468 attempt 1 at 6aa9245a8458, each from its job on a GitHub-hosted runner, judged again\", which refuses a baseline that failed or ran no test",
       "run": {
         "attempt": 1,
-        "commit": "299686c570ee93898af6a31e554010de66763cab",
-        "id": 43648487347,
-        "number": 173
+        "commit": "6aa9245a8458f932c3c4f6a3b81c3a00e0a76cb2",
+        "id": 43658092468,
+        "number": 1,
+        "workflow": ".github/workflows/c3-evidence.yml"
       },
-      "status": "NOT VERIFIED"
+      "status": "VERIFIED"
     },
     {
       "adr": "0062",
@@ -1520,7 +1564,7 @@
         "kind": "mutation-campaign"
       },
       "finding": "F-01",
-      "gap": "no hosted run has ever executed this review; the C3 workflow runs it and keeps its records for the C3 gate",
+      "gap": "",
       "id": "F-01-10",
       "identities": 1,
       "invariant": "mutation review",
@@ -1528,11 +1572,17 @@
       "make_target": "sandbox-taint-mutations",
       "mutation_control": [],
       "negative_control": "each mutant must be KILLED; any other outcome fails the review",
-      "observed": "local, 2026-11-13: 20 of 20 killed",
+      "observed": "20 of 20 killed in 3 shards; each by a named failing test of the authority's unit suite; none needed sandbox-egress-evidence",
       "positive_control": "the unmutated baseline passes, each selection running at least one test",
-      "provenance": "the developer's machine only; never a hosted run",
-      "run": null,
-      "status": "NOT VERIFIED"
+      "provenance": "the C3 gate in the same run (job 132645720181, make c3-gate-check): \"C3 gate: COMPLETE: 12 record(s) of run 43658092468 attempt 1 at 6aa9245a8458, each from its job on a GitHub-hosted runner, judged again\"",
+      "run": {
+        "attempt": 1,
+        "commit": "6aa9245a8458f932c3c4f6a3b81c3a00e0a76cb2",
+        "id": 43658092468,
+        "number": 1,
+        "workflow": ".github/workflows/c3-evidence.yml"
+      },
+      "status": "VERIFIED"
     },
     {
       "adr": "0063",
@@ -1595,7 +1645,7 @@
         "kind": "eval"
       },
       "finding": "F-18",
-      "gap": "the cases' own lines and the two uids are not retained; the C3 workflow's cross-uid job keeps both",
+      "gap": "",
       "id": "F-18-2",
       "identities": 2,
       "invariant": "\u00a73 a foreign uid takes over nothing; \u00a74",
@@ -1605,7 +1655,7 @@
         "ownership-mutations: OM1: a subject that may not hold a session is not refused"
       ],
       "negative_control": "foreign-uid-session-takeover, foreign-uid-profile-escalation, foreign-uid-owned-session-held: each contained",
-      "observed": "pass, score 1.0: 7 of 7 expected cases contained, layers peer-gate=3 state-fence=3 filesystem=1, against the real dwkd-authority binary",
+      "observed": "pass, score 1.0: 7 of 7 expected cases contained, layers peer-gate=3 state-fence=3 filesystem=1, against the real dwkd-authority binary; the cases' own lines and both uids are now kept (row F-18-8)",
       "positive_control": "the same uid's own session is held",
       "provenance": "the eval's result line kept in m5e-evidence-evals (judged-0.txt); its runner fails unless every named case is reported contained",
       "run": {
@@ -1620,7 +1670,7 @@
       "adr": "0063",
       "artifact": null,
       "behaviour": "Takeover after expiry, release and restart; same-uid reconnect; first acquirer; binding, sharing, profiles, delegation and revocation; stale epochs; migration and adoption fail closed; forged subject fields.",
-      "ci_job": "tests (make test) (ubuntu-latest, windows-latest, macos-latest)",
+      "ci_job": "C3 hosted evidence (manual): ownership-mutations, the unmutated baseline's stage ownership-suites",
       "evidence": {
         "file": "crates/dwkd-authority/tests/state_ownership.rs",
         "kind": "unit",
@@ -1646,7 +1696,7 @@
         ]
       },
       "finding": "F-18",
-      "gap": "a green job is not an observed test: the C3 workflow's `ownership-mutations` baseline records each of these tests by name",
+      "gap": "",
       "id": "F-18-3",
       "identities": 1,
       "invariant": "\u00a73; \u00a75; \u00a76; \u00a77",
@@ -1659,22 +1709,23 @@
         "ownership-mutations: OM26: the adoption overlooks another subject in the history"
       ],
       "negative_control": "every other subject is refused LEASE_HELD or UNKNOWN_AGENT_PROFILE and reaps nothing",
-      "observed": "the job succeeded; no per-test result of it is retained",
+      "observed": "each named test passed in the unmutated baseline of both ownership shards, before any mutant",
       "positive_control": "the same uid, the first acquirer, a declared principal hold their sessions",
-      "provenance": "job conclusions read from GitHub's jobs API for run 43648487347",
+      "provenance": "the shards' job logs (the baseline, before the first `mutant:` line), and the C3 gate in the same run (job 132645720181, make c3-gate-check): \"C3 gate: COMPLETE: 12 record(s) of run 43658092468 attempt 1 at 6aa9245a8458, each from its job on a GitHub-hosted runner, judged again\", which refuses a baseline that failed or ran no test",
       "run": {
         "attempt": 1,
-        "commit": "299686c570ee93898af6a31e554010de66763cab",
-        "id": 43648487347,
-        "number": 173
+        "commit": "6aa9245a8458f932c3c4f6a3b81c3a00e0a76cb2",
+        "id": 43658092468,
+        "number": 1,
+        "workflow": ".github/workflows/c3-evidence.yml"
       },
-      "status": "NOT VERIFIED"
+      "status": "VERIFIED"
     },
     {
       "adr": "0063",
       "artifact": null,
       "behaviour": "Ownership holds through workload settlement: a revoked run's parked workload is ended and answered with nothing it produced; a crash on either side completes the revocation.",
-      "ci_job": "tests (make test) (ubuntu-latest, windows-latest, macos-latest)",
+      "ci_job": "C3 hosted evidence (manual): ownership-mutations, the unmutated baseline's stage authority-unit",
       "evidence": {
         "file": "crates/dwkd-authority/src/state/ownership_route_tests.rs",
         "kind": "unit",
@@ -1687,7 +1738,7 @@
         ]
       },
       "finding": "F-18",
-      "gap": "a green job is not an observed test: the C3 workflow's `ownership-mutations` baseline records each of these tests by name",
+      "gap": "",
       "id": "F-18-4",
       "identities": 1,
       "invariant": "\u00a75 two-phase revocation; settlement",
@@ -1698,22 +1749,23 @@
         "ownership-mutations: OM23: a revocation's second phase is skipped"
       ],
       "negative_control": "a parked workload's output is withheld (OUTCOME_UNKNOWN)",
-      "observed": "the job succeeded; no per-test result of it is retained",
+      "observed": "each named test passed in the unmutated baseline of both ownership shards, before any mutant",
       "positive_control": "a revocation of nothing writes nothing",
-      "provenance": "job conclusions read from GitHub's jobs API for run 43648487347",
+      "provenance": "the shards' job logs (the baseline, before the first `mutant:` line), and the C3 gate in the same run (job 132645720181, make c3-gate-check): \"C3 gate: COMPLETE: 12 record(s) of run 43658092468 attempt 1 at 6aa9245a8458, each from its job on a GitHub-hosted runner, judged again\", which refuses a baseline that failed or ran no test",
       "run": {
         "attempt": 1,
-        "commit": "299686c570ee93898af6a31e554010de66763cab",
-        "id": 43648487347,
-        "number": 173
+        "commit": "6aa9245a8458f932c3c4f6a3b81c3a00e0a76cb2",
+        "id": 43658092468,
+        "number": 1,
+        "workflow": ".github/workflows/c3-evidence.yml"
       },
-      "status": "NOT VERIFIED"
+      "status": "VERIFIED"
     },
     {
       "adr": "0063",
       "artifact": null,
       "behaviour": "A pipe end or terminal master passed over the real socket is never installed in the authority.",
-      "ci_job": "authority boundary (make authority-transport-evidence)",
+      "ci_job": "C3 hosted evidence (manual): cross-uid ownership (make c3-cross-uid-evidence)",
       "evidence": {
         "file": "crates/dwkd-authority/tests/transport_hostile.rs",
         "kind": "unit",
@@ -1722,7 +1774,7 @@
         ]
       },
       "finding": "F-18",
-      "gap": "the C3 workflow's cross-uid job keeps this test's pass by name",
+      "gap": "",
       "id": "F-18-5",
       "identities": 1,
       "invariant": "\u00a71 (TX061): runtime-provided descriptors never become authority",
@@ -1730,16 +1782,17 @@
       "make_target": "authority-transport-evidence",
       "mutation_control": [],
       "negative_control": "no passed descriptor appears in the authority's /proc fd table",
-      "observed": "the job succeeded; no per-test result of it is retained",
+      "observed": "transport_hostile: 11 of 11 passed, this test among them by name",
       "positive_control": "the same connection's ordinary messages are served",
-      "provenance": "job conclusions read from GitHub's jobs API for run 43648487347",
+      "provenance": "the C3 gate in the same run (job 132645720181, make c3-gate-check): \"C3 gate: COMPLETE: 12 record(s) of run 43658092468 attempt 1 at 6aa9245a8458, each from its job on a GitHub-hosted runner, judged again\", which requires this test in the record's passed tests",
       "run": {
         "attempt": 1,
-        "commit": "299686c570ee93898af6a31e554010de66763cab",
-        "id": 43648487347,
-        "number": 173
+        "commit": "6aa9245a8458f932c3c4f6a3b81c3a00e0a76cb2",
+        "id": 43658092468,
+        "number": 1,
+        "workflow": ".github/workflows/c3-evidence.yml"
       },
-      "status": "NOT VERIFIED"
+      "status": "VERIFIED"
     },
     {
       "adr": "0063",
@@ -1756,7 +1809,7 @@
         ]
       },
       "finding": "F-18",
-      "gap": "static hygiene, not containment (architecture.toml); no per-rule output retained",
+      "gap": "",
       "id": "F-18-6",
       "identities": 1,
       "invariant": "boundary rules TX061-TX064",
@@ -1764,16 +1817,17 @@
       "make_target": "arch",
       "mutation_control": [],
       "negative_control": "the boundary checker's own tests reject each rule's violation",
-      "observed": "the job succeeded; locally `make arch`: dwcheck ok",
+      "observed": "the boundaries job succeeded (CI #176 failed only in D11 hardening): dwcheck ok on the tree, and on the deliberately invalid fixture tree each of TX061, TX062, TX063 and TX064 reported its own planted violation, and the tree was rejected",
       "positive_control": "make arch passes",
-      "provenance": "job conclusions read from GitHub's jobs API for run 43648487347",
+      "provenance": "the job's log (job 132635850811 of run 43656395503); static hygiene, not containment",
       "run": {
         "attempt": 1,
-        "commit": "299686c570ee93898af6a31e554010de66763cab",
-        "id": 43648487347,
-        "number": 173
+        "commit": "6aa9245a8458f932c3c4f6a3b81c3a00e0a76cb2",
+        "id": 43656395503,
+        "number": 176,
+        "workflow": ".github/workflows/ci.yml"
       },
-      "status": "NOT VERIFIED"
+      "status": "VERIFIED"
     },
     {
       "adr": "0063",
@@ -1785,7 +1839,7 @@
         "kind": "mutation-campaign"
       },
       "finding": "F-18",
-      "gap": "no hosted run has ever executed this review; the C3 workflow runs it and keeps its records for the C3 gate",
+      "gap": "",
       "id": "F-18-7",
       "identities": 1,
       "invariant": "mutation review",
@@ -1793,11 +1847,17 @@
       "make_target": "authority-ownership-mutations",
       "mutation_control": [],
       "negative_control": "each mutant must be KILLED; any other outcome fails the review",
-      "observed": "local, 2026-11-14: 27 of 27 killed",
+      "observed": "27 of 27 killed in 2 shards; each by a named failing test: 22 by the ownership suites, 5 by the authority's unit suite",
       "positive_control": "the unmutated baseline passes, each selection running at least one test",
-      "provenance": "the developer's machine only; never a hosted run",
-      "run": null,
-      "status": "NOT VERIFIED"
+      "provenance": "the C3 gate in the same run (job 132645720181, make c3-gate-check): \"C3 gate: COMPLETE: 12 record(s) of run 43658092468 attempt 1 at 6aa9245a8458, each from its job on a GitHub-hosted runner, judged again\"",
+      "run": {
+        "attempt": 1,
+        "commit": "6aa9245a8458f932c3c4f6a3b81c3a00e0a76cb2",
+        "id": 43658092468,
+        "number": 1,
+        "workflow": ".github/workflows/c3-evidence.yml"
+      },
+      "status": "VERIFIED"
     },
     {
       "adr": "0063",
@@ -1809,7 +1869,7 @@
         "kind": "mutation-campaign"
       },
       "finding": "F-18",
-      "gap": "the owner dispatches the C3 workflow",
+      "gap": "",
       "id": "F-18-8",
       "identities": 2,
       "invariant": "\u00a73 a foreign uid takes over nothing (case lines and uids kept)",
@@ -1817,11 +1877,17 @@
       "make_target": "c3-cross-uid-evidence",
       "mutation_control": [],
       "negative_control": "every one of the seven cases reported contained",
-      "observed": "never run (new in C3)",
+      "observed": "the second identity proven by number (this job uid 1001, DW_PEER_AS=nobody uid 65534); the cross-uid suite 3 of 3 tests, 7 of 7 cases contained, its output and both uids kept in the record",
       "positive_control": "the second identity is proven a distinct, non-root uid by number",
-      "provenance": "",
-      "run": null,
-      "status": "NOT VERIFIED"
+      "provenance": "the C3 gate in the same run (job 132645720181, make c3-gate-check): \"C3 gate: COMPLETE: 12 record(s) of run 43658092468 attempt 1 at 6aa9245a8458, each from its job on a GitHub-hosted runner, judged again\"; it re-judges the kept output and requires two distinct non-root uids",
+      "run": {
+        "attempt": 1,
+        "commit": "6aa9245a8458f932c3c4f6a3b81c3a00e0a76cb2",
+        "id": 43658092468,
+        "number": 1,
+        "workflow": ".github/workflows/c3-evidence.yml"
+      },
+      "status": "VERIFIED"
     }
   ],
   "schema": "direwolf.c3.evidence-matrix",
