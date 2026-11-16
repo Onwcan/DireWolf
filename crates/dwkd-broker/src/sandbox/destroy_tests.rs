@@ -66,6 +66,22 @@ fn empty_grant() -> EgressGrant {
     }
 }
 
+/// Proxies under `scratch` that admit `uid` -- this process's -- as their
+/// relay: the test below dials a neighbour's proxy as itself, standing where
+/// its relay would (F-04, ADR-0068).
+fn admitting(scratch: &Scratch, uid: u32) -> Arc<Proxies> {
+    Arc::new(
+        Proxies::new(
+            scratch.0.join("egress"),
+            uid,
+            Arc::new(SystemResolver),
+            Limits::PRODUCTION,
+        )
+        .unwrap()
+        .admitting(uid),
+    )
+}
+
 #[test]
 fn destruction_closes_only_its_proxy_even_when_the_runtime_cannot_be_reproved() {
     for expected in [
@@ -75,15 +91,7 @@ fn destruction_closes_only_its_proxy_even_when_the_runtime_cannot_be_reproved() 
     ] {
         let scratch = Scratch::new();
         let uid = rustix::process::geteuid().as_raw();
-        let proxies = Arc::new(
-            Proxies::new(
-                scratch.0.join("egress"),
-                uid,
-                Arc::new(SystemResolver),
-                Limits::PRODUCTION,
-            )
-            .unwrap(),
-        );
+        let proxies = admitting(&scratch, uid);
         let environment = EnvironmentId::parse("env_01M24BB8G3E0A851TRWE3M8FZF").unwrap();
         let neighbour = "env_01M24BB8G3E0A851TRWE3M8FZG";
         // Empty grants refuse before resolving any name: neither listener

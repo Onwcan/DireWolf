@@ -9220,6 +9220,276 @@ def task_approver_identity_mutations() -> None:
     approver_review()
 
 
+# F-04 (ADR-0068, Proposed): the CONNECT proxy admits a connection only from
+# the relay's uid, as the kernel reports it, before a byte is read or a
+# handler slot is held. The broker's own tests, by name: the decision, a uid
+# the ACL lets through refused unread, a refused flood, the order in
+# `accept`, and a relay whose pid the broker cannot see (a real kernel pid of
+# 0, in an unprivileged user and pid namespace); then, with a second
+# identity, a foreign uid through a deliberately loosened, disposable
+# directory, and the same uid served only when it is the relay.
+PROXY_PEER_TESTS = (
+    "egress::tests::f04_only_the_relays_uid_is_admitted_whatever_its_pid",
+    "egress::tests::f04_a_uid_the_acl_lets_through_is_refused_before_a_byte_is_read",
+    "egress::tests::f04_refused_peers_hold_no_slot_thread_or_budget_and_closing_still_works",
+    "egress::tests::f04_the_admission_precedes_every_slot_byte_and_thread",
+    "egress::tests::f04_a_relay_whose_pid_cannot_be_seen_is_judged_by_its_uid_alone",
+)
+PROXY_PEER_FOREIGN_TESTS = (
+    "egress::tests::"
+    "f04_a_foreign_uid_is_refused_by_its_kernel_uid_even_through_a_loosened_directory",
+)
+# Every case those tests print, one line each, after its assertions held.
+PROXY_PEER_CASES = (
+    "decision-uid-only-pid-ignored-errors-refused",
+    "broker-uid-through-the-acl-refused-unread",
+    "refused-peer-reaches-no-parser-resolver-origin-or-budget",
+    "refused-flood-holds-no-slot-and-closing-returns",
+    "admission-before-slot-byte-and-thread",
+    "hidden-pid-admitted-by-uid-and-refused-by-uid",
+)
+PROXY_PEER_FOREIGN_CASES = (
+    "foreign-uid-refused-through-a-loosened-directory",
+    "foreign-uid-served-only-when-it-is-the-relay",
+)
+PROXY_PEER_PREFIX = "F04-EVIDENCE "
+
+
+def require_proxy_peer_evidence(
+    output: str, tests: Sequence[str], cases: Sequence[str], what: str
+) -> None:
+    """F-04's suites count only if every named test ran and every case was
+    reported: libtest exits 0 when a filter selects nothing, and the hidden
+    pid case passes without its line where no namespace can be made."""
+    summaries = [line for line in output.splitlines() if line.startswith("test result: ")]
+    expected = f"test result: ok. {len(tests)} passed; 0 failed; 0 ignored"
+    if len(summaries) != 1 or not summaries[0].startswith(expected):
+        raise TaskError(
+            f"the {what} did not run every one of its tests: expected `{expected}`, "
+            f"got {summaries or 'no summary'}"
+        )
+    reported: set[str] = set()
+    for line in output.splitlines():
+        at = line.find(PROXY_PEER_PREFIX)
+        if at < 0:
+            continue
+        try:
+            evidence = json.loads(line[at + len(PROXY_PEER_PREFIX) :])
+        except json.JSONDecodeError as exc:
+            raise TaskError(f"unreadable evidence line: {line[:200]}") from exc
+        if isinstance(evidence, dict) and evidence.get("contained") is True:
+            reported.add(str(evidence.get("case")))
+    missing = sorted(set(cases) - reported)
+    if missing:
+        hint = (
+            " (the hidden-pid case needs unprivileged user and pid namespaces: "
+            "kernel.apparmor_restrict_unprivileged_userns=0 on a disposable runner)"
+            if "hidden-pid-admitted-by-uid-and-refused-by-uid" in missing
+            else ""
+        )
+        raise TaskError(f"the {what} did not report: {', '.join(missing)}{hint}")
+    print(f"{what}: {len(tests)} test(s), {len(cases)} case(s) contained")
+
+
+def task_proxy_peer_evidence() -> None:
+    """F-04 (ADR-0068, Proposed): the CONNECT proxy admits only the relay's
+    uid, as the kernel reports it. The broker's same-identity cases by name --
+    the decision, a uid the ACL lets through refused unread, a refused flood
+    that holds no slot, the order in `accept`, a relay whose pid cannot be
+    seen -- each required to report; then, with DW_PEER_AS (proven a second,
+    non-root uid by number first), a real foreign uid refused through a
+    deliberately loosened, disposable directory and served only by proxies
+    that admit it as their relay.
+
+    Without a second identity the cross-uid half is NOT EXERCISED and the
+    task fails after running everything else. Linux only.
+    """
+    if not sys.platform.startswith("linux"):
+        raise TaskError("NOT EXERCISED: the CONNECT proxy runs only on Linux; use WSL2")
+    user = os.environ.get("DW_PEER_AS", "").strip()
+    if user:
+        second_identity("DW_PEER_AS")
+    broker = ("cargo", "test", "--locked", "-p", "dwkd-broker", "--bin", "dwkd-broker", "--")
+    output = run_captured(*broker, "--exact", "--nocapture", "--test-threads=1", *PROXY_PEER_TESTS)
+    require_proxy_peer_evidence(output, PROXY_PEER_TESTS, PROXY_PEER_CASES, "proxy peer suite")
+    if not user:
+        raise TaskError(
+            "NOT EXERCISED: the cross-uid half needs a second identity. Set DW_PEER_AS to a "
+            "user `sudo -n -u` can switch to (CI uses `nobody`); every same-identity case "
+            "above ran"
+        )
+    output = run_captured(
+        *broker,
+        "--ignored",
+        "--exact",
+        "--nocapture",
+        "--test-threads=1",
+        *PROXY_PEER_FOREIGN_TESTS,
+    )
+    require_proxy_peer_evidence(
+        output, PROXY_PEER_FOREIGN_TESTS, PROXY_PEER_FOREIGN_CASES, "cross-uid proxy peer suite"
+    )
+
+
+# F-04 (ADR-0068, Proposed): each guard of the proxy's peer check weakened in
+# turn -- the check skipped, every uid admitted, the broker's uid taken for
+# the relay's, an unreadable peer admitted, a hidden pid refused, a visible
+# pid vouching for a wrong uid, a slot held before the check, a refusal
+# unrecorded, the test seam compiled into the broker, the closing check
+# dropped. The broker's own tests are the detectors: the decision table, then
+# the order in `accept` (which stops a mutant that would hang a close before
+# any suite closes a proxy), then the egress suites, by behaviour; every
+# mutant must be KILLED by a named failing test, and every file restored
+# byte-identically.
+_F04_PROXY = "crates/dwkd-broker/src/egress/proxy.rs"
+PROXY_PEER_MUTATIONS = (
+    (
+        "K1: the peer is never checked",
+        _F04_PROXY,
+        "        if let Err(refusal) = admits(&crate::peer::of(&stream), relay) {\n",
+        "        if let Err(refusal) =\n"
+        "            admits(&crate::peer::of(&stream), relay).or(Ok::<(), PeerRefusal>(()))\n"
+        "        {\n",
+    ),
+    (
+        "K2: every peer the kernel names is admitted",
+        _F04_PROXY,
+        "        Ok(peer) if peer.uid == relay => Ok(()),\n",
+        "        Ok(peer) if peer.uid == relay || peer.uid != relay => Ok(()),\n",
+    ),
+    (
+        "K3: the broker's own uid is taken for the relay's",
+        _F04_PROXY,
+        "            relay: RELAY_UID,\n        };\n        proxies.clear_stale();\n",
+        "            relay: owner,\n        };\n        proxies.clear_stale();\n",
+    ),
+    (
+        "K4: a peer the kernel cannot name is admitted",
+        _F04_PROXY,
+        "        Err(_) => Err(PeerRefusal::Unidentified),\n",
+        "        Err(_) => Ok(()),\n",
+    ),
+    (
+        "K5: a relay whose pid cannot be seen is refused",
+        _F04_PROXY,
+        "        Ok(peer) if peer.uid == relay => Ok(()),\n",
+        "        Ok(peer) if peer.uid == relay && peer.pid.is_some() => Ok(()),\n",
+    ),
+    (
+        "K6: a visible pid vouches for a wrong uid",
+        _F04_PROXY,
+        "        Ok(peer) if peer.uid == relay => Ok(()),\n",
+        "        Ok(peer) if peer.uid == relay => Ok(()),\n"
+        "        Ok(peer) if peer.pid.is_some() => Ok(()),\n",
+    ),
+    (
+        "K7: a handler slot is held before the peer is checked",
+        _F04_PROXY,
+        "        if let Err(refusal) = admits(&crate::peer::of(&stream), relay) {\n"
+        "            refuse(context, refused, refusal);\n"
+        "            continue;\n"
+        "        }\n"
+        "        let Some(handling) = Handling::take(handlers) else {\n"
+        "            context.counters.record(EgressDisposition::TunnelLimit);\n"
+        "            continue;\n"
+        "        };\n",
+        "        let Some(handling) = Handling::take(handlers) else {\n"
+        "            context.counters.record(EgressDisposition::TunnelLimit);\n"
+        "            continue;\n"
+        "        };\n"
+        "        if let Err(refusal) = admits(&crate::peer::of(&stream), relay) {\n"
+        "            refuse(context, refused, refusal);\n"
+        "            continue;\n"
+        "        }\n",
+    ),
+    (
+        "K8: a refused peer is not recorded",
+        _F04_PROXY,
+        "            refuse(context, refused, refusal);\n",
+        "            let _ = refusal;\n",
+    ),
+    (
+        "K9: the test seam is compiled into the broker",
+        _F04_PROXY,
+        "    #[cfg(test)]\n    pub(crate) fn admitting(",
+        "    pub(crate) fn admitting(",
+    ),
+    (
+        "K10: the closing check is dropped, so the broker's wake-up is judged",
+        _F04_PROXY,
+        "        if context.closing.load(Ordering::SeqCst) {\n"
+        "            return;\n"
+        "        }\n"
+        "        let Ok(stream) = incoming else {\n",
+        "        let Ok(stream) = incoming else {\n",
+    ),
+)
+PROXY_PEER_EVIDENCE_DIR = ROOT / "target" / "f04-evidence"
+PROXY_PEER_RECORD_SCHEMA = "direwolf.f04.mutation-review"
+
+
+def _proxy_peer_stages() -> tuple[MutationStage, ...]:
+    """The review's detectors, in order: the decision table (what the check
+    decides, on what); the order in `accept`, read from the source -- which
+    alone stops a mutant that would make a close wait for ever before any
+    suite closes a proxy; then the broker's egress, destruction and
+    peer-reader suites, which show by what the proxy does whose uid it
+    admits and that a refusal is recorded."""
+    broker = ("cargo", "test", "--locked", "-p", "dwkd-broker", "--bin", "dwkd-broker", "--")
+    return (
+        MutationStage(
+            "proxy-decision",
+            (
+                *broker,
+                "--exact",
+                "egress::tests::f04_only_the_relays_uid_is_admitted_whatever_its_pid",
+            ),
+        ),
+        MutationStage(
+            "proxy-order",
+            (
+                *broker,
+                "--exact",
+                "egress::tests::f04_the_admission_precedes_every_slot_byte_and_thread",
+            ),
+        ),
+        MutationStage("broker-egress", (*broker, "egress::", "sandbox::destroy_tests", "peer::")),
+    )
+
+
+def proxy_peer_review(
+    mutations: Sequence[tuple[str, str, str, str]] = PROXY_PEER_MUTATIONS,
+    *,
+    root: Path | None = None,
+    tests: Callable[..., SuiteRun] = run_tests,
+) -> dict[str, object]:
+    """F-04's mutation review, as F-02's, F-03's, F-12's and F-18's: see
+    `_finding_review`. The build is the broker's binary."""
+    return _finding_review(
+        ("F-04", "0068", "proxy-peer-mutations", PROXY_PEER_RECORD_SCHEMA),
+        "proxy peer",
+        mutations,
+        stages=_proxy_peer_stages(),
+        build=("cargo", "build", "--locked", "-p", "dwkd-broker"),
+        directory=PROXY_PEER_EVIDENCE_DIR if root is None else root,
+        tests=tests,
+    )
+
+
+def task_proxy_peer_mutations() -> None:
+    """Weaken each guard of the CONNECT proxy's peer check in turn (F-04,
+    ADR-0068, Proposed); the broker's own tests must catch every one.
+
+    The unmutated baseline must pass first; every file is restored
+    byte-identically whatever happens, and checked; the record is kept in
+    target/f04-evidence/. Linux, local, and never run beside another build.
+    The cross-uid property itself is `make proxy-peer-evidence`'s.
+    """
+    if not sys.platform.startswith("linux"):
+        raise TaskError("NOT EXERCISED: the CONNECT proxy runs only on Linux; run it in WSL2")
+    proxy_peer_review()
+
+
 # M5d.3 (ADR-0052 §7): a sandboxed `process.exec` that consumes a credential.
 SECRET_SANDBOX_BROKER_TESTS = (
     "linux::a_descriptor_secret_reaches_the_program_on_descriptor_three_and_nowhere_else",
@@ -15804,6 +16074,8 @@ TASKS = {
     "posture-mutations": task_posture_mutations,
     "policy-anchor-mutations": task_policy_anchor_mutations,
     "approver-identity-mutations": task_approver_identity_mutations,
+    "proxy-peer-evidence": task_proxy_peer_evidence,
+    "proxy-peer-mutations": task_proxy_peer_mutations,
     "sandbox-neighbour-mutations": task_sandbox_neighbour_mutations,
     "sandbox-secret-evidence": task_sandbox_secret_evidence,
     "sandbox-secret-mutations": task_sandbox_secret_mutations,

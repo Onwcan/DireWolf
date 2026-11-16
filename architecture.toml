@@ -1025,6 +1025,11 @@ exempt_paths = [
     # user and mount namespace of its own; it launches nothing a hop or an
     # authorisation names.
     "crates/dwkd-broker/src/exchange/workspace_tests.rs",
+    # F-04 (ADR-0068): the CONNECT proxy's peer cases, under `cfg(test)`,
+    # start `unshare` for a reader that cannot see its peer, and
+    # `sudo -n -u $DW_PEER_AS` for a client of a second user; they launch
+    # nothing a hop, an authorisation or a relay names.
+    "crates/dwkd-broker/src/peer/harness.rs",
 ]
 suffixes = [".rs"]
 patterns = [

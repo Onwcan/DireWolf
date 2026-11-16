@@ -14,6 +14,11 @@
 
 use std::os::fd::AsFd;
 
+// F-04's process harness (ADR-0068): a hidden judge and a second user, for
+// the CONNECT proxy's peer cases. Tests only; TX021 names it.
+#[cfg(test)]
+pub(crate) mod harness;
+
 /// What the kernel reports about a socket's peer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Peer {

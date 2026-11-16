@@ -26,15 +26,24 @@
 //! already decides who reaches it. A filesystem that cannot keep the ACL
 //! refuses the proxy (`PROXY_UNAVAILABLE`).
 //!
-//! `SO_PEERCRED` is **not** consulted here (ADR-0048). When M5b was built the
-//! only reader was `rustix` 1.1.5's `socket_peercred`, and where the runtime
-//! runs containers in a pid namespace the broker cannot see (Docker Desktop's
-//! engine runs in a sibling WSL distribution) the kernel reports the relay's
-//! pid as 0 — measured: uid 10002, gid 10002, pid 0 — which that read turned
-//! into undefined behaviour. The ACL makes the same uid check, at path
-//! resolution instead of after `accept`. A sound reader now exists
-//! (`crate::peer`, ADR-0049); checking the relay's uid after `accept` as
-//! well, as defence in depth, is ADR-0048's revisit, not done here.
+//! **And each accepted connection is the relay's, by the uid the kernel
+//! recorded for it** (F-04, [ADR-0068], Proposed): before a byte of it is
+//! read, before it holds a handler slot, the broker asks the kernel who
+//! connected (`SO_PEERCRED`, through `crate::peer`, ADR-0049) and closes any
+//! connection whose uid is not the relay's ([`RELAY_UID`]) -- the broker's
+//! own, the authority's, root's, anyone's -- or whose credentials cannot be
+//! read. It is recorded (`egress_peer_refused`, `egress_peer_unidentified`)
+//! and never counted as a tunnel. Only the uid decides: the pid is `None`
+//! for a relay in a pid namespace the broker cannot see (Docker Desktop's
+//! engine, measured: uid 10002, gid 10002, pid 0), and no gid is read. When
+//! M5b was built the only reader, `rustix` 1.1.5's, turned that pid into
+//! undefined behaviour, which is why ADR-0048 made the ACL the only check.
+//! The ACL stays: the two are independent, and either alone refuses. A uid is
+//! not a process: anything running as uid 10002 that reaches the socket is
+//! the relay to this check, and only the ACL, the mount and the environment's
+//! own grant and budgets keep it to this environment.
+//!
+//! [ADR-0068]: ../../../../docs/adr/0068-f04-connect-proxy-peers-are-authenticated-by-kernel-uid.md
 //!
 //! Each environment's grant, budgets and counters are its own.
 //!
@@ -52,7 +61,7 @@ use std::os::unix::fs::{
 };
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -63,6 +72,7 @@ use dwk_sandbox_profile::{EGRESS_SOCKET_NAME, RELAY_MAX_CONNECTIONS, RELAY_UID};
 use super::authorised::{Root, RootKey, Roots};
 use super::tunnel::{self, Context};
 use super::{Counters, Limits, resolve};
+use crate::peer::Peer;
 
 /// The root's mode: the broker's alone.
 const ROOT_MODE: u32 = 0o700;
@@ -90,6 +100,8 @@ struct Open {
     identity: (u64, u64),
     context: Arc<Context>,
     handlers: Arc<AtomicUsize>,
+    /// Connections closed because their peer was not the relay (F-04).
+    refused: Arc<AtomicU64>,
     accept: Option<JoinHandle<()>>,
 }
 
@@ -112,6 +124,9 @@ pub(crate) struct Proxies {
     /// Every workspace root's egress state (F-17): shared by every
     /// environment on the root.
     roots: Roots,
+    /// The one uid an accepted connection may have (F-04): [`RELAY_UID`].
+    /// Nothing outside this crate's tests can name another.
+    relay: u32,
 }
 
 /// A workload's egress authorisation in force (F-17): removed, and its
@@ -138,6 +153,32 @@ impl Drop for Authorised {
         if !self.finished {
             let _ = self.root.finish(&self.environment, &self.invocation);
         }
+    }
+}
+
+/// Why a connection to a proxy was closed before a byte of it was read
+/// (F-04, ADR-0068).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PeerRefusal {
+    /// The kernel could not say who connected.
+    Unidentified,
+    /// The kernel reported a uid that is not the relay's.
+    NotTheRelay {
+        /// That uid.
+        uid: u32,
+    },
+}
+
+/// Whether the kernel's record of a connection's peer is the relay's: its
+/// uid, `relay`, and nothing else. The pid is not consulted -- it is `None`
+/// for a relay in a pid namespace the broker cannot see (ADR-0049), and a
+/// visible one vouches for nothing -- and no gid is read. A record the kernel
+/// could not give is a refusal, never a pass.
+pub(crate) fn admits(peer: &std::io::Result<Peer>, relay: u32) -> Result<(), PeerRefusal> {
+    match peer {
+        Ok(peer) if peer.uid == relay => Ok(()),
+        Ok(peer) => Err(PeerRefusal::NotTheRelay { uid: peer.uid }),
+        Err(_) => Err(PeerRefusal::Unidentified),
     }
 }
 
@@ -261,9 +302,19 @@ impl Proxies {
             limits,
             open: Mutex::new(BTreeMap::new()),
             roots: Roots::default(),
+            relay: RELAY_UID,
         };
         proxies.clear_stale();
         Ok(proxies)
+    }
+
+    /// These proxies, admitting `uid` as the relay: for this crate's tests,
+    /// which stand where the relay does as their own uid. Not compiled into
+    /// the broker, which admits [`RELAY_UID`] alone.
+    #[cfg(test)]
+    pub(crate) fn admitting(mut self, uid: u32) -> Self {
+        self.relay = uid;
+        self
     }
 
     /// A registry with no root on disk, for unit tests of code that holds a
@@ -278,6 +329,7 @@ impl Proxies {
             limits,
             open: Mutex::new(BTreeMap::new()),
             roots: Roots::default(),
+            relay: RELAY_UID,
         }
     }
 
@@ -351,12 +403,15 @@ impl Proxies {
             }
         };
         let handlers = Arc::new(AtomicUsize::new(0));
+        let refused = Arc::new(AtomicU64::new(0));
         let accept = {
             let context = Arc::clone(&context);
             let handlers = Arc::clone(&handlers);
+            let refused = Arc::clone(&refused);
+            let relay = self.relay;
             std::thread::Builder::new()
                 .name("dw-egress-accept".to_owned())
-                .spawn(move || accept(&listener, &context, &handlers))
+                .spawn(move || accept(&listener, &context, (&handlers, &refused), relay))
         };
         let accept = match accept {
             Ok(accept) => accept,
@@ -374,6 +429,7 @@ impl Proxies {
                 identity,
                 context,
                 handlers,
+                refused,
                 accept: Some(accept),
             },
         );
@@ -494,7 +550,25 @@ impl Proxies {
             let _ = fs::remove_file(&closing.socket);
         }
         let _ = fs::remove_dir(&closing.dir);
+        let refused = closing.refused.load(Ordering::SeqCst);
+        if refused > 0 {
+            crate::event(&format!(
+                "egress_peer_refusals environment={environment} total={refused}"
+            ));
+        }
         closing.context.counters.snapshot()
+    }
+
+    /// How many connections `environment`'s proxy closed because their
+    /// peer was not the relay, and how many handler slots are held now.
+    #[cfg(test)]
+    pub(crate) fn peers(&self, environment: &str) -> Option<(u64, usize)> {
+        let open = self.open.lock().ok()?;
+        let o = open.get(environment)?;
+        Some((
+            o.refused.load(Ordering::SeqCst),
+            o.handlers.load(Ordering::SeqCst),
+        ))
     }
 
     /// Every open proxy's environment.
@@ -528,12 +602,19 @@ impl Drop for Handling {
     }
 }
 
-/// Accept the relay's connections until the environment closes. Nothing is
-/// asked of the kernel about the peer (the directory's ACL decided who could
-/// reach the socket), and
-/// nothing the peer sends is trusted: at most [`RELAY_MAX_CONNECTIONS`]
-/// connections are handled at once whatever the relay does.
-fn accept(listener: &UnixListener, context: &Arc<Context>, handlers: &Arc<AtomicUsize>) {
+/// Accept the relay's connections until the environment closes. The
+/// closing check comes first -- the broker's own wake-up connection is never
+/// judged -- then who connected, as the kernel recorded it (F-04): a peer
+/// that is not the relay is closed before a byte of it is read and before it
+/// holds a handler slot, a thread, a resolution, a grant or a budget. Nothing
+/// the relay sends is trusted either: at most [`RELAY_MAX_CONNECTIONS`]
+/// connections are handled at once whatever it does.
+fn accept(
+    listener: &UnixListener,
+    context: &Arc<Context>,
+    (handlers, refused): (&Arc<AtomicUsize>, &AtomicU64),
+    relay: u32,
+) {
     for incoming in listener.incoming() {
         if context.closing.load(Ordering::SeqCst) {
             return;
@@ -543,6 +624,10 @@ fn accept(listener: &UnixListener, context: &Arc<Context>, handlers: &Arc<Atomic
             std::thread::sleep(ACCEPT_BACKOFF);
             continue;
         };
+        if let Err(refusal) = admits(&crate::peer::of(&stream), relay) {
+            refuse(context, refused, refusal);
+            continue;
+        }
         let Some(handling) = Handling::take(handlers) else {
             context.counters.record(EgressDisposition::TunnelLimit);
             continue;
@@ -560,4 +645,22 @@ fn accept(listener: &UnixListener, context: &Arc<Context>, handlers: &Arc<Atomic
                 ));
             });
     }
+}
+
+/// Record a connection closed because its peer was not the relay: the
+/// kernel's uid when it gave one, the environment, and how many so far.
+/// Never a tunnel's disposition, and nothing the peer sent -- it sent
+/// nothing that was read.
+fn refuse(context: &Context, refused: &AtomicU64, refusal: PeerRefusal) {
+    let count = refused.fetch_add(1, Ordering::SeqCst).saturating_add(1);
+    crate::event(&match refusal {
+        PeerRefusal::NotTheRelay { uid } => format!(
+            "egress_peer_refused environment={} uid={uid} refused={count}",
+            context.environment
+        ),
+        PeerRefusal::Unidentified => format!(
+            "egress_peer_unidentified environment={} refused={count}",
+            context.environment
+        ),
+    });
 }

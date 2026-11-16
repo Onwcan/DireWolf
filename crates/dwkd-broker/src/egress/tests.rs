@@ -12,6 +12,12 @@
 //! workload's egress authorisation is in force: [`env`] installs one that
 //! allows every granted destination, so each test here exercises its own
 //! check; the tests at the end exercise the authorisation itself.
+//!
+//! Since F-04 (ADR-0068, Proposed) the proxy admits a connection only from
+//! the relay's uid, as the kernel reports it: the tunnel tests here stand
+//! where the relay does as this process's own uid, so their proxies admit it
+//! (`Proxies::admitting`, compiled into tests only). The `f04_` tests at the
+//! end keep the production relay uid and stand where it is not.
 
 #![allow(
     clippy::unwrap_used,
@@ -38,9 +44,10 @@ use dwk_proto::wire::id::InvocationId;
 use dwk_sandbox_profile::{EGRESS_SOCKET_NAME, RELAY_UID};
 
 use super::hello::build;
-use super::proxy::{Authorised, Proxies, relay_only_acl};
+use super::proxy::{Authorised, PeerRefusal, Proxies, admits, relay_only_acl};
 use super::resolve::{FixtureResolver, Resolver as _, Shared};
 use super::{HELLO_MAX_BUFFERED, Limits};
+use crate::peer::{Peer, harness};
 
 const HOST: &str = "origin.test";
 
@@ -170,7 +177,9 @@ fn env_with(fixture: &str, grant: EgressGrant, limits: Limits) -> Env {
     let scratch = Scratch::new();
     let resolver = Arc::new(FixtureResolver::parse(fixture).unwrap());
     let shared: Shared = Arc::<FixtureResolver>::clone(&resolver);
-    let proxies = Proxies::new(scratch.0.join("egress"), own_uid(), shared, limits).unwrap();
+    let proxies = Proxies::new(scratch.0.join("egress"), own_uid(), shared, limits)
+        .unwrap()
+        .admitting(own_uid());
     let granted = destinations(&grant);
     let dir = proxies.start(ENV, grant, ROOT).unwrap();
     let authorised = Some(
@@ -426,7 +435,9 @@ fn metadata_names_are_refused_by_name_even_when_granted() {
     let fixture = FixtureResolver::parse("resolve metadata.google.internal 151.101.0.1\n").unwrap();
     let resolver = Arc::new(fixture);
     let shared: Shared = Arc::<FixtureResolver>::clone(&resolver);
-    let proxies = Proxies::new(scratch.0.join("egress"), own_uid(), shared, limits()).unwrap();
+    let proxies = Proxies::new(scratch.0.join("egress"), own_uid(), shared, limits())
+        .unwrap()
+        .admitting(own_uid());
     let grant = EgressGrant {
         targets: EgressTargets::new(vec![EgressTarget {
             host: EgressHost::new("metadata.google.internal".to_owned()).unwrap(),
@@ -1092,7 +1103,9 @@ fn a_cell_that_allows_nothing_refuses_before_resolution() {
     let scratch = Scratch::new();
     let resolver = Arc::new(FixtureResolver::parse(&loopback()).unwrap());
     let shared: Shared = Arc::<FixtureResolver>::clone(&resolver);
-    let proxies = Proxies::new(scratch.0.join("egress"), own_uid(), shared, limits()).unwrap();
+    let proxies = Proxies::new(scratch.0.join("egress"), own_uid(), shared, limits())
+        .unwrap()
+        .admitting(own_uid());
     let dir = proxies
         .start(ENV, grant_of(&[(HOST, origin.port)]), ROOT)
         .unwrap();
@@ -1132,7 +1145,9 @@ fn an_address_outside_the_cell_is_refused_whole_and_one_inside_is_reached() {
         let scratch = Scratch::new();
         let resolver = Arc::new(FixtureResolver::parse(&loopback()).unwrap());
         let shared: Shared = Arc::<FixtureResolver>::clone(&resolver);
-        let proxies = Proxies::new(scratch.0.join("egress"), own_uid(), shared, limits()).unwrap();
+        let proxies = Proxies::new(scratch.0.join("egress"), own_uid(), shared, limits())
+            .unwrap()
+            .admitting(own_uid());
         let dir = proxies
             .start(ENV, grant_of(&[(HOST, origin.port)]), ROOT)
             .unwrap();
@@ -1184,7 +1199,9 @@ fn a_destination_reached_is_decided_by_its_seen_cell() {
     let scratch = Scratch::new();
     let resolver = Arc::new(FixtureResolver::parse(&loopback()).unwrap());
     let shared: Shared = Arc::<FixtureResolver>::clone(&resolver);
-    let proxies = Proxies::new(scratch.0.join("egress"), own_uid(), shared, limits()).unwrap();
+    let proxies = Proxies::new(scratch.0.join("egress"), own_uid(), shared, limits())
+        .unwrap()
+        .admitting(own_uid());
     let dir = proxies
         .start(ENV, grant_of(&[(HOST, origin.port)]), ROOT)
         .unwrap();
@@ -1213,7 +1230,9 @@ fn a_tunnel_carries_back_no_more_than_its_cell_allows() {
     let scratch = Scratch::new();
     let resolver = Arc::new(FixtureResolver::parse(&loopback()).unwrap());
     let shared: Shared = Arc::<FixtureResolver>::clone(&resolver);
-    let proxies = Proxies::new(scratch.0.join("egress"), own_uid(), shared, limits()).unwrap();
+    let proxies = Proxies::new(scratch.0.join("egress"), own_uid(), shared, limits())
+        .unwrap()
+        .admitting(own_uid());
     let dir = proxies
         .start(ENV, grant_of(&[(HOST, origin.port)]), ROOT)
         .unwrap();
@@ -1287,7 +1306,9 @@ fn exposure_revokes_what_it_no_longer_allows_on_the_whole_root_before_the_byte_a
     let scratch = Scratch::new();
     let resolver = Arc::new(FixtureResolver::parse(&two_names()).unwrap());
     let shared: Shared = Arc::<FixtureResolver>::clone(&resolver);
-    let proxies = Proxies::new(scratch.0.join("egress"), own_uid(), shared, limits()).unwrap();
+    let proxies = Proxies::new(scratch.0.join("egress"), own_uid(), shared, limits())
+        .unwrap()
+        .admitting(own_uid());
     let yes: &[bool] = &[true, true];
     let no: &[bool] = &[false, false];
     let mut held = Vec::new();
@@ -1403,7 +1424,9 @@ fn the_tunnel_whose_byte_exposes_the_root_is_held_to_its_seen_cell() {
     let (waiting, open_waiting) = gated_origin(4);
     let scratch = Scratch::new();
     let shared: Shared = Arc::new(FixtureResolver::parse(&two_names()).unwrap());
-    let proxies = Proxies::new(scratch.0.join("egress"), own_uid(), shared, limits()).unwrap();
+    let proxies = Proxies::new(scratch.0.join("egress"), own_uid(), shared, limits())
+        .unwrap()
+        .admitting(own_uid());
     let yes: &[bool] = &[true, true];
     let no: &[bool] = &[false, false];
     let dir = proxies
@@ -1449,7 +1472,9 @@ fn an_authorisation_is_refused_without_a_proxy_beyond_the_grant_or_twice() {
     use dwk_proto::brokerp::BrokerRefusal;
     let scratch = Scratch::new();
     let shared: Shared = Arc::new(FixtureResolver::parse(&loopback()).unwrap());
-    let proxies = Proxies::new(scratch.0.join("egress"), own_uid(), shared, limits()).unwrap();
+    let proxies = Proxies::new(scratch.0.join("egress"), own_uid(), shared, limits())
+        .unwrap()
+        .admitting(own_uid());
     let open = |pairs: &[(&str, u16)]| WorkloadEgress::uniform(pairs, true, false).unwrap();
     assert_eq!(
         proxies
@@ -1486,4 +1511,419 @@ fn an_authorisation_is_refused_without_a_proxy_beyond_the_grant_or_twice() {
             .authorise(ENV, &invocation(35), open(&[(HOST, 443)]))
             .is_ok()
     );
+}
+
+// ---------------------------------------------------------------------------
+// F-04 (ADR-0068, Proposed): each accepted connection is the relay's, by the
+// uid the kernel recorded for it -- before a byte of it is read, before it
+// holds a handler slot. These proxies keep the production relay uid
+// (`RELAY_UID`); this process is not it.
+// ---------------------------------------------------------------------------
+
+/// One line per F-04 case, printed after its assertions held, for
+/// `make proxy-peer-evidence`.
+fn f04_evidence(case: &str, level: &str) {
+    println!("F04-EVIDENCE {{\"case\":\"{case}\",\"level\":\"{level}\",\"contained\":true}}");
+}
+
+/// Wait until `environment`'s proxy has closed `refused` connections for
+/// their peer, and return what it holds then.
+fn f04_refused(proxies: &Proxies, refused: u64) -> (u64, usize) {
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let now = proxies.peers(ENV).unwrap();
+        if now.0 >= refused {
+            assert_eq!(now.0, refused, "refused more than were turned away");
+            return now;
+        }
+        assert!(Instant::now() < deadline, "{now:?}: never refused");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// Refused connections in the flood: three times the relay's handler slots.
+const F04_FLOOD: usize = 3 * dwk_sandbox_profile::RELAY_MAX_CONNECTIONS;
+/// The same, as the proxy counts them.
+const F04_FLOODED: u64 = 3 * 64;
+
+/// A request a relay could send: a granted CONNECT.
+fn f04_granted(port: u16) -> String {
+    format!("CONNECT {HOST}:{port} HTTP/1.1\r\nHost: {HOST}:{port}\r\n\r\n")
+}
+
+#[test]
+fn f04_only_the_relays_uid_is_admitted_whatever_its_pid() {
+    // The relay: with a pid this broker can see, and with none -- a pid
+    // namespace it cannot see, where the kernel says 0 (ADR-0049).
+    for pid in [Some(4242), Some(1), None] {
+        assert_eq!(
+            admits(
+                &Ok(Peer {
+                    uid: RELAY_UID,
+                    pid
+                }),
+                RELAY_UID
+            ),
+            Ok(())
+        );
+    }
+    // Anyone else, whatever its pid: this process (the broker's uid here), an
+    // authority's, root, the environment's workload uid, nobody, the uids
+    // beside the relay's. A visible pid -- this very process's -- vouches for
+    // nothing, and no gid is read at all (`Peer` holds none).
+    for uid in [
+        own_uid(),
+        1001,
+        0,
+        dwk_sandbox_profile::SANDBOX_UID,
+        65_534,
+        RELAY_UID - 1,
+        RELAY_UID + 1,
+        u32::MAX,
+    ] {
+        if uid == RELAY_UID {
+            continue;
+        }
+        for pid in [Some(1), Some(std::process::id()), None] {
+            assert_eq!(
+                admits(&Ok(Peer { uid, pid }), RELAY_UID),
+                Err(PeerRefusal::NotTheRelay { uid }),
+                "{uid} {pid:?}"
+            );
+        }
+    }
+    // Credentials the kernel would not give: refused, never a pass.
+    for kind in [
+        std::io::ErrorKind::PermissionDenied,
+        std::io::ErrorKind::Unsupported,
+        std::io::ErrorKind::InvalidInput,
+        std::io::ErrorKind::Other,
+    ] {
+        assert_eq!(
+            admits(&Err(std::io::Error::from(kind)), RELAY_UID),
+            Err(PeerRefusal::Unidentified),
+            "{kind:?}"
+        );
+    }
+    f04_evidence("decision-uid-only-pid-ignored-errors-refused", "unit");
+}
+
+#[test]
+fn f04_a_uid_the_acl_lets_through_is_refused_before_a_byte_is_read() {
+    // This process owns the proxy's directory, so the ACL lets it reach the
+    // socket -- as it lets the broker's uid -- and it is not the relay.
+    let origin = origin(5);
+    let scratch = Scratch::new();
+    let resolver = Arc::new(FixtureResolver::parse(&loopback()).unwrap());
+    let shared: Shared = Arc::<FixtureResolver>::clone(&resolver);
+    let proxies = Proxies::new(scratch.0.join("egress"), own_uid(), shared, limits()).unwrap();
+    let grant = grant(origin.port, 4, 1 << 20, 1 << 20);
+    let granted = destinations(&grant);
+    let dir = proxies.start(ENV, grant, ROOT).unwrap();
+    let authorised = proxies
+        .authorise(ENV, &invocation(40), open_to(&granted))
+        .unwrap();
+    let before = proxies.counters(ENV);
+    // A granted CONNECT, a malformed one, and nothing at all: each closed
+    // unanswered.
+    for request in [
+        f04_granted(origin.port),
+        "GARBAGE\r\n\r\n".to_owned(),
+        String::new(),
+    ] {
+        let mut stream = dial(&dir);
+        let _ = stream.write_all(request.as_bytes());
+        assert!(drain(&mut stream).is_empty(), "{request:?} was answered");
+    }
+    assert_eq!(f04_refused(&proxies, 3), (3, 0), "no slot is held");
+    // Nothing was parsed, counted, resolved, dialled or spent.
+    assert_eq!(proxies.counters(ENV), before, "a refusal is not a tunnel");
+    assert_eq!(resolver.queries(HOST), 0, "the resolver was reached");
+    assert_eq!(
+        origin.accepted.load(Ordering::SeqCst),
+        0,
+        "the origin was reached"
+    );
+    let report = authorised.finish().unwrap();
+    let target = &report.targets.as_slice()[0];
+    assert!(target.dispositions.as_slice().is_empty() && !target.reached);
+    // The environment still closes; its directory goes.
+    assert!(proxies.close(ENV).is_some());
+    assert!(!dir.exists());
+    f04_evidence("broker-uid-through-the-acl-refused-unread", "unix-socket");
+    f04_evidence(
+        "refused-peer-reaches-no-parser-resolver-origin-or-budget",
+        "unix-socket",
+    );
+}
+
+#[test]
+fn f04_refused_peers_hold_no_slot_thread_or_budget_and_closing_still_works() {
+    let origin = origin(5);
+    let scratch = Scratch::new();
+    let resolver = Arc::new(FixtureResolver::parse(&loopback()).unwrap());
+    let shared: Shared = Arc::<FixtureResolver>::clone(&resolver);
+    let proxies = Proxies::new(scratch.0.join("egress"), own_uid(), shared, limits()).unwrap();
+    let grant = grant(origin.port, 4, 1 << 20, 1 << 20);
+    let dir = proxies.start(ENV, grant, ROOT).unwrap();
+    // Far more refused connections than there are handler slots, each held
+    // open by its client while the next arrives: none takes a slot, so none
+    // is turned away as over the limit and none waits on a thread.
+    let mut held = Vec::new();
+    for _ in 0..F04_FLOOD {
+        let mut stream = dial(&dir);
+        let _ = stream.write_all(f04_granted(origin.port).as_bytes());
+        held.push(stream);
+    }
+    assert_eq!(usize::try_from(F04_FLOODED), Ok(F04_FLOOD));
+    let (refused, handling) = f04_refused(&proxies, F04_FLOODED);
+    assert_eq!((refused, handling), (F04_FLOODED, 0));
+    assert_eq!(
+        proxies.counters(ENV).map_or(0, |c| c.count(D::TunnelLimit)),
+        0,
+        "a refused peer was counted against the tunnel limit"
+    );
+    // Every one was closed by the proxy, unanswered: its descriptor is gone.
+    for mut stream in held {
+        assert!(drain(&mut stream).is_empty());
+    }
+    assert_eq!(resolver.queries(HOST), 0);
+    assert_eq!(origin.accepted.load(Ordering::SeqCst), 0);
+    // The broker's own wake-up connection is never judged: closing is seen
+    // first, and closing returns.
+    let started = Instant::now();
+    assert!(proxies.close(ENV).is_some());
+    assert!(started.elapsed() < Duration::from_secs(3), "closing waited");
+    assert!(UnixStream::connect(dir.join(EGRESS_SOCKET_NAME)).is_err());
+    assert!(proxies.peers(ENV).is_none());
+    f04_evidence(
+        "refused-flood-holds-no-slot-and-closing-returns",
+        "unix-socket",
+    );
+}
+
+#[test]
+fn f04_the_admission_precedes_every_slot_byte_and_thread() {
+    // The order in `accept`, read off the source the review mutates: the
+    // closing check, the kernel's record, and only then a handler slot and a
+    // thread. Order is all this checks; what the check decides, whose uid it
+    // admits and that a refusal is recorded are the other tests' to show by
+    // what the proxy does.
+    let source = include_str!("proxy.rs");
+    let start = source.find("\nfn accept(").unwrap();
+    let body = &source[start..start + source[start..].find("\n}\n").unwrap()];
+    let at = |needle: &str| {
+        body.find(needle)
+            .unwrap_or_else(|| panic!("`accept` lost {needle}"))
+    };
+    let admission = at("admits(&crate::peer::of(&stream), relay)");
+    assert!(
+        at("context.closing.load(") < admission,
+        "the wake-up would be judged"
+    );
+    assert!(
+        admission < at("Handling::take(handlers)"),
+        "a slot before the check"
+    );
+    assert!(at("Handling::take(handlers)") < at(".spawn("));
+    // The one way to name another relay uid is compiled into tests only.
+    let seam = source.find("    pub(crate) fn admitting(").unwrap();
+    assert!(
+        source[..seam].trim_end().ends_with("#[cfg(test)]"),
+        "the test seam is in the broker"
+    );
+    f04_evidence("admission-before-slot-byte-and-thread", "static");
+}
+
+#[test]
+fn f04_a_relay_whose_pid_cannot_be_seen_is_judged_by_its_uid_alone() {
+    if harness::is_hidden_judge() {
+        // The judge, in a pid namespace that cannot see its peer: its stdin
+        // is the far end of a pair the outer test made, so the kernel gives
+        // the outer test's uid and a pid of 0.
+        let own = own_uid();
+        let pid = crate::peer::of(&std::io::stdin()).map(|peer| peer.pid);
+        println!(
+            "F04-HIDDEN pid={pid:?} relay={:?} other={:?}",
+            admits(&crate::peer::of(&std::io::stdin()), own),
+            admits(&crate::peer::of(&std::io::stdin()), own.wrapping_add(1)),
+        );
+        return;
+    }
+    let (ours, theirs) = UnixStream::pair().unwrap();
+    let Some(output) = harness::judge_hidden(
+        "egress::tests::f04_a_relay_whose_pid_cannot_be_seen_is_judged_by_its_uid_alone",
+        std::os::fd::OwnedFd::from(theirs),
+    ) else {
+        return;
+    };
+    drop(ours);
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "{text}{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let own = own_uid();
+    let line =
+        format!("F04-HIDDEN pid=Ok(None) relay=Ok(()) other=Err(NotTheRelay {{ uid: {own} }})");
+    assert!(text.contains(&line), "{text}");
+    f04_evidence(
+        "hidden-pid-admitted-by-uid-and-refused-by-uid",
+        "kernel-hidden-pid",
+    );
+}
+
+// --- A real second identity (hosted) ---------------------------------------
+
+/// Make `dir` traversable by every user -- in this test's disposable scratch
+/// only: it is the loosened directory the check must not depend on.
+fn f04_loosen(dir: &Path) {
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o711)).unwrap();
+}
+
+/// The foreign client script, where the second user can read it.
+fn f04_client(staging: &Path) -> PathBuf {
+    let source =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/authority/foreign_peer_client.py");
+    let staged = staging.join("foreign_peer_client.py");
+    std::fs::copy(&source, &staged).unwrap();
+    std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o644)).unwrap();
+    staged
+}
+
+/// Connect to `socket` as `user`, send `request`, read until the proxy
+/// closes: (euid, connected, bytes received, saw the close).
+fn f04_as(user: &str, script: &Path, socket: &Path, request: &str) -> (u32, bool, u64, bool) {
+    let mut hex = String::with_capacity(request.len() * 2);
+    for byte in request.bytes() {
+        let _ = std::fmt::Write::write_fmt(&mut hex, format_args!("{byte:02x}"));
+    }
+    let output = harness::run_as(
+        user,
+        script,
+        &[
+            std::ffi::OsStr::new("hello"),
+            socket.as_os_str(),
+            std::ffi::OsStr::new(&hex),
+        ],
+    );
+    let text = String::from_utf8_lossy(&output.stdout).into_owned();
+    assert!(
+        output.status.success(),
+        "the foreign client failed: {text}{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let field = |key: &str| -> String {
+        let at = text
+            .find(&format!("\"{key}\": "))
+            .unwrap_or_else(|| panic!("{key} in {text}"));
+        text[at + key.len() + 4..]
+            .split([',', '}'])
+            .next()
+            .unwrap()
+            .trim()
+            .to_owned()
+    };
+    (
+        field("euid").parse().unwrap(),
+        field("connected") == "true",
+        field("received").parse().unwrap(),
+        field("eof") == "true",
+    )
+}
+
+#[test]
+#[ignore = "needs a second OS identity (DW_PEER_AS); run by `make proxy-peer-evidence`"]
+fn f04_a_foreign_uid_is_refused_by_its_kernel_uid_even_through_a_loosened_directory() {
+    let (user, foreign) = harness::second_identity(&[own_uid(), RELAY_UID]);
+    let origin = origin(5);
+    let scratch = Scratch::new();
+    f04_loosen(&scratch.0);
+    let staging = scratch.0.join("staging");
+    std::fs::create_dir(&staging).unwrap();
+    f04_loosen(&staging);
+    let script = f04_client(&staging);
+
+    // The production relay uid. The directories are loosened -- here, in
+    // this disposable scratch, never by the broker -- so the foreign uid
+    // reaches the socket the ACL would have kept it from; the measurement
+    // calls that drift, and the uid check still refuses it.
+    let resolver = Arc::new(FixtureResolver::parse(&loopback()).unwrap());
+    let shared: Shared = Arc::<FixtureResolver>::clone(&resolver);
+    let root = scratch.0.join("egress");
+    let proxies = Proxies::new(root.clone(), own_uid(), shared, limits()).unwrap();
+    let grant = grant(origin.port, 4, 1 << 20, 1 << 20);
+    let granted = destinations(&grant);
+    let dir = proxies.start(ENV, grant.clone(), ROOT).unwrap();
+    let authorised = proxies
+        .authorise(ENV, &invocation(41), open_to(&granted))
+        .unwrap();
+    f04_loosen(&root);
+    f04_loosen(&dir);
+    assert!(!proxies.is_open(ENV), "a loosened directory is drift");
+    let before = proxies.counters(ENV);
+    let (euid, connected, received, closed) = f04_as(
+        &user,
+        &script,
+        &dir.join(EGRESS_SOCKET_NAME),
+        &f04_granted(origin.port),
+    );
+    assert_eq!(euid, foreign, "the client ran as the second identity");
+    assert!(connected, "the loosened directory let it reach the socket");
+    assert_eq!(received, 0, "not one byte came back");
+    assert!(closed, "the proxy closed it");
+    assert_eq!(f04_refused(&proxies, 1), (1, 0));
+    assert_eq!(proxies.counters(ENV), before, "a refusal is not a tunnel");
+    assert_eq!(resolver.queries(HOST), 0);
+    assert_eq!(origin.accepted.load(Ordering::SeqCst), 0);
+    let report = authorised.finish().unwrap();
+    let target = &report.targets.as_slice()[0];
+    assert!(target.dispositions.as_slice().is_empty() && !target.reached);
+    let _ = proxies.close(ENV);
+    f04_evidence(
+        "foreign-uid-refused-through-a-loosened-directory",
+        "cross-uid",
+    );
+
+    // The same client and the same loosened directories, to proxies that
+    // admit the foreign uid as their relay: its request reaches the parser
+    // and the grant. What refused it above was the uid the kernel reported,
+    // and nothing else.
+    let shared: Shared = Arc::new(FixtureResolver::parse(&loopback()).unwrap());
+    let root = scratch.0.join("egress-admitting");
+    let proxies = Proxies::new(root.clone(), own_uid(), shared, limits())
+        .unwrap()
+        .admitting(foreign);
+    let dir = proxies.start(ENV, grant, ROOT).unwrap();
+    f04_loosen(&root);
+    f04_loosen(&dir);
+    let (euid, connected, received, closed) = f04_as(
+        &user,
+        &script,
+        &dir.join(EGRESS_SOCKET_NAME),
+        "CONNECT ungranted.test:443 HTTP/1.1\r\n\r\n",
+    );
+    assert_eq!(euid, foreign);
+    assert!(connected && closed);
+    assert!(received > 0, "the relay's request was not answered");
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while proxies
+        .counters(ENV)
+        .map_or(0, |c| c.count(D::TargetNotGranted))
+        < 1
+    {
+        assert!(
+            Instant::now() < deadline,
+            "the request never reached the grant"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(
+        proxies.peers(ENV).map(|p| p.0),
+        Some(0),
+        "the relay was refused"
+    );
+    let _ = proxies.close(ENV);
+    f04_evidence("foreign-uid-served-only-when-it-is-the-relay", "cross-uid");
 }

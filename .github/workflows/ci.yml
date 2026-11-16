@@ -428,6 +428,22 @@ jobs:
           path: target/m5e-evidence/sandbox-egress-evidence/
           if-no-files-found: error
           retention-days: 7
+      # F-04 (ADR-0068, Proposed): the CONNECT proxy admits only the relay's
+      # uid, as the kernel reports it -- a real second identity (`nobody`)
+      # refused through a deliberately loosened, disposable directory and
+      # served only by proxies that admit it as their relay, and a relay
+      # whose pid the broker cannot see, which needs an unprivileged user and
+      # pid namespace this runner's AppArmor restricts by default. Last, so
+      # the egress evidence above ran on an unchanged host. Disposable runner
+      # only. Nothing here may be skipped: NOT EXERCISED fails.
+      - name: Let a test have a namespace of its own (F-04)
+        run: |
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+      - run: make proxy-peer-evidence
+        env:
+          DW_PEER_AS: nobody
 
   # M5d.1 (ADR-0052): workloads in a REAL OCI environment -- the released
   # broker running the sandbox fixture as a workload through its real runtime

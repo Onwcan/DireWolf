@@ -20,7 +20,8 @@ DW := $(PY) scripts/dw.py
         filesystem-operations-evidence process-broker-evidence secret-broker-evidence \
         sandbox-foundation-evidence sandbox-egress-evidence sandbox-egress-policy-mutations \
         sandbox-taint-mutations authority-ownership-mutations authority-concurrency-mutations posture-mutations \
-        policy-anchor-mutations approver-identity-mutations \
+        policy-anchor-mutations approver-identity-mutations proxy-peer-evidence \
+        proxy-peer-mutations \
         sandbox-workload-evidence \
         net-http-evidence net-http-mutations sandbox-workload-mutations sandbox-secret-evidence \
         sandbox-secret-mutations sandbox-workspace-evidence sandbox-workspace-mutations \
@@ -133,6 +134,12 @@ policy-anchor-mutations: ## F-12 mutation review (ADR-0066, Proposed): each guar
 
 approver-identity-mutations: ## F-18 Phase 3.4 mutation review (ADR-0067, Proposed): each guard of the approver endpoint's identity boundary -- approvers only the operator's uids, never a runtime's, the broker's or the authority's, never the DWKP socket, every peer recorded by the kernel's uid, nothing read or answered, runtime admissions unattended, no standing grant -- weakened in turn must fail the authority's suites or the real server (slow, Linux)
 	@$(DW) approver-identity-mutations
+
+proxy-peer-evidence: ## F-04 (ADR-0068, Proposed): the CONNECT proxy admits only the relay's kernel-reported uid -- the decision, a uid the ACL lets through refused unread, a refused flood holding no slot, the order in accept, a relay whose pid cannot be seen; with DW_PEER_AS, a real foreign uid through a loosened, disposable directory (Linux)
+	@$(DW) proxy-peer-evidence
+
+proxy-peer-mutations: ## F-04 mutation review (ADR-0068, Proposed): each guard of the CONNECT proxy's peer check -- skipped, every uid admitted, the broker's uid taken for the relay's, an unreadable peer admitted, a hidden pid refused, a visible pid vouching, a slot before the check, a refusal unrecorded, the test seam in the broker, the closing check dropped -- weakened in turn must fail the broker's tests (slow, Linux)
+	@$(DW) proxy-peer-mutations
 
 sandbox-workload-evidence: ## M5d.1-M5d.2 workloads in real OCI environments: identity, bounds, wall clock, process trees ended, digests, drift, escapes, an agent-shaped workload, the authority's gates, ledger and crash windows; the public process.exec over real DWKP, serve --sandbox-config, the hygiene launcher with real git/Python/pytest; M5e.2 cross-run isolation
 	@$(DW) sandbox-workload-evidence
