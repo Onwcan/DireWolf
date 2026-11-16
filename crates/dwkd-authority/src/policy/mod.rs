@@ -91,8 +91,8 @@ pub use action::{ArgvSafety, CanonicalAction, Environment, IpAddress, Novelty};
 pub use approval::{ApprovalScopeKind, ApprovalSpec, Ttl};
 pub use compose::compose;
 pub use context::{
-    ConfigFlags, ConfigKey, Origin, PathAnchor, PathAnchors, PolicyContext, StandingGrantState,
-    TaintLevel,
+    ConfigFlags, ConfigKey, HostPlacement, HostPlacements, LOGICAL_ROOT, Origin, PathAnchor,
+    PathAnchors, PolicyContext, StandingGrantState, TaintLevel,
 };
 pub use effect::Effect;
 pub use error::{Expected, FieldPath, PolicyLoadError, ValueError};

@@ -64,8 +64,8 @@ use rusqlite::OptionalExtension as _;
 
 use crate::capability::{self, Capability, PrivacyClass, UnresolvedScope};
 use crate::policy::{
-    self, CanonicalAction, Decision, Effect, IpAddress, Origin, PathAnchors, PolicyContext,
-    TaintLevel,
+    self, CanonicalAction, Decision, Effect, HostPlacements, IpAddress, Origin, PathAnchors,
+    PolicyContext, TaintLevel,
 };
 
 use super::admission::{self, Admission, taint_from_rank};
@@ -262,10 +262,28 @@ impl fmt::Display for TaintCause {
 
 /// Build the run's `PolicyContext` from kernel-owned state. The only way one
 /// is built for a live decision.
+///
+/// In the logical namespace with **no host path placed** (F-12): a decision
+/// about a `/workspace/...` path made through here leaves every rule naming
+/// a host place unresolved, and denied. Only a filesystem decision has a path
+/// such a rule can be about, and it is made through
+/// [`policy_context_placed`], with the placements found beside the root its
+/// targets were resolved beneath.
 pub(super) fn policy_context(
     work: &Work<'_>,
     run: &str,
     active: &ActiveAuthority,
+) -> Result<PolicyContext, AuthorityError> {
+    policy_context_placed(work, run, active, HostPlacements::new())
+}
+
+/// [`policy_context`], with where every host path of the active policy lies
+/// relative to the run's pinned root ([`super::anchors::place`]).
+pub(super) fn policy_context_placed(
+    work: &Work<'_>,
+    run: &str,
+    active: &ActiveAuthority,
+    placed: HostPlacements,
 ) -> Result<PolicyContext, AuthorityError> {
     let (origin, taint, privacy): (String, i64, String) = work
         .db(work
@@ -293,6 +311,10 @@ pub(super) fn policy_context(
     if super::resolution::run_workspace_bound(work, run)? {
         anchors.workspace = Some(crate::resource::fs::workspace_anchor());
     }
+    // Every live context is in the logical namespace: a host path is
+    // answered by its placement, never compared with `/workspace` by
+    // spelling (F-12).
+    anchors.host = Some(placed);
     Ok(PolicyContext::new(origin, taint)
         .with_privacy(privacy)
         .with_config(active.flags)

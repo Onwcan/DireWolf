@@ -1,6 +1,7 @@
 //! Compiled rules, postconditions and profiles.
 
 use core::fmt;
+use std::collections::BTreeSet;
 
 use super::approval::ApprovalSpec;
 use super::effect::Effect;
@@ -9,6 +10,7 @@ use super::limits;
 use super::obligation::Obligations;
 use super::predicate::{Unless, When};
 use super::reason::Reason;
+use super::value::RulePath;
 use super::{RuleId, SourceLocation};
 
 /// Whether a string is `[a-z][a-z0-9-]*`, bounded, with no doubled or trailing
@@ -416,6 +418,24 @@ impl CompiledPolicy {
     #[must_use]
     pub fn postconditions(&self) -> &[Postcondition] {
         &self.postconditions
+    }
+
+    /// Every `path_under` path a rule or postcondition writes that names a
+    /// **host** location ([`RulePath::is_host`]), each once: what the state
+    /// layer places on the host before a live decision about a filesystem
+    /// path (F-12). `executable_in` paths are not here: they are compared
+    /// with an executable's host path directly.
+    #[must_use]
+    pub fn host_paths(&self) -> BTreeSet<RulePath> {
+        let rules = self.rules.iter().map(Rule::when);
+        let posts = self.postconditions.iter().map(Postcondition::when);
+        rules
+            .chain(posts)
+            .filter_map(|when| when.path_under.as_ref())
+            .flat_map(super::predicate::MatchValue::values)
+            .filter(|path| path.is_host())
+            .cloned()
+            .collect()
     }
 
     /// The mandatory unconditional rule, which is always last.

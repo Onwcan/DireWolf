@@ -26,6 +26,44 @@ use crate::state::{
 /// Most uids one peer policy may name. A closed, short list is the point.
 pub const MAX_ALLOWED_UIDS: usize = 64;
 
+/// The most `--path-anchor` directories one authority takes (F-12): each is
+/// walked before every filesystem decision.
+pub(crate) const MAX_PATH_ANCHORS: usize = 32;
+
+/// A host path anchor a `--path-anchor` names (F-12, ADR-0066): what a policy
+/// rule's `~` or `${DIREWOLF_*}` stands for on the host. `${WORKSPACE}` is not
+/// one -- it is the run's pinned root -- and neither is `/`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum AnchorName {
+    /// `~`: a home whose credentials the packs protect.
+    Home,
+    /// `${DIREWOLF_HOME}`.
+    DirewolfHome,
+    /// `${DIREWOLF_CONFIG}`.
+    DirewolfConfig,
+    /// `${DIREWOLF_INSTALL}`.
+    DirewolfInstall,
+}
+
+impl AnchorName {
+    /// Every name, as `--path-anchor` spells it.
+    pub const ALL: [(Self, &'static str); 4] = [
+        (Self::Home, "home"),
+        (Self::DirewolfHome, "direwolf-home"),
+        (Self::DirewolfConfig, "direwolf-config"),
+        (Self::DirewolfInstall, "direwolf-install"),
+    ];
+
+    /// The `--path-anchor` spelling.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        Self::ALL
+            .iter()
+            .find(|(name, _)| *name == self)
+            .map_or("", |(_, text)| text)
+    }
+}
+
 /// Which peers may speak DWKP to this authority: an explicit, closed set of
 /// uids the operator named.
 ///
@@ -142,6 +180,10 @@ pub struct ServeConfig {
     /// assurance, stated at start-up; never implied. `RLIMIT_CORE` is 0
     /// either way.
     pub dumpable_permitted: bool,
+    /// The host directories the operator says each path anchor stands for
+    /// (F-12, ADR-0066): absolute, UTF-8, each checked at start by the state
+    /// layer. `~` has no other source.
+    pub path_anchors: Vec<(AnchorName, String)>,
 }
 
 /// A command line that does not describe a configuration.
@@ -181,6 +223,7 @@ pub const SERVE_USAGE: &str = "\
     --secrets-file <PATH>      the operator's secret metadata (absolute; handles, never values)
     --sandbox-config <PATH>    the operator's execution environment (absolute; needs a broker)
     --allow-dumpable           leave the process dumpable, its memory readable by its uid (development only)
+    --path-anchor <NAME>=<DIR> what a policy anchor stands for on the host: home|direwolf-home|direwolf-config|direwolf-install; repeat
 ";
 
 /// Parse the arguments after `serve`.
@@ -217,6 +260,7 @@ struct Parsed {
     secrets_file: Option<PathBuf>,
     sandbox_config: Option<PathBuf>,
     dumpable: bool,
+    path_anchors: Vec<(AnchorName, String)>,
 }
 
 impl Parsed {
@@ -275,6 +319,18 @@ impl Parsed {
             "--secrets-file" => once(&mut self.secrets_file, flag, PathBuf::from(value()?)),
             "--sandbox-config" => once(&mut self.sandbox_config, flag, PathBuf::from(value()?)),
             "--allow-dumpable" => switch(&mut self.dumpable, flag),
+            "--path-anchor" => {
+                let anchor = parse_anchor(value()?)?;
+                if self.path_anchors.contains(&anchor) {
+                    return Err(UsageError::new(format!(
+                        "--path-anchor {}={} is repeated",
+                        anchor.0.as_str(),
+                        bounded(&anchor.1)
+                    )));
+                }
+                self.path_anchors.push(anchor);
+                bound(self.path_anchors.len(), MAX_PATH_ANCHORS, flag)
+            }
             other => Err(UsageError::new(format!(
                 "unknown serve argument {}",
                 bounded(other)
@@ -369,6 +425,7 @@ impl Parsed {
             secrets_file: self.secrets_file,
             sandbox_config: self.sandbox_config,
             dumpable_permitted: self.dumpable,
+            path_anchors: self.path_anchors,
             state_dir,
             socket,
             peers: PeerPolicy::new(self.uids, self.authority_uid_permitted),
@@ -439,6 +496,28 @@ fn parse_uid_for(flag: &str, text: &str) -> Result<u32, UsageError> {
     }
     text.parse::<u32>()
         .map_err(|_| UsageError::new(format!("{flag} {} is out of range", bounded(text))))
+}
+
+/// `<NAME>=<DIR>`: one of [`AnchorName::ALL`], and an absolute, NUL-free,
+/// UTF-8 directory path. Nothing is looked up here: the state layer checks
+/// the directory at start.
+fn parse_anchor(text: &str) -> Result<(AnchorName, String), UsageError> {
+    let usage = || {
+        UsageError::new(format!(
+            "--path-anchor takes <NAME>=<DIR>, NAME one of home, direwolf-home, direwolf-config, direwolf-install, and DIR an absolute path; not {}",
+            bounded(text)
+        ))
+    };
+    let (name, dir) = text.split_once('=').ok_or_else(usage)?;
+    let anchor = AnchorName::ALL
+        .iter()
+        .find(|(_, spelled)| *spelled == name)
+        .map(|(anchor, _)| *anchor)
+        .ok_or_else(usage)?;
+    if dir.contains('\0') || !Path::new(dir).is_absolute() || dir.len() > 4096 {
+        return Err(usage());
+    }
+    Ok((anchor, dir.to_owned()))
 }
 
 fn parse_mode(text: &str) -> Result<Mode, UsageError> {

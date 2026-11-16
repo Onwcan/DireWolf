@@ -7,12 +7,13 @@
 
 use core::fmt;
 
-use crate::capability::{CanonicalPath, ExecutableIdentity};
+use crate::capability::{CanonicalPath, ExecutableIdentity, PathComponent};
 
 use super::action::IpAddress;
-use super::context::{PathAnchor, PathAnchors};
+use super::context::{HostPlacement, LOGICAL_ROOT, PathAnchor, PathAnchors};
 use super::error::ValueError;
 use super::limits;
+use super::predicate::Unevaluable;
 
 /// A rule-side path: a closed symbolic anchor and a sequence of segments.
 ///
@@ -95,6 +96,31 @@ impl RulePath {
         &self.segments
     }
 
+    /// Whether this path is written in a run's **logical** namespace:
+    /// `${WORKSPACE}`, or an absolute path whose first segment is
+    /// [`LOGICAL_ROOT`] (`/workspace/...`).
+    #[must_use]
+    pub fn is_logical(&self) -> bool {
+        match self.anchor {
+            PathAnchor::Workspace => true,
+            PathAnchor::Absolute => self
+                .segments
+                .first()
+                .is_some_and(|first| first == LOGICAL_ROOT),
+            PathAnchor::DirewolfHome
+            | PathAnchor::DirewolfConfig
+            | PathAnchor::DirewolfInstall
+            | PathAnchor::Home => false,
+        }
+    }
+
+    /// Whether this path names a place on the **host** (F-12): every anchor
+    /// but `${WORKSPACE}`, and every absolute path not under `/workspace`.
+    #[must_use]
+    pub fn is_host(&self) -> bool {
+        !self.is_logical()
+    }
+
     /// Whether `candidate` lies under this path.
     ///
     /// **Component-wise containment, never `starts_with` on a string.** The
@@ -103,37 +129,70 @@ impl RulePath {
     /// sequence. So `${WORKSPACE}` covers `/workspace/src/main.rs` and does not
     /// cover `/workspaceX`, which is a directory an attacker can create.
     ///
+    /// **A host path in the logical namespace is not compared at all** (F-12):
+    /// `~/.ssh` and `/etc/shadow` are not spellings of any `/workspace/...`
+    /// path, so the answer is the [`HostPlacement`] the state layer found on
+    /// the host for exactly this rule path -- `Disjoint` is `false`,
+    /// `Encloses` is `true`, and the other two leave the rule unevaluated.
+    ///
     /// # Errors
     ///
-    /// The anchor, if the context does not say what it resolves to. The caller
-    /// turns that into a denial rather than into "did not match": a deny rule
-    /// whose anchor is missing must not quietly stop denying.
+    /// What could not be evaluated: the anchor, if the context does not say
+    /// what it resolves to (or, for a host path, placed nothing for it); or
+    /// the host location whose placement does not decide the predicate. The
+    /// caller turns either into a denial rather than into "did not match": a
+    /// deny rule whose anchor is missing must not quietly stop denying.
     pub fn contains(
         &self,
         anchors: &PathAnchors,
         candidate: &CanonicalPath,
-    ) -> Result<bool, PathAnchor> {
-        let root: &[_] = match self.anchor {
+    ) -> Result<bool, Unevaluable> {
+        if let Some(placements) = anchors.host()
+            && self.is_host()
+        {
+            return match placements.get(self) {
+                Some(HostPlacement::Disjoint) => Ok(false),
+                Some(HostPlacement::Encloses) => Ok(true),
+                Some(doubt @ (HostPlacement::InsideWorkspace | HostPlacement::Unexamined)) => {
+                    Err(Unevaluable::HostLocation(self.anchor, doubt))
+                }
+                None => Err(Unevaluable::PathAnchor(self.anchor)),
+            };
+        }
+        let root = self.root(anchors).map_err(Unevaluable::PathAnchor)?;
+        Ok(self.under(root, candidate))
+    }
+
+    /// The components this path's anchor stands for, compared by spelling:
+    /// the logical root's (`${WORKSPACE}`), the filesystem root's (absolute,
+    /// the empty prefix), or -- in the one-namespace model -- the anchor's own.
+    fn root<'a>(&self, anchors: &'a PathAnchors) -> Result<&'a [PathComponent], PathAnchor> {
+        match self.anchor {
             // Not "missing": the filesystem root is the empty prefix, and
             // every canonical path begins with it.
-            PathAnchor::Absolute => &[],
-            other => anchors.get(other).ok_or(other)?.components(),
-        };
+            PathAnchor::Absolute => Ok(&[]),
+            other => Ok(anchors.get(other).ok_or(other)?.components()),
+        }
+    }
+
+    /// Whether `candidate`'s components begin with `root` and then this
+    /// path's segments.
+    fn under(&self, root: &[PathComponent], candidate: &CanonicalPath) -> bool {
         let components = candidate.components();
         if components.len() < root.len() + self.segments.len() {
-            return Ok(false);
+            return false;
         }
         let under_root = components
             .iter()
             .zip(root.iter())
             .all(|(actual, expected)| actual == expected);
         if !under_root {
-            return Ok(false);
+            return false;
         }
         let below = components.iter().skip(root.len());
-        Ok(below
+        below
             .zip(self.segments.iter())
-            .all(|(actual, expected)| actual.as_str() == expected))
+            .all(|(actual, expected)| actual.as_str() == expected)
     }
 }
 
@@ -294,6 +353,11 @@ impl ExecutableSpec {
 impl RulePath {
     /// Whether `candidate` *is* this path, rather than lying under it.
     ///
+    /// For `executable_in`, whose candidate is an executable's canonical
+    /// **host** path: the rule path and the candidate are in one namespace
+    /// here, so this compares by components in either model (F-12 changes
+    /// only `path_under` over logical paths).
+    ///
     /// # Errors
     ///
     /// The anchor, if the context does not resolve it.
@@ -302,16 +366,11 @@ impl RulePath {
         anchors: &PathAnchors,
         candidate: &CanonicalPath,
     ) -> Result<bool, PathAnchor> {
-        let root: &[_] = match self.anchor {
-            PathAnchor::Absolute => &[],
-            other => anchors.get(other).ok_or(other)?.components(),
-        };
-        let components = candidate.components();
-        if components.len() == root.len() + self.segments.len() {
-            self.contains(anchors, candidate)
-        } else {
-            Ok(false)
-        }
+        let root = self.root(anchors)?;
+        Ok(
+            candidate.components().len() == root.len() + self.segments.len()
+                && self.under(root, candidate),
+        )
     }
 }
 

@@ -29,20 +29,169 @@
 //! filter that refuses it, gets [`ResolveError::Unsupported`]: there is no
 //! reduced-assurance walk to fall back to, so nothing is silently weaker.
 //!
+//! # Host walks (F-12, ADR-0066)
+//!
+//! One other kind of walk lives here, and it resolves nothing for use: where
+//! a **host location** a policy rule names (`~/.ssh`, `/etc/shadow`) lies
+//! relative to a pinned root. It starts from `/`, opens one name at a time
+//! with `O_PATH | O_NOFOLLOW` relative to the previous directory, follows a
+//! symbolic link the way the kernel would (its target spliced in, at most
+//! `HOST_LINK_LIMIT`), and records each real directory's `(device, inode)`.
+//! Mount points are crossed -- a host location is wherever the host put it --
+//! and nothing is opened for reading, listed or kept: the walk returns
+//! identities, and the descriptors close with it.
+//!
 //! [ADR-0042]: ../../../../../../../docs/adr/0042-m4a-canonical-filesystem-resolution.md
 
 #[cfg(test)]
 mod tests;
+
+use std::collections::VecDeque;
 
 use rustix::fd::{AsFd as _, BorrowedFd, OwnedFd};
 use rustix::fs::{self as sys, AtFlags, FileType, Mode, OFlags, ResolveFlags, Stat, StatxFlags};
 use rustix::io::Errno;
 
 use super::{
-    BirthTime, FileIdentity, PathError, Probe, ResolveError, ResourceKind, RootError,
-    RootFingerprint, RootMeasure, Walked,
+    BirthTime, FileIdentity, HOST_LINK_LIMIT, HostEnd, HostWalk, MAX_ROOT_PATH_BYTES, PathError,
+    Probe, ResolveError, ResourceKind, RootError, RootFingerprint, RootMeasure, Walked,
 };
 use crate::resource::PathComponent;
+
+/// The most steps one host walk takes, links' targets included: a bound on
+/// the work an adversarial link farm can make a decision do.
+const MAX_HOST_STEPS: usize = 4096;
+
+/// One step of a host walk.
+enum Step {
+    /// Look up one name in the current directory.
+    Name(PathComponent),
+    /// Go to the current directory's parent (a `..` in a link's target).
+    Parent,
+}
+
+/// The steps of an absolute path or a link's target: empty and `.` segments
+/// dropped, `..` kept as a step up, every name one the grammar accepts --
+/// `None` for one it refuses.
+fn host_steps(text: &str) -> Option<Vec<Step>> {
+    let mut steps = Vec::new();
+    for part in text.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => steps.push(Step::Parent),
+            name => steps.push(Step::Name(super::single_component(name).ok()?)),
+        }
+    }
+    Some(steps)
+}
+
+/// Walk the absolute host `path` from `/` as the kernel would resolve it,
+/// recording every real directory by identity (the module's "Host walks").
+pub(in crate::resource) fn host_walk(path: &str) -> HostWalk {
+    let stop = |directories, end| HostWalk { directories, end };
+    let Ok(root) = sys::open(
+        "/",
+        OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC,
+        Mode::empty(),
+    ) else {
+        return stop(Vec::new(), HostEnd::Failed);
+    };
+    let Ok(root_st) = sys::fstat(&root) else {
+        return stop(Vec::new(), HostEnd::Failed);
+    };
+    let mut directories = vec![identity(&root_st)];
+    let Some(initial) = host_steps(path) else {
+        return stop(directories, HostEnd::Failed);
+    };
+    let mut pending: VecDeque<Step> = initial.into();
+    let mut held: Vec<OwnedFd> = Vec::new();
+    let (mut links, mut taken) = (0usize, 0usize);
+    while let Some(step) = pending.pop_front() {
+        taken = taken.saturating_add(1);
+        if taken > MAX_HOST_STEPS {
+            return stop(directories, HostEnd::Failed);
+        }
+        let name = match step {
+            // `..` never climbs above `/`, as the kernel's does not.
+            Step::Parent => {
+                if held.pop().is_some() {
+                    directories.pop();
+                }
+                continue;
+            }
+            Step::Name(name) => name,
+        };
+        let parent = held.last().map_or(root.as_fd(), |fd| fd.as_fd());
+        let fd = match sys::openat(
+            parent,
+            name.as_str(),
+            OFlags::PATH | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        ) {
+            Ok(fd) => fd,
+            Err(Errno::NOENT | Errno::NOTDIR) => return stop(directories, HostEnd::Absent),
+            Err(Errno::ACCESS) => return stop(directories, HostEnd::Unsearchable),
+            Err(_) => return stop(directories, HostEnd::Failed),
+        };
+        let Ok(st) = sys::fstat(&fd) else {
+            return stop(directories, HostEnd::Failed);
+        };
+        match FileType::from_raw_mode(st.st_mode) {
+            FileType::Symlink => {
+                links = links.saturating_add(1);
+                if links > HOST_LINK_LIMIT {
+                    return stop(directories, HostEnd::Failed);
+                }
+                // The link this descriptor holds, not whatever the name binds
+                // by now.
+                let Ok(target) = sys::readlinkat(&fd, "", Vec::new()) else {
+                    return stop(directories, HostEnd::Failed);
+                };
+                let Ok(target) = target.to_str() else {
+                    return stop(directories, HostEnd::Failed);
+                };
+                if target.is_empty() || target.len() > MAX_ROOT_PATH_BYTES {
+                    return stop(directories, HostEnd::Failed);
+                }
+                if target.starts_with('/') {
+                    held.clear();
+                    directories.truncate(1);
+                }
+                let Some(spliced) = host_steps(target) else {
+                    return stop(directories, HostEnd::Failed);
+                };
+                for step in spliced.into_iter().rev() {
+                    pending.push_front(step);
+                }
+            }
+            FileType::Directory => {
+                directories.push(identity(&st));
+                held.push(fd);
+            }
+            // Any other kind ends the path, or stands where a directory
+            // would have to be: nothing below it exists.
+            _ if pending.is_empty() => return stop(directories, HostEnd::Found(identity(&st))),
+            _ => return stop(directories, HostEnd::Absent),
+        }
+    }
+    // The path ended on a directory -- `/` itself, or the last one opened.
+    let end = directories
+        .last()
+        .map_or(HostEnd::Failed, |last| HostEnd::Found(*last));
+    stop(directories, end)
+}
+
+/// Whether the authority can search the directory `fd` holds: look `.` up in
+/// it, which needs exactly that permission and opens nothing for use.
+pub(in crate::resource) fn searchable(fd: &OwnedFd) -> bool {
+    sys::openat(
+        fd,
+        ".",
+        OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .is_ok()
+}
 
 /// A live descriptor.
 pub(in crate::resource) type Fd = OwnedFd;

@@ -33,7 +33,9 @@
 //! [ADR-0028]: ../../../../../docs/adr/0028-policy-input-ownership.md
 
 use core::fmt;
+use std::collections::BTreeMap;
 
+use super::value::RulePath;
 use crate::capability::{CanonicalPath, PrivacyClass};
 
 /// What started the run.
@@ -329,6 +331,115 @@ impl fmt::Display for PathAnchor {
     }
 }
 
+/// The first component of every path in a run's **logical** namespace:
+/// `/workspace` is the run's pinned workspace root ([ADR-0042]). A rule-side
+/// absolute path beginning with it is written in that namespace; every other
+/// absolute path names a place on the host.
+///
+/// The resource layer's `WORKSPACE_ANCHOR` is the same text; the state layer,
+/// which may name both, tests that they agree (F-12).
+///
+/// [ADR-0042]: ../../../../../docs/adr/0042-m4a-canonical-filesystem-resolution.md
+pub const LOGICAL_ROOT: &str = "workspace";
+
+/// Where a **host location** a rule names lies relative to the run's
+/// workspace root, as the kernel found it on the host before this decision
+/// (F-12, [ADR-0066], Proposed).
+///
+/// Every path a live decision is about is a logical `/workspace/...` path the
+/// resolver produced beneath the pinned root. A rule-side `~/.ssh` or
+/// `/etc/shadow` is not in that namespace, so it is never compared with one by
+/// spelling: the state layer finds both on the host, by `(device, inode)`, and
+/// says how they relate. Two answers decide a `path_under` predicate; the
+/// other two leave it unevaluated, which denies.
+///
+/// [ADR-0066]: ../../../../../docs/adr/0066-f12-host-path-anchors-are-placed-by-identity.md
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum HostPlacement {
+    /// Neither lies inside the other: no path of this run can be under it.
+    Disjoint,
+    /// The workspace root lies inside it (or is it): every path of this run is
+    /// under it.
+    Encloses,
+    /// It lies inside the workspace root, or would if it were created there:
+    /// which of the run's paths are under it is not decided by this build, so
+    /// a rule naming it is not evaluated.
+    InsideWorkspace,
+    /// Where it lies could not be established: a link loop, a name the
+    /// grammar refuses, an error the kernel would not explain away.
+    Unexamined,
+}
+
+impl HostPlacement {
+    /// The audit spelling.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Disjoint => "disjoint",
+            Self::Encloses => "encloses",
+            Self::InsideWorkspace => "inside-workspace",
+            Self::Unexamined => "unexamined",
+        }
+    }
+}
+
+impl fmt::Display for HostPlacement {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Every host-anchored rule path the state layer placed for one decision.
+///
+/// Keyed by the rule path itself (anchor and segments), so a rule that names
+/// `~/.ssh` and one that names `~/.aws` are placed separately: whether the
+/// workspace overlaps one says nothing about the other. A path with no entry
+/// is unresolved and its rule is not evaluated.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HostPlacements {
+    placements: BTreeMap<RulePath, HostPlacement>,
+}
+
+impl HostPlacements {
+    /// None placed yet.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            placements: BTreeMap::new(),
+        }
+    }
+
+    /// Record where `path` lies.
+    pub fn insert(&mut self, path: RulePath, placement: HostPlacement) {
+        self.placements.insert(path, placement);
+    }
+
+    /// Where `path` lies, if it was placed.
+    #[must_use]
+    pub fn get(&self, path: &RulePath) -> Option<HostPlacement> {
+        self.placements.get(path).copied()
+    }
+
+    /// Every placement, in rule-path order.
+    pub fn iter(&self) -> impl Iterator<Item = (&RulePath, HostPlacement)> {
+        self.placements
+            .iter()
+            .map(|(path, placement)| (path, *placement))
+    }
+
+    /// How many paths were placed.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.placements.len()
+    }
+
+    /// Whether none was.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.placements.is_empty()
+    }
+}
+
 /// What each symbolic anchor resolves to, as canonical paths.
 ///
 /// Every field is `Option` because M3c cannot produce a [`CanonicalPath`] —
@@ -341,23 +452,52 @@ impl fmt::Display for PathAnchor {
 /// is the exact failure the strict loader exists to prevent, arriving one layer
 /// later.
 ///
+/// # Two namespaces (F-12)
+///
+/// [`PathAnchors::host`] says which model a context is in:
+///
+/// * `Some(placements)` -- **the logical namespace, every live decision.** A
+///   candidate is a `/workspace/...` path. `${WORKSPACE}` and an absolute
+///   rule path beginning `/workspace` compare with it component by component;
+///   every other rule-side path names a host location and is answered by its
+///   [`HostPlacement`], or is unresolved when it has none. This is the
+///   default ([`PathAnchors::empty`]): nothing placed, every host path
+///   unresolved.
+/// * `None` -- **one namespace**, the pure engine's own model, which its unit
+///   tests and benchmark build: every anchor, `/` included, is a canonical
+///   path in the candidate's own namespace and compares with it by
+///   components. No live decision is made in it; on the logical namespace it
+///   would compare `/etc/shadow` with `/workspace/...` by spelling and never
+///   match, which is the defect F-12 found.
+///
 /// [ADR-0037]: ../../../../../docs/adr/0037-capability-specifications-and-canonical-authority-identities.md
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PathAnchors {
     /// `${WORKSPACE}`.
     pub workspace: Option<CanonicalPath>,
-    /// `${DIREWOLF_HOME}`.
+    /// `${DIREWOLF_HOME}`, in the one-namespace model only.
     pub direwolf_home: Option<CanonicalPath>,
-    /// `${DIREWOLF_CONFIG}`.
+    /// `${DIREWOLF_CONFIG}`, in the one-namespace model only.
     pub direwolf_config: Option<CanonicalPath>,
-    /// `${DIREWOLF_INSTALL}`.
+    /// `${DIREWOLF_INSTALL}`, in the one-namespace model only.
     pub direwolf_install: Option<CanonicalPath>,
-    /// `~`.
+    /// `~`, in the one-namespace model only.
     pub home: Option<CanonicalPath>,
+    /// The logical namespace's host placements, or `None` for the
+    /// one-namespace model.
+    pub host: Option<HostPlacements>,
+}
+
+impl Default for PathAnchors {
+    fn default() -> Self {
+        Self::empty()
+    }
 }
 
 impl PathAnchors {
-    /// None of them. The default for a context nobody has filled in.
+    /// None of them. The default for a context nobody has filled in: the
+    /// logical namespace with nothing placed, so every rule-side path but
+    /// `${WORKSPACE}`'s is unresolved.
     #[must_use]
     pub const fn empty() -> Self {
         Self {
@@ -366,7 +506,14 @@ impl PathAnchors {
             direwolf_config: None,
             direwolf_install: None,
             home: None,
+            host: Some(HostPlacements::new()),
         }
+    }
+
+    /// The host placements, when this context is in the logical namespace.
+    #[must_use]
+    pub const fn host(&self) -> Option<&HostPlacements> {
+        self.host.as_ref()
     }
 
     /// What an anchor resolves to, or `None` if this context does not hold it.

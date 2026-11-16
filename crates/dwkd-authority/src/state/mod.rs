@@ -57,6 +57,7 @@
 
 mod admission;
 mod adoption;
+mod anchors;
 mod audit;
 mod clock;
 mod config;
@@ -120,6 +121,7 @@ use crate::policy::{PolicyContext, TaintLevel};
 pub use crate::policy::ConfigFlags;
 pub use admission::{Admission, Grant, Withheld, WithheldCause, request_digest};
 pub use adoption::Adoption;
+pub use anchors::HostAnchors;
 pub use audit::{
     AUDIT_FORMAT_VERSION, AuditEvent, AuditLogFault, AuditLogSummary, AuditRecord,
     MAX_RECORD_BYTES, RecordFault, StoreAuditFault, StoreComparison, read_audit_log,
@@ -191,6 +193,11 @@ pub struct StartupConfig {
     /// Each run's `net.http` budgets (M5c, ADR-0050 §10): D10's defaults
     /// unless the operator narrows or widens them.
     pub net_budget: NetBudget,
+    /// What each host path anchor stands for (F-12, ADR-0066, Proposed): the
+    /// operator's directories, checked at start. None by default, so every
+    /// rule naming `~` or a DireWolf anchor is unresolved and denies until
+    /// the operator says.
+    pub anchors: HostAnchors,
 }
 
 impl StartupConfig {
@@ -205,6 +212,7 @@ impl StartupConfig {
             lease_ttl_ms: DEFAULT_LEASE_TTL_MS,
             secrets: crate::secret::metadata::SecretConfig::default(),
             net_budget: NetBudget::default(),
+            anchors: HostAnchors::default(),
         }
     }
 }
@@ -367,6 +375,9 @@ struct Shared {
     /// F-02 (ADR-0064, Proposed): every handle's effects and every end of
     /// authority, ordered ([`gate`]).
     gate: Arc<gate::Gate>,
+    /// F-12 (ADR-0066, Proposed): what each host path anchor stands for,
+    /// checked at start; walked again before each filesystem decision.
+    anchors: HostAnchors,
     // Held for the life of the process; the OS releases it on exit.
     _lock: std::fs::File,
 }
@@ -623,9 +634,13 @@ impl Authority {
                 "the composed policy has no default".to_owned(),
             ));
         }
-
         let (resolved, paths, lock, layout) = prepare_state_directory(dir)?;
         let authority_uid = files::owner_uid(&resolved)?;
+        // F-12: the operator's host anchor directories and the authority's
+        // own, each one the authority can examine -- or the start does not
+        // happen, never a rule that quietly stands for less than it says.
+        let anchors = config.anchors.with_own(&resolved);
+        anchors.check().map_err(StartError::Configuration)?;
         // Secrets (M4e): consumer identities resolved and every configured
         // value fingerprinted for the redaction index, outside any transaction
         // and before the store is opened; each plaintext is dropped as soon as
@@ -670,6 +685,7 @@ impl Authority {
             net_budget: config.net_budget,
             net_exceptions: OnceLock::new(),
             gate: Arc::new(gate::Gate::new(gate::WAIT_LIMIT)),
+            anchors,
             _lock: lock,
         });
         let mut authority = Self { shared, conn };
@@ -1245,6 +1261,13 @@ impl Authority {
         })
     }
 
+    /// What each host path anchor stands for in this incarnation (F-12): the
+    /// operator's directories and the authority's own, as start checked them.
+    #[must_use]
+    pub fn host_anchors(&self) -> &HostAnchors {
+        &self.shared.anchors
+    }
+
     /// The `PolicyContext` the kernel builds for `run` from `kernel.db` — the
     /// only one any decision about it uses.
     ///
@@ -1333,7 +1356,7 @@ impl Authority {
             epoch,
             request,
         };
-        let (call, targets) = match self.resolve_call(&asked)? {
+        let (call, targets, placed) = match self.resolve_call(&asked)? {
             Ok(found) => found,
             Err(reason) => return Ok(ToolReply::Refused(asked.operation, reason)),
         };
@@ -1341,7 +1364,8 @@ impl Authority {
         // authority commits -- the broker never performs what was decided
         // for a run, a tenure or a grant that has ended since.
         let effect = shared.gate.effect()?;
-        let decided = self.transact(|work| tool::decide(work, &asked, &call, &targets, active))?;
+        let decided =
+            self.transact(|work| tool::decide(work, &asked, &call, &targets, &placed, active))?;
         let (plan, invocation) = match decided {
             tool::Decided::Refused(reason) => {
                 return Ok(ToolReply::Refused(asked.operation, reason));
@@ -1553,11 +1577,12 @@ impl Authority {
             epoch,
             request,
         };
-        let (call, targets) = match self.resolve_call(&asked)? {
+        let (call, targets, placed) = match self.resolve_call(&asked)? {
             Ok(found) => found,
             Err(reason) => return Ok(ToolReply::Refused(asked.operation, reason)),
         };
-        let decided = self.transact(|work| tool::decide(work, &asked, &call, &targets, active))?;
+        let decided =
+            self.transact(|work| tool::decide(work, &asked, &call, &targets, &placed, active))?;
         // The resolved targets' `O_PATH` handles close here, unused.
         drop(targets);
         Ok(match decided {
@@ -1575,10 +1600,21 @@ impl Authority {
     /// every target beneath the run's pinned root with **no transaction open**
     /// — `O_PATH` descriptors only; nothing is opened for an effect. A refusal
     /// at either step is recorded and returned.
+    ///
+    /// Beside the targets, and through the same pinned root: where every
+    /// host path the active policy names lies relative to it (F-12,
+    /// ADR-0066), for the decision to be made on.
+    #[allow(
+        clippy::type_complexity,
+        reason = "the three things step 2 hands step 3, named where they are used"
+    )]
     fn resolve_call(
         &mut self,
         asked: &tool::Asked<'_>,
-    ) -> Result<Result<(plan::Call, tool::Targets), FsRefusalReason>, AuthorityError> {
+    ) -> Result<
+        Result<(plan::Call, tool::Targets, crate::policy::HostPlacements), FsRefusalReason>,
+        AuthorityError,
+    > {
         let shared = Arc::clone(&self.shared);
         let active = shared.active()?;
         let located = self.transact(|work| tool::locate(work, asked, active))?;
@@ -1586,8 +1622,11 @@ impl Authority {
             tool::Located::Refused(reason) => return Ok(Err(reason)),
             tool::Located::At { call, binding } => (call, binding),
         };
-        match tool::resolve_targets(&binding, &call) {
-            Ok(targets) => Ok(Ok((call, targets))),
+        let place = |root: &crate::resource::fs::PinnedRoot| {
+            anchors::place(root, &binding.host_path, &active.compiled, &shared.anchors)
+        };
+        match tool::resolve_targets(&binding, &call, place) {
+            Ok((targets, placed)) => Ok(Ok((call, targets, placed))),
             Err(reason) => {
                 self.transact(|work| tool::refuse(work, asked, reason))?;
                 Ok(Err(reason))

@@ -295,7 +295,7 @@ What actually happens, and is sound:
 
 The identity check is real and lives in the canonicaliser; the policy engine stays a pure function over already-resolved values. Both properties survive — the earlier phrasing collapsed the two layers and got both slightly wrong.
 
-Rule-side paths outside the workspace (`~/.ssh`, `/var/run/docker.sock`) match on the canonicalised candidate string, and are written as **deny** rules, so a path that does not yet exist and therefore cannot be resolved still matches — the fail-closed direction.
+Rule-side paths outside the workspace (`~/.ssh`, `/var/run/docker.sock`) were first meant to match on the canonicalised candidate string. Since M4a a candidate is a logical `/workspace/...` path, and no host path is a spelling of one, so F-12 ([ADR-0066](adr/0066-f12-host-path-anchors-are-placed-by-identity.md), Proposed) decides them by **where they lie** instead: before each filesystem decision the state layer walks each host path the policy names, and the run's pinned root, on the host by `(device, inode)` -- symbolic links followed, a place that does not exist yet placed by its deepest existing directory -- and hands the engine one of four answers: disjoint (no match), the root inside it (a match: every path of the run is under it), it inside the root or unexaminable (not evaluated, which denies). `~` stands for the homes the operator names (`serve --path-anchor home=`), and with none every rule naming it stays unresolved. Such a path may be named only by a **deny** rule, so the change can only refuse more.
 
 #### Scalar and list are two grammars, not one with a shorthand
 

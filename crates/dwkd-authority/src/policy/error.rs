@@ -145,6 +145,10 @@ pub enum ValueError {
     /// A rule-side path that is not anchored, not absolute, empty, too deep, or
     /// contains a segment a canonical path could never have.
     MalformedPath,
+    /// A `path_under` naming a host location -- `~`, a DireWolf anchor, an
+    /// absolute path not under `/workspace` -- in a rule that is not `DENY`
+    /// (F-12, ADR-0066): such a path can only ever add a refusal.
+    HostPathOutsideDenial,
     /// A host pattern that is not a label sequence, or wildcards in TLD
     /// position.
     MalformedHost,
@@ -190,6 +194,9 @@ impl ValueError {
             Self::UnknownConfigKey => "not a configuration key policy may read",
             Self::UnknownPathAnchor => "not a path anchor policy defines",
             Self::MalformedPath => "not an anchored or absolute path",
+            Self::HostPathOutsideDenial => {
+                "a path outside the workspace may be named only by a DENY rule"
+            }
             Self::MalformedHost => "not a host pattern",
             Self::MalformedCidr => "not an address and prefix length",
             Self::MalformedRuleId => "not a rule id",

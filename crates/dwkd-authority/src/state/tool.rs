@@ -83,6 +83,7 @@ use crate::broker::{
     RawListEntry, SearchDelivery, StatDelivery,
 };
 use crate::capability::DeclaredPath;
+use crate::policy::HostPlacements;
 use crate::resource::fs::{
     Access, Expect, PathError, PinnedRoot, ResolveError, ResolvedResource, RootError, Target,
     VacantResource,
@@ -780,15 +781,26 @@ pub(super) fn locate(
 /// or delete changes one name only, so a hard-linked file may be moved or
 /// deleted; its other names are untouched (ADR-0044 §5).
 ///
+/// `place` is handed the same pinned root, once the targets resolved: where
+/// the active policy's host paths lie relative to it (F-12, ADR-0066), so
+/// the decision is made about the root every target was resolved beneath.
+///
 /// # Errors
 ///
 /// The refusal, by class.
 pub(super) fn resolve_targets(
     binding: &RootBinding,
     call: &Call,
-) -> Result<Targets, FsRefusalReason> {
+    place: impl FnOnce(&PinnedRoot) -> HostPlacements,
+) -> Result<(Targets, HostPlacements), FsRefusalReason> {
     let root =
         PinnedRoot::reopen(&binding.host_path, &binding.fingerprint).map_err(root_refusal)?;
+    let targets = targets_beneath(&root, call)?;
+    Ok((targets, place(&root)))
+}
+
+/// Every target of `call`, resolved beneath `root`.
+fn targets_beneath(root: &PinnedRoot, call: &Call) -> Result<Targets, FsRefusalReason> {
     let resolve = |path: &DeclaredPath, access, expect| {
         root.resolve(path, access, expect).map_err(resolve_refusal)
     };
@@ -854,13 +866,15 @@ pub(super) fn decide(
     asked: &Asked<'_>,
     call: &Call,
     targets: &Targets,
+    placed: &HostPlacements,
     active: &ActiveAuthority,
 ) -> Result<Decided, AuthorityError> {
     if let Some(reason) = standing(work, asked, active)? {
         return refuse(work, asked, reason).map(Decided::Refused);
     }
     let admission = admission::load(work, asked.run.as_str())?;
-    let context = query::policy_context(work, asked.run.as_str(), active)?;
+    // F-12: the host paths as step 2 found them, beside the same root.
+    let context = query::policy_context_placed(work, asked.run.as_str(), active, placed.clone())?;
     // The canonical paths are the resolver's: the filesystem supplied them.
     let plan = plan::decide(call, &targets.resolved(), &admission, &context, active)?;
     let mut fields = base_fields(asked, plan.tool());

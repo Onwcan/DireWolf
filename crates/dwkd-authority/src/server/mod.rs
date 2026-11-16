@@ -438,6 +438,7 @@ fn start(
         lease_ttl_ms: config.lease_ttl_ms,
         secrets,
         net_budget: crate::state::NetBudget::default(),
+        anchors: host_anchors(config),
     };
     let options = StartOptions {
         broker,
@@ -459,8 +460,68 @@ fn start(
              {authority_uid}; one process cannot be both"
         )));
     }
+    log_anchors(authority.host_anchors());
     record_posture(&mut authority, config, authority_uid, workspace)?;
     Ok((place, authority, report))
+}
+
+/// What each host path anchor stands for (F-12, ADR-0066, Proposed): the
+/// operator's `--path-anchor` directories, and the directory of every
+/// configuration file this start reads -- policy files, the secret metadata,
+/// the sandbox configuration -- under `${DIREWOLF_CONFIG}`. The state layer
+/// adds its own state and executable directories and checks every one.
+fn host_anchors(config: &ServeConfig) -> crate::state::HostAnchors {
+    use self::config::AnchorName;
+    let mut anchors = crate::state::HostAnchors::default();
+    for (name, dir) in &config.path_anchors {
+        let list = match name {
+            AnchorName::Home => &mut anchors.home,
+            AnchorName::DirewolfHome => &mut anchors.direwolf_home,
+            AnchorName::DirewolfConfig => &mut anchors.direwolf_config,
+            AnchorName::DirewolfInstall => &mut anchors.direwolf_install,
+        };
+        list.push(dir.clone());
+    }
+    let mut files: Vec<&std::path::Path> = Vec::new();
+    if let PolicyInput::Files { files: policy, .. } = &config.policy {
+        files.extend(policy.iter().map(std::path::PathBuf::as_path));
+    }
+    files.extend(config.secrets_file.as_deref());
+    files.extend(config.sandbox_config.as_deref());
+    for file in files {
+        let directory = std::fs::canonicalize(file).ok().and_then(|real| {
+            real.parent()
+                .and_then(|dir| dir.to_str())
+                .map(str::to_owned)
+        });
+        if let Some(directory) = directory
+            && !anchors.direwolf_config.contains(&directory)
+        {
+            anchors.direwolf_config.push(directory);
+        }
+    }
+    anchors
+}
+
+/// Say what each host path anchor stands for, once, at start: the operator
+/// can see which locations the packs' hard denials are placed against, and
+/// that `~` stands for nothing when no home was configured.
+fn log_anchors(anchors: &crate::state::HostAnchors) {
+    for (name, list) in [
+        ("~", &anchors.home),
+        ("${DIREWOLF_HOME}", &anchors.direwolf_home),
+        ("${DIREWOLF_CONFIG}", &anchors.direwolf_config),
+        ("${DIREWOLF_INSTALL}", &anchors.direwolf_install),
+    ] {
+        if list.is_empty() {
+            log(&format!(
+                "path anchor {name} stands for nothing: every rule naming it is unresolved and \
+                 denies (--path-anchor)"
+            ));
+        } else {
+            log(&format!("path anchor {name} = {}", list.join(", ")));
+        }
+    }
 }
 
 /// Say the effective start-up posture on stderr and record it in

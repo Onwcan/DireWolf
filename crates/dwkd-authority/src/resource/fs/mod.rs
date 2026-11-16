@@ -519,6 +519,264 @@ impl PinnedRoot {
     }
 }
 
+/// Where a host location lies relative to a pinned workspace root (F-12,
+/// ADR-0066, Proposed): the fact a policy rule naming `~/.ssh` or
+/// `/etc/shadow` is decided on, because no `/workspace/...` path is a
+/// spelling of either.
+///
+/// Found by `(device, inode)`, never by comparing path text: both the root's
+/// path and the location are walked from `/` the way the kernel resolves
+/// them -- symlinks followed, at most [`HOST_LINK_LIMIT`] -- and every real
+/// directory on each walk is recorded by identity. A bind mount presenting a
+/// directory twice presents one identity, so it does not hide an overlap in
+/// either direction but the one ADR-0066 names: a root that is itself a bind
+/// mount of a directory inside the location.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum HostRelation {
+    /// Neither lies inside the other.
+    Disjoint,
+    /// The root lies inside the location, or is it.
+    Encloses,
+    /// The location lies inside the root, or would if created there: its
+    /// deepest existing directory is the root or below it.
+    Inside,
+    /// Could not be established: the root's path no longer names the pinned
+    /// root, a link loop or a name the grammar refuses, or an error other than
+    /// "absent" and "not searchable".
+    Unknown,
+}
+
+impl HostRelation {
+    /// A stable spelling.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Disjoint => "disjoint",
+            Self::Encloses => "encloses",
+            Self::Inside => "inside",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+/// The most symbolic links one host walk follows: the kernel's own bound
+/// (`MAXSYMLINKS`).
+pub const HOST_LINK_LIMIT: usize = 40;
+
+/// What one host walk found (F-12): every real directory from `/` down to
+/// where it stopped, by identity, and why it stopped.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(in crate::resource) struct HostWalk {
+    /// `/` first, then each directory the path's real form passes through;
+    /// the last is where the walk stopped (the location itself, when it is a
+    /// directory that exists).
+    pub(in crate::resource) directories: Vec<FileIdentity>,
+    /// How the walk ended.
+    pub(in crate::resource) end: HostEnd,
+}
+
+/// How a host walk ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::resource) enum HostEnd {
+    /// The whole path exists: this object, of any kind.
+    Found(FileIdentity),
+    /// A component does not exist, or a non-directory stands where a
+    /// directory would be: nothing below the last directory exists.
+    Absent,
+    /// The last directory cannot be searched by the authority: whatever lies
+    /// below it was not examined (ADR-0066's assumption: beneath it).
+    Unsearchable,
+    /// Anything else.
+    Failed,
+}
+
+impl PinnedRoot {
+    /// Where the absolute host path `location` lies relative to this root.
+    /// `root_host_path` is the operator's path this root was pinned through,
+    /// walked again here: if it no longer names this root, the answer is
+    /// [`HostRelation::Unknown`].
+    ///
+    /// | location's walk | answer |
+    /// |---|---|
+    /// | failed | `Unknown` |
+    /// | found, and it is the root or one of the root's directories | `Encloses` |
+    /// | passes through the root (found or not) | `Inside` |
+    /// | stopped unsearchable at one of the root's own directories | `Unknown` |
+    /// | anything else | `Disjoint` |
+    ///
+    /// A location below a directory the authority cannot search is taken to
+    /// lie beneath that directory: the resolver, which runs as the authority,
+    /// can never reach below it either, so the residual is a symbolic link
+    /// inside it that points elsewhere -- made by that directory's owner
+    /// (ADR-0066).
+    #[must_use]
+    pub fn relation_to(&self, root_host_path: &str, location: &str) -> HostRelation {
+        if check_host_path(root_host_path).is_err() || check_host_path(location).is_err() {
+            return HostRelation::Unknown;
+        }
+        relate(
+            self.identity,
+            &imp::host_walk(root_host_path),
+            &imp::host_walk(location),
+        )
+    }
+}
+
+/// [`PinnedRoot::relation_to`]'s judgement, from the two walks alone: the
+/// root (pinned as `identity`) walked through its recorded path, and the
+/// location.
+fn relate(identity: FileIdentity, root: &HostWalk, target: &HostWalk) -> HostRelation {
+    if root.end != HostEnd::Found(identity) {
+        return HostRelation::Unknown;
+    }
+    let ancestors = &root.directories;
+    match target.end {
+        HostEnd::Failed => HostRelation::Unknown,
+        HostEnd::Found(found) if ancestors.contains(&found) => HostRelation::Encloses,
+        _ if target.directories.contains(&identity) => HostRelation::Inside,
+        // Stopped at one of the root's own directories, which the root's own
+        // walk could search: what lies below it is not assumed.
+        HostEnd::Unsearchable
+            if target
+                .directories
+                .last()
+                .is_some_and(|stopped| ancestors.contains(stopped)) =>
+        {
+            HostRelation::Unknown
+        }
+        HostEnd::Found(_) | HostEnd::Absent | HostEnd::Unsearchable => HostRelation::Disjoint,
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod relation_tests {
+    use super::{FileIdentity, HostEnd, HostRelation, HostWalk, relate};
+
+    fn id(n: u64) -> FileIdentity {
+        FileIdentity::new(1, n)
+    }
+
+    fn walk(directories: &[u64], end: HostEnd) -> HostWalk {
+        HostWalk {
+            directories: directories.iter().copied().map(id).collect(),
+            end,
+        }
+    }
+
+    /// `/` (1), `/srv` (2), `/srv/ws` (3, the root).
+    fn root() -> HostWalk {
+        walk(&[1, 2, 3], HostEnd::Found(id(3)))
+    }
+
+    #[test]
+    fn each_shape_of_walk_has_one_answer() {
+        let cases = [
+            // `/home/alice/.ssh`, beside the root.
+            (
+                walk(&[1, 4, 5, 6], HostEnd::Found(id(6))),
+                HostRelation::Disjoint,
+            ),
+            (walk(&[1, 4, 5], HostEnd::Absent), HostRelation::Disjoint),
+            // `/srv`, above the root; the root itself.
+            (walk(&[1, 2], HostEnd::Found(id(2))), HostRelation::Encloses),
+            (
+                walk(&[1, 2, 3], HostEnd::Found(id(3))),
+                HostRelation::Encloses,
+            ),
+            // Through the root: found, absent, or a file in it.
+            (
+                walk(&[1, 2, 3, 7], HostEnd::Found(id(7))),
+                HostRelation::Inside,
+            ),
+            (walk(&[1, 2, 3], HostEnd::Absent), HostRelation::Inside),
+            (
+                walk(&[1, 2, 3], HostEnd::Found(id(8))),
+                HostRelation::Inside,
+            ),
+            // Below an unsearchable directory beside the root: beneath it.
+            (
+                walk(&[1, 4, 5], HostEnd::Unsearchable),
+                HostRelation::Disjoint,
+            ),
+            // Below an unsearchable directory that is one of the root's own:
+            // not assumed.
+            (walk(&[1, 2], HostEnd::Unsearchable), HostRelation::Unknown),
+            (walk(&[1, 4], HostEnd::Failed), HostRelation::Unknown),
+        ];
+        for (n, (target, expected)) in cases.into_iter().enumerate() {
+            assert_eq!(relate(id(3), &root(), &target), expected, "case {n}");
+        }
+    }
+
+    #[test]
+    fn a_root_path_that_does_not_end_at_the_pinned_root_places_nothing() {
+        let anything = walk(&[1, 4], HostEnd::Found(id(4)));
+        for root in [
+            walk(&[1, 2, 9], HostEnd::Found(id(9))),
+            walk(&[1, 2], HostEnd::Unsearchable),
+            walk(&[1, 2], HostEnd::Absent),
+            walk(&[], HostEnd::Failed),
+        ] {
+            assert_eq!(relate(id(3), &root, &anything), HostRelation::Unknown);
+        }
+    }
+}
+
+/// Why an operator's host anchor directory was refused at start (F-12).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AnchorError {
+    /// It is not a directory the authority can open: [`RootError`]'s classes.
+    Root(RootError),
+    /// The authority may open it but not search it, so nothing below it --
+    /// `~/.ssh` below `~` -- could be examined.
+    NotSearchable,
+}
+
+impl fmt::Display for AnchorError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Root(error) => write!(f, "{error}"),
+            Self::NotSearchable => f.write_str("ANCHOR_NOT_SEARCHABLE"),
+        }
+    }
+}
+
+impl std::error::Error for AnchorError {}
+
+/// The directory this process's executable is in, as the kernel records it
+/// (`/proc/self/exe`): `${DIREWOLF_INSTALL}`'s own location (F-12). `None`
+/// where the kernel will not say, the path is not UTF-8, or off Linux.
+#[must_use]
+pub fn own_executable_directory() -> Option<String> {
+    #[cfg(target_os = "linux")]
+    {
+        let exe = std::fs::read_link("/proc/self/exe").ok()?;
+        exe.parent()?.to_str().map(str::to_owned)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        None
+    }
+}
+
+/// Check a directory an operator declared as a host path anchor (F-12): an
+/// absolute, bounded, NUL-free path naming a directory -- not a symlink, not
+/// on procfs or sysfs -- that the authority can search. Nothing is kept
+/// open: each decision walks it again.
+///
+/// # Errors
+///
+/// [`AnchorError`], naming the class.
+pub fn check_anchor_directory(host_path: &str) -> Result<(), AnchorError> {
+    check_host_path(host_path).map_err(AnchorError::Root)?;
+    let (fd, _, _) = imp::open_root(host_path).map_err(AnchorError::Root)?;
+    if imp::searchable(&fd) {
+        Ok(())
+    } else {
+        Err(AnchorError::NotSearchable)
+    }
+}
+
 /// Classify the names a listing found (M4c, ADR-0044 §6): `true` for a name a
 /// canonical path can name — UTF-8, one component the grammar accepts (NFC,
 /// no control, bidi or invisible-format character, at most 255 bytes, not `.`

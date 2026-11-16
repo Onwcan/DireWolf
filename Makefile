@@ -20,6 +20,7 @@ DW := $(PY) scripts/dw.py
         filesystem-operations-evidence process-broker-evidence secret-broker-evidence \
         sandbox-foundation-evidence sandbox-egress-evidence sandbox-egress-policy-mutations \
         sandbox-taint-mutations authority-ownership-mutations authority-concurrency-mutations posture-mutations \
+        policy-anchor-mutations \
         sandbox-workload-evidence \
         net-http-evidence net-http-mutations sandbox-workload-mutations sandbox-secret-evidence \
         sandbox-secret-mutations sandbox-workspace-evidence sandbox-workspace-mutations \
@@ -126,6 +127,9 @@ authority-concurrency-mutations: ## F-02 mutation review (ADR-0064, Proposed): e
 
 posture-mutations: ## F-03 mutation review (ADR-0065, Proposed): each guard of the effective posture -- an acknowledgement always reduced, an unread fact never safe, a recommendation never required, the authority's record written -- weakened in turn must fail the broker's or the authority's suites (slow, Linux)
 	@$(DW) posture-mutations
+
+policy-anchor-mutations: ## F-12 mutation review (ADR-0066, Proposed): each guard of the host path anchors -- an unplaced or overlapping protection never a non-match, an absolute one placed on the host, a host path only in a denial, the anchors checked at start -- weakened in turn must fail the authority's suites or the real daemons (slow, Linux)
+	@$(DW) policy-anchor-mutations
 
 sandbox-workload-evidence: ## M5d.1-M5d.2 workloads in real OCI environments: identity, bounds, wall clock, process trees ended, digests, drift, escapes, an agent-shaped workload, the authority's gates, ledger and crash windows; the public process.exec over real DWKP, serve --sandbox-config, the hygiene launcher with real git/Python/pytest; M5e.2 cross-run isolation
 	@$(DW) sandbox-workload-evidence

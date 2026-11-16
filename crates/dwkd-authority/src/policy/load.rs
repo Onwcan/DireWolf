@@ -322,6 +322,7 @@ impl Walker<'_> {
         let approval = self.approval(table, field, effect, at)?;
 
         self.check_applicability(&when, &unless, field, at)?;
+        Self::check_host_paths(&when, effect, field, at)?;
 
         Ok(Rule::new(
             id,
@@ -333,6 +334,39 @@ impl Walker<'_> {
             obligations,
             approval,
         ))
+    }
+
+    /// A `path_under` that names a **host** location -- `~`, a DireWolf
+    /// anchor, an absolute path not under `/workspace` -- only in a `DENY`
+    /// rule (F-12, ADR-0066).
+    ///
+    /// On a live decision such a path is answered by where it lies relative to
+    /// the run's workspace root, and when the root lies inside it, every path
+    /// of the run is under it. In a `DENY` rule that can only refuse more. In
+    /// an `ALLOW` or `REQUIRE_APPROVAL` rule it would permit, or offer for
+    /// approval, whole workspaces by where their roots happen to be on the
+    /// host -- and would match, first, actions a later rule denies. Before
+    /// F-12 such a rule never matched a live path at all, so refusing it at
+    /// load turns a silently dead rule into an error rather than into a
+    /// permission. Postconditions only narrow, and are not limited.
+    fn check_host_paths(
+        when: &When,
+        effect: Effect,
+        field: &FieldPath,
+        at: &SourceLocation,
+    ) -> Result<(), PolicyLoadError> {
+        let names_host = when
+            .path_under
+            .as_ref()
+            .is_some_and(|paths| paths.values().any(RulePath::is_host));
+        if names_host && effect != Effect::Deny {
+            return Err(PolicyLoadError::BadValue {
+                at: at.clone(),
+                field: field.member("when").member("path_under"),
+                error: ValueError::HostPathOutsideDenial,
+            });
+        }
+        Ok(())
     }
 
     /// Every `[[postcondition]]`.

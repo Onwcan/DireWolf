@@ -19,14 +19,16 @@
 //! [`POLICY.md`]: ../../../../../docs/POLICY.md
 
 use super::action::{ArgvSafety, CanonicalAction, IpAddress, Novelty};
-use super::context::{ConfigFlags, Origin, PathAnchor, PathAnchors, PolicyContext, TaintLevel};
+use super::context::{
+    ConfigFlags, HostPlacement, Origin, PathAnchor, PathAnchors, PolicyContext, TaintLevel,
+};
 use super::effect::Effect;
 use super::predicate::Unevaluable;
 use super::reason::Reason;
 use super::rule::CompiledPolicy;
 use super::testing::{
-    anchors, executable_capability, interactive, on_host, path_capability, sandboxed, scheduled,
-    syntactic_capability, universal_capability,
+    anchors, executable_capability, interactive, logical, on_host, path_capability, sandboxed,
+    scheduled, syntactic_capability, universal_capability,
 };
 use super::{Decision, compose, evaluate, load, profiles};
 
@@ -808,4 +810,441 @@ fn a_decision_renders_deterministically_and_from_typed_state_only() {
     assert!(rendered.contains("REQUIRE_APPROVAL"));
     assert!(rendered.contains("balanced.toml:"));
     assert!(rendered.contains("path_set"));
+}
+
+// ===========================================================================
+// F-12: the logical namespace every live decision is made in. A candidate is
+// a `/workspace/...` path; a host path a rule names is answered by where the
+// state layer found it on the host, never by its spelling.
+// ===========================================================================
+
+/// Every host path the three shipped packs name -- the same twelve in each.
+const SHIPPED_HOST_PATHS: [&str; 12] = [
+    "${DIREWOLF_HOME}",
+    "${DIREWOLF_CONFIG}",
+    "${DIREWOLF_INSTALL}",
+    "~/.ssh",
+    "~/.aws",
+    "~/.gnupg",
+    "~/.config/gh",
+    "~/.kube",
+    "/etc/shadow",
+    "/etc/sudoers",
+    "/var/run/docker.sock",
+    "/run/podman/podman.sock",
+];
+
+const SHIPPED: [&str; 3] = ["safe.toml", "balanced.toml", "power.toml"];
+
+/// A live-shaped context: `${WORKSPACE}` resolved, every host path of
+/// `policy` placed as `placed` says.
+fn live(
+    origin: Origin,
+    policy: &CompiledPolicy,
+    placed: impl Fn(&str) -> Option<HostPlacement>,
+) -> PolicyContext {
+    PolicyContext::new(origin, TaintLevel::None)
+        .with_anchors(logical(policy, |path| placed(&path.to_string())))
+}
+
+/// Every host path disjoint from the workspace: the ordinary deployment.
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "the shape every placement function of these tests has"
+)]
+fn disjoint(_: &str) -> Option<HostPlacement> {
+    Some(HostPlacement::Disjoint)
+}
+
+#[test]
+fn every_shipped_pack_names_the_same_twelve_host_paths() {
+    let expected: std::collections::BTreeSet<String> =
+        SHIPPED_HOST_PATHS.iter().map(|p| (*p).to_owned()).collect();
+    for file in SHIPPED {
+        let named: std::collections::BTreeSet<String> = pack(file)
+            .host_paths()
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        assert_eq!(named, expected, "{file}");
+    }
+}
+
+#[test]
+fn a_workspace_read_is_allowed_in_every_pack_once_its_host_paths_are_placed() {
+    for file in SHIPPED {
+        let policy = pack(file);
+        let context = live(Origin::Interactive, &policy, disjoint);
+        let read = fs("fs.read", &["workspace", "src", "main.rs"]).with_byte_count(1024);
+        expect(
+            &evaluate(&policy, &read, &context),
+            Effect::Allow,
+            "allow-workspace-read",
+        );
+        // A live listing or stat moves no content: the state layer gives it a
+        // byte count of zero, which every pack's read cap admits.
+        for verb in ["fs.list", "fs.stat"] {
+            let action = fs(verb, &["workspace", "src"]).with_byte_count(0);
+            let decision = evaluate(&policy, &action, &context);
+            expect(&decision, Effect::Allow, "allow-workspace-read");
+        }
+    }
+}
+
+#[test]
+fn an_unplaced_host_path_denies_and_names_its_anchor_in_every_pack() {
+    // Nothing placed, and then only `~` missing: a missing home anchor never
+    // disables `deny-credential-paths`; the read is not evaluated.
+    let only_home_missing =
+        |path: &str| (!path.starts_with('~')).then_some(HostPlacement::Disjoint);
+    for file in SHIPPED {
+        let policy = pack(file);
+        let read = fs("fs.read", &["workspace", "a.txt"]).with_byte_count(10);
+        for context in [
+            live(Origin::Interactive, &policy, |_| None),
+            live(Origin::Interactive, &policy, only_home_missing),
+        ] {
+            let decision = evaluate(&policy, &read, &context);
+            assert_eq!(decision.effect(), Effect::Deny, "{file}: {decision}");
+            assert_eq!(decision.reason(), Reason::UnresolvedCanonicalInput);
+            assert_eq!(decision.rule_id().as_str(), "deny-credential-paths");
+            assert_eq!(
+                decision.unevaluable(),
+                Some(Unevaluable::PathAnchor(PathAnchor::Home))
+            );
+        }
+        // A write meets `deny-direwolf-self-modification` first, and so its
+        // missing anchor.
+        let write = fs("fs.write", &["workspace", "a.txt"]);
+        let decision = evaluate(
+            &policy,
+            &write,
+            &live(Origin::Interactive, &policy, |_| None),
+        );
+        assert_eq!(
+            decision.unevaluable(),
+            Some(Unevaluable::PathAnchor(PathAnchor::DirewolfHome)),
+            "{file}"
+        );
+    }
+}
+
+#[test]
+fn a_workspace_inside_a_protected_location_denies_every_path_of_it() {
+    // `Encloses`: the workspace root lies inside `~/.ssh`. Every path the run
+    // can name is under it, so the credential rule denies -- by name.
+    let inside_ssh = |path: &str| {
+        Some(if path == "~/.ssh" {
+            HostPlacement::Encloses
+        } else {
+            HostPlacement::Disjoint
+        })
+    };
+    for file in SHIPPED {
+        let policy = pack(file);
+        let context = live(Origin::Interactive, &policy, inside_ssh);
+        for components in [vec!["workspace", "id_ed25519"], vec!["workspace", "x", "y"]] {
+            let decision = evaluate(
+                &policy,
+                &fs("fs.read", &components).with_byte_count(10),
+                &context,
+            );
+            expect(&decision, Effect::Deny, "deny-credential-paths");
+            assert_eq!(decision.reason(), Reason::SensitivePath, "{file}");
+        }
+    }
+}
+
+#[test]
+fn a_protected_location_inside_the_workspace_is_not_evaluated_and_denies() {
+    // `InsideWorkspace` and `Unexamined`: the rule cannot say which paths are
+    // under the location, so it is not evaluated -- and that denies, naming
+    // the rule, the anchor and why.
+    for doubt in [HostPlacement::InsideWorkspace, HostPlacement::Unexamined] {
+        let home_doubted = |path: &str| {
+            Some(if path.starts_with('~') {
+                doubt
+            } else {
+                HostPlacement::Disjoint
+            })
+        };
+        for file in SHIPPED {
+            let policy = pack(file);
+            let context = live(Origin::Interactive, &policy, home_doubted);
+            let decision = evaluate(
+                &policy,
+                &fs("fs.read", &["workspace", "notes.md"]).with_byte_count(10),
+                &context,
+            );
+            assert_eq!(decision.effect(), Effect::Deny, "{file}: {decision}");
+            assert_eq!(decision.rule_id().as_str(), "deny-credential-paths");
+            assert_eq!(decision.reason(), Reason::UnresolvedCanonicalInput);
+            assert_eq!(
+                decision.unevaluable(),
+                Some(Unevaluable::HostLocation(PathAnchor::Home, doubt))
+            );
+        }
+    }
+}
+
+#[test]
+fn an_absolute_protected_path_is_placed_on_the_host_not_compared_with_the_workspace() {
+    // The defect F-12 found beneath the unresolved home anchor: compared by
+    // spelling, `/etc/shadow` is never a prefix of a `/workspace/...` path, so
+    // a workspace root bound at `/etc` exposed `/workspace/shadow` -- which is
+    // `/etc/shadow` -- to `allow-workspace-read`. Placed, it lies inside the
+    // workspace root, and the rule is not evaluated: refused.
+    let etc_inside = |path: &str| {
+        Some(if path.starts_with("/etc/") {
+            HostPlacement::InsideWorkspace
+        } else {
+            HostPlacement::Disjoint
+        })
+    };
+    let run_inside = |path: &str| {
+        Some(
+            if path == "/var/run/docker.sock" || path == "/run/podman/podman.sock" {
+                HostPlacement::InsideWorkspace
+            } else {
+                HostPlacement::Disjoint
+            },
+        )
+    };
+    for file in SHIPPED {
+        let policy = pack(file);
+        let shadow = fs("fs.read", &["workspace", "shadow"]).with_byte_count(10);
+        let decision = evaluate(
+            &policy,
+            &shadow,
+            &live(Origin::Interactive, &policy, etc_inside),
+        );
+        assert_eq!(
+            decision.rule_id().as_str(),
+            "deny-credential-paths",
+            "{file}"
+        );
+        assert_eq!(
+            decision.unevaluable(),
+            Some(Unevaluable::HostLocation(
+                PathAnchor::Absolute,
+                HostPlacement::InsideWorkspace
+            ))
+        );
+        let socket = fs("fs.read", &["workspace", "docker.sock"]).with_byte_count(10);
+        let decision = evaluate(
+            &policy,
+            &socket,
+            &live(Origin::Interactive, &policy, run_inside),
+        );
+        assert_eq!(
+            decision.rule_id().as_str(),
+            "deny-container-socket",
+            "{file}"
+        );
+        assert_eq!(decision.effect(), Effect::Deny);
+    }
+}
+
+#[test]
+fn a_logical_absolute_path_still_compares_by_components() {
+    let Ok(profile) = load(
+        "logical.toml",
+        r#"schema_version = 1
+[meta]
+name = "logical"
+
+[[rule]]
+id = "deny-git-dir"
+effect = "DENY"
+reason = "SENSITIVE_PATH"
+when.verb = "fs.read"
+when.path_under = "/workspace/.git"
+
+[[rule]]
+id = "allow-workspace"
+effect = "ALLOW"
+when.verb = "fs.read"
+when.path_under = "${WORKSPACE}"
+
+[[rule]]
+id = "default"
+effect = "DENY"
+reason = "NO_MATCHING_RULE"
+"#,
+    ) else {
+        unreachable!("the fixture loads")
+    };
+    let name = profile.name().clone();
+    let Ok(policy) = compose(&name, &[profile]) else {
+        unreachable!("the fixture composes")
+    };
+    assert!(policy.host_paths().is_empty(), "/workspace/... is logical");
+    let context = live(Origin::Interactive, &policy, |_| None);
+    let git = evaluate(
+        &policy,
+        &fs("fs.read", &["workspace", ".git", "config"]),
+        &context,
+    );
+    expect(&git, Effect::Deny, "deny-git-dir");
+    let src = evaluate(&policy, &fs("fs.read", &["workspace", "src"]), &context);
+    expect(&src, Effect::Allow, "allow-workspace");
+}
+
+#[test]
+fn a_host_path_may_be_named_only_by_a_denial() {
+    let profile = |effect: &str, path: &str, extra: &str| {
+        format!(
+            r#"schema_version = 1
+[meta]
+name = "hosted"
+
+[[rule]]
+id = "the-rule"
+effect = "{effect}"
+{extra}
+when.verb = "fs.read"
+when.path_under = "{path}"
+
+[[rule]]
+id = "default"
+effect = "DENY"
+reason = "NO_MATCHING_RULE"
+"#
+        )
+    };
+    let approval = "reason = \"SENSITIVE_PATH\"\napproval.scope = \"exact_action\"\n\
+                    approval.ttl = \"10m\"\napproval.max_uses = 1";
+    for (effect, extra) in [("ALLOW", ""), ("REQUIRE_APPROVAL", approval)] {
+        for path in ["~/notes", "${DIREWOLF_CONFIG}", "/srv/shared", "/"] {
+            match load("hosted.toml", &profile(effect, path, extra)) {
+                Err(super::PolicyLoadError::BadValue { error, field, .. }) => {
+                    assert_eq!(
+                        error,
+                        super::ValueError::HostPathOutsideDenial,
+                        "{effect} {path}"
+                    );
+                    assert_eq!(field.as_str(), "rule[0].when.path_under");
+                }
+                other => unreachable!("{effect} naming {path} loaded: {other:?}"),
+            }
+        }
+        // The workspace's own spellings are not host paths.
+        for path in ["${WORKSPACE}/src", "/workspace/src"] {
+            assert!(
+                load("hosted.toml", &profile(effect, path, extra)).is_ok(),
+                "{effect} {path}"
+            );
+        }
+    }
+    let deny = "reason = \"SENSITIVE_PATH\"";
+    for path in ["~/notes", "${DIREWOLF_CONFIG}", "/srv/shared", "/"] {
+        assert!(
+            load("hosted.toml", &profile("DENY", path, deny)).is_ok(),
+            "DENY {path}"
+        );
+    }
+}
+
+#[test]
+fn an_executable_path_is_still_compared_on_the_host() {
+    // `executable_in` names executables by their canonical HOST path, so F-12
+    // leaves it as it was: the logical namespace changes only `path_under`.
+    let Ok(profile) = load(
+        "exec.toml",
+        r#"schema_version = 1
+[meta]
+name = "exec"
+
+[[rule]]
+id = "allow-git"
+effect = "ALLOW"
+when.verb = "process.exec"
+when.executable_in = ["/usr/bin/git"]
+
+[[rule]]
+id = "default"
+effect = "DENY"
+reason = "NO_MATCHING_RULE"
+"#,
+    ) else {
+        unreachable!("the fixture loads")
+    };
+    let name = profile.name().clone();
+    let Ok(policy) = compose(&name, &[profile]) else {
+        unreachable!("the fixture composes")
+    };
+    let git = on_host(executable_capability(
+        "process.exec",
+        &["usr", "bin", "git"],
+        7,
+    ));
+    let decision = evaluate(&policy, &git, &live(Origin::Interactive, &policy, |_| None));
+    expect(&decision, Effect::Allow, "allow-git");
+}
+
+#[test]
+fn each_pack_keeps_its_ceiling_once_the_host_paths_are_placed() {
+    let write = fs("fs.write", &["workspace", "src", "main.rs"]);
+    let delete = fs("fs.delete", &["workspace", "old.txt"]);
+
+    let safe = pack("safe.toml");
+    let context = live(Origin::Interactive, &safe, disjoint);
+    let decision = evaluate(&safe, &write, &context);
+    expect(&decision, Effect::Deny, "deny-workspace-mutation");
+    assert_eq!(decision.reason(), Reason::ProfileCeiling);
+
+    // BALANCED allows the write in policy and attaches the obligation the
+    // state layer cannot enforce yet (F-12, M8): policy truth only.
+    let balanced = balanced();
+    let context = live(Origin::Interactive, &balanced, disjoint);
+    let decision = evaluate(&balanced, &write, &context);
+    expect(&decision, Effect::Allow, "allow-workspace-write");
+    assert!(
+        decision
+            .obligations()
+            .as_slice()
+            .contains(&super::Obligation::RequireArtifactCapture)
+    );
+    // A delete still needs a human, and nobody is there for a scheduled run.
+    expect(
+        &evaluate(&balanced, &delete, &context),
+        Effect::RequireApproval,
+        "approve-workspace-delete",
+    );
+    let unattended = live(Origin::Scheduled, &balanced, disjoint);
+    let decision = evaluate(&balanced, &delete, &unattended);
+    assert_eq!(decision.effect(), Effect::Deny, "{decision}");
+    assert_eq!(decision.reason(), Reason::NoHumanAvailable);
+
+    let power = pack("power.toml");
+    let context = live(Origin::Interactive, &power, disjoint);
+    expect(
+        &evaluate(&power, &write, &context),
+        Effect::Allow,
+        "allow-workspace-write",
+    );
+    expect(
+        &evaluate(&power, &delete, &context),
+        Effect::Allow,
+        "allow-workspace-write",
+    );
+    // POWER is still policy: a workspace inside DireWolf's own state is
+    // self-modification, and reading it is not.
+    let in_state = |path: &str| {
+        Some(if path == "${DIREWOLF_HOME}" {
+            HostPlacement::Encloses
+        } else {
+            HostPlacement::Disjoint
+        })
+    };
+    let context = live(Origin::Interactive, &power, in_state);
+    let decision = evaluate(&power, &write, &context);
+    expect(&decision, Effect::Deny, "deny-direwolf-self-modification");
+    assert_eq!(decision.reason(), Reason::SelfModification);
+    let read = fs("fs.read", &["workspace", "kernel.db"]).with_byte_count(10);
+    expect(
+        &evaluate(&power, &read, &context),
+        Effect::Allow,
+        "allow-workspace-read",
+    );
 }

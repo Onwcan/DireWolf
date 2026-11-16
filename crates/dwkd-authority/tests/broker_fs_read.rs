@@ -346,25 +346,35 @@ mod linux {
         evidence(SUITE, "zero-broker-contact-for-non-effects", "zero", 0);
     }
 
+    /// The fixture's `serve` arguments with a shipped pack in place of the
+    /// operator policy file, and `extra` after them.
+    fn shipped_args(setup: &Setup, pack: &str, extra: &[String]) -> Vec<String> {
+        let mut args = setup.authority_args(Some(own_uid()), &[]);
+        let at = args.iter().position(|a| a == "--policy-file").unwrap();
+        args.splice(at..at + 4, ["--policy-shipped".to_owned(), pack.to_owned()]);
+        args.extend_from_slice(extra);
+        args
+    }
+
     #[test]
     fn shipped_packs_deny_every_read_before_the_broker() {
-        // The shipped packs name `~/.ssh` in their first fs rule, and no run
-        // has a home anchor: that rule cannot be evaluated, so the pack denies
-        // (UNRESOLVED_POLICY_INPUT) rather than guessing. Fail-closed, and
-        // documented; an operator policy is how a deployment reads files.
+        // The shipped packs name `~/.ssh` in their first fs rule, and with no
+        // `--path-anchor home=` the home anchor stands for nothing: that rule
+        // cannot be evaluated, so the pack denies (UNRESOLVED_POLICY_INPUT)
+        // rather than guessing. Fail-closed, and documented (F-12, ADR-0066).
         let setup = Setup::new("m4b-shipped");
         let broker = Broker::start(
             &setup.broker_socket(),
             own_uid(),
             &["--allow-shared-authority-uid"],
         );
-        let mut args = setup.authority_args(Some(own_uid()), &[]);
-        let at = args.iter().position(|a| a == "--policy-file").unwrap();
-        args.splice(
-            at..at + 4,
-            ["--policy-shipped".to_owned(), "balanced".to_owned()],
+        let args = shipped_args(&setup, "balanced", &[]);
+        let server = Server::start(&args);
+        assert!(
+            server.stderr().contains("path anchor ~ stands for nothing"),
+            "{}",
+            server.stderr()
         );
-        let _server = Server::start(&args);
         let mut rt = Runtime::admit(&setup.kernel_socket(), 1, &["fs.read:/workspace"]);
         let got = rt.invoke("/workspace/a.txt", 64);
         let got = denial(&got);
@@ -377,6 +387,102 @@ mod linux {
         std::thread::sleep(Duration::from_millis(100));
         assert_eq!(broker.count("connection"), 0);
         evidence(SUITE, "shipped-pack-denies-unevaluable", "denied", 0);
+    }
+
+    #[test]
+    fn a_shipped_pack_reads_the_workspace_once_the_operator_names_the_home() {
+        // F-12 (ADR-0066): `--path-anchor home=` names the home whose
+        // credentials the packs protect. It lies beside the workspace, so the
+        // credential rule is decided -- no workspace path is under it -- and
+        // BALANCED's read is performed through the real broker. The key in
+        // that home stays where it is: unreachable through the workspace.
+        let setup = Setup::new("f12-shipped-home");
+        let home = setup.dir.path().join("home");
+        std::fs::create_dir_all(home.join(".ssh")).unwrap();
+        std::fs::write(home.join(".ssh/id_ed25519"), b"PRIVATE KEY").unwrap();
+        let broker = Broker::start(
+            &setup.broker_socket(),
+            own_uid(),
+            &["--allow-shared-authority-uid"],
+        );
+        let anchor = [
+            "--path-anchor".to_owned(),
+            format!("home={}", home.display()),
+        ];
+        let server = Server::start(&shipped_args(&setup, "balanced", &anchor));
+        let said = server.stderr();
+        assert!(
+            said.contains(&format!("path anchor ~ = {}", home.display())),
+            "{said}"
+        );
+        // DireWolf's own state directory is placed too, by the authority.
+        assert!(said.contains("path anchor ${DIREWOLF_HOME} = "), "{said}");
+        let mut rt = Runtime::admit(&setup.kernel_socket(), 1, &["fs.read:/workspace"]);
+        let got = rt.invoke("/workspace/a.txt", 64);
+        assert_eq!(
+            result(&got).fs_read.content.to_bytes(),
+            b"hello, workspace\n"
+        );
+        broker.wait_for("executed", 1);
+        assert!(!broker.stderr().contains("PRIVATE KEY"));
+        evidence(SUITE, "shipped-pack-reads-with-a-trusted-home", "read", 1);
+    }
+
+    #[test]
+    fn a_shipped_pack_refuses_every_read_where_the_home_is_the_workspace() {
+        // The home is the workspace root itself: its `.ssh` would be inside
+        // the workspace, and which paths are under it is not decided by this
+        // build -- so the credential rule is not evaluated, and the read is
+        // denied before the broker hears anything.
+        let setup = Setup::new("f12-shipped-overlap");
+        let broker = Broker::start(
+            &setup.broker_socket(),
+            own_uid(),
+            &["--allow-shared-authority-uid"],
+        );
+        let anchor = [
+            "--path-anchor".to_owned(),
+            format!("home={}", setup.root.display()),
+        ];
+        let _server = Server::start(&shipped_args(&setup, "balanced", &anchor));
+        let mut rt = Runtime::admit(&setup.kernel_socket(), 1, &["fs.read:/workspace"]);
+        let got = rt.invoke("/workspace/a.txt", 64);
+        let got = denial(&got);
+        assert_eq!(
+            got.decision.reason,
+            ToolDecisionReason::UnresolvedPolicyInput
+        );
+        assert_eq!(got.decision.capability_result, GateResult::Satisfied);
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(broker.count("connection"), 0);
+        evidence(
+            SUITE,
+            "shipped-pack-refuses-an-overlapping-home",
+            "denied",
+            0,
+        );
+    }
+
+    #[test]
+    fn serve_refuses_a_home_it_cannot_examine() {
+        // An anchor is configuration the authority checks before it serves: a
+        // home that is absent, or a file, is a start that does not happen --
+        // never a rule that quietly stands for nothing.
+        let setup = Setup::new("f12-shipped-bad-home");
+        for home in [setup.dir.path().join("absent"), setup.root.join("a.txt")] {
+            let anchor = [
+                "--path-anchor".to_owned(),
+                format!("home={}", home.display()),
+            ];
+            match Server::try_start(&shipped_args(&setup, "balanced", &anchor)) {
+                Ok(_) => panic!("serve started with --path-anchor home={}", home.display()),
+                Err((status, stderr)) => {
+                    assert!(status.is_some_and(|s| !s.success()), "{stderr}");
+                    assert!(stderr.contains("path anchor ~"), "{stderr}");
+                }
+            }
+        }
+        evidence(SUITE, "serve-refuses-an-unexaminable-home", "refused", 2);
     }
 
     #[test]

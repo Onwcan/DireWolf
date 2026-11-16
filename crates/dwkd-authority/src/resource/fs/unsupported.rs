@@ -10,7 +10,10 @@
 //!
 //! [ADR-0042]: ../../../../../../docs/adr/0042-m4a-canonical-filesystem-resolution.md
 
-use super::{FileIdentity, Probe, ResolveError, RootError, RootFingerprint, RootMeasure, Walked};
+use super::{
+    FileIdentity, HostEnd, HostWalk, Probe, ResolveError, RootError, RootFingerprint, RootMeasure,
+    Walked,
+};
 use crate::resource::PathComponent;
 
 /// No descriptor exists on this platform.
@@ -21,6 +24,19 @@ pub(in crate::resource) fn open_root(
     _host: &str,
 ) -> Result<(Fd, FileIdentity, RootFingerprint), RootError> {
     Err(RootError::Unsupported)
+}
+
+/// No host walk here (F-12): where a location lies is never established, so
+/// every rule naming one is unevaluated, and denies.
+pub(in crate::resource) const fn host_walk(_path: &str) -> HostWalk {
+    HostWalk {
+        directories: Vec::new(),
+        end: HostEnd::Failed,
+    }
+}
+
+pub(in crate::resource) fn searchable(fd: &Fd) -> bool {
+    match *fd {}
 }
 
 pub(in crate::resource) fn measure_root(root: &Fd) -> Result<RootMeasure, RootError> {

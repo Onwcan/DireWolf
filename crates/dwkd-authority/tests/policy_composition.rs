@@ -177,10 +177,13 @@ fn a_profile_with_no_extends_composes_as_itself() {
 fn a_child_allow_is_refused() {
     // "override parent DENY with ALLOW". The child cannot know whether its
     // rule shadows a parent denial, and the loader cannot decide it in
-    // general, so the whole shape is refused.
+    // general, so the whole shape is refused. (A child ALLOW naming the
+    // parent's own `~/.ssh` is refused earlier still, at load -- F-12, the
+    // test below -- so this one names a workspace path, to reach the
+    // composition check.)
     let error = compose_child(
         "\n[[rule]]\nid = \"child-allow-secrets\"\neffect = \"ALLOW\"\n\
-         when.verb = [\"fs.read\"]\nwhen.path_under = [\"~/.ssh\"]\n",
+         when.verb = [\"fs.read\"]\nwhen.path_under = [\"${WORKSPACE}/secrets\"]\n",
     )
     .expect_err("a child ALLOW must be refused");
     match error {
@@ -201,11 +204,43 @@ fn a_child_require_approval_is_refused() {
     // parent could return.
     let error = compose_child(
         "\n[[rule]]\nid = \"child-approve\"\neffect = \"REQUIRE_APPROVAL\"\n\
-         reason = \"SENSITIVE_PATH\"\nwhen.verb = [\"fs.read\"]\nwhen.path_under = [\"~/.ssh\"]\n\
+         reason = \"SENSITIVE_PATH\"\nwhen.verb = [\"fs.read\"]\n\
+         when.path_under = [\"${WORKSPACE}/secrets\"]\n\
          approval.scope = \"exact_action\"\napproval.ttl = \"1h\"\napproval.max_uses = 1\n",
     )
     .expect_err("a child REQUIRE_APPROVAL must be refused");
     assert!(matches!(error, PolicyLoadError::WideningExtension { .. }));
+}
+
+#[test]
+fn a_child_permitting_the_parents_protected_location_is_refused_at_load() {
+    // F-12 (ADR-0066): a path outside the workspace may be named only by a
+    // DENY rule, so the child that would allow -- or offer for approval --
+    // the parent's `~/.ssh` does not even load: refused before composition is
+    // asked, by a check that holds for a profile composed with nothing.
+    for (effect, extra) in [
+        ("ALLOW", ""),
+        (
+            "REQUIRE_APPROVAL",
+            "reason = \"SENSITIVE_PATH\"\napproval.scope = \"exact_action\"\n\
+             approval.ttl = \"1h\"\napproval.max_uses = 1\n",
+        ),
+    ] {
+        let body = format!(
+            "\n[[rule]]\nid = \"child-secrets\"\neffect = \"{effect}\"\n{extra}\
+             when.verb = [\"fs.read\"]\nwhen.path_under = [\"~/.ssh\"]\n"
+        );
+        match load("child.toml", &child(&body)) {
+            Err(PolicyLoadError::BadValue { error, field, .. }) => {
+                assert_eq!(
+                    error,
+                    dwkd_authority::policy::ValueError::HostPathOutsideDenial
+                );
+                assert_eq!(field.as_str(), "rule[0].when.path_under");
+            }
+            other => panic!("{effect} on ~/.ssh loaded: {other:?}"),
+        }
+    }
 }
 
 #[test]

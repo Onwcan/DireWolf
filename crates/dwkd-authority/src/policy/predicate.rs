@@ -32,7 +32,7 @@ use core::fmt;
 use crate::capability::{Scope, ScopeFamily, SyntacticScope, Verb};
 
 use super::action::{ArgvSafety, CanonicalAction, Environment, Novelty};
-use super::context::{ConfigKey, Origin, PathAnchor, PolicyContext, TaintLevel};
+use super::context::{ConfigKey, HostPlacement, Origin, PathAnchor, PolicyContext, TaintLevel};
 use super::effect::Effect;
 use super::value::{Cidr, ExecutableSpec, RulePath};
 use crate::capability::{HostPattern, PrivacyClass};
@@ -371,6 +371,10 @@ pub struct Unless {
 pub enum Unevaluable {
     /// A rule-side path named an anchor the context does not resolve.
     PathAnchor(PathAnchor),
+    /// A rule-side path named a host location whose placement relative to the
+    /// run's workspace root does not decide whether a path is under it (F-12):
+    /// [`HostPlacement::InsideWorkspace`] or [`HostPlacement::Unexamined`].
+    HostLocation(PathAnchor, HostPlacement),
     /// A rule constrained the destination address and the action has none.
     ResolvedAddress,
 }
@@ -379,6 +383,14 @@ impl fmt::Display for Unevaluable {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::PathAnchor(anchor) => write!(f, "the path anchor {anchor} is unresolved"),
+            Self::HostLocation(anchor, HostPlacement::InsideWorkspace) => write!(
+                f,
+                "a host location under the path anchor {anchor} lies inside the workspace root"
+            ),
+            Self::HostLocation(anchor, placement) => write!(
+                f,
+                "a host location under the path anchor {anchor} could not be placed ({placement})"
+            ),
             Self::ResolvedAddress => f.write_str("the destination address is unresolved"),
         }
     }
@@ -516,7 +528,7 @@ impl When {
         if let Some(paths) = &self.path_under {
             match path_under(paths, context, scope) {
                 Ok(matched) => result = result.and(Match::from_bool(matched)),
-                Err(anchor) => return Match::Unevaluable(Unevaluable::PathAnchor(anchor)),
+                Err(why) => return Match::Unevaluable(why),
             }
         }
         if let Some(specs) = &self.executable_in {
@@ -535,7 +547,7 @@ fn path_under(
     named: &MatchValue<RulePath>,
     context: &PolicyContext,
     scope: &Scope,
-) -> Result<bool, PathAnchor> {
+) -> Result<bool, Unevaluable> {
     let Scope::Path(candidate) = scope else {
         // A universal scope is not a path. `fs.read:*` names every path, and
         // "every path" is not under any particular root -- treating it as

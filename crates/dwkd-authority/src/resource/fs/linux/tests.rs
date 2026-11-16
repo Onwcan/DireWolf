@@ -1327,3 +1327,199 @@ fn resolution_cost_is_measured() {
         assert!(median < 50_000, "{case}: {median} us is pathological");
     }
 }
+
+// ---------------------------------------------------------------------------
+// Host walks (F-12, ADR-0066): where a host location a rule names lies
+// relative to a pinned root, by identity -- the real kernel, real trees.
+// ---------------------------------------------------------------------------
+
+mod host_placement {
+    use std::fs;
+    use std::os::unix::fs::{DirBuilderExt as _, symlink};
+    use std::path::Path;
+
+    use super::super::super::{AnchorError, HostRelation, RootError, check_anchor_directory};
+    use super::{Fixture, evidence, host};
+
+    /// Whether directory permissions bind this process (they do not bind
+    /// root): a lookup in a `0600` directory is refused.
+    fn permissions_bind(locked: &Path) -> bool {
+        fs::symlink_metadata(locked.join("anything"))
+            .err()
+            .is_some_and(|error| error.kind() == std::io::ErrorKind::PermissionDenied)
+    }
+
+    #[test]
+    fn a_location_beside_the_root_is_disjoint_and_one_above_it_encloses_it() {
+        let fx = Fixture::new("host-beside");
+        let longer = fx.scratch.path().join("wsX");
+        fs::create_dir(&longer).unwrap();
+        let root = fx.pin();
+        let r = host(&fx.root);
+        for location in [
+            fx.outside.clone(),
+            fx.out("secret"),
+            fx.out("absent/below"),
+            // A sibling whose name extends the root's is not the root.
+            longer,
+        ] {
+            assert_eq!(
+                root.relation_to(r, host(&location)),
+                HostRelation::Disjoint,
+                "{location:?}"
+            );
+        }
+        // The root's ancestors and the root itself: every path of the root is
+        // under each.
+        for location in [fx.scratch.path().to_str().unwrap(), "/", r] {
+            assert_eq!(
+                root.relation_to(r, location),
+                HostRelation::Encloses,
+                "{location}"
+            );
+        }
+        evidence("host-placement", "beside-and-above", "disjoint-encloses", 7);
+    }
+
+    #[test]
+    fn a_location_inside_the_root_is_inside_whether_or_not_it_exists() {
+        let fx = Fixture::new("host-inside");
+        fs::create_dir_all(fx.ws("home/.ssh")).unwrap();
+        fs::write(fx.ws("shadow"), b"x").unwrap();
+        let root = fx.pin();
+        let r = host(&fx.root);
+        for rel in [
+            "home/.ssh",
+            "home",
+            "shadow",
+            "home/.aws",
+            "home/.config/gh",
+            "absent/deeper",
+        ] {
+            assert_eq!(
+                root.relation_to(r, host(&fx.ws(rel))),
+                HostRelation::Inside,
+                "{rel}"
+            );
+        }
+        // A file standing where a directory would be: nothing below it exists,
+        // and the file is inside the root.
+        assert_eq!(
+            root.relation_to(r, host(&fx.ws("shadow/below"))),
+            HostRelation::Inside
+        );
+        evidence("host-placement", "inside-the-root", "inside", 7);
+    }
+
+    #[test]
+    fn a_symbolic_link_is_followed_to_where_it_leads() {
+        let fx = Fixture::new("host-links");
+        fs::create_dir_all(fx.ws("keys")).unwrap();
+        // A protected name outside the root that leads into it: whatever it
+        // protects lives in the workspace.
+        symlink(fx.ws("keys"), fx.out("dot-ssh")).unwrap();
+        symlink("../ws/keys", fx.out("relative")).unwrap();
+        // One inside the root that leads out of it.
+        symlink(&fx.outside, fx.ws("escape")).unwrap();
+        let alias = fx.scratch.path().join("alias");
+        symlink(fx.scratch.path(), &alias).unwrap();
+        symlink(fx.out("loop-b"), fx.out("loop-a")).unwrap();
+        symlink(fx.out("loop-a"), fx.out("loop-b")).unwrap();
+        let root = fx.pin();
+        let r = host(&fx.root);
+        for rel in ["dot-ssh", "dot-ssh/id_ed25519", "relative"] {
+            assert_eq!(
+                root.relation_to(r, host(&fx.out(rel))),
+                HostRelation::Inside,
+                "{rel}"
+            );
+        }
+        // Followed, `ws/escape` is `outside`: the location is not in the
+        // workspace, and the resolver never follows the link to reach it.
+        assert_eq!(
+            root.relation_to(r, host(&fx.ws("escape/secret"))),
+            HostRelation::Disjoint
+        );
+        // A root pinned through a symlinked ancestor is found by what it is.
+        let through = alias.join("ws");
+        assert_eq!(
+            root.relation_to(host(&through), host(&fx.ws("keys"))),
+            HostRelation::Inside
+        );
+        // A loop is not an answer.
+        assert_eq!(
+            root.relation_to(r, host(&fx.out("loop-a/x"))),
+            HostRelation::Unknown
+        );
+        evidence("host-placement", "links-followed", "as-the-kernel-would", 6);
+    }
+
+    #[test]
+    fn a_root_path_that_now_names_another_directory_places_nothing() {
+        let fx = Fixture::new("host-replaced");
+        let root = fx.pin();
+        let r = host(&fx.root).to_owned();
+        fs::rename(&fx.root, fx.scratch.path().join("moved")).unwrap();
+        fs::create_dir(&fx.root).unwrap();
+        assert_eq!(
+            root.relation_to(&r, host(&fx.outside)),
+            HostRelation::Unknown
+        );
+        for bad in ["relative/path", "", "/a\0b"] {
+            assert_eq!(root.relation_to(&r, bad), HostRelation::Unknown, "{bad:?}");
+        }
+        evidence("host-placement", "root-replaced", "unknown", 1);
+    }
+
+    #[test]
+    fn below_an_unsearchable_directory_a_location_is_taken_to_be_beneath_it() {
+        // Made `0600` as it is created: nothing here changes a mode (TX057).
+        // The case where the unsearchable directory is one of the root's own
+        // is `relation_tests` in the module itself, from the walks alone.
+        let fx = Fixture::new("host-unsearchable");
+        let locked = fx.out("locked");
+        fs::DirBuilder::new().mode(0o600).create(&locked).unwrap();
+        let root = fx.pin();
+        let beneath = root.relation_to(host(&fx.root), host(&locked.join(".ssh")));
+        let anchor = check_anchor_directory(host(&locked));
+        if permissions_bind(&locked) {
+            assert_eq!(beneath, HostRelation::Disjoint);
+            assert_eq!(anchor, Err(AnchorError::NotSearchable));
+            evidence("host-placement", "unsearchable", "beneath-and-refused", 2);
+        } else {
+            evidence("host-placement", "unsearchable", "not-exercised-as-root", 0);
+        }
+    }
+
+    #[test]
+    fn an_anchor_directory_is_checked_before_it_is_believed() {
+        let fx = Fixture::new("host-anchor");
+        symlink(&fx.outside, fx.out("link")).unwrap();
+        assert_eq!(check_anchor_directory(host(&fx.outside)), Ok(()));
+        for (path, error) in [
+            (fx.out("absent"), RootError::Missing),
+            (fx.out("secret"), RootError::NotADirectory),
+            (fx.out("link"), RootError::Symlink),
+        ] {
+            assert_eq!(
+                check_anchor_directory(host(&path)),
+                Err(AnchorError::Root(error)),
+                "{path:?}"
+            );
+        }
+        assert_eq!(
+            check_anchor_directory("relative/home"),
+            Err(AnchorError::Root(RootError::NotAbsolute))
+        );
+        assert_eq!(
+            check_anchor_directory("/proc"),
+            Err(AnchorError::Root(RootError::UnsupportedFilesystem))
+        );
+        evidence(
+            "host-placement",
+            "anchor-checked",
+            "refused-unless-a-directory",
+            5,
+        );
+    }
+}

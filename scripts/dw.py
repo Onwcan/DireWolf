@@ -1026,6 +1026,9 @@ BROKER_CASES = (
     ("broker-fs-read", "max-bytes-before-effect"),
     ("broker-fs-read", "zero-broker-contact-for-non-effects"),
     ("broker-fs-read", "shipped-pack-denies-unevaluable"),
+    ("broker-fs-read", "shipped-pack-reads-with-a-trusted-home"),
+    ("broker-fs-read", "shipped-pack-refuses-an-overlapping-home"),
+    ("broker-fs-read", "serve-refuses-an-unexaminable-home"),
     ("broker-fs-read", "preview-zero-effect-and-differential"),
     ("broker-fs-read", "broker-down-and-restart"),
     ("broker-fs-read", "no-broker-configured"),
@@ -8245,18 +8248,22 @@ CONCURRENCY_MUTATIONS: tuple[tuple[str, str, str, str], ...] = (
         "C1: a file operation is decided and handed over outside any section",
         _F02_STATE,
         "        let effect = shared.gate.effect()?;\n"
-        "        let decided = self.transact(|work| tool::decide(",
+        "        let decided =\n"
+        "            self.transact(|work| tool::decide(",
         "        let effect = drop(shared.gate.effect()?);\n"
-        "        let decided = self.transact(|work| tool::decide(",
+        "        let decided =\n"
+        "            self.transact(|work| tool::decide(",
     ),
     (
         "C2: a file operation's section ends at its decision, before the broker",
         _F02_STATE,
         "        let effect = shared.gate.effect()?;\n"
-        "        let decided = self.transact(|work| tool::decide(work, &asked, &call, &targets, "
+        "        let decided =\n"
+        "            self.transact(|work| tool::decide(work, &asked, &call, &targets, &placed, "
         "active))?;\n",
         "        let effect = shared.gate.effect()?;\n"
-        "        let decided = self.transact(|work| tool::decide(work, &asked, &call, &targets, "
+        "        let decided =\n"
+        "            self.transact(|work| tool::decide(work, &asked, &call, &targets, &placed, "
         "active))?;\n"
         "        let effect = drop(effect);\n",
     ),
@@ -8264,9 +8271,11 @@ CONCURRENCY_MUTATIONS: tuple[tuple[str, str, str, str], ...] = (
         "C7: a file operation takes its section only after its decision",
         _F02_STATE,
         "        let effect = shared.gate.effect()?;\n"
-        "        let decided = self.transact(|work| tool::decide(work, &asked, &call, &targets, "
+        "        let decided =\n"
+        "            self.transact(|work| tool::decide(work, &asked, &call, &targets, &placed, "
         "active))?;\n",
-        "        let decided = self.transact(|work| tool::decide(work, &asked, &call, &targets, "
+        "        let decided =\n"
+        "            self.transact(|work| tool::decide(work, &asked, &call, &targets, &placed, "
         "active))?;\n"
         "        let effect = shared.gate.effect()?;\n",
     ),
@@ -8761,6 +8770,207 @@ def task_posture_mutations() -> None:
     if not sys.platform.startswith("linux"):
         raise TaskError("NOT EXERCISED: the daemons' posture is Linux's; run it in WSL2")
     posture_review()
+
+
+# F-12 (ADR-0066, Proposed): each guard of the host path anchors weakened in
+# turn -- an unplaced host path read as "no match", a protected location
+# inside the workspace read as disjoint or one enclosing it as not, an
+# absolute protection compared by spelling again, a permitting rule let name a
+# host path, the root's own path not re-proved, a symbolic link taken for an
+# absence, an unsearchable directory of the root's own taken as safe, a
+# second home averaged away, the placements never handed to the decision, a
+# live context left in the one-namespace model, the start's check skipped, a
+# home taken from the authority's own state, a shipped denial dropped, the
+# capture obligation counted as enforced. The authority's unit suites, the
+# shipped packs through the real decision path (`policy_packs`), composition,
+# and the real authority and broker (`broker_fs_read`) are the detectors;
+# every mutant must be KILLED by a named failing test, and every file
+# restored byte-identically.
+_F12_VALUE = "crates/dwkd-authority/src/policy/value.rs"
+_F12_LOAD = "crates/dwkd-authority/src/policy/load.rs"
+_F12_RESOURCE = "crates/dwkd-authority/src/resource/fs/mod.rs"
+_F12_LINUX = "crates/dwkd-authority/src/resource/fs/linux/mod.rs"
+_F12_ANCHORS = "crates/dwkd-authority/src/state/anchors.rs"
+_F12_TOOL = "crates/dwkd-authority/src/state/tool.rs"
+_F12_QUERY = "crates/dwkd-authority/src/state/query.rs"
+_F12_STATE = "crates/dwkd-authority/src/state/mod.rs"
+_F12_PLAN = "crates/dwkd-authority/src/state/plan.rs"
+_F12_BALANCED = "policy/balanced.toml"
+POLICY_ANCHOR_MUTATIONS = (
+    (
+        "A1: an unplaced host path reads as no match",
+        _F12_VALUE,
+        "                None => Err(Unevaluable::PathAnchor(self.anchor)),\n",
+        "                None => Ok(false),\n",
+    ),
+    (
+        "A2: a protected location inside the workspace reads as disjoint",
+        _F12_VALUE,
+        "                Some(HostPlacement::Disjoint) => Ok(false),\n",
+        "                Some(HostPlacement::Disjoint | HostPlacement::InsideWorkspace) "
+        "=> Ok(false),\n",
+    ),
+    (
+        "A3: a location enclosing the workspace does not match",
+        _F12_VALUE,
+        "                Some(HostPlacement::Encloses) => Ok(true),\n",
+        "                Some(HostPlacement::Encloses) => Ok(false),\n",
+    ),
+    (
+        "A4: an absolute protection is compared by spelling again",
+        _F12_VALUE,
+        "            && self.is_host()\n",
+        "            && self.is_host()\n            && self.anchor != PathAnchor::Absolute\n",
+    ),
+    (
+        "A5: an absolute path under /workspace is taken for a host path",
+        _F12_VALUE,
+        "            PathAnchor::Absolute => self\n",
+        "            PathAnchor::Absolute => !self\n",
+    ),
+    (
+        "A6: a permitting rule may name a host path",
+        _F12_LOAD,
+        "        if names_host && effect != Effect::Deny {\n",
+        "        if names_host && effect == Effect::Deny && effect != Effect::Deny {\n",
+    ),
+    (
+        "A7: the root's own path is not re-proved",
+        _F12_RESOURCE,
+        "    if root.end != HostEnd::Found(identity) {\n",
+        "    if root.end == HostEnd::Failed {\n",
+    ),
+    (
+        "A8: a location the workspace lies in does not enclose it",
+        _F12_RESOURCE,
+        "        HostEnd::Found(found) if ancestors.contains(&found) => HostRelation::Encloses,\n",
+        "        HostEnd::Found(found) if ancestors.is_empty() "
+        "&& ancestors.contains(&found) => HostRelation::Encloses,\n",
+    ),
+    (
+        "A9: a location inside the workspace reads as disjoint",
+        _F12_RESOURCE,
+        "        _ if target.directories.contains(&identity) => HostRelation::Inside,\n",
+        "        _ if target.directories.is_empty() "
+        "&& target.directories.contains(&identity) => HostRelation::Inside,\n",
+    ),
+    (
+        "A10: a symbolic link is taken for an absence, not followed",
+        _F12_LINUX,
+        "                links = links.saturating_add(1);\n",
+        "                links = links.saturating_add(1);\n"
+        "                if links > 0 {\n"
+        "                    return stop(directories, HostEnd::Absent);\n"
+        "                }\n",
+    ),
+    (
+        "A11: an unsearchable directory of the root's own is taken as safe",
+        _F12_RESOURCE,
+        "        HostEnd::Unsearchable\n            if target\n",
+        "        HostEnd::Unsearchable\n            if target.directories.is_empty() && target\n",
+    ),
+    (
+        "A12: an anchor directory the authority cannot search is accepted",
+        _F12_RESOURCE,
+        "    if imp::searchable(&fd) {\n",
+        "    if imp::searchable(&fd) || host_path.starts_with('/') {\n",
+    ),
+    (
+        "A13: an anchor with several directories takes the least strict",
+        _F12_ANCHORS,
+        "            .max_by_key(|found| strictness(*found));\n",
+        "            .min_by_key(|found| strictness(*found));\n",
+    ),
+    (
+        "A14: the home is taken from the authority's own state",
+        _F12_ANCHORS,
+        "        add(&mut all.direwolf_home, state.clone());\n",
+        "        add(&mut all.direwolf_home, state.clone());\n"
+        "        add(&mut all.home, state.clone());\n",
+    ),
+    (
+        "A15: the decision is made without the placements",
+        _F12_TOOL,
+        "    let context = query::policy_context_placed(work, asked.run.as_str(), active, "
+        "placed.clone())?;\n",
+        "    let context = query::policy_context(work, asked.run.as_str(), active)?;\n"
+        "    let _ = placed;\n",
+    ),
+    (
+        "A16: a live context is left in the one-namespace model",
+        _F12_QUERY,
+        "    anchors.host = Some(placed);\n",
+        "    anchors.host = None;\n    let _ = placed;\n",
+    ),
+    (
+        "A17: the start does not check its anchors",
+        _F12_STATE,
+        "        anchors.check().map_err(StartError::Configuration)?;\n",
+        "        let _ = anchors.check();\n",
+    ),
+    (
+        "A18: a shipped pack drops its home's ssh directory from the credential rule",
+        _F12_BALANCED,
+        'when.path_under = ["~/.ssh", "~/.aws",',
+        'when.path_under = ["~/.aws",',
+    ),
+    (
+        "A19: the capture obligation counts as enforced",
+        _F12_PLAN,
+        "            Obligation::ForceEnvironment(_)\n"
+        "            | Obligation::RequireArtifactCapture\n",
+        "            Obligation::RequireArtifactCapture => true,\n"
+        "            Obligation::ForceEnvironment(_)\n",
+    ),
+)
+POLICY_ANCHOR_EVIDENCE_DIR = ROOT / "target" / "f12-evidence"
+POLICY_ANCHOR_RECORD_SCHEMA = "direwolf.f12.mutation-review"
+
+
+def _policy_anchor_stages() -> tuple[MutationStage, ...]:
+    """The review's detectors: the authority's unit suites (the policy engine,
+    the host walk, the placements), the shipped packs through the authority's
+    decision path, composition, then the real authority and broker."""
+    authority = ("cargo", "test", "--locked", "-p", "dwkd-authority")
+    return (
+        MutationStage("authority-unit", (*authority, "--lib")),
+        MutationStage("policy-packs", (*authority, "--test", "policy_packs")),
+        MutationStage("policy-composition", (*authority, "--test", "policy_composition")),
+        MutationStage("authority-process", (*authority, "--test", "broker_fs_read")),
+    )
+
+
+def policy_anchor_review(
+    mutations: Sequence[tuple[str, str, str, str]] = POLICY_ANCHOR_MUTATIONS,
+    *,
+    root: Path | None = None,
+    tests: Callable[..., SuiteRun] = run_tests,
+) -> dict[str, object]:
+    """F-12's mutation review, as F-02's and F-03's: see `_finding_review`.
+    The build is both daemons' binaries, which the process stage runs."""
+    return _finding_review(
+        ("F-12", "0066", "policy-anchor-mutations", POLICY_ANCHOR_RECORD_SCHEMA),
+        "policy anchor",
+        mutations,
+        stages=_policy_anchor_stages(),
+        build=("cargo", "build", "--locked", "-p", "dwkd-broker", "-p", "dwkd-authority"),
+        directory=POLICY_ANCHOR_EVIDENCE_DIR if root is None else root,
+        tests=tests,
+    )
+
+
+def task_policy_anchor_mutations() -> None:
+    """Weaken each guard of F-12's host path anchors in turn (ADR-0066,
+    Proposed); the authority's suites, the shipped packs through its decision
+    path, or the real daemons must catch every one.
+
+    The unmutated baseline must pass first; every file is restored
+    byte-identically whatever happens, and checked; the record is kept in
+    target/f12-evidence/. Linux, local, and never run beside another build.
+    """
+    if not sys.platform.startswith("linux"):
+        raise TaskError("NOT EXERCISED: the host walk is Linux's; run it in WSL2")
+    policy_anchor_review()
 
 
 # M5d.3 (ADR-0052 §7): a sandboxed `process.exec` that consumes a credential.
@@ -15345,6 +15555,7 @@ TASKS = {
     "authority-ownership-mutations": task_authority_ownership_mutations,
     "authority-concurrency-mutations": task_authority_concurrency_mutations,
     "posture-mutations": task_posture_mutations,
+    "policy-anchor-mutations": task_policy_anchor_mutations,
     "sandbox-neighbour-mutations": task_sandbox_neighbour_mutations,
     "sandbox-secret-evidence": task_sandbox_secret_evidence,
     "sandbox-secret-mutations": task_sandbox_secret_mutations,

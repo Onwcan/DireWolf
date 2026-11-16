@@ -97,12 +97,14 @@ pub(crate) fn on_host(capability: Capability) -> CanonicalAction {
     CanonicalAction::new(capability, Environment::Host)
 }
 
-/// The anchors the shipped profiles name, resolved to synthetic roots.
+/// The anchors the shipped profiles name, resolved to synthetic roots, in the
+/// **one-namespace** model (`host: None`).
 ///
 /// `${WORKSPACE}` is `/workspace`, `~` is `/home/agent`, and DireWolf's own
-/// three are under `/opt/direwolf`. Invented, and standing in for what M4's
-/// canonicaliser will pin from kernel-owned state; M3d leaves every anchor
-/// unresolved.
+/// three are under `/opt/direwolf`. Invented: the pure engine's own model, in
+/// which a candidate may be any canonical path. A live decision is made in
+/// the logical namespace instead, where host paths are placed by the state
+/// layer ([`logical`], F-12).
 pub(crate) fn anchors() -> PathAnchors {
     let build = |components: &[&str]| match synthetic::path(components) {
         Some(path) => path,
@@ -114,6 +116,27 @@ pub(crate) fn anchors() -> PathAnchors {
         direwolf_config: Some(build(&["opt", "direwolf", "config"])),
         direwolf_install: Some(build(&["opt", "direwolf", "bin"])),
         home: Some(build(&["home", "agent"])),
+        host: None,
+    }
+}
+
+/// The logical namespace a live decision is made in (F-12): `${WORKSPACE}`
+/// is `/workspace`, and every host path of `policy` is placed as `placed`
+/// says -- or, for a path `placed` does not name, left unplaced.
+pub(crate) fn logical(
+    policy: &super::CompiledPolicy,
+    placed: impl Fn(&super::RulePath) -> Option<super::context::HostPlacement>,
+) -> PathAnchors {
+    let mut placements = super::context::HostPlacements::new();
+    for path in policy.host_paths() {
+        if let Some(placement) = placed(&path) {
+            placements.insert(path, placement);
+        }
+    }
+    PathAnchors {
+        workspace: synthetic::path(&["workspace"]),
+        host: Some(placements),
+        ..PathAnchors::empty()
     }
 }
 
