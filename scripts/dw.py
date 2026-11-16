@@ -803,7 +803,13 @@ def require_filesystem_evidence(output: str) -> None:
     print(f"{GREEN}filesystem canonicalization evidence: complete{OFF}")
 
 
-TRANSPORT_SUITES = ("transport_server", "transport_hostile", "transport_stress")
+TRANSPORT_SUITES = (
+    "transport_server",
+    "transport_hostile",
+    "transport_stress",
+    # F-18 Phase 3.4 (ADR-0067): the approver endpoint, one identity.
+    "transport_approver",
+)
 
 # The cross-uid suite: every test is `#[ignore]`d, so that a plain `cargo test`
 # stays runnable on a one-user machine, and this task selects them BY NAME.
@@ -828,6 +834,22 @@ FOREIGN_CASES = (
     "foreign-uid-owned-session-held",
 )
 
+# F-18 Phase 3.4 (ADR-0067, Proposed): the approver endpoint across three
+# identities -- the authority (this runner), the runtime (DW_PEER_AS) and the
+# approver (DW_APPROVER_AS), each a distinct uid. Its own suite, apart from
+# `transport_foreign`, whose every ignored test the `peer-credential-check`
+# eval runs with one second identity. Selected by name; every case must be
+# reported.
+APPROVER_TESTS = ("linux::an_approver_is_its_own_identity_and_a_runtime_is_never_one",)
+APPROVER_CASES = (
+    "cross-uid-runtime-refused",
+    "cross-uid-approver-authenticated-holds-nothing",
+    "cross-uid-approver-not-a-runtime",
+    "cross-uid-runtime-served-at-its-own-door",
+    "cross-uid-authority-refused",
+    "cross-uid-approver-socket-not-replaceable",
+)
+
 
 def task_authority_transport_evidence() -> None:
     """M3e's real-process evidence (ADR-0041): the released `dwkd-authority`
@@ -845,14 +867,28 @@ def task_authority_transport_evidence() -> None:
     Without a second identity the cross-uid half is NOT EXERCISED and this task
     fails after running everything else -- it never reports a pass it did not
     earn. CI's Linux job provides one.
+
+    F-18 Phase 3.4 (ADR-0067, Proposed): with DW_APPROVER_AS as well -- a third
+    identity, proven distinct from the second by number -- the approver
+    endpoint's three-identity test runs by name and must report every case.
+    Without it that half is NOT EXERCISED and the task fails the same way.
     """
     if not sys.platform.startswith("linux"):
         raise TaskError(
             "NOT EXERCISED: the DWKP server runs only on Linux (ADR-0041); use WSL2 on Windows"
         )
     user = os.environ.get("DW_PEER_AS", "").strip()
+    approver = os.environ.get("DW_APPROVER_AS", "").strip()
+    peer_uid: int | None = None
     if user:
-        second_identity("DW_PEER_AS")
+        _, _, peer_uid = second_identity("DW_PEER_AS")
+    if approver:
+        _, _, approver_uid = second_identity("DW_APPROVER_AS")
+        if approver_uid == peer_uid:
+            raise TaskError(
+                f"DW_APPROVER_AS={approver} and DW_PEER_AS={user} are both uid {peer_uid}: "
+                "the approver and the runtime are one identity, not two"
+            )
     suites: list[str] = []
     for suite in TRANSPORT_SUITES:
         suites += ["--test", suite]
@@ -873,11 +909,33 @@ def task_authority_transport_evidence() -> None:
             *FOREIGN_TESTS,
         )
         require_foreign_evidence(output)
+    if user and approver:
+        output = run_captured(
+            "cargo",
+            "test",
+            "--locked",
+            "-p",
+            "dwkd-authority",
+            "--test",
+            "transport_approver",
+            "--",
+            "--ignored",
+            "--exact",
+            "--nocapture",
+            *APPROVER_TESTS,
+        )
+        require_approver_evidence(output)
     uvrun("dwcheck", "closure", "--report")
     if not user:
         raise TaskError(
             "NOT EXERCISED: the cross-uid half needs a second identity. Set DW_PEER_AS to a "
             "user `sudo -n -u` can switch to (CI uses `nobody`); every same-uid suite above ran"
+        )
+    if not approver:
+        raise TaskError(
+            "NOT EXERCISED: the approver endpoint's three-identity half needs DW_APPROVER_AS, a "
+            "third user `sudo -n -u` can switch to (CI creates `dwapprover`); every other suite "
+            "above ran"
         )
 
 
@@ -1011,6 +1069,42 @@ def require_foreign_evidence(output: str) -> None:
     if missing:
         raise TaskError(f"the cross-uid suite did not report: {', '.join(missing)}")
     print(f"cross-uid evidence: {len(FOREIGN_TESTS)} tests, {len(FOREIGN_CASES)} cases contained")
+
+
+def require_approver_evidence(output: str) -> None:
+    """The approver endpoint's three-identity test counts only if it ran and
+    reported every case (F-18 Phase 3.4, ADR-0067): as for the cross-uid
+    suite, a filter that selected nothing is a green run that proved nothing,
+    and each case's line is printed only after its assertions held."""
+    summaries = [line for line in output.splitlines() if line.startswith("test result: ")]
+    expected = f"test result: ok. {len(APPROVER_TESTS)} passed; 0 failed; 0 ignored"
+    if len(summaries) != 1 or not summaries[0].startswith(expected):
+        raise TaskError(
+            f"the approver suite did not run every one of its tests: expected `{expected}`, "
+            f"got {summaries or 'no summary'}"
+        )
+    reported: set[str] = set()
+    for line in output.splitlines():
+        at = line.find(EVIDENCE_PREFIX)
+        if at < 0:
+            continue
+        try:
+            evidence = json.loads(line[at + len(EVIDENCE_PREFIX) :])
+        except json.JSONDecodeError as exc:
+            raise TaskError(f"unreadable evidence line: {line[:200]}") from exc
+        if (
+            isinstance(evidence, dict)
+            and evidence.get("suite") == "approver"
+            and evidence.get("contained") is True
+        ):
+            reported.add(str(evidence.get("case")))
+    missing = sorted(set(APPROVER_CASES) - reported)
+    if missing:
+        raise TaskError(f"the approver suite did not report: {', '.join(missing)}")
+    print(
+        f"approver evidence: {len(APPROVER_TESTS)} test, {len(APPROVER_CASES)} cases contained, "
+        "three identities"
+    )
 
 
 EVIDENCE_PREFIX = "DWKP-EVIDENCE "
@@ -8973,6 +9067,159 @@ def task_policy_anchor_mutations() -> None:
     policy_anchor_review()
 
 
+# F-18 Phase 3.4 (ADR-0067, Proposed): each guard of the approver endpoint's
+# identity boundary weakened in turn -- an approver set that admits anyone, a
+# record naming a configured uid, a runtime's, the broker's or the
+# authority's uid made an approver, the endpoint put on the DWKP socket, a
+# refusal left unrecorded, the endpoint reading or answering a peer, a
+# runtime admission made attended, a standing grant held, an authenticated
+# approver recorded as an approval. The authority's unit suites and the real
+# server (`transport_approver`) are the detectors; every mutant must be
+# KILLED by a named failing test, and every file restored byte-identically.
+_P34_APPROVER = "crates/dwkd-authority/src/server/approver.rs"
+_P34_CONFIG = "crates/dwkd-authority/src/server/config.rs"
+_P34_SERVER = "crates/dwkd-authority/src/server/mod.rs"
+_P34_TRANSPORT = "crates/dwkd-authority/src/state/transport.rs"
+_P34_ADMISSION = "crates/dwkd-authority/src/state/admission.rs"
+_P34_CONTEXT = "crates/dwkd-authority/src/policy/context.rs"
+APPROVER_MUTATIONS = (
+    (
+        "P1: the approver set admits every uid",
+        _P34_APPROVER,
+        "        self.uids.contains(&uid)\n",
+        "        self.uids.contains(&uid) || uid != u32::MAX\n",
+    ),
+    (
+        "P2: a refusal names a configured approver, not the kernel's uid",
+        _P34_APPROVER,
+        "        TransportEvent::ApproverRefused {\n            uid: credentials.uid,\n",
+        "        TransportEvent::ApproverRefused {\n"
+        "            uid: policy.uids().first().copied().unwrap_or(0),\n",
+    ),
+    (
+        "P3: a runtime's uid may be an approver",
+        _P34_CONFIG,
+        "    if let Some(uid) = uids.iter().find(|uid| peers.contains(uid)) {\n",
+        "    if let Some(uid) = uids.iter().find(|uid| peers.contains(uid) && peers.is_empty())"
+        " {\n",
+    ),
+    (
+        "P4: the broker's uid may be an approver",
+        _P34_CONFIG,
+        "        && uids.contains(&broker.uid)\n",
+        "        && uids.contains(&broker.uid)\n        && uids.is_empty()\n",
+    ),
+    (
+        "P5: the approver endpoint may be the DWKP socket",
+        _P34_CONFIG,
+        "    if socket == dwkp_socket {\n",
+        "    if socket == dwkp_socket && uids.is_empty() {\n",
+    ),
+    (
+        "P6: the authority's own uid may be an approver",
+        _P34_SERVER,
+        "    if approver.uids.contains(&authority_uid) {\n",
+        "    if approver.uids.contains(&authority_uid) && authority_uid == u32::MAX {\n",
+    ),
+    (
+        "P7: the DWKP socket by another spelling may be the approver endpoint",
+        _P34_SERVER,
+        "    if resolved.as_deref() == Some(dwkp.path()) {\n",
+        "    if resolved.as_deref() == Some(dwkp.path()) && resolved.is_none() {\n",
+    ),
+    (
+        "P8: a refused peer is not recorded",
+        _P34_APPROVER,
+        "        record(judge(policy, credentials));\n",
+        "        let verdict = judge(policy, credentials);\n"
+        "        if matches!(verdict, TransportEvent::ApproverAuthenticated { .. }) {\n"
+        "            record(verdict);\n"
+        "        }\n",
+    ),
+    (
+        "P9: the endpoint reads what a peer sends",
+        _P34_APPROVER,
+        "        drop(stream);\n    }\n}\n",
+        "        let mut sink = [0u8; 1];\n"
+        "        let _ = std::io::Read::read(&mut &stream, &mut sink);\n"
+        "        drop(stream);\n    }\n}\n",
+    ),
+    (
+        "P10: the endpoint answers a peer",
+        _P34_APPROVER,
+        "        drop(stream);\n    }\n}\n",
+        '        let _ = std::io::Write::write_all(&mut &stream, b"approved");\n'
+        "        drop(stream);\n    }\n}\n",
+    ),
+    (
+        "P11: an authenticated approver is recorded as an approval",
+        _P34_TRANSPORT,
+        '                        .text("reason", "no_approval_operation"),\n',
+        '                        .text("reason", "approved"),\n',
+    ),
+    (
+        "P12: a runtime's admission is attended",
+        _P34_ADMISSION,
+        "        origin: Origin::Api,\n",
+        "        origin: Origin::Interactive,\n",
+    ),
+    (
+        "P13: a standing grant is held",
+        _P34_CONTEXT,
+        "            Self::Unavailable => false,\n",
+        "            Self::Unavailable => true,\n",
+    ),
+)
+APPROVER_EVIDENCE_DIR = ROOT / "target" / "p34-evidence"
+APPROVER_RECORD_SCHEMA = "direwolf.f18-approver.mutation-review"
+
+
+def _approver_stages() -> tuple[MutationStage, ...]:
+    """The review's detectors: the authority's unit suites (the endpoint's
+    decision and its own scan, the parser, the records, the policy context),
+    then the real server with an approver endpoint (`transport_approver`)."""
+    authority = ("cargo", "test", "--locked", "-p", "dwkd-authority")
+    return (
+        MutationStage("authority-unit", (*authority, "--lib")),
+        MutationStage("approver-process", (*authority, "--test", "transport_approver")),
+    )
+
+
+def approver_review(
+    mutations: Sequence[tuple[str, str, str, str]] = APPROVER_MUTATIONS,
+    *,
+    root: Path | None = None,
+    tests: Callable[..., SuiteRun] = run_tests,
+) -> dict[str, object]:
+    """F-18 Phase 3.4's mutation review, as F-02's, F-03's and F-12's: see
+    `_finding_review`. The build is the authority's binary, which the process
+    stage runs."""
+    return _finding_review(
+        ("F-18", "0067", "approver-identity-mutations", APPROVER_RECORD_SCHEMA),
+        "approver identity",
+        mutations,
+        stages=_approver_stages(),
+        build=("cargo", "build", "--locked", "-p", "dwkd-authority"),
+        directory=APPROVER_EVIDENCE_DIR if root is None else root,
+        tests=tests,
+    )
+
+
+def task_approver_identity_mutations() -> None:
+    """Weaken each guard of the approver endpoint's identity boundary in turn
+    (F-18 Phase 3.4, ADR-0067, Proposed); the authority's unit suites or the
+    real server must catch every one.
+
+    The unmutated baseline must pass first; every file is restored
+    byte-identically whatever happens, and checked; the record is kept in
+    target/p34-evidence/. Linux, local, and never run beside another build.
+    The three-identity property itself is `make authority-transport-evidence`'s.
+    """
+    if not sys.platform.startswith("linux"):
+        raise TaskError("NOT EXERCISED: the DWKP server runs only on Linux; run it in WSL2")
+    approver_review()
+
+
 # M5d.3 (ADR-0052 §7): a sandboxed `process.exec` that consumes a credential.
 SECRET_SANDBOX_BROKER_TESTS = (
     "linux::a_descriptor_secret_reaches_the_program_on_descriptor_three_and_nowhere_else",
@@ -15556,6 +15803,7 @@ TASKS = {
     "authority-concurrency-mutations": task_authority_concurrency_mutations,
     "posture-mutations": task_posture_mutations,
     "policy-anchor-mutations": task_policy_anchor_mutations,
+    "approver-identity-mutations": task_approver_identity_mutations,
     "sandbox-neighbour-mutations": task_sandbox_neighbour_mutations,
     "sandbox-secret-evidence": task_sandbox_secret_evidence,
     "sandbox-secret-mutations": task_sandbox_secret_mutations,

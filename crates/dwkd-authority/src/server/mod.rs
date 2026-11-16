@@ -45,6 +45,19 @@
 //! [`CallerContext`]: crate::state::CallerContext
 //! [`LeaseHolder`]: crate::state::LeaseHolder
 //!
+//! # The approver endpoint
+//!
+//! An operator may give the server a second socket, `--approver-socket`, for
+//! the uids named by `--approver-uid` (F-18 Phase 3.4, [ADR-0067],
+//! Proposed). It is a door of its own: none of its uids is a DWKP peer, the
+//! broker or the authority, with no override; its place is checked as this
+//! socket's is; its peers are judged by the kernel's report before a byte is
+//! read. It holds no approval operation before M6 -- a peer it authenticates
+//! is recorded and closed -- and this endpoint never takes an approver's
+//! decision either. See `approver.rs`.
+//!
+//! [ADR-0067]: ../../../../docs/adr/0067-f18-approver-endpoint-identity-boundary.md
+//!
 //! # Platforms
 //!
 //! Linux only. macOS and native Windows have no peer-credential mechanism this
@@ -61,6 +74,10 @@
 //!
 //! [ADR-0041]: ../../../../docs/adr/0041-m3e-authenticated-dwkp-transport.md
 
+// The approver endpoint (F-18 Phase 3.4, ADR-0067): an identity boundary
+// that holds no approval operation before M6 (TX065).
+#[cfg(unix)]
+mod approver;
 mod config;
 // The one reader of a peer's credentials (TX043), which the broker link
 // asks too.
@@ -86,8 +103,8 @@ mod worker;
 use core::fmt;
 
 pub use config::{
-    MAX_ALLOWED_UIDS, PeerPolicy, PolicyInput, SERVE_USAGE, ServeConfig, UsageError,
-    parse_serve_args,
+    ApproverConfig, MAX_ALLOWED_UIDS, MAX_APPROVER_UIDS, PeerPolicy, PolicyInput, SERVE_USAGE,
+    ServeConfig, UsageError, parse_serve_args,
 };
 
 use crate::state::{PoisonReason, StartError};
@@ -309,16 +326,56 @@ fn run(config: &ServeConfig) -> Result<Stopped, ServeError> {
             );
         }
     }
-    let (place, authority, report) = start(config)?;
+    let (place, authority, report, approver) = start(config)?;
     let bound = socket::bind(&place).map_err(|e| ServeError::Socket(e.to_string()))?;
     let path = place.path().to_path_buf();
+    let approver = match approver {
+        None => None,
+        Some((approver_place, policy)) => {
+            let approver_bound = socket::bind(&approver_place)
+                .map_err(|e| ServeError::Socket(format!("the approver endpoint: {e}")))?;
+            Some((approver_place, approver_bound, policy))
+        }
+    };
+    let approver_path = approver
+        .as_ref()
+        .map(|(approver_place, _, _)| approver_place.path().to_path_buf());
     let shutdown = Arc::new(worker::Shutdown::default());
     let wake_path = path.clone();
+    let wake_approver = approver_path.clone();
     let (handle, worker_thread) = worker::spawn(authority, Arc::clone(&shutdown), move || {
-        // Wake the accept loop so it sees the worker has stopped.
+        // Wake the accept loops so they see the worker has stopped.
         let _ = std::os::unix::net::UnixStream::connect(&wake_path);
+        if let Some(approver) = &wake_approver {
+            let _ = std::os::unix::net::UnixStream::connect(approver);
+        }
     })
     .map_err(|e| ServeError::Io(format!("starting the authority worker: {e}")))?;
+    let approver_thread = match approver {
+        None => None,
+        Some((approver_place, approver_bound, policy)) => {
+            log(&format!(
+                "approver endpoint at {} for uids {:?}: it authenticates approvers by the \
+                 kernel's report and holds no approval operation before M6; every \
+                 REQUIRE_APPROVAL still denies",
+                approver_place.path().display(),
+                policy.uids()
+            ));
+            let recorder = handle.clone();
+            let stopping = Arc::clone(&shutdown);
+            let thread = std::thread::Builder::new()
+                .name("dwkp-approver-accept".to_owned())
+                .spawn(move || {
+                    approver::accept(approver_bound.listener(), &policy, &stopping, |event| {
+                        recorder.audit(event);
+                    });
+                    drop(approver_bound);
+                    drop(approver_place);
+                })
+                .map_err(|e| ServeError::Io(format!("starting the approver endpoint: {e}")))?;
+            Some(thread)
+        }
+    };
 
     println!(
         "dwkd-authority: serving DWKP at {} (pid {}, incarnation {}, policy revision {}, \
@@ -339,6 +396,12 @@ fn run(config: &ServeConfig) -> Result<Stopped, ServeError> {
         connection::Limits::for_lease_ttl(config.lease_ttl_ms),
     );
 
+    // The DWKP loop ends only once the server is stopping; wake the approver
+    // loop too, and wait for it, before the worker it records through.
+    if let (Some(thread), Some(approver)) = (approver_thread, approver_path) {
+        let _ = std::os::unix::net::UnixStream::connect(&approver);
+        let _ = thread.join();
+    }
     drop(handle);
     let _ = worker_thread.join();
     drop(bound);
@@ -348,10 +411,63 @@ fn run(config: &ServeConfig) -> Result<Stopped, ServeError> {
     ))
 }
 
+/// The approver endpoint's checked place and its approvers (F-18 Phase 3.4,
+/// ADR-0067). Unix only, as `start` is.
+#[cfg(unix)]
+type Approver = (socket::SocketPlace, approver::ApproverPolicy);
+
+/// The approver endpoint's place, if one is configured, checked, locked and
+/// cleared as the DWKP socket's is, and its approvers: none the authority's
+/// own uid -- the parser has already kept out the runtime's and the
+/// broker's -- and never the DWKP socket's name, however it is spelled.
+/// Unix only, as `start` is, its one caller.
+#[cfg(unix)]
+fn approver_place(
+    config: &ServeConfig,
+    authority_uid: u32,
+    dwkp: &socket::SocketPlace,
+) -> Result<Option<Approver>, ServeError> {
+    let Some(approver) = &config.approver else {
+        return Ok(None);
+    };
+    if approver.uids.contains(&authority_uid) {
+        return Err(ServeError::Configuration(format!(
+            "--approver-uid {authority_uid} is the authority's own uid: the authority decides \
+             what an approval permits and is never the human who approves it. There is no \
+             override"
+        )));
+    }
+    let resolved = approver
+        .socket
+        .parent()
+        .and_then(|dir| std::fs::canonicalize(dir).ok())
+        .zip(approver.socket.file_name())
+        .map(|(dir, name)| dir.join(name));
+    if resolved.as_deref() == Some(dwkp.path()) {
+        return Err(ServeError::Configuration(
+            "--approver-socket names the DWKP socket: the approver endpoint is a door of its own"
+                .to_owned(),
+        ));
+    }
+    let (place, _, existing) = socket::prepare(&approver.socket)
+        .map_err(|e| ServeError::Socket(format!("the approver endpoint: {e}")))?;
+    if existing == socket::Existing::StaleRemoved {
+        log(&format!(
+            "removed this authority's own dead approver socket at {}",
+            place.path().display()
+        ));
+    }
+    Ok(Some((
+        place,
+        approver::ApproverPolicy::new(approver.uids.clone()),
+    )))
+}
+
 /// Everything before the socket is bound: the policy read, the socket's place
 /// checked, locked and cleared — before the authority starts, so a socket
 /// path that cannot be protected costs no incarnation — the peer policy
-/// checked against the authority's own uid, and the authority started.
+/// checked against the authority's own uid, the approver endpoint's place and
+/// approvers checked the same way, and the authority started.
 #[cfg(unix)]
 fn start(
     config: &ServeConfig,
@@ -360,6 +476,7 @@ fn start(
         socket::SocketPlace,
         crate::state::Authority,
         crate::state::StartReport,
+        Option<Approver>,
     ),
     ServeError,
 > {
@@ -399,6 +516,7 @@ fn start(
              (--allow-authority-uid); such a peer is not constrained by the process boundary"
         ));
     }
+    let approver = approver_place(config, authority_uid, &place)?;
 
     let broker = match &config.broker {
         None => {
@@ -462,7 +580,7 @@ fn start(
     }
     log_anchors(authority.host_anchors());
     record_posture(&mut authority, config, authority_uid, workspace)?;
-    Ok((place, authority, report))
+    Ok((place, authority, report, approver))
 }
 
 /// What each host path anchor stands for (F-12, ADR-0066, Proposed): the

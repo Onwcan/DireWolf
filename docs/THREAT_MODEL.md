@@ -130,6 +130,7 @@ E9 and E6 rank highest because they are attacker-*chosen* content delivered thro
 | **T** | Approved action mutated before execution | `binding_hash` over the canonical action; drift → deny |
 | **R** | Operator denies approving | Approvals recorded in the audit chain with timestamp and full canonical action |
 | **E** | Approval reused for a different agent or a later action | `agent_id` in the binding; single-use; expiry |
+| **S** | The runtime approves its own request, or claims a human | **Built (F-18 Phase 3.4, [ADR-0067](adr/0067-f18-approver-endpoint-identity-boundary.md), Proposed):** an approver is reached only at an endpoint of its own, by operator-declared uids disjoint from every runtime's, the broker's and the authority's, authenticated by the kernel before a byte is read; every runtime admission stays `api`, and an `origin`, `approved`, approver or terminal claim on the DWKP wire is undecodable. **Not built:** the approvals themselves -- the registry, rendering and consumption are M6's, and until then `REQUIRE_APPROVAL` denies. **Residual:** a uid is the approver; every process of that uid is trusted as it. |
 
 ---
 

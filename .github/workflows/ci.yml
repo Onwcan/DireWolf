@@ -202,15 +202,23 @@ jobs:
   # tests are selected by name and must both run and report every case, and
   # the strict gate fails an eval it could not exercise. No step here may be
   # conditional or allowed to fail; the `ci` job below requires this one.
+  #
+  # F-18 Phase 3.4 (ADR-0067, Proposed): the approver endpoint needs a third
+  # identity, the approver, distinct from the runtime (`nobody`) and from the
+  # runner, also proven by its numeric uid before anything runs; its
+  # three-identity test is selected by name and must report every case.
   authority-transport:
     name: authority boundary (make authority-transport-evidence)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/setup
+      - name: A third operating-system identity, the approver (F-18 Phase 3.4)
+        run: sudo useradd --system --no-create-home --shell /usr/sbin/nologin dwapprover
       - run: make authority-transport-evidence
         env:
           DW_PEER_AS: nobody
+          DW_APPROVER_AS: dwapprover
       - run: make authority-write-probe
         env:
           DW_PROBE_AS: nobody

@@ -283,6 +283,14 @@ pub enum AuditEvent {
     /// A live lease was invalidated because its holder's grant was revoked
     /// (F-18).
     LeaseRevoked,
+    /// The approver endpoint refused a connection whose kernel-reported uid
+    /// is not an operator-declared approver, before reading a byte (F-18
+    /// Phase 3.4, ADR-0067).
+    ApproverPeerRefused,
+    /// The approver endpoint authenticated an operator-declared approver and
+    /// closed the connection, reading nothing: no approval operation exists
+    /// before M6 (F-18 Phase 3.4, ADR-0067). Never an approval.
+    ApproverPeerAuthenticated,
     /// The effective start-up posture of a served incarnation: each control's
     /// condition and the acknowledgement that reduced it (F-03).
     AuthorityPosture,
@@ -290,7 +298,7 @@ pub enum AuditEvent {
 
 impl AuditEvent {
     /// Every kind, in declaration order.
-    pub const ALL: [Self; 73] = [
+    pub const ALL: [Self; 75] = [
         Self::StoreCreated,
         Self::StoreOpened,
         Self::PolicyInstalled,
@@ -363,6 +371,8 @@ impl AuditEvent {
         Self::OwnershipAdopted,
         Self::OwnershipIncomplete,
         Self::LeaseRevoked,
+        Self::ApproverPeerRefused,
+        Self::ApproverPeerAuthenticated,
         Self::AuthorityPosture,
     ];
 
@@ -442,6 +452,8 @@ impl AuditEvent {
             Self::OwnershipAdopted => "ownership.adopted",
             Self::OwnershipIncomplete => "ownership.incomplete",
             Self::LeaseRevoked => "lease.revoked",
+            Self::ApproverPeerRefused => "approver.peer_refused",
+            Self::ApproverPeerAuthenticated => "approver.peer_authenticated",
             Self::AuthorityPosture => "authority.posture",
         }
     }

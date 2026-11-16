@@ -30,6 +30,10 @@ pub const MAX_ALLOWED_UIDS: usize = 64;
 /// walked before every filesystem decision.
 pub(crate) const MAX_PATH_ANCHORS: usize = 32;
 
+/// Most uids one approver set may name (F-18 Phase 3.4, ADR-0067). The
+/// people who may approve are few, and the list says who they are.
+pub const MAX_APPROVER_UIDS: usize = 16;
+
 /// A host path anchor a `--path-anchor` names (F-12, ADR-0066): what a policy
 /// rule's `~` or `${DIREWOLF_*}` stands for on the host. `${WORKSPACE}` is not
 /// one -- it is the run's pinned root -- and neither is `/`.
@@ -131,6 +135,31 @@ pub struct BrokerConfig {
     pub shared_uid_permitted: bool,
 }
 
+/// The approver endpoint (F-18 Phase 3.4, [ADR-0067], Proposed): a second
+/// socket, apart from the runtime's DWKP socket, and the closed set of uids
+/// the kernel must report for a peer to be an approver there.
+///
+/// **No approver is a runtime, the broker or the authority.** The parser
+/// refuses an approver uid that is also an `--allow-uid` or the
+/// `--broker-uid`; the start refuses the authority's own. There is no
+/// development override, as there is for the authority's or the broker's
+/// uid: a runtime that is also an approver can approve its own requests,
+/// and that is the one thing this endpoint exists to prevent.
+///
+/// The endpoint holds **no approval operation** until M6's approval
+/// registry exists: a peer it authenticates is recorded and closed, nothing
+/// it sends is read, and every `REQUIRE_APPROVAL` still denies.
+///
+/// [ADR-0067]: ../../../../../docs/adr/0067-f18-approver-endpoint-identity-boundary.md
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApproverConfig {
+    /// The approver endpoint's socket. Absolute, and never the DWKP socket.
+    pub socket: PathBuf,
+    /// The uids that may connect to it. None is a DWKP peer's, the
+    /// broker's or the authority's.
+    pub uids: BTreeSet<u32>,
+}
+
 /// Where the policy comes from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PolicyInput {
@@ -184,6 +213,9 @@ pub struct ServeConfig {
     /// (F-12, ADR-0066): absolute, UTF-8, each checked at start by the state
     /// layer. `~` has no other source.
     pub path_anchors: Vec<(AnchorName, String)>,
+    /// The approver endpoint (F-18 Phase 3.4, ADR-0067), if the operator
+    /// configured one. Without one there is no approver endpoint at all.
+    pub approver: Option<ApproverConfig>,
 }
 
 /// A command line that does not describe a configuration.
@@ -224,6 +256,8 @@ pub const SERVE_USAGE: &str = "\
     --sandbox-config <PATH>    the operator's execution environment (absolute; needs a broker)
     --allow-dumpable           leave the process dumpable, its memory readable by its uid (development only)
     --path-anchor <NAME>=<DIR> what a policy anchor stands for on the host: home|direwolf-home|direwolf-config|direwolf-install; repeat
+    --approver-socket <PATH>   absolute path of the approver endpoint's socket (with --approver-uid; no approval operation before M6)
+    --approver-uid <UID>       a uid that may connect to the approver endpoint; repeat; never a DWKP peer's, the broker's or the authority's
 ";
 
 /// Parse the arguments after `serve`.
@@ -261,6 +295,8 @@ struct Parsed {
     sandbox_config: Option<PathBuf>,
     dumpable: bool,
     path_anchors: Vec<(AnchorName, String)>,
+    approver_socket: Option<PathBuf>,
+    approver_uids: BTreeSet<u32>,
 }
 
 impl Parsed {
@@ -331,6 +367,14 @@ impl Parsed {
                 self.path_anchors.push(anchor);
                 bound(self.path_anchors.len(), MAX_PATH_ANCHORS, flag)
             }
+            "--approver-socket" => once(&mut self.approver_socket, flag, PathBuf::from(value()?)),
+            "--approver-uid" => {
+                let uid = parse_uid_for(flag, value()?)?;
+                if !self.approver_uids.insert(uid) {
+                    return Err(UsageError::new(format!("--approver-uid {uid} is repeated")));
+                }
+                bound(self.approver_uids.len(), MAX_APPROVER_UIDS, flag)
+            }
             other => Err(UsageError::new(format!(
                 "unknown serve argument {}",
                 bounded(other)
@@ -389,43 +433,26 @@ impl Parsed {
                 ));
             }
         };
-        let broker = match (self.broker_socket, self.broker_uid) {
-            (Some(socket), Some(uid)) => {
-                if !socket.is_absolute() {
-                    return Err(UsageError::new("--broker-socket must be an absolute path"));
-                }
-                Some(BrokerConfig {
-                    socket,
-                    uid,
-                    shared_uid_permitted: self.shared_broker_uid,
-                })
-            }
-            (None, None) => {
-                if self.shared_broker_uid {
-                    return Err(UsageError::new(
-                        "--allow-shared-broker-uid needs --broker-socket and --broker-uid",
-                    ));
-                }
-                None
-            }
-            _ => {
-                return Err(UsageError::new(
-                    "--broker-socket and --broker-uid go together: a broker is named by where \
-                     it listens and who the kernel says it is",
-                ));
-            }
-        };
+        let broker = broker_fits(self.broker_socket, self.broker_uid, self.shared_broker_uid)?;
         if let Some(path) = &self.secrets_file
             && !path.is_absolute()
         {
             return Err(UsageError::new("--secrets-file must be an absolute path"));
         }
         sandbox_config_fits(self.sandbox_config.as_deref(), broker.is_some())?;
+        let approver = approver_fits(
+            self.approver_socket,
+            self.approver_uids,
+            &socket,
+            &self.uids,
+            broker.as_ref(),
+        )?;
         Ok(ServeConfig {
             secrets_file: self.secrets_file,
             sandbox_config: self.sandbox_config,
             dumpable_permitted: self.dumpable,
             path_anchors: self.path_anchors,
+            approver,
             state_dir,
             socket,
             peers: PeerPolicy::new(self.uids, self.authority_uid_permitted),
@@ -436,6 +463,39 @@ impl Parsed {
             lease_ttl_ms: self.lease_ttl_ms.unwrap_or(DEFAULT_LEASE_TTL_MS),
             broker,
         })
+    }
+}
+
+/// `--broker-socket` and `--broker-uid`: together or not at all, the socket
+/// absolute; `--allow-shared-broker-uid` only beside them.
+fn broker_fits(
+    socket: Option<PathBuf>,
+    uid: Option<u32>,
+    shared_uid_permitted: bool,
+) -> Result<Option<BrokerConfig>, UsageError> {
+    match (socket, uid) {
+        (Some(socket), Some(uid)) => {
+            if !socket.is_absolute() {
+                return Err(UsageError::new("--broker-socket must be an absolute path"));
+            }
+            Ok(Some(BrokerConfig {
+                socket,
+                uid,
+                shared_uid_permitted,
+            }))
+        }
+        (None, None) => {
+            if shared_uid_permitted {
+                return Err(UsageError::new(
+                    "--allow-shared-broker-uid needs --broker-socket and --broker-uid",
+                ));
+            }
+            Ok(None)
+        }
+        _ => Err(UsageError::new(
+            "--broker-socket and --broker-uid go together: a broker is named by where it \
+             listens and who the kernel says it is",
+        )),
     }
 }
 
@@ -455,6 +515,65 @@ fn sandbox_config_fits(path: Option<&Path>, broker: bool) -> Result<(), UsageErr
         ));
     }
     Ok(())
+}
+
+/// `--approver-socket` and `--approver-uid` (F-18 Phase 3.4, ADR-0067):
+/// together or not at all; the socket absolute and not the DWKP socket;
+/// every approver uid outside the DWKP peers and not the broker's. There is
+/// no override for any of it: an approver that is also a runtime could
+/// approve its own requests. The authority's own uid is checked at start,
+/// where it is known.
+fn approver_fits(
+    socket: Option<PathBuf>,
+    uids: BTreeSet<u32>,
+    dwkp_socket: &Path,
+    peers: &BTreeSet<u32>,
+    broker: Option<&BrokerConfig>,
+) -> Result<Option<ApproverConfig>, UsageError> {
+    let socket = match (socket, uids.is_empty()) {
+        (None, true) => return Ok(None),
+        (Some(socket), false) => socket,
+        (None, false) => {
+            return Err(UsageError::new(
+                "--approver-uid needs --approver-socket: an approver is named by the endpoint \
+                 it may reach and who the kernel says it is",
+            ));
+        }
+        (Some(_), true) => {
+            return Err(UsageError::new(
+                "--approver-socket needs at least one --approver-uid: there is no default \
+                 approver",
+            ));
+        }
+    };
+    if !socket.is_absolute() {
+        return Err(UsageError::new(
+            "--approver-socket must be an absolute path",
+        ));
+    }
+    if socket == dwkp_socket {
+        return Err(UsageError::new(
+            "--approver-socket must not be the DWKP socket: the approver endpoint is a door of \
+             its own, which no runtime may use",
+        ));
+    }
+    if let Some(uid) = uids.iter().find(|uid| peers.contains(uid)) {
+        return Err(UsageError::new(format!(
+            "--approver-uid {uid} is also an --allow-uid: a uid that may speak DWKP is a \
+             runtime's, and a runtime is never an approver. The approver identities must be \
+             disjoint from the runtime's; there is no override"
+        )));
+    }
+    if let Some(broker) = broker
+        && uids.contains(&broker.uid)
+    {
+        return Err(UsageError::new(format!(
+            "--approver-uid {} is the --broker-uid: the broker performs effects and is never \
+             the human who approves them; there is no override",
+            broker.uid
+        )));
+    }
+    Ok(Some(ApproverConfig { socket, uids }))
 }
 
 fn switch(slot: &mut bool, flag: &str) -> Result<(), UsageError> {
@@ -784,5 +903,143 @@ mod tests {
             assert!(error(&words).contains("unknown serve argument"), "{name}");
         }
         assert!(!SERVE_USAGE.contains("hygiene-profile"));
+    }
+
+    /// An absolute approver socket on this target, in its own directory.
+    #[cfg(windows)]
+    const APPROVER_SOCKET: &str = r"C:\run\dw-approve\approver.sock";
+    #[cfg(not(windows))]
+    const APPROVER_SOCKET: &str = "/run/dw-approve/approver.sock";
+
+    /// The base command line with an approver endpoint for uid 2001.
+    fn with_approver() -> Vec<&'static str> {
+        let mut words = base();
+        words.extend([
+            "--approver-socket",
+            APPROVER_SOCKET,
+            "--approver-uid",
+            "2001",
+        ]);
+        words
+    }
+
+    #[test]
+    fn an_approver_endpoint_exists_only_when_the_operator_configures_one() {
+        let Ok(config) = parse_serve_args(&args(&base())) else {
+            unreachable!("the base command line parses")
+        };
+        assert_eq!(config.approver, None, "no approver endpoint by default");
+        let Ok(config) = parse_serve_args(&args(&with_approver())) else {
+            unreachable!("an approver endpoint parses")
+        };
+        let Some(approver) = config.approver.as_ref() else {
+            unreachable!("the approver endpoint is configured")
+        };
+        assert_eq!(approver.socket, Path::new(APPROVER_SOCKET));
+        assert_eq!(approver.uids.iter().copied().collect::<Vec<_>>(), [2001]);
+        assert!(
+            !config.peers.allows(2001),
+            "an approver is not admitted to DWKP by being an approver"
+        );
+
+        let mut words = base();
+        words.extend(["--approver-uid", "2001"]);
+        assert!(error(&words).contains("--approver-uid needs --approver-socket"));
+        let mut words = base();
+        words.extend(["--approver-socket", APPROVER_SOCKET]);
+        assert!(error(&words).contains("needs at least one --approver-uid"));
+    }
+
+    #[test]
+    fn a_runtime_uid_is_never_an_approver() {
+        // 1001 is the base command line's --allow-uid: a runtime's.
+        let mut words = with_approver();
+        words.extend(["--approver-uid", "1001"]);
+        let message = error(&words);
+        assert!(
+            message.contains("--approver-uid 1001 is also an --allow-uid"),
+            "{message}"
+        );
+        // Whichever flag comes first.
+        let mut words = with_approver();
+        words.extend(["--allow-uid", "2001"]);
+        assert!(error(&words).contains("--approver-uid 2001 is also an --allow-uid"));
+        // The authority's own-uid acknowledgement does not open it either.
+        let mut words = with_approver();
+        words.extend(["--allow-authority-uid", "--approver-uid", "1001"]);
+        assert!(error(&words).contains("is also an --allow-uid"));
+    }
+
+    #[test]
+    fn the_broker_is_never_an_approver() {
+        // 1002 is the attached broker's uid.
+        let mut words = attached();
+        words.extend([
+            "--approver-socket",
+            APPROVER_SOCKET,
+            "--approver-uid",
+            "1002",
+        ]);
+        assert!(error(&words).contains("--approver-uid 1002 is the --broker-uid"));
+        // The shared-broker acknowledgement is about the broker, not about
+        // approvers: it opens nothing here.
+        words.push("--allow-shared-broker-uid");
+        assert!(error(&words).contains("--approver-uid 1002 is the --broker-uid"));
+    }
+
+    #[test]
+    fn the_approver_endpoint_is_never_the_dwkp_socket_and_is_absolute() {
+        let mut words = base();
+        words.extend([
+            "--approver-socket",
+            ABSOLUTE_SOCKET,
+            "--approver-uid",
+            "2001",
+        ]);
+        assert!(error(&words).contains("must not be the DWKP socket"));
+        let mut words = base();
+        words.extend([
+            "--approver-socket",
+            "approver.sock",
+            "--approver-uid",
+            "2001",
+        ]);
+        assert!(error(&words).contains("--approver-socket must be an absolute path"));
+    }
+
+    #[test]
+    fn an_approver_uid_is_a_number_unrepeated_and_bounded() {
+        for bad in ["-1", "root", "", "0x7d1", "4294967296"] {
+            let mut words = base();
+            words.extend(["--approver-socket", APPROVER_SOCKET, "--approver-uid", bad]);
+            assert!(error(&words).contains("--approver-uid"), "{bad:?}");
+        }
+        let mut words = with_approver();
+        words.extend(["--approver-uid", "2001"]);
+        assert!(error(&words).contains("--approver-uid 2001 is repeated"));
+        let uids: Vec<String> = (0..=super::MAX_APPROVER_UIDS)
+            .map(|n| (3000 + n).to_string())
+            .collect();
+        let mut words = base();
+        words.extend(["--approver-socket", APPROVER_SOCKET]);
+        for uid in &uids {
+            words.extend(["--approver-uid", uid.as_str()]);
+        }
+        assert!(error(&words).contains("more than"));
+    }
+
+    #[test]
+    fn no_flag_lets_an_approver_share_an_identity() {
+        for flag in [
+            "--allow-shared-approver-uid",
+            "--allow-runtime-approver",
+            "--allow-self-approval",
+            "--approver-origin",
+        ] {
+            let mut words = with_approver();
+            words.push(flag);
+            assert!(error(&words).contains("unknown serve argument"), "{flag}");
+            assert!(!SERVE_USAGE.contains(flag), "{flag}");
+        }
     }
 }

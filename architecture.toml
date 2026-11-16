@@ -489,6 +489,12 @@ Until M4b this rule was TX009-one-authority-server and exempted only the
 authority's server; ADR-0043 designs the private authority-to-broker hop and
 exempts exactly the one file it lives in.
 
+F-18 Phase 3.4 (ADR-0067, Proposed) adds a second authority listener inside
+the server directory: the approver endpoint (`server/approver.rs`), bound by
+the same `socket.rs` place checks, behind its own peer-credential gate over
+an operator-declared uid set disjoint from every DWKP peer, the broker and
+the authority. It reads nothing and answers nothing before M6 (TX065).
+
 M5b (ADR-0048) adds the broker's `PROXY_ONLY` egress listeners, in one file,
 `egress/proxy.rs`: one Unix socket per prepared environment, in a directory
 beneath a root only the broker can enter, whose ACL lets only the relay's
@@ -2433,6 +2439,33 @@ a subject once per connection in `server/connection.rs` as
 `unix_uid(peer.uid)`. A subject made from anything else in the server --
 a field of a message, a configuration value, a constant -- would let a
 runtime say who it is.
+"""
+
+[[text_rules]]
+id = "TX065-the-approver-endpoint-holds-no-operation-before-m6"
+paths = ["crates/dwkd-authority/src/server/approver.rs"]
+exempt_paths = []
+suffixes = [".rs"]
+patterns = [
+    '^(?!\s*//).*\bstd::io::(Read|Write)\b',
+    '^(?!\s*//).*\.(read|read_exact|read_to_end|read_to_string|peek|write|write_all|set_read_timeout)\(',
+    '^(?!\s*//).*\b(dispatch|dispatch_parkable)\b',
+    '^(?!\s*//).*\.connect\(',
+    '^(?!\s*//).*\b(unix_uid|AuthenticatedSubject|CallerContext|LeaseHolder)\b',
+    '^(?!\s*//).*\bconnection::',
+    '^(?!\s*//).*\bdecode\w*\(',
+]
+reason = """
+F-18 Phase 3.4 (ADR-0067, Proposed): the approver endpoint is an identity
+boundary and nothing else until M6's approval registry exists. It judges a
+peer by the uid the kernel reports, records it, and closes the connection:
+it reads no byte a peer sends, writes no answer, makes no subject or lease
+holder, decodes no frame and reaches no dispatch. An endpoint that accepted a
+decision before the registry could only approve by fiat -- with no binding,
+expiry, single use or record behind it. M6 changes this module, and this
+rule, under a decision of its own. The module's own test
+(`the_endpoint_reads_answers_and_dispatches_nothing`) states the same, where
+a mutation review sees it.
 """
 
 [[text_rules]]

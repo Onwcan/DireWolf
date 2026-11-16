@@ -150,7 +150,9 @@ def test_the_authority_records_its_posture_after_what_it_attaches_and_before_it_
     assert start.index("let workspace = sandbox::attach(") < start.index(
         "record_posture(&mut authority, config, authority_uid, workspace)?;"
     )
-    assert start.index("record_posture(") < start.index("Ok((place, authority, report))")
+    # The start's success return; F-18 Phase 3.4 (ADR-0067) adds the approver
+    # endpoint's place to the tuple after `report`.
+    assert start.index("record_posture(") < start.index("Ok((place, authority, report")
     record = server[server.index("fn record_posture(") :]
     record = record[: record.index("\n}\n")]
     assert "hardening::observed()" in record

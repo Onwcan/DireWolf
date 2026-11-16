@@ -894,6 +894,18 @@ def test_the_runtime_endpoint_takes_its_subject_from_the_kernel(
     assert {line for _, line, _ in _findings(rule)} == {5}
 
 
+def test_the_approver_endpoint_holds_no_operation_before_m6(
+    violation_rules: list[str],
+) -> None:
+    """F-18 Phase 3.4 (ADR-0067, Proposed): in the approver endpoint, a way to
+    read a peer's bytes, answer it, make it a subject or dispatch it is caught
+    on every line; the fixture's doc comment naming them is not."""
+    rule = "TX065-the-approver-endpoint-holds-no-operation-before-m6"
+    assert rule in violation_rules
+    assert _paths(rule) == {"crates/dwkd-authority/src/server/approver.rs"}
+    assert {line for _, line, _ in _findings(rule)} == {4, 6, 7, 8, 9}
+
+
 def test_history_is_never_read_as_authority(violation_rules: list[str]) -> None:
     """F-18 (ADR-0063, Proposed): only the schema and the single-principal
     adoption name `ownership_observation`; a decision that reads it -- the
@@ -1157,6 +1169,7 @@ def test_the_required_boundary_rules_are_all_declared() -> None:
         "TX062-the-runtime-path-selects-no-origin-and-records-no-approval",
         "TX063-the-runtime-endpoint-takes-its-subject-from-the-kernel",
         "TX064-history-is-never-read-as-authority",
+        "TX065-the-approver-endpoint-holds-no-operation-before-m6",
         "DEP001-no-agent-framework-dependency",
         "DEP002-runtime-has-no-transport-dependency",
         "RS001-authority-depends-on-nothing-in-tree",

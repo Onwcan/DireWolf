@@ -45,6 +45,7 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CI = REPO_ROOT / ".github" / "workflows" / "ci.yml"
 FOREIGN_SUITE = REPO_ROOT / "crates" / "dwkd-authority" / "tests" / "transport_foreign.rs"
+APPROVER_SUITE = REPO_ROOT / "crates" / "dwkd-authority" / "tests" / "transport_approver.rs"
 
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
 import dw  # noqa: E402  - imported after the path is extended
@@ -233,6 +234,25 @@ def test_the_evidence_job_runs_the_cross_uid_suite_as_a_real_second_user() -> No
     _second_identity(_env(probe).get("DW_PROBE_AS"))
 
 
+def test_the_evidence_job_runs_the_approver_suite_as_a_real_third_user() -> None:
+    """F-18 Phase 3.4 (ADR-0067, Proposed): the approver is a third identity --
+    neither the runner nor the runtime (`DW_PEER_AS`) -- created by the job
+    before the task that needs it runs."""
+    step = _step_running(EVIDENCE_JOB, "make authority-transport-evidence")
+    env = _env(step)
+    approver = env.get("DW_APPROVER_AS")
+    _second_identity(approver)
+    assert approver != env.get("DW_PEER_AS"), "the approver and the runtime are one user"
+    commands = [_run(s) or "" for s in _steps(_jobs()[EVIDENCE_JOB])]
+    created = [
+        i
+        for i, command in enumerate(commands)
+        if command.startswith("sudo useradd ") and command.split()[-1] == approver
+    ]
+    assert len(created) == 1, f"the job does not create {approver}"
+    assert created[0] < commands.index("make authority-transport-evidence")
+
+
 def test_the_evidence_job_checks_the_authority_suite_strictly_with_the_second_user() -> None:
     """The M3 authority properties, strict -- `--require-exercised`, so an eval
     this job cannot exercise fails -- with the real second user, against the
@@ -335,6 +355,26 @@ def test_the_foreign_tests_are_ignored_by_default_and_selected_by_name() -> None
         )
 
 
+def test_the_approver_test_is_ignored_by_default_selected_by_name_and_apart() -> None:
+    """F-18 Phase 3.4: the three-identity test is an `#[ignore]`d test of
+    `transport_approver.rs`, never of `transport_foreign.rs`, whose every
+    ignored test the `peer-credential-check` eval runs with one second
+    identity; the approver's cases are not the eval's either."""
+    from direwolf_evals.runners import authority
+
+    source = APPROVER_SUITE.read_text(encoding="utf-8")
+    assert len(dw.APPROVER_TESTS) == 1
+    for name in dw.APPROVER_TESTS:
+        module, function = name.split("::")
+        assert module == "linux"
+        assert re.search(r"#\[ignore = [^\]]*\]\s*fn " + re.escape(function) + r"\(\)", source)
+        assert function not in FOREIGN_SUITE.read_text(encoding="utf-8")
+    assert "transport_approver" in dw.TRANSPORT_SUITES
+    assert not set(dw.APPROVER_CASES) & set(authority.PEER_CASES)
+    for case in dw.APPROVER_CASES:
+        assert f'"{case}"' in source, case
+
+
 def test_the_task_and_the_eval_expect_the_same_foreign_cases() -> None:
     from direwolf_evals.runners import authority
 
@@ -391,6 +431,43 @@ def test_a_cross_uid_run_that_selected_nothing_is_not_evidence() -> None:
     dw.require_foreign_evidence(_libtest(FOREIGN_RUN, dw.FOREIGN_CASES))
 
 
+def _approver_libtest(passed: int, cases: tuple[str, ...]) -> str:
+    lines = [f"running {len(dw.APPROVER_TESTS)} tests"]
+    lines += [
+        f'test linux::x ... DWKP-EVIDENCE {{"suite":"approver","case":"{c}",'
+        f'"layer":"approver-gate","contained":true,"audited":true,'
+        f'"server":"/t/dwkd-authority"}}'
+        for c in cases
+    ]
+    lines.append(
+        f"test result: ok. {passed} passed; 0 failed; 0 ignored; 0 measured; "
+        f"{len(dw.APPROVER_TESTS) - passed} filtered out; finished in 1.00s"
+    )
+    return "\n".join(lines)
+
+
+def test_an_approver_run_that_selected_nothing_or_missed_a_case_is_not_evidence() -> None:
+    with pytest.raises(dw.TaskError, match="did not run every"):
+        dw.require_approver_evidence(_approver_libtest(0, ()))
+    missing = tuple(c for c in dw.APPROVER_CASES if c != "cross-uid-runtime-refused")
+    with pytest.raises(dw.TaskError, match="did not report: cross-uid-runtime-refused"):
+        dw.require_approver_evidence(_approver_libtest(1, missing))
+    uncontained = _approver_libtest(1, dw.APPROVER_CASES).replace(
+        '"case":"cross-uid-approver-not-a-runtime","layer":"approver-gate","contained":true',
+        '"case":"cross-uid-approver-not-a-runtime","layer":"approver-gate","contained":false',
+    )
+    with pytest.raises(dw.TaskError, match="cross-uid-approver-not-a-runtime"):
+        dw.require_approver_evidence(uncontained)
+    # Another suite's line with the same case name is not the approver's.
+    wrong_suite = _approver_libtest(1, dw.APPROVER_CASES).replace(
+        '"suite":"approver","case":"cross-uid-authority-refused"',
+        '"suite":"peer","case":"cross-uid-authority-refused"',
+    )
+    with pytest.raises(dw.TaskError, match="cross-uid-authority-refused"):
+        dw.require_approver_evidence(wrong_suite)
+    dw.require_approver_evidence(_approver_libtest(1, dw.APPROVER_CASES))
+
+
 class _Recorder:
     def __init__(self) -> None:
         self.commands: list[tuple[str, ...]] = []
@@ -400,6 +477,8 @@ class _Recorder:
 
     def captured(self, *command: str) -> str:
         self.commands.append(command)
+        if "transport_approver" in command:
+            return _approver_libtest(len(dw.APPROVER_TESTS), dw.APPROVER_CASES)
         return _libtest(FOREIGN_RUN, dw.FOREIGN_CASES)
 
     def uvrun(self, module: str, *args: str) -> None:
@@ -411,24 +490,68 @@ def test_the_evidence_task_proves_the_identity_first_and_selects_the_ignored_tes
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     recorder = _Recorder()
-    proven_after: list[int] = []
+    proven_after: list[tuple[str, int]] = []
+    uids = {"DW_PEER_AS": ("nobody", 65534), "DW_APPROVER_AS": ("dwapprover", 998)}
 
     def second_identity(variable: str) -> tuple[str, int, int]:
-        assert variable == "DW_PEER_AS"
-        proven_after.append(len(recorder.commands))
-        return "nobody", 1001, 65534
+        proven_after.append((variable, len(recorder.commands)))
+        user, uid = uids[variable]
+        return user, 1001, uid
 
     monkeypatch.setenv("DW_PEER_AS", "nobody")
+    monkeypatch.setenv("DW_APPROVER_AS", "dwapprover")
     monkeypatch.setattr(dw, "run", recorder.run)
     monkeypatch.setattr(dw, "run_captured", recorder.captured)
     monkeypatch.setattr(dw, "uvrun", recorder.uvrun)
     monkeypatch.setattr(dw, "second_identity", second_identity)
     dw.task_authority_transport_evidence()
-    assert proven_after == [0], "the second identity is proven before anything runs"
+    assert proven_after == [("DW_PEER_AS", 0), ("DW_APPROVER_AS", 0)], (
+        "every identity is proven before anything runs"
+    )
     foreign = [c for c in recorder.commands if "transport_foreign" in c]
     assert len(foreign) == 1
     for flag in ("--ignored", "--exact", *dw.FOREIGN_TESTS):
         assert flag in foreign[0], f"the cross-uid run lacks {flag}"
+    approver = [c for c in recorder.commands if "transport_approver" in c and "--ignored" in c]
+    assert len(approver) == 1
+    for flag in ("--exact", *dw.APPROVER_TESTS):
+        assert flag in approver[0], f"the approver run lacks {flag}"
+
+
+@pytest.mark.skipif(not LINUX, reason="the task runs only where the server does")
+def test_the_evidence_task_without_an_approver_is_not_exercised(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """F-18 Phase 3.4: the second identity alone runs the cross-uid suite and
+    then fails the task NOT EXERCISED; the approver's test is never run as if
+    one of the identities could stand in for another."""
+    recorder = _Recorder()
+    monkeypatch.setenv("DW_PEER_AS", "nobody")
+    monkeypatch.delenv("DW_APPROVER_AS", raising=False)
+    monkeypatch.setattr(dw, "run", recorder.run)
+    monkeypatch.setattr(dw, "run_captured", recorder.captured)
+    monkeypatch.setattr(dw, "uvrun", recorder.uvrun)
+    monkeypatch.setattr(dw, "second_identity", lambda _variable: ("nobody", 1001, 65534))
+    with pytest.raises(dw.TaskError, match="NOT EXERCISED: the approver endpoint"):
+        dw.task_authority_transport_evidence()
+    assert [c for c in recorder.commands if "transport_foreign" in c]
+    assert not [c for c in recorder.commands if "transport_approver" in c and "--ignored" in c]
+
+
+@pytest.mark.skipif(not LINUX, reason="the task runs only where the server does")
+def test_the_approver_and_the_runtime_are_never_one_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recorder = _Recorder()
+    monkeypatch.setenv("DW_PEER_AS", "nobody")
+    monkeypatch.setenv("DW_APPROVER_AS", "nobody2")
+    monkeypatch.setattr(dw, "run", recorder.run)
+    monkeypatch.setattr(dw, "run_captured", recorder.captured)
+    monkeypatch.setattr(dw, "uvrun", recorder.uvrun)
+    monkeypatch.setattr(dw, "second_identity", lambda variable: (variable, 1001, 65534))
+    with pytest.raises(dw.TaskError, match="one identity, not two"):
+        dw.task_authority_transport_evidence()
+    assert not recorder.commands, "nothing ran"
 
 
 @pytest.mark.skipif(not LINUX, reason="the task runs only where the server does")
@@ -437,6 +560,7 @@ def test_the_evidence_task_without_a_second_user_is_not_exercised(
 ) -> None:
     recorder = _Recorder()
     monkeypatch.delenv("DW_PEER_AS", raising=False)
+    monkeypatch.delenv("DW_APPROVER_AS", raising=False)
     monkeypatch.setattr(dw, "run", recorder.run)
     monkeypatch.setattr(dw, "run_captured", recorder.captured)
     monkeypatch.setattr(dw, "uvrun", recorder.uvrun)
