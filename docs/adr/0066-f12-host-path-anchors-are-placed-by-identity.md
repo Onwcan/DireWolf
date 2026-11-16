@@ -179,7 +179,10 @@ still not permission.
   backstop only once declared. `$DIREWOLF_HOME`'s layout is fixed at
   packaging (M17).
 - **Off Linux** nothing is placed. Every host-path rule is unevaluated there,
-  and neither daemon serves anyway.
+  and neither daemon serves anyway. The anchors are not checked at start
+  there either: with no resolver, no check could pass, and a start that
+  failed on one would stop the in-process authority every test uses (CI #184,
+  macOS).
 
 ## Alternatives considered
 

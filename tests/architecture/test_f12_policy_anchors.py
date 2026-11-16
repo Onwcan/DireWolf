@@ -118,6 +118,25 @@ def test_the_home_anchor_has_no_source_but_the_operator() -> None:
             assert word not in text, word
 
 
+def test_the_anchors_build_and_start_off_linux() -> None:
+    """CI #184 (ace658b): Windows did not compile -- the server's anchor
+    functions called the Unix-only `log` -- and on macOS every in-process
+    start failed, the authority's own state directory refused by a check that
+    has no resolver there. Neither shows on Linux, where the gates run."""
+    server = _read(AUTHORITY / "server" / "mod.rs")
+    for function in ("fn host_anchors(", "fn log_anchors(", "fn start(", "fn log("):
+        head = server.split(function, 1)[0].rsplit("\n\n", 1)[-1]
+        assert "#[cfg(unix)]" in head, f"{function} is not Unix-only like its callers"
+    anchors = _code(_read(AUTHORITY / "state" / "anchors.rs"))
+    check = anchors.split("pub fn check(", 1)[1].split("\n    }\n", 1)[0]
+    # The first thing the check does off Linux is nothing.
+    first = check.split("{", 1)[1].strip()
+    assert first.startswith('if !cfg!(target_os = "linux") {\n            return Ok(());'), first
+    resource = _read(AUTHORITY / "resource" / "fs" / "mod.rs")
+    host_end = resource.split("pub(in crate::resource) enum HostEnd {", 1)[0].rsplit("///", 1)[-1]
+    assert 'not(target_os = "linux")' in host_end and "dead_code" in host_end
+
+
 def test_the_mutation_table_matches_the_source_once_per_mutant() -> None:
     names = [m[0] for m in dw.POLICY_ANCHOR_MUTATIONS]
     assert len(names) == len(set(names))

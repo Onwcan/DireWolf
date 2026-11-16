@@ -470,6 +470,8 @@ fn start(
 /// configuration file this start reads -- policy files, the secret metadata,
 /// the sandbox configuration -- under `${DIREWOLF_CONFIG}`. The state layer
 /// adds its own state and executable directories and checks every one.
+/// Unix only, as `start` is, its one caller.
+#[cfg(unix)]
 fn host_anchors(config: &ServeConfig) -> crate::state::HostAnchors {
     use self::config::AnchorName;
     let mut anchors = crate::state::HostAnchors::default();
@@ -505,7 +507,9 @@ fn host_anchors(config: &ServeConfig) -> crate::state::HostAnchors {
 
 /// Say what each host path anchor stands for, once, at start: the operator
 /// can see which locations the packs' hard denials are placed against, and
-/// that `~` stands for nothing when no home was configured.
+/// that `~` stands for nothing when no home was configured. Unix only, as
+/// `log` and `start` are.
+#[cfg(unix)]
 fn log_anchors(anchors: &crate::state::HostAnchors) {
     for (name, list) in [
         ("~", &anchors.home),

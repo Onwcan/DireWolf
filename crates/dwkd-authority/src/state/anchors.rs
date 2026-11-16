@@ -112,11 +112,20 @@ impl HostAnchors {
 
     /// Check every configured directory (start-up).
     ///
+    /// **Linux only.** Elsewhere no root can be pinned and no host path is
+    /// ever placed (ADR-0042 §11, ADR-0066): every filesystem call is refused
+    /// before a placement would be made, and every rule naming a host path
+    /// stays unplaced. There is nothing to check, so nothing is refused --
+    /// a start off Linux must not fail on a resolver that does not exist.
+    ///
     /// # Errors
     ///
     /// The first that is not an absolute directory the authority can search,
     /// named by its anchor and path -- the operator's own configuration.
     pub fn check(&self) -> Result<(), String> {
+        if !cfg!(target_os = "linux") {
+            return Ok(());
+        }
         for (anchor, dir) in self.each() {
             resource::check_anchor_directory(dir)
                 .map_err(|error| format!("path anchor {anchor} = {dir}: {error}"))?;

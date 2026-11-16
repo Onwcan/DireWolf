@@ -577,6 +577,13 @@ pub(in crate::resource) struct HostWalk {
 
 /// How a host walk ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(
+    not(target_os = "linux"),
+    allow(
+        dead_code,
+        reason = "off Linux the only walk is the stub's, which always fails"
+    )
+)]
 pub(in crate::resource) enum HostEnd {
     /// The whole path exists: this object, of any kind.
     Found(FileIdentity),
