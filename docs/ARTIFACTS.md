@@ -2,6 +2,8 @@
 
 First-class, content-addressed, provenance-carrying outputs. Artifacts keep large data out of the context window and make results durable beyond a run.
 
+> **Status: specified, not built.** No artifact store exists yet, so the policy obligation `require_artifact_capture` cannot be enforced, and BALANCED's workspace writes are refused `OBLIGATION_UNENFORCEABLE` until it can ([F12_POLICY_PACK_USABILITY.md](F12_POLICY_PACK_USABILITY.md) §8). Where the capture is built is tracked under M8 and M12 in [ROADMAP.md](ROADMAP.md).
+
 ---
 
 ## 1. Model
