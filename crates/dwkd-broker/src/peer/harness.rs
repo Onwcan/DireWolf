@@ -3,6 +3,8 @@
 //! one process -- a reader in a pid namespace that cannot see its peer
 //! (`unshare --user --map-current-user --pid`, no privilege), and a client
 //! running as a second operating-system user (`sudo -n -u $DW_PEER_AS`).
+//! F-05's identity tables (ADR-0069) use the first to judge a real kernel's
+//! mapping in an unprivileged user namespace.
 //!
 //! It starts nothing a hop, an authorisation or a relay names, and nothing
 //! the broker runs; TX021 names it beside the other test files that start a

@@ -658,6 +658,99 @@ mod linux {
         (prepared.container.unwrap(), measurement)
     }
 
+    /// The broker's last stderr line holding `needle`, waited for: its
+    /// reader thread may lag the outcome.
+    fn stderr_line(broker: &Broker, needle: &str) -> String {
+        let deadline = Instant::now() + PROMPT;
+        loop {
+            if let Some(line) = broker.stderr().lines().rev().find(|l| l.contains(needle)) {
+                return line.to_owned();
+            }
+            assert!(
+                Instant::now() < deadline,
+                "no `{needle}`:\n{}",
+                broker.stderr()
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// F-05 (ADR-0069): who runs in the environment and what confines it, as
+    /// the broker judged its probe's kernel against the runtime's record and
+    /// the host's kernel -- a report, never an invariant. What it must say is
+    /// worked out here from this host's own kernel and the container's own
+    /// record, so the same assertion holds on a host running AppArmor and on
+    /// one running none: the identity map (the deployment contract), never
+    /// counted as remapping; AppArmor enforced only where the kernel runs it
+    /// and the runtime gave the container a profile; SELinux nowhere it does
+    /// not run; Landlock never.
+    fn identity_reported(
+        ev: &Evidence,
+        broker: &Broker,
+        e: &EnvironmentId,
+        container: &ContainerRef,
+    ) {
+        let line = stderr_line(
+            broker,
+            &format!("event=sandbox_identity environment={}", e.as_str()),
+        );
+        assert!(
+            line.contains(" userns=UNSUPPORTED:inside:shared "),
+            "{line}"
+        );
+        let read = |path: &str| std::fs::read_to_string(path).ok();
+        let listed = read("/sys/kernel/security/lsm")
+            .map(|list| list.trim().split(',').any(|m| m == "apparmor"));
+        let apparmor_runs = read("/sys/module/apparmor/parameters/enabled")
+            .is_some_and(|e| e.trim() == "Y")
+            && listed != Some(false);
+        let profile = ev
+            .docker_ok(&[
+                "container",
+                "inspect",
+                "--format",
+                "{{.AppArmorProfile}}",
+                container.as_str(),
+            ])
+            .trim()
+            .to_owned();
+        let apparmor = if !apparmor_runs {
+            "UNSUPPORTED:host:kernel-has-none".to_owned()
+        } else if profile.is_empty() || profile == "unconfined" {
+            "REDUCED:both:unconfined".to_owned()
+        } else {
+            format!("ENFORCED:both:{profile}")
+        };
+        assert!(line.contains(&format!(" apparmor={apparmor} ")), "{line}");
+        if read("/sys/fs/selinux/enforce").is_none() {
+            assert!(
+                line.contains(" selinux=UNSUPPORTED:host:kernel-has-none "),
+                "{line}"
+            );
+        }
+        assert!(
+            line.ends_with(" landlock=NOT_APPLICABLE:build:no-ruleset"),
+            "{line}"
+        );
+        let state = apparmor
+            .split(':')
+            .next()
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        for case in [
+            "real-environment-userns-shared".to_owned(),
+            format!("real-environment-apparmor-{state}"),
+            "real-environment-landlock-not-applicable".to_owned(),
+        ] {
+            println!(
+                "F05-EVIDENCE {{\"case\":\"{case}\",\"level\":\"real-oci\",\"contained\":true}}"
+            );
+        }
+        // The judgement itself, as the broker wrote it: names and states only.
+        let observed = &line[line.find("event=sandbox_identity").unwrap_or_default()..];
+        println!("F05-OBSERVED {observed}");
+    }
+
     // ---- the strict profile --------------------------------------------------
 
     #[test]
@@ -672,6 +765,7 @@ mod linux {
         let (e, r) = (environment(), run());
         let s = spec(&e, &r, &workspace, &ev.image, &ev.probe_sha256);
         let (container, measurement) = prepared_clean(&socket, &ev, &s, &broker);
+        identity_reported(&ev, &broker, &e, &container);
         evidence(
             "prepare-clean",
             &format!("pass-{}", measurement.checks.len()),

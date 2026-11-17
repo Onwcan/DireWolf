@@ -167,6 +167,7 @@ mod linux {
             version: ProbeReportVersion::new(3).unwrap_or_else(|| unreachable!("3 is in range")),
             checks: InvariantChecks::new(checks).unwrap_or_else(|| unreachable!("bounded")),
             workspace: None,
+            identity: None,
         };
         report.to_bytes().unwrap_or_default()
     }

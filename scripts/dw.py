@@ -9490,6 +9490,153 @@ def task_proxy_peer_mutations() -> None:
     proxy_peer_review()
 
 
+# F-05 (ADR-0069, Proposed): each guard of the environment identity
+# judgement weakened in turn -- a complain-mode profile, a contradiction
+# between the record and the process, a record with nothing seen inside,
+# permissive SELinux, an unconfined SELinux domain, Landlock's availability
+# and the shared identity map each counted as enforced; a kernel not running
+# AppArmor judged from labels; a listed-but-disabled AppArmor counted as
+# running; the host's user-namespace mode read as shared; SELinux's label read
+# as AppArmor's. The detectors are the broker's identity tables; every mutant
+# must be KILLED by a named failing test, and the file restored
+# byte-identically. The probe report's own rules (its version, the identity
+# map) are the private protocol's, which nothing here may name (TX016); their
+# unit tests stand alone.
+_F05_IDENTITY = "crates/dwkd-broker/src/sandbox/identity.rs"
+IDENTITY_MUTATIONS = (
+    (
+        "N1: an AppArmor profile in complain mode counts as enforced",
+        _F05_IDENTITY,
+        '            judged(Condition::Reduced, "both", "complain")\n',
+        '            judged(Condition::Enforced, "both", "complain")\n',
+    ),
+    (
+        "N2: a profile the record does not name counts as enforced",
+        _F05_IDENTITY,
+        "        (Profile::Enforce(name), Some(named))"
+        ' if name == named && name != "unconfined" => {\n',
+        '        (Profile::Enforce(name), _) if name != "unconfined" => {\n',
+    ),
+    (
+        "N3: a profile only the record names counts as enforced",
+        _F05_IDENTITY,
+        '        return judged(Condition::Unverified, "none", "unobserved");\n'
+        "    };\n"
+        "    match (profile(label), record) {\n",
+        '        return judged(Condition::Enforced, "record", "unobserved");\n'
+        "    };\n"
+        "    match (profile(label), record) {\n",
+    ),
+    (
+        "N4: permissive SELinux counts as enforced",
+        _F05_IDENTITY,
+        '        judged(Condition::Reduced, "both", "permissive")\n',
+        '        judged(Condition::Enforced, "both", "permissive")\n',
+    ),
+    (
+        "N5: an unconfined SELinux domain counts as enforced",
+        _F05_IDENTITY,
+        "    if domain.is_empty() || UNCONFINED_DOMAINS.contains(&domain) {\n",
+        "    if domain.is_empty() {\n",
+    ),
+    (
+        "N6: Landlock's availability counts as confinement",
+        _F05_IDENTITY,
+        '        landlock: judged(Condition::NotApplicable, "build", "no-ruleset"),\n',
+        '        landlock: judged(Condition::Enforced, "build", "no-ruleset"),\n',
+    ),
+    (
+        "N7: the shared identity map counts as user-namespace isolation",
+        _F05_IDENTITY,
+        '            judged(Condition::Unsupported, "inside", "shared")\n',
+        '            judged(Condition::Enforced, "inside", "shared")\n',
+    ),
+    (
+        "N8: a kernel not running AppArmor is judged from the labels",
+        _F05_IDENTITY,
+        "    if !host.apparmor {\n"
+        '        return judged(Condition::Unsupported, "host", "kernel-has-none");\n'
+        "    }\n",
+        "",
+    ),
+    (
+        "N9: a listed but disabled AppArmor counts as running",
+        _F05_IDENTITY,
+        '            apparmor: apparmor_enabled.is_some_and(|e| e.trim() == "Y")'
+        " && listed != Some(false),\n",
+        "            apparmor: apparmor_enabled.is_some() && listed != Some(false),\n",
+    ),
+    (
+        "N10: the host's user-namespace mode reads as shared",
+        _F05_IDENTITY,
+        '    if recorded.userns_mode == Some("host") {\n',
+        '    if recorded.userns_mode == Some("host") && facts.is_none() {\n',
+    ),
+    (
+        "N11: SELinux's label is read as an AppArmor profile",
+        _F05_IDENTITY,
+        "            .or_else(|| f.lsm.as_ref().filter(|_| host.selinux_enforcing.is_none()))\n",
+        "            .or_else(|| f.lsm.as_ref())\n",
+    ),
+)
+IDENTITY_EVIDENCE_DIR = ROOT / "target" / "f05-evidence"
+IDENTITY_RECORD_SCHEMA = "direwolf.f05.mutation-review"
+
+
+def _identity_stages() -> tuple[MutationStage, ...]:
+    """The review's detectors: the broker's identity tables and its
+    real-kernel mapping case."""
+    return (
+        MutationStage(
+            "broker-identity",
+            (
+                "cargo",
+                "test",
+                "--locked",
+                "-p",
+                "dwkd-broker",
+                "--bin",
+                "dwkd-broker",
+                "--",
+                "sandbox::identity_tests",
+            ),
+        ),
+    )
+
+
+def identity_review(
+    mutations: Sequence[tuple[str, str, str, str]] = IDENTITY_MUTATIONS,
+    *,
+    root: Path | None = None,
+    tests: Callable[..., SuiteRun] = run_tests,
+) -> dict[str, object]:
+    """F-05's mutation review, as F-04's and F-18's: see `_finding_review`."""
+    return _finding_review(
+        ("F-05", "0069", "sandbox-identity-mutations", IDENTITY_RECORD_SCHEMA),
+        "sandbox identity",
+        mutations,
+        stages=_identity_stages(),
+        build=("cargo", "build", "--locked", "-p", "dwkd-broker"),
+        directory=IDENTITY_EVIDENCE_DIR if root is None else root,
+        tests=tests,
+    )
+
+
+def task_sandbox_identity_mutations() -> None:
+    """Weaken each guard of the environment identity judgement in turn
+    (F-05, ADR-0069, Proposed); the broker's identity tables must catch
+    every one.
+
+    The unmutated baseline must pass first; every file is restored
+    byte-identically whatever happens, and checked; the record is kept in
+    target/f05-evidence/. Linux, local, and never run beside another build.
+    The real environments' judgement is `make sandbox-foundation-evidence`'s.
+    """
+    if not sys.platform.startswith("linux"):
+        raise TaskError("NOT EXERCISED: the identity judgement is the broker's; run it in WSL2")
+    identity_review()
+
+
 # M5d.3 (ADR-0052 §7): a sandboxed `process.exec` that consumes a credential.
 SECRET_SANDBOX_BROKER_TESTS = (
     "linux::a_descriptor_secret_reaches_the_program_on_descriptor_three_and_nowhere_else",
@@ -16076,6 +16223,7 @@ TASKS = {
     "approver-identity-mutations": task_approver_identity_mutations,
     "proxy-peer-evidence": task_proxy_peer_evidence,
     "proxy-peer-mutations": task_proxy_peer_mutations,
+    "sandbox-identity-mutations": task_sandbox_identity_mutations,
     "sandbox-neighbour-mutations": task_sandbox_neighbour_mutations,
     "sandbox-secret-evidence": task_sandbox_secret_evidence,
     "sandbox-secret-mutations": task_sandbox_secret_mutations,

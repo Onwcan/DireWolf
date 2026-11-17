@@ -33,6 +33,8 @@
 
 mod digest;
 mod environment;
+// F-05 (ADR-0069): the environment's identity and confinement, reported.
+mod identity;
 mod inspect;
 mod oci;
 mod plan;
@@ -683,3 +685,6 @@ mod admission_tests;
 #[cfg(test)]
 #[path = "destroy_tests.rs"]
 mod destroy_tests;
+#[cfg(test)]
+#[path = "identity_tests.rs"]
+mod identity_tests;

@@ -796,6 +796,13 @@ exempt_paths = [
     # their own runtime-descriptor fixtures and proxy directories. They open
     # no workspace path and launch no OCI client or container.
     "crates/dwkd-broker/src/sandbox/destroy_tests.rs",
+    # F-05 (ADR-0069): the identity judgement reads three of the host
+    # kernel's own files -- the securityfs module list, AppArmor's `enabled`
+    # parameter and SELinux's `enforce` -- and nothing a workspace names.
+    "crates/dwkd-broker/src/sandbox/identity.rs",
+    # F-05: its unit tests, under `cfg(test)`, read the same files and the
+    # test process's own `/proc/self/uid_map` and `gid_map`.
+    "crates/dwkd-broker/src/sandbox/identity_tests.rs",
 ]
 suffixes = [".rs"]
 patterns = [
@@ -839,6 +846,12 @@ M5d.1 (ADR-0052 §13): `posture.rs` reads `/proc/sys/kernel/yama/ptrace_scope`
 and `stat`s the broker's own executable, once, before it serves, to refuse a
 deployment where a process of its uid could trace the processes it starts
 before they harden themselves (ADR-0050 §21). Neither is a workspace name.
+
+F-05 (ADR-0069): `sandbox/identity.rs` reads `/sys/kernel/security/lsm`,
+`/sys/module/apparmor/parameters/enabled` and `/sys/fs/selinux/enforce` each
+time it judges an environment, to say whether the host's kernel runs the
+security module a label claims; its tests read the same files and the test
+process's own uid and gid maps. None is a workspace name.
 
 Hygiene, not containment.
 """

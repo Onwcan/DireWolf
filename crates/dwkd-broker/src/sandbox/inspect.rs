@@ -198,6 +198,17 @@ impl<'a> Record<'a> {
             .map(|(_, v)| v)
     }
 
+    /// What the record says of the container's identity and confinement
+    /// (F-05, ADR-0069): its user-namespace mode, its AppArmor profile and
+    /// its SELinux process label, as the runtime recorded them.
+    pub(crate) fn recorded_identity(&self) -> super::identity::Recorded<'a> {
+        super::identity::Recorded {
+            userns_mode: text(self.object, &["HostConfig", "UsernsMode"]),
+            apparmor_profile: text(self.object, &["AppArmorProfile"]),
+            process_label: text(self.object, &["ProcessLabel"]),
+        }
+    }
+
     /// What the container is to its environment, by its role label.
     pub(crate) fn role(&self) -> Option<ContainerRole> {
         ContainerRole::from_label(self.label(LABEL_ROLE)?)
@@ -326,6 +337,9 @@ impl<'a> Record<'a> {
                 verdict(text(o, &["HostConfig", "UTSMode"]).map(str::is_empty)),
             ),
             (
+                // Only that the runtime was not told to use the host's mode:
+                // the mapping the container has is the probe's to read and
+                // `identity`'s to report (F-05, ADR-0069).
                 SandboxInvariant::HostUsernsNotHost,
                 verdict(text(o, &["HostConfig", "UsernsMode"]).map(|m| m != "host")),
             ),

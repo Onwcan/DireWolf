@@ -194,7 +194,14 @@ wire_enum! {
         HostIpcNamespacePrivate = "HOST_IPC_NAMESPACE_PRIVATE",
         /// A private UTS namespace.
         HostUtsNamespacePrivate = "HOST_UTS_NAMESPACE_PRIVATE",
-        /// Not the host's user namespace mode.
+        /// The runtime's record does not put the container in the host's user
+        /// namespace mode (`UsernsMode` is not `host`). **Not** a user
+        /// namespace of its own: under the deployment contract the runtime
+        /// keeps the default, the container shares the host's initial user
+        /// namespace and its workload uid 10001 *is* host uid 10001 (F-05,
+        /// ADR-0069). The mapping the container really has is measured from
+        /// inside ([`IdentityFacts`]) and reported by the broker, never
+        /// inferred from this name.
         HostUsernsNotHost = "HOST_USERNS_NOT_HOST",
         /// A private cgroup namespace.
         HostCgroupNamespacePrivate = "HOST_CGROUP_NAMESPACE_PRIVATE",
@@ -489,9 +496,11 @@ wire_int! {
     /// The probe report's schema version: 2 since M5b added the `PROXY_ONLY`
     /// and direct-egress invariants (ADR-0048); 3 since M5d.4 replaced the
     /// workspace's identity with its whole [`WorkspaceFacts`] and added the
-    /// group's inheritance. A report of an earlier version — a probe built
-    /// before them — is not a report.
-    ProbeReportVersion(u16), min = 3, max = 3
+    /// group's inheritance; 4 since F-05 (ADR-0069) added the probe's own
+    /// [`IdentityFacts`]. A report of an earlier version than 3 -- a probe
+    /// built before them -- is not a report; a version-3 report, from a probe
+    /// built before F-05, is still one, and says nothing of its identity.
+    ProbeReportVersion(u16), min = 3, max = 4
 }
 
 wire_struct! {
@@ -522,6 +531,9 @@ wire_struct! {
         /// What the mounted workspace is, as the probe found it -- all of it,
         /// or nothing when any part could not be read.
         optional workspace: WorkspaceFacts,
+        /// Who the probe is, as its own kernel states it (F-05): present in
+        /// every version-4 report and in no version-3 one.
+        optional identity: IdentityFacts,
     }
 }
 
@@ -538,6 +550,14 @@ impl ProbeReport {
     /// Anything else.
     pub fn decode_bytes(bytes: &[u8]) -> Result<Self, ProtocolError> {
         let report: Self = super::decode_bytes(bytes, MAX_PROBE_REPORT_BYTES)?;
+        // A version-4 report says who the probe is; an earlier one cannot.
+        if (report.version.get() >= 4) != report.identity.is_some() {
+            return Err(ProtocolError::schema(
+                crate::error::Violation::Inconsistent,
+                "/identity",
+                "a version-4 probe report, and only one, carries the probe's identity",
+            ));
+        }
         let mut seen = Vec::new();
         for check in &report.checks {
             if seen.contains(&check.invariant) || check.invariant.vantage() != Vantage::Container {
@@ -712,6 +732,139 @@ impl WorkspaceFacts {
             self.blocks.value(),
             self.blocks_available.value(),
         )
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The probe's identity, as its own kernel states it (F-05, ADR-0069).
+// ---------------------------------------------------------------------------
+
+wire_struct! {
+    /// One line of `/proc/self/uid_map` or `gid_map`: ids `inside ..
+    /// inside + count` in the probe's user namespace are ids `outside ..` in
+    /// the namespace that made it.
+    IdRange: reject {
+        /// The first id inside.
+        required inside: KernelNumber,
+        /// The first id outside.
+        required outside: KernelNumber,
+        /// How many ids the line maps. Never 0.
+        required count: KernelNumber,
+    }
+}
+
+/// A user namespace's mapping as the kernel states it: at most 8 lines. A
+/// mapping of more is not one DireWolf judges.
+pub type IdMap = BoundedList<IdRange, 8>;
+
+/// The kernel's identity mapping: every id is itself, the only mapping of
+/// the initial user namespace.
+const IDENTITY_COUNT: u64 = 4_294_967_295;
+
+/// The mapping `/proc/<pid>/uid_map` or `gid_map` states: whitespace-separated
+/// `inside outside count` lines. `None` for any line that is not three
+/// decimal numbers with a count of at least 1, for none, or for more than 8.
+#[must_use]
+pub fn id_map_from_kernel(text: &str) -> Option<IdMap> {
+    let mut ranges = Vec::new();
+    for line in text.lines() {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        let [inside, outside, count] = fields.as_slice() else {
+            return None;
+        };
+        let number = |field: &str| -> Option<u64> {
+            (!field.is_empty() && field.bytes().all(|b| b.is_ascii_digit()))
+                .then(|| field.parse::<u64>().ok())
+                .flatten()
+        };
+        let (inside, outside, count) = (number(inside)?, number(outside)?, number(count)?);
+        if count == 0 {
+            return None;
+        }
+        ranges.push(IdRange {
+            inside: KernelNumber::from_u64(inside),
+            outside: KernelNumber::from_u64(outside),
+            count: KernelNumber::from_u64(count),
+        });
+    }
+    if ranges.is_empty() {
+        return None;
+    }
+    IdMap::new(ranges)
+}
+
+/// Whether `map` is the kernel's identity mapping (`0 0 4294967295`): the
+/// one line the initial user namespace has, under which an id inside is the
+/// same id on the host.
+#[must_use]
+pub fn is_identity_map(map: &IdMap) -> bool {
+    matches!(
+        map.as_slice(),
+        [IdRange { inside, outside, count }]
+            if inside.value() == 0 && outside.value() == 0 && count.value() == IDENTITY_COUNT
+    )
+}
+
+/// The id outside that `inside` maps to under `map`, if it is mapped.
+#[must_use]
+pub fn mapped_outside(map: &IdMap, inside: u64) -> Option<u64> {
+    map.iter().find_map(|range| {
+        let first = range.inside.value();
+        let offset = inside.checked_sub(first)?;
+        (offset < range.count.value()).then(|| range.outside.value().checked_add(offset))?
+    })
+}
+
+wire_text! {
+    /// A Linux security module's label for a process, as the kernel prints
+    /// it in `/proc/self/attr/...` -- `docker-default (enforce)`,
+    /// `system_u:system_r:container_t:s0:c1,c2`, `unconfined`, `kernel`:
+    /// printable ASCII, at most 255 characters. Data, never authority: the
+    /// broker compares it with the runtime's record and the host's kernel.
+    LsmLabel,
+    max_chars = 255,
+    pattern = Some("^[!-~][ -~]{0,254}$"),
+    format = None,
+    validate = |s| {
+        !s.is_empty()
+            && s.len() <= 255
+            && !s.starts_with(' ')
+            && s.bytes().all(|b| (0x20..=0x7e).contains(&b))
+    }
+}
+
+impl LsmLabel {
+    /// The label the kernel printed: its bytes up to a newline or a NUL --
+    /// SELinux ends one with a NUL, AppArmor with a newline -- and nothing
+    /// that is not a label.
+    #[must_use]
+    pub fn from_kernel(bytes: &[u8]) -> Option<Self> {
+        let end = bytes
+            .iter()
+            .position(|b| matches!(b, b'\n' | b'\0'))
+            .unwrap_or(bytes.len());
+        let text = core::str::from_utf8(bytes.get(..end)?).ok()?;
+        Self::new(text.trim_end().to_owned())
+    }
+}
+
+wire_struct! {
+    /// Who the probe is, as its own kernel states it (F-05, ADR-0069): its
+    /// user namespace's mappings and its security module labels. Facts,
+    /// never verdicts: the broker judges them against the runtime's record
+    /// of the container and the host's kernel. A field the probe could not
+    /// read is absent.
+    IdentityFacts: reject {
+        /// `/proc/self/uid_map`.
+        optional uid_map: IdMap,
+        /// `/proc/self/gid_map`.
+        optional gid_map: IdMap,
+        /// `/proc/self/attr/current`: the label of the major security
+        /// module the kernel runs, whatever it is.
+        optional lsm: LsmLabel,
+        /// `/proc/self/attr/apparmor/current`, where the kernel has
+        /// AppArmor running.
+        optional apparmor: LsmLabel,
     }
 }
 
@@ -895,6 +1048,7 @@ mod tests {
             version: ProbeReportVersion::new(3).unwrap(),
             checks,
             workspace: Some(facts()),
+            identity: None,
         };
         let bytes = report.to_bytes().unwrap();
         let text = String::from_utf8(bytes.clone()).unwrap();
@@ -1156,5 +1310,131 @@ mod tests {
         assert!(ContainerRef::new(digest.clone()).is_some());
         assert!(ContainerRef::new(&digest[..12]).is_none(), "no short ids");
         assert!(StoreInstance::new("").is_none());
+    }
+
+    // --- F-05 (ADR-0069): the probe's identity -----------------------------
+
+    #[test]
+    fn a_mapping_is_read_as_the_kernel_prints_it_and_nothing_else() {
+        // The initial user namespace's one line, column-aligned as printed.
+        let identity = id_map_from_kernel("         0          0 4294967295\n").unwrap();
+        assert!(is_identity_map(&identity));
+        assert_eq!(mapped_outside(&identity, 10_001), Some(10_001));
+        // `unshare --user --map-current-user`, `--map-root-user`, and a
+        // runtime's subordinate range: none is the identity.
+        for (text, inside, outside) in [
+            ("1000 1000 1\n", 1000, Some(1000)),
+            ("0 1000 1\n", 0, Some(1000)),
+            ("0 100000 65536\n", 10_001, Some(110_001)),
+            ("0 100000 65536\n", 65_536, None),
+        ] {
+            let map = id_map_from_kernel(text).unwrap();
+            assert!(!is_identity_map(&map), "{text:?}");
+            assert_eq!(mapped_outside(&map, inside), outside, "{text:?}");
+        }
+        // Two lines, the second offset: each id finds its own line.
+        let two = id_map_from_kernel("0 100000 1000\n1000 1000 1\n").unwrap();
+        assert_eq!(mapped_outside(&two, 1000), Some(1000));
+        assert_eq!(mapped_outside(&two, 999), Some(100_999));
+        // Not a mapping: empty, a zero count, a sign, words, short lines,
+        // more than eight lines.
+        let nine = "1 1 1\n".repeat(9);
+        for bad in [
+            "",
+            "\n",
+            "0 0 0\n",
+            "-1 0 1\n",
+            "0 0\n",
+            "a b c\n",
+            "0 0 1 1\n",
+            &nine,
+        ] {
+            assert!(id_map_from_kernel(bad).is_none(), "{bad:?}");
+        }
+        // A full identity is one line, not a near miss.
+        assert!(!is_identity_map(
+            &id_map_from_kernel("0 0 4294967294\n").unwrap()
+        ));
+        assert!(!is_identity_map(
+            &id_map_from_kernel("1 1 4294967295\n").unwrap()
+        ));
+    }
+
+    #[test]
+    fn a_security_label_is_printable_bounded_and_ends_where_the_kernel_ends_it() {
+        assert_eq!(
+            LsmLabel::from_kernel(b"docker-default (enforce)\n")
+                .unwrap()
+                .as_str(),
+            "docker-default (enforce)"
+        );
+        assert_eq!(
+            LsmLabel::from_kernel(b"system_u:system_r:container_t:s0:c1,c2\0")
+                .unwrap()
+                .as_str(),
+            "system_u:system_r:container_t:s0:c1,c2"
+        );
+        assert_eq!(
+            LsmLabel::from_kernel(b"kernel\0").unwrap().as_str(),
+            "kernel"
+        );
+        // Control characters, escapes, bidi controls, non-ASCII, nothing,
+        // and more than 255 characters are not labels.
+        let long = vec![b'a'; 256];
+        for bad in [
+            &b""[..],
+            b"\n",
+            b"\x1b[2Jfake (enforce)",
+            b"profile\x07",
+            "x\u{202e}y".as_bytes(),
+            "caf\u{e9}".as_bytes(),
+            b" leading",
+            &long,
+        ] {
+            assert!(LsmLabel::from_kernel(bad).is_none(), "{bad:?}");
+        }
+    }
+
+    fn identity() -> IdentityFacts {
+        IdentityFacts {
+            uid_map: id_map_from_kernel("0 0 4294967295\n"),
+            gid_map: id_map_from_kernel("0 0 4294967295\n"),
+            lsm: LsmLabel::from_kernel(b"docker-default (enforce)\n"),
+            apparmor: LsmLabel::from_kernel(b"docker-default (enforce)\n"),
+        }
+    }
+
+    #[test]
+    fn a_version_four_report_and_only_one_says_who_the_probe_is() {
+        let checks = InvariantChecks::new(
+            probe_invariants()
+                .into_iter()
+                .map(|invariant| InvariantCheck {
+                    invariant,
+                    verdict: Verdict::Pass,
+                })
+                .collect(),
+        )
+        .unwrap();
+        let report = |version: u16, identity: Option<IdentityFacts>| ProbeReport {
+            kind: ProbeReportKind::Report,
+            version: ProbeReportVersion::new(version).unwrap(),
+            checks: checks.clone(),
+            workspace: Some(facts()),
+            identity,
+        };
+        // A version-4 report with its identity, and a version-3 one without:
+        // each decodes to exactly itself.
+        for good in [report(4, Some(identity())), report(3, None)] {
+            let bytes = good.to_bytes().unwrap();
+            assert_eq!(ProbeReport::decode_bytes(&bytes).unwrap(), good);
+        }
+        // Either without the other is not a report.
+        for bad in [report(4, None), report(3, Some(identity()))] {
+            let bytes = bad.to_bytes().unwrap();
+            assert!(ProbeReport::decode_bytes(&bytes).is_err(), "{bad:?}");
+        }
+        assert!(ProbeReportVersion::new(5).is_none());
+        assert!(ProbeReportVersion::new(2).is_none());
     }
 }

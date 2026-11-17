@@ -53,7 +53,7 @@ enum AssuranceLevel { None, ProcessIsolation, ContainerIsolation, VmIsolation }
 
 ```yaml
 image:            direwolf/sandbox-base:<pinned-digest>   # digest, never a tag
-user:             10001:10001                              # non-root, no host-uid overlap
+user:             10001:10001                              # non-root; host uid 10001 (identity map, F-05)
 read_only_root:   true
 workdir:          /workspace
 mounts:
@@ -66,7 +66,7 @@ cap_drop:         [ALL]
 cap_add:          []              # empty. Not DAC_OVERRIDE, not CHOWN, not FOWNER.
 no_new_privileges: true
 seccomp:          direwolf-default.json    # stricter than the runtime default; see §3
-apparmor/selinux: enforced where available
+apparmor/selinux: the runtime's default; measured and reported, not required (F-05)
 pids_limit:       256
 memory:           2Gi
 memory_swap:      2Gi             # == memory, i.e. swap disabled
@@ -78,12 +78,14 @@ oom_score_adj:    500
 device_cgroup:    deny-all except /dev/null,zero,random,urandom,tty
 ipc:              private
 uts:              private
-userns:           remap           # Linux: user namespace remapping where available
+userns:           host's initial  # identity map, measured and reported -- not remapped (F-05)
 ```
 
 **As built in M5a** ([ADR-0047](adr/0047-m5a-oci-execution-environment-and-measured-assurance.md) §5): every line above, with these differences stated rather than implied. `network` is `NO_NETWORK` (the evidence harness's topology, only with the broker's `--allow-evidence-topology`) or, since M5b, `PROXY_ONLY` ([ADR-0048](adr/0048-m5b-proxy-only-topology-and-connect-proxy.md): the same interface-free namespace, `169.254.7.1/32` added to its loopback by a one-shot setup container, and an unprivileged relay as its only peer; the environment's proxy variables are exactly the broker's). The device set also admits `/dev/full` and `/dev/ptmx` (the runtime's defaults), and nothing else. The workspace bind carries no `nosuid,nodev` as mount flags — the runtime has none for binds — and `no_new_privileges`, `cap_drop: ALL` (no `mknod`) and the device cgroup deliver what they would. `disk_quota`, the 600 s workload `timeout` and `userns: remap` concern workloads and are M5d's; AppArmor/SELinux labels are the runtime's default where it has them, not a required invariant.
 
 **Found in M5e.2 (finding F-R8; closed 2026-11-01 by ADR-0056, accepted):** `userns: remap` was not built — every environment's workload is host uid 10001 — and `nproc: 256` limited a count the kernel keeps **per uid**, so that count was shared by every environment while `pids_limit` bounds each one alone. A workload holding its own bound therefore stopped every other environment from starting a process, the broker's probe included, until it ended; the other run's workload was refused `ENVIRONMENT_NOT_CLEAN` and its environment destroyed. It failed closed, but one run could deny the others. Nothing was changed to hide it; the remedy was the owner's ([M5E_ASSURANCE_PLAN.md](M5E_ASSURANCE_PLAN.md) §5a). [ADR-0056](adr/0056-m5e-cross-run-task-limit-isolation.md) (**accepted** 2026-11-01) keeps `pids_limit` as each environment's bound and raises `nproc` to a host-wide backstop no set of environments the authority allows can reach; the owner selected that remedy, Option B, for implementation on 2026-10-31. As built: `nproc` is `PIDS_LIMIT × MAX_LIVE_ENVIRONMENTS × 2` = 8 192, soft and hard, still set by the plan and measured exactly from the runtime's record and from inside — `256` and `unlimited` are refused as any other value is — and an environment without its pids limit is refused, since that limit is now its only task bound. R8's neighbour evidence is required again (M5E_ASSURANCE_PLAN.md §3) and passed hosted (run [41242001763](https://github.com/Onwcan/DireWolf/actions/runs/41242001763)), the 16-environment cap included; the owner accepted the ADR on 2026-11-01. Every environment is still the same host uid: the ADR's deployment contract — one store's environments on a host, no other process of uid 10001 — and its residuals (§§4, 5 there) say what that leaves.
+
+**Measured since F-05** ([ADR-0069](adr/0069-f05-user-namespace-and-lsm-assurance-are-measured-not-assumed.md), Proposed; [F05_USERNS_LSM.md](F05_USERNS_LSM.md)): the profile's `userns` and `apparmor/selinux` lines above say what is built, not what was designed (`userns: remap`, `apparmor/selinux: enforced where available`). Each time the broker judges an environment, the digest-pinned probe reports its own uid and gid maps and security labels, and the broker writes one `sandbox_identity` event judging them against the runtime's record and the host's kernel. Every environment shares the host's initial user namespace — the identity map, reported `UNSUPPORTED:inside:shared`, never as remapping — because the workspace group (ADR-0052 §6), the task backstop (ADR-0056), the proxy directory's ACL (ADR-0048) and the proxy's peer check (ADR-0068) all depend on it, and each would refuse a remapped environment. AppArmor or SELinux counts as `ENFORCED` only where the host's kernel runs it, the probe's kernel shows an enforcing profile or a confined domain, and the record names the same one; on Docker Desktop, which runs neither, the event says `UNSUPPORTED`. Landlock is `NOT_APPLICABLE`: nothing installs a ruleset. `HOST_USERNS_NOT_HOST` checks only that the runtime was not told to use the host's mode. None of this admits or refuses an environment; remapping, a required module and carrying the judgement to the authority are open decisions (ADR-0069 OD-1 to OD-3).
 
 ### Hard rules — no configuration option exists to violate these
 
@@ -169,7 +171,7 @@ Requirements, all of which must hold:
 5. An audit record with `assurance=None` and the full canonical command.
 6. Still subject to: env scrubbing, rlimits, egress proxy routing, output caps, and the full policy pipeline. Host execution removes *isolation*, not *authorization*.
 
-On Linux, host execution additionally applies Landlock (where available) and a seccomp filter, giving partial containment even without a container. This is `AssuranceLevel::ProcessIsolation`, reported honestly as less than `ContainerIsolation`.
+On Linux, host execution was designed to apply Landlock (where available) and a seccomp filter, giving partial containment even without a container — `AssuranceLevel::ProcessIsolation`, less than `ContainerIsolation`. **Not built:** no production build launches on the host (M4d), the `local` environment's confinement has its own ADR with M6 ([ADR-0052](adr/0052-m5d-sandboxed-process-exec.md) §12), and DireWolf installs no Landlock ruleset anywhere ([ADR-0069](adr/0069-f05-user-namespace-and-lsm-assurance-are-measured-not-assumed.md), Proposed).
 
 ## 4a. The allowlisted-interpreter problem
 
@@ -199,12 +201,13 @@ None of this makes the allowlist a confinement boundary. It narrows what an inje
 |---|---|---|---|
 | Container isolation | Native (namespaces, cgroups v2) | Docker Desktop **VM** — arguably stronger | Docker Desktop + WSL2 (Linux VM) |
 | seccomp | ✅ | ✅ inside the VM | ✅ inside WSL2 |
-| Landlock (host exec) | ✅ 5.13+ | ✗ | ✗ |
+| Landlock (host exec) | designed, **not built** (F-05) | ✗ | ✗ |
 | Seatbelt (host exec) | ✗ | ✅ `sandbox_init` (deprecated but functional) | ✗ |
 | Job objects / restricted tokens (host exec) | ✗ | ✗ | ✅ partial |
 | `openat2` RESOLVE_* | ✅ 5.6+ | ✗ — no resolver in M4a (a fallback walk needs its own ADR) | ✗ — no resolver in M4a (a fallback walk + handle identity needs its own ADR) |
 | cgroup resource limits | ✅ | via VM | via VM |
-| User namespace remap | ✅ | n/a | n/a |
+| User namespace remap | **not built**: the identity map, measured and reported (F-05) | n/a | n/a |
+| AppArmor / SELinux label | runtime default, measured and reported; enforced only where the host's kernel runs it (F-05) | inside the VM: not measured | inside WSL2: none on Docker Desktop (measured) |
 | **Overall host-exec assurance** | **Good** | **Moderate** | **Weak** |
 | **Overall sandboxed assurance** | **Good** | **Good** (VM) | **Good** (VM) |
 

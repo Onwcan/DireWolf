@@ -743,6 +743,17 @@ impl<'a> Oci<'a> {
             Verdict::Unobservable
         };
         checks.push((SandboxInvariant::HostProbeDigest, digest));
+        // Who runs in it and what confines it, as its own kernel says, judged
+        // against the record and the host's kernel: reported, never admitted
+        // on (F-05, ADR-0069).
+        crate::event(&super::identity::line(
+            spec.environment_id.as_str(),
+            &super::identity::judge(
+                &record.recorded_identity(),
+                report.as_ref().and_then(|r| r.identity.as_ref()),
+                super::identity::HostLsm::read(),
+            ),
+        ));
         checks.extend(workspace_checks(
             report.as_ref().and_then(|r| r.workspace.as_ref()),
             spec,

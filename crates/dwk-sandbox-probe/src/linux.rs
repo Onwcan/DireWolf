@@ -16,9 +16,10 @@ use std::time::{Duration, Instant};
 
 use dwk_proto::brokerp::KernelNumber;
 use dwk_proto::brokerp::sandbox::{
-    InvariantCheck, InvariantChecks, NetworkTopology, ProbeReport, ProbeReportKind,
-    ProbeReportVersion, SandboxInvariant as I, Verdict, WORKSPACE_GROUP, WorkspaceFacts,
-    WorkspaceReport, WorkspaceReportKind, WorkspaceReportVersion, probe_invariants,
+    IdentityFacts, InvariantCheck, InvariantChecks, LsmLabel, NetworkTopology, ProbeReport,
+    ProbeReportKind, ProbeReportVersion, SandboxInvariant as I, Verdict, WORKSPACE_GROUP,
+    WorkspaceFacts, WorkspaceReport, WorkspaceReportKind, WorkspaceReportVersion,
+    id_map_from_kernel, probe_invariants,
 };
 use dwk_proto::wire::id::EnvironmentId;
 use dwk_sandbox_profile as profile;
@@ -221,7 +222,7 @@ fn measure(environment: &EnvironmentId) -> ExitCode {
                 .map_or(Verdict::Unobservable, |(_, v)| *v),
         })
         .collect();
-    let (Some(checks), Some(version)) = (InvariantChecks::new(checks), ProbeReportVersion::new(3))
+    let (Some(checks), Some(version)) = (InvariantChecks::new(checks), ProbeReportVersion::new(4))
     else {
         return ExitCode::from(3);
     };
@@ -230,8 +231,31 @@ fn measure(environment: &EnvironmentId) -> ExitCode {
         version,
         checks,
         workspace,
+        identity: Some(identity_facts()),
     };
     print_report(report.to_bytes().ok())
+}
+
+/// Who this process is, as its kernel states it (F-05, ADR-0069): its user
+/// namespace's uid and gid mappings, and its security module labels. Read,
+/// never judged: the broker compares them with the runtime's record and the
+/// host's kernel. What cannot be read is left out -- `attr/apparmor/current`
+/// answers `EINVAL` where AppArmor is not running.
+fn identity_facts() -> IdentityFacts {
+    IdentityFacts {
+        uid_map: fs::read_to_string("/proc/self/uid_map")
+            .ok()
+            .and_then(|text| id_map_from_kernel(&text)),
+        gid_map: fs::read_to_string("/proc/self/gid_map")
+            .ok()
+            .and_then(|text| id_map_from_kernel(&text)),
+        lsm: fs::read("/proc/self/attr/current")
+            .ok()
+            .and_then(|bytes| LsmLabel::from_kernel(&bytes)),
+        apparmor: fs::read("/proc/self/attr/apparmor/current")
+            .ok()
+            .and_then(|bytes| LsmLabel::from_kernel(&bytes)),
+    }
 }
 
 /// Print one report, or exit 3 having printed nothing.
@@ -927,8 +951,28 @@ fn unshare_blocked() -> Verdict {
 
 #[cfg(test)]
 mod tests {
-    use super::{Verdict, WorkspaceMount, cgroup_limits_in, mount_at, rlimits_in};
+    use super::{Verdict, WorkspaceMount, cgroup_limits_in, identity_facts, mount_at, rlimits_in};
+    use dwk_proto::brokerp::sandbox::mapped_outside;
     use dwk_sandbox_profile as profile;
+
+    #[test]
+    fn the_probe_reads_its_own_mapping_from_the_kernel() {
+        // F-05 (ADR-0069): the mapping this test process has, read through
+        // the probe's own reader from the real kernel. Whatever namespace the
+        // test runs in, its own uid maps somewhere, and the map is a real
+        // one: never empty, never a guess.
+        let facts = identity_facts();
+        let own = std::fs::metadata("/proc/self")
+            .map(|meta| u64::from(std::os::unix::fs::MetadataExt::uid(&meta)));
+        assert!(
+            matches!(
+                (&facts.uid_map, &facts.gid_map, own),
+                (Some(uid_map), Some(gid_map), Ok(own))
+                    if mapped_outside(uid_map, own).is_some() && !gid_map.as_slice().is_empty()
+            ),
+            "{facts:?}"
+        );
+    }
 
     /// `/proc/self/limits` as the kernel prints it, with `processes` for the
     /// task limit's soft and hard values.

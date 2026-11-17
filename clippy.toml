@@ -11,5 +11,7 @@ doc-valid-idents = [
     "MACed",
     "MACs",
     "I-JSON",
+    "AppArmor",
+    "SELinux",
     "..",
 ]
