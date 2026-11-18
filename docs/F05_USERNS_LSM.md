@@ -170,3 +170,38 @@ As ADR-0069's Residuals and OD-1 to OD-4: one host uid for every
 environment; uid 0 inside is host uid 0; no security module on Docker
 Desktop; the judgement is the broker's alone until protocol 13; which relay
 connected stays ADR-0068's open question.
+
+## 12. Since ADR-0070 (Proposed): the host's vantage and a required module
+
+[ADR-0070](adr/0070-adr-0069-decisions-host-vantage-required-lsm-and-what-stays-deferred.md)
+takes ADR-0069's four decisions as far as they go without weakening a
+control or changing protocol 12:
+
+- **OD-1, built in part.** Where the broker shares the runtime's pid
+  namespace, it reads `/proc/<pid>/cgroup`, `uid_map` and `gid_map` of the
+  container's first process (`State.Pid`), bounded to 4 KiB each, once a
+  line of its control-group file ends in exactly `/<id>` or
+  `/docker-<id>.scope` -- before and after the maps. Two agreeing vantages
+  say `both`; two that disagree say `UNVERIFIED:both:contradiction`. The
+  identity map stays the contract: no supported runtime offers a user
+  namespace per container, and ADR-0070 records the migration a remapped
+  deployment needs.
+- **OD-2, built as an opt-in.** `dwkd-broker serve --require-lsm
+  apparmor|selinux`: the broker refuses to start where the host's kernel does
+  not enforce the module (SELinux permissive is not enforcement), and
+  refuses every environment not judged `ENFORCED` with `UNSUPPORTED`, after
+  taking it down, writing `sandbox_lsm_required … outcome=refused`. Without
+  the flag nothing changes; no flag turns it off.
+- **OD-3, deferred.** The judgement and the requirement's reason reach the
+  authority only with protocol 13, its own change.
+- **OD-4, deferred.** No process DireWolf confines opens a file by path (the
+  exchange worker's filter allows none; an architecture test holds it), so a
+  Landlock ruleset would add nothing until host execution exists (M6).
+
+| case | level | local (Docker Desktop) | hosted |
+|---|---|---|---|
+| the control-group table; a real namespace read from both sides | unit, kernel | passed | expected to pass |
+| a broker requiring AppArmor, and one requiring SELinux, on a host running neither | real process | refused to start (both) | SELinux refused |
+| a conforming environment met; one started `apparmor=unconfined` refused | real OCI | NOT EXERCISED (no AppArmor) | pending |
+| the userns vantage | real OCI | `inside` | `both`, pending |
+| `make sandbox-identity-mutations` | mutation | 20 of 20 killed | -- |

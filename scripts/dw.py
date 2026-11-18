@@ -2426,6 +2426,7 @@ SANDBOX_BROKER_TESTS = (
     "linux::a_broker_crash_after_creation_leaves_only_a_labelled_reapable_container",
     "linux::resource_limits_hold_under_bounded_pressure",
     "linux::latency_of_prepare_measure_and_destroy",
+    "linux::a_required_security_module_confines_every_environment_or_nothing_is_served",
 )
 SANDBOX_AUTHORITY_TESTS = (
     "linux::the_lifecycle_is_durable_before_every_effect",
@@ -9497,12 +9498,18 @@ def task_proxy_peer_mutations() -> None:
 # and the shared identity map each counted as enforced; a kernel not running
 # AppArmor judged from labels; a listed-but-disabled AppArmor counted as
 # running; the host's user-namespace mode read as shared; SELinux's label read
-# as AppArmor's. The detectors are the broker's identity tables; every mutant
-# must be KILLED by a named failing test, and the file restored
-# byte-identically. The probe report's own rules (its version, the identity
-# map) are the private protocol's, which nothing here may name (TX016); their
-# unit tests stand alone.
+# as AppArmor's. ADR-0070 (Proposed) adds the host's vantage on the user
+# namespace (OD-1) and the operator's required security module (OD-2): a
+# disagreement, a remapped host view and a substring of a control group each
+# believed; a REDUCED module, a permissive SELinux host, an unconfined
+# environment, the other module's state and two loose spellings of the flag
+# each accepted. The detectors are the broker's identity tables and its
+# command-line tests; every mutant must be KILLED by a named failing test,
+# and the file restored byte-identically. The probe report's own rules (its
+# version, the identity map) are the private protocol's, which nothing here
+# may name (TX016); their unit tests stand alone.
 _F05_IDENTITY = "crates/dwkd-broker/src/sandbox/identity.rs"
+_F05_CONFIG = "crates/dwkd-broker/src/config.rs"
 IDENTITY_MUTATIONS = (
     (
         "N1: an AppArmor profile in complain mode counts as enforced",
@@ -9548,8 +9555,10 @@ IDENTITY_MUTATIONS = (
     (
         "N7: the shared identity map counts as user-namespace isolation",
         _F05_IDENTITY,
-        '            judged(Condition::Unsupported, "inside", "shared")\n',
-        '            judged(Condition::Enforced, "inside", "shared")\n',
+        "        (Some(seen), None) if shared(seen) =>"
+        ' judged(Condition::Unsupported, "inside", "shared"),\n',
+        "        (Some(seen), None) if shared(seen) =>"
+        ' judged(Condition::Enforced, "inside", "shared"),\n',
     ),
     (
         "N8: a kernel not running AppArmor is judged from the labels",
@@ -9578,14 +9587,71 @@ IDENTITY_MUTATIONS = (
         "            .or_else(|| f.lsm.as_ref().filter(|_| host.selinux_enforcing.is_none()))\n",
         "            .or_else(|| f.lsm.as_ref())\n",
     ),
+    # ADR-0070 (Proposed), OD-1: the host's own vantage on the user namespace.
+    (
+        "N12: two vantages that disagree are not a contradiction",
+        _F05_IDENTITY,
+        "        (Some(seen), Some(hosted)) if seen != hosted => {\n",
+        "        (Some(seen), Some(hosted)) if seen != hosted && false => {\n",
+    ),
+    (
+        "N13: a remapped host view reads as shared",
+        _F05_IDENTITY,
+        "        (Some(_), Some(hosted)) if shared(hosted) => {\n",
+        "        (Some(_), Some(_)) if true => {\n",
+    ),
+    (
+        "N14: a process is believed the container's on a substring of its group",
+        _F05_IDENTITY,
+        "        !container.is_empty() && (last == container || last == scope)\n",
+        "        !container.is_empty() && line.contains(container)\n",
+    ),
+    # OD-2: the operator's required security module.
+    (
+        "N15: a REDUCED module meets the requirement",
+        _F05_IDENTITY,
+        "    of_required(required, identity).condition == Condition::Enforced\n",
+        "    of_required(required, identity).condition != Condition::Unverified\n",
+    ),
+    (
+        "N16: a permissive SELinux host is served as enforcing",
+        _F05_IDENTITY,
+        "        RequiredLsm::SeLinux => matches!(host.selinux_enforcing, Some(true)),\n",
+        "        RequiredLsm::SeLinux => host.selinux_enforcing.is_some(),\n",
+    ),
+    (
+        "N17: an environment the required module does not confine is admitted",
+        _F05_IDENTITY,
+        "        Some(module) if !meets(module, identity) => Err(BrokerRefusal::Unsupported),\n",
+        "        Some(module) if !meets(module, identity) && false =>"
+        " Err(BrokerRefusal::Unsupported),\n",
+    ),
+    (
+        "N18: the required module is judged by the other module's state",
+        _F05_IDENTITY,
+        "        RequiredLsm::AppArmor => &identity.apparmor,\n",
+        "        RequiredLsm::AppArmor => &identity.selinux,\n",
+    ),
+    (
+        "N19: --require-lsm takes a spelling it does not name",
+        _F05_CONFIG,
+        '        "apparmor" => RequiredLsm::AppArmor,\n',
+        '        "apparmor" | "AppArmor" | "landlock" => RequiredLsm::AppArmor,\n',
+    ),
+    (
+        "N20: --require-lsm given twice keeps the last",
+        _F05_CONFIG,
+        "    if slot.replace(module).is_some() {\n",
+        "    if slot.replace(module).is_some() && false {\n",
+    ),
 )
 IDENTITY_EVIDENCE_DIR = ROOT / "target" / "f05-evidence"
 IDENTITY_RECORD_SCHEMA = "direwolf.f05.mutation-review"
 
 
 def _identity_stages() -> tuple[MutationStage, ...]:
-    """The review's detectors: the broker's identity tables and its
-    real-kernel mapping case."""
+    """The review's detectors: the broker's identity tables, its
+    real-kernel mapping cases, and its command-line tests."""
     return (
         MutationStage(
             "broker-identity",
@@ -9599,6 +9665,7 @@ def _identity_stages() -> tuple[MutationStage, ...]:
                 "dwkd-broker",
                 "--",
                 "sandbox::identity_tests",
+                "config::tests",
             ),
         ),
     )
@@ -9635,6 +9702,175 @@ def task_sandbox_identity_mutations() -> None:
     if not sys.platform.startswith("linux"):
         raise TaskError("NOT EXERCISED: the identity judgement is the broker's; run it in WSL2")
     identity_review()
+
+
+# F-06 (ADR-0071, Proposed): each guard of the operator's egress allowlist
+# weakened in turn -- an empty list, a suffix, any port, any path, an unknown
+# member, a single label, a number each read as allowed; the predicate
+# ignored; BALANCED's and POWER's network rules not requiring it; a hop, and a
+# workload's tunnel, judged against the wrong entries; a relative file path
+# taken. The detectors are the allowlist's own tests, the pack fixtures, the
+# in-process net.http and workload launches, and the real binary's start;
+# every mutant must be KILLED by a named failing test, and the file restored
+# byte-identically. A leading `*` is refused twice (before and after the
+# capability grammar): weakening either alone is an equivalent mutant, so
+# neither is in the table.
+_F06_EGRESS = "crates/dwkd-authority/src/state/egress_allowlist.rs"
+EGRESS_ALLOWLIST_MUTATIONS = (
+    (
+        "G1: an empty allowlist covers every destination",
+        _F06_EGRESS,
+        "            .any(|d| d.port == port && d.host == host && d.scopes.contains(&scope))\n",
+        "            .any(|d| d.port == port && d.host == host && d.scopes.contains(&scope))\n"
+        "            || self.destinations.is_empty()\n",
+    ),
+    (
+        "G2: a host is covered by a suffix of it",
+        _F06_EGRESS,
+        "            .any(|d| d.port == port && d.host == host && d.scopes.contains(&scope))\n",
+        "            .any(|d| d.port == port && host.ends_with(d.host.as_str())"
+        " && d.scopes.contains(&scope))\n",
+    ),
+    (
+        "G3: any port of a named host is covered",
+        _F06_EGRESS,
+        "            .any(|d| d.port == port && d.host == host && d.scopes.contains(&scope))\n",
+        "            .any(|d| d.host == host && d.scopes.contains(&scope))\n",
+    ),
+    (
+        "G4: an entry covers both paths whatever it names",
+        _F06_EGRESS,
+        "            .any(|d| d.port == port && d.host == host && d.scopes.contains(&scope))\n",
+        "            .any(|d| d.port == port && d.host == host && !d.scopes.is_empty())\n",
+    ),
+    (
+        "G5: an unknown member is accepted",
+        _F06_EGRESS,
+        "        if !allowed.contains(&name) {\n",
+        "        if !allowed.contains(&name) && name.is_empty() {\n",
+    ),
+    (
+        "G6: a single-label host is accepted",
+        _F06_EGRESS,
+        "    if labels.len() < 2 {\n",
+        "    if labels.len() < 1 {\n",
+    ),
+    (
+        "G7: a numeric host is accepted",
+        _F06_EGRESS,
+        "        .is_some_and(|last| last.as_str().bytes().all(|b| b.is_ascii_digit()))\n",
+        "        .is_some_and(|_| false)\n",
+    ),
+    (
+        "G8: a rule requiring the allowlist matches whatever the authority said",
+        "crates/dwkd-authority/src/policy/predicate.rs",
+        "                |wanted| action.destination_allowlisted() == Some(wanted),\n",
+        "                |_| true,\n",
+    ),
+    (
+        "G9: BALANCED's registries need no allowlist entry",
+        "policy/balanced.toml",
+        'when.destination_allowlisted = true\nobligations = ["max_output_bytes=8388608"]\n',
+        'obligations = ["max_output_bytes=8388608"]\n',
+    ),
+    (
+        "G10: POWER's HTTPS needs no allowlist entry",
+        "policy/power.toml",
+        'when.destination_allowlisted = true\nobligations = ["max_output_bytes=33554432"]\n',
+        'obligations = ["max_output_bytes=33554432"]\n',
+    ),
+    (
+        "G11: a net.http hop is allowlisted whatever the file says",
+        "crates/dwkd-authority/src/state/net_http/plan.rs",
+        "        .with_destination_allowlisted(active.egress.covers(\n",
+        "        .with_destination_allowlisted(true || active.egress.covers(\n",
+    ),
+    (
+        "G12: a workload's tunnel is judged by the net.http entries",
+        "crates/dwkd-authority/src/state/workload_egress.rs",
+        "        crate::state::egress_allowlist::EgressScope::Workload,\n",
+        "        crate::state::egress_allowlist::EgressScope::NetHttp,\n",
+    ),
+    (
+        "G13: a relative --egress-allowlist path is taken",
+        "crates/dwkd-authority/src/server/config.rs",
+        "        if let Some(path) = &self.egress_allowlist\n            && !path.is_absolute()\n",
+        "        if let Some(path) = &self.egress_allowlist\n"
+        "            && path.as_os_str().is_empty()\n",
+    ),
+)
+EGRESS_ALLOWLIST_EVIDENCE_DIR = ROOT / "target" / "f06-evidence"
+EGRESS_ALLOWLIST_RECORD_SCHEMA = "direwolf.f06.mutation-review"
+
+
+def _egress_allowlist_stages() -> tuple[MutationStage, ...]:
+    """The review's detectors: the authority's unit tests (the allowlist, the
+    pack fixtures, the in-process net.http and workload launches), then the
+    real binary's start."""
+    return (
+        MutationStage(
+            "authority-units",
+            (
+                "cargo",
+                "test",
+                "--locked",
+                "-p",
+                "dwkd-authority",
+                "--lib",
+                "--",
+                "state::egress_allowlist",
+                "policy::fixtures",
+                "state::net_http::tests::f06",
+                "state::workload_route::tests::f06",
+            ),
+        ),
+        MutationStage(
+            "serve",
+            (
+                "cargo",
+                "test",
+                "--locked",
+                "-p",
+                "dwkd-authority",
+                "--test",
+                "transport_server",
+                "--",
+                "the_operator_egress_allowlist_is_checked",
+            ),
+        ),
+    )
+
+
+def egress_allowlist_review(
+    mutations: Sequence[tuple[str, str, str, str]] = EGRESS_ALLOWLIST_MUTATIONS,
+    *,
+    root: Path | None = None,
+    tests: Callable[..., SuiteRun] = run_tests,
+) -> dict[str, object]:
+    """F-06's mutation review, as F-05's: see `_finding_review`."""
+    return _finding_review(
+        ("F-06", "0071", "egress-allowlist-mutations", EGRESS_ALLOWLIST_RECORD_SCHEMA),
+        "egress allowlist",
+        mutations,
+        stages=_egress_allowlist_stages(),
+        build=("cargo", "build", "--locked", "-p", "dwkd-authority"),
+        directory=EGRESS_ALLOWLIST_EVIDENCE_DIR if root is None else root,
+        tests=tests,
+    )
+
+
+def task_egress_allowlist_mutations() -> None:
+    """Weaken each guard of the operator's egress allowlist in turn (F-06,
+    ADR-0071, Proposed); the authority's tests must catch every one.
+
+    The unmutated baseline must pass first; every file is restored
+    byte-identically whatever happens, and checked; the record is kept in
+    target/f06-evidence/. Linux, local, and never run beside another build.
+    The real broker's hops are `make net-http-evidence`'s.
+    """
+    if not sys.platform.startswith("linux"):
+        raise TaskError("NOT EXERCISED: the serve stage needs Linux; run it in WSL2")
+    egress_allowlist_review()
 
 
 # M5d.3 (ADR-0052 §7): a sandboxed `process.exec` that consumes a credential.
@@ -13670,6 +13906,14 @@ NET_HTTP_CASES = (
     ("broker-http", "wrong-name"),
     ("net-http", "broker-killed-takes-its-worker"),
     ("net-http", "budget-redirect-hop"),
+    # F-06 (ADR-0071, Proposed): the operator's egress allowlist, hop by hop.
+    ("net-http", "egress-allowlist-absent-denies"),
+    ("net-http", "egress-allowlist-cross-origin-hop-denied"),
+    ("net-http", "egress-allowlist-exact-allows"),
+    ("net-http", "egress-allowlist-neighbour-denies"),
+    ("net-http", "egress-allowlist-other-path-denies"),
+    ("net-http", "egress-allowlist-other-port-denies"),
+    ("net-http", "egress-allowlist-private-address-still-blocked"),
     ("net-http", "budget-requests"),
     ("net-http", "crash-after-exchange"),
     ("net-http", "crash-after-intent"),
@@ -16224,6 +16468,7 @@ TASKS = {
     "proxy-peer-evidence": task_proxy_peer_evidence,
     "proxy-peer-mutations": task_proxy_peer_mutations,
     "sandbox-identity-mutations": task_sandbox_identity_mutations,
+    "egress-allowlist-mutations": task_egress_allowlist_mutations,
     "sandbox-neighbour-mutations": task_sandbox_neighbour_mutations,
     "sandbox-secret-evidence": task_sandbox_secret_evidence,
     "sandbox-secret-mutations": task_sandbox_secret_mutations,

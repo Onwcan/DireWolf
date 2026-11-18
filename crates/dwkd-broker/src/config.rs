@@ -77,6 +77,32 @@ pub(crate) struct ServeConfig {
     /// real one can. Evidence only, stated loudly at start-up, never implied,
     /// and absent from every production configuration.
     pub(crate) evidence_trust: Option<PathBuf>,
+    /// The security module the operator requires of every environment
+    /// (ADR-0070, Proposed, OD-2): `--require-lsm apparmor|selinux`. The
+    /// broker then serves only where the host's kernel runs it in its
+    /// enforcing mode, and refuses every environment it does not confine as
+    /// both vantages show. Never implied, never defaulted; no flag turns it
+    /// off.
+    pub(crate) require_lsm: Option<RequiredLsm>,
+}
+
+/// A Linux security module an operator can require of every environment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RequiredLsm {
+    /// AppArmor: the profile the runtime's record names, enforcing.
+    AppArmor,
+    /// SELinux: a confined domain the record names, on an enforcing host.
+    SeLinux,
+}
+
+impl RequiredLsm {
+    /// The word `--require-lsm` takes, and the event line says.
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::AppArmor => "apparmor",
+            Self::SeLinux => "selinux",
+        }
+    }
 }
 
 /// What the broker does where a process of its uid could trace the
@@ -168,6 +194,9 @@ pub(crate) const UNVERIFIED_WORKSPACE: &str = "--allow-unverified-workspace";
 pub(crate) const EVIDENCE_EGRESS: &str = "--allow-evidence-egress";
 /// A test authority is trusted instead of Mozilla's roots.
 pub(crate) const EVIDENCE_TRUST: &str = "--allow-evidence-trust";
+/// A security module every environment must be confined by (a
+/// strengthening, never an acknowledgement).
+pub(crate) const REQUIRE_LSM: &str = "--require-lsm";
 
 /// A command line that does not describe a configuration.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -223,6 +252,27 @@ fn evidence_path(flag: &str, value: &str, slot: &mut Option<PathBuf>) -> Result<
     Ok(())
 }
 
+/// `--require-lsm`'s value: one of the two modules, by its one spelling,
+/// given once.
+fn required_module(value: &str, slot: &mut Option<RequiredLsm>) -> Result<(), UsageError> {
+    let module = match value {
+        "apparmor" => RequiredLsm::AppArmor,
+        "selinux" => RequiredLsm::SeLinux,
+        other => {
+            return Err(UsageError::new(format!(
+                "{REQUIRE_LSM} takes apparmor or selinux, not {}",
+                bounded(other)
+            )));
+        }
+    };
+    if slot.replace(module).is_some() {
+        return Err(UsageError::new(format!(
+            "{REQUIRE_LSM} is given more than once"
+        )));
+    }
+    Ok(())
+}
+
 pub(crate) fn parse(args: &[String]) -> Result<Command, UsageError> {
     let mut rest = args.iter();
     match rest.next().map(String::as_str) {
@@ -257,6 +307,7 @@ pub(crate) fn parse(args: &[String]) -> Result<Command, UsageError> {
     };
     let mut evidence_egress: Option<PathBuf> = None;
     let mut evidence_trust: Option<PathBuf> = None;
+    let mut require_lsm: Option<RequiredLsm> = None;
     while let Some(flag) = rest.next() {
         let mut value = || {
             rest.next()
@@ -283,6 +334,7 @@ pub(crate) fn parse(args: &[String]) -> Result<Command, UsageError> {
             UNVERIFIED_WORKSPACE => acknowledge(&mut unverified_workspace, flag)?,
             EVIDENCE_EGRESS => evidence_path(flag, value()?, &mut evidence_egress)?,
             EVIDENCE_TRUST => evidence_path(flag, value()?, &mut evidence_trust)?,
+            REQUIRE_LSM => required_module(value()?, &mut require_lsm)?,
             other => {
                 return Err(UsageError::new(format!("unknown flag {}", bounded(other))));
             }
@@ -318,6 +370,7 @@ pub(crate) fn parse(args: &[String]) -> Result<Command, UsageError> {
         unverified_workspace: UnverifiedWorkspace::acknowledged(unverified_workspace),
         evidence_egress,
         evidence_trust,
+        require_lsm,
     }))
 }
 
@@ -326,7 +379,8 @@ mod tests {
     use std::path::PathBuf;
 
     use super::{
-        Command, ServeConfig, SwappableWorkers, TraceableWorkers, UnverifiedWorkspace, parse,
+        Command, RequiredLsm, ServeConfig, SwappableWorkers, TraceableWorkers, UnverifiedWorkspace,
+        parse,
     };
 
     /// A socket path that is absolute on this platform: `/b` is not, on
@@ -372,6 +426,7 @@ mod tests {
                 unverified_workspace: UnverifiedWorkspace::Refused,
                 evidence_egress: None,
                 evidence_trust: None,
+                require_lsm: None,
             }))
         );
         for bad in [
@@ -613,6 +668,50 @@ mod tests {
             let mut with = args(&base);
             with.push(absent.to_owned());
             assert!(parse(&with).is_err(), "{absent}");
+        }
+    }
+
+    #[test]
+    fn a_required_security_module_is_named_once_and_never_defaulted() {
+        // ADR-0070 OD-2: no module is required unless the operator names
+        // one, by its one spelling, once; nothing else turns it on or off.
+        let base = ["serve", "--socket", "ABS", "--authority-uid", "7"];
+        assert!(matches!(
+            parse(&args(&base)),
+            Ok(Command::Serve(ServeConfig {
+                require_lsm: None,
+                ..
+            }))
+        ));
+        for (word, module) in [
+            ("apparmor", RequiredLsm::AppArmor),
+            ("selinux", RequiredLsm::SeLinux),
+        ] {
+            let mut with = base.to_vec();
+            with.extend(["--require-lsm", word]);
+            assert!(
+                matches!(
+                    parse(&args(&with)),
+                    Ok(Command::Serve(ServeConfig { require_lsm: Some(m), .. })) if m == module
+                ),
+                "{word}"
+            );
+            assert_eq!(module.as_str(), word);
+            with.extend(["--require-lsm", word]);
+            assert!(parse(&args(&with)).is_err(), "{word} twice");
+        }
+        for bad in ["AppArmor", "landlock", "none", "", "apparmor,selinux"] {
+            let mut with = base.to_vec();
+            with.extend(["--require-lsm", bad]);
+            assert!(parse(&args(&with)).is_err(), "{bad:?}");
+        }
+        let mut valueless = base.to_vec();
+        valueless.push("--require-lsm");
+        assert!(parse(&args(&valueless)).is_err());
+        for absent in ["--allow-no-lsm", "--no-require-lsm", "--optional-lsm"] {
+            let mut with = base.to_vec();
+            with.push(absent);
+            assert!(parse(&args(&with)).is_err(), "{absent}");
         }
     }
 

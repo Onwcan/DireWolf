@@ -209,6 +209,19 @@ impl<'a> Record<'a> {
         }
     }
 
+    /// Where the host's own kernel shows the container (ADR-0070 OD-1):
+    /// its first process as the runtime's pid namespace numbers it
+    /// (`State.Pid`, `None` for 0 or anything not a positive number), and
+    /// its id. A vantage only once its control group names that id.
+    pub(crate) fn host_vantage(&self) -> (Option<u32>, Option<&'a str>) {
+        (
+            integer(self.object, &["State", "Pid"])
+                .and_then(|pid| u32::try_from(pid).ok())
+                .filter(|pid| *pid > 0),
+            text(self.object, &["Id"]),
+        )
+    }
+
     /// What the container is to its environment, by its role label.
     pub(crate) fn role(&self) -> Option<ContainerRole> {
         ContainerRole::from_label(self.label(LABEL_ROLE)?)

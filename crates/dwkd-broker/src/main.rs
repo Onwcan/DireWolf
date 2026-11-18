@@ -238,6 +238,10 @@ fn serve(config: &config::ServeConfig) -> ExitCode {
         log(&why);
         return ExitCode::FAILURE;
     }
+    if let Err(why) = required_module(config) {
+        log(&why);
+        return ExitCode::FAILURE;
+    }
     let bound = match listener::bind(&place) {
         Ok(bound) => bound,
         Err(error) => {
@@ -290,6 +294,7 @@ fn serve(config: &config::ServeConfig) -> ExitCode {
             config.evidence_topology_permitted,
             config.unverified_workspace == config::UnverifiedWorkspace::Permitted,
             processes.generation().clone(),
+            config.require_lsm,
         ),
         proxies,
     );
@@ -305,6 +310,30 @@ fn serve(config: &config::ServeConfig) -> ExitCode {
         },
     );
     ExitCode::SUCCESS
+}
+
+/// A required security module (ADR-0070 OD-2), checked before the socket
+/// exists: a host whose kernel does not enforce it is not served, and the
+/// requirement is never waived to serve it.
+#[cfg(target_os = "linux")]
+fn required_module(config: &config::ServeConfig) -> Result<(), String> {
+    let Some(required) = config.require_lsm else {
+        return Ok(());
+    };
+    if !sandbox::identity::host_runs(required, sandbox::identity::HostLsm::read()) {
+        return Err(format!(
+            "cannot serve: {} {}: this host's kernel does not run it in its enforcing mode, \
+             and a required module is never waived",
+            config::REQUIRE_LSM,
+            required.as_str()
+        ));
+    }
+    log(&format!(
+        "required security module: {} -- every environment it does not confine, as both \
+         vantages show, is refused (UNSUPPORTED)",
+        required.as_str()
+    ));
+    Ok(())
 }
 
 /// What the broker verifies about its own deployment before it serves: an
@@ -600,7 +629,7 @@ fn help() -> String {
                               [--allow-traceable-workers] [--allow-swappable-workers]\n    \
                               [--allow-evidence-topology] [--allow-unverified-workspace]\n    \
                               [--allow-evidence-egress <FILE>]\n    \
-                              [--allow-evidence-trust <PEM>]\n    \
+                              [--allow-evidence-trust <PEM>] [--require-lsm apparmor|selinux]\n    \
              {NAME} [-V | --version] [-h | --help]\n\
          \n\
          OPTIONS:\n    \
@@ -613,7 +642,8 @@ fn help() -> String {
              --allow-evidence-topology       permit NO_NETWORK execution environments (M5a evidence only)\n    \
              --allow-unverified-workspace    mount a workspace with no proved group or quota (evidence only)\n    \
              --allow-evidence-egress <FILE>  resolve egress names from a fixture file (M5b, M5c evidence only)\n    \
-             --allow-evidence-trust <PEM>    trust a test authority instead of Mozilla's roots; needs --allow-evidence-egress (M5c evidence only)\n\
+             --allow-evidence-trust <PEM>    trust a test authority instead of Mozilla's roots; needs --allow-evidence-egress (M5c evidence only)\n    \
+             --require-lsm <MODULE>          serve only where the kernel enforces apparmor or selinux, and refuse every environment it does not confine\n\
          \n\
          STATUS: M4d - the filesystem tools (read, stat, list, search, write,\n\
          patch, move, delete) and process execution (start, status, kill) of the\n\

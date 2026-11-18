@@ -341,17 +341,20 @@ pub(crate) struct Oci<'a> {
     seccomp_profile: &'a str,
     socket: String,
     proxies: &'a Proxies,
+    /// The security module the operator requires of every environment
+    /// (ADR-0070 OD-2), if any.
+    require_lsm: Option<crate::config::RequiredLsm>,
 }
 
 impl<'a> Oci<'a> {
     /// The environment kind, over `runtime`, with the profile file the
-    /// listener wrote and the profile text it holds, and the broker's
-    /// proxies.
+    /// listener wrote and the profile text it holds, the broker's proxies,
+    /// and the security module the operator requires, if any.
     pub(crate) fn new(
         runtime: Runtime<'a>,
         (seccomp_path, seccomp_profile): (&'a str, &'a str),
         socket: &str,
-        proxies: &'a Proxies,
+        (proxies, require_lsm): (&'a Proxies, Option<crate::config::RequiredLsm>),
     ) -> Self {
         Self {
             runtime,
@@ -359,6 +362,7 @@ impl<'a> Oci<'a> {
             seccomp_profile,
             socket: socket.to_owned(),
             proxies,
+            require_lsm,
         }
     }
 
@@ -743,17 +747,32 @@ impl<'a> Oci<'a> {
             Verdict::Unobservable
         };
         checks.push((SandboxInvariant::HostProbeDigest, digest));
-        // Who runs in it and what confines it, as its own kernel says, judged
-        // against the record and the host's kernel: reported, never admitted
-        // on (F-05, ADR-0069).
+        // Who runs in it and what confines it, as its own kernel says and --
+        // where this broker can see the container's first process -- as the
+        // host's kernel says, judged against the record: reported (F-05,
+        // ADR-0069; the host vantage, ADR-0070 OD-1).
+        let (pid, container) = record.host_vantage();
+        let identity = super::identity::judge_with(
+            &record.recorded_identity(),
+            report.as_ref().and_then(|r| r.identity.as_ref()),
+            super::identity::HostLsm::read(),
+            super::identity::HostMaps::read(pid, container).as_ref(),
+        );
         crate::event(&super::identity::line(
             spec.environment_id.as_str(),
-            &super::identity::judge(
-                &record.recorded_identity(),
-                report.as_ref().and_then(|r| r.identity.as_ref()),
-                super::identity::HostLsm::read(),
-            ),
+            &identity,
         ));
+        // A module the operator requires (ADR-0070 OD-2) is no report: an
+        // environment it does not confine is refused here, and every caller
+        // takes a refused measurement's environment down.
+        if let Some(required) = self.require_lsm {
+            crate::event(&super::identity::required_line(
+                spec.environment_id.as_str(),
+                required,
+                &identity,
+            ));
+        }
+        super::identity::admits(self.require_lsm, &identity).map_err(EnvFailure::Refused)?;
         checks.extend(workspace_checks(
             report.as_ref().and_then(|r| r.workspace.as_ref()),
             spec,
@@ -1197,11 +1216,21 @@ impl ExecutionEnvironment for Oci<'_> {
         if let Some(dir) = &egress_dir {
             self.connect_peer(spec, &handle.container, dir);
         }
-        let Ok(measured) = self.measure(&handle, spec) else {
-            return match self.teardown(spec, &handle.container) {
-                Ok(()) => Err(EnvFailure::Refused(BrokerRefusal::RuntimeFailed)),
-                Err(_) => Err(EnvFailure::Unconfirmed),
-            };
+        let measured = match self.measure(&handle, spec) {
+            Ok(measured) => measured,
+            Err(failure) => {
+                // A module the operator requires that this environment lacks
+                // is said as itself (UNSUPPORTED, ADR-0070 OD-2); any other
+                // failed measurement is the runtime's.
+                let why = match failure {
+                    EnvFailure::Refused(BrokerRefusal::Unsupported) => BrokerRefusal::Unsupported,
+                    _ => BrokerRefusal::RuntimeFailed,
+                };
+                return match self.teardown(spec, &handle.container) {
+                    Ok(()) => Err(EnvFailure::Refused(why)),
+                    Err(_) => Err(EnvFailure::Unconfirmed),
+                };
+            }
         };
         crate::crash::point("environment_measured");
         let container = handle.container.clone();

@@ -29,6 +29,7 @@ fn sandbox(evidence_topology: bool, unverified_workspace: bool) -> Sandbox {
             evidence_topology,
             unverified_workspace,
             BrokerGeneration::new("a".repeat(32)).unwrap(),
+            None,
         ),
         Arc::new(crate::egress::proxy::Proxies::without_root(
             Arc::new(crate::egress::resolve::SystemResolver),

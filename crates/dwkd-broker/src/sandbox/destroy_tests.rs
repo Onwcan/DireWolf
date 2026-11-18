@@ -131,7 +131,12 @@ fn destruction_closes_only_its_proxy_even_when_the_runtime_cannot_be_reproved() 
                 },
                 client_config: scratch.0.clone(),
             },
-            (false, false, BrokerGeneration::new("a".repeat(32)).unwrap()),
+            (
+                false,
+                false,
+                BrokerGeneration::new("a".repeat(32)).unwrap(),
+                None,
+            ),
             Arc::clone(&proxies),
         );
         let authorisation = EnvironmentDestroyAuthorisation::new(

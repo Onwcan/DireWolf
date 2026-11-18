@@ -57,7 +57,7 @@ fn effects() -> Effects<'static> {
                 seccomp: PathBuf::from("/nonexistent/seccomp.json"),
                 client_config: PathBuf::from("/nonexistent/client"),
             },
-            (false, false, processes.generation().clone()),
+            (false, false, processes.generation().clone(), None),
             no_proxies(),
         ))),
         http: Box::leak(Box::new(crate::http::Client::in_process(

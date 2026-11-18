@@ -4,7 +4,8 @@
 //! (`unshare --user --map-current-user --pid`, no privilege), and a client
 //! running as a second operating-system user (`sudo -n -u $DW_PEER_AS`).
 //! F-05's identity tables (ADR-0069) use the first to judge a real kernel's
-//! mapping in an unprivileged user namespace.
+//! mapping in an unprivileged user namespace, and ADR-0070's read one such
+//! namespace's maps from inside it and from outside (`namespace_views`).
 //!
 //! It starts nothing a hop, an authorisation or a relay names, and nothing
 //! the broker runs; TX021 names it beside the other test files that start a
@@ -71,6 +72,49 @@ pub(crate) fn judge_hidden(name: &str, peer: OwnedFd) -> Option<Output> {
         .output()
         .expect("the hidden judge starts");
     Some(output)
+}
+
+/// A real unprivileged user namespace's uid and gid maps as the process in it
+/// prints them (`cat` reading its own `/proc/self/uid_map` and `gid_map`,
+/// then holding on its standard input), and `outside(pid)`'s answer, called
+/// while that process lives -- the caller reads the host's view of it. No
+/// shell, and no file read here (TX015). `None`, said on stderr, where
+/// unprivileged user namespaces are not available: NOT EXERCISED, never a
+/// pass. ADR-0070's two-vantage comparison rests on the two agreeing.
+pub(crate) fn namespace_views<T>(outside: impl FnOnce(u32) -> T) -> Option<((String, String), T)> {
+    use std::io::{BufRead as _, BufReader};
+    let _fork = crate::process::fork_guard();
+    let Ok(mut child) = Command::new("unshare")
+        .args([
+            "--user",
+            "--map-root-user",
+            "cat",
+            "/proc/self/uid_map",
+            "/proc/self/gid_map",
+            "-",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+    else {
+        eprintln!("NOT EXERCISED: `unshare` cannot be started here");
+        return None;
+    };
+    let mut lines = BufReader::new(child.stdout.take().expect("stdout")).lines();
+    let (Some(Ok(uid)), Some(Ok(gid))) = (lines.next(), lines.next()) else {
+        let _ = child.kill();
+        let _ = child.wait();
+        eprintln!(
+            "NOT EXERCISED: an unprivileged user namespace is not available here \
+             (`unshare --user --map-root-user` printed no map)"
+        );
+        return None;
+    };
+    let seen = outside(child.id());
+    drop(child.stdin.take());
+    let _ = child.wait();
+    Some(((uid, gid), seen))
 }
 
 /// The user `DW_PEER_AS` names, proven by numbers: the uid a process started

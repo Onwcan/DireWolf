@@ -798,10 +798,13 @@ exempt_paths = [
     "crates/dwkd-broker/src/sandbox/destroy_tests.rs",
     # F-05 (ADR-0069): the identity judgement reads three of the host
     # kernel's own files -- the securityfs module list, AppArmor's `enabled`
-    # parameter and SELinux's `enforce` -- and nothing a workspace names.
+    # parameter and SELinux's `enforce` -- and, ADR-0070 OD-1, the `cgroup`,
+    # `uid_map` and `gid_map` of the one process the runtime's record names
+    # as a container's first: nothing a workspace names.
     "crates/dwkd-broker/src/sandbox/identity.rs",
-    # F-05: its unit tests, under `cfg(test)`, read the same files and the
-    # test process's own `/proc/self/uid_map` and `gid_map`.
+    # F-05: its unit tests, under `cfg(test)`, read the same files, the test
+    # process's own `/proc/self/uid_map` and `gid_map`, and those of a child
+    # it starts in a user namespace of its own (ADR-0070).
     "crates/dwkd-broker/src/sandbox/identity_tests.rs",
 ]
 suffixes = [".rs"]
@@ -850,8 +853,11 @@ before they harden themselves (ADR-0050 §21). Neither is a workspace name.
 F-05 (ADR-0069): `sandbox/identity.rs` reads `/sys/kernel/security/lsm`,
 `/sys/module/apparmor/parameters/enabled` and `/sys/fs/selinux/enforce` each
 time it judges an environment, to say whether the host's kernel runs the
-security module a label claims; its tests read the same files and the test
-process's own uid and gid maps. None is a workspace name.
+security module a label claims; and (ADR-0070 OD-1) `/proc/<pid>/cgroup`,
+`uid_map` and `gid_map` of the process the runtime's record names as the
+container's first, bounded to 4 KiB each, to see its user namespace from the
+host's side. Its tests read the same files and the uid and gid maps of the
+test process and of a child it starts. None is a workspace name.
 
 Hygiene, not containment.
 """

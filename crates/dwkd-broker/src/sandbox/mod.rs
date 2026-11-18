@@ -33,8 +33,9 @@
 
 mod digest;
 mod environment;
-// F-05 (ADR-0069): the environment's identity and confinement, reported.
-mod identity;
+// F-05 (ADR-0069): the environment's identity and confinement, reported;
+// and the operator's required module, enforced (ADR-0070).
+pub(crate) mod identity;
 mod inspect;
 mod oci;
 mod plan;
@@ -96,6 +97,9 @@ struct Parts {
     files: SandboxFiles,
     profile: String,
     proxies: Arc<Proxies>,
+    /// The security module the operator requires of every environment
+    /// (ADR-0070 OD-2), if any.
+    require_lsm: Option<crate::config::RequiredLsm>,
 }
 
 /// The sandbox supervisor: what it needs to drive a runtime, the workloads
@@ -238,7 +242,7 @@ fn with_oci<T>(
         held,
         (seccomp, &parts.profile),
         runtime.socket.as_str(),
-        &parts.proxies,
+        (&parts.proxies, parts.require_lsm),
     )))
 }
 
@@ -384,7 +388,12 @@ impl Sandbox {
         helper: PathBuf,
         authority_uid: u32,
         files: SandboxFiles,
-        (evidence_topology, unverified_workspace, generation): (bool, bool, BrokerGeneration),
+        (evidence_topology, unverified_workspace, generation, require_lsm): (
+            bool,
+            bool,
+            BrokerGeneration,
+            Option<crate::config::RequiredLsm>,
+        ),
         proxies: Arc<Proxies>,
     ) -> Self {
         Self {
@@ -394,6 +403,7 @@ impl Sandbox {
                 files,
                 profile: dwk_sandbox_profile::seccomp_profile_json(),
                 proxies,
+                require_lsm,
             }),
             evidence_topology,
             unverified_workspace,

@@ -303,6 +303,66 @@ mod linux {
 
     impl Broker {
         fn start(socket: &Path, evidence_topology: bool, crash: Option<&str>) -> Self {
+            Self::start_with(socket, evidence_topology, crash, &[])
+        }
+
+        /// A broker that must not serve with `extra`: its stderr once it has
+        /// exited, unready. A broker that says it serves fails the test.
+        fn refuses_to_start(socket: &Path, extra: &[&str]) -> String {
+            let mut child = Command::new(BIN)
+                .env_clear()
+                .arg("serve")
+                .arg("--socket")
+                .arg(socket)
+                .arg("--authority-uid")
+                .arg(own_uid().to_string())
+                .arg("--allow-shared-authority-uid")
+                .arg("--allow-unverified-workspace")
+                .args(extra)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap();
+            let deadline = Instant::now() + PROMPT;
+            let status = loop {
+                if let Some(status) = child.try_wait().unwrap() {
+                    break status;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "the broker neither served nor exited with {extra:?}"
+                );
+                std::thread::sleep(Duration::from_millis(20));
+            };
+            let mut stdout = String::new();
+            let mut stderr = String::new();
+            child
+                .stdout
+                .take()
+                .unwrap()
+                .read_to_string(&mut stdout)
+                .unwrap();
+            child
+                .stderr
+                .take()
+                .unwrap()
+                .read_to_string(&mut stderr)
+                .unwrap();
+            assert!(!status.success(), "it exited 0 with {extra:?}:\n{stderr}");
+            assert!(
+                !stdout.contains("serving the private broker channel at"),
+                "it served with {extra:?}:\n{stdout}"
+            );
+            stderr
+        }
+
+        fn start_with(
+            socket: &Path,
+            evidence_topology: bool,
+            crash: Option<&str>,
+            extra: &[&str],
+        ) -> Self {
             let mut command = Command::new(BIN);
             command.env_clear();
             if let Some(point) = crash {
@@ -319,6 +379,7 @@ mod linux {
             if evidence_topology {
                 command.arg("--allow-evidence-topology");
             }
+            command.args(extra);
             let mut child = command
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
@@ -675,6 +736,38 @@ mod linux {
         }
     }
 
+    /// Whether this host's kernel runs AppArmor, read as the broker reads it.
+    fn host_apparmor() -> bool {
+        let read = |path: &str| std::fs::read_to_string(path).ok();
+        let listed = read("/sys/kernel/security/lsm")
+            .map(|list| list.trim().split(',').any(|m| m == "apparmor"));
+        read("/sys/module/apparmor/parameters/enabled").is_some_and(|e| e.trim() == "Y")
+            && listed != Some(false)
+    }
+
+    /// Whether this process sees the container's first process in the
+    /// container's own control group: the runtime's pid namespace is this
+    /// host's. Worked out here independently of the broker's own reading.
+    fn host_sees(ev: &Evidence, container: &ContainerRef) -> bool {
+        let format = |field: &str| {
+            ev.docker_ok(&[
+                "container",
+                "inspect",
+                "--format",
+                field,
+                container.as_str(),
+            ])
+            .trim()
+            .to_owned()
+        };
+        let (pid, id) = (format("{{.State.Pid}}"), format("{{.Id}}"));
+        std::fs::read_to_string(format!("/proc/{pid}/cgroup")).is_ok_and(|text| {
+            text.lines().any(|line| {
+                line.ends_with(&format!("/docker-{id}.scope")) || line.ends_with(&format!("/{id}"))
+            })
+        })
+    }
+
     /// F-05 (ADR-0069): who runs in the environment and what confines it, as
     /// the broker judged its probe's kernel against the runtime's record and
     /// the host's kernel -- a report, never an invariant. What it must say is
@@ -694,16 +787,21 @@ mod linux {
             broker,
             &format!("event=sandbox_identity environment={}", e.as_str()),
         );
+        // ADR-0070 OD-1: both vantages where this process, like the broker,
+        // sees the container's first process in the container's own group
+        // (a native Linux host); from inside alone where it cannot (Docker
+        // Desktop's processes are another kernel's).
+        let vantage = if host_sees(ev, container) {
+            "both"
+        } else {
+            "inside"
+        };
         assert!(
-            line.contains(" userns=UNSUPPORTED:inside:shared "),
+            line.contains(&format!(" userns=UNSUPPORTED:{vantage}:shared ")),
             "{line}"
         );
         let read = |path: &str| std::fs::read_to_string(path).ok();
-        let listed = read("/sys/kernel/security/lsm")
-            .map(|list| list.trim().split(',').any(|m| m == "apparmor"));
-        let apparmor_runs = read("/sys/module/apparmor/parameters/enabled")
-            .is_some_and(|e| e.trim() == "Y")
-            && listed != Some(false);
+        let apparmor_runs = host_apparmor();
         let profile = ev
             .docker_ok(&[
                 "container",
@@ -739,6 +837,7 @@ mod linux {
             .to_ascii_lowercase();
         for case in [
             "real-environment-userns-shared".to_owned(),
+            format!("real-environment-userns-seen-{vantage}"),
             format!("real-environment-apparmor-{state}"),
             "real-environment-landlock-not-applicable".to_owned(),
         ] {
@@ -749,6 +848,100 @@ mod linux {
         // The judgement itself, as the broker wrote it: names and states only.
         let observed = &line[line.find("event=sandbox_identity").unwrap_or_default()..];
         println!("F05-OBSERVED {observed}");
+    }
+
+    /// ADR-0070 OD-2 (Proposed): a broker that requires a security module
+    /// does not serve where the host's kernel does not enforce it -- on any
+    /// host, for SELinux or AppArmor, whichever it does not run -- and, where
+    /// AppArmor runs, prepares a conforming environment (its profile
+    /// enforced, as both vantages show) and refuses one started unconfined,
+    /// which no invariant refuses.
+    #[test]
+    #[ignore = "needs a real OCI runtime: make sandbox-foundation-evidence"]
+    fn a_required_security_module_confines_every_environment_or_nothing_is_served() {
+        let ev = Evidence::load();
+        let _reaper = Reaper::new(&ev);
+        let dir = Scratch::new("required-lsm");
+        let socket = dir.socket();
+        let selinux_enforcing =
+            std::fs::read_to_string("/sys/fs/selinux/enforce").is_ok_and(|mode| mode.trim() == "1");
+        let mut unserved = 0;
+        for (module, runs) in [
+            ("apparmor", host_apparmor()),
+            ("selinux", selinux_enforcing),
+        ] {
+            if runs {
+                continue;
+            }
+            let said = Broker::refuses_to_start(&socket, &["--require-lsm", module]);
+            assert!(
+                said.contains(&format!("cannot serve: --require-lsm {module}:")),
+                "{said}"
+            );
+            unserved += 1;
+            println!(
+                "F70-EVIDENCE {{\"case\":\"required-{module}-absent-not-served\",\"level\":\"real-process\",\"contained\":true}}"
+            );
+        }
+        assert!(unserved >= 1, "a host enforcing both AppArmor and SELinux");
+        if !host_apparmor() {
+            // Docker Desktop: no AppArmor, so nothing below can be shown here.
+            println!(
+                "F70-EVIDENCE {{\"case\":\"required-apparmor-environments\",\"level\":\"real-oci\",\"contained\":false,\"note\":\"NOT EXERCISED: this host's kernel runs no AppArmor\"}}"
+            );
+            return;
+        }
+        let broker = Broker::start_with(&socket, true, None, &["--require-lsm", "apparmor"]);
+        assert!(
+            broker
+                .stderr()
+                .contains("required security module: apparmor"),
+            "{}",
+            broker.stderr()
+        );
+        let workspace = dir.workspace("ws");
+        // A conforming environment: the runtime's default profile, enforced.
+        let (e, r) = (environment(), run());
+        let s = spec(&e, &r, &workspace, &ev.image, &ev.probe_sha256);
+        let (container, _) = prepared_clean(&socket, &ev, &s, &broker);
+        let line = stderr_line(
+            &broker,
+            &format!("event=sandbox_lsm_required environment={}", e.as_str()),
+        );
+        assert!(
+            line.contains(" module=apparmor outcome=met state=ENFORCED:both:"),
+            "{line}"
+        );
+        ev.remove(container.as_str());
+        println!(
+            "F70-EVIDENCE {{\"case\":\"required-apparmor-enforced-met\",\"level\":\"real-oci\",\"contained\":true}}"
+        );
+        // The same environment started unconfined: every invariant passes,
+        // and the required module refuses it.
+        let seccomp = seccomp_file(&socket);
+        let (e, r) = (environment(), run());
+        let argv = test_only_plan(&seccomp, &workspace, (&e, &r), &ev.image, &|a: &mut Vec<
+            String,
+        >| {
+            add(a, &["--security-opt", "apparmor=unconfined"]);
+        });
+        let id = started(&ev, &argv);
+        let container = ContainerRef::new(id.clone()).unwrap();
+        let s = spec(&e, &r, &workspace, &ev.image, &ev.probe_sha256);
+        let refused = refusal(measure(&socket, &ev, &s, &container));
+        ev.remove(&id);
+        assert_eq!(refused, BrokerRefusal::Unsupported, "{}", broker.stderr());
+        let line = stderr_line(
+            &broker,
+            &format!("event=sandbox_lsm_required environment={}", e.as_str()),
+        );
+        assert!(
+            line.contains(" module=apparmor outcome=refused state=REDUCED:both:unconfined"),
+            "{line}"
+        );
+        println!(
+            "F70-EVIDENCE {{\"case\":\"required-apparmor-unconfined-refused\",\"level\":\"real-oci\",\"contained\":true}}"
+        );
     }
 
     // ---- the strict profile --------------------------------------------------

@@ -14,7 +14,10 @@ use std::os::unix::net::UnixStream;
 
 use dwk_proto::brokerp::sandbox::{IdentityFacts, LsmLabel, id_map_from_kernel, is_identity_map};
 
-use super::identity::{HostLsm, Identity, Judged, Recorded, judge, line};
+use super::identity::{
+    HostLsm, HostMaps, Identity, Judged, Recorded, admits, cgroup_names, host_runs, judge,
+    judge_with, line, meets, required_line,
+};
 use crate::effective::Condition as C;
 use crate::peer::harness;
 
@@ -412,4 +415,312 @@ fn a_real_kernel_mapping_is_judged_where_it_is_read() {
         "userns-real-kernel-initial-and-unprivileged-namespace",
         "kernel",
     );
+}
+
+// ---- ADR-0070 (Proposed): the host vantage (OD-1) and a required module (OD-2)
+
+const CONTAINER: &str = "4f1c0a2e9b7d6c5a4f1c0a2e9b7d6c5a4f1c0a2e9b7d6c5a4f1c0a2e9b7d6c5a";
+
+#[test]
+fn a_process_is_the_container_only_where_its_own_control_group_names_it() {
+    // systemd's driver, cgroup v2; the cgroupfs driver; cgroup v1's many
+    // lines with one naming it: each places the process in the container.
+    for text in [
+        format!("0::/system.slice/docker-{CONTAINER}.scope\n"),
+        format!("0::/docker/{CONTAINER}\n"),
+        format!("12:pids:/docker/{CONTAINER}\n11:memory:/docker/{CONTAINER}\n1:name=systemd:/\n"),
+    ] {
+        assert!(cgroup_names(&text, CONTAINER), "{text:?}");
+    }
+    // A parent group, a child group, a prefix, a substring, another
+    // container, the host's own group, nothing: never.
+    let other = "a".repeat(64);
+    for text in [
+        "0::/docker\n".to_owned(),
+        format!("0::/docker/{CONTAINER}/init\n"),
+        format!("0::/docker/{}\n", &CONTAINER[..32]),
+        format!("0::/docker/x{CONTAINER}\n"),
+        format!("0::/system.slice/docker-{CONTAINER}.scope.d\n"),
+        format!("0::/system.slice/containerd-{CONTAINER}.scope\n"),
+        format!("0::/docker/{other}\n"),
+        "0::/user.slice/user-1000.slice/session-1.scope\n".to_owned(),
+        String::new(),
+    ] {
+        assert!(!cgroup_names(&text, CONTAINER), "{text:?}");
+    }
+    assert!(!cgroup_names("0::/\n", ""));
+    // No vantage without a pid, with pid 0, with an id that is not the
+    // runtime's 64 hexadecimal digits -- or, on this kernel, for this very
+    // process: its control group names no container.
+    assert_eq!(HostMaps::read(None, Some(CONTAINER)), None);
+    assert_eq!(HostMaps::read(Some(0), Some(CONTAINER)), None);
+    assert_eq!(HostMaps::read(Some(std::process::id()), None), None);
+    for bad in ["", "abc", &"g".repeat(64), &format!("{CONTAINER}0")] {
+        assert_eq!(HostMaps::read(Some(std::process::id()), Some(bad)), None);
+    }
+    assert_eq!(
+        HostMaps::read(Some(std::process::id()), Some(CONTAINER)),
+        None
+    );
+    assert_eq!(HostMaps::read(Some(u32::MAX), Some(CONTAINER)), None);
+    f05_evidence("host-vantage-only-for-the-named-container", "unit+kernel");
+}
+
+#[test]
+fn the_user_namespace_is_judged_from_both_vantages_where_the_host_shows_it() {
+    let judged = |r: &Recorded<'_>, f: Option<&IdentityFacts>, h: Option<&HostMaps>| {
+        of(&judge_with(r, f, NO_LSM, h).userns).0
+    };
+    let detail = |r: &Recorded<'_>, f: Option<&IdentityFacts>, h: Option<&HostMaps>| {
+        let j = judge_with(r, f, NO_LSM, h).userns;
+        (j.condition, j.seen, j.detail)
+    };
+    let none = recorded(None, None);
+    let shared = facts(IDENTITY, IDENTITY, None, None);
+    let remapped = facts(REMAPPED, REMAPPED, None, None);
+    let host_shared = HostMaps::from_kernel(IDENTITY, IDENTITY).unwrap();
+    let host_remapped = HostMaps::from_kernel(REMAPPED, REMAPPED).unwrap();
+    let host_half = HostMaps::from_kernel(IDENTITY, REMAPPED).unwrap();
+    // Both vantages: the identity map is still shared, never ENFORCED.
+    assert_eq!(
+        detail(&none, Some(&shared), Some(&host_shared)),
+        (C::Unsupported, "both", "shared".to_owned())
+    );
+    assert_eq!(
+        detail(&none, Some(&remapped), Some(&host_remapped)),
+        (C::Unverified, "both", "remapped".to_owned())
+    );
+    // The two disagree -- the probe's map is not the host's, either way, or
+    // in its gid alone: never shared, never remapped.
+    for (inside, host) in [
+        (&shared, &host_remapped),
+        (&remapped, &host_shared),
+        (&shared, &host_half),
+    ] {
+        assert_eq!(
+            detail(&none, Some(inside), Some(host)),
+            (C::Unverified, "both", "contradiction".to_owned())
+        );
+    }
+    // One vantage: said as that one.
+    assert_eq!(
+        detail(&none, None, Some(&host_shared)),
+        (C::Unsupported, "host", "shared".to_owned())
+    );
+    assert_eq!(
+        detail(&none, None, Some(&host_remapped)),
+        (C::Unverified, "host", "remapped".to_owned())
+    );
+    assert_eq!(
+        detail(&none, Some(&shared), None),
+        (C::Unsupported, "inside", "shared".to_owned())
+    );
+    // `judge` is `judge_with` and no host vantage.
+    assert_eq!(
+        judge(&none, Some(&shared), NO_LSM),
+        judge_with(&none, Some(&shared), NO_LSM, None)
+    );
+    // The record's host mode, whatever both kernels show.
+    let host_mode = Recorded {
+        userns_mode: Some("host"),
+        ..none
+    };
+    assert_eq!(
+        judged(&host_mode, Some(&shared), Some(&host_shared)),
+        C::Unsupported
+    );
+    assert_eq!(
+        detail(&host_mode, Some(&shared), Some(&host_shared)).2,
+        "host-mode"
+    );
+    f05_evidence("userns-two-vantages-shared-remapped-contradiction", "unit");
+}
+
+#[test]
+fn a_real_namespace_reads_the_same_from_inside_and_from_the_host() {
+    // The contradiction rule rests on a kernel fact: a process's maps read
+    // by the process itself and read by another process outside its user
+    // namespace state the same ids. Shown here on a real unprivileged user
+    // namespace (`unshare --user --map-root-user`): its own view printed,
+    // the host's read from `/proc/<pid>/` while it lives.
+    let Some(((users, groups), host)) = harness::namespace_views(|pid| {
+        let read = |name: &str| std::fs::read_to_string(format!("/proc/{pid}/{name}"));
+        HostMaps::from_kernel(&read("uid_map").unwrap(), &read("gid_map").unwrap())
+    }) else {
+        return;
+    };
+    let inside = facts(&users, &groups, None, None);
+    let host = host.expect("the host's view is a map");
+    assert_eq!(inside.uid_map.as_ref(), Some(&host.uid));
+    assert_eq!(inside.gid_map.as_ref(), Some(&host.gid));
+    assert!(!is_identity_map(&host.uid));
+    assert_eq!(
+        of(&judge_with(&recorded(None, None), Some(&inside), NO_LSM, Some(&host)).userns),
+        (C::Unverified, "both", "remapped")
+    );
+    f05_evidence("userns-real-kernel-two-vantages-agree", "kernel");
+}
+
+#[test]
+fn a_required_module_is_met_only_where_it_is_enforced() {
+    use crate::config::RequiredLsm;
+    // Before serving: the host's kernel must enforce it. SELinux permissive
+    // is not enforcement; a module the kernel does not run is not either.
+    assert!(host_runs(RequiredLsm::AppArmor, APPARMOR));
+    assert!(!host_runs(RequiredLsm::AppArmor, NO_LSM));
+    assert!(!host_runs(RequiredLsm::AppArmor, SELINUX_ENFORCING));
+    assert!(host_runs(RequiredLsm::SeLinux, SELINUX_ENFORCING));
+    assert!(!host_runs(RequiredLsm::SeLinux, SELINUX_PERMISSIVE));
+    assert!(!host_runs(RequiredLsm::SeLinux, APPARMOR));
+    // Per environment: ENFORCED alone meets it; every other state refuses.
+    let enforced = judge(
+        &recorded(Some("docker-default"), None),
+        Some(&facts(
+            IDENTITY,
+            IDENTITY,
+            None,
+            Some("docker-default (enforce)"),
+        )),
+        APPARMOR,
+    );
+    assert!(meets(RequiredLsm::AppArmor, &enforced));
+    assert!(!meets(RequiredLsm::SeLinux, &enforced));
+    let refused = [
+        // complain
+        judge(
+            &recorded(Some("docker-default"), None),
+            Some(&facts(
+                IDENTITY,
+                IDENTITY,
+                None,
+                Some("docker-default (complain)"),
+            )),
+            APPARMOR,
+        ),
+        // unconfined
+        judge(
+            &recorded(Some("unconfined"), None),
+            Some(&facts(IDENTITY, IDENTITY, None, Some("unconfined"))),
+            APPARMOR,
+        ),
+        // the record and the process disagree
+        judge(
+            &recorded(Some("other"), None),
+            Some(&facts(
+                IDENTITY,
+                IDENTITY,
+                None,
+                Some("docker-default (enforce)"),
+            )),
+            APPARMOR,
+        ),
+        // nothing seen inside
+        judge(&recorded(Some("docker-default"), None), None, APPARMOR),
+        // a host without the module
+        judge(
+            &recorded(Some("docker-default"), None),
+            Some(&facts(
+                IDENTITY,
+                IDENTITY,
+                None,
+                Some("docker-default (enforce)"),
+            )),
+            NO_LSM,
+        ),
+    ];
+    for identity in &refused {
+        assert!(
+            !meets(RequiredLsm::AppArmor, identity),
+            "{:?}",
+            identity.apparmor
+        );
+    }
+    let permissive = judge(
+        &recorded(None, Some("system_u:system_r:container_t:s0")),
+        Some(&facts(
+            IDENTITY,
+            IDENTITY,
+            Some("system_u:system_r:container_t:s0"),
+            None,
+        )),
+        SELINUX_PERMISSIVE,
+    );
+    assert!(!meets(RequiredLsm::SeLinux, &permissive));
+    let confined = judge(
+        &recorded(None, Some("system_u:system_r:container_t:s0")),
+        Some(&facts(
+            IDENTITY,
+            IDENTITY,
+            Some("system_u:system_r:container_t:s0"),
+            None,
+        )),
+        SELINUX_ENFORCING,
+    );
+    assert!(meets(RequiredLsm::SeLinux, &confined));
+    f05_evidence("required-lsm-met-only-when-enforced", "unit");
+}
+
+#[test]
+fn a_required_module_refuses_every_environment_it_does_not_confine() {
+    use crate::config::RequiredLsm;
+    let enforced = judge(
+        &recorded(Some("docker-default"), None),
+        Some(&facts(
+            IDENTITY,
+            IDENTITY,
+            None,
+            Some("docker-default (enforce)"),
+        )),
+        APPARMOR,
+    );
+    let refused = [
+        judge(
+            &recorded(Some("docker-default"), None),
+            Some(&facts(
+                IDENTITY,
+                IDENTITY,
+                None,
+                Some("docker-default (complain)"),
+            )),
+            APPARMOR,
+        ),
+        judge(&recorded(Some("docker-default"), None), None, APPARMOR),
+        judge(
+            &recorded(Some("docker-default"), None),
+            Some(&facts(
+                IDENTITY,
+                IDENTITY,
+                None,
+                Some("docker-default (enforce)"),
+            )),
+            NO_LSM,
+        ),
+    ];
+    // Applied to an environment: nothing required refuses nothing; a
+    // required module admits what it confines and refuses the rest as
+    // UNSUPPORTED.
+    for identity in &refused {
+        assert_eq!(admits(None, identity), Ok(()));
+        assert_eq!(
+            admits(Some(RequiredLsm::AppArmor), identity),
+            Err(dwk_proto::brokerp::BrokerRefusal::Unsupported)
+        );
+    }
+    assert_eq!(admits(Some(RequiredLsm::AppArmor), &enforced), Ok(()));
+    assert_eq!(
+        admits(Some(RequiredLsm::SeLinux), &enforced),
+        Err(dwk_proto::brokerp::BrokerRefusal::Unsupported)
+    );
+    // The event says which, and why.
+    assert_eq!(
+        required_line("env_1", RequiredLsm::AppArmor, &enforced),
+        "sandbox_lsm_required environment=env_1 module=apparmor outcome=met \
+         state=ENFORCED:both:docker-default"
+    );
+    assert_eq!(
+        required_line("env_1", RequiredLsm::AppArmor, &refused[2]),
+        "sandbox_lsm_required environment=env_1 module=apparmor outcome=refused \
+         state=UNSUPPORTED:host:kernel-has-none"
+    );
+    f05_evidence("required-lsm-refuses-what-it-does-not-confine", "unit");
 }

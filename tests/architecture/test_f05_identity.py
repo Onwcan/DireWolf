@@ -73,10 +73,16 @@ def test_the_probe_reports_its_own_kernel_in_a_version_four_report() -> None:
 
 def test_the_judgement_is_reported_and_never_an_invariant() -> None:
     """One call site, in the broker's judgement, writing an event; no
-    invariant, no verdict and no admission reads it, and protocol 12 is
-    unchanged."""
+    invariant and no verdict reads it, and protocol 12 is unchanged. The one
+    admission effect is the operator's own (ADR-0070 OD-2): `admits`, once,
+    with the module `--require-lsm` named, refusing as UNSUPPORTED."""
     oci = _read(OCI)
-    assert oci.count("super::identity::judge(") == 1
+    assert oci.count("super::identity::judge_with(") == 1
+    assert "super::identity::judge(" not in oci
+    assert oci.count("super::identity::admits(") == 1
+    assert (
+        "super::identity::admits(self.require_lsm, &identity).map_err(EnvFailure::Refused)?;" in oci
+    )
     call = oci[oci.index("crate::event(&super::identity::line(") :]
     call = call[: call.index("));\n") + 4]
     assert "checks.push" not in call and "Verdict" not in call
@@ -109,6 +115,8 @@ def test_only_both_vantages_on_a_running_module_count_as_enforced() -> None:
     assert enforced == [
         'judged(Condition::Enforced, "both", name)',
         'judged(Condition::Enforced, "both", domain)',
+        # ADR-0070 OD-2: the requirement is met by ENFORCED alone.
+        "of_required(required, identity).condition == Condition::Enforced",
     ], enforced
     apparmor = _function(source, "fn apparmor(")
     assert apparmor.index("if !host.apparmor {") < apparmor.index("Condition::Enforced")
@@ -129,7 +137,12 @@ def test_the_mutation_table_matches_the_source_once_per_mutant() -> None:
         text = (REPO_ROOT / rel).read_bytes().decode("utf-8")
         assert text.count(old) == 1, what
         assert old != new, what
-    assert {m[1] for m in dw.IDENTITY_MUTATIONS} == {"crates/dwkd-broker/src/sandbox/identity.rs"}
+    assert {m[1] for m in dw.IDENTITY_MUTATIONS} == {
+        "crates/dwkd-broker/src/sandbox/identity.rs",
+        "crates/dwkd-broker/src/config.rs",
+    }
+    # ADR-0070: the host vantage (N12-N14) and the required module (N15-N20).
+    assert len(dw.IDENTITY_MUTATIONS) == 20
     assert dw.TASKS["sandbox-identity-mutations"] is dw.task_sandbox_identity_mutations
     stages = dw._identity_stages()
     assert [s.name for s in stages] == ["broker-identity"]
@@ -162,12 +175,20 @@ def test_only_the_judgement_reads_the_hosts_kernel_files() -> None:
         "/sys/kernel/security/lsm",
         "/sys/module/apparmor/parameters/enabled",
     ], reads
+    # ADR-0070 OD-1: the host vantage reads three files of one process the
+    # runtime's record names, and nothing else under /proc.
+    assert 'format!("/proc/{pid}/{name}")' in source
+    assert sorted(re.findall(r'read\("([a-z_]+)"\)', source)) == ["cgroup", "gid_map", "uid_map"]
 
 
 def test_the_real_environment_reports_its_identity_from_both_vantages() -> None:
     suite = _read(REPO_ROOT / "crates" / "dwkd-broker" / "tests" / "sandbox_foundation.rs")
     assert "identity_reported(&ev, &broker, &e, &container);" in suite
-    assert '" userns=UNSUPPORTED:inside:shared "' in suite
+    # From both vantages where the test, like the broker, sees the
+    # container's process in its own group (ADR-0070 OD-1); from inside
+    # alone where it cannot.
+    assert '" userns=UNSUPPORTED:{vantage}:shared "' in suite
+    assert '"both"' in suite and '"inside"' in suite
     assert '"{{.AppArmorProfile}}"' in suite
     assert '" landlock=NOT_APPLICABLE:build:no-ruleset"' in suite
 
@@ -202,6 +223,90 @@ def test_adr_0069_is_proposed_and_records_its_evidence() -> None:
         assert evidence in text, evidence
     index = _read(REPO_ROOT / "docs" / "adr" / "README.md")
     assert "[0069](0069-f05-user-namespace-and-lsm-assurance-are-measured-not-assumed.md)" in index
+
+
+ADR_0070 = (
+    REPO_ROOT
+    / "docs"
+    / "adr"
+    / "0070-adr-0069-decisions-host-vantage-required-lsm-and-what-stays-deferred.md"
+)
+CONFINE = REPO_ROOT / "crates" / "dwkd-broker" / "src" / "http" / "confine.rs"
+BROKER_CONFIG = REPO_ROOT / "crates" / "dwkd-broker" / "src" / "config.rs"
+BROKER_MAIN = REPO_ROOT / "crates" / "dwkd-broker" / "src" / "main.rs"
+
+
+def test_adr_0070_is_proposed_and_says_what_stays_deferred() -> None:
+    text = _read(ADR_0070)
+    assert text.startswith("# ADR-0070:")
+    assert re.search(r"^\*\*Status:\*\* Proposed ", text, re.M)
+    for said in (
+        "### OD-1:",
+        "### OD-2:",
+        "### OD-3: deferred",
+        "### OD-4: deferred",
+        "--require-lsm",
+        "UNSUPPORTED:both:shared",
+        "UNVERIFIED:both:contradiction",
+        "protocol 12",
+        "Docker Desktop",
+        "OD-A",
+        "OD-D",
+    ):
+        assert said in text, said
+    index = _read(REPO_ROOT / "docs" / "adr" / "README.md")
+    assert (
+        "[0070](0070-adr-0069-decisions-host-vantage-required-lsm-and-what-stays-deferred.md)"
+        in index
+    )
+
+
+def test_a_required_module_has_no_off_switch_and_is_checked_before_the_socket() -> None:
+    """OD-2: one flag turns the requirement on; nothing turns it off, and a
+    host that cannot enforce it is refused before the broker binds."""
+    config = _read(BROKER_CONFIG)
+    assert 'pub(crate) const REQUIRE_LSM: &str = "--require-lsm";' in config
+    for absent in ("--allow-no-lsm", "--no-require-lsm", "--optional-lsm", "--allow-unconfined"):
+        assert f'"{absent}"' not in config.split("#[cfg(test)]")[0], absent
+    serve = _function(_read(BROKER_MAIN), "fn serve(config: &config::ServeConfig) -> ExitCode {")
+    assert serve.index("required_module(config)") < serve.index("listener::bind(&place)")
+
+
+def test_the_exchange_worker_opens_no_path_so_landlock_would_add_nothing() -> None:
+    """OD-4's finding, held: the worker's filter allows no path-based
+    filesystem call. If one is ever allowed, ADR-0070's revisit applies."""
+    source = _read(CONFINE)
+    table = source[source.index("pub(crate) const ALLOWED") :]
+    table = table[: table.index("];")]
+    allowed = set(re.findall(r'\("([a-z_0-9]+)"', table))
+    assert {"read", "write", "exit_group"} <= allowed, allowed
+    pathwise = {
+        "open",
+        "openat",
+        "openat2",
+        "creat",
+        "mkdir",
+        "mkdirat",
+        "unlink",
+        "unlinkat",
+        "rename",
+        "renameat",
+        "renameat2",
+        "link",
+        "linkat",
+        "symlink",
+        "symlinkat",
+        "chmod",
+        "fchmodat",
+        "chown",
+        "fchownat",
+        "truncate",
+        "mknod",
+        "mknodat",
+        "execve",
+        "execveat",
+    }
+    assert not (allowed & pathwise), allowed & pathwise
 
 
 # --- the review's machinery, driven with a stand-in for cargo ----------------
