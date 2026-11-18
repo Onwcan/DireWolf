@@ -32,8 +32,8 @@ use std::os::unix::fs::MetadataExt as _;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver};
-use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use dwk_proto::dwkp::{self, DwkpBody, DwkpMessage};
@@ -41,7 +41,8 @@ use dwk_proto::frame::{ContentType, FrameDecoder, encode};
 use dwkd_authority::state::{AuditLogFault, AuditRecord, read_audit_log};
 
 use super::state_support::{
-    TempDir, balanced, ceiling, decode, grant_fixture_profiles, id, install_fixtures, start,
+    CapturedStderr, TempDir, balanced, ceiling, decode, grant_fixture_profiles, id,
+    install_fixtures, start,
 };
 
 /// The binary under test: the one `cargo build` produces and an operator runs.
@@ -212,7 +213,7 @@ impl Fixture {
 pub(crate) struct Server {
     child: Child,
     pub(crate) pid: u32,
-    stderr: Arc<Mutex<String>>,
+    stderr: CapturedStderr,
     ready_line: String,
 }
 
@@ -244,26 +245,19 @@ impl Server {
     }
 
     fn spawn(mut command: Command) -> Result<Self, (Option<ExitStatus>, String)> {
+        // Its stderr goes to a file: complete, for everything written before
+        // the ready line, as soon as that line is seen (CapturedStderr).
+        let (stderr, sink) = CapturedStderr::new();
         let mut child = super::state_support::spawn(
             command
                 .env_clear()
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
-                .stderr(Stdio::piped()),
+                .stderr(sink),
         )
         .expect("the binary spawns");
         let pid = child.id();
         let stdout = child.stdout.take().expect("stdout");
-        let stderr_pipe = child.stderr.take().expect("stderr");
-        let stderr = Arc::new(Mutex::new(String::new()));
-        let sink = Arc::clone(&stderr);
-        std::thread::spawn(move || {
-            for line in BufReader::new(stderr_pipe).lines().map_while(Result::ok) {
-                let mut text = sink.lock().unwrap();
-                text.push_str(&line);
-                text.push('\n');
-            }
-        });
         let (lines, ready): (mpsc::Sender<String>, Receiver<String>) = mpsc::channel();
         std::thread::spawn(move || {
             for line in BufReader::new(stdout).lines().map_while(Result::ok) {
@@ -285,15 +279,13 @@ impl Server {
                 Err(mpsc::RecvTimeoutError::Disconnected) => {}
             }
             if let Ok(Some(status)) = child.try_wait() {
-                // Give the stderr reader a moment to drain.
-                std::thread::sleep(Duration::from_millis(100));
-                let text = stderr.lock().unwrap().clone();
-                return Err((Some(status), text));
+                // Everything it wrote before it exited is in the file.
+                return Err((Some(status), stderr.all()));
             }
             if Instant::now() > deadline {
                 let _ = child.kill();
                 let _ = child.wait();
-                let text = stderr.lock().unwrap().clone();
+                let text = stderr.all();
                 return Err((None, format!("timed out waiting to serve\n{text}")));
             }
         }
@@ -303,8 +295,10 @@ impl Server {
         &self.ready_line
     }
 
+    /// Every line the server has written to stderr so far: whatever it wrote
+    /// before anything the test has seen it do is there (CapturedStderr).
     pub(crate) fn stderr(&self) -> String {
-        self.stderr.lock().unwrap().clone()
+        self.stderr.text()
     }
 
     /// `SIGKILL`: no destructor runs, and the socket file stays behind.
@@ -313,12 +307,12 @@ impl Server {
         let _ = self.child.wait();
     }
 
-    /// Wait for the server to exit on its own.
+    /// Wait for the server to exit on its own. Everything it wrote to stderr
+    /// before it exited is in [`Self::stderr`] once this returns.
     pub(crate) fn wait_exit(&mut self, timeout: Duration) -> Option<ExitStatus> {
         let deadline = Instant::now() + timeout;
         while Instant::now() < deadline {
             if let Ok(Some(status)) = self.child.try_wait() {
-                std::thread::sleep(Duration::from_millis(100));
                 return Some(status);
             }
             std::thread::sleep(Duration::from_millis(20));

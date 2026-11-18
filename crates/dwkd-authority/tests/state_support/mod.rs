@@ -77,6 +77,52 @@ pub(crate) fn status(command: &mut Command) -> std::io::Result<ExitStatus> {
     spawn(command)?.wait()
 }
 
+/// A child's stderr, written to a file the harness owns instead of a pipe.
+///
+/// A daemon writes its start-up lines to stderr and only then says, on
+/// stdout, that it is ready. Read through a pipe and a thread of its own,
+/// that text can lag the ready line -- the bytes are in the pipe, not yet in
+/// the text -- and an assertion on it races the scheduler: F-12's
+/// `a_shipped_pack_reads_the_workspace_once_the_operator_names_the_home`
+/// failed 23 times in 40 on one CPU beside a busy loop. A write to a regular
+/// file is in the file when the write returns, so a read made after the test
+/// observed anything the child did afterwards -- its ready line, its answer
+/// -- holds every line the child wrote before it. There is no reader to wait
+/// for and no pipe to fill and stall the child. Only what the child has not
+/// written yet is still waited for, by the caller, bounded by a deadline.
+pub(crate) struct CapturedStderr {
+    _dir: TempDir,
+    path: PathBuf,
+}
+
+impl CapturedStderr {
+    /// An empty capture file in a private directory of its own, and the
+    /// `Stdio` that writes a child's stderr to it.
+    pub(crate) fn new() -> (Self, Stdio) {
+        let dir = TempDir::new("stderr");
+        let path = dir.path().join("stderr.log");
+        let file = std::fs::File::create(&path).expect("the stderr capture file");
+        (Self { _dir: dir, path }, Stdio::from(file))
+    }
+
+    /// Every complete line the child has written so far; a line it is still
+    /// writing (no newline yet) is left for a later read.
+    pub(crate) fn text(&self) -> String {
+        let bytes = std::fs::read(&self.path).unwrap_or_default();
+        let complete = bytes
+            .iter()
+            .rposition(|&b| b == b'\n')
+            .map_or(0, |last| last + 1);
+        String::from_utf8_lossy(&bytes[..complete]).into_owned()
+    }
+
+    /// Everything, an unterminated last line included: what a child that
+    /// has exited left.
+    pub(crate) fn all(&self) -> String {
+        String::from_utf8_lossy(&std::fs::read(&self.path).unwrap_or_default()).into_owned()
+    }
+}
+
 /// The mode of every [`TempDir`] on Unix, whatever the process's umask.
 pub(crate) const PRIVATE_DIR_MODE: u32 = 0o700;
 

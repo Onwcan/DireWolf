@@ -26,8 +26,8 @@
 use std::io::{BufRead as _, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver};
-use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use dwk_proto::dwkp::{DwkpBody, DwkpMessage};
@@ -35,7 +35,7 @@ use dwk_proto::wire::id::{RunId, SessionId};
 use dwkd_authority::state::{AuditRecord, WorkspaceId, WorkspaceSensitivity};
 
 use super::state_support::{
-    START_MS, TempDir, acquire_msg, admit_msg, bind_owned, ceiling, decode, id,
+    CapturedStderr, START_MS, TempDir, acquire_msg, admit_msg, bind_owned, ceiling, decode, id,
     install_fixture_records, session, start,
 };
 use super::transport_support::{BIN, Client, PROMPT, Server, live_audit, own_uid};
@@ -191,7 +191,7 @@ pub(crate) struct Broker {
     child: Child,
     /// The broker's own pid, from its ready line.
     pub(crate) pid: u32,
-    stderr: Arc<Mutex<String>>,
+    stderr: CapturedStderr,
     /// The user it was started as through `sudo`, if not this process's.
     user: Option<String>,
 }
@@ -281,6 +281,9 @@ impl Broker {
         authority_uid: u32,
         extra: &[&str],
     ) -> Result<Self, String> {
+        // Its stderr goes to a file: every event it wrote before an answer
+        // the test has received is there to count (CapturedStderr).
+        let (stderr, sink) = CapturedStderr::new();
         let mut child = super::state_support::spawn(
             command
                 .arg("serve")
@@ -291,19 +294,9 @@ impl Broker {
                 .args(extra)
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
-                .stderr(Stdio::piped()),
+                .stderr(sink),
         )
         .expect("the broker spawns");
-        let stderr = Arc::new(Mutex::new(String::new()));
-        let sink = Arc::clone(&stderr);
-        let pipe = child.stderr.take().expect("stderr");
-        std::thread::spawn(move || {
-            for line in BufReader::new(pipe).lines().map_while(Result::ok) {
-                let mut text = sink.lock().unwrap();
-                text.push_str(&line);
-                text.push('\n');
-            }
-        });
         let stdout = child.stdout.take().expect("stdout");
         let (lines, ready): (mpsc::Sender<String>, Receiver<String>) = mpsc::channel();
         std::thread::spawn(move || {
@@ -328,19 +321,18 @@ impl Broker {
                 });
             }
             if let Ok(Some(status)) = child.try_wait() {
-                std::thread::sleep(Duration::from_millis(100));
-                return Err(format!("{status:?}\n{}", stderr.lock().unwrap()));
+                return Err(format!("{status:?}\n{}", stderr.all()));
             }
             if Instant::now() > deadline {
                 let _ = child.kill();
                 let _ = child.wait();
-                return Err(format!("timed out\n{}", stderr.lock().unwrap()));
+                return Err(format!("timed out\n{}", stderr.all()));
             }
         }
     }
 
     pub(crate) fn stderr(&self) -> String {
-        self.stderr.lock().unwrap().clone()
+        self.stderr.text()
     }
 
     /// Every `event=` line the broker has written, without the prefix.

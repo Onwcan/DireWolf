@@ -3933,6 +3933,111 @@ mod linux {
                 }
             }
 
+            /// The client's next request head; `None` at a clean end. A reset
+            /// before any byte of it is the client hanging up between
+            /// requests -- its own choice, as a refused write is, never a
+            /// failure of the socket: Docker's CLI exits once it has a
+            /// `wait`'s status (`docker run --rm`, the relay), and if the
+            /// chunked answer's last bytes are still unread in its socket,
+            /// Linux reports that close to this read as a reset, not an end
+            /// (hosted run 44088761924). A reset inside a head stays a failure.
+            fn read_request_head(
+                from: &mut BufReader<UnixStream>,
+            ) -> Result<Option<Vec<u8>>, String> {
+                if from.buffer().is_empty() {
+                    match from.fill_buf() {
+                        Ok([]) => return Ok(None),
+                        Ok(_) => {}
+                        Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset => {
+                            return Err(format!("{HANGUP}between requests: {e}"));
+                        }
+                        Err(e) => return Err(format!("reading a head: {e}")),
+                    }
+                }
+                read_head(from)
+            }
+
+            /// The rule above on a real socket pair: Linux reports a peer that
+            /// closed with bytes it never read as a reset. Between requests
+            /// that is the client's hang-up; a clean end stays an end; a reset
+            /// after part of a head stays a failure.
+            #[test]
+            fn a_client_gone_with_an_answer_unread_hung_up_between_requests() {
+                let (proxy, client) = UnixStream::pair().unwrap();
+                // A chunked answer's terminator, written and never read.
+                (&proxy).write_all(b"0\r\n\r\n").unwrap();
+                drop(client);
+                let got = read_request_head(&mut BufReader::new(proxy));
+                assert!(
+                    matches!(&got, Err(why) if why.starts_with(HANGUP)),
+                    "{got:?}"
+                );
+
+                let (proxy, client) = UnixStream::pair().unwrap();
+                drop(client);
+                assert_eq!(read_request_head(&mut BufReader::new(proxy)), Ok(None));
+
+                let (proxy, client) = UnixStream::pair().unwrap();
+                (&client).write_all(b"GET /x HTTP/1.1\r\n").unwrap();
+                (&proxy).write_all(b"never read").unwrap();
+                drop(client);
+                let got = read_request_head(&mut BufReader::new(proxy));
+                assert!(matches!(&got, Err(why) if !why.contains(HANGUP)), "{got:?}");
+            }
+
+            /// An answer in flight, on real socket pairs: delivered whole when
+            /// the daemon sends it whole; a reset or an early end from the
+            /// daemon in the middle of it is a failure -- never a hang-up, never
+            /// a success; a client gone in the middle of it (Docker's CLI
+            /// exiting) is the client's hang-up, as a refused write always was.
+            #[test]
+            fn an_answer_in_flight_is_delivered_whole_or_its_cut_is_named() {
+                let head =
+                    Head::parse(b"HTTP/1.1 200 OK\r\nContent-Length: 8\r\n\r\n".to_vec()).unwrap();
+                // Whole.
+                let (from_daemon, daemon) = UnixStream::pair().unwrap();
+                let (mut to_client, client) = UnixStream::pair().unwrap();
+                (&daemon).write_all(b"12345678").unwrap();
+                let whole = stream_body(&mut BufReader::new(from_daemon), &mut to_client, &head);
+                assert_eq!(whole, Ok(false));
+                let mut got = [0u8; 8];
+                (&client).read_exact(&mut got).unwrap();
+                assert_eq!(&got, b"12345678");
+
+                // The daemon resets half way: a failure.
+                let (from_daemon, daemon) = UnixStream::pair().unwrap();
+                let (mut to_client, _client) = UnixStream::pair().unwrap();
+                (&daemon).write_all(b"1234").unwrap();
+                (&from_daemon)
+                    .write_all(b"never read by the daemon")
+                    .unwrap();
+                drop(daemon);
+                let cut = stream_body(&mut BufReader::new(from_daemon), &mut to_client, &head);
+                assert!(matches!(&cut, Err(why) if !why.contains(HANGUP)), "{cut:?}");
+
+                // The daemon ends cleanly, short: a failure.
+                let (from_daemon, daemon) = UnixStream::pair().unwrap();
+                let (mut to_client, _client) = UnixStream::pair().unwrap();
+                (&daemon).write_all(b"1234").unwrap();
+                drop(daemon);
+                let short = stream_body(&mut BufReader::new(from_daemon), &mut to_client, &head);
+                assert!(
+                    matches!(&short, Err(why) if why.contains("cut short") && !why.contains(HANGUP)),
+                    "{short:?}"
+                );
+
+                // The client gone before the answer: its hang-up.
+                let (from_daemon, daemon) = UnixStream::pair().unwrap();
+                let (mut to_client, client) = UnixStream::pair().unwrap();
+                (&daemon).write_all(b"12345678").unwrap();
+                drop(client);
+                let gone = stream_body(&mut BufReader::new(from_daemon), &mut to_client, &head);
+                assert!(
+                    matches!(&gone, Err(why) if why.starts_with(HANGUP)),
+                    "{gone:?}"
+                );
+            }
+
             /// A body: its bytes as they crossed (`raw`), and its content.
             pub(super) struct Body {
                 pub(super) raw: Vec<u8>,
@@ -4123,7 +4228,7 @@ mod linux {
                     })
                 };
                 loop {
-                    let Some(raw) = read_head(&mut from_client)? else {
+                    let Some(raw) = read_request_head(&mut from_client)? else {
                         let _ = to_daemon.shutdown(Shutdown::Write);
                         return Ok(());
                     };
