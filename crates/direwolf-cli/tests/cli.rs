@@ -10,6 +10,10 @@
 
 use std::process::{Command, Output};
 
+// The binary's own dependencies (ADR-0072's library), unused here.
+use dwk_proto as _;
+use sha2 as _;
+
 fn direwolf(args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_direwolf"))
         .args(args)

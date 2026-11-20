@@ -242,7 +242,12 @@ pub(crate) fn decide_net(
     let capability = required(facts.host, facts.port, facts.method, facts.next_request)?;
     let base = CanonicalAction::new(capability, Environment::Host)
         .with_byte_count(facts.body_bytes)
-        .with_destination_novelty(facts.novelty);
+        .with_destination_novelty(facts.novelty)
+        .with_destination_allowlisted(active.egress.covers(
+            facts.host,
+            facts.port,
+            crate::state::egress_allowlist::EgressScope::NetHttp,
+        ));
     let mut limit = facts.response_limit;
     let mut gates = Vec::new();
     match facts.addresses {

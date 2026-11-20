@@ -21,7 +21,7 @@ DW := $(PY) scripts/dw.py
         sandbox-foundation-evidence sandbox-egress-evidence sandbox-egress-policy-mutations \
         sandbox-taint-mutations authority-ownership-mutations authority-concurrency-mutations posture-mutations \
         policy-anchor-mutations approver-identity-mutations proxy-peer-evidence \
-        proxy-peer-mutations sandbox-identity-mutations \
+        proxy-peer-mutations sandbox-identity-mutations egress-allowlist-mutations \
         sandbox-workload-evidence \
         net-http-evidence net-http-mutations sandbox-workload-mutations sandbox-secret-evidence \
         sandbox-secret-mutations sandbox-workspace-evidence sandbox-workspace-mutations \
@@ -143,6 +143,9 @@ proxy-peer-mutations: ## F-04 mutation review (ADR-0068, Proposed): each guard o
 
 sandbox-identity-mutations: ## F-05 mutation review (ADR-0069, Proposed): each guard of the environment identity judgement -- complain, a contradiction, a record alone, permissive SELinux, an unconfined domain, Landlock and the shared identity map never enforced; AppArmor judged only where the kernel runs it; the host mode never shared; SELinux's label never AppArmor's -- weakened in turn must fail the broker's identity tables (Linux)
 	@$(DW) sandbox-identity-mutations
+
+egress-allowlist-mutations: ## F-06 mutation review (ADR-0071, Proposed): each guard of the operator's egress allowlist -- an empty list, a suffix, any port, any path, an unknown member, a single label or a number never allowed; the predicate never ignored; BALANCED and POWER never without it; each path judged by its own entries; a relative file never taken -- weakened in turn must fail the authority's tests (Linux)
+	@$(DW) egress-allowlist-mutations
 
 sandbox-workload-evidence: ## M5d.1-M5d.2 workloads in real OCI environments: identity, bounds, wall clock, process trees ended, digests, drift, escapes, an agent-shaped workload, the authority's gates, ledger and crash windows; the public process.exec over real DWKP, serve --sandbox-config, the hygiene launcher with real git/Python/pytest; M5e.2 cross-run isolation
 	@$(DW) sandbox-workload-evidence

@@ -7,6 +7,9 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
+# Never published. Also what lets it inherit the in-tree `dwk-proto` by
+# path without a version (deny.toml, `wildcards`; ADR-0072).
+publish = false
 
 [[bin]]
 name = "direwolf"
@@ -16,3 +19,8 @@ path = "src/main.rs"
 workspace = true
 
 [dependencies]
+# `direwolf models` (ADR-0072, Proposed): the library's manifests are
+# dwk-proto's strict, canonical JSON, and every file is hashed with the
+# SHA-256 the authority already links. No HTTP or TLS crate (TX044).
+dwk-proto = { workspace = true }
+sha2 = { workspace = true }

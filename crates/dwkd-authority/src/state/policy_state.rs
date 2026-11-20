@@ -401,6 +401,10 @@ pub(super) struct ActiveAuthority {
     /// when a decision that needs the address is refused instead.
     pub(super) partition:
         Result<crate::policy::partition::NetworkPartition, crate::policy::partition::TooFine>,
+    /// The operator's egress allowlist (F-06, ADR-0071, Proposed): what
+    /// `destination_allowlisted` is computed from for every network action
+    /// of this incarnation. Empty without a file.
+    pub(super) egress: crate::state::egress_allowlist::EgressAllowlist,
 }
 
 /// Parse a ceiling. Every entry must parse. Its entries are kept as declared:

@@ -792,7 +792,7 @@ def test_the_gate_judges_every_bundle_of_this_run_again(tmp_path: Path) -> None:
     lines, blockers = dw.m5e_gate_verdict(GATE_ENV, root, REPO_ROOT)
     assert lines[0].startswith(dw._INVENTORY_VERDICT)
     assert "attributed inventory: 7 of 7 cases" in lines[1]
-    assert "  net-http-evidence: 179 case(s) judged again" in lines
+    assert "  net-http-evidence: 186 case(s) judged again" in lines
     assert blockers  # today: M5e.5 is not accepted
     # An earlier attempt of the same run is this run: its job passed and was
     # not run again.

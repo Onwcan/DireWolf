@@ -175,6 +175,8 @@ pub enum PredicateName {
     IpIn,
     /// `when.destination_novel`.
     DestinationNovel,
+    /// `when.destination_allowlisted` (F-06, ADR-0071).
+    DestinationAllowlisted,
     /// `when.environment`.
     Environment,
     /// `when.origin`.
@@ -193,7 +195,7 @@ pub enum PredicateName {
 
 impl PredicateName {
     /// Every predicate, in declaration order.
-    pub const ALL: [Self; 15] = [
+    pub const ALL: [Self; 16] = [
         Self::Verb,
         Self::PathUnder,
         Self::MaxBytes,
@@ -202,6 +204,7 @@ impl PredicateName {
         Self::HostMatches,
         Self::IpIn,
         Self::DestinationNovel,
+        Self::DestinationAllowlisted,
         Self::Environment,
         Self::Origin,
         Self::TaintLevel,
@@ -223,6 +226,7 @@ impl PredicateName {
             Self::HostMatches => "host_matches",
             Self::IpIn => "ip_in",
             Self::DestinationNovel => "destination_novel",
+            Self::DestinationAllowlisted => "destination_allowlisted",
             Self::Environment => "environment",
             Self::Origin => "origin",
             Self::TaintLevel => "taint_level",
@@ -261,7 +265,9 @@ impl PredicateName {
                 verb.scope_family(),
                 ScopeFamily::Endpoint | ScopeFamily::Domain
             ),
-            Self::IpIn => verb.scope_family() == ScopeFamily::Endpoint,
+            Self::IpIn | Self::DestinationAllowlisted => {
+                verb.scope_family() == ScopeFamily::Endpoint
+            }
             Self::DestinationNovel => matches!(
                 verb.scope_family(),
                 ScopeFamily::Endpoint | ScopeFamily::Domain | ScopeFamily::ChannelTarget
@@ -278,7 +284,9 @@ impl PredicateName {
                 "it applies to process verbs, whose scope is an executable"
             }
             Self::HostMatches => "it applies to network and browser verbs",
-            Self::IpIn => "it applies to network verbs, whose scope is an endpoint",
+            Self::IpIn | Self::DestinationAllowlisted => {
+                "it applies to network verbs, whose scope is an endpoint"
+            }
             Self::DestinationNovel => {
                 "it applies to verbs with a destination: network, browser, channel"
             }
@@ -333,6 +341,11 @@ pub struct When {
     /// `destination_novel` — the run has, or has not, been here before.
     /// **Scalar only**, as `argv_safe`.
     pub destination_novel: Option<Novelty>,
+    /// `destination_allowlisted` (F-06, ADR-0071) -- the operator's egress
+    /// allowlist names, or does not name, this host, port and path. An
+    /// action the authority built without the input never matches either
+    /// value. **Scalar only**, as `argv_safe`.
+    pub destination_allowlisted: Option<bool>,
     /// `environment` — equality or membership.
     pub environment: Option<MatchValue<Environment>>,
     /// `origin` — equality or membership.
@@ -449,6 +462,10 @@ impl When {
             self.destination_novel.is_some(),
             PredicateName::DestinationNovel,
         );
+        note(
+            self.destination_allowlisted.is_some(),
+            PredicateName::DestinationAllowlisted,
+        );
         note(self.environment.is_some(), PredicateName::Environment);
         note(self.origin.is_some(), PredicateName::Origin);
         note(self.taint_level.is_some(), PredicateName::TaintLevel);
@@ -507,6 +524,10 @@ impl When {
         result = result
             .and(Match::from_bool(self.destination_novel.is_none_or(
                 |wanted| action.destination_novelty() == Some(wanted),
+            )));
+        result = result
+            .and(Match::from_bool(self.destination_allowlisted.is_none_or(
+                |wanted| action.destination_allowlisted() == Some(wanted),
             )));
         result = result.and(Match::from_bool(
             self.host_matches

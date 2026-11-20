@@ -460,9 +460,10 @@ fn power_is_partitioned_by_its_internal_ranges_and_decided_by_them() {
     let partition = NetworkPartition::of(&policy).unwrap();
     assert_eq!(partition.ranges().len(), 9);
     let context = context(0, 0);
-    let base = action(false);
+    let base = action(false).with_destination_allowlisted(true);
     // An address in an internal range is denied by deny-internal-ranges; one
-    // outside every range is allowed by allow-https-egress.
+    // outside every range is allowed by allow-https-egress, the operator's
+    // allowlist naming it (F-06).
     let inside = partition
         .representative(partition.piece_of(&IpAddress::V4([10, 9, 9, 9])))
         .unwrap();

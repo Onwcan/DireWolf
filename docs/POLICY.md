@@ -327,12 +327,14 @@ Which shape a field takes:
 | `when.max_bytes` | ✓ | ✗ | `u64` | the action moves no more than this |
 | `when.argv_safe` | ✓ | ✗ | `ArgvSafety` | the canonicaliser's classification equals this |
 | `when.destination_novel` | ✓ | ✗ | `Novelty` | the run has, or has not, been here |
+| `when.destination_allowlisted` | ✓ | ✗ | `bool` | the operator's egress allowlist names, or does not name, this host, port and path (F-06, [ADR-0071](adr/0071-f06-an-operator-egress-allowlist-every-shipped-network-rule-requires.md), Proposed); an action built without it matches neither |
 | `unless.config` | ✓ | ✗ | `ConfigKey` | this kernel flag is set |
 | `unless.standing_grant` | ✓ | ✗ | `bool` | a grant covers this (never, before M6) |
 | `obligations` | ✗ | ✓ | `Obligations` | the conditions a permission carries |
 
-The three scalar-only `when` fields are not membership tests: a numeric bound
-and two canonicaliser-derived classifications. `max_bytes = [1, 2]` names no
+The four scalar-only `when` fields are not membership tests: a numeric bound,
+two canonicaliser-derived classifications and the operator's egress allowlist's
+answer for the destination. `max_bytes = [1, 2]` names no
 bound, so it is a type error rather than a set. `obligations` is the mirror
 case — an output set rather than a match, so the scalar spelling documented for
 `eq` does not apply to it and `obligations = "network_deny"` is refused.

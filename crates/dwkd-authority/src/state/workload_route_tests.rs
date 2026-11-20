@@ -2133,6 +2133,77 @@ fn destination<'a>(
         .unwrap()
 }
 
+/// F-06 (ADR-0071): a rule requiring `destination_allowlisted` decides a
+/// workload's tunnels by the operator's allowlist for the `workload` path --
+/// at launch, every cell, nothing else changed.
+#[test]
+fn f06_a_workload_reaches_only_what_the_operator_allowlisted_for_workloads() {
+    let rule = "when.environment = \"sandbox\"\nobligations = [\"max_output_bytes=4096\"]";
+    assert_eq!(EGRESS_POLICY.matches(rule).count(), 1);
+    let policy = PolicySet {
+        profile: "f17".to_owned(),
+        sources: vec![PolicySource {
+            name: "f17.toml".to_owned(),
+            text: EGRESS_POLICY.replace(
+                rule,
+                "when.environment = \"sandbox\"\nwhen.destination_allowlisted = true\n\
+                 obligations = [\"max_output_bytes=4096\"]",
+            ),
+        }],
+    };
+    let entry = |scope: &str| {
+        crate::state::egress_allowlist::EgressAllowlist::parse(&format!(
+            "schema_version = 1\n[[destination]]\nname = \"allowed\"\n\
+             host = \"allowed.example.com\"\nport = 443\nscope = [\"{scope}\"]\n\
+             purpose = \"F-06\"\n"
+        ))
+        .unwrap()
+    };
+    let decide = |list: crate::state::egress_allowlist::EgressAllowlist| {
+        let mut declared = DECLARED.to_vec();
+        declared.push("network.https:*");
+        let mut fx = Fixture::with_declared(policy.clone(), None, &declared);
+        fx.config.egress = list;
+        fx.start(None);
+        fx.authority().attach_sandbox(proxy_sandbox(IMAGE)).unwrap();
+        fx.clock.advance(1);
+        fx.lease();
+        let run = fx.run("r1", &[GRANT, ALLOWED, "network.https:other.example.com"]);
+        fx.ready(&run);
+        let body = fx.ran(&run, "k1", &call(FIXTURE, &[]));
+        let (_, out) = result(&body);
+        assert_eq!(out.ending, SandboxEnding::Exited);
+        let egresses = fx.fake.egresses();
+        assert_eq!(egresses.len(), 1);
+        egresses[0].clone().unwrap()
+    };
+    let nothing = [false, false, false];
+    // No allowlist, or one for the net.http path only: no tunnel anywhere.
+    for list in [
+        crate::state::egress_allowlist::EgressAllowlist::empty(),
+        entry("net_http"),
+    ] {
+        let egress = decide(list);
+        for host in ["allowed.example.com", "other.example.com"] {
+            let target = destination(&egress, host);
+            for (seen, exposed) in [(false, false), (false, true), (true, false), (true, true)] {
+                assert_eq!(pieces(target.cell(seen, exposed)), nothing, "{host}");
+            }
+        }
+    }
+    // Named for workloads: that destination as the rest of the policy says;
+    // the other granted destination still nothing.
+    let egress = decide(entry("workload"));
+    let allowed = destination(&egress, "allowed.example.com");
+    assert_eq!(pieces(&allowed.novel_pristine), [true, true, false]);
+    assert_eq!(pieces(&allowed.seen_pristine), [true, true, false]);
+    let other = destination(&egress, "other.example.com");
+    for (seen, exposed) in [(false, false), (false, true), (true, false), (true, true)] {
+        assert_eq!(pieces(other.cell(seen, exposed)), nothing);
+    }
+    evidence("f06-allowlist-decides-workload-egress", "exact-only");
+}
+
 #[test]
 fn f17_a_launch_carries_both_gates_decision_for_every_granted_destination() {
     let mut fx = proxy_fixture();

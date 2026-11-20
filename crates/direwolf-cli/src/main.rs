@@ -9,8 +9,9 @@
 //! that does not exist: it invites callers, scripts and documentation to form
 //! around a shape nobody has designed yet.
 //!
-//! So this binary implements exactly two things, both of which are true today:
-//! `--version` and `doctor`.
+//! So this binary implements exactly three things, each true today:
+//! `--version`, `doctor`, and `models` -- the operator's offline model library
+//! (ADR-0072, Proposed), which downloads nothing and serves no inference.
 //!
 //! Argument parsing is hand-written. With two commands, a dependency would buy
 //! nothing; `clap` is expected at M17 when there is a real hierarchy to
@@ -18,6 +19,7 @@
 
 mod build_info;
 mod doctor;
+mod models;
 mod platform;
 
 use std::process::ExitCode;
@@ -34,6 +36,7 @@ USAGE:
 
 COMMANDS:
     doctor      Report build provenance and host platform facts
+    models      The operator's offline model library (direwolf models --help)
 
 OPTIONS:
     -V, --version    Print version and build provenance
@@ -70,6 +73,7 @@ fn dispatch(args: &[&str]) -> u8 {
             0
         }
         ["doctor"] => u8::try_from(doctor::run()).unwrap_or(EXIT_USAGE),
+        ["models", rest @ ..] => models::run(rest),
         [unknown, ..] => {
             eprintln!("direwolf: unknown command or option: {unknown}");
             eprintln!("Try `direwolf --help`.");

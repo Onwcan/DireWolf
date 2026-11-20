@@ -352,23 +352,107 @@ fn allowlisted_hosts_are_reachable_and_label_neighbours_are_not() {
         "static.crates.io",
         "crates.io",
     ] {
-        let action = sandboxed(syntactic_capability(&format!("network.https:{host}")));
+        let action = sandboxed(syntactic_capability(&format!("network.https:{host}")))
+            .with_destination_allowlisted(true);
         let decision = evaluate(&policy, &action, &context);
         expect(&decision, Effect::Allow, "allow-package-registries");
     }
 
     // The suffix-confusion trap. `ends_with("github.com")` would match the
-    // first of these, and it is a domain anyone can register.
+    // first of these, and it is a domain anyone can register. The pack's list
+    // still narrows what the operator's allowlist names (F-06).
     for host in [
         "evil-github.com",
         "github.com.attacker.test",
         "notgithub.com",
         "crates.io.evil.test",
     ] {
-        let action = sandboxed(syntactic_capability(&format!("network.https:{host}")));
+        let action = sandboxed(syntactic_capability(&format!("network.https:{host}")))
+            .with_destination_allowlisted(true);
         let decision = evaluate(&policy, &action, &context);
         expect(&decision, Effect::Deny, "default");
     }
+}
+
+#[test]
+fn no_shipped_pack_reaches_a_destination_the_operator_did_not_allowlist() {
+    // F-06 (ADR-0071): a registry the pack names, and any HTTPS destination
+    // POWER would take, are reached only where the operator's allowlist
+    // names them. Not said (an action the authority built without it), or
+    // said false: the shipped rule does not match, and the pack's default
+    // denies -- the denial named, the rule source a real line.
+    let context = interactive();
+    for (pack_file, host) in [
+        ("balanced.toml", "registry.npmjs.org"),
+        ("balanced.toml", "github.com"),
+        ("balanced.toml", "uploads.github.com"),
+        ("balanced.toml", "upload.pypi.org"),
+        ("power.toml", "example.com"),
+        ("power.toml", "gist.github.com"),
+    ] {
+        let policy = pack(pack_file);
+        let base = sandboxed(syntactic_capability(&format!("network.https:{host}")))
+            .with_destination_novelty(Novelty::Seen)
+            .with_destination_ip(IpAddress::V4([93, 184, 216, 34]));
+        for action in [
+            base.clone(),
+            base.clone().with_destination_allowlisted(false),
+        ] {
+            let decision = evaluate(&policy, &action, &context);
+            expect(&decision, Effect::Deny, "default");
+            assert_eq!(
+                decision.reason(),
+                Reason::NoMatchingRule,
+                "{pack_file} {host}"
+            );
+        }
+        let allowed = base.with_destination_allowlisted(true);
+        assert_eq!(
+            evaluate(&policy, &allowed, &context).effect(),
+            Effect::Allow,
+            "{pack_file} {host}"
+        );
+    }
+    // SAFE has no network rule to require it: denied whatever is said.
+    let safe = pack("safe.toml");
+    let action = sandboxed(syntactic_capability("network.https:github.com"))
+        .with_destination_allowlisted(true);
+    assert_eq!(evaluate(&safe, &action, &context).effect(), Effect::Deny);
+}
+
+#[test]
+fn an_allowlisted_destination_widens_no_other_layer() {
+    // The allowlist only narrows: the private ranges, taint and novelty, and
+    // plaintext are decided before it is consulted, whatever it says.
+    let context = interactive();
+    let power = pack("power.toml");
+    let metadata = sandboxed(syntactic_capability("network.https:metadata.example.com"))
+        .with_destination_allowlisted(true)
+        .with_destination_ip(IpAddress::V4([169, 254, 169, 254]));
+    expect(
+        &evaluate(&power, &metadata, &context),
+        Effect::Deny,
+        "deny-internal-ranges",
+    );
+    let tainted = PolicyContext::new(Origin::Interactive, TaintLevel::ExternalUntrusted)
+        .with_anchors(anchors());
+    for file in ["balanced.toml", "power.toml"] {
+        let novel = sandboxed(syntactic_capability("network.https:github.com"))
+            .with_destination_allowlisted(true)
+            .with_destination_novelty(Novelty::Novel)
+            .with_destination_ip(IpAddress::V4([93, 184, 216, 34]));
+        expect(
+            &evaluate(&pack(file), &novel, &tainted),
+            Effect::RequireApproval,
+            "approve-egress-when-tainted",
+        );
+    }
+    let plaintext = sandboxed(syntactic_capability("network.http:github.com"))
+        .with_destination_allowlisted(true);
+    assert_eq!(
+        evaluate(&balanced(), &plaintext, &context).effect(),
+        Effect::Deny
+    );
 }
 
 #[test]
@@ -377,7 +461,8 @@ fn a_tainted_run_reaching_somewhere_new_stops_even_for_an_allowlisted_host() {
     let tainted = PolicyContext::new(Origin::Interactive, TaintLevel::ExternalUntrusted)
         .with_anchors(anchors());
     let action = sandboxed(syntactic_capability("network.https:github.com"))
-        .with_destination_novelty(Novelty::Novel);
+        .with_destination_novelty(Novelty::Novel)
+        .with_destination_allowlisted(true);
 
     let decision = evaluate(&policy, &action, &tainted);
     expect(
@@ -394,7 +479,8 @@ fn a_tainted_run_reaching_somewhere_new_stops_even_for_an_allowlisted_host() {
     // Two neighbours, each of which must NOT stop. A destination this run has
     // already reached is not novel...
     let seen = sandboxed(syntactic_capability("network.https:github.com"))
-        .with_destination_novelty(Novelty::Seen);
+        .with_destination_novelty(Novelty::Seen)
+        .with_destination_allowlisted(true);
     expect(
         &evaluate(&policy, &seen, &tainted),
         Effect::Allow,
@@ -641,7 +727,8 @@ fn power_refuses_the_private_ranges_an_agent_should_never_reach() {
         IpAddress::V4([169, 253, 0, 1]),
     ] {
         let action = sandboxed(syntactic_capability("network.https:example.com"))
-            .with_destination_ip(address);
+            .with_destination_ip(address)
+            .with_destination_allowlisted(true);
         expect(
             &evaluate(&policy, &action, &context),
             Effect::Allow,
@@ -677,8 +764,11 @@ fn a_network_action_with_no_destination_address_is_refused_rather_than_allowed()
     );
     assert_eq!(decision.rule_id().as_str(), "deny-internal-ranges");
 
-    // Given a public destination address, the same action is permitted.
-    let resolved = unresolved.with_destination_ip(IpAddress::V4([93, 184, 216, 34]));
+    // Given a public destination address -- and the operator's allowlist
+    // naming it (F-06) -- the same action is permitted.
+    let resolved = unresolved
+        .with_destination_ip(IpAddress::V4([93, 184, 216, 34]))
+        .with_destination_allowlisted(true);
     expect(
         &evaluate(&policy, &resolved, &context),
         Effect::Allow,
@@ -707,9 +797,13 @@ fn a_policy_decision_is_about_one_destination_and_binds_nothing_to_it() {
     let (policy, context) = (pack("power.toml"), interactive());
     let capability = syntactic_capability("network.https:rebind.example.com");
 
-    let public =
-        sandboxed(capability.clone()).with_destination_ip(IpAddress::V4([93, 184, 216, 34]));
-    let loopback = sandboxed(capability).with_destination_ip(IpAddress::V4([127, 0, 0, 1]));
+    // The operator's allowlist names the host (F-06); only the address differs.
+    let public = sandboxed(capability.clone())
+        .with_destination_ip(IpAddress::V4([93, 184, 216, 34]))
+        .with_destination_allowlisted(true);
+    let loopback = sandboxed(capability)
+        .with_destination_ip(IpAddress::V4([127, 0, 0, 1]))
+        .with_destination_allowlisted(true);
 
     let allowed = evaluate(&policy, &public, &context);
     let denied = evaluate(&policy, &loopback, &context);

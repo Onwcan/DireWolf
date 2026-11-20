@@ -72,10 +72,14 @@ when.ip_in = ["127.0.0.0/8", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16",
               "fc00:0000:0000:0000:0000:0000:0000:0000/7",
               "fe80:0000:0000:0000:0000:0000:0000:0000/10"]
 
+# F-06 (ADR-0071, Proposed): "any HTTPS" is any destination the operator's
+# egress allowlist (`--egress-allowlist`) names -- its host, its port and the
+# path -- and nothing else. Without that file this rule grants nothing.
 [[rule]]
 id     = "allow-https-egress"
 effect = "ALLOW"
 when.verb = ["network.https"]
+when.destination_allowlisted = true
 obligations = ["max_output_bytes=33554432"]
 
 [[rule]]

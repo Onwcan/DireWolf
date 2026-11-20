@@ -895,6 +895,97 @@ mod linux {
         drop(server);
     }
 
+    /// F-06 (ADR-0071, Proposed): the operator's egress allowlist is read and
+    /// checked before the authority serves, as every operator file is, and
+    /// said at start; anything not exactly its grammar, or a file another uid
+    /// could change, is a start that does not happen.
+    #[test]
+    fn the_operator_egress_allowlist_is_checked_before_the_authority_serves() {
+        let fx = Fixture::new("t-egress");
+        let file = |name: &str, text: &str, mode: u32| {
+            let path = fx.dir.path().join(name);
+            std::fs::write(&path, text).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+            path.display().to_string()
+        };
+        let with = |path: &str| {
+            let mut args = fx.args(&[]);
+            args.extend(["--egress-allowlist".to_owned(), path.to_owned()]);
+            args
+        };
+        // None: said, and nothing else changes.
+        {
+            let server = Server::start(&fx.args(&[]));
+            assert!(
+                server.stderr().contains("egress allowlist: none"),
+                "{}",
+                server.stderr()
+            );
+        }
+        let entry = "schema_version = 1\n[[destination]]\nname = \"npm\"\n\
+                     host = \"registry.npmjs.org\"\nport = 443\nscope = [\"workload\"]\n\
+                     purpose = \"npm install in a sandboxed workload\"\n";
+        // A good file: read, parsed, said by name.
+        let good = file("egress-good.toml", entry, 0o600);
+        {
+            let server = Server::start(&with(&good));
+            assert!(
+                server
+                    .stderr()
+                    .contains(&format!("egress allowlist {good}: 1 destination(s): npm")),
+                "{}",
+                server.stderr()
+            );
+        }
+        // Refused: an unknown member, a wildcard, a file another uid could
+        // change, one that is not there.
+        for (name, text, mode, said) in [
+            (
+                "egress-unknown.toml",
+                format!("{entry}allow_private = true\n"),
+                0o600,
+                "unknown member",
+            ),
+            (
+                "egress-wildcard.toml",
+                entry.replace("registry.npmjs.org", "*.npmjs.org"),
+                0o600,
+                "wildcard",
+            ),
+            (
+                "egress-writable.toml",
+                entry.to_owned(),
+                0o620,
+                "--egress-allowlist",
+            ),
+        ] {
+            let path = file(name, &text, mode);
+            let Err((status, stderr)) = Server::try_start(&with(&path)) else {
+                panic!("started with {name}")
+            };
+            assert!(status.is_some_and(|s| !s.success()), "{name}: {stderr}");
+            assert!(stderr.contains("--egress-allowlist"), "{name}: {stderr}");
+            assert!(stderr.contains(said), "{name}: {stderr}");
+        }
+        let absent = fx
+            .dir
+            .path()
+            .join("egress-absent.toml")
+            .display()
+            .to_string();
+        let Err((status, stderr)) = Server::try_start(&with(&absent)) else {
+            panic!("started with an absent allowlist")
+        };
+        assert!(status.is_some_and(|s| !s.success()), "{stderr}");
+        assert!(stderr.contains("--egress-allowlist"), "{stderr}");
+        // A relative path: a usage error, before anything is read.
+        let Err((status, stderr)) = Server::try_start(&with("egress.toml")) else {
+            panic!("started with a relative allowlist path")
+        };
+        assert!(status.is_some_and(|s| !s.success()), "{stderr}");
+        assert!(stderr.contains("must be an absolute path"), "{stderr}");
+    }
+
     #[test]
     fn help_describes_the_server_that_exists() {
         let output =

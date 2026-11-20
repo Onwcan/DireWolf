@@ -165,6 +165,13 @@ approval.max_uses = 1
 # Wildcards are label-aware: `*.crates.io` covers `static.crates.io` and does
 # not cover `crates.io` itself or `evil-crates.io`, so the apex is listed
 # separately where it is wanted.
+#
+# F-06 (ADR-0071, Proposed): every host here takes uploads as well as
+# downloads -- a publish, a push, a release asset -- and a workload's tunnel is
+# opaque, so no pack can tell one from the other. The list is the ceiling; a
+# destination is reached only where the operator's egress allowlist
+# (`--egress-allowlist`) also names its host, its port and the path. Without
+# that file this rule grants nothing.
 [[rule]]
 id     = "allow-package-registries"
 effect = "ALLOW"
@@ -174,6 +181,7 @@ when.host_matches = ["crates.io", "*.crates.io",
                      "registry.npmjs.org",
                      "github.com", "*.github.com",
                      "proxy.golang.org"]
+when.destination_allowlisted = true
 obligations = ["max_output_bytes=8388608"]
 
 # ===========================================================================

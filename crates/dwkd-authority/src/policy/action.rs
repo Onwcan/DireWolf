@@ -211,6 +211,7 @@ pub struct CanonicalAction {
     byte_count: Option<u64>,
     destination_ip: Option<IpAddress>,
     destination_novelty: Option<Novelty>,
+    destination_allowlisted: Option<bool>,
 }
 
 impl CanonicalAction {
@@ -224,6 +225,7 @@ impl CanonicalAction {
             byte_count: None,
             destination_ip: None,
             destination_novelty: None,
+            destination_allowlisted: None,
         }
     }
 
@@ -252,6 +254,15 @@ impl CanonicalAction {
     #[must_use]
     pub const fn with_destination_novelty(mut self, novelty: Novelty) -> Self {
         self.destination_novelty = Some(novelty);
+        self
+    }
+
+    /// Whether the operator's egress allowlist names this destination, on
+    /// the path the action takes (F-06, ADR-0071): set by the authority from
+    /// the operator's file and nothing else.
+    #[must_use]
+    pub const fn with_destination_allowlisted(mut self, allowlisted: bool) -> Self {
+        self.destination_allowlisted = Some(allowlisted);
         self
     }
 
@@ -326,6 +337,13 @@ impl CanonicalAction {
     #[must_use]
     pub const fn destination_novelty(&self) -> Option<Novelty> {
         self.destination_novelty
+    }
+
+    /// Whether the operator's egress allowlist names the destination, if the
+    /// authority said; an action built without it is never allowlisted.
+    #[must_use]
+    pub const fn destination_allowlisted(&self) -> Option<bool> {
+        self.destination_allowlisted
     }
 }
 

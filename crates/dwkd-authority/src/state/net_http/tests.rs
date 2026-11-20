@@ -435,10 +435,15 @@ fn start(
 }
 
 fn fixture_with(policy: &str, budget: NetBudget, hook: Option<CrashHook>) -> Fixture {
+    fixture_from(config(policy, budget), hook)
+}
+
+/// The fixture over a configuration the test made (F-06: an egress
+/// allowlist).
+fn fixture_from(config: StartupConfig, hook: Option<CrashHook>) -> Fixture {
     let scratch = Scratch::new("net-http");
     let root = scratch.path().join("ws");
     std::fs::create_dir_all(&root).unwrap();
-    let config = config(policy, budget);
     let fake = Arc::new(Fake::default());
     let clock = Arc::new(ManualClock::new(START_MS));
     let state = scratch.path().join("state");
@@ -621,6 +626,68 @@ fn output(reply: &NetReply) -> &dwk_proto::dwkp::netops::NetHttpResult {
 }
 
 const GRANT: &str = "network.https:*.example.com";
+
+/// The shape of every shipped network rule since F-06 (ADR-0071): HTTPS on
+/// the host where the operator's egress allowlist names the destination.
+const ALLOWLISTED: &str = "schema_version = 1\n\n[meta]\nname = \"m5c\"\n\n[[rule]]\n\
+    id = \"allow-allowlisted\"\neffect = \"ALLOW\"\nwhen.verb = \"network.https\"\n\
+    when.environment = \"host\"\nwhen.destination_allowlisted = true\n\n[[rule]]\n\
+    id = \"default\"\neffect = \"DENY\"\nreason = \"NO_MATCHING_RULE\"\n";
+
+fn allowlist(entries: &[(&str, u16, &str)]) -> crate::state::egress_allowlist::EgressAllowlist {
+    use std::fmt::Write as _;
+    let mut text = "schema_version = 1\n".to_owned();
+    for (n, (host, port, scope)) in entries.iter().enumerate() {
+        let _ = write!(
+            text,
+            "[[destination]]\nname = \"d{n}\"\nhost = \"{host}\"\nport = {port}\n\
+             scope = [\"{scope}\"]\npurpose = \"F-06\"\n"
+        );
+    }
+    crate::state::egress_allowlist::EgressAllowlist::parse(&text).unwrap()
+}
+
+#[test]
+fn f06_a_hop_reaches_only_what_the_operator_allowlisted_for_net_http() {
+    // Not named, named for the workload path, on another port, or a
+    // neighbour: the rule does not match, the default denies, and nothing is
+    // resolved or sent.
+    for list in [
+        crate::state::egress_allowlist::EgressAllowlist::empty(),
+        allowlist(&[("api.example.com", 443, "workload")]),
+        allowlist(&[("api.example.com", 8443, "net_http")]),
+        allowlist(&[("other.example.com", 443, "net_http")]),
+    ] {
+        let mut config = config(ALLOWLISTED, NetBudget::default());
+        config.egress = list.clone();
+        let mut fx = fixture_from(config, None);
+        let run = fx.run("r1", &[GRANT]);
+        let reply = fx.invoke(
+            &run,
+            call(HttpMethod::Get, "https://api.example.com/x"),
+            "k1",
+        );
+        assert_eq!(
+            denied_reason(&reply),
+            NetDecisionReason::DefaultDeny,
+            "{list:?}"
+        );
+        assert!(fx.fake.asked().is_empty(), "{list:?}");
+    }
+    // Named exactly: decided, resolved, sent.
+    let mut config = config(ALLOWLISTED, NetBudget::default());
+    config.egress = allowlist(&[("api.example.com", 443, "net_http")]);
+    let mut fx = fixture_from(config, None);
+    let run = fx.run("r1", &[GRANT]);
+    let reply = fx.invoke(
+        &run,
+        call(HttpMethod::Get, "https://api.example.com/x"),
+        "k1",
+    );
+    assert_eq!(output(&reply).status.get(), 200);
+    assert_eq!(fx.fake.operations(), ["http.resolve", "http.exchange"]);
+    evidence("f06-allowlist-decides-net-http", "exact-only");
+}
 
 #[test]
 fn a_request_is_decided_resolved_guarded_recorded_and_only_then_sent() {

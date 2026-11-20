@@ -308,7 +308,7 @@ Profiles are **capability ceilings plus policy rule packs**, never prompt change
 | `fs.read` | workspace only | workspace + explicit extras | workspace + home, minus a deny list |
 | `fs.write` | workspace only | workspace only | workspace + approved extras |
 | `process.exec` | denied | allowlisted executables, sandboxed | any, sandboxed; approval per novel executable |
-| `network.*` | denied | allowlisted hosts | allowlist + approval for novel hosts |
+| `network.*` | denied | registry hosts the operator's egress allowlist also names (F-06) | hosts the operator's egress allowlist names; approval for a tainted run's novel host |
 | `secret.use` | denied | approval per use | standing grants permitted, expiring |
 | `agent.spawn` | denied | depth ≤ 2, fan-out ≤ 4 | depth ≤ 4, fan-out ≤ 8 |
 | `scheduler.create` | denied | approval | allowed |

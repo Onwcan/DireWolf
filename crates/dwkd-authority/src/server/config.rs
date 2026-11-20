@@ -216,6 +216,10 @@ pub struct ServeConfig {
     /// The approver endpoint (F-18 Phase 3.4, ADR-0067), if the operator
     /// configured one. Without one there is no approver endpoint at all.
     pub approver: Option<ApproverConfig>,
+    /// The operator's egress allowlist file (F-06, ADR-0071, Proposed), if
+    /// any: the exact destinations a network rule requiring
+    /// `destination_allowlisted` may reach. Without one, none.
+    pub egress_allowlist: Option<PathBuf>,
 }
 
 /// A command line that does not describe a configuration.
@@ -258,6 +262,7 @@ pub const SERVE_USAGE: &str = "\
     --path-anchor <NAME>=<DIR> what a policy anchor stands for on the host: home|direwolf-home|direwolf-config|direwolf-install; repeat
     --approver-socket <PATH>   absolute path of the approver endpoint's socket (with --approver-uid; no approval operation before M6)
     --approver-uid <UID>       a uid that may connect to the approver endpoint; repeat; never a DWKP peer's, the broker's or the authority's
+    --egress-allowlist <PATH>  the operator's exact network destinations (absolute); without it no rule requiring `destination_allowlisted` grants one
 ";
 
 /// Parse the arguments after `serve`.
@@ -297,6 +302,7 @@ struct Parsed {
     path_anchors: Vec<(AnchorName, String)>,
     approver_socket: Option<PathBuf>,
     approver_uids: BTreeSet<u32>,
+    egress_allowlist: Option<PathBuf>,
 }
 
 impl Parsed {
@@ -368,6 +374,7 @@ impl Parsed {
                 bound(self.path_anchors.len(), MAX_PATH_ANCHORS, flag)
             }
             "--approver-socket" => once(&mut self.approver_socket, flag, PathBuf::from(value()?)),
+            "--egress-allowlist" => once(&mut self.egress_allowlist, flag, PathBuf::from(value()?)),
             "--approver-uid" => {
                 let uid = parse_uid_for(flag, value()?)?;
                 if !self.approver_uids.insert(uid) {
@@ -439,6 +446,13 @@ impl Parsed {
         {
             return Err(UsageError::new("--secrets-file must be an absolute path"));
         }
+        if let Some(path) = &self.egress_allowlist
+            && !path.is_absolute()
+        {
+            return Err(UsageError::new(
+                "--egress-allowlist must be an absolute path",
+            ));
+        }
         sandbox_config_fits(self.sandbox_config.as_deref(), broker.is_some())?;
         let approver = approver_fits(
             self.approver_socket,
@@ -448,6 +462,7 @@ impl Parsed {
             broker.as_ref(),
         )?;
         Ok(ServeConfig {
+            egress_allowlist: self.egress_allowlist,
             secrets_file: self.secrets_file,
             sandbox_config: self.sandbox_config,
             dumpable_permitted: self.dumpable,

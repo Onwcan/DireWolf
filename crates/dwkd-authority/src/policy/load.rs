@@ -38,7 +38,7 @@
 //! | shape | fields | a wrong shape is |
 //! |---|---|---|
 //! | **match** — scalar *or* list | the ten `when` predicates that name values | a type error |
-//! | **scalar only** | `max_bytes`, `argv_safe`, `destination_novel`, `unless.*`, and every identifier and enum outside `when` | a type error |
+//! | **scalar only** | `max_bytes`, `argv_safe`, `destination_novel`, `destination_allowlisted`, `unless.*`, and every identifier and enum outside `when` | a type error |
 //! | **list only** | `obligations` | a type error |
 //!
 //! A malformed policy never becomes a valid weaker policy.
@@ -644,6 +644,9 @@ impl Walker<'_> {
             destination_novel: self
                 .optional_bool(table, "destination_novel", &member)?
                 .map(|(flag, _)| Novelty::from_rule_flag(flag)),
+            destination_allowlisted: self
+                .optional_bool(table, "destination_allowlisted", &member)?
+                .map(|(flag, _)| flag),
             environment: self.match_value(table, "environment", &member, |text| {
                 Environment::parse(text).ok_or(ValueError::UnknownEnvironment)
             })?,

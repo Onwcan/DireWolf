@@ -548,6 +548,7 @@ fn start(
         }
     };
     let secrets = secret_config(config.secrets_file.as_deref(), authority_uid)?;
+    let egress = egress_allowlist(config.egress_allowlist.as_deref(), authority_uid)?;
     let startup = StartupConfig {
         policy,
         mode: config.mode,
@@ -557,6 +558,7 @@ fn start(
         secrets,
         net_budget: crate::state::NetBudget::default(),
         anchors: host_anchors(config),
+        egress,
     };
     let options = StartOptions {
         broker,
@@ -608,6 +610,7 @@ fn host_anchors(config: &ServeConfig) -> crate::state::HostAnchors {
     }
     files.extend(config.secrets_file.as_deref());
     files.extend(config.sandbox_config.as_deref());
+    files.extend(config.egress_allowlist.as_deref());
     for file in files {
         let directory = std::fs::canonicalize(file).ok().and_then(|real| {
             real.parent()
@@ -702,6 +705,51 @@ fn secret_config(
     crate::secret::metadata::parse(&text).map_err(|error| {
         ServeError::Configuration(format!("--secrets-file {}: {error}", path.display()))
     })
+}
+
+/// The operator's egress allowlist (`--egress-allowlist`, F-06, ADR-0071):
+/// read as every operator file is -- owned by root or the authority,
+/// writable by nobody else, no symlink, bounded -- and parsed strictly. Said
+/// at start: how many destinations, by name, or that there is none.
+#[cfg(unix)]
+fn egress_allowlist(
+    path: Option<&std::path::Path>,
+    authority_uid: u32,
+) -> Result<crate::state::egress_allowlist::EgressAllowlist, ServeError> {
+    let Some(path) = path else {
+        log(
+            "egress allowlist: none -- every network rule that requires \
+             destination_allowlisted, every shipped pack's among them, grants no destination",
+        );
+        return Ok(crate::state::egress_allowlist::EgressAllowlist::empty());
+    };
+    let text = crate::secret::backend::read_operator_file(
+        &path.to_string_lossy(),
+        authority_uid,
+        crate::state::egress_allowlist::MAX_FILE_BYTES,
+        "--egress-allowlist",
+    )
+    .map_err(ServeError::Configuration)?;
+    let allowlist =
+        crate::state::egress_allowlist::EgressAllowlist::parse(&text).map_err(|error| {
+            ServeError::Configuration(format!("--egress-allowlist {}: {error}", path.display()))
+        })?;
+    let names: Vec<&str> = allowlist
+        .destinations()
+        .iter()
+        .map(|d| d.name.as_str())
+        .collect();
+    log(&format!(
+        "egress allowlist {}: {} destination(s): {}",
+        path.display(),
+        names.len(),
+        if names.is_empty() {
+            "none".to_owned()
+        } else {
+            names.join(",")
+        }
+    ));
+    Ok(allowlist)
 }
 
 /// Accept connections until the worker stops.

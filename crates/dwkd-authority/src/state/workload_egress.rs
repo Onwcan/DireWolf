@@ -163,7 +163,20 @@ pub(super) fn context_digest(
     active: &ActiveAuthority,
     context: &PolicyContext,
 ) -> digest::Sha256Hash {
-    digest::plain(format!("{}\n{context:?}", active.revision.to_hex()).as_bytes())
+    // The operator's egress allowlist is part of what decided (F-06); a
+    // deployment without one keeps the digest it had before.
+    if active.egress.is_empty() {
+        digest::plain(format!("{}\n{context:?}", active.revision.to_hex()).as_bytes())
+    } else {
+        digest::plain(
+            format!(
+                "{}\n{context:?}\negress:{:?}",
+                active.revision.to_hex(),
+                active.egress
+            )
+            .as_bytes(),
+        )
+    }
 }
 
 /// The capability a tunnel to `host:port` requires: exactly the destination,
@@ -219,12 +232,13 @@ fn verdict(record: &DecisionRecord) -> Verdict {
 
 /// One verdict per piece, for one novelty and one taint.
 fn piece_verdicts(
-    (capability, novelty, context): (&Capability, Novelty, &PolicyContext),
+    (capability, novelty, context, allowlisted): (&Capability, Novelty, &PolicyContext, bool),
     (admission, active): (&Admission, &ActiveAuthority),
     pieces: usize,
 ) -> Vec<Verdict> {
     let base = CanonicalAction::new(capability.clone(), Environment::Sandbox)
-        .with_destination_novelty(novelty);
+        .with_destination_novelty(novelty)
+        .with_destination_allowlisted(allowlisted);
     let without = query::decide(&base, admission, context, active);
     match without.policy().unevaluable() {
         None => vec![verdict(&without); pieces],
@@ -375,6 +389,12 @@ fn destination(
     inputs: &Inputs<'_>,
 ) -> Result<(WorkloadEgressTarget, Value, Field), AuthorityError> {
     let capability = required(host, port)?;
+    // The operator's egress allowlist, for a workload's tunnel (F-06).
+    let allowlisted = inputs.active.egress.covers(
+        host,
+        port,
+        crate::state::egress_allowlist::EgressScope::Workload,
+    );
     // One evaluation per novelty and taint, each for every piece.
     let mut table: Vec<((bool, TaintLevel), Vec<Verdict>)> = Vec::new();
     for novel in [true, false] {
@@ -384,7 +404,7 @@ fn destination(
             table.push((
                 (novel, *taint),
                 piece_verdicts(
-                    (&capability, novelty, &taint_context),
+                    (&capability, novelty, &taint_context, allowlisted),
                     (inputs.admission, inputs.active),
                     inputs.pieces,
                 ),

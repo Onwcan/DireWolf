@@ -123,6 +123,14 @@ mod linux {
         \"allow-https\"\neffect = \"ALLOW\"\nwhen.verb = \"network.https\"\nwhen.environment = \
         \"host\"\n\n[[rule]]\nid = \"default\"\neffect = \"DENY\"\nreason = \"NO_MATCHING_RULE\"\n";
 
+    /// The shape of every shipped network rule since F-06 (ADR-0071): HTTPS
+    /// on the host only where the operator's egress allowlist names the
+    /// destination.
+    const ALLOWLISTED: &str = "schema_version = 1\n\n[meta]\nname = \"m5c\"\n\n[[rule]]\nid = \
+        \"allow-allowlisted\"\neffect = \"ALLOW\"\nwhen.verb = \"network.https\"\n\
+        when.environment = \"host\"\nwhen.destination_allowlisted = true\n\n[[rule]]\nid = \
+        \"default\"\neffect = \"DENY\"\nreason = \"NO_MATCHING_RULE\"\n";
+
     /// The evidence's names: the origins, and every SSRF shape.
     const NAMES: &str = "resolve origin.test 127.0.0.1\nresolve alt.origin.test 127.0.0.1\n\
         resolve wrongname.test 127.0.0.1\nresolve rebind.test 127.0.0.1;10.0.0.1\n\
@@ -362,6 +370,8 @@ exit 1"#,
         requested: &'a [&'a str],
         hook: Option<CrashHook>,
         socket: Option<PathBuf>,
+        /// The operator's egress allowlist (F-06): none unless a case names one.
+        egress: dwkd_authority::state::egress_allowlist::EgressAllowlist,
     }
 
     impl<'a> HostSpec<'a> {
@@ -375,6 +385,7 @@ exit 1"#,
                 requested,
                 hook: None,
                 socket: None,
+                egress: dwkd_authority::state::egress_allowlist::EgressAllowlist::empty(),
             }
         }
     }
@@ -386,6 +397,7 @@ exit 1"#,
             vec!["network.https:*".to_owned(), "secret.use:*".to_owned()],
         );
         config.net_budget = spec.budget;
+        config.egress = spec.egress;
         if let Some(text) = &spec.secrets {
             config.secrets = dwkd_authority::secret::metadata::parse(text).unwrap();
         }
@@ -725,6 +737,105 @@ exit 1"#,
             b.alt.requests().is_empty(),
             "no SSRF case reached an origin"
         );
+    }
+
+    // ---- the operator's egress allowlist (F-06) --------------------------------
+
+    /// A rule requiring `destination_allowlisted` -- the shape of every
+    /// shipped network rule since F-06 (ADR-0071, Proposed) -- reaches an
+    /// origin only where the operator's allowlist names its host, its port
+    /// and the `net_http` path. A redirect's hop is decided again; the
+    /// address guard still refuses a private answer the allowlist names.
+    #[test]
+    fn the_operator_egress_allowlist_decides_every_hop_and_widens_nothing() {
+        use dwkd_authority::state::egress_allowlist::EgressAllowlist;
+        let Some(b) = bench("net-f06") else {
+            return;
+        };
+        let allowlist = |entries: &[(&str, u16, &str)]| {
+            use std::fmt::Write as _;
+            let mut text = "schema_version = 1\n".to_owned();
+            for (n, (host, port, scope)) in entries.iter().enumerate() {
+                let _ = write!(
+                    text,
+                    "[[destination]]\nname = \"d{n}\"\nhost = \"{host}\"\nport = {port}\n\
+                     scope = [\"{scope}\"]\npurpose = \"F-06 evidence\"\n"
+                );
+            }
+            EgressAllowlist::parse(&text).unwrap()
+        };
+        let spec = |tag, list| {
+            let mut spec = HostSpec::open(tag, &["network.https:*"]);
+            spec.policy = policy("m5c", ALLOWLISTED);
+            spec.egress = list;
+            spec
+        };
+        let port = b.origin.port;
+        // No allowlist: the rule does not match, the default denies, and no
+        // origin hears of it.
+        {
+            let mut h = host(&b, spec("f06-none", EgressAllowlist::empty()));
+            let got = h.get(&b.o("/ok?f06=none"), "f1");
+            assert!(matches!(got, Got::Denied(D::DefaultDeny, None)), "{got:?}");
+            evidence("egress-allowlist-absent-denies", "DEFAULT_DENY");
+        }
+        // Named for the other path, on another port, or a neighbour only:
+        // none of them is this destination.
+        for (tag, list, case) in [
+            (
+                "f06-workload-only",
+                allowlist(&[("origin.test", port, "workload")]),
+                "egress-allowlist-other-path-denies",
+            ),
+            (
+                "f06-other-port",
+                allowlist(&[("origin.test", port.wrapping_add(1).max(1), "net_http")]),
+                "egress-allowlist-other-port-denies",
+            ),
+            (
+                "f06-neighbour",
+                allowlist(&[("alt.origin.test", b.alt.port, "net_http")]),
+                "egress-allowlist-neighbour-denies",
+            ),
+        ] {
+            let mut h = host(&b, spec(tag, list));
+            let got = h.get(&b.o(&format!("/ok?f06={tag}")), "f2");
+            assert!(
+                matches!(got, Got::Denied(D::DefaultDeny, None)),
+                "{tag}: {got:?}"
+            );
+            evidence(case, "DEFAULT_DENY");
+        }
+        assert!(b.origin.to("/ok?f06").is_empty());
+        {
+            // Named exactly: performed, once.
+            let exact = allowlist(&[("origin.test", port, "net_http")]);
+            let mut h = host(&b, spec("f06-exact", exact));
+            let ok = h.get(&b.o("/ok?f06=exact"), "f3").done();
+            assert_eq!(ok.status.get(), 200);
+            assert_eq!(b.origin.to("/ok?f06=exact").len(), 1);
+            evidence("egress-allowlist-exact-allows", "200-one-request");
+            // A redirect to an origin the allowlist does not name: that hop
+            // is decided again, and denied; the alternative hears nothing.
+            let to = enc(&b.a("/ok?f06=hop"));
+            let r = h
+                .follow(&b.o(&format!("/redirect?status=302&to={to}")), "f4")
+                .done();
+            assert_eq!(r.redirect_ended, Some(E::HopDenied));
+            assert!(b.alt.to("/ok?f06=hop").is_empty());
+            evidence("egress-allowlist-cross-origin-hop-denied", "HOP_DENIED");
+        }
+        {
+            // The address guard is not the allowlist's to waive.
+            let private = allowlist(&[("private.test", 443, "net_http")]);
+            let mut h = host(&b, spec("f06-private", private));
+            let got = h.get("https://private.test/x", "f5");
+            assert!(matches!(got, Got::Refused(R::AddressBlocked)), "{got:?}");
+            evidence(
+                "egress-allowlist-private-address-still-blocked",
+                "ADDRESS_BLOCKED",
+            );
+        }
     }
 
     // ---- HTTP, redirects, TLS -------------------------------------------------

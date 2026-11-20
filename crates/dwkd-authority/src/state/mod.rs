@@ -64,6 +64,9 @@ mod config;
 mod crash;
 mod db;
 mod digest;
+// F-06 (ADR-0071): the operator's egress allowlist, held for every
+// network action's `destination_allowlisted`.
+pub mod egress_allowlist;
 mod environment;
 mod environment_ops;
 mod error;
@@ -198,6 +201,11 @@ pub struct StartupConfig {
     /// rule naming `~` or a DireWolf anchor is unresolved and denies until
     /// the operator says.
     pub anchors: HostAnchors,
+    /// The operator's egress allowlist (F-06, ADR-0071, Proposed): the exact
+    /// destinations `when.destination_allowlisted` may name. Empty by
+    /// default, so every rule that requires it -- every shipped pack's
+    /// network rule -- grants nothing until the operator says.
+    pub egress: crate::state::egress_allowlist::EgressAllowlist,
 }
 
 impl StartupConfig {
@@ -213,6 +221,7 @@ impl StartupConfig {
             secrets: crate::secret::metadata::SecretConfig::default(),
             net_budget: NetBudget::default(),
             anchors: HostAnchors::default(),
+            egress: crate::state::egress_allowlist::EgressAllowlist::empty(),
         }
     }
 }
@@ -715,6 +724,7 @@ impl Authority {
             ceiling: ceiling_set,
             partition,
             compiled: prepared.compiled,
+            egress: config.egress.clone(),
         });
 
         let report = StartReport {
