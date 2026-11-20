@@ -127,8 +127,11 @@ def _connect(host: str, port: int, request: bytes | None = None) -> tuple[socket
 
 
 def _tls_context(cafile: str) -> ssl.SSLContext:
-    """Verification on, the default way, against this run's anchor only."""
+    """Verification on, the default way, against this run's anchor only -- and
+    never below TLS 1.2, whatever the image's interpreter defaults to (the
+    floor the test origins hold too, `tests/net_http/origin.py`)."""
     context = ssl.create_default_context(cafile=cafile)
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
     context.check_hostname = True
     context.verify_mode = ssl.CERT_REQUIRED
     return context

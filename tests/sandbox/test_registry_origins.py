@@ -137,8 +137,10 @@ def registry(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Registry]:
 
 
 def _verifying(cafile: Path) -> ssl.SSLContext:
-    """The standard library's verifying client, trusting `cafile` alone."""
+    """The standard library's verifying client, trusting `cafile` alone, never
+    below TLS 1.2 whatever the interpreter defaults to."""
     context = ssl.create_default_context(cafile=str(cafile))
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
     assert context.verify_mode == ssl.CERT_REQUIRED and context.check_hostname
     return context
 
