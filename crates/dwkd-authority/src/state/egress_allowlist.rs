@@ -3,16 +3,22 @@
 //! by the operator and read by the authority at start -- never by a run.
 //!
 //! **What it is.** A canonical input, `destination_allowlisted`, that the
-//! authority computes for every `network.https` action from this file and no
-//! other source: true exactly when one entry names the action's host, its
-//! port and the path the action takes (`net_http`, a kernel-performed hop;
-//! `workload`, a sandboxed workload's tunnel). A policy rule may require it
-//! (`when.destination_allowlisted = true`); the shipped packs' network rules
-//! do, so with no file -- or a file with no entry -- they grant no
-//! destination at all. It only ever narrows: it is one more condition on a
-//! rule, never a rule, and a run still needs its capability, the address
-//! guard still refuses every private address, and taint and novelty still
-//! decide first.
+//! authority computes for every `network.https` decision from this file and
+//! no other source ([`EgressAllowlist::admits`], called by the state layer's
+//! one decision function): true exactly when one entry names the action's
+//! host, its port and the path the action takes (`net_http`, a
+//! kernel-performed hop; `workload`, a sandboxed workload's tunnel).
+//!
+//! **A ceiling, since OF-2** ([ADR-0073], Proposed). The policy evaluator
+//! denies every network action this list does not admit, whatever the
+//! policy says -- a shipped pack, an operator's own file, a rule that allows
+//! `network.https:*` -- so with no file, or a file with no entry, no agent
+//! action reaches the network at all. A rule may still require the input
+//! (`when.destination_allowlisted = true`, as the shipped packs do); it is
+//! no longer the only thing that holds. The ceiling only narrows: a run
+//! still needs its capability, the address guard still refuses every
+//! private address, taint and novelty still decide, and a rule that denies
+//! still denies.
 //!
 //! **What it is not.** No wildcard, no suffix, no CIDR, no scheme, no path,
 //! no userinfo: an entry is one host, one port, one or two paths, a name and
@@ -31,10 +37,13 @@
 //! the whole file, and the authority does not start.
 //!
 //! [ADR-0071]: ../../../../docs/adr/0071-f06-an-operator-egress-allowlist-every-shipped-network-rule-requires.md
+//! [ADR-0073]: ../../../../docs/adr/0073-f06-of2-the-operators-egress-allowlist-is-a-ceiling-every-policy-is-under.md
 
 use toml::de::{DeTable, DeValue};
 
 use crate::capability::scope::HostPattern;
+use crate::capability::{Capability, PortSpec, Scope, SyntacticScope};
+use crate::policy::Environment;
 
 /// The largest file read.
 pub const MAX_FILE_BYTES: u64 = 64 * 1024;
@@ -113,6 +122,27 @@ impl EgressAllowlist {
         self.destinations
             .iter()
             .any(|d| d.port == port && d.host == host && d.scopes.contains(&scope))
+    }
+
+    /// Whether a network action's own destination is under this list: its
+    /// capability names one exact host and one port, and an entry names both
+    /// for the path its environment takes -- `Host`, a kernel-performed
+    /// `net.http` hop; `Sandbox`, a workload's tunnel. Anything else (a
+    /// wildcard, no port, another scope family) is not.
+    #[must_use]
+    pub fn admits(&self, capability: &Capability, environment: &Environment) -> bool {
+        let Scope::Syntactic(SyntacticScope::Endpoint(endpoint)) = capability.scope() else {
+            return false;
+        };
+        let (HostPattern::Exact(_), PortSpec::Port(port)) = (endpoint.host(), endpoint.port())
+        else {
+            return false;
+        };
+        let scope = match environment {
+            Environment::Host => EgressScope::NetHttp,
+            Environment::Sandbox => EgressScope::Workload,
+        };
+        self.covers(&endpoint.host().to_string(), port, scope)
     }
 
     /// The destinations, in the file's order.

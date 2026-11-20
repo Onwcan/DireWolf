@@ -1147,6 +1147,12 @@ reason = "NO_MATCHING_RULE"
                 args.push("--ceiling".to_owned());
                 args.push(capability);
             }
+            // The operator's egress allowlist (F-06 OF-2, ADR-0073): exactly
+            // the destinations the agent's runs are granted, for workloads.
+            let allowlist =
+                crate::state_support::workload_allowlist_file(self.dir.path(), &self.grants());
+            args.push("--egress-allowlist".to_owned());
+            args.push(allowlist.to_str().unwrap().to_owned());
             args
         }
 

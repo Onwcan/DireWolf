@@ -30,7 +30,8 @@ use super::testing::{
     anchors, executable_capability, interactive, logical, on_host, path_capability, sandboxed,
     scheduled, syntactic_capability, universal_capability,
 };
-use super::{Decision, compose, evaluate, load, profiles};
+use super::{Decision, PolicyLoadError, ValueError, compose, evaluate, load, profiles};
+use crate::capability::Capability;
 
 /// Compile one shipped pack.
 fn pack(file: &str) -> CompiledPolicy {
@@ -1341,4 +1342,174 @@ fn each_pack_keeps_its_ceiling_once_the_host_paths_are_placed() {
         Effect::Allow,
         "allow-workspace-read",
     );
+}
+
+// ===========================================================================
+// F-06 OF-2 (ADR-0073): the operator's egress ceiling, which no rule reaches.
+// ===========================================================================
+
+/// An operator's own policy: every HTTPS action allowed, and reading; no rule
+/// in it requires `destination_allowlisted`.
+const OPERATOR_ALLOWS_EVERY_HOST: &str = "schema_version = 1\n\n[meta]\nname = \"operator\"\n\n\
+    [[rule]]\nid = \"allow-every-host\"\neffect = \"ALLOW\"\nwhen.verb = [\"network.https\"]\n\n\
+    [[rule]]\nid = \"allow-reading\"\neffect = \"ALLOW\"\nwhen.verb = [\"fs.read\"]\n\n\
+    [[rule]]\nid = \"default\"\neffect = \"DENY\"\nreason = \"NO_MATCHING_RULE\"\n";
+
+fn operator(text: &str) -> CompiledPolicy {
+    let Ok(profile) = load("operator.toml", text) else {
+        unreachable!("the operator's policy loads")
+    };
+    let name = profile.name().clone();
+    let Ok(policy) = compose(&name, &[profile]) else {
+        unreachable!("the operator's policy composes")
+    };
+    policy
+}
+
+/// A decision the operator's ceiling made: `DENY`, by the reserved rule and
+/// reason, from the operator's file, with what the policy matched still on
+/// the record and nothing offered.
+#[track_caller]
+fn beyond_ceiling(decision: &Decision, matched: &str) {
+    assert_eq!(
+        (decision.effect(), decision.rule_id().as_str()),
+        (Effect::Deny, "operator-egress-ceiling"),
+        "decision was:\n{decision}"
+    );
+    assert_eq!(decision.reason(), Reason::OutsideEgressAllowlist);
+    assert_eq!(decision.rule_source().to_string(), "--egress-allowlist:1");
+    assert_eq!(decision.primary_rule().id().as_str(), matched);
+    assert!(
+        decision.approval().is_none(),
+        "nobody is asked past the ceiling"
+    );
+    assert!(decision.obligations().as_slice().is_empty());
+}
+
+#[test]
+fn an_operator_policy_allowing_every_host_is_under_the_operator_egress_ceiling() {
+    let (policy, context) = (operator(OPERATOR_ALLOWS_EVERY_HOST), interactive());
+    let builds: [fn(Capability) -> CanonicalAction; 2] = [sandboxed, on_host];
+    for build in builds {
+        let base = build(syntactic_capability("network.https:api.example.com:443"))
+            .with_destination_ip(IpAddress::V4([93, 184, 216, 34]));
+        // Not said (an action no authority placed), or said false: denied,
+        // whatever the rule said.
+        for outside in [
+            base.clone(),
+            base.clone().with_destination_allowlisted(false),
+        ] {
+            beyond_ceiling(&evaluate(&policy, &outside, &context), "allow-every-host");
+        }
+        // Said true: the operator's rule stands.
+        expect(
+            &evaluate(&policy, &base.with_destination_allowlisted(true), &context),
+            Effect::Allow,
+            "allow-every-host",
+        );
+    }
+    // Not a network action: the ceiling is not consulted.
+    expect(
+        &evaluate(
+            &policy,
+            &fs("fs.read", &["workspace", "notes.md"]),
+            &context,
+        ),
+        Effect::Allow,
+        "allow-reading",
+    );
+}
+
+#[test]
+fn an_approval_cannot_lift_the_ceiling_and_a_denial_keeps_its_own_name() {
+    // A tainted run's novel destination: BALANCED and POWER would ask a human
+    // (their approval rule does not require the allowlist). Outside the
+    // ceiling nobody is asked: it denies, and offers no approval.
+    let tainted = PolicyContext::new(Origin::Interactive, TaintLevel::ExternalUntrusted)
+        .with_anchors(anchors());
+    for file in ["balanced.toml", "power.toml"] {
+        let novel = sandboxed(syntactic_capability("network.https:github.com"))
+            .with_destination_novelty(Novelty::Novel)
+            .with_destination_ip(IpAddress::V4([140, 82, 112, 3]));
+        for outside in [
+            novel.clone(),
+            novel.clone().with_destination_allowlisted(false),
+        ] {
+            beyond_ceiling(
+                &evaluate(&pack(file), &outside, &tainted),
+                "approve-egress-when-tainted",
+            );
+        }
+        expect(
+            &evaluate(
+                &pack(file),
+                &novel.with_destination_allowlisted(true),
+                &tainted,
+            ),
+            Effect::RequireApproval,
+            "approve-egress-when-tainted",
+        );
+    }
+    // A rule that denies keeps its own name, inside the ceiling or out.
+    let context = interactive();
+    let metadata = sandboxed(syntactic_capability("network.https:metadata.example.com"))
+        .with_destination_ip(IpAddress::V4([169, 254, 169, 254]));
+    for action in [
+        metadata.clone(),
+        metadata.with_destination_allowlisted(true),
+    ] {
+        expect(
+            &evaluate(&pack("power.toml"), &action, &context),
+            Effect::Deny,
+            "deny-internal-ranges",
+        );
+    }
+    let deny = OPERATOR_ALLOWS_EVERY_HOST.replace(
+        "id = \"allow-every-host\"\neffect = \"ALLOW\"",
+        "id = \"deny-every-host\"\neffect = \"DENY\"\nreason = \"PROFILE_CEILING\"",
+    );
+    assert_ne!(deny, OPERATOR_ALLOWS_EVERY_HOST);
+    let named = sandboxed(syntactic_capability("network.https:api.example.com:443"))
+        .with_destination_allowlisted(true);
+    expect(
+        &evaluate(&operator(&deny), &named, &context),
+        Effect::Deny,
+        "deny-every-host",
+    );
+}
+
+#[test]
+fn no_policy_file_may_name_the_ceiling_or_claim_its_reason() {
+    let refused = |text: &str| {
+        matches!(
+            load("operator.toml", text),
+            Err(PolicyLoadError::BadValue {
+                error: ValueError::MalformedRuleId | ValueError::UnknownReason,
+                ..
+            })
+        )
+    };
+    let as_rule = OPERATOR_ALLOWS_EVERY_HOST.replace(
+        "id = \"allow-every-host\"",
+        "id = \"operator-egress-ceiling\"",
+    );
+    assert_ne!(as_rule, OPERATOR_ALLOWS_EVERY_HOST);
+    assert!(refused(&as_rule));
+    let as_postcondition = format!(
+        "{OPERATOR_ALLOWS_EVERY_HOST}\n[[postcondition]]\nid = \"operator-egress-ceiling\"\n\
+         effect = \"DENY\"\nreason = \"PROFILE_CEILING\"\nwhen.provisional_effect = [\"ALLOW\"]\n"
+    );
+    assert!(refused(&as_postcondition));
+    let reason = OPERATOR_ALLOWS_EVERY_HOST.replace(
+        "reason = \"NO_MATCHING_RULE\"",
+        "reason = \"OUTSIDE_EGRESS_ALLOWLIST\"",
+    );
+    assert_ne!(reason, OPERATOR_ALLOWS_EVERY_HOST);
+    assert!(refused(&reason));
+    // A neighbouring name is a name like any other.
+    let near = OPERATOR_ALLOWS_EVERY_HOST.replace(
+        "id = \"allow-every-host\"",
+        "id = \"operator-egress-ceilings\"",
+    );
+    assert!(load("operator.toml", &near).is_ok());
 }

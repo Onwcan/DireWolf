@@ -1056,6 +1056,19 @@ reason = "NO_MATCHING_RULE"
                 args.push("--ceiling".to_owned());
                 args.push(capability);
             }
+            // The operator's egress allowlist (F-06 OF-2, ADR-0073): every
+            // destination a case's run is granted, for workloads.
+            let allowlist = crate::state_support::workload_allowlist_file(
+                dir.path(),
+                &[
+                    format!("network.https:{GRANTED}:{GRANTED_PORT}"),
+                    format!("network.https:{GRANTED}:{ROGUE_PORT}"),
+                    format!("network.https:{GRANTED}:{SYSTEM_PORT}"),
+                    format!("network.https:{UNGRANTED}:{UNGRANTED_PORT}"),
+                ],
+            );
+            args.push("--egress-allowlist".to_owned());
+            args.push(allowlist.to_str().unwrap().to_owned());
             let server = Server::start(&args);
             let said = server.stderr();
             assert!(

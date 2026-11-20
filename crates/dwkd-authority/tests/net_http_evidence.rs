@@ -289,6 +289,38 @@ exit 1"#,
             self.on(&self.alt, "alt.origin.test", path)
         }
 
+        /// Every name the bench resolves (and the one the URL cases spell),
+        /// on every origin's port and 443, for the `net_http` path.
+        fn allowlist(&self) -> dwkd_authority::state::egress_allowlist::EgressAllowlist {
+            use std::fmt::Write as _;
+            let names = NAMES
+                .lines()
+                .filter_map(|line| line.strip_prefix("resolve "))
+                .filter_map(|line| line.split_whitespace().next())
+                .chain(["xn--rigin-0ra.test"]);
+            let ports = [
+                self.origin.port,
+                self.alt.port,
+                self.expired.port,
+                self.selfsigned.port,
+                self.rogue.port,
+                443,
+            ];
+            let mut text = "schema_version = 1\n".to_owned();
+            let mut n = 0;
+            for name in names {
+                for port in ports {
+                    n += 1;
+                    let _ = write!(
+                        text,
+                        "[[destination]]\nname = \"d{n}\"\nhost = \"{name}\"\nport = {port}\n\
+                         scope = [\"net_http\"]\npurpose = \"the bench\"\n"
+                    );
+                }
+            }
+            dwkd_authority::state::egress_allowlist::EgressAllowlist::parse(&text).unwrap()
+        }
+
         /// How many resolutions the broker has performed.
         fn resolutions(&self) -> usize {
             std::thread::sleep(std::time::Duration::from_millis(100));
@@ -370,8 +402,12 @@ exit 1"#,
         requested: &'a [&'a str],
         hook: Option<CrashHook>,
         socket: Option<PathBuf>,
-        /// The operator's egress allowlist (F-06): none unless a case names one.
-        egress: dwkd_authority::state::egress_allowlist::EgressAllowlist,
+        /// The operator's egress allowlist (F-06). `None`: every name the
+        /// bench resolves, on every origin's port and 443, for `net_http`
+        /// ([`Bench::allowlist`]) -- under the ceiling every policy is under
+        /// (OF-2, ADR-0073) a case about the guard, TLS or a budget reaches
+        /// nothing otherwise. A case about the allowlist names its own.
+        egress: Option<dwkd_authority::state::egress_allowlist::EgressAllowlist>,
     }
 
     impl<'a> HostSpec<'a> {
@@ -385,7 +421,7 @@ exit 1"#,
                 requested,
                 hook: None,
                 socket: None,
-                egress: dwkd_authority::state::egress_allowlist::EgressAllowlist::empty(),
+                egress: None,
             }
         }
     }
@@ -397,7 +433,7 @@ exit 1"#,
             vec!["network.https:*".to_owned(), "secret.use:*".to_owned()],
         );
         config.net_budget = spec.budget;
-        config.egress = spec.egress;
+        config.egress = spec.egress.unwrap_or_else(|| bench.allowlist());
         if let Some(text) = &spec.secrets {
             config.secrets = dwkd_authority::secret::metadata::parse(text).unwrap();
         }
@@ -519,6 +555,24 @@ exit 1"#,
                     Got::Denied(net.expect("a network action"), injection)
                 }
                 other => panic!("not a version-4 answer: {other:?}"),
+            }
+        }
+
+        /// A `GET`'s denial: its network decision's reason and the rule it
+        /// names on the wire.
+        fn denied_by(&mut self, url: &str, key: &str) -> (D, String) {
+            match self.send(&net("GET", url, false, ""), Some(key)).unwrap() {
+                DwkpBody::ToolDeniedV4(denial) => denial
+                    .plan
+                    .actions
+                    .iter()
+                    .find_map(|a| {
+                        a.net
+                            .as_ref()
+                            .map(|n| (n.decision.reason, n.decision.rule_id.as_str().to_owned()))
+                    })
+                    .expect("a network action"),
+                other => panic!("not a denial: {other:?}"),
             }
         }
 
@@ -767,7 +821,7 @@ exit 1"#,
         let spec = |tag, list| {
             let mut spec = HostSpec::open(tag, &["network.https:*"]);
             spec.policy = policy("m5c", ALLOWLISTED);
-            spec.egress = list;
+            spec.egress = Some(list);
             spec
         };
         let port = b.origin.port;
@@ -835,6 +889,109 @@ exit 1"#,
                 "egress-allowlist-private-address-still-blocked",
                 "ADDRESS_BLOCKED",
             );
+        }
+    }
+
+    /// F-06 OF-2 (ADR-0073, Proposed): an operator policy that allows every
+    /// HTTPS hop (`OPEN`: no `destination_allowlisted` in it) is under the
+    /// operator's egress ceiling, on the real broker and real origins. Not
+    /// named, named for the other path, on another port, a neighbour: the
+    /// ceiling denies, nothing is resolved, no origin hears of it. Named
+    /// exactly: performed once. A redirect to an origin not named is
+    /// decided again and denied. A rule that denies a named origin still
+    /// denies it, by its own name.
+    #[test]
+    fn an_operator_policy_cannot_lift_the_egress_ceiling() {
+        use dwkd_authority::state::egress_allowlist::EgressAllowlist;
+        let Some(b) = bench("net-of2") else {
+            return;
+        };
+        let list = |entries: &[(&str, u16, &str)]| {
+            use std::fmt::Write as _;
+            let mut text = "schema_version = 1\n".to_owned();
+            for (n, (host, port, scope)) in entries.iter().enumerate() {
+                let _ = write!(
+                    text,
+                    "[[destination]]\nname = \"d{n}\"\nhost = \"{host}\"\nport = {port}\n\
+                     scope = [\"{scope}\"]\npurpose = \"OF-2 evidence\"\n"
+                );
+            }
+            EgressAllowlist::parse(&text).unwrap()
+        };
+        let spec = |tag, egress| {
+            let mut spec = HostSpec::open(tag, &["network.https:*"]);
+            spec.egress = Some(egress);
+            spec
+        };
+        let port = b.origin.port;
+        for (tag, egress, case) in [
+            (
+                "of2-none",
+                EgressAllowlist::empty(),
+                "of2-operator-policy-absent-denies",
+            ),
+            (
+                "of2-workload-only",
+                list(&[("origin.test", port, "workload")]),
+                "of2-operator-policy-other-path-denies",
+            ),
+            (
+                "of2-other-port",
+                list(&[("origin.test", port.wrapping_add(1).max(1), "net_http")]),
+                "of2-operator-policy-other-port-denies",
+            ),
+            (
+                "of2-neighbour",
+                list(&[("alt.origin.test", b.alt.port, "net_http")]),
+                "of2-operator-policy-neighbour-denies",
+            ),
+        ] {
+            let mut h = host(&b, spec(tag, egress));
+            let resolved = b.resolutions();
+            let (reason, rule) = h.denied_by(&b.o(&format!("/ok?of2={tag}")), "o1");
+            assert_eq!(
+                (reason, rule.as_str()),
+                (D::DeniedByRule, "operator-egress-ceiling"),
+                "{tag}"
+            );
+            assert_eq!(b.resolutions(), resolved, "{tag}: nothing was resolved");
+            evidence(case, "operator-egress-ceiling");
+        }
+        assert!(b.origin.to("/ok?of2").is_empty());
+        {
+            // Named exactly: the operator's policy allows it, performed once.
+            let mut h = host(
+                &b,
+                spec("of2-exact", list(&[("origin.test", port, "net_http")])),
+            );
+            let ok = h.get(&b.o("/ok?of2=exact"), "o2").done();
+            assert_eq!(ok.status.get(), 200);
+            assert_eq!(b.origin.to("/ok?of2=exact").len(), 1);
+            evidence("of2-operator-policy-exact-allows", "200-one-request");
+            // A redirect to an origin the list does not name: decided again,
+            // and denied; the alternative hears nothing.
+            let to = enc(&b.a("/ok?of2=hop"));
+            let r = h
+                .follow(&b.o(&format!("/redirect?status=302&to={to}")), "o3")
+                .done();
+            assert_eq!(r.redirect_ended, Some(E::HopDenied));
+            assert!(b.alt.to("/ok?of2=hop").is_empty());
+            evidence("of2-operator-policy-cross-origin-hop-denied", "HOP_DENIED");
+        }
+        {
+            // A rule that denies, over a named origin: its own denial.
+            let deny = OPEN.replace(
+                "id = \"allow-https\"\neffect = \"ALLOW\"",
+                "id = \"deny-https\"\neffect = \"DENY\"\nreason = \"PROFILE_CEILING\"",
+            );
+            assert_ne!(deny, OPEN);
+            let mut named = spec("of2-deny", list(&[("origin.test", port, "net_http")]));
+            named.policy = policy("m5c", &deny);
+            let mut h = host(&b, named);
+            let (reason, rule) = h.denied_by(&b.o("/ok?of2=deny"), "o4");
+            assert_eq!((reason, rule.as_str()), (D::DeniedByRule, "deny-https"));
+            assert!(b.origin.to("/ok?of2=deny").is_empty());
+            evidence("of2-operator-policy-deny-rule-kept", "deny-https");
         }
     }
 

@@ -117,6 +117,12 @@ impl RuleId {
     /// The reserved id of the mandatory unconditional rule.
     pub const DEFAULT: &'static str = "default";
 
+    /// The reserved id of the operator's egress ceiling (F-06 OF-2,
+    /// ADR-0073): the rule a network decision outside the operator's
+    /// allowlist is attributed to. No policy file may declare it, so a
+    /// decision naming it was never a file's.
+    pub const EGRESS_CEILING: &'static str = "operator-egress-ceiling";
+
     /// Accept the identifier grammar.
     #[must_use]
     pub fn new(text: &str) -> Option<Self> {
@@ -137,6 +143,17 @@ impl RuleId {
     #[must_use]
     pub fn is_default(&self) -> bool {
         self.0 == Self::DEFAULT
+    }
+
+    /// Whether this is the egress ceiling's reserved id.
+    #[must_use]
+    pub fn is_egress_ceiling(&self) -> bool {
+        self.0 == Self::EGRESS_CEILING
+    }
+
+    /// The egress ceiling's id.
+    fn egress_ceiling() -> Self {
+        Self(Self::EGRESS_CEILING.to_owned())
     }
 }
 
@@ -196,6 +213,16 @@ impl SourceLocation {
     pub(crate) fn synthetic() -> Self {
         Self {
             source: "<load>".to_owned(),
+            line: 1,
+        }
+    }
+
+    /// Where the operator's egress ceiling is written: the file
+    /// `--egress-allowlist` named, as a whole. Line 1, because no line of it
+    /// decides: the absence of an entry does.
+    fn egress_ceiling() -> Self {
+        Self {
+            source: "--egress-allowlist".to_owned(),
             line: 1,
         }
     }
@@ -338,7 +365,8 @@ impl Decision {
         self.deciding.id()
     }
 
-    /// Where that rule is written. Always a real file and a real line.
+    /// Where that rule is written: a real file and a real line -- or, for the
+    /// operator's egress ceiling, `--egress-allowlist:1`, the file as a whole.
     #[must_use]
     pub const fn rule_source(&self) -> &SourceLocation {
         self.deciding.source()
@@ -397,6 +425,27 @@ impl Decision {
     #[must_use]
     pub const fn unevaluable(&self) -> Option<Unevaluable> {
         self.unevaluable
+    }
+
+    /// The same decision under the operator's egress ceiling (F-06 OF-2,
+    /// ADR-0073): narrowed to `DENY` as by one last postcondition -- the
+    /// reserved `operator-egress-ceiling`, which no policy file holds --
+    /// with no approval to offer and no obligation to keep. The rules that
+    /// matched before it stay on the record, so an explanation shows what
+    /// the policy said and what overruled it.
+    pub(crate) fn beyond_egress_ceiling(mut self) -> Self {
+        let ceiling = MatchedRule::new(
+            RuleId::egress_ceiling(),
+            SourceLocation::egress_ceiling(),
+            Reason::OutsideEgressAllowlist,
+        );
+        self.postconditions.push(ceiling.clone());
+        self.deciding = ceiling;
+        self.effect = Effect::Deny;
+        self.approval = None;
+        self.obligations = Obligations::none();
+        self.unevaluable = None;
+        self
     }
 }
 

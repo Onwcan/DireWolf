@@ -654,12 +654,35 @@ struct Fixture {
 /// more.
 const DECLARED: &[&str] = &["process.exec:*", "fs.read:*", "fs.stat:*"];
 
+/// Every destination this module's workloads are granted, named for both
+/// paths in the operator's egress allowlist (F-06 OF-2, ADR-0073): F-17's
+/// cells, taint and exposure show nothing unless a destination is past
+/// the ceiling. The ceiling's own tests set their own list.
+const DESTINATIONS: &[&str] = &[
+    "allowed.example.com",
+    "blocked.example.com",
+    "captured.example.com",
+    "counted.example.com",
+    "other.example.com",
+];
+
 fn startup(policy: PolicySet, declared: &[&str]) -> StartupConfig {
-    StartupConfig::new(
+    use std::fmt::Write as _;
+    let mut config = StartupConfig::new(
         policy,
         Mode::Balanced,
         declared.iter().map(|c| (*c).to_owned()).collect(),
-    )
+    );
+    let mut text = "schema_version = 1\n".to_owned();
+    for (n, host) in DESTINATIONS.iter().enumerate() {
+        let _ = write!(
+            text,
+            "[[destination]]\nname = \"d{n}\"\nhost = \"{host}\"\nport = 443\n\
+             scope = [\"net_http\", \"workload\"]\npurpose = \"tests\"\n"
+        );
+    }
+    config.egress = crate::state::egress_allowlist::EgressAllowlist::parse(&text).unwrap();
+    config
 }
 
 fn custom() -> PolicySet {

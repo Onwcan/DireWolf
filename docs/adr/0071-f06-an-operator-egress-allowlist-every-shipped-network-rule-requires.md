@@ -1,6 +1,6 @@
 # ADR-0071: F-06 -- an operator egress allowlist, which every shipped network rule requires: no pack reaches a destination the operator did not name by host, port and path
 
-**Status:** Proposed · **Date:** 2026-11-17 (designed, built and reviewed locally 2026-11-17 for finding F-06; hosted evidence pending, and nothing here is accepted) · **Changes:** the shipped packs' network rules (BALANCED `allow-package-registries`, POWER `allow-https-egress`), POLICY.md's predicate table, one `serve` flag · **Builds on:** [ADR-0048](0048-m5b-proxy-only-topology-and-connect-proxy.md), [ADR-0050](0050-m5c-kernel-performed-net-http-ssrf-redirects-and-credential-egress.md), [ADR-0060](0060-a-constrained-network-grant-gives-no-proxy-only-destination.md), [ADR-0061](0061-workload-egress-decided-by-policy-novelty-and-exposure.md), [ADR-0062](0062-taint-follows-delivered-content.md) · **Leaves unchanged:** DWKP, the private broker protocol, the store's schema, the address guard, DNS pinning, SNI agreement, every budget, and every operator policy file
+**Status:** Proposed · **Date:** 2026-11-17 (designed, built and reviewed locally 2026-11-17 for finding F-06; hosted evidence observed on CI #198 (run 44706359028, `3584f3e`, 2026-11-20); OF-1 approved as implemented, OF-2 authorised and built as [ADR-0073](0073-f06-of2-the-operators-egress-allowlist-is-a-ceiling-every-policy-is-under.md), OF-3 partially decided, 2026-11-20; the ADR is not accepted) · **Changes:** the shipped packs' network rules (BALANCED `allow-package-registries`, POWER `allow-https-egress`), POLICY.md's predicate table, one `serve` flag · **Builds on:** [ADR-0048](0048-m5b-proxy-only-topology-and-connect-proxy.md), [ADR-0050](0050-m5c-kernel-performed-net-http-ssrf-redirects-and-credential-egress.md), [ADR-0060](0060-a-constrained-network-grant-gives-no-proxy-only-destination.md), [ADR-0061](0061-workload-egress-decided-by-policy-novelty-and-exposure.md), [ADR-0062](0062-taint-follows-delivered-content.md) · **Leaves unchanged:** DWKP, the private broker protocol, the store's schema, the address guard, DNS pinning, SNI agreement, every budget, and every operator policy file
 
 > **Every shipped network rule now also requires `destination_allowlisted`**,
 > a canonical input the authority computes from one operator file
@@ -102,6 +102,11 @@ predicate, and a rule that does not is the operator's explicit decision, as
 before. Whether the allowlist should become a gate on every policy is left to
 the owner (OF-2).
 
+**Since 2026-11-20** OF-2 is decided and built: the allowlist is a ceiling
+every policy is under, an operator's own among them -- see
+[ADR-0073](0073-f06-of2-the-operators-egress-allowlist-is-a-ceiling-every-policy-is-under.md) (Proposed), which
+would amend this section.
+
 ### 6. Revocation and staleness
 
 Removing an entry and restarting revokes it for every `net.http` hop decided
@@ -165,6 +170,19 @@ destination: named, or denied. Nothing is allowlisted by default.
 - **OF-2** whether the allowlist should also gate operator policies;
 - **OF-3** per-entry quotas, and the `model_download` path (ADR-0072).
 
+**Decided 2026-11-20.** The status stays **Proposed**.
+
+- **OF-1 -- approved as implemented.** BALANCED's and POWER's network
+  rules stay constrained by the operator's allowlist, with the
+  compatibility change above.
+- **OF-2 -- implementation authorised**, and built as
+  [ADR-0073](0073-f06-of2-the-operators-egress-allowlist-is-a-ceiling-every-policy-is-under.md) (Proposed): the ceiling
+  applies to every policy, enforced by the authority, never left to a
+  policy author's predicate.
+- **OF-3 -- partially decided.** A future `model_download` path gets its
+  own separately authorised egress; per-entry quotas are evaluated on their
+  own. Neither is built, and no direct downloader exists.
+
 ## Evidence
 
 - `crates/dwkd-authority/src/state/egress_allowlist_tests.rs`: the grammar -- exact,
@@ -182,7 +200,9 @@ destination: named, or denied. Nothing is allowlisted by default.
 - `crates/dwkd-authority/tests/transport_server.rs`: the real binary reads,
   says and refuses the file.
 - `make egress-allowlist-mutations`: thirteen guards weakened in turn, each
-  killed by a named test.
+  killed by a named test (nineteen since ADR-0073).
+- CI #198 (run 44706359028, `3584f3e`, 2026-11-20): the hosted `net.http` job reported
+  186 cases, the seven `egress-allowlist-*` among them.
 - `tests/architecture/test_f06_egress_allowlist.py`.
 
 ## Rollback and deployment

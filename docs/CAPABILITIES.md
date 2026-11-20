@@ -315,6 +315,8 @@ Profiles are **capability ceilings plus policy rule packs**, never prompt change
 | Host execution | never | never | opt-in, per-invocation approval, loud |
 | Unattended (scheduler) runs | denied | `REQUIRE_APPROVAL` → `DENY` | standing grants only |
 
+Every profile, and every operator policy, is under the operator's egress allowlist: a network action whose exact host, port and path it does not name is denied whatever the policy allows (F-06 OF-2, [ADR-0073](adr/0073-f06-of2-the-operators-egress-allowlist-is-a-ceiling-every-policy-is-under.md), Proposed).
+
 Switching profile is a kernel-side configuration change. The agent cannot request or induce a profile change; `mode` is not in the runtime's request vocabulary.
 
 ## 7. Worked example

@@ -232,13 +232,12 @@ fn verdict(record: &DecisionRecord) -> Verdict {
 
 /// One verdict per piece, for one novelty and one taint.
 fn piece_verdicts(
-    (capability, novelty, context, allowlisted): (&Capability, Novelty, &PolicyContext, bool),
+    (capability, novelty, context): (&Capability, Novelty, &PolicyContext),
     (admission, active): (&Admission, &ActiveAuthority),
     pieces: usize,
 ) -> Vec<Verdict> {
     let base = CanonicalAction::new(capability.clone(), Environment::Sandbox)
-        .with_destination_novelty(novelty)
-        .with_destination_allowlisted(allowlisted);
+        .with_destination_novelty(novelty);
     let without = query::decide(&base, admission, context, active);
     match without.policy().unevaluable() {
         None => vec![verdict(&without); pieces],
@@ -388,13 +387,9 @@ fn destination(
     (host, port, reach): (&str, u16, Reach),
     inputs: &Inputs<'_>,
 ) -> Result<(WorkloadEgressTarget, Value, Field), AuthorityError> {
+    // The operator's egress ceiling is placed by `query::decide` (F-06
+    // OF-2, ADR-0073), for the workload's path, as for every decision.
     let capability = required(host, port)?;
-    // The operator's egress allowlist, for a workload's tunnel (F-06).
-    let allowlisted = inputs.active.egress.covers(
-        host,
-        port,
-        crate::state::egress_allowlist::EgressScope::Workload,
-    );
     // One evaluation per novelty and taint, each for every piece.
     let mut table: Vec<((bool, TaintLevel), Vec<Verdict>)> = Vec::new();
     for novel in [true, false] {
@@ -404,7 +399,7 @@ fn destination(
             table.push((
                 (novel, *taint),
                 piece_verdicts(
-                    (&capability, novelty, &taint_context, allowlisted),
+                    (&capability, novelty, &taint_context),
                     (inputs.admission, inputs.active),
                     inputs.pieces,
                 ),

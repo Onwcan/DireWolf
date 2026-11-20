@@ -216,9 +216,9 @@ pub struct ServeConfig {
     /// The approver endpoint (F-18 Phase 3.4, ADR-0067), if the operator
     /// configured one. Without one there is no approver endpoint at all.
     pub approver: Option<ApproverConfig>,
-    /// The operator's egress allowlist file (F-06, ADR-0071, Proposed), if
-    /// any: the exact destinations a network rule requiring
-    /// `destination_allowlisted` may reach. Without one, none.
+    /// The operator's egress allowlist file (F-06, ADR-0071 and ADR-0073,
+    /// Proposed), if any: the exact destinations any network action may
+    /// reach, whatever the policy. Without one, none.
     pub egress_allowlist: Option<PathBuf>,
 }
 
@@ -262,7 +262,7 @@ pub const SERVE_USAGE: &str = "\
     --path-anchor <NAME>=<DIR> what a policy anchor stands for on the host: home|direwolf-home|direwolf-config|direwolf-install; repeat
     --approver-socket <PATH>   absolute path of the approver endpoint's socket (with --approver-uid; no approval operation before M6)
     --approver-uid <UID>       a uid that may connect to the approver endpoint; repeat; never a DWKP peer's, the broker's or the authority's
-    --egress-allowlist <PATH>  the operator's exact network destinations (absolute); without it no rule requiring `destination_allowlisted` grants one
+    --egress-allowlist <PATH>  the operator's exact network destinations (absolute): the ceiling every policy is under; without it no network action is allowed
 ";
 
 /// Parse the arguments after `serve`.

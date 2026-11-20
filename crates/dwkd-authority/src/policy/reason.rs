@@ -67,11 +67,16 @@ pub enum Reason {
     /// makes a predicate disappear" failure the strict loader exists to
     /// prevent, arriving one layer later.
     UnresolvedCanonicalInput,
+    /// A network action whose destination the operator's egress allowlist
+    /// does not name, for the path it takes: the ceiling every policy is
+    /// under (F-06 OF-2, ADR-0073). The evaluator's own, like
+    /// `PERMITTED_BY_RULE`: no policy file may claim it.
+    OutsideEgressAllowlist,
 }
 
 impl Reason {
     /// Every reason, in declaration order.
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 13] = [
         Self::SelfModification,
         Self::SensitivePath,
         Self::SandboxEscapeVector,
@@ -84,6 +89,7 @@ impl Reason {
         Self::NoMatchingRule,
         Self::PermittedByRule,
         Self::UnresolvedCanonicalInput,
+        Self::OutsideEgressAllowlist,
     ];
 
     /// The TOML and audit spelling.
@@ -102,6 +108,7 @@ impl Reason {
             Self::NoMatchingRule => "NO_MATCHING_RULE",
             Self::PermittedByRule => "PERMITTED_BY_RULE",
             Self::UnresolvedCanonicalInput => "UNRESOLVED_CANONICAL_INPUT",
+            Self::OutsideEgressAllowlist => "OUTSIDE_EGRESS_ALLOWLIST",
         }
     }
 
@@ -113,14 +120,18 @@ impl Reason {
 
     /// Whether a rule author may write this reason.
     ///
-    /// Two of them are the evaluator's own: `PERMITTED_BY_RULE` is what an
-    /// `ALLOW` with no stated reason becomes, and `UNRESOLVED_CANONICAL_INPUT`
-    /// describes a context the rule cannot know about. Letting a file claim
-    /// either would put a decision the evaluator makes under the rule author's
-    /// control.
+    /// Three of them are the evaluator's own: `PERMITTED_BY_RULE` is what an
+    /// `ALLOW` with no stated reason becomes, `UNRESOLVED_CANONICAL_INPUT`
+    /// describes a context the rule cannot know about, and
+    /// `OUTSIDE_EGRESS_ALLOWLIST` is the operator's egress ceiling, which no
+    /// rule is. Letting a file claim any of them would put a decision the
+    /// evaluator makes under the rule author's control.
     #[must_use]
     pub const fn is_authorable(self) -> bool {
-        !matches!(self, Self::PermittedByRule | Self::UnresolvedCanonicalInput)
+        !matches!(
+            self,
+            Self::PermittedByRule | Self::UnresolvedCanonicalInput | Self::OutsideEgressAllowlist
+        )
     }
 }
 
@@ -162,10 +173,11 @@ mod tests {
     fn the_evaluators_own_reasons_are_not_authorable() {
         assert!(!Reason::PermittedByRule.is_authorable());
         assert!(!Reason::UnresolvedCanonicalInput.is_authorable());
+        assert!(!Reason::OutsideEgressAllowlist.is_authorable());
         let authorable = Reason::ALL
             .into_iter()
             .filter(|r| r.is_authorable())
             .count();
-        assert_eq!(authorable, Reason::ALL.len() - 2);
+        assert_eq!(authorable, Reason::ALL.len() - 3);
     }
 }

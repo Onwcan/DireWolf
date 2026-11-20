@@ -259,6 +259,63 @@ pub(crate) fn balanced() -> StartupConfig {
 }
 
 /// A single-file policy from text, named `name.toml`.
+/// The operator's egress allowlist a lab's runs need (F-06 OF-2,
+/// ADR-0073): one `workload` entry for each exact
+/// `network.https:<host>:<port>` among `grants` -- a wildcard, a grant with
+/// no port and every other capability name none. Under the ceiling every
+/// policy is under, a granted destination with no entry reaches nothing.
+pub(crate) fn workload_allowlist_text(grants: &[String]) -> String {
+    use std::fmt::Write as _;
+    let mut seen: Vec<(String, u16)> = Vec::new();
+    for grant in grants {
+        let Some(rest) = grant.strip_prefix("network.https:") else {
+            continue;
+        };
+        let endpoint = rest.split('?').next().unwrap_or(rest);
+        let Some((host, port)) = endpoint.rsplit_once(':') else {
+            continue;
+        };
+        let Ok(port) = port.parse::<u16>() else {
+            continue;
+        };
+        if host.contains('*') || seen.iter().any(|(h, p)| h == host && *p == port) {
+            continue;
+        }
+        seen.push((host.to_owned(), port));
+    }
+    let mut text = "schema_version = 1\n".to_owned();
+    for (n, (host, port)) in seen.iter().enumerate() {
+        let _ = write!(
+            text,
+            "[[destination]]\nname = \"d{n}\"\nhost = \"{host}\"\nport = {port}\n\
+             scope = [\"workload\"]\npurpose = \"the lab's grants\"\n"
+        );
+    }
+    text
+}
+
+/// [`workload_allowlist_text`], as the authority holds it in process.
+pub(crate) fn workload_allowlist(
+    grants: &[String],
+) -> dwkd_authority::state::egress_allowlist::EgressAllowlist {
+    dwkd_authority::state::egress_allowlist::EgressAllowlist::parse(&workload_allowlist_text(
+        grants,
+    ))
+    .expect("the lab's allowlist parses")
+}
+
+/// [`workload_allowlist_text`], as `serve --egress-allowlist` reads it: a
+/// file in `dir`, this uid's, mode 0600.
+#[cfg(unix)]
+pub(crate) fn workload_allowlist_file(dir: &Path, grants: &[String]) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt as _;
+    let path = dir.join("egress-allowlist.toml");
+    std::fs::write(&path, workload_allowlist_text(grants)).expect("the allowlist file");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+        .expect("the allowlist's mode");
+    path
+}
+
 pub(crate) fn policy(name: &str, text: &str) -> PolicySet {
     PolicySet {
         profile: name.to_owned(),

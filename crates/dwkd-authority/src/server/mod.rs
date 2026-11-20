@@ -718,8 +718,8 @@ fn egress_allowlist(
 ) -> Result<crate::state::egress_allowlist::EgressAllowlist, ServeError> {
     let Some(path) = path else {
         log(
-            "egress allowlist: none -- every network rule that requires \
-             destination_allowlisted, every shipped pack's among them, grants no destination",
+            "egress allowlist: none -- the egress ceiling admits no destination: no \
+             network action is allowed, whatever the policy says (ADR-0073)",
         );
         return Ok(crate::state::egress_allowlist::EgressAllowlist::empty());
     };

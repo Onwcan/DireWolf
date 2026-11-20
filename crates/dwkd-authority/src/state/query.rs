@@ -440,12 +440,28 @@ pub(super) fn query(
 }
 
 /// Both gates. Neither consults the other.
+///
+/// A network action's place under the operator's egress ceiling (F-06
+/// OF-2, ADR-0073) is computed here, for every decision, from the allowlist
+/// the authority read at start -- never taken from whoever built the action,
+/// and never from a run: what a caller set is replaced.
 pub(super) fn decide(
     action: &CanonicalAction,
     admission: &Admission,
     context: &PolicyContext,
     active: &ActiveAuthority,
 ) -> DecisionRecord {
+    let placed;
+    let action = if action.capability().verb().namespace() == capability::Namespace::Network {
+        placed = action.clone().with_destination_allowlisted(
+            active
+                .egress
+                .admits(action.capability(), action.environment()),
+        );
+        &placed
+    } else {
+        action
+    };
     let covering = admission
         .granted()
         .iter()

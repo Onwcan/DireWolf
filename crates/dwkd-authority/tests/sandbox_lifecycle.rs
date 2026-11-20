@@ -333,11 +333,17 @@ mod linux {
         /// egress names from `fixture` — the evidence's, never production's —
         /// its workloads the fixture by digest, and its policy `policy_text`
         /// (F-17: every tunnel is a workload's, decided by that policy).
+        ///
+        /// `granted`: every destination a case's runs are granted, which the
+        /// operator's egress allowlist names for workloads (F-06 OF-2,
+        /// ADR-0073) -- so each case is refused, or reached, by the mechanism
+        /// it always was, under the ceiling every policy is under.
         fn proxy_only(
             tag: &str,
             (image, probe, relay): (&str, &str, &str),
             fixture: &str,
             policy_text: &str,
+            granted: &[String],
         ) -> Self {
             let fixture_sha = var("DW_SANDBOX_FIXTURE_SHA256");
             let sandbox = SandboxConfig::proxy_only(
@@ -359,8 +365,9 @@ mod linux {
             // F-01: a run holding external content writes the workspace.
             ceiling.push("fs.write:*".to_owned());
             ceiling.push("fs.create:*".to_owned());
-            let config =
+            let mut config =
                 StartupConfig::new(policy("m5b-egress", policy_text), Mode::Balanced, ceiling);
+            config.egress = crate::state_support::workload_allowlist(granted);
             let mut lab = Self::with(
                 tag,
                 &[
@@ -975,6 +982,13 @@ mod linux {
             (&image, &probe, &relay),
             fixture.to_str().unwrap(),
             &egress_policy(),
+            &[
+                format!("network.https:origin.example.com:{port}"),
+                format!("network.https:methods.example.com:{port}"),
+                format!("network.https:counted.example.com:{port}"),
+                "network.https:api.example.com:443".to_owned(),
+                "network.https:github.com:443".to_owned(),
+            ],
         );
         let rt = lab.runtime.clone();
 
@@ -1326,7 +1340,12 @@ reason = "NO_MATCHING_RULE"
     }
 
     /// A PROXY_ONLY lab under `policy_text`, its resolver naming `names`.
-    fn egress_lab(tag: &str, names: &[&str], policy_text: &str) -> (Lab, TempDir) {
+    fn egress_lab(
+        tag: &str,
+        names: &[&str],
+        policy_text: &str,
+        granted: &[String],
+    ) -> (Lab, TempDir) {
         let fixture_dir = TempDir::new(&format!("{tag}-fixture"));
         let fixture = fixture_dir.path().join("egress-fixture.txt");
         let mut lines: String = names
@@ -1344,6 +1363,7 @@ reason = "NO_MATCHING_RULE"
             ),
             fixture.to_str().unwrap(),
             policy_text,
+            granted,
         );
         (lab, fixture_dir)
     }
@@ -1410,6 +1430,8 @@ reason = "NO_MATCHING_RULE"
                 "review.example.com",
             ],
             &egress_policy(),
+            &["origin", "second", "review", "refused"]
+                .map(|h| format!("network.https:{h}.example.com:{port}")),
         );
         let grants: Vec<String> = ["origin", "second", "review", "refused"]
             .iter()
@@ -1592,8 +1614,12 @@ reason = "NO_MATCHING_RULE"
     #[ignore = "needs a real OCI runtime: make sandbox-egress-evidence"]
     fn ranges_refuse_at_the_address_and_an_interrupted_workload_exposes_its_root() {
         let (port, accepted) = origin();
-        let (mut lab, _fixture) =
-            egress_lab("f17-ranges", &["origin.example.com"], &power_policy());
+        let (mut lab, _fixture) = egress_lab(
+            "f17-ranges",
+            &["origin.example.com"],
+            &power_policy(),
+            &[format!("network.https:origin.example.com:{port}")],
+        );
         let grant = format!("network.https:origin.example.com:{port}");
         let asked = [grant.as_str(), "process.exec:*"];
         let run = lab.admit_with(&asked);
@@ -1852,6 +1878,12 @@ when.verb = ["fs.read", "fs.write", "fs.create"]
             "f01-taint",
             &["origin.example.com", "capped.example.com"],
             &taint_policy(),
+            &[
+                format!("network.https:origin.example.com:{port}"),
+                format!("network.https:origin.example.com:{closed}"),
+                format!("network.https:capped.example.com:{port}"),
+                format!("network.https:refused.example.com:{port}"),
+            ],
         );
         lab.authority()
             .operator()

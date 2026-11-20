@@ -420,6 +420,17 @@ fn fixture_with(tag: &str, policy: Policy, hook: Option<CrashHook>) -> Option<Fi
         security_allow_host_execution: true,
     };
     config.secrets = metadata::parse(&secrets_toml(&prefix)).unwrap();
+    // Both credentials' origins, under the operator's egress ceiling for
+    // `net_http` (F-06 OF-2, ADR-0073): an injection is shown only on a hop
+    // past it.
+    config.egress = crate::state::egress_allowlist::EgressAllowlist::parse(
+        "schema_version = 1\n\
+         [[destination]]\nname = \"api\"\nhost = \"api.example.com\"\nport = 443\n\
+         scope = [\"net_http\"]\npurpose = \"m4e\"\n\
+         [[destination]]\nname = \"mirror\"\nhost = \"mirror.example.com\"\nport = 443\n\
+         scope = [\"net_http\"]\npurpose = \"m4e\"\n",
+    )
+    .unwrap();
     let fake = Arc::new(Fake::default());
     let state = scratch.path().join("state");
     let mut authority = start(&state, &config, &fake, hook);

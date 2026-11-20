@@ -409,8 +409,36 @@ fn config(policy: &str, budget: NetBudget) -> StartupConfig {
         vec!["network.https:*".to_owned(), "fs.read:*".to_owned()],
     );
     config.net_budget = budget;
+    config.egress = allowlist(
+        &ORIGINS
+            .iter()
+            .map(|(host, port)| (*host, *port, "net_http"))
+            .collect::<Vec<_>>(),
+    );
     config
 }
+
+/// Every origin this module's hops are decided for, named for the
+/// `net_http` path in the operator's egress allowlist (F-06 OF-2,
+/// ADR-0073): a test of the guard, the budgets or a redirect shows nothing
+/// unless its hop is past the ceiling. The ceiling's own tests set their
+/// own list. (A metadata service's name is refused before any decision, by
+/// the one address guard, and is not here.)
+const ORIGINS: &[(&str, u16)] = &[
+    ("api.example.com", 443),
+    ("api.example.com", 8443),
+    ("cdn.example.com", 443),
+    ("capped.example.com", 443),
+    ("denied.example.com", 443),
+    ("down.example.com", 443),
+    ("elsewhere.example.com", 443),
+    ("new.example.com", 443),
+    ("other.example.com", 443),
+    ("sandboxed.example.com", 443),
+    ("www.example.com", 443),
+    ("evil.test", 443),
+    ("api.example.com.evil.test", 443),
+];
 
 fn start(
     state: &Path,
@@ -618,6 +646,18 @@ fn denied_reason(reply: &NetReply) -> NetDecisionReason {
     }
 }
 
+/// The rule a denial is attributed to.
+fn denied_rule(reply: &NetReply) -> String {
+    match reply {
+        NetReply::Denied(plan) => plan
+            .net
+            .reported()
+            .map(|g| g.record().policy().rule_id().as_str().to_owned())
+            .unwrap(),
+        other => panic!("not a denial: {other:?}"),
+    }
+}
+
 fn output(reply: &NetReply) -> &dwk_proto::dwkp::netops::NetHttpResult {
     match reply {
         NetReply::Done { output, .. } => output,
@@ -687,6 +727,116 @@ fn f06_a_hop_reaches_only_what_the_operator_allowlisted_for_net_http() {
     assert_eq!(output(&reply).status.get(), 200);
     assert_eq!(fx.fake.operations(), ["http.resolve", "http.exchange"]);
     evidence("f06-allowlist-decides-net-http", "exact-only");
+}
+
+/// An operator's own policy that allows every HTTPS hop: no
+/// `destination_allowlisted` anywhere in it.
+const ALLOW_EVERY_HOP: &str = "schema_version = 1\n\n[meta]\nname = \"m5c\"\n\n[[rule]]\n\
+    id = \"allow-every-https\"\neffect = \"ALLOW\"\nwhen.verb = \"network.https\"\n\n\
+    [[rule]]\nid = \"default\"\neffect = \"DENY\"\nreason = \"NO_MATCHING_RULE\"\n";
+
+/// F-06 OF-2 (ADR-0073): the operator's egress allowlist is a ceiling an
+/// operator policy cannot lift. A policy that allows every hop reaches
+/// only what the list names, for this path and port; a rule that denies
+/// still denies a named destination, by its own name.
+#[test]
+fn of2_a_policy_allowing_every_hop_reaches_only_what_the_operator_allowlisted() {
+    for list in [
+        crate::state::egress_allowlist::EgressAllowlist::empty(),
+        allowlist(&[("api.example.com", 443, "workload")]),
+        allowlist(&[("api.example.com", 8443, "net_http")]),
+        allowlist(&[("other.example.com", 443, "net_http")]),
+    ] {
+        let mut setup = config(ALLOW_EVERY_HOP, NetBudget::default());
+        setup.egress = list.clone();
+        let mut fx = fixture_from(setup, None);
+        let run = fx.run("r1", &[GRANT]);
+        let reply = fx.invoke(
+            &run,
+            call(HttpMethod::Get, "https://api.example.com/x"),
+            "k1",
+        );
+        assert_eq!(
+            denied_reason(&reply),
+            NetDecisionReason::DeniedByRule,
+            "{list:?}"
+        );
+        assert_eq!(denied_rule(&reply), "operator-egress-ceiling", "{list:?}");
+        assert!(
+            fx.fake.asked().is_empty(),
+            "nothing resolved or sent: {list:?}"
+        );
+    }
+    // Named exactly: the policy's allow stands.
+    let mut setup = config(ALLOW_EVERY_HOP, NetBudget::default());
+    setup.egress = allowlist(&[("api.example.com", 443, "net_http")]);
+    let mut fx = fixture_from(setup, None);
+    let run = fx.run("r1", &[GRANT]);
+    let reply = fx.invoke(
+        &run,
+        call(HttpMethod::Get, "https://api.example.com/x"),
+        "k1",
+    );
+    assert_eq!(output(&reply).status.get(), 200);
+    assert_eq!(fx.fake.operations(), ["http.resolve", "http.exchange"]);
+    // A rule that denies, over a named destination: its own denial.
+    let deny = ALLOW_EVERY_HOP.replace(
+        "id = \"allow-every-https\"\neffect = \"ALLOW\"",
+        "id = \"deny-every-https\"\neffect = \"DENY\"\nreason = \"PROFILE_CEILING\"",
+    );
+    assert_ne!(deny, ALLOW_EVERY_HOP);
+    let mut setup = config(&deny, NetBudget::default());
+    setup.egress = allowlist(&[("api.example.com", 443, "net_http")]);
+    let mut fx = fixture_from(setup, None);
+    let run = fx.run("r1", &[GRANT]);
+    let reply = fx.invoke(
+        &run,
+        call(HttpMethod::Get, "https://api.example.com/x"),
+        "k1",
+    );
+    assert_eq!(denied_reason(&reply), NetDecisionReason::DeniedByRule);
+    assert_eq!(denied_rule(&reply), "deny-every-https");
+    assert!(fx.fake.asked().is_empty());
+    evidence("of2-ceiling-over-an-operator-policy", "exact-only");
+}
+
+/// F-06 OF-2 (ADR-0073): the file is read at start. With the entry removed
+/// and the authority restarted, a new run's hop to the destination it used
+/// to reach is the ceiling's to deny: nothing is resolved or sent.
+#[test]
+fn of2_a_restart_without_the_entry_denies_what_it_allowed() {
+    let mut setup = config(ALLOW_EVERY_HOP, NetBudget::default());
+    setup.egress = allowlist(&[("api.example.com", 443, "net_http")]);
+    let mut fx = fixture_from(setup, None);
+    let run = fx.run("r1", &[GRANT]);
+    let reply = fx.invoke(
+        &run,
+        call(HttpMethod::Get, "https://api.example.com/x"),
+        "k1",
+    );
+    assert_eq!(output(&reply).status.get(), 200);
+    let asked = fx.fake.asked().len();
+    // The operator removes the entry; the authority starts again.
+    fx.config.egress = crate::state::egress_allowlist::EgressAllowlist::empty();
+    drop(fx.authority.take());
+    let state = fx.state();
+    let mut restarted = start(&state, &fx.config, &fx.fake, &fx.clock, None);
+    let caller = restarted.connect(AuthenticatedSubject::unix_uid(1000));
+    let Reply::Done(epoch) = restarted.acquire_lease(&caller, &fx.session).unwrap() else {
+        panic!("a lease")
+    };
+    fx.authority = Some(restarted);
+    fx.caller = caller;
+    fx.epoch = epoch;
+    let run = fx.run("r2", &[GRANT]);
+    let reply = fx.invoke(
+        &run,
+        call(HttpMethod::Get, "https://api.example.com/x"),
+        "k2",
+    );
+    assert_eq!(denied_reason(&reply), NetDecisionReason::DeniedByRule);
+    assert_eq!(denied_rule(&reply), "operator-egress-ceiling");
+    assert_eq!(fx.fake.asked().len(), asked, "nothing resolved or sent");
 }
 
 #[test]

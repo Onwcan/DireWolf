@@ -29,6 +29,43 @@ fn refused(text: &str) -> String {
     EgressAllowlist::parse(text).expect_err(text)
 }
 
+/// F-06 OF-2 (ADR-0073): what the authority asks of the list for every
+/// network decision -- the action's own exact host and port, for the path
+/// its environment takes; a wildcard, no port, another host or port and
+/// another scope family are outside.
+#[test]
+fn an_action_is_admitted_only_at_its_exact_destination_for_its_path() {
+    use crate::policy::Environment;
+    let cap = |text: &str| crate::capability::parse(text).unwrap().resolve().unwrap();
+    let list = EgressAllowlist::parse(&file(&[
+        entry("api", "api.example.com", "443", "[\"net_http\"]"),
+        entry("pkg", "pkg.example.com", "443", "[\"workload\"]"),
+    ]))
+    .unwrap();
+    let api = cap("network.https:api.example.com:443");
+    let pkg = cap("network.https:pkg.example.com:443");
+    assert!(list.admits(&api, &Environment::Host));
+    assert!(!list.admits(&api, &Environment::Sandbox), "the other path");
+    assert!(list.admits(&pkg, &Environment::Sandbox));
+    assert!(!list.admits(&pkg, &Environment::Host), "the other path");
+    for outside in [
+        "network.https:api.example.com",
+        "network.https:api.example.com:8443",
+        "network.https:*.example.com:443",
+        "network.https:*",
+        "network.https:example.com:443",
+        "network.https:www.api.example.com:443",
+        "secret.use:api-token",
+    ] {
+        assert!(!list.admits(&cap(outside), &Environment::Host), "{outside}");
+        assert!(
+            !list.admits(&cap(outside), &Environment::Sandbox),
+            "{outside}"
+        );
+    }
+    assert!(!EgressAllowlist::empty().admits(&api, &Environment::Host));
+}
+
 #[test]
 fn no_file_and_an_empty_file_cover_nothing() {
     let none = EgressAllowlist::empty();

@@ -576,10 +576,20 @@ fn a_rule_needing_an_address_the_action_lacks_is_a_gap_not_a_lie() {
 
 #[test]
 fn a_decision_about_a_destination_address_records_that_address() {
-    let mut h = Harness::with_config("address", config(policy("probe", PROBE)));
+    // The destination is named exactly, and the operator's egress allowlist
+    // names it for a workload (F-06 OF-2, ADR-0073): the decision is the
+    // policy's, about the address.
+    let mut setup = config(policy("probe", PROBE));
+    setup.egress = dwkd_authority::state::egress_allowlist::EgressAllowlist::parse(
+        "schema_version = 1\n[[destination]]\nname = \"api\"\nhost = \"api.example.com\"\n\
+         port = 443\nscope = [\"workload\"]\npurpose = \"OF-2\"\n",
+    )
+    .unwrap();
+    let mut h = Harness::with_config("address", setup);
     let run = admit(&mut h, &["network.https:*.example.com"]);
     let decide_for = |h: &mut Harness, octets: [u8; 4]| {
-        let a = action("network.https:api.example.com").with_destination_ip(IpAddress::V4(octets));
+        let a =
+            action("network.https:api.example.com:443").with_destination_ip(IpAddress::V4(octets));
         let Reply::Done(answer) = h
             .authority()
             .query_authority(
@@ -614,6 +624,59 @@ fn a_decision_about_a_destination_address_records_that_address() {
     // The record is evidence for a future binding, not a binding: nothing in
     // M3d pins the address, and the record does not say it does.
     assert!(records.iter().all(|r| r.get("pinned").is_none()));
+}
+
+/// F-06 OF-2 (ADR-0073): a proposal's place under the operator's egress
+/// ceiling is the authority's to compute, from the operator's file. A
+/// caller that says its destination is allowlisted is not believed; a
+/// policy that allows every HTTPS action reaches only what the file names.
+#[test]
+fn a_proposal_cannot_say_its_own_destination_is_allowlisted() {
+    let decide_with =
+        |tag: &str, egress: Option<dwkd_authority::state::egress_allowlist::EgressAllowlist>| {
+            let mut setup = config(policy("probe", PROBE));
+            if let Some(list) = egress {
+                setup.egress = list;
+            }
+            let mut h = Harness::with_config(tag, setup);
+            let run = admit(&mut h, &["network.https:*.example.com"]);
+            let a = action("network.https:api.example.com:443")
+                .with_destination_ip(IpAddress::V4([93, 184, 216, 34]))
+                .with_destination_allowlisted(true);
+            let Reply::Done(answer) = h
+                .authority()
+                .query_authority(
+                    &run.caller,
+                    &run.session,
+                    &run.run,
+                    run.epoch,
+                    Some(Proposal::Action(&a)),
+                )
+                .unwrap()
+            else {
+                panic!("answered")
+            };
+            let record = answer.decision().unwrap();
+            (
+                record.permits(),
+                record.policy().rule_id().as_str().to_owned(),
+            )
+        };
+    // No file: the caller's `true` is replaced, and the ceiling denies.
+    assert_eq!(
+        decide_with("of2-claimed", None),
+        (false, "operator-egress-ceiling".to_owned())
+    );
+    // The file names it: the policy's own rule decides.
+    let named = dwkd_authority::state::egress_allowlist::EgressAllowlist::parse(
+        "schema_version = 1\n[[destination]]\nname = \"api\"\nhost = \"api.example.com\"\n\
+             port = 443\nscope = [\"workload\"]\npurpose = \"OF-2\"\n",
+    )
+    .unwrap();
+    assert_eq!(
+        decide_with("of2-named", Some(named)),
+        (true, "allow-https".to_owned())
+    );
 }
 
 #[test]

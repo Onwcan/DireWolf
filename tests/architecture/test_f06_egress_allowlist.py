@@ -4,11 +4,16 @@
 that can match a network verb also requires `when.destination_allowlisted =
 true`, so without the operator's file no pack reaches any destination.
 
-**The authority alone says it.** The input is set in exactly the two places a
-network action is built (a `net.http` hop, a workload's launch), from the
-operator's file; no wire type of `dwk-proto` carries an allowlist, so no run
-can supply or widen one. The file is read only through the trusted operator
-reader, under its own flag.
+**The authority alone says it.** The input is set in exactly one place, the
+state layer's decision function, for every network decision, from the
+operator's file (OF-2, ADR-0073); no wire type of `dwk-proto` carries an
+allowlist, so no run can supply or widen one. The file is read only through
+the trusted operator reader, under its own flag.
+
+**It is a ceiling** (OF-2). The policy evaluator denies every network action
+the input does not place inside, whatever a rule said, attributed to a
+reserved rule id and reason no policy file may claim; the evaluator has one
+caller, so no decision is made around it.
 
 **Each guard has a mutant.** `make egress-allowlist-mutations` weakens each in
 turn; its table must match the source exactly once per mutant.
@@ -28,6 +33,12 @@ ADR = (
     / "docs"
     / "adr"
     / "0071-f06-an-operator-egress-allowlist-every-shipped-network-rule-requires.md"
+)
+CEILING_ADR = (
+    REPO_ROOT
+    / "docs"
+    / "adr"
+    / "0073-f06-of2-the-operators-egress-allowlist-is-a-ceiling-every-policy-is-under.md"
 )
 
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
@@ -76,26 +87,51 @@ def test_the_predicate_is_a_network_predicate_the_loader_knows() -> None:
     assert '.optional_bool(table, "destination_allowlisted", &member)?' in load
 
 
-def test_only_the_authority_sets_it_in_the_two_places_an_action_is_built() -> None:
+def test_only_the_authority_sets_it_in_its_one_decision_function() -> None:
     setters = sorted(
         p.relative_to(REPO_ROOT).as_posix()
         for p in AUTHORITY.rglob("*.rs")
         if not p.name.endswith(("tests.rs", "_tests.rs", "fixtures.rs", "testing.rs"))
         and ".with_destination_allowlisted(" in _read(p)
     )
-    assert setters == [
-        "crates/dwkd-authority/src/state/net_http/plan.rs",
-        "crates/dwkd-authority/src/state/workload_egress.rs",
-    ], setters
-    plan = _read(AUTHORITY / "state" / "net_http" / "plan.rs")
-    assert "crate::state::egress_allowlist::EgressScope::NetHttp," in plan
-    workload = _read(AUTHORITY / "state" / "workload_egress.rs")
-    assert "crate::state::egress_allowlist::EgressScope::Workload," in workload
+    assert setters == ["crates/dwkd-authority/src/state/query.rs"], setters
+    query = _read(AUTHORITY / "state" / "query.rs")
+    assert ".admits(action.capability(), action.environment())," in query
+    egress = _read(AUTHORITY / "state" / "egress_allowlist.rs")
+    assert "Environment::Host => EgressScope::NetHttp," in egress
+    assert "Environment::Sandbox => EgressScope::Workload," in egress
+    # The builders no longer compute it: one place, one answer.
+    for builder in (("net_http", "plan.rs"), ("workload_egress.rs",)):
+        text = _read(AUTHORITY.joinpath("state", *builder))
+        assert ".covers(" not in text and ".admits(" not in text, builder
     # No wire type carries an allowlist or the input: a run cannot say it.
     for path in (REPO_ROOT / "crates" / "dwk-proto" / "src").rglob("*.rs"):
         text = _read(path)
         assert "destination_allowlisted" not in text, path
         assert "egress_allowlist" not in text.lower(), path
+
+
+def test_the_ceiling_is_the_evaluators_and_no_file_can_claim_it() -> None:
+    evaluator = _read(AUTHORITY / "policy" / "eval.rs")
+    assert "    egress_ceiling(by_rules(policy, action, context), action)\n" in evaluator
+    public = sorted(re.findall(r"^pub (?:const )?fn (\w+)", evaluator, re.M))
+    assert public == ["evaluate", "would_require_approval"], public
+    policy = _read(AUTHORITY / "policy" / "mod.rs")
+    assert 'pub const EGRESS_CEILING: &\'static str = "operator-egress-ceiling";' in policy
+    load = _read(AUTHORITY / "policy" / "load.rs")
+    assert ".filter(|id| !id.is_egress_ceiling())" in load
+    reason = _read(AUTHORITY / "policy" / "reason.rs")
+    assert 'Self::OutsideEgressAllowlist => "OUTSIDE_EGRESS_ALLOWLIST",' in reason
+    # The evaluator's one caller is the state layer's decision function:
+    # no product path decides a network action around the ceiling.
+    callers = sorted(
+        p.relative_to(REPO_ROOT).as_posix()
+        for p in AUTHORITY.rglob("*.rs")
+        if p.parent.name != "policy"
+        and not p.name.endswith(("tests.rs", "_tests.rs", "fixtures.rs", "testing.rs"))
+        and re.search(r"\bevaluate\(", _read(p))
+    )
+    assert callers == ["crates/dwkd-authority/src/state/query.rs"], callers
 
 
 def test_the_file_is_read_only_through_the_trusted_operator_reader() -> None:
@@ -116,14 +152,18 @@ def test_the_file_is_read_only_through_the_trusted_operator_reader() -> None:
 
 def test_the_mutation_table_matches_the_source_once_per_mutant() -> None:
     names = [m[0] for m in dw.EGRESS_ALLOWLIST_MUTATIONS]
-    assert len(names) == len(set(names)) == 13
-    assert [n.split(":")[0] for n in names] == [f"G{i}" for i in range(1, 14)]
+    assert len(names) == len(set(names)) == 19
+    assert [n.split(":")[0] for n in names] == [f"G{i}" for i in range(1, 20)]
     for what, rel, old, new in dw.EGRESS_ALLOWLIST_MUTATIONS:
         text = _read(REPO_ROOT / rel)
         assert text.count(old) == 1, what
         assert old != new, what
     assert dw.TASKS["egress-allowlist-mutations"] is dw.task_egress_allowlist_mutations
-    assert [s.name for s in dw._egress_allowlist_stages()] == ["authority-units", "serve"]
+    assert [s.name for s in dw._egress_allowlist_stages()] == [
+        "authority-units",
+        "query",
+        "serve",
+    ]
     makefile = _read(REPO_ROOT / "Makefile")
     assert "\negress-allowlist-mutations: ## F-06" in makefile
     assert "\t@$(DW) egress-allowlist-mutations\n" in makefile
@@ -141,6 +181,13 @@ def test_the_real_broker_evidence_is_required() -> None:
         "egress-allowlist-other-path-denies",
         "egress-allowlist-other-port-denies",
         "egress-allowlist-private-address-still-blocked",
+        "of2-operator-policy-absent-denies",
+        "of2-operator-policy-cross-origin-hop-denied",
+        "of2-operator-policy-deny-rule-kept",
+        "of2-operator-policy-exact-allows",
+        "of2-operator-policy-neighbour-denies",
+        "of2-operator-policy-other-path-denies",
+        "of2-operator-policy-other-port-denies",
     ):
         assert case in cases, case
         assert f'"{case}"' in bench, case
@@ -159,3 +206,15 @@ def test_adr_0071_is_proposed_and_the_documents_say_what_is_built() -> None:
     assert rows == [str(n) for n in range(1, 31)], rows
     for path in ("NETWORK_SECURITY.md", "POLICY.md", "SECURITY.md", "THREAT_MODEL.md"):
         assert ADR.name in _read(REPO_ROOT / "docs" / path), path
+
+
+def test_adr_0073_is_proposed_and_the_documents_say_the_ceiling_is_built() -> None:
+    text = _read(CEILING_ADR)
+    assert text.startswith("# ADR-0073:")
+    assert re.search(r"^\*\*Status:\*\* Proposed ", text, re.M)
+    for said in ("operator-egress-ceiling", "OUTSIDE_EGRESS_ALLOWLIST", "OF-2", "restart"):
+        assert said in text, said
+    index = _read(REPO_ROOT / "docs" / "adr" / "README.md")
+    assert f"[0073]({CEILING_ADR.name})" in index
+    for path in ("F06_EGRESS_ALLOWLIST.md", "NETWORK_SECURITY.md", "POLICY.md"):
+        assert CEILING_ADR.name in _read(REPO_ROOT / "docs" / path), path

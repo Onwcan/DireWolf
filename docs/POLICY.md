@@ -327,7 +327,7 @@ Which shape a field takes:
 | `when.max_bytes` | ✓ | ✗ | `u64` | the action moves no more than this |
 | `when.argv_safe` | ✓ | ✗ | `ArgvSafety` | the canonicaliser's classification equals this |
 | `when.destination_novel` | ✓ | ✗ | `Novelty` | the run has, or has not, been here |
-| `when.destination_allowlisted` | ✓ | ✗ | `bool` | the operator's egress allowlist names, or does not name, this host, port and path (F-06, [ADR-0071](adr/0071-f06-an-operator-egress-allowlist-every-shipped-network-rule-requires.md), Proposed); an action built without it matches neither |
+| `when.destination_allowlisted` | ✓ | ✗ | `bool` | the operator's egress allowlist names, or does not name, this host, port and path (F-06, [ADR-0071](adr/0071-f06-an-operator-egress-allowlist-every-shipped-network-rule-requires.md), Proposed); computed by the authority for every network decision, never supplied; an action built without it matches neither -- and is outside the operator's egress ceiling ([ADR-0073](adr/0073-f06-of2-the-operators-egress-allowlist-is-a-ceiling-every-policy-is-under.md), Proposed) |
 | `unless.config` | ✓ | ✗ | `ConfigKey` | this kernel flag is set |
 | `unless.standing_grant` | ✓ | ✗ | `bool` | a grant covers this (never, before M6) |
 | `obligations` | ✗ | ✓ | `Obligations` | the conditions a permission carries |
@@ -373,14 +373,26 @@ evaluate(action, context) -> Decision
        if provisional.effect in postcondition.when.provisional_effect
           and matches(postcondition.when) and not matches(postcondition.unless):
               provisional.effect = meet(provisional.effect, postcondition.effect)
-  3. return provisional
+
+  THE OPERATOR'S EGRESS CEILING -- after the policy, which no rule reaches
+  (F-06 OF-2, ADR-0073)
+  3. if action.verb is network.* and provisional.effect != DENY
+        and action.destination_allowlisted != true:
+           provisional = DENY / OUTSIDE_EGRESS_ALLOWLIST by the reserved
+                         `operator-egress-ceiling` (--egress-allowlist:1)
+  4. return provisional
 ```
 
 `meet` is the more restrictive of the two under `DENY ⊑ REQUIRE_APPROVAL ⊑
 ALLOW`. Phase two therefore cannot widen, *whatever a postcondition says* —
 and the loader independently refuses a postcondition whose effect is not `⊑`
 every provisional effect it selects, so the property is checked twice by two
-different mechanisms.
+different mechanisms. Step 3 narrows the same way: it never turns a `DENY`
+into anything else, and a rule that denies keeps its own name. No policy
+file may declare `operator-egress-ceiling` or claim
+`OUTSIDE_EGRESS_ALLOWLIST`; `destination_allowlisted` is computed by the
+authority from the operator's `--egress-allowlist` file, for every network
+decision ([ADR-0073](adr/0073-f06-of2-the-operators-egress-allowlist-is-a-ceiling-every-policy-is-under.md), Proposed).
 
 Step 1's first clause is this document's own "assert; uncanonicalised input is
 a bug", fail-closed. An unresolved `${WORKSPACE}` or an unpinned address is a

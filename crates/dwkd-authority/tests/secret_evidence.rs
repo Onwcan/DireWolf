@@ -724,6 +724,17 @@ M4E:DONE"
             let text =
                 std::fs::read_to_string(egress_secrets_file(dir, entry, origin, closed)).unwrap();
             config.secrets = dwkd_authority::secret::metadata::parse(&text).unwrap();
+            // The credential's two origins, under the operator's egress
+            // ceiling for `net_http` (F-06 OF-2, ADR-0073).
+            config.egress =
+                dwkd_authority::state::egress_allowlist::EgressAllowlist::parse(&format!(
+                    "schema_version = 1\n\
+                     [[destination]]\nname = \"origin\"\nhost = \"origin.test\"\nport = {origin}\n\
+                     scope = [\"net_http\"]\npurpose = \"m4e\"\n\
+                     [[destination]]\nname = \"closed\"\nhost = \"closed.test\"\nport = {closed}\n\
+                     scope = [\"net_http\"]\npurpose = \"m4e\"\n"
+                ))
+                .unwrap();
             let link: Arc<dyn EffectBroker> =
                 Arc::new(UnixBroker::new(PathBuf::from(broker), own_uid()));
             let (mut authority, _) = Authority::start(

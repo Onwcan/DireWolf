@@ -38,6 +38,8 @@
 //! [`POLICY.md`]: ../../../../../docs/POLICY.md
 //! [ADR-0028]: ../../../../../docs/adr/0028-policy-input-ownership.md
 
+use crate::capability::Namespace;
+
 use super::action::CanonicalAction;
 use super::context::PolicyContext;
 use super::effect::Effect;
@@ -67,8 +69,41 @@ pub const fn would_require_approval(provisional: Effect) -> bool {
 ///
 /// The `default` rule is mandatory and unconditional, so phase one always
 /// matches something and this function is total.
+///
+/// Then the operator's egress ceiling (F-06 OF-2, ADR-0073), which no rule
+/// can reach: a network action the policy allowed, or would ask a human
+/// about, is denied unless the action says the operator's allowlist names
+/// its destination ([`CanonicalAction::destination_allowlisted`], which the
+/// authority computes from the operator's file for every network
+/// decision). A rule that denies keeps its own attribution.
 #[must_use]
 pub fn evaluate(
+    policy: &CompiledPolicy,
+    action: &CanonicalAction,
+    context: &PolicyContext,
+) -> Decision {
+    egress_ceiling(by_rules(policy, action, context), action)
+}
+
+/// The operator's egress ceiling. It only narrows: a decision that already
+/// denies -- by a rule, by `default`, or for want of an input -- is
+/// returned as it is, and a non-network action is untouched. Anything else
+/// about a network action stands only where the allowlist input is `true`:
+/// missing is outside, so an action built without it can never reach the
+/// network.
+fn egress_ceiling(decision: Decision, action: &CanonicalAction) -> Decision {
+    let network = action.capability().verb().namespace() == Namespace::Network;
+    if !network
+        || decision.effect() == Effect::Deny
+        || action.destination_allowlisted() == Some(true)
+    {
+        return decision;
+    }
+    decision.beyond_egress_ceiling()
+}
+
+/// The policy's own two phases.
+fn by_rules(
     policy: &CompiledPolicy,
     action: &CanonicalAction,
     context: &PolicyContext,

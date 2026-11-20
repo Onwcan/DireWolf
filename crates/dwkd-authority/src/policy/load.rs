@@ -432,13 +432,18 @@ impl Walker<'_> {
     }
 
     /// `id`, which must be the identifier grammar.
+    ///
+    /// The egress ceiling's reserved id (F-06 OF-2, ADR-0073) is no file's:
+    /// a decision naming it must never have been a rule's.
     fn rule_id(&self, table: &DeTable<'_>, field: &FieldPath) -> Result<RuleId, PolicyLoadError> {
         let (text, at) = self.required_str(table, "id", field)?;
-        RuleId::new(text).ok_or(PolicyLoadError::BadValue {
-            at,
-            field: field.member("id"),
-            error: ValueError::MalformedRuleId,
-        })
+        RuleId::new(text)
+            .filter(|id| !id.is_egress_ceiling())
+            .ok_or(PolicyLoadError::BadValue {
+                at,
+                field: field.member("id"),
+                error: ValueError::MalformedRuleId,
+            })
     }
 
     /// `effect`, mandatory.
