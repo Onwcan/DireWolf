@@ -62,6 +62,207 @@ fn limits() -> Limits {
     }
 }
 
+// ---- F-16 (ADR-0074): the decided name and no other --------------------------
+
+/// What the hostile configuration's DNS server says about a name.
+enum Hostile {
+    /// These A records.
+    Addresses(Vec<[u8; 4]>),
+    /// NXDOMAIN.
+    Missing,
+    /// Nothing, ever.
+    Silent,
+}
+
+/// The hostile configuration's DNS answers: a search domain's expansion of a
+/// name that does not exist, three addresses, one more than the bound, and
+/// a name nothing ever answers. Every other name does not exist.
+fn hostile_answer(name: &str) -> Hostile {
+    match name {
+        "pypi.org.evil.test" => Hostile::Addresses(vec![[198, 51, 100, 7]]),
+        "few.test" => Hostile::Addresses(vec![
+            [198, 51, 100, 1],
+            [198, 51, 100, 2],
+            [198, 51, 100, 3],
+        ]),
+        "many.test" => Hostile::Addresses(
+            (1..=u8::try_from(super::resolve::MAX_ANSWER_ADDRESSES + 1).unwrap())
+                .map(|n| [198, 51, 100, n])
+                .collect(),
+        ),
+        "slow.test" => Hostile::Silent,
+        _ => Hostile::Missing,
+    }
+}
+
+/// One DNS answer to `query`: its own question, then the name's A records
+/// (none for any other type), NXDOMAIN for a name that does not exist, and
+/// nothing at all for one that is never answered.
+fn hostile_reply(query: &[u8]) -> Option<Vec<u8>> {
+    let mut at = 12;
+    let mut labels = Vec::new();
+    loop {
+        let n = usize::from(*query.get(at)?);
+        if n == 0 {
+            break;
+        }
+        labels.push(String::from_utf8_lossy(query.get(at + 1..at + 1 + n)?).to_ascii_lowercase());
+        at += 1 + n;
+    }
+    let qtype = u16::from_be_bytes([*query.get(at + 1)?, *query.get(at + 2)?]);
+    let question = query.get(12..at + 5)?;
+    let (flags, records): ([u8; 2], Vec<[u8; 4]>) = match hostile_answer(&labels.join(".")) {
+        Hostile::Silent => return None,
+        Hostile::Missing => ([0x81, 0x83], Vec::new()),
+        Hostile::Addresses(addresses) if qtype == 1 => ([0x81, 0x80], addresses),
+        Hostile::Addresses(_) => ([0x81, 0x80], Vec::new()),
+    };
+    let mut reply = query.get(..2)?.to_vec();
+    reply.extend_from_slice(&flags);
+    for count in [1, u16::try_from(records.len()).ok()?, 0, 0] {
+        reply.extend_from_slice(&count.to_be_bytes());
+    }
+    reply.extend_from_slice(question);
+    for address in records {
+        reply.extend_from_slice(&[0xc0, 0x0c, 0, 1, 0, 1, 0, 0, 0, 5, 0, 4]);
+        reply.extend_from_slice(&address);
+    }
+    Some(reply)
+}
+
+/// The responder, on the namespace's own loopback, port 53.
+fn hostile_dns() {
+    let socket = std::net::UdpSocket::bind("127.0.0.1:53").unwrap();
+    std::thread::spawn(move || {
+        let mut buffer = [0u8; 1500];
+        while let Ok((n, peer)) = socket.recv_from(&mut buffer) {
+            if let Some(reply) = hostile_reply(&buffer[..n]) {
+                let _ = socket.send_to(&reply, peer);
+            }
+        }
+    });
+}
+
+/// Inside its namespaces (the next test starts it): the host's resolver
+/// under the hostile configuration. A relative lookup is answered for
+/// another name -- the search domain's expansion, the hosts file's entry --
+/// and the broker's is not; the bound, NXDOMAIN and a silent server too.
+#[test]
+fn f16_hostile_resolver_inner() {
+    use std::net::ToSocketAddrs as _;
+    let Some(dir) = crate::peer::harness::hostile_resolver_dir() else {
+        return;
+    };
+    if let Err(why) = crate::peer::harness::install_hostile_resolver(&dir) {
+        println!("F16-NOT-EXERCISED {why}");
+        return;
+    }
+    hostile_dns();
+    let ip = |text: &str| text.parse::<std::net::IpAddr>().unwrap();
+    let relative = |name: &str| -> Vec<std::net::IpAddr> {
+        (name, 0u16)
+            .to_socket_addrs()
+            .map(|a| a.map(|s| s.ip()).collect())
+            .unwrap_or_default()
+    };
+    // The configuration is live: a relative lookup lands on another name.
+    assert_eq!(
+        relative("pypi.org"),
+        [ip("198.51.100.7")],
+        "the search domain answers"
+    );
+    assert_eq!(
+        relative("victim.test"),
+        [ip("198.51.100.8")],
+        "the hosts file answers"
+    );
+    let resolver = super::resolve::SystemResolver;
+    let long = Duration::from_secs(5);
+    for (name, case) in [
+        ("pypi.org", "f16-search-domain-not-appended"),
+        ("victim.test", "f16-hosts-file-not-consulted"),
+        ("gone.test", "f16-nxdomain-fails"),
+        ("many.test", "f16-answer-past-the-bound-refused"),
+    ] {
+        assert_eq!(
+            resolver.resolve(name, long),
+            Err(D::ResolutionFailed),
+            "{name}"
+        );
+        println!("F16-EVIDENCE {{\"case\":\"{case}\",\"outcome\":\"RESOLUTION_FAILED\"}}");
+    }
+    let mut few = resolver.resolve("few.test", long).unwrap();
+    few.sort();
+    assert_eq!(
+        few,
+        [ip("198.51.100.1"), ip("198.51.100.2"), ip("198.51.100.3")]
+    );
+    println!("F16-EVIDENCE {{\"case\":\"f16-whole-answer-kept\",\"outcome\":\"3-addresses\"}}");
+    assert_eq!(
+        resolver.resolve("slow.test", Duration::from_millis(300)),
+        Err(D::ResolutionTimeout)
+    );
+    println!(
+        "F16-EVIDENCE {{\"case\":\"f16-silent-server-times-out\",\"outcome\":\"RESOLUTION_TIMEOUT\"}}"
+    );
+}
+
+/// F-16 (ADR-0074, Proposed): the broker asks the host's resolver for the
+/// name the authority decided and no other. Under a hostile configuration in
+/// namespaces of the test's own -- a search domain whose expansion of a
+/// missing name answers, an `/etc/hosts` entry -- a relative lookup lands on
+/// another name's address and the broker's does not; an answer past the
+/// bound is refused whole; a missing name fails and a silent server times
+/// out. NOT EXERCISED where unprivileged namespaces are not available.
+#[test]
+fn f16_the_resolver_asks_for_the_decided_name_and_no_other() {
+    if crate::peer::harness::hostile_resolver_dir().is_some() {
+        return;
+    }
+    let scratch = Scratch::new();
+    for (file, text) in [
+        (
+            "resolv.conf",
+            "nameserver 127.0.0.1\nsearch evil.test\noptions ndots:1 attempts:1 timeout:1 edns0\n",
+        ),
+        ("nsswitch.conf", "hosts: files dns\n"),
+        ("hosts", "127.0.0.1 localhost\n198.51.100.8 victim.test\n"),
+    ] {
+        std::fs::write(scratch.0.join(file), text).unwrap();
+    }
+    let Some(output) = crate::peer::harness::under_hostile_resolver(
+        "egress::tests::f16_hostile_resolver_inner",
+        &scratch.0,
+    ) else {
+        return;
+    };
+    let said = String::from_utf8_lossy(&output.stdout);
+    if let Some(why) = said.lines().find(|l| l.starts_with("F16-NOT-EXERCISED")) {
+        println!("NOT EXERCISED: {why}");
+        return;
+    }
+    assert!(
+        output.status.success(),
+        "{said}\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(said.contains("test result: ok. 1 passed"), "{said}");
+    for case in [
+        "f16-search-domain-not-appended",
+        "f16-hosts-file-not-consulted",
+        "f16-nxdomain-fails",
+        "f16-answer-past-the-bound-refused",
+        "f16-whole-answer-kept",
+        "f16-silent-server-times-out",
+    ] {
+        let line = said
+            .lines()
+            .find(|l| l.contains(&format!("\"case\":\"{case}\"")))
+            .unwrap_or_else(|| panic!("{case}: {said}"));
+        println!("{line}");
+    }
+}
+
 /// A scratch directory, removed when dropped.
 struct Scratch(PathBuf);
 

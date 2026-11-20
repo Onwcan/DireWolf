@@ -22,6 +22,16 @@ use std::process::{Command, Output, Stdio};
 /// Set in the copy of a test binary that judges a hidden peer.
 const HIDDEN_JUDGE: &str = "DW_BROKER_F04_HIDDEN_JUDGE";
 
+/// Set in the copy of a test binary that resolves under a hostile resolver
+/// configuration (F-16, ADR-0074): the directory holding it.
+const HOSTILE_RESOLVER: &str = "DW_BROKER_F16_HOSTILE_RESOLVER";
+
+/// User, mount and network namespaces of the copy's own: its
+/// `/etc/resolv.conf`, `/etc/nsswitch.conf` and `/etc/hosts` are the test's
+/// files, bind-mounted, and its loopback is its own, so the test's DNS
+/// responder answers it on port 53. Nothing outside them changes.
+const RESOLVER_NAMESPACES: [&str; 4] = ["--user", "--map-root-user", "--mount", "--net"];
+
 /// A new user namespace (so no privilege is needed) and a new pid namespace,
 /// of which the judge is the first process: its peer outside is invisible to
 /// it, and the kernel reports that peer's pid as 0.
@@ -72,6 +82,87 @@ pub(crate) fn judge_hidden(name: &str, peer: OwnedFd) -> Option<Output> {
         .output()
         .expect("the hidden judge starts");
     Some(output)
+}
+
+/// The hostile resolver configuration's directory, in the copy a test
+/// started -- `None` everywhere else.
+pub(crate) fn hostile_resolver_dir() -> Option<std::path::PathBuf> {
+    std::env::var_os(HOSTILE_RESOLVER).map(std::path::PathBuf::from)
+}
+
+/// Run this binary's test `name` under the hostile resolver configuration
+/// in `dir` (`resolv.conf`, `nsswitch.conf`, `hosts`), in namespaces of its
+/// own. `None`, said on stderr, where unprivileged user, mount and network
+/// namespaces are not available: NOT EXERCISED, never a pass.
+///
+/// # Panics
+///
+/// The test binary cannot be started.
+pub(crate) fn under_hostile_resolver(name: &str, dir: &Path) -> Option<Output> {
+    let _fork = crate::process::fork_guard();
+    let available = Command::new("unshare")
+        .args(RESOLVER_NAMESPACES)
+        .arg("true")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success());
+    if !available {
+        eprintln!(
+            "NOT EXERCISED: unprivileged user, mount and network namespaces are not \
+             available here (`unshare --user --mount --net` failed), so no resolver \
+             configuration of the test's own can be made"
+        );
+        return None;
+    }
+    let output = Command::new("unshare")
+        .args(RESOLVER_NAMESPACES)
+        .arg(std::env::current_exe().expect("this test binary"))
+        .args(["--exact", name, "--nocapture", "--test-threads=1"])
+        .env(HOSTILE_RESOLVER, dir)
+        .stdin(Stdio::null())
+        .output()
+        .expect("the copy starts");
+    Some(output)
+}
+
+/// Inside that copy: its loopback up, and the three files bind-mounted over
+/// the host's -- in its own namespaces, so nothing outside them changes. No
+/// shell: `ip` and `mount`, each run directly.
+///
+/// # Errors
+///
+/// The command that could not run or failed, and what it said.
+pub(crate) fn install_hostile_resolver(dir: &Path) -> Result<(), String> {
+    let _fork = crate::process::fork_guard();
+    let run = |program: &str, args: &[&OsStr]| -> Result<(), String> {
+        let output = Command::new(program)
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .output()
+            .map_err(|e| format!("{program}: {e}"))?;
+        if output.status.success() {
+            Ok(())
+        } else {
+            Err(format!(
+                "{program} {args:?}: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ))
+        }
+    };
+    run("ip", &["link", "set", "lo", "up"].map(OsStr::new))?;
+    for file in ["resolv.conf", "nsswitch.conf", "hosts"] {
+        let from = dir.join(file);
+        let onto = Path::new("/etc").join(file);
+        run(
+            "mount",
+            &[OsStr::new("--bind"), from.as_os_str(), onto.as_os_str()],
+        )?;
+    }
+    Ok(())
 }
 
 /// A real unprivileged user namespace's uid and gid maps as the process in it

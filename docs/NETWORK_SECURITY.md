@@ -62,7 +62,7 @@ The sandbox gets a minimal private network namespace: a veth pair, no default ro
 
 **What a tunnel brings taints its run, and its root (F-01, [ADR-0062](adr/0062-taint-follows-delivered-content.md), Proposed).** The first origin byte a workload's tunnel receives makes the run `EXTERNAL_UNTRUSTED` when the workload's outcome is recorded, whatever it printed; and whatever any run later receives from that workspace root -- the file the workload left included -- is `EXTERNAL_UNTRUSTED` too. The criterion is the first origin byte, TLS handshake bytes included: the tunnel is opaque. A refused CONNECT, a failed dial and bytes sent upstream are egress, not content, and raise nothing.
 
-**No shipped pack reaches a destination the operator did not name (F-06, [ADR-0071](adr/0071-f06-an-operator-egress-allowlist-every-shipped-network-rule-requires.md), Proposed; built, hosted evidence pending).** BALANCED's registry rule and POWER's HTTPS rule also require `destination_allowlisted`, which the authority computes from the operator's `--egress-allowlist` file -- an exact host, a port and the path (`net_http` or `workload`) per entry, nothing else -- for every `net.http` hop and every destination of a workload's launch. Without the file neither rule matches, and the pack's default denies. It only narrows: the run's grant, the taint and novelty rules, the address guard and every budget still decide, and a redirect's hop needs its own entry. Every registry also takes uploads, so an entry is the operator's choice of an exfiltration route, bounded by the budgets ([F06_EGRESS_ALLOWLIST.md](F06_EGRESS_ALLOWLIST.md)).
+**No shipped pack reaches a destination the operator did not name (F-06, [ADR-0071](adr/0071-f06-an-operator-egress-allowlist-every-shipped-network-rule-requires.md), Proposed; built, hosted-verified on CI #198, 2026-11-20).** BALANCED's registry rule and POWER's HTTPS rule also require `destination_allowlisted`, which the authority computes from the operator's `--egress-allowlist` file -- an exact host, a port and the path (`net_http` or `workload`) per entry, nothing else -- for every `net.http` hop and every destination of a workload's launch. Without the file neither rule matches, and the pack's default denies. It only narrows: the run's grant, the taint and novelty rules, the address guard and every budget still decide, and a redirect's hop needs its own entry. Every registry also takes uploads, so an entry is the operator's choice of an exfiltration route, bounded by the budgets ([F06_EGRESS_ALLOWLIST.md](F06_EGRESS_ALLOWLIST.md)). **Since OF-2 the allowlist is a ceiling every policy is under** ([ADR-0073](adr/0073-f06-of2-the-operators-egress-allowlist-is-a-ceiling-every-policy-is-under.md), Proposed; built 2026-11-20, hosted evidence pending): after any policy's rules -- a shipped pack's or an operator's own -- the evaluator denies every network action whose exact host, port and path the file does not name, as the reserved `operator-egress-ceiling`; the input is computed by the authority for every decision (each hop, each workload destination, each preview), and a rule that denies keeps its name.
 
 This also resolves a product problem: `npm install`, `pip install` and `cargo fetch` work against allowlisted registry hosts, which the earlier "all allowlisted executables get `network_deny`" rule made impossible.
 
@@ -87,6 +87,17 @@ The runtime process likewise has no sockets (enforced by banned-import lint *and
 13. Response             size cap, MIME classification, artifact spill, redaction
 14. Audit
 ```
+
+**Step 3, as built (F-16, [ADR-0074](adr/0074-f16-the-broker-resolves-the-decided-name-and-no-other.md), Proposed; built
+2026-11-20, hosted evidence pending).** The broker resolves through the host's
+own resolver (glibc's `getaddrinfo`), once per hop or tunnel, under a deadline,
+and caches nothing: no answer outlives the hop or tunnel that asked. It asks
+for the absolute name -- the decided name and a trailing dot -- so no search
+domain (`search` or `domain` in `resolv.conf`, `LOCALDOMAIN`) is appended and
+glibc's `/etc/hosts` lookup does not answer for it, and it refuses an answer of
+more than 64 addresses whole. DireWolf validates no DNSSEC signature. Where
+the host's resolver is a local stub (systemd-resolved), the stub's own
+`/etc/hosts` records and its upstream are the host's configuration.
 
 **For sandbox egress (M5b, as built — [ADR-0048](adr/0048-m5b-proxy-only-topology-and-connect-proxy.md) §§4–7)** the pipeline is the proxy's: a strict CONNECT parse, the run's own exact `network.https` grants (a wildcard grants no tunnel, and neither does a grant that carries a constraint: the tunnel is opaque, so `methods` and `max_requests` could not be kept — [ADR-0060](adr/0060-a-constrained-network-grant-gives-no-proxy-only-destination.md), Proposed), metadata names refused, the tunnel limit, one resolution by the host's resolver under a deadline, the whole answer guarded, `200`, a strict `ClientHello` whose one server name is the CONNECT host (ECH refused; TLS only), the pinned address dialled, and environment-wide byte budgets at the socket. Credential injection, redirects and response handling are `net.http`'s (M5c).
 

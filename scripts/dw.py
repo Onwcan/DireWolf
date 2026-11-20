@@ -9707,10 +9707,15 @@ def task_sandbox_identity_mutations() -> None:
 # F-06 (ADR-0071, Proposed): each guard of the operator's egress allowlist
 # weakened in turn -- an empty list, a suffix, any port, any path, an unknown
 # member, a single label, a number each read as allowed; the predicate
-# ignored; BALANCED's and POWER's network rules not requiring it; a hop, and a
-# workload's tunnel, judged against the wrong entries; a relative file path
-# taken. The detectors are the allowlist's own tests, the pack fixtures, the
-# in-process net.http and workload launches, and the real binary's start;
+# ignored; BALANCED's and POWER's network rules not requiring it; every
+# network action placed inside whatever the file says, and a workload's
+# tunnel judged against the wrong entries; a relative file path taken. Since
+# OF-2 (ADR-0073, Proposed) the ceiling's own guards too: it narrows nothing,
+# an action without the input counts as inside, an approval is not narrowed,
+# a caller's claim stands, the reserved id is a file's, the ceiling's reason
+# is authorable. The detectors are the allowlist's own tests, the pack
+# fixtures, the in-process net.http and workload launches, the in-process
+# query path, and the real binary's start;
 # every mutant must be KILLED by a named failing test, and the file restored
 # byte-identically. A leading `*` is refused twice (before and after the
 # capability grammar): weakening either alone is an equivalent mutant, so
@@ -9780,16 +9785,17 @@ EGRESS_ALLOWLIST_MUTATIONS = (
         'obligations = ["max_output_bytes=33554432"]\n',
     ),
     (
-        "G11: a net.http hop is allowlisted whatever the file says",
-        "crates/dwkd-authority/src/state/net_http/plan.rs",
-        "        .with_destination_allowlisted(active.egress.covers(\n",
-        "        .with_destination_allowlisted(true || active.egress.covers(\n",
+        "G11: every network action is inside whatever the file says",
+        "crates/dwkd-authority/src/state/query.rs",
+        "                .admits(action.capability(), action.environment()),\n",
+        "                .admits(action.capability(), action.environment())\n"
+        "                || true,\n",
     ),
     (
         "G12: a workload's tunnel is judged by the net.http entries",
-        "crates/dwkd-authority/src/state/workload_egress.rs",
-        "        crate::state::egress_allowlist::EgressScope::Workload,\n",
-        "        crate::state::egress_allowlist::EgressScope::NetHttp,\n",
+        _F06_EGRESS,
+        "            Environment::Sandbox => EgressScope::Workload,\n",
+        "            Environment::Sandbox => EgressScope::NetHttp,\n",
     ),
     (
         "G13: a relative --egress-allowlist path is taken",
@@ -9798,6 +9804,48 @@ EGRESS_ALLOWLIST_MUTATIONS = (
         "        if let Some(path) = &self.egress_allowlist\n"
         "            && path.as_os_str().is_empty()\n",
     ),
+    # OF-2 (ADR-0073, Proposed): the ceiling every policy is under.
+    (
+        "G14: the egress ceiling narrows nothing",
+        "crates/dwkd-authority/src/policy/eval.rs",
+        "    decision.beyond_egress_ceiling()\n",
+        "    decision\n",
+    ),
+    (
+        "G15: an action without the allowlist input counts as inside the ceiling",
+        "crates/dwkd-authority/src/policy/eval.rs",
+        "        || action.destination_allowlisted() == Some(true)\n",
+        "        || action.destination_allowlisted() != Some(false)\n",
+    ),
+    (
+        "G16: an approval outside the ceiling is left to a human",
+        "crates/dwkd-authority/src/policy/eval.rs",
+        "        || decision.effect() == Effect::Deny\n",
+        "        || decision.effect() != Effect::Allow\n",
+    ),
+    (
+        "G17: a caller's claim that its destination is allowlisted stands",
+        "crates/dwkd-authority/src/state/query.rs",
+        "    let action = if action.capability().verb().namespace() == "
+        "capability::Namespace::Network {\n",
+        "    let action = if action.capability().verb().namespace() == "
+        "capability::Namespace::Network\n"
+        "        && action.destination_allowlisted().is_none()\n"
+        "    {\n",
+    ),
+    (
+        "G18: a policy file may declare the ceiling's reserved id",
+        "crates/dwkd-authority/src/policy/load.rs",
+        "            .filter(|id| !id.is_egress_ceiling())\n",
+        "            .filter(|_| true)\n",
+    ),
+    (
+        "G19: a policy file may claim the ceiling's reason",
+        "crates/dwkd-authority/src/policy/reason.rs",
+        "            Self::PermittedByRule | Self::UnresolvedCanonicalInput"
+        " | Self::OutsideEgressAllowlist\n",
+        "            Self::PermittedByRule | Self::UnresolvedCanonicalInput\n",
+    ),
 )
 EGRESS_ALLOWLIST_EVIDENCE_DIR = ROOT / "target" / "f06-evidence"
 EGRESS_ALLOWLIST_RECORD_SCHEMA = "direwolf.f06.mutation-review"
@@ -9805,8 +9853,9 @@ EGRESS_ALLOWLIST_RECORD_SCHEMA = "direwolf.f06.mutation-review"
 
 def _egress_allowlist_stages() -> tuple[MutationStage, ...]:
     """The review's detectors: the authority's unit tests (the allowlist, the
-    pack fixtures, the in-process net.http and workload launches), then the
-    real binary's start."""
+    pack fixtures and the ceiling, the reasons, the in-process net.http and
+    workload launches), the in-process query path (OF-2: what a caller
+    claims is replaced), then the real binary's start."""
     return (
         MutationStage(
             "authority-units",
@@ -9820,8 +9869,24 @@ def _egress_allowlist_stages() -> tuple[MutationStage, ...]:
                 "--",
                 "state::egress_allowlist",
                 "policy::fixtures",
+                "policy::reason",
                 "state::net_http::tests::f06",
+                "state::net_http::tests::of2",
                 "state::workload_route::tests::f06",
+            ),
+        ),
+        MutationStage(
+            "query",
+            (
+                "cargo",
+                "test",
+                "--locked",
+                "-p",
+                "dwkd-authority",
+                "--test",
+                "state_query",
+                "--",
+                "a_proposal_cannot_say_its_own_destination_is_allowlisted",
             ),
         ),
         MutationStage(
@@ -9860,8 +9925,9 @@ def egress_allowlist_review(
 
 
 def task_egress_allowlist_mutations() -> None:
-    """Weaken each guard of the operator's egress allowlist in turn (F-06,
-    ADR-0071, Proposed); the authority's tests must catch every one.
+    """Weaken each guard of the operator's egress allowlist and of its ceiling
+    in turn (F-06, ADR-0071 and ADR-0073, Proposed); the authority's tests
+    must catch every one.
 
     The unmutated baseline must pass first; every file is restored
     byte-identically whatever happens, and checked; the record is kept in
@@ -9871,6 +9937,93 @@ def task_egress_allowlist_mutations() -> None:
     if not sys.platform.startswith("linux"):
         raise TaskError("NOT EXERCISED: the serve stage needs Linux; run it in WSL2")
     egress_allowlist_review()
+
+
+# F-16 (ADR-0074, Proposed): each guard of the broker's resolver weakened in
+# turn -- the decided name asked relative (a search domain or the hosts file
+# may then answer for it), an answer past the bound kept, a silent resolver
+# waited for. The detector is the broker's hostile-resolver test, run in
+# user, mount and network namespaces of its own; every mutant must be KILLED
+# by a named failing test, and the file restored byte-identically.
+_F16_RESOLVE = "crates/dwkd-broker/src/egress/resolve.rs"
+RESOLVER_MUTATIONS = (
+    (
+        "R1: the decided name is asked relative",
+        _F16_RESOLVE,
+        '        let absolute = format!("{name}.");\n',
+        "        let absolute = name.to_owned();\n",
+    ),
+    (
+        "R2: an answer past the bound is kept",
+        _F16_RESOLVE,
+        "                if answer.len() == MAX_ANSWER_ADDRESSES {\n",
+        "                if answer.len() == usize::MAX {\n",
+    ),
+    (
+        "R3: a silent resolver is waited for",
+        _F16_RESOLVE,
+        "    match receive.recv_timeout(deadline) {\n",
+        "    match receive.recv_timeout(deadline.saturating_mul(100)) {\n",
+    ),
+)
+RESOLVER_EVIDENCE_DIR = ROOT / "target" / "f16-evidence"
+RESOLVER_RECORD_SCHEMA = "direwolf.f16.mutation-review"
+
+
+def _resolver_stages() -> tuple[MutationStage, ...]:
+    """The review's detector: the broker's resolver tests, the hostile
+    configuration's among them."""
+    return (
+        MutationStage(
+            "broker-resolver",
+            (
+                "cargo",
+                "test",
+                "--locked",
+                "-p",
+                "dwkd-broker",
+                "--bin",
+                "dwkd-broker",
+                "--",
+                "egress::tests::f16",
+                "egress::resolve",
+            ),
+        ),
+    )
+
+
+def resolver_review(
+    mutations: Sequence[tuple[str, str, str, str]] = RESOLVER_MUTATIONS,
+    *,
+    root: Path | None = None,
+    tests: Callable[..., SuiteRun] = run_tests,
+) -> dict[str, object]:
+    """F-16's mutation review, as F-05's and F-06's: see `_finding_review`."""
+    return _finding_review(
+        ("F-16", "0074", "resolver-mutations", RESOLVER_RECORD_SCHEMA),
+        "resolver",
+        mutations,
+        stages=_resolver_stages(),
+        build=("cargo", "build", "--locked", "-p", "dwkd-broker"),
+        directory=RESOLVER_EVIDENCE_DIR if root is None else root,
+        tests=tests,
+    )
+
+
+def task_resolver_mutations() -> None:
+    """Weaken each guard of the broker's resolver in turn (F-16, ADR-0074,
+    Proposed); the broker's hostile-resolver test must catch every one.
+
+    The unmutated baseline must pass first; every file is restored
+    byte-identically whatever happens, and checked; the record is kept in
+    target/f16-evidence/. Linux, local (unprivileged user, mount and network
+    namespaces), and never run beside another build.
+    """
+    if not sys.platform.startswith("linux"):
+        raise TaskError(
+            "NOT EXERCISED: the hostile resolver needs Linux namespaces; run it in WSL2"
+        )
+    resolver_review()
 
 
 # M5d.3 (ADR-0052 §7): a sandboxed `process.exec` that consumes a credential.
@@ -13914,6 +14067,14 @@ NET_HTTP_CASES = (
     ("net-http", "egress-allowlist-other-path-denies"),
     ("net-http", "egress-allowlist-other-port-denies"),
     ("net-http", "egress-allowlist-private-address-still-blocked"),
+    # F-06 OF-2 (ADR-0073, Proposed): an operator policy under the ceiling.
+    ("net-http", "of2-operator-policy-absent-denies"),
+    ("net-http", "of2-operator-policy-cross-origin-hop-denied"),
+    ("net-http", "of2-operator-policy-deny-rule-kept"),
+    ("net-http", "of2-operator-policy-exact-allows"),
+    ("net-http", "of2-operator-policy-neighbour-denies"),
+    ("net-http", "of2-operator-policy-other-path-denies"),
+    ("net-http", "of2-operator-policy-other-port-denies"),
     ("net-http", "budget-requests"),
     ("net-http", "crash-after-exchange"),
     ("net-http", "crash-after-intent"),
@@ -16469,6 +16630,7 @@ TASKS = {
     "proxy-peer-mutations": task_proxy_peer_mutations,
     "sandbox-identity-mutations": task_sandbox_identity_mutations,
     "egress-allowlist-mutations": task_egress_allowlist_mutations,
+    "resolver-mutations": task_resolver_mutations,
     "sandbox-neighbour-mutations": task_sandbox_neighbour_mutations,
     "sandbox-secret-evidence": task_sandbox_secret_evidence,
     "sandbox-secret-mutations": task_sandbox_secret_mutations,

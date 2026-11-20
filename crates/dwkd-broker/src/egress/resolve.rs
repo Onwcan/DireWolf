@@ -10,6 +10,14 @@
 //! per broker, abandoned ones included, so a resolver that never answers
 //! cannot accumulate threads.
 //!
+//! **The decided name and no other** (F-16, ADR-0074, Proposed). It asks
+//! for the name as an absolute one -- a trailing dot -- so the host's
+//! resolver never appends a search domain (`search` or `domain` in
+//! `resolv.conf`, `LOCALDOMAIN`) and answers for another name, and glibc's
+//! `/etc/hosts` lookup, which compares names as written, answers nothing.
+//! An answer of more than [`MAX_ANSWER_ADDRESSES`] addresses is refused
+//! whole, never cut to what the guard happened to see.
+//!
 //! [`FixtureResolver`] is **evidence only** — selected only by the broker's
 //! `--allow-evidence-egress <file>`, which logs that it is evidence-only.
 //! It answers from a file instead of DNS, so the evidence controls what a
@@ -30,6 +38,10 @@ use dwk_proto::wire::host;
 
 /// The most resolutions in flight at once, abandoned ones included.
 pub(crate) const RESOLVER_MAX_IN_FLIGHT: usize = 32;
+
+/// The most distinct addresses one answer may hold (F-16, ADR-0074): a
+/// longer answer is refused whole.
+pub(crate) const MAX_ANSWER_ADDRESSES: usize = 64;
 
 /// What a name resolves to.
 pub(crate) trait Resolver: Send + Sync + fmt::Debug {
@@ -100,16 +112,22 @@ impl Resolver for SystemResolver {
         if !host::is_host(name) || host::is_address_literal(name) {
             return Err(EgressDisposition::ResolutionFailed);
         }
-        let name = name.to_owned();
+        // F-16: absolute, so no search domain and no hosts-file entry answers
+        // for the name the authority decided.
+        let absolute = format!("{name}.");
         within(deadline, move || {
-            let addresses = (name.as_str(), 0u16)
+            let addresses = (absolute.as_str(), 0u16)
                 .to_socket_addrs()
                 .map_err(|_| EgressDisposition::ResolutionFailed)?;
             let mut answer: Vec<IpAddr> = Vec::new();
             for address in addresses {
-                if !answer.contains(&address.ip()) {
-                    answer.push(address.ip());
+                if answer.contains(&address.ip()) {
+                    continue;
                 }
+                if answer.len() == MAX_ANSWER_ADDRESSES {
+                    return Err(EgressDisposition::ResolutionFailed);
+                }
+                answer.push(address.ip());
             }
             Ok(answer)
         })

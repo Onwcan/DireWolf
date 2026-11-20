@@ -22,6 +22,7 @@ DW := $(PY) scripts/dw.py
         sandbox-taint-mutations authority-ownership-mutations authority-concurrency-mutations posture-mutations \
         policy-anchor-mutations approver-identity-mutations proxy-peer-evidence \
         proxy-peer-mutations sandbox-identity-mutations egress-allowlist-mutations \
+        resolver-mutations \
         sandbox-workload-evidence \
         net-http-evidence net-http-mutations sandbox-workload-mutations sandbox-secret-evidence \
         sandbox-secret-mutations sandbox-workspace-evidence sandbox-workspace-mutations \
@@ -146,6 +147,9 @@ sandbox-identity-mutations: ## F-05 mutation review (ADR-0069, Proposed): each g
 
 egress-allowlist-mutations: ## F-06 mutation review (ADR-0071, Proposed): each guard of the operator's egress allowlist -- an empty list, a suffix, any port, any path, an unknown member, a single label or a number never allowed; the predicate never ignored; BALANCED and POWER never without it; each path judged by its own entries; a relative file never taken -- weakened in turn must fail the authority's tests (Linux)
 	@$(DW) egress-allowlist-mutations
+
+resolver-mutations: ## F-16 mutation review (ADR-0074, Proposed): each guard of the broker's resolver -- the decided name asked absolute, an answer past the bound refused, a silent resolver abandoned at the deadline -- weakened in turn must fail the broker's hostile-resolver test (Linux namespaces)
+	@$(DW) resolver-mutations
 
 sandbox-workload-evidence: ## M5d.1-M5d.2 workloads in real OCI environments: identity, bounds, wall clock, process trees ended, digests, drift, escapes, an agent-shaped workload, the authority's gates, ledger and crash windows; the public process.exec over real DWKP, serve --sandbox-config, the hygiene launcher with real git/Python/pytest; M5e.2 cross-run isolation
 	@$(DW) sandbox-workload-evidence
