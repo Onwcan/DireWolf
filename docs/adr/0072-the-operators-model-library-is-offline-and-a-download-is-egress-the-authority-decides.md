@@ -1,6 +1,6 @@
 # ADR-0072: The operator's model library is an offline command-line tool; a model download is egress the authority must decide, and waits for a download operation the broker does not have
 
-**Status:** Proposed · **Date:** 2026-11-18 (the offline library designed, built and tested locally 2026-11-18; nothing here is accepted) · **Proposes a change to:** [ROADMAP.md](../ROADMAP.md) M7, whose providers (Hugging Face, Ollama, llama.cpp, LM Studio) explicitly exclude downloading models and launching their servers · **Builds on:** [ADR-0071](0071-f06-an-operator-egress-allowlist-every-shipped-network-rule-requires.md) (the operator's egress allowlist), [ADR-0050](0050-m5c-kernel-performed-net-http-ssrf-redirects-and-credential-egress.md) (the broker's one HTTPS client), [ADR-0020](0020-provider-request-path-v2.md) (model calls) · **Leaves unchanged:** DWKP, the private broker protocol, the authority, the broker, every policy pack and TX044
+**Status:** Proposed · **Date:** 2026-11-18 (the offline library designed, built and tested locally 2026-11-18; its tests passed on Linux, Windows and macOS on CI #198 (run 44706359028, `3584f3e`, 2026-11-20); OM-1 to OM-4 decided 2026-11-20; the ADR is not accepted) · **Proposes a change to:** [ROADMAP.md](../ROADMAP.md) M7, whose providers (Hugging Face, Ollama, llama.cpp, LM Studio) explicitly exclude downloading models and launching their servers · **Builds on:** [ADR-0071](0071-f06-an-operator-egress-allowlist-every-shipped-network-rule-requires.md) (the operator's egress allowlist), [ADR-0050](0050-m5c-kernel-performed-net-http-ssrf-redirects-and-credential-egress.md) (the broker's one HTTPS client), [ADR-0020](0020-provider-request-path-v2.md) (model calls) · **Leaves unchanged:** DWKP, the private broker protocol, the authority, the broker, every policy pack and TX044
 
 > **Managing model artifacts and running inference are different security
 > operations, and stay apart.** What is built is an **offline library** an
@@ -191,6 +191,24 @@ route.
 - **OM-4** whether a GPU probe (vendor tool or driver interface) is ever
   acceptable for recommendations.
 
+**Decided 2026-11-20.** The status stays **Proposed**.
+
+- **OM-1 -- approved as implemented.** The offline library is the scope
+  built: content-addressed objects, format validation, checksums verified
+  again, safe import and removal, conservative recommendations.
+- **OM-2 -- approved as a roadmap decision.** Downloads are their own
+  reviewed milestone after M7's provider route, and the authority decides a
+  download apart from inference and from any agent's network capability.
+  Not built.
+- **OM-3 -- accepted as a security constraint.** An external Ollama
+  daemon's own egress is not DireWolf's: it is never described as covered
+  by DireWolf's egress enforcement unless the daemon is confined and its
+  traffic mediated.
+- **OM-4 -- approved with restrictions.** Read-only hardware inspection
+  only: no vendor GPU tool run, no driver installed, no downloaded binary
+  run, no privileged host access. What is built (`/proc/meminfo` and a
+  size the operator states) is within it.
+
 ## Evidence
 
 - `crates/direwolf-cli/src/models/tests.rs`: hand-built GGUF and safetensors
@@ -202,6 +220,9 @@ route.
   without any online command.
 - `tests/architecture/test_models_offline.py`: no HTTP or TLS crate in the
   CLI, no network call in its source, and no online command.
+- CI #198 (run 44706359028, `3584f3e`, 2026-11-20): `make test` passed on ubuntu-latest
+  and macos-latest (16 library tests each) and windows-latest (14: the
+  two that need Unix permissions and symlinks are Unix-only).
 
 ## Rollback and deployment
 

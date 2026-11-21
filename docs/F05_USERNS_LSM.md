@@ -84,7 +84,7 @@ fact came from (`both` vantages, `inside`, `record`, the `host` kernel, the
 | environment | userns | AppArmor | SELinux | Landlock | contracts | evidence |
 |---|---|---|---|---|---|---|
 | Docker Desktop, WSL2 (local) | `UNSUPPORTED:inside:shared` | `UNSUPPORTED:host` | `UNSUPPORTED:host` | `NOT_APPLICABLE` | all hold | **observed**, `make sandbox-foundation-evidence` |
-| Docker Engine, Ubuntu runner | `UNSUPPORTED:inside:shared` | `ENFORCED:both:docker-default` (expected) | `UNSUPPORTED:host` | `NOT_APPLICABLE` | all hold | **pending**: hosted `sandbox-foundation` job |
+| Docker Engine, Ubuntu runner | `UNSUPPORTED:both:shared` (`inside` before ADR-0070) | `ENFORCED:both:docker-default` | `UNSUPPORTED:host` | `NOT_APPLICABLE` | all hold | **observed**: hosted `sandbox-foundation` job, CI #198 (2026-11-20) |
 | Docker with `userns-remap` | `UNVERIFIED:inside:remapped` (tabled) | as the host | as the host | `NOT_APPLICABLE` | the workspace, the relay's ACL and F-04's peer check refuse (§7) | not exercised |
 | rootless Docker or Podman | `UNVERIFIED:inside:remapped` (tabled) | as the host | as the host | `NOT_APPLICABLE` | refused as above | not exercised; not a supported runtime |
 | an SELinux host (`container_t`) | `UNSUPPORTED:inside:shared` | `UNSUPPORTED:host` | `ENFORCED:both:container_t` enforcing, `REDUCED` permissive (tabled) | `NOT_APPLICABLE` | all hold | not exercised |
@@ -132,7 +132,7 @@ ADR (ADR-0069 OD-1), never an exception in one of them.
 | 22 | a profile name with spaces and separators, 130 characters | one field, sanitised, 64 characters | `the_event_line_names_every_property_and_carries_nothing_unbounded` | implemented |
 | 23 | the judgement used to admit or refuse | impossible: no invariant, one event call | `test_f05_identity.py` | implemented |
 | 24 | a new protocol-12 invariant | none: 52, unchanged | `test_f05_identity.py` | implemented |
-| 25 | a real AppArmor-enforcing environment | `ENFORCED:both:docker-default` | `sandbox_foundation.rs`, hosted | **pending** |
+| 25 | a real AppArmor-enforcing environment | `ENFORCED:both:docker-default` | `sandbox_foundation.rs`, hosted | **observed**, CI #198 |
 | 26 | a real `userns-remap` daemon, rootless runtime, SELinux host | as tabled | -- | not exercised: changing the host's daemon or kernel settings is outside this change |
 
 ## 9. Mutations
@@ -153,6 +153,11 @@ module (TX016).
 
 ## 10. Evidence
 
+- Hosted, CI #198 (run 44706359028, `3584f3e`, 2026-11-20), the
+  `sandbox-foundation` job on an Ubuntu runner: `real-environment-apparmor-enforced`,
+  `real-environment-userns-seen-both`, `real-environment-landlock-not-applicable`;
+  the event `userns=UNSUPPORTED:both:shared apparmor=ENFORCED:both:docker-default
+  selinux=UNSUPPORTED:host:kernel-has-none landlock=NOT_APPLICABLE:build:no-ruleset`.
 - `make sandbox-foundation-evidence` (real OCI runtime, Docker Desktop on
   WSL2, 2026-11-17): passed, 109 cases at `real-oci`, with
   `real-environment-userns-shared`, `real-environment-apparmor-unsupported`
@@ -194,14 +199,52 @@ control or changing protocol 12:
   the flag nothing changes; no flag turns it off.
 - **OD-3, deferred.** The judgement and the requirement's reason reach the
   authority only with protocol 13, its own change.
+- **Decided 2026-11-20:** OD-A (the host vantage) and OD-B (the opt-in
+  requirement) approved as implemented; OD-C deferred to a separate
+  security-architecture phase, OD-D to M6 (ADR-0070). Per-environment
+  remapping is not built.
 - **OD-4, deferred.** No process DireWolf confines opens a file by path (the
   exchange worker's filter allows none; an architecture test holds it), so a
   Landlock ruleset would add nothing until host execution exists (M6).
 
 | case | level | local (Docker Desktop) | hosted |
 |---|---|---|---|
-| the control-group table; a real namespace read from both sides | unit, kernel | passed | expected to pass |
-| a broker requiring AppArmor, and one requiring SELinux, on a host running neither | real process | refused to start (both) | SELinux refused |
-| a conforming environment met; one started `apparmor=unconfined` refused | real OCI | NOT EXERCISED (no AppArmor) | pending |
-| the userns vantage | real OCI | `inside` | `both`, pending |
+| the control-group table; a real namespace read from both sides | unit, kernel | passed | passed (CI #198) |
+| a broker requiring AppArmor, and one requiring SELinux, on a host running neither | real process | refused to start (both) | SELinux refused (`required-selinux-absent-not-served`, CI #198) |
+| a conforming environment met; one started `apparmor=unconfined` refused | real OCI | NOT EXERCISED (no AppArmor) | met and refused (`required-apparmor-enforced-met`, `required-apparmor-unconfined-refused`, CI #198) |
+| the userns vantage | real OCI | `inside` | `both` (CI #198) |
 | `make sandbox-identity-mutations` | mutation | 20 of 20 killed | -- |
+
+## 13. 2026-11-20: per-environment remapping re-examined -- blocked, F-05 partially completed
+
+The remaining property -- each environment its own host identity, enforced
+by the kernel -- was examined again against the supported runtime. Docker
+Engine 29.9.3 (the local runtime; the hosted runners' is the same family)
+offers no per-container user namespace: `docker run --userns` takes `host`
+and nothing else, and the daemon reports no `userns` security option. No
+Podman, `runc` or `crun` is a supported runtime here. Every path to the
+property needs one of: a runtime with per-container user namespaces (ADR-0070
+option B), a system-wide daemon change (option A -- prohibited, and one range
+for every container still), or subordinate id ranges provisioned on the host
+(`/etc/subuid`, `/etc/subgid` -- an owner action, not done here). With none
+available, nothing was forced: the identity map stays the contract, reported
+truthfully from both vantages, and **F-05 is PARTIALLY COMPLETED**.
+
+| property | state |
+|---|---|
+| truthful user-namespace judgement, inside and from the host | built; hosted-verified (CI #198) |
+| required AppArmor or SELinux, opt-in | built; hosted-verified (CI #198) |
+| per-environment uid/gid remapping | **not built**: no supported runtime offers it |
+| idmapped workspace mounts | not built: needs the above |
+| Landlock for host execution | deferred to M6 (ADR-0070 OD-D) |
+| the judgement in the authority's audit (protocol 13) | deferred to its own phase (OD-C) |
+
+**The missing primitive:** a per-container user namespace with a mapping
+the broker chooses, from a supported runtime. **The smallest next step:** an
+ADR choosing that runtime (Podman with `--userns=auto` over a delegated
+subordinate range, or an OCI runtime the broker drives directly) and the
+broker's per-environment id-range allocator -- the migration ADR-0070 §OD-1
+describes -- together with the host provisioning it needs, stated as owner
+actions. Until then the shared-identity contracts (workload 10001, relay
+10002, the 2770 workspace group, the relay directory's ACL, F-04's peer
+uid, ADR-0056's task arithmetic) stay as they are, and stay measured.

@@ -1,6 +1,6 @@
 # ADR-0069: An environment's user namespace and security-module confinement are measured from inside and reported, never assumed -- the identity map stays the contract, and only an enforcing profile both vantages name counts
 
-**Status:** Proposed · **Date:** 2026-11-17 (designed, built and reviewed locally 2026-11-17 for finding F-05; its hosted AppArmor evidence is pending and nothing here is accepted) · **Would amend (on acceptance):** [ADR-0047](0047-m5a-oci-execution-environment-and-measured-assurance.md) §5 (AppArmor/SELinux labels stay "not a required invariant", and are now measured and reported) and the reading of its `HOST_USERNS_NOT_HOST` (§6: the runtime was not told to use the host's mode -- **not** a user namespace of the container's own) · **Refines:** [ADR-0052](0052-m5d-sandboxed-process-exec.md)'s residual "No user-namespace remapping" and [ADR-0056](0056-m5e-cross-run-task-limit-isolation.md) §5's "every environment is the same host uid": both now measured in each environment, not only stated · **Leaves open:** user-namespace remapping (OD-1), a required security module (OD-2), carrying the judgement to the authority (protocol 13, OD-3)
+**Status:** Proposed · **Date:** 2026-11-17 (designed, built and reviewed locally 2026-11-17 for finding F-05; its hosted AppArmor evidence observed on CI #198 (run 44706359028, `3584f3e`, 2026-11-20); nothing here is accepted) · **Would amend (on acceptance):** [ADR-0047](0047-m5a-oci-execution-environment-and-measured-assurance.md) §5 (AppArmor/SELinux labels stay "not a required invariant", and are now measured and reported) and the reading of its `HOST_USERNS_NOT_HOST` (§6: the runtime was not told to use the host's mode -- **not** a user namespace of the container's own) · **Refines:** [ADR-0052](0052-m5d-sandboxed-process-exec.md)'s residual "No user-namespace remapping" and [ADR-0056](0056-m5e-cross-run-task-limit-isolation.md) §5's "every environment is the same host uid": both now measured in each environment, not only stated · **Leaves open:** user-namespace remapping (OD-1), a required security module (OD-2), carrying the judgement to the authority (protocol 13, OD-3)
 
 > **What an environment's own kernel says about who runs in it and what
 > confines it is read by the digest-pinned probe and judged by the broker
@@ -220,6 +220,15 @@ protocol 12, the invariants, the store and every flag are unchanged.
 - OD-4 Landlock and host execution stay unbuilt; host execution's
   confinement keeps its own ADR with M6 (ADR-0052 §12).
 
+**Decided 2026-11-20** (recorded in full in
+[ADR-0070](0070-adr-0069-decisions-host-vantage-required-lsm-and-what-stays-deferred.md)):
+OD-1 keeps the identity map as the contract -- the host-side vantage is
+approved, per-environment remapping is not built; OD-2 is met by
+ADR-0070's operator opt-in, approved as implemented; OD-3 is deferred to
+a separate security-architecture phase (protocol 13 together with F-03's
+D6); OD-4 is deferred to M6's host execution. This ADR stays
+**Proposed**.
+
 ## Evidence
 
 - `crates/dwk-proto/src/brokerp/sandbox.rs`: the report's version rule, the
@@ -235,7 +244,9 @@ protocol 12, the invariants, the store and every flag are unchanged.
   unsupported where `selinuxfs` is absent, and the AppArmor state this host's
   kernel and the container's record call for -- `UNSUPPORTED:host` on Docker
   Desktop (observed locally), `ENFORCED:both:docker-default` on an Ubuntu
-  runner (the hosted `sandbox-foundation` job; pending).
+  runner (the hosted `sandbox-foundation` job: observed on CI #198 (run 44706359028, `3584f3e`, 2026-11-20),
+  `apparmor=ENFORCED:both:docker-default`, with ADR-0070's host vantage
+  making the user namespace `UNSUPPORTED:both:shared`).
 - `make sandbox-identity-mutations`: the judgement's eleven guards weakened
   in turn, each killed by a named test. The probe report's two rules -- the
   version rule and the identity map -- were weakened the same way once while

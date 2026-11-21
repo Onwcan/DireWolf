@@ -866,6 +866,25 @@ ADR — [ADR-0052](adr/0052-m5d-sandboxed-process-exec.md) OD-7, accepted).
 **Adversarial:** full escape suite; full SSRF suite; resource exhaustion; cross-run persistence attempts; a configuration that looks hardened while the running environment differs; a tampered or substituted assurance probe; a fronted request through an allowlisted shared host, which must stay within its byte budget and connection count.
 **Deferred:** gVisor/Kata/Firecracker, SSH, remote workers.
 
+**Pre-M6 security remediation (a separate effort, not a milestone; status 2026-11-20).**
+Built and hosted-verified, among others: F-01, F-02, F-03, F-04, F-07, F-11, F-12, F-17,
+F-18, F-19; F-05's truthful identity judgement and opt-in required LSM
+(ADR-0069, ADR-0070: OD-A and OD-B approved as implemented); F-06's shipped
+packs under the operator's allowlist (ADR-0071, OF-1 approved as
+implemented). Built locally, hosted evidence pending: F-06 OF-2, the
+allowlist as a ceiling every policy is under
+([ADR-0073](adr/0073-f06-of2-the-operators-egress-allowlist-is-a-ceiling-every-policy-is-under.md));
+F-16, the broker resolving the decided name and no other
+([ADR-0074](adr/0074-f16-the-broker-resolves-the-decided-name-and-no-other.md));
+the TLS floor of two evidence clients (code scanning #10-#13). Partially
+completed: **F-05** -- per-environment user-namespace remapping is blocked on
+a runtime that offers per-container user namespaces
+([F05_USERNS_LSM.md](F05_USERNS_LSM.md) §13). Deferred: protocol 13 with
+F-03's D6 (ADR-0070 OD-C), Landlock with M6's host execution (OD-D), a
+`model_download` path and per-entry quotas (ADR-0071 OF-3), online model
+downloads after M7 (ADR-0072 OM-2). Every ADR named here stays Proposed
+until accepted.
+
 ### M6 · Approvals and budgets
 **Deps:** M3. **Deliverables:** binding hash; approval registry with scopes, expiry, single-use burn; standing grants with the 90-day cap and `require_untainted_run`; kernel-rendered approval prompts; hierarchical subtractive budget ledger; unattended degradation to DENY.
 **Acceptance:** every property test in [APPROVALS.md](APPROVALS.md) §10; burn is atomic under concurrency; prompts contain no model-authored text in the authoritative region.

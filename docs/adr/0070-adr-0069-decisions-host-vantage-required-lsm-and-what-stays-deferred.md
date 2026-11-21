@@ -1,6 +1,6 @@
 # ADR-0070: ADR-0069's four decisions -- the user namespace seen from the host too, a security module an operator can require, and what stays deferred with its exact prerequisite
 
-**Status:** Proposed · **Date:** 2026-11-17 (designed, built and reviewed locally 2026-11-17; hosted evidence pending, and nothing here is accepted) · **Builds on:** [ADR-0069](0069-f05-user-namespace-and-lsm-assurance-are-measured-not-assumed.md) (Proposed), its OD-1 to OD-4 · **Would amend (on acceptance):** ADR-0069 §2 (the user namespace from two vantages where the host shows it) and §4 (one admission effect: the operator's required module) · **Leaves unchanged:** DWKP, private broker protocol 12, its 52 invariants, the store, the probe report (version 4), and every existing flag
+**Status:** Proposed · **Date:** 2026-11-17 (designed, built and reviewed locally 2026-11-17; OD-A and OD-B approved as implemented, OD-C and OD-D deferred, 2026-11-20; hosted evidence observed on CI #198 (run 44706359028, `3584f3e`, 2026-11-20); the ADR as a whole is not accepted) · **Builds on:** [ADR-0069](0069-f05-user-namespace-and-lsm-assurance-are-measured-not-assumed.md) (Proposed), its OD-1 to OD-4 · **Would amend (on acceptance):** ADR-0069 §2 (the user namespace from two vantages where the host shows it) and §4 (one admission effect: the operator's required module) · **Leaves unchanged:** DWKP, private broker protocol 12, its 52 invariants, the store, the probe report (version 4), and every existing flag
 
 > **The container's user namespace is now read from the host's side too**,
 > where the broker shares the runtime's pid namespace and the container's
@@ -166,7 +166,8 @@ seccomp or the sandbox.
   owner between two reads).
 - Not exercised locally: the host vantage (Docker Desktop's processes are
   another kernel's) and the required module's environments (no AppArmor);
-  both are the hosted `sandbox-foundation` job's.
+  both are the hosted `sandbox-foundation` job's, and both were observed
+  there on CI #198 (run 44706359028, `3584f3e`, 2026-11-20).
 
 ## Alternatives considered
 
@@ -185,6 +186,28 @@ seccomp or the sandbox.
   phase;
 - **OD-D** keep Landlock with host execution under M6.
 
+**Decided 2026-11-20.** A decision approved here is not this ADR
+accepted: its status stays **Proposed** until it is accepted as a whole.
+
+- **OD-A -- approved as implemented.** The host-side `/proc` reading is
+  ADR-0069 §2's additional vantage, with the probe's own observation, the
+  control-group correlation of the process to the container, the
+  contradiction it can find, the honest classification and the
+  fail-closed reading of a map neither vantage can verify. It does not mean
+  that per-environment uid or gid remapping exists: it does not.
+- **OD-B -- approved as implemented.** `dwkd-broker serve --require-lsm
+  apparmor|selinux` stays an operator's explicit opt-in: verified against
+  the host's kernel, refused where the module is not enforced, refusing
+  every environment it does not confine, never quietly advisory. No module
+  becomes a requirement everywhere; without the flag nothing changes on
+  any platform.
+- **OD-C -- deferred** to a separate security-architecture phase:
+  protocol 13 and F-03's D6 change the private protocol together, as one
+  reviewed evolution. No part of it is in this change.
+- **OD-D -- deferred** to M6's host execution: Landlock is for host
+  execution, which stays apart from the OCI path and is not enabled without
+  M6's approvals.
+
 ## Evidence
 
 - `crates/dwkd-broker/src/sandbox/identity_tests.rs`: the control-group
@@ -197,7 +220,10 @@ seccomp or the sandbox.
   can see; a broker requiring a module the host does not run refuses to
   start (observed locally for both); where AppArmor runs, a conforming
   environment is prepared and met, and one started `apparmor=unconfined` is
-  refused (hosted, pending).
+  refused. Observed on CI #198 (run 44706359028, `3584f3e`, 2026-11-20):
+  `required-apparmor-enforced-met`, `required-apparmor-unconfined-refused`
+  and `required-selinux-absent-not-served`, the environment's event saying
+  `userns=UNSUPPORTED:both:shared apparmor=ENFORCED:both:docker-default`.
 - `make sandbox-identity-mutations`: 20 mutants, the nine of this ADR among
   them, each killed by a named test.
 - `tests/architecture/test_f05_identity.py`: the pins, and the exchange
