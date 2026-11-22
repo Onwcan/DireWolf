@@ -9,7 +9,7 @@ decision is
 
 | Part | Status |
 |---|---|
-| Home and DireWolf anchors, absolute protections (§§5-7) | implementation complete; hosted evidence pending |
+| Home and DireWolf anchors, absolute protections (§§5-7) | implementation complete; hosted evidence observed on CI #201 ([PRE_M6_REMEDIATION.md](PRE_M6_REMEDIATION.md)) |
 | `require_artifact_capture` (§8) | **ARTIFACT CAPTURE DEFERRED TO M8**: still unenforceable, and BALANCED's writes are still refused |
 
 ## 1. Source and scope
@@ -326,7 +326,9 @@ None of the following needed a DWKP change:
 
 ## 10. Evidence
 
-Local, WSL Ubuntu 26.04; hosted evidence pending.
+Local, WSL Ubuntu 26.04. Hosted, CI #201 (run 44818094052, `3998de2`): `broker-fs-read`'s
+shipped-pack cases and `make test` on three platforms
+([PRE_M6_REMEDIATION.md](PRE_M6_REMEDIATION.md)).
 
 | Claim | Evidence |
 |---|---|

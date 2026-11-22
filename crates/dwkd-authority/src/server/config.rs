@@ -240,8 +240,10 @@ impl fmt::Display for UsageError {
 
 impl std::error::Error for UsageError {}
 
-/// The `serve` flags, for the help text. One line each.
-pub const SERVE_USAGE: &str = "\
+/// The `serve` flags, for the help text. One line each, every one indented
+/// alike (the escaped line break drops the next line's leading spaces, so the
+/// first line's are written before it).
+pub const SERVE_USAGE: &str = "    \
     --state-dir <DIR>          the authority's private state directory (required)
     --socket <PATH>            absolute path of the Unix-domain socket to bind (required)
     --allow-uid <UID>          a uid that may speak DWKP; repeat for each (at least one)
@@ -1055,6 +1057,15 @@ mod tests {
             words.push(flag);
             assert!(error(&words).contains("unknown serve argument"), "{flag}");
             assert!(!SERVE_USAGE.contains(flag), "{flag}");
+        }
+    }
+
+    #[test]
+    fn every_serve_flag_line_is_indented_alike() {
+        let lines: Vec<&str> = SERVE_USAGE.lines().collect();
+        assert!(lines.len() > 20, "{SERVE_USAGE}");
+        for line in lines {
+            assert!(line.starts_with("    --"), "{line:?}");
         }
     }
 }

@@ -166,8 +166,8 @@ module (TX016).
   and `cargo test -p dwk-proto --lib -- brokerp::sandbox`, including the real
   kernel's maps.
 - `tests/architecture/test_f05_identity.py`.
-- Pending: the hosted `sandbox-foundation` job, where the same assertion
-  expects AppArmor `ENFORCED:both:docker-default`.
+- Hosted again, CI #201 (run 44818094052, `3998de2`), `sandbox-foundation`: the same
+  event, `userns=UNSUPPORTED:both:shared apparmor=ENFORCED:both:docker-default`.
 
 ## 11. Residuals and owner decisions
 

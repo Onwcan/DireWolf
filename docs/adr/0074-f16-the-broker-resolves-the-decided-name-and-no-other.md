@@ -1,6 +1,6 @@
 # ADR-0074: F-16 -- the broker resolves the name the authority decided and no other: an absolute query, a bounded answer, nothing cached
 
-**Status:** Proposed · **Date:** 2026-11-20 (designed, built and tested locally 2026-11-20 for finding F-16; hosted evidence pending; nothing here is accepted) · **Builds on:** [ADR-0048](0048-m5b-proxy-only-topology-and-connect-proxy.md) (the broker resolves, once per tunnel), [ADR-0050](0050-m5c-kernel-performed-net-http-ssrf-redirects-and-credential-egress.md) (once per hop, pinned), [ADR-0073](0073-f06-of2-the-operators-egress-allowlist-is-a-ceiling-every-policy-is-under.md) (the destination decided exactly) · **Leaves unchanged:** DWKP, the private broker protocol, the address guard, pinning, the fixture resolver the evidence uses, and every decision
+**Status:** Proposed · **Date:** 2026-11-20 (designed, built and tested locally 2026-11-20 for finding F-16; hosted: NOT EXERCISED on CI #201 (run 44818094052, `3998de2`), no unprivileged namespaces on the runner, recorded in [PRE_M6_REMEDIATION.md](../PRE_M6_REMEDIATION.md); nothing here is accepted) · **Builds on:** [ADR-0048](0048-m5b-proxy-only-topology-and-connect-proxy.md) (the broker resolves, once per tunnel), [ADR-0050](0050-m5c-kernel-performed-net-http-ssrf-redirects-and-credential-egress.md) (once per hop, pinned), [ADR-0073](0073-f06-of2-the-operators-egress-allowlist-is-a-ceiling-every-policy-is-under.md) (the destination decided exactly) · **Leaves unchanged:** DWKP, the private broker protocol, the address guard, pinning, the fixture resolver the evidence uses, and every decision
 
 > **The broker asks the host's resolver for exactly the name the authority
 > decided.** The query is the name made absolute -- a trailing dot -- so no
@@ -102,6 +102,11 @@ whose address the guard then judged.
   test.
 - `tests/architecture/test_f16_resolver.py`: the absolute query, the bound,
   one production resolver, the review's table.
+- Hosted, CI #201 (run 44818094052, `3998de2`): the test ran in the broker's unit run and passed
+  as NOT EXERCISED ("unprivileged user, mount and network namespaces are
+  not available here"): the hosted runner restricts them, and only the
+  `sandbox-egress` job lifts the restriction, for F-04's case alone. The
+  property is shown locally, not by a hosted run.
 
 ## Rollback and deployment
 

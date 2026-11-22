@@ -1,6 +1,6 @@
 # ADR-0060: A `network.https` grant that carries a constraint gives a `PROXY_ONLY` environment no destination
 
-**Status:** Proposed · **Date:** 2026-11-12 (proposed and built 2026-11-12 for finding F-19; its hosted evidence is pending and nothing here is accepted) · **Would amend (on acceptance):** [ADR-0048](0048-m5b-proxy-only-topology-and-connect-proxy.md) §5 (which of a run's grants become a `PROXY_ONLY` environment's destinations) · **Addresses:** finding F-19
+**Status:** Proposed · **Date:** 2026-11-12 (proposed and built 2026-11-12 for finding F-19; hosted evidence observed on CI #201 (run 44818094052, `3998de2`), recorded in [PRE_M6_REMEDIATION.md](../PRE_M6_REMEDIATION.md); nothing here is accepted) · **Would amend (on acceptance):** [ADR-0048](0048-m5b-proxy-only-topology-and-connect-proxy.md) §5 (which of a run's grants become a `PROXY_ONLY` environment's destinations) · **Addresses:** finding F-19
 
 > **A `PROXY_ONLY` environment's destinations are the run's exact
 > `network.https` grants that carry no constraint.** A grant that carries

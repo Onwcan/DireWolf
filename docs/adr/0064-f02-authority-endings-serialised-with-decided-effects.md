@@ -1,6 +1,6 @@
 # ADR-0064: An end of authority waits for every effect already decided -- one gate per store orders a revocation, a lease taken over or released and a run released after each effect standing between its decision and its outcome
 
-**Status:** Proposed · **Date:** 2026-11-15 (designed, built and reviewed locally 2026-11-15 for finding F-02; its hosted evidence is pending and nothing here is accepted) · **Would amend (on acceptance):** [ADR-0011](0011-session-concurrency.md) point 5 (an epoch fences the effects a request has decided as well as the request: no tenure begins while one of them stands between its decision and its outcome), [ADR-0039](0039-durable-authority-state.md) (the handles onto one store share an in-memory gate beside SQLite's transactions) · **Refines (Proposed):** [ADR-0063](0063-principal-ownership-of-sessions-workspaces-and-profiles.md)'s concurrency residual ("F-02 must keep a revocation serialised with intents already recorded") · **Leaves open:** the F-02 residuals of [ADR-0061](0061-workload-egress-decided-by-policy-novelty-and-exposure.md) and [ADR-0062](0062-taint-follows-delivered-content.md) -- per-tunnel mediation and concurrency within a run -- designed in [F02_AUTHORITY_CONCURRENCY.md](../F02_AUTHORITY_CONCURRENCY.md) §9 and not built
+**Status:** Proposed · **Date:** 2026-11-15 (designed, built and reviewed locally 2026-11-15 for finding F-02; hosted evidence observed on CI #201 (run 44818094052, `3998de2`), recorded in [PRE_M6_REMEDIATION.md](../PRE_M6_REMEDIATION.md); nothing here is accepted) · **Would amend (on acceptance):** [ADR-0011](0011-session-concurrency.md) point 5 (an epoch fences the effects a request has decided as well as the request: no tenure begins while one of them stands between its decision and its outcome), [ADR-0039](0039-durable-authority-state.md) (the handles onto one store share an in-memory gate beside SQLite's transactions) · **Refines (Proposed):** [ADR-0063](0063-principal-ownership-of-sessions-workspaces-and-profiles.md)'s concurrency residual ("F-02 must keep a revocation serialised with intents already recorded") · **Leaves open:** the F-02 residuals of [ADR-0061](0061-workload-egress-decided-by-policy-novelty-and-exposure.md) and [ADR-0062](0062-taint-follows-delivered-content.md) -- per-tunnel mediation and concurrency within a run -- designed in [F02_AUTHORITY_CONCURRENCY.md](../F02_AUTHORITY_CONCURRENCY.md) §9 and not built
 
 > **From the commit of an end of authority -- a revocation's first phase, a
 > lease acquired over another tenure, a lease released, a run released --
@@ -174,7 +174,7 @@ and a brokered change still waits while a workload may run on its root.
 
 ## Evidence
 
-Built and run locally on 2026-11-15; **hosted evidence is pending**:
+Built and run locally on 2026-11-15; hosted evidence since observed ([PRE_M6_REMEDIATION.md](../PRE_M6_REMEDIATION.md)):
 
 - reproduction before the change: the three interleavings above, each
   failing its assertion (`active_runs: 0` at the broker);

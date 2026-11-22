@@ -211,7 +211,9 @@ it is made the authority's record says `UNVERIFIED`.
 
 ## 10. Evidence
 
-Local, WSL Ubuntu 26.04; hosted evidence pending.
+Local, WSL Ubuntu 26.04. Hosted, CI #201 (run 44818094052, `3998de2`): the authority's record per
+incarnation against the real binary in `authority-transport`, and the
+broker's posture tests in `make test` ([PRE_M6_REMEDIATION.md](PRE_M6_REMEDIATION.md)).
 
 | Claim | Evidence |
 |---|---|

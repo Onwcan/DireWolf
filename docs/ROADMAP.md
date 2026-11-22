@@ -28,9 +28,9 @@ We accept that estimate rather than defending the original. The implications are
 
 ## Ordering rationale
 
-The brief's suggested order puts the tool registry (M6) before capabilities and policy (M7). We invert that: **the kernel comes first, before there is anything to constrain.** Retrofitting a privilege boundary is the mistake this whole architecture exists to avoid, and a tool registry built against an in-process check will encode that assumption everywhere.
+The brief's suggested order puts the tool registry (the brief's M6; here M10) before capabilities and policy (the brief's M7; here M3). We invert that: **the kernel comes first, before there is anything to constrain.** Retrofitting a privilege boundary is the mistake this whole architecture exists to avoid, and a tool registry built against an in-process check will encode that assumption everywhere.
 
-We also pull **events and the run state machine (M5) before the agent kernel (M4)**, because the loop should be built on top of a durable state machine rather than having one bolted on afterwards.
+We also pull **events and the run state machine (the brief's M5; here M8) before the agent kernel (the brief's M4; here M9)**, because the loop should be built on top of a durable state machine rather than having one bolted on afterwards.
 
 ```
 M0 architecture ─ M1 foundation ─ M2 protocol+schemas
@@ -53,6 +53,10 @@ M0 architecture ─ M1 foundation ─ M2 protocol+schemas
 ```
 
 **Build order after M5 (2026-11-11):** M6 → M3.5 → M7 → M8 → M9 → M10–M16 → M17 → M18 → V1.0. The vertical slice (M3.5) is not in the tree above: it runs after M6, whose approvals it measures, and before M7, because its measurements can still change everything from M7 on (M3.5, above).
+
+**The tree draws the main chain.** Where it is simpler than a milestone's
+**Deps:** line, the line decides -- M7: M3; M8: M2, M3; M10: M4, M5, M9;
+M11a: M3, M11; M16: M10; M17: M9–M16 -- and M2.5 (on M2) is not drawn.
 
 ---
 
@@ -866,24 +870,28 @@ ADR — [ADR-0052](adr/0052-m5d-sandboxed-process-exec.md) OD-7, accepted).
 **Adversarial:** full escape suite; full SSRF suite; resource exhaustion; cross-run persistence attempts; a configuration that looks hardened while the running environment differs; a tampered or substituted assurance probe; a fronted request through an allowlisted shared host, which must stay within its byte budget and connection count.
 **Deferred:** gVisor/Kata/Firecracker, SSH, remote workers.
 
-**Pre-M6 security remediation (a separate effort, not a milestone; status 2026-11-20).**
-Built and hosted-verified, among others: F-01, F-02, F-03, F-04, F-07, F-11, F-12, F-17,
-F-18, F-19; F-05's truthful identity judgement and opt-in required LSM
-(ADR-0069, ADR-0070: OD-A and OD-B approved as implemented); F-06's shipped
-packs under the operator's allowlist (ADR-0071, OF-1 approved as
-implemented). Built locally, hosted evidence pending: F-06 OF-2, the
-allowlist as a ceiling every policy is under
-([ADR-0073](adr/0073-f06-of2-the-operators-egress-allowlist-is-a-ceiling-every-policy-is-under.md));
-F-16, the broker resolving the decided name and no other
-([ADR-0074](adr/0074-f16-the-broker-resolves-the-decided-name-and-no-other.md));
-the TLS floor of two evidence clients (code scanning #10-#13). Partially
-completed: **F-05** -- per-environment user-namespace remapping is blocked on
-a runtime that offers per-container user namespaces
-([F05_USERNS_LSM.md](F05_USERNS_LSM.md) §13). Deferred: protocol 13 with
+**Pre-M6 security remediation (a separate effort, not a milestone; status 2026-11-21).**
+Findings F-01 to F-19 of the review of 2026-11-11/12; each one's record, and
+what a hosted run exercised, is [PRE_M6_REMEDIATION.md](PRE_M6_REMEDIATION.md).
+Built, with hosted evidence observed (CI #201, run 44818094052 at `3998de2`,
+unless that page says otherwise): F-01, F-02, F-03, F-04, F-06 (OF-1 and OF-2:
+[ADR-0071](adr/0071-f06-an-operator-egress-allowlist-every-shipped-network-rule-requires.md),
+[ADR-0073](adr/0073-f06-of2-the-operators-egress-allowlist-is-a-ceiling-every-policy-is-under.md)),
+F-07, F-11, F-12, F-17, F-18, F-19, and the TLS floor of two evidence
+clients (code scanning #10-#13, closed as fixed). F-05's truthful identity
+judgement and opt-in required LSM (ADR-0069, ADR-0070: OD-A and OD-B approved
+as implemented) are hosted-observed too, and **F-05 is partially completed**:
+per-environment user-namespace remapping is blocked on a runtime that offers
+per-container user namespaces ([F05_USERNS_LSM.md](F05_USERNS_LSM.md) §13).
+Built and passing, hosted NOT EXERCISED: F-16, the broker resolving the
+decided name and no other ([ADR-0074](adr/0074-f16-the-broker-resolves-the-decided-name-and-no-other.md)), whose test has no unprivileged
+namespaces on the hosted runner. F-08 to F-10 are settings and tooling, and
+F-13 to F-15 documentation, on the same page. Deferred: protocol 13 with
 F-03's D6 (ADR-0070 OD-C), Landlock with M6's host execution (OD-D), a
 `model_download` path and per-entry quotas (ADR-0071 OF-3), online model
-downloads after M7 (ADR-0072 OM-2). Every ADR named here stays Proposed
-until accepted.
+downloads after M7 (ADR-0072 OM-2). Remaining before M6: the independent
+security review of this remediation, and the final pre-M6 handoff; M6 has
+not started. Every ADR named here stays Proposed until accepted.
 
 ### M6 · Approvals and budgets
 **Deps:** M3. **Deliverables:** binding hash; approval registry with scopes, expiry, single-use burn; standing grants with the 90-day cap and `require_untainted_run`; kernel-rendered approval prompts; hierarchical subtractive budget ledger; unattended degradation to DENY.

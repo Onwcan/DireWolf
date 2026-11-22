@@ -1,6 +1,6 @@
 # ADR-0065: Each daemon says its effective security posture, control by control, and the authority records its own in the audit log -- a weakened control is never presented as enforced
 
-**Status:** Proposed · **Date:** 2026-11-15 (designed, built and reviewed locally 2026-11-15 for finding F-03; its hosted evidence is pending and nothing here is accepted) · **Would amend (on acceptance):** [ADR-0053](0053-d11-exchange-worker-confinement-and-secret-memory.md) §§4, 7 (an acknowledgement is reduced assurance whatever the host says at start, and a hop it admits against the host's facts is reported at that hop), [ADR-0039](0039-durable-authority-state.md) (one more audit event, `authority.posture`, once per served incarnation) · **Refines:** [ADR-0017](0017-observability-vs-audit.md) (the kernel records its own posture; the broker's stays the broker's log) · **Leaves open:** the broker's posture in the authority's record, and a per-hop posture refusal distinct from a failed worker -- both need a private-protocol change, designed in [F03_EFFECTIVE_POSTURE.md](../F03_EFFECTIVE_POSTURE.md) §8 and not built
+**Status:** Proposed · **Date:** 2026-11-15 (designed, built and reviewed locally 2026-11-15 for finding F-03; hosted evidence observed on CI #201 (run 44818094052, `3998de2`), recorded in [PRE_M6_REMEDIATION.md](../PRE_M6_REMEDIATION.md); nothing here is accepted) · **Would amend (on acceptance):** [ADR-0053](0053-d11-exchange-worker-confinement-and-secret-memory.md) §§4, 7 (an acknowledgement is reduced assurance whatever the host says at start, and a hop it admits against the host's facts is reported at that hop), [ADR-0039](0039-durable-authority-state.md) (one more audit event, `authority.posture`, once per served incarnation) · **Refines:** [ADR-0017](0017-observability-vs-audit.md) (the kernel records its own posture; the broker's stays the broker's log) · **Leaves open:** the broker's posture in the authority's record, and a per-hop posture refusal distinct from a failed worker -- both need a private-protocol change, designed in [F03_EFFECTIVE_POSTURE.md](../F03_EFFECTIVE_POSTURE.md) §8 and not built
 
 > **A control an operator weakened is reported as reduced -- by name, with
 > the guarantee it costs -- wherever it is reported, and the security record
@@ -190,7 +190,7 @@ decision changes; every refusal stays where it was.
 
 ## Evidence
 
-Local, WSL Ubuntu 26.04 (hosted evidence pending):
+Local, WSL Ubuntu 26.04 (hosted evidence since observed: [PRE_M6_REMEDIATION.md](../PRE_M6_REMEDIATION.md)):
 
 - `crates/dwkd-broker/src/effective_tests.rs`: every acknowledgement reduces
   exactly its control and names itself; an acknowledgement on a safe host is

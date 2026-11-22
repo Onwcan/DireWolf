@@ -9,7 +9,7 @@ this is its inventory, its adversarial matrix and its evidence.
 |---|---|
 | The approver endpoint's identity boundary | **IMPLEMENTATION PARTIAL**: built; the approval operations it will carry are not |
 | Its same-identity evidence | local: passing (§11) |
-| Its three-identity evidence | **HOSTED EVIDENCE PENDING**: `authority-transport`, `DW_PEER_AS` + `DW_APPROVER_AS` |
+| Its three-identity evidence | **HOSTED EVIDENCE VERIFIED** on CI #201 (run 44818094052): `authority-transport`, `DW_PEER_AS` + `DW_APPROVER_AS`, six `cross-uid-*` cases contained |
 | ADR-0067 | **ARCHITECTURAL ACCEPTANCE PENDING** (Proposed) |
 | The approval registry, rendering, consumption, standing grants | **M6 APPROVAL REGISTRY DEFERRED** |
 | A terminal-based approval | design only: none is accepted (§6) |
@@ -45,7 +45,7 @@ and the broker's.
 | I1 | DWKP peers are the operator's closed uid list | no separate approver identity | an approver indistinguishable from a runtime | `--approver-uid`, a closed set of at most 16 | ADR-0067 §2 | `config.rs` unit tests; `transport_approver` | **built** |
 | I2 | DWKP socket's place checks | no approver endpoint | approvals would have to arrive on the runtime's socket | `--approver-socket`, same place checks, own lock | ADR-0067 §1 | `the_approver_socket_is_protected_as_the_dwkp_socket_is` | **built** |
 | I3 | `--allow-authority-uid`, `--allow-shared-broker-uid` acknowledgements | none for approvers | a development override would make a runtime its own approver | disjoint from `--allow-uid`, `--broker-uid`, the authority; no override | ADR-0067 §2 | `a_runtime_uid_is_never_an_approver`, `the_broker_is_never_an_approver`, `the_authority_is_never_an_approver_and_naming_it_starts_nothing` | **built** |
-| I4 | peer gate before a byte is read | approver gate | a payload could claim an approver | judged by the kernel's uid alone, before any read | ADR-0067 §3 | `only_a_uid_the_operator_named_is_an_approver`; hosted `cross-uid-*` | **built**; hosted pending |
+| I4 | peer gate before a byte is read | approver gate | a payload could claim an approver | judged by the kernel's uid alone, before any read | ADR-0067 §3 | `only_a_uid_the_operator_named_is_an_approver`; hosted `cross-uid-*` | **built**; hosted three-identity, CI #201 |
 | I5 | transport audit records | approver records | unattributed approver attempts | `approver.peer_refused`, `approver.peer_authenticated`, rate-limited | ADR-0067 §3 | `transport.rs` unit test; `transport_approver` | **built** |
 | I6 | none | an endpoint holding no operation | a premature approval path by fiat | the endpoint reads, answers and dispatches nothing | ADR-0067 §3, TX065 | `the_endpoint_reads_answers_and_dispatches_nothing`; TX065 fixture | **built** |
 | I7 | strict DWKP decoder | claims of a human | `origin=interactive`, `approved=true`, an external agent's yolo flag taken as authority | none needed: every such field is unknown | ADR-0067 §4 | `a_runtime_cannot_claim_an_approval_an_approver_or_a_human_on_the_wire` | **verified** |
@@ -145,9 +145,9 @@ can be spent), **M6** (pending, not claimed).
 
 | # | Property | Status | Evidence | Level |
 |---|---|---|---|---|
-| 1 | a runtime cannot use the approver endpoint | IMPLEMENTED | `transport_approver`: runtime uid refused unread; hosted `cross-uid-runtime-refused` | local same-uid; hosted three-uid pending |
+| 1 | a runtime cannot use the approver endpoint | IMPLEMENTED | `transport_approver`: runtime uid refused unread; hosted `cross-uid-runtime-refused` | local same-uid; hosted three-uid, CI #201 |
 | 2 | an allowed DWKP uid is not an approver | IMPLEMENTED | `a_runtime_uid_is_never_an_approver` (parser); `transport_approver` | unit; real process |
-| 3 | an unknown uid cannot approve | IMPLEMENTED (identity) | `only_a_uid_the_operator_named_is_an_approver`; `cross-uid-authority-refused` | unit; hosted pending |
+| 3 | an unknown uid cannot approve | IMPLEMENTED (identity) | `only_a_uid_the_operator_named_is_an_approver`; `cross-uid-authority-refused` | unit; hosted three-uid, CI #201 |
 | 4 | a runtime-controlled pty cannot satisfy an approval | IMPLEMENTED (no terminal anywhere) | TX061, TX065, `a_descriptor_a_runtime_passes_is_never_installed_in_the_authority` | static; real process |
 | 5 | a runtime's descriptor stays discarded | PRESERVED | `transport_hostile` | real process |
 | 6 | forged `origin=interactive` cannot attend a run | IMPLEMENTED | `a_runtime_cannot_claim_...` (undecodable; admission `api`); TX062 | real process |
@@ -161,7 +161,7 @@ can be spent), **M6** (pending, not claimed).
 | 28 | unattended requests stay denied | PRESERVED | `an_unattended_run_cannot_be_approved_and_is_denied_instead`; route tests; P12 | unit; real process |
 | 29 | agent text cannot impersonate authority text | M6 | no prompt is rendered | -- |
 | 30 | an external agent's approval is not DireWolf's | IMPLEMENTED | `auto_approve`, `yolo`, `dangerously_skip_permissions` undecodable | real process |
-| 31 | cross-uid checks use real identities | IMPLEMENTED; HOSTED EVIDENCE PENDING | `an_approver_is_its_own_identity_and_a_runtime_is_never_one` | hosted three-uid |
+| 31 | cross-uid checks use real identities | IMPLEMENTED; HOSTED, CI #201 | `an_approver_is_its_own_identity_and_a_runtime_is_never_one` | hosted three-uid |
 | 32 | TX061-TX063 hold | PRESERVED | rules unchanged; their fixtures | static |
 | 33 | F-02 concurrency | PRESERVED | `state_concurrency`, route tests in `make test` | unit; in process |
 | 34 | F-03 posture | PRESERVED | posture code unchanged; `transport_server` posture test | real process |
@@ -180,7 +180,10 @@ admission attended; P13 a standing grant held. Results: §11.
 
 ## 11. Evidence
 
-Local, WSL Ubuntu 26.04, one identity, 2026-11-16; hosted evidence pending.
+Local, WSL Ubuntu 26.04, one identity, 2026-11-16. Hosted, CI #201 (run
+44818094052, `3998de2`): the `authority-transport` job with three
+identities -- uid 1001, `DW_PEER_AS`, `DW_APPROVER_AS` (uid 999) -- ran the six
+`cross-uid-*` approver cases, every one contained ([PRE_M6_REMEDIATION.md](PRE_M6_REMEDIATION.md)).
 
 `make approver-identity-mutations`: **13 of 13 killed**, each by a named
 test, every file restored byte-identically; the unmutated baseline passed

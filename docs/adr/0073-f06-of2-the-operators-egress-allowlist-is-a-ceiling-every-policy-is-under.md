@@ -1,6 +1,6 @@
 # ADR-0073: F-06 OF-2 -- the operator's egress allowlist is a ceiling every policy is under: no network action reaches a destination the operator did not name, whatever a policy allows
 
-**Status:** Proposed · **Date:** 2026-11-20 (implementation authorised 2026-11-20 as ADR-0071's OF-2; designed, built and tested locally 2026-11-20; hosted evidence pending; nothing here is accepted) · **Builds on:** [ADR-0071](0071-f06-an-operator-egress-allowlist-every-shipped-network-rule-requires.md) (Proposed; its OF-1 approved as implemented 2026-11-20), [ADR-0050](0050-m5c-kernel-performed-net-http-ssrf-redirects-and-credential-egress.md), [ADR-0061](0061-workload-egress-decided-by-policy-novelty-and-exposure.md), [ADR-0028](0028-policy-input-ownership.md) · **Would amend (on acceptance):** ADR-0071 §5 ("a policy file of the operator's own is unchanged") · **Leaves unchanged:** DWKP, the private broker protocol, the store's schema, the allowlist's grammar and its one flag, the shipped packs, the address guard, DNS pinning, SNI agreement and every budget
+**Status:** Proposed · **Date:** 2026-11-20 (implementation authorised 2026-11-20 as ADR-0071's OF-2; designed, built and tested locally 2026-11-20; hosted evidence observed on CI #201 (run 44818094052, `3998de2`), recorded in [PRE_M6_REMEDIATION.md](../PRE_M6_REMEDIATION.md); nothing here is accepted) · **Builds on:** [ADR-0071](0071-f06-an-operator-egress-allowlist-every-shipped-network-rule-requires.md) (Proposed; its OF-1 approved as implemented 2026-11-20), [ADR-0050](0050-m5c-kernel-performed-net-http-ssrf-redirects-and-credential-egress.md), [ADR-0061](0061-workload-egress-decided-by-policy-novelty-and-exposure.md), [ADR-0028](0028-policy-input-ownership.md) · **Would amend (on acceptance):** ADR-0071 §5 ("a policy file of the operator's own is unchanged") · **Leaves unchanged:** DWKP, the private broker protocol, the store's schema, the allowlist's grammar and its one flag, the shipped packs, the address guard, DNS pinning, SNI agreement and every budget
 
 > **The operator's `--egress-allowlist` is now a ceiling, not a predicate a
 > policy may choose to require.** After a policy's rules and postconditions,
@@ -173,6 +173,10 @@ admits no destination`.
   test.
 - `tests/architecture/test_f06_egress_allowlist.py`: one setter, the
   evaluator's ceiling, its one caller.
+- Hosted, CI #201 (run 44818094052, `3998de2`): the `net.http` job reported 193 cases, the
+  seven `of2-operator-policy-*` among them; `sandbox-registry` (20 cases)
+  and `sandbox-hygiene` (44) passed with `--egress-allowlist` naming their
+  destinations.
 
 ## Rollback and deployment
 

@@ -146,13 +146,15 @@ def test_adr_0067_is_proposed_and_adr_0063_is_not_silently_accepted() -> None:
     report = _read(REPORT)
     for marker in (
         "IMPLEMENTATION PARTIAL",
-        "HOSTED EVIDENCE PENDING",
+        "HOSTED EVIDENCE VERIFIED",
         "ARCHITECTURAL ACCEPTANCE PENDING",
         "M6 APPROVAL REGISTRY DEFERRED",
         "F-12 ARTIFACT CAPTURE DEFERRED",
     ):
         assert marker in report, marker
     assert "IMPLEMENTATION COMPLETE" not in report
+    # CI #201 ran the three-identity cases; acceptance is still the owner's.
+    assert "HOSTED EVIDENCE PENDING" not in report
 
 
 def test_the_mutation_table_matches_the_source_once_per_mutant() -> None:

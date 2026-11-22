@@ -1,6 +1,6 @@
 # ADR-0061: Each sandboxed workload's egress is decided by policy, the run's novelty and its workspace's exposure, and held by the broker for the workload's life
 
-**Status:** Proposed · **Date:** 2026-11-13 (designed and reviewed 2026-11-12, built 2026-11-13 for finding F-17; its hosted evidence is pending and nothing here is accepted) · **Would amend (on acceptance):** [ADR-0048](0048-m5b-proxy-only-topology-and-connect-proxy.md) §§5–7, 12 (what the CONNECT proxy carries, in what order it decides, and what it records), [ADR-0052](0052-m5d-sandboxed-process-exec.md) §§5, 8 (what a workload's start carries and what its ending reports) · **Builds on:** [ADR-0060](0060-a-constrained-network-grant-gives-no-proxy-only-destination.md) (Proposed: which grants are destinations) · **Addresses:** finding F-17
+**Status:** Proposed · **Date:** 2026-11-13 (designed and reviewed 2026-11-12, built 2026-11-13 for finding F-17; hosted evidence observed on CI #201 (run 44818094052, `3998de2`), recorded in [PRE_M6_REMEDIATION.md](../PRE_M6_REMEDIATION.md); nothing here is accepted) · **Would amend (on acceptance):** [ADR-0048](0048-m5b-proxy-only-topology-and-connect-proxy.md) §§5–7, 12 (what the CONNECT proxy carries, in what order it decides, and what it records), [ADR-0052](0052-m5d-sandboxed-process-exec.md) §§5, 8 (what a workload's start carries and what its ending reports) · **Builds on:** [ADR-0060](0060-a-constrained-network-grant-gives-no-proxy-only-destination.md) (Proposed: which grants are destinations) · **Addresses:** finding F-17
 
 > **A tunnel opens only while a workload the broker supervises holds an
 > egress authorisation that allows it.** The authority decides that
@@ -293,8 +293,9 @@ record in turn.
 
 ## Evidence
 
-Built and run locally on 2026-11-13; **hosted evidence is pending** and the
-record stays Proposed until it passes and the decision is accepted:
+Built and run locally on 2026-11-13; hosted evidence since observed
+([PRE_M6_REMEDIATION.md](../PRE_M6_REMEDIATION.md)). The record stays Proposed until the decision is
+accepted:
 
 - unit and property tests: `dwk-proto`'s wire and lookup, the authority's
   partition (P-1 to P-6), decision, settlement and reconciliation, the

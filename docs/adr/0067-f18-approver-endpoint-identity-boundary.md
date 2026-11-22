@@ -1,6 +1,6 @@
 # ADR-0067: The approver is reached at an endpoint of its own, by operator-declared uids disjoint from every runtime's, the broker's and the authority's -- authenticated by the kernel, and holding no approval operation until M6's registry exists
 
-**Status:** Proposed · **Date:** 2026-11-16 (designed, built and reviewed locally 2026-11-16 for F-18 Phase 3.4; its hosted three-identity evidence is pending and nothing here is accepted) · **Would amend (on acceptance):** [ADR-0041](0041-m3e-authenticated-dwkp-transport.md) (the authority listens at a second socket, the approver endpoint, beside the DWKP socket; two audit kinds) · **Refines:** [ADR-0063](0063-principal-ownership-of-sessions-workspaces-and-profiles.md) §8 (the approver endpoint's identity boundary is built; what an approval is stays M6's), [APPROVALS.md](../APPROVALS.md) §7 (the approver's channel), [ADR-0021](0021-approval-binding-v2.md) (proposes, for M6, that the requester's principal join the binding) · **Leaves open:** the approval registry, its request vocabulary, kernel-rendered prompts, standing grants and any terminal -- all M6's, under the contract in §7
+**Status:** Proposed · **Date:** 2026-11-16 (designed, built and reviewed locally 2026-11-16 for F-18 Phase 3.4; its three-identity evidence observed on CI #201 (run 44818094052, `3998de2`), recorded in [PRE_M6_REMEDIATION.md](../PRE_M6_REMEDIATION.md); nothing here is accepted) · **Would amend (on acceptance):** [ADR-0041](0041-m3e-authenticated-dwkp-transport.md) (the authority listens at a second socket, the approver endpoint, beside the DWKP socket; two audit kinds) · **Refines:** [ADR-0063](0063-principal-ownership-of-sessions-workspaces-and-profiles.md) §8 (the approver endpoint's identity boundary is built; what an approval is stays M6's), [APPROVALS.md](../APPROVALS.md) §7 (the approver's channel), [ADR-0021](0021-approval-binding-v2.md) (proposes, for M6, that the requester's principal join the binding) · **Leaves open:** the approval registry, its request vocabulary, kernel-rendered prompts, standing grants and any terminal -- all M6's, under the contract in §7
 
 > **An approver is a uid the operator names with `--approver-uid`, and is
 > reached only at `--approver-socket`, a socket of its own.** No approver is
@@ -238,8 +238,9 @@ has been. Two `serve` flags are added.
   socket. A directory of the approvers' own narrows it.
 - **No terminal proof** exists; none is relied on (§5).
 - **Hosted evidence.** The three-identity property is exercised only by the
-  hosted `authority-transport` job (`DW_PEER_AS`, `DW_APPROVER_AS`); until it
-  runs green this record's cross-uid claims are unverified.
+  hosted `authority-transport` job (`DW_PEER_AS`, `DW_APPROVER_AS`). On CI
+  #201 it ran with three identities (uid 1001, `DW_PEER_AS`, `DW_APPROVER_AS`
+  uid 999), and the six `cross-uid-*` cases were contained.
 
 ## Alternatives considered
 

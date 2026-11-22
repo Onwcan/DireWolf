@@ -1,6 +1,6 @@
 # ADR-0066: A policy path outside the workspace names a place on the host, and is decided by where that place lies relative to the run's pinned root -- found by identity, never by spelling; `~` stands for the homes the operator names and nothing else
 
-**Status:** Proposed · **Date:** 2026-11-16 (designed, built and reviewed locally 2026-11-16 for finding F-12; its hosted evidence is pending and nothing here is accepted) · **Would amend (on acceptance):** [ADR-0042](0042-m4a-canonical-filesystem-resolution.md) §10 (the anchors other than `${WORKSPACE}` are resolved -- as host locations placed against the pinned root -- rather than left unresolved), [ADR-0038](0038-policy-evaluation-phases-and-composition.md) (a load rule: a `path_under` outside the workspace only in a `DENY` rule) · **Refines:** [ADR-0028](0028-policy-input-ownership.md) (a path anchor is operator configuration or a fact the authority holds, never a runtime or environment value), [ADR-0037](0037-capability-specifications-and-canonical-authority-identities.md) (a rule-side path is still never resolved into a capability) · **Leaves open:** `require_artifact_capture` stays unenforceable -- the capture store is M8's (F12_POLICY_PACK_USABILITY.md §8)
+**Status:** Proposed · **Date:** 2026-11-16 (designed, built and reviewed locally 2026-11-16 for finding F-12; hosted evidence observed on CI #201 (run 44818094052, `3998de2`), recorded in [PRE_M6_REMEDIATION.md](../PRE_M6_REMEDIATION.md); nothing here is accepted) · **Would amend (on acceptance):** [ADR-0042](0042-m4a-canonical-filesystem-resolution.md) §10 (the anchors other than `${WORKSPACE}` are resolved -- as host locations placed against the pinned root -- rather than left unresolved), [ADR-0038](0038-policy-evaluation-phases-and-composition.md) (a load rule: a `path_under` outside the workspace only in a `DENY` rule) · **Refines:** [ADR-0028](0028-policy-input-ownership.md) (a path anchor is operator configuration or a fact the authority holds, never a runtime or environment value), [ADR-0037](0037-capability-specifications-and-canonical-authority-identities.md) (a rule-side path is still never resolved into a capability) · **Leaves open:** `require_artifact_capture` stays unenforceable -- the capture store is M8's (F12_POLICY_PACK_USABILITY.md §8)
 
 > **A rule-side path that is not `${WORKSPACE}`'s names a place on the
 > host, and a live decision is made about it by where that place lies relative
@@ -214,7 +214,7 @@ still not permission.
 
 ## Evidence
 
-Local, WSL Ubuntu 26.04 (hosted evidence pending):
+Local, WSL Ubuntu 26.04 (hosted evidence since observed: [PRE_M6_REMEDIATION.md](../PRE_M6_REMEDIATION.md)):
 
 - `crates/dwkd-authority/src/policy/fixtures.rs`: every pack names the same
   twelve host paths; a read is allowed once they are placed disjoint; an

@@ -43,6 +43,12 @@ fn help_exits_zero_and_says_what_is_not_implemented() {
         stdout.contains("not implemented"),
         "help must be honest about the absent command surface; got: {stdout:?}"
     );
+    // No hard-coded milestone: it goes stale the day the next one closes.
+    assert!(
+        !stdout.contains("milestone M"),
+        "help must not say which milestone DireWolf is at; got: {stdout:?}"
+    );
+    assert!(stdout.contains("models"), "got: {stdout:?}");
 }
 
 #[test]
