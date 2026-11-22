@@ -87,13 +87,15 @@ unit and the host settings it checks are in
 [BROKER_HARDENING.md](BROKER_HARDENING.md).
 
 The authority reads the operator's files once, at start, and parses each
-whole: an unknown key refuses it, and the authority does not start.
-`--secrets-file`, `--sandbox-config` and `--egress-allowlist` must each be a
-regular file owned by root or the authority's uid, writable by nobody else,
-under directories only they can change. A policy file is checked as a
-regular file within the loader's size bound, and not for its owner: keep it
-where only root or the authority can write. A change to any of them takes
-effect at the next start, and a restart reaps every run.
+whole: an unknown key refuses it, and the authority does not start. Every
+one of them -- policy files, `--secrets-file`, `--sandbox-config`,
+`--egress-allowlist` -- must be an absolute path to a regular file owned by
+root or the authority's uid and writable by nobody else, reached without a
+symlink through directories only they can change (sticky ones too); one
+that is not is refused before it is read
+([ADR-0075](adr/0075-sr01-operator-policy-files-are-read-as-the-other-operator-files-are.md),
+Proposed, for policy files). A change to any of them takes effect at the
+next start, and a restart reaps every run.
 
 ### Policy
 

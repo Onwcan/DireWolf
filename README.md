@@ -327,7 +327,7 @@ three are design properties whose mechanisms arrive with model egress (M7), appr
 [M5E5_IMPLEMENTATION_HANDOFF](docs/M5E5_IMPLEMENTATION_HANDOFF.md) ·
 [M5E6_PREPARATION_HANDOFF](docs/M5E6_PREPARATION_HANDOFF.md)
 
-**Decisions**: [docs/adr/](docs/adr/) — 75 architecture decision records (0000–0074): 55 accepted, 4 superseded and kept as history (0001, 0002, 0007, 0057), and 16 Proposed (0051, 0060–0074). Start with [ADR-0000](docs/adr/0000-authority-plane-separation.md), then [ADR-0018](docs/adr/0018-authority-broker-split.md); everything else is downstream. The [index](docs/adr/README.md) says which are current.
+**Decisions**: [docs/adr/](docs/adr/) — 76 architecture decision records (0000–0075): 55 accepted, 4 superseded and kept as history (0001, 0002, 0007, 0057), and 17 Proposed (0051, 0060–0075). Start with [ADR-0000](docs/adr/0000-authority-plane-separation.md), then [ADR-0018](docs/adr/0018-authority-broker-split.md); everything else is downstream. The [index](docs/adr/README.md) says which are current.
 
 ---
 

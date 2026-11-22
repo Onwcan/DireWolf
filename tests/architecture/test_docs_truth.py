@@ -674,8 +674,11 @@ def test_a_tree_note_that_disagrees_with_a_deps_line_is_found() -> None:
 
 def test_a_wrong_decision_record_count_is_found() -> None:
     readme, statuses = _read("README.md"), adr_status_lines()
-    assert adr_count_disagreements(_broken(readme, "and 16 Proposed", "and 15 Proposed"), statuses)
-    with_another = {**statuses, "0075": "Proposed · **Date:** 2026-11-22"}
+    proposed = sum(adr_kind(status) == "proposed" for status in statuses.values())
+    miscounted = _broken(readme, f"and {proposed} Proposed", f"and {proposed - 1} Proposed")
+    assert adr_count_disagreements(miscounted, statuses)
+    after = f"{int(max(statuses)) + 1:04d}"
+    with_another = {**statuses, after: "Proposed · **Date:** 2026-11-22"}
     assert adr_count_disagreements(readme, with_another)
 
 

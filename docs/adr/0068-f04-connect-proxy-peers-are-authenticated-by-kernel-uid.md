@@ -1,6 +1,6 @@
 # ADR-0068: The CONNECT proxy admits a connection only from the relay's uid, as the kernel reports it -- after `accept`, before a byte is read, beside the directory's ACL
 
-**Status:** Proposed · **Date:** 2026-11-16 (designed, built and reviewed locally 2026-11-16 for finding F-04; its cross-uid evidence observed on CI #201 (run 44818094052, `3998de2`), its hidden-pid case NOT EXERCISED there, recorded in [PRE_M6_REMEDIATION.md](../PRE_M6_REMEDIATION.md); nothing here is accepted) · **Would amend (on acceptance):** [ADR-0048](0048-m5b-proxy-only-topology-and-connect-proxy.md) §3 ("`SO_PEERCRED` is deliberately not consulted": it is now consulted, after `accept`, as a second and independent check; the ACL stays) · **Refines:** [ADR-0049](0049-peer-credentials-read-soundly-through-nix.md) (its "Revisit if" on the egress socket is met with its reader) · **Leaves open:** a proof of *which* process or environment connected, beyond its uid (F-05's user namespaces and LSM)
+**Status:** Proposed · **Date:** 2026-11-16 (designed, built and reviewed locally 2026-11-16 for finding F-04; its cross-uid and hidden-pid evidence observed on CI #201 (run 44818094052, `3998de2`) in `make proxy-peer-evidence`, recorded in [PRE_M6_REMEDIATION.md](../PRE_M6_REMEDIATION.md); nothing here is accepted) · **Would amend (on acceptance):** [ADR-0048](0048-m5b-proxy-only-topology-and-connect-proxy.md) §3 ("`SO_PEERCRED` is deliberately not consulted": it is now consulted, after `accept`, as a second and independent check; the ACL stays) · **Refines:** [ADR-0049](0049-peer-credentials-read-soundly-through-nix.md) (its "Revisit if" on the egress socket is met with its reader) · **Leaves open:** a proof of *which* process or environment connected, beyond its uid (F-05's user namespaces and LSM)
 
 > **Each connection the broker's per-environment CONNECT proxy accepts is
 > admitted only if the kernel reports the relay's uid (`RELAY_UID`, 10002)
@@ -164,8 +164,10 @@ runtime is refused the same way, fail-closed.
 - **Hosted evidence.** The cross-uid cases run only with a second identity,
   on the hosted `sandbox-egress` job. On CI #201 they ran as uid 65534
   (`DW_PEER_AS=nobody`), and both were contained. The hidden-pid case needs
-  unprivileged user and pid namespaces, which the hosted unit run did not
-  have: NOT EXERCISED there.
+  unprivileged user and pid namespaces: the job lifts the runner's AppArmor
+  restriction first, and on CI #201 that case was contained too
+  (`kernel-hidden-pid`). Only the unit runs of other jobs, where the
+  restriction stands, print NOT EXERCISED for it (corrected 2026-11-22).
 
 ## Alternatives considered
 

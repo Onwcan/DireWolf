@@ -219,9 +219,9 @@ Secrets never appear in configuration; only handles. Configuration is schema-val
 **As built (2026-11-21).** No layered configuration and no `direwolf config
 validate`. The authority takes flags and reads the operator's files they name --
 policy files, `--secrets-file`, `--sandbox-config`, `--egress-allowlist` -- once,
-at start, each parsed whole, an unknown key refusing it; the last three must be
-owned by root or the authority and writable by nobody else, and a policy file is
-not checked for its owner. The security settings above are already the
+at start, each parsed whole, an unknown key refusing it; each must be owned by
+root or the authority and writable by nobody else (ADR-0075 for policy files).
+The security settings above are already the
 authority's alone: host execution, the policy and the mode's ceiling are
 `dwkd-authority serve` flags, and nothing a workspace or a client sends can set
 them ([OPERATIONS.md](OPERATIONS.md) §4).

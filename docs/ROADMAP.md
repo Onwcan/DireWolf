@@ -885,13 +885,16 @@ per-environment user-namespace remapping is blocked on a runtime that offers
 per-container user namespaces ([F05_USERNS_LSM.md](F05_USERNS_LSM.md) §13).
 Built and passing, hosted NOT EXERCISED: F-16, the broker resolving the
 decided name and no other ([ADR-0074](adr/0074-f16-the-broker-resolves-the-decided-name-and-no-other.md)), whose test has no unprivileged
-namespaces on the hosted runner. F-08 to F-10 are settings and tooling, and
+namespaces on the hosted runner; a required hosted step for it, added
+2026-11-22, has not run yet. F-08 to F-10 are settings and tooling, and
 F-13 to F-15 documentation, on the same page. Deferred: protocol 13 with
 F-03's D6 (ADR-0070 OD-C), Landlock with M6's host execution (OD-D), a
 `model_download` path and per-entry quotas (ADR-0071 OF-3), online model
-downloads after M7 (ADR-0072 OM-2). Remaining before M6: the independent
-security review of this remediation, and the final pre-M6 handoff; M6 has
-not started. Every ADR named here stays Proposed until accepted.
+downloads after M7 (ADR-0072 OM-2). The security review of 2026-11-22
+([INDEPENDENT_SECURITY_REVIEW_2026-11-22.md](INDEPENDENT_SECURITY_REVIEW_2026-11-22.md)) added one Proposed record,
+ADR-0075 (operator policy files). Remaining before M6: that review's
+conditions, an independent review of the remediation, and the final pre-M6
+handoff; M6 has not started. Every ADR named here stays Proposed until accepted.
 
 ### M6 · Approvals and budgets
 **Deps:** M3. **Deliverables:** binding hash; approval registry with scopes, expiry, single-use burn; standing grants with the 90-day cap and `require_untainted_run`; kernel-rendered approval prompts; hierarchical subtractive budget ledger; unattended degradation to DENY.
