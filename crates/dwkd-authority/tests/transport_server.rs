@@ -986,6 +986,126 @@ mod linux {
         assert!(stderr.contains("must be an absolute path"), "{stderr}");
     }
 
+    /// SR-01 (ADR-0075, Proposed): the loader itself. A file in a directory
+    /// of its owner's own loads; one another uid could write -- by its mode or
+    /// by the directory it is in -- a symlink, a file whose owner the reader
+    /// does not trust, or a relative path does not, each before it is read.
+    #[test]
+    fn the_policy_loader_refuses_a_file_another_uid_could_change() {
+        use std::os::unix::fs::MetadataExt as _;
+        use std::path::{Path, PathBuf};
+
+        use dwkd_authority::state::PolicySet;
+
+        let fx = Fixture::new("t-policy-loader");
+        let text = PolicySet::shipped("balanced")
+            .map(|set| set.sources[0].text.clone())
+            .unwrap();
+        let dir = fx.dir.path();
+        let owner = std::fs::metadata(dir).unwrap().uid();
+        let file = |at: &Path, mode: u32| -> PathBuf {
+            std::fs::write(at, &text).unwrap();
+            std::fs::set_permissions(at, std::fs::Permissions::from_mode(mode)).unwrap();
+            at.to_path_buf()
+        };
+        let load = |path: &Path, trusted: u32| {
+            PolicySet::from_files("balanced", &[path.to_path_buf()], trusted)
+        };
+        let refused = |path: &Path| load(path, owner).err().unwrap_or_default();
+
+        let good = file(&dir.join("balanced.toml"), 0o644);
+        let set = load(&good, owner).unwrap();
+        assert_eq!(set.sources[0].name, "balanced.toml");
+        assert_eq!(set.sources[0].text, text);
+        assert!(owner == 0 || load(&good, owner.wrapping_add(4242)).is_err());
+        for (name, mode) in [
+            ("group-writable.toml", 0o620),
+            ("other-writable.toml", 0o602),
+        ] {
+            let why = refused(&file(&dir.join(name), mode));
+            assert!(why.contains("--policy-file"), "{name}: {why}");
+        }
+        let link = dir.join("linked.toml");
+        std::os::unix::fs::symlink(&good, &link).unwrap();
+        assert!(refused(&link).contains("--policy-file"));
+        let open = dir.join("open");
+        std::fs::create_dir(&open).unwrap();
+        std::fs::set_permissions(&open, std::fs::Permissions::from_mode(0o777)).unwrap();
+        let inside = file(&open.join("balanced.toml"), 0o600);
+        assert!(refused(&inside).contains("--policy-file"));
+        let relative = refused(Path::new("balanced.toml"));
+        assert!(relative.contains("not an absolute path"), "{relative}");
+        std::fs::set_permissions(&open, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+
+    /// SR-01 (ADR-0075, Proposed): an operator's policy file is read as its
+    /// other files are. One in the fixture's private directory serves; one
+    /// another uid could write, a symlink, or one in a directory everyone can
+    /// write is a start that does not happen, and says which flag.
+    #[test]
+    fn an_operator_policy_file_is_trusted_only_as_the_other_operator_files_are() {
+        let fx = Fixture::new("t-policy-file");
+        let text = dwkd_authority::state::PolicySet::shipped("balanced")
+            .map(|set| set.sources[0].text.clone())
+            .unwrap();
+        let file = |at: &std::path::Path, mode: u32| {
+            std::fs::write(at, &text).unwrap();
+            std::fs::set_permissions(at, std::fs::Permissions::from_mode(mode)).unwrap();
+            at.display().to_string()
+        };
+        let with = |path: &str| {
+            let mut args = fx.args(&[]);
+            let at = args.iter().position(|a| a == "--policy-shipped").unwrap();
+            args.splice(
+                at..at + 2,
+                [
+                    "--policy-file".to_owned(),
+                    path.to_owned(),
+                    "--policy-profile".to_owned(),
+                    "balanced".to_owned(),
+                ],
+            );
+            args
+        };
+        let good = file(&fx.dir.path().join("balanced.toml"), 0o600);
+        {
+            let server = Server::start(&with(&good));
+            assert!(
+                !server.stderr().contains("--policy-file"),
+                "{}",
+                server.stderr()
+            );
+        }
+        let link = fx.dir.path().join("linked.toml");
+        std::os::unix::fs::symlink(&good, &link).unwrap();
+        let open = fx.dir.path().join("open");
+        std::fs::create_dir(&open).unwrap();
+        std::fs::set_permissions(&open, std::fs::Permissions::from_mode(0o777)).unwrap();
+        for (name, path) in [
+            (
+                "group-writable",
+                file(&fx.dir.path().join("group.toml"), 0o620),
+            ),
+            (
+                "other-writable",
+                file(&fx.dir.path().join("other.toml"), 0o606),
+            ),
+            ("a symlink", link.display().to_string()),
+            (
+                "in an open directory",
+                file(&open.join("balanced.toml"), 0o600),
+            ),
+            ("relative", "balanced.toml".to_owned()),
+        ] {
+            let Err((status, stderr)) = Server::try_start(&with(&path)) else {
+                panic!("started with a policy file that is {name}")
+            };
+            assert!(status.is_some_and(|s| !s.success()), "{name}: {stderr}");
+            assert!(stderr.contains("--policy-file"), "{name}: {stderr}");
+        }
+        std::fs::set_permissions(&open, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+
     #[test]
     fn help_describes_the_server_that_exists() {
         let output =

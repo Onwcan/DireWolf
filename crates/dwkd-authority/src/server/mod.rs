@@ -463,11 +463,13 @@ fn approver_place(
     )))
 }
 
-/// Everything before the socket is bound: the policy read, the socket's place
-/// checked, locked and cleared — before the authority starts, so a socket
-/// path that cannot be protected costs no incarnation — the peer policy
-/// checked against the authority's own uid, the approver endpoint's place and
-/// approvers checked the same way, and the authority started.
+/// Everything before the socket is bound: the socket's place checked, locked
+/// and cleared — before the authority starts, so a socket path that cannot
+/// be protected costs no incarnation — the policy read once the authority's
+/// own uid is known (an operator's policy file is trusted only as its other
+/// files are, ADR-0075), the peer policy checked against that uid, the
+/// approver endpoint's place and approvers checked the same way, and the
+/// authority started.
 #[cfg(unix)]
 fn start(
     config: &ServeConfig,
@@ -484,6 +486,8 @@ fn start(
 
     use crate::state::{Authority, PolicySet, StartOptions, StartupConfig};
 
+    let (place, authority_uid, existing) =
+        socket::prepare(&config.socket).map_err(|e| ServeError::Socket(e.to_string()))?;
     let policy = match &config.policy {
         PolicyInput::Shipped(name) => PolicySet::shipped(name).ok_or_else(|| {
             ServeError::Policy(format!(
@@ -491,12 +495,9 @@ fn start(
             ))
         })?,
         PolicyInput::Files { profile, files } => {
-            PolicySet::from_files(profile, files).map_err(ServeError::Policy)?
+            PolicySet::from_files(profile, files, authority_uid).map_err(ServeError::Policy)?
         }
     };
-
-    let (place, authority_uid, existing) =
-        socket::prepare(&config.socket).map_err(|e| ServeError::Socket(e.to_string()))?;
     if existing == socket::Existing::StaleRemoved {
         log(&format!(
             "removed this authority's own dead socket at {}",
