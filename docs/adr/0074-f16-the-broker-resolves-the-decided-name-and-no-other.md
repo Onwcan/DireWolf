@@ -107,6 +107,10 @@ whose address the guard then judged.
   not available here"): the hosted runner restricts them, and only the
   `sandbox-egress` job lifts the restriction, for F-04's case alone. The
   property is shown locally, not by a hosted run.
+- Since 2026-11-22, `make namespace-evidence` runs this test by name in the
+  hosted `sandbox-egress` job, after that job lifts the restriction, and
+  requires its six cases: NOT EXERCISED fails the step. Its first hosted
+  run is pending; until it reports, the hosted state stays NOT EXERCISED.
 
 ## Rollback and deployment
 

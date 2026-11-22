@@ -9332,6 +9332,81 @@ def task_proxy_peer_evidence() -> None:
     )
 
 
+# The broker's tests that need unprivileged user, mount, network or pid
+# namespaces: F-16's hostile resolver (ADR-0074), F-05's real kernel maps
+# (ADR-0069, ADR-0070) and the hidden-pid peer reader (ADR-0049). Ubuntu's
+# hosted runner restricts unprivileged user namespaces
+# (`kernel.apparmor_restrict_unprivileged_userns=1`), so in `make test` and
+# the unit runs of the evidence jobs each prints NOT EXERCISED and passes.
+# This task runs each by name where a disposable runner lifts the
+# restriction, and requires every marker the test prints only once its
+# assertions held; a test that printed NOT EXERCISED fails it.
+_F16_CASES = (
+    "f16-search-domain-not-appended",
+    "f16-hosts-file-not-consulted",
+    "f16-nxdomain-fails",
+    "f16-answer-past-the-bound-refused",
+    "f16-whole-answer-kept",
+    "f16-silent-server-times-out",
+)
+NAMESPACE_EVIDENCE: tuple[tuple[str, tuple[str, ...]], ...] = (
+    (
+        "egress::tests::f16_the_resolver_asks_for_the_decided_name_and_no_other",
+        tuple(f'F16-EVIDENCE {{"case":"{case}"' for case in _F16_CASES),
+    ),
+    (
+        "sandbox::identity_tests::a_real_kernel_mapping_is_judged_where_it_is_read",
+        ('F05-EVIDENCE {"case":"userns-real-kernel-initial-and-unprivileged-namespace"',),
+    ),
+    (
+        "sandbox::identity_tests::a_real_namespace_reads_the_same_from_inside_and_from_the_host",
+        ('F05-EVIDENCE {"case":"userns-real-kernel-two-vantages-agree"',),
+    ),
+    (
+        "process::tests::a_peer_in_a_pid_namespace_this_process_cannot_see_is_read_soundly",
+        ("exercised in a hidden pid namespace: HIDDEN-PEER ",),
+    ),
+)
+NAMESPACE_HINT = (
+    "kernel.apparmor_restrict_unprivileged_userns=0 on a disposable runner, as the hosted "
+    "sandbox-egress job sets it"
+)
+
+
+def require_namespace_evidence(output: str, test: str, markers: Sequence[str]) -> None:
+    """One namespace test's run: it ran, alone, and passed; it did not say NOT
+    EXERCISED; and every marker it prints only once its assertions held is
+    there. A pass without its markers is not evidence."""
+    summaries = [line for line in output.splitlines() if line.startswith("test result: ")]
+    expected = "test result: ok. 1 passed; 0 failed; 0 ignored"
+    if len(summaries) != 1 or not summaries[0].startswith(expected):
+        raise TaskError(f"{test} did not run: expected `{expected}`, got {summaries or 'none'}")
+    if "NOT EXERCISED" in output:
+        raise TaskError(f"NOT EXERCISED: {test} could not make its namespaces ({NAMESPACE_HINT})")
+    lines = output.splitlines()
+    missing = [marker for marker in markers if not any(marker in line for line in lines)]
+    if missing:
+        raise TaskError(f"{test} did not report: {'; '.join(missing)}")
+
+
+def task_namespace_evidence() -> None:
+    """The broker's namespace-dependent tests, each required to be exercised:
+    F-16's hostile resolver (six cases, ADR-0074), F-05's real kernel maps
+    (two cases, ADR-0069/0070), the hidden-pid peer reader (ADR-0049). Each
+    runs alone with its output shown; NOT EXERCISED, a missing marker or a
+    failure fails the task. Linux, with unprivileged user namespaces: WSL2,
+    or a disposable hosted runner after its AppArmor restriction is lifted.
+    """
+    if not sys.platform.startswith("linux"):
+        raise TaskError("NOT EXERCISED: the broker's namespace tests run only on Linux; use WSL2")
+    broker = ("cargo", "test", "--locked", "-p", "dwkd-broker", "--bin", "dwkd-broker", "--")
+    for test, markers in NAMESPACE_EVIDENCE:
+        output = run_captured(*broker, "--exact", "--nocapture", "--test-threads=1", test)
+        require_namespace_evidence(output, test, markers)
+    count = sum(len(required) for _, required in NAMESPACE_EVIDENCE)
+    print(f"namespace evidence: {len(NAMESPACE_EVIDENCE)} tests, {count} markers, each exercised")
+
+
 # F-04 (ADR-0068, Proposed): each guard of the proxy's peer check weakened in
 # turn -- the check skipped, every uid admitted, the broker's uid taken for
 # the relay's, an unreadable peer admitted, a hidden pid refused, a visible
@@ -16627,6 +16702,7 @@ TASKS = {
     "policy-anchor-mutations": task_policy_anchor_mutations,
     "approver-identity-mutations": task_approver_identity_mutations,
     "proxy-peer-evidence": task_proxy_peer_evidence,
+    "namespace-evidence": task_namespace_evidence,
     "proxy-peer-mutations": task_proxy_peer_mutations,
     "sandbox-identity-mutations": task_sandbox_identity_mutations,
     "egress-allowlist-mutations": task_egress_allowlist_mutations,
