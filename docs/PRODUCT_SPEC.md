@@ -1,5 +1,11 @@
 # Product Specification
 
+> **This is the V1 specification: the target, not the build.** What runs today,
+> and how to run it, is [OPERATIONS.md](OPERATIONS.md) (as built, 2026-11-21);
+> which milestone builds each part is [ROADMAP.md](ROADMAP.md). A section that
+> shows a command or a mode that does not exist yet carries an **As built** note
+> saying what exists instead.
+
 ---
 
 ## 1. What DireWolf is
@@ -97,6 +103,12 @@ $ direwolf run authority run_01J8...
   Budget  $0.31 / $5.00 · 6/50 calls · 2m14s / 30m
 ```
 
+**As built (2026-11-21).** None of the commands above exists yet: `direwolf` has
+`--version`, `doctor` and `models`, and the agent, its chat, its approvals and its
+budgets are M6 to M17. What runs is the authority plane, `dwkd-authority serve`
+and `dwkd-broker serve`, which a DWKP client addresses directly
+([OPERATIONS.md](OPERATIONS.md)).
+
 ## 5. V1 scope — frozen
 
 ### In
@@ -114,6 +126,15 @@ $ direwolf run authority run_01J8...
 | **Observability** | OTel traces/metrics, structured logs, `doctor` |
 | **Evaluation** | Eval harness + the security eval suite as a merge gate |
 | **Release** | Per-platform binaries with generated third-party notices, an SBOM, build provenance and signatures; a reproducibility check (M18) |
+
+**As built (2026-11-21).** Of the kernel row: the policy engine, the capability
+lattice, the secret, filesystem and execution brokers, the egress proxy, the OCI
+sandbox supervisor and the audit record exist (M3 to M5); the approval registry
+and the budget ledger are M6's, model egress M7's. Of the interface row,
+`direwolf doctor` exists as its foundation subset; `direwolf run --detach`,
+`direwolf approve --list` and every other command are M17's. Nothing in the
+runtime row is built yet (M8 to M16). Nothing is released: DireWolf is built from
+source ([OPERATIONS.md](OPERATIONS.md) §2).
 
 ### The V1 core tool set
 
@@ -173,6 +194,15 @@ Mode 2 is real and supported, because most people will run it and pretending oth
 
 Workspace access follows from this: the **kernel** reads and mounts the workspace; the runtime never opens workspace files at the OS level. In mode 1 that is enforced by uid; in mode 2 it is enforced only by the runtime having no filesystem code path, which is defence in depth rather than a boundary. Both facts are stated by `doctor`.
 
+**As built (2026-11-21).** There is no `direwolf init`. The operator creates the
+identities and names them to the daemons -- the DWKP peers with `--allow-uid`,
+the broker with `--broker-uid`, the authority with the broker's
+`--authority-uid` -- and a single-user deployment, mode 2 above, passes the
+development acknowledgements, which each daemon logs as `REDUCED ASSURANCE` and
+records in its effective posture. `direwolf doctor` reports no `AssuranceLevel`:
+it names each property it does not check and the daemon that reports it
+([OPERATIONS.md](OPERATIONS.md) §3).
+
 ## 7. Configuration
 
 Layered, with later layers only narrowing security-relevant settings:
@@ -185,6 +215,16 @@ defaults < system (/etc/direwolf) < user (~/.direwolf) < workspace (.direwolf/)
 **Security settings do not follow normal precedence.** `security.allow_host_execution`, policy profile selection and capability ceilings are **kernel-side only** and may not be set by workspace config, agent profile or CLI flags. Otherwise a repository could ship a `.direwolf/config.toml` that disables the sandbox — a config file in a cloned repository is untrusted content.
 
 Secrets never appear in configuration; only handles. Configuration is schema-validated with `direwolf config validate`, and unknown keys are errors rather than silently ignored typos.
+
+**As built (2026-11-21).** No layered configuration and no `direwolf config
+validate`. The authority takes flags and reads the operator's files they name --
+policy files, `--secrets-file`, `--sandbox-config`, `--egress-allowlist` -- once,
+at start, each parsed whole, an unknown key refusing it; the last three must be
+owned by root or the authority and writable by nobody else, and a policy file is
+not checked for its owner. The security settings above are already the
+authority's alone: host execution, the policy and the mode's ceiling are
+`dwkd-authority serve` flags, and nothing a workspace or a client sends can set
+them ([OPERATIONS.md](OPERATIONS.md) §4).
 
 ## 8. Product modes
 
@@ -203,6 +243,16 @@ Secrets never appear in configuration; only handles. Configuration is schema-val
 | Runtime RSS | < 250 MB idle |
 | Platforms | Linux (full), macOS (full via Docker VM), Windows (WSL2 recommended; native = reduced assurance, loudly stated) |
 | Install | Single binary + a Python environment; one command |
+
+**As built (2026-11-21).** The daemons serve on Linux only, WSL2 included; on macOS
+and native Windows `serve` refuses to start, so the VM-hosted sandbox of the
+platforms row is the design. Nothing is installed by one command: DireWolf is
+built from source (`make dev`), and released binaries are M18's. Audit
+verification is `dwkd-authority verify-audit <state-dir>`, a read-only check of
+the whole chain against `kernel.db`; there is no signed checkpoint, and a served
+authority verifies the chain at every start. The latency rows are targets until
+M3.5 measures them; policy evaluation was measured at M3, p99 3.6 µs at 300 rules
+([OPERATIONS.md](OPERATIONS.md) §7).
 
 ## 10. Licence and governance
 

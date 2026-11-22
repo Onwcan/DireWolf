@@ -5,7 +5,9 @@
 //! `kernel.db`, and a container runtime for sandboxing.  The support tiers
 //! below are the ones stated in `docs/PRODUCT_SPEC.md` §9, restated here in
 //! code so `direwolf doctor` reports them rather than a reader having to infer
-//! them.
+//! them -- each with what is built today where the two differ: the daemons
+//! serve on Linux only (WSL2 included) and refuse to start on macOS and
+//! native Windows (`docs/OPERATIONS.md`).
 //!
 //! This module reports a *fact about the host*.  It does not configure, assert
 //! or enforce anything, and a tier is not an assurance level: the runtime
@@ -36,10 +38,14 @@ impl SupportTier {
     pub(crate) fn explain(self) -> &'static str {
         match self {
             Self::Full => "supported; all required OS mechanisms are available natively",
-            Self::FullViaVm => "supported; the container sandbox runs in a Linux VM",
+            Self::FullViaVm => {
+                "design target: the container sandbox in a Linux VM; not built -- \
+                 dwkd-authority and dwkd-broker serve on Linux only and refuse to start here"
+            }
             Self::Wsl2 => "supported; this is the recommended Windows development path",
             Self::ReducedAssurance => {
-                "runs, but some OS mechanisms the design relies on are absent or differ"
+                "runs, but some OS mechanisms the design relies on are absent or differ; \
+                 dwkd-authority and dwkd-broker refuse to start here"
             }
             Self::Unknown => "not evaluated by the project",
         }
@@ -50,7 +56,7 @@ impl fmt::Display for SupportTier {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let s = match self {
             Self::Full => "full",
-            Self::FullViaVm => "full (via VM)",
+            Self::FullViaVm => "full via VM (design target)",
             Self::Wsl2 => "full (WSL2)",
             Self::ReducedAssurance => "reduced assurance",
             Self::Unknown => "unknown",
@@ -111,6 +117,24 @@ mod tests {
     #[test]
     fn macos_is_full_via_vm() {
         assert_eq!(classify("macos", false), SupportTier::FullViaVm);
+    }
+
+    /// Where the daemons do not serve, doctor says so: a tier is the
+    /// design's, and the explanation is what is built.
+    #[test]
+    fn a_platform_the_daemons_do_not_serve_on_says_so() {
+        for os in ["macos", "windows"] {
+            let tier = classify(os, false);
+            assert!(
+                tier.explain().contains("refuse to start here"),
+                "{os}: {}",
+                tier.explain()
+            );
+            assert!(!tier.to_string().starts_with("full ("), "{os}: {tier}");
+        }
+        for (os, wsl) in [("linux", false), ("linux", true)] {
+            assert!(!classify(os, wsl).explain().contains("refuse"), "{os}");
+        }
     }
 
     #[test]

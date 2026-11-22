@@ -67,6 +67,8 @@ The agent above it is not built yet.
 | **Brokered effects** | Files resolved by identity (`openat2`; no symlink, mount or Unicode escape); processes decided on executable identity; secrets by opaque handle, with no API that returns a value | M4 |
 | **A measured sandbox** | `oci-strict` environments measured from the runtime's record and by a digest-pinned probe; `PROXY_ONLY` egress through the broker's CONNECT proxy; the kernel's own `net.http` | M5 |
 | **Package managers, contained** | `npm ci`, `npm install` and `pip install` only under evidence-backed profiles; npx, pnpm, yarn, bun and cargo refused | M5 |
+| **Security remediation** | The proxy admitting only its relay's uid; each daemon's effective posture, control by control; an environment's user namespace and security module measured, a module required on request; the operator's egress allowlist a ceiling over every policy; the broker resolving the decided name and no other; host path anchors placed by identity; the approver's own endpoint ([ADR-0060](docs/adr/0060-a-constrained-network-grant-gives-no-proxy-only-destination.md) to [ADR-0074](docs/adr/0074-f16-the-broker-resolves-the-decided-name-and-no-other.md), Proposed) | after M5 |
+| **An offline model library** | `direwolf models`: local GGUF and safetensors files imported, hashed, identified by their own headers, verified and removed; no download, no inference ([ADR-0072](docs/adr/0072-the-operators-model-library-is-offline-and-a-download-is-egress-the-authority-decides.md), Proposed) | after M5 |
 | **Evidence, not assertions** | Every property exercised against the real binaries in hosted CI, on three genuine operating-system identities where it needs them; NOT EXERCISED fails rather than passes | every milestone |
 
 ## Quick start
@@ -84,8 +86,9 @@ campaigns also need Linux and a Docker-compatible runtime.
 [CONTRIBUTING.md](CONTRIBUTING.md) has the detail; on Windows without WSL2, run
 `python scripts/dw.py <task>` instead of `make`.
 
-There is no agent to run yet — `direwolf` supports `--version` and `doctor`. What runs
-today is the authority plane and the evidence for it.
+There is no agent to run yet — `direwolf` supports `--version`, `doctor` and `models`.
+What runs today is the authority plane and the evidence for it;
+[docs/OPERATIONS.md](docs/OPERATIONS.md) is how to run it.
 
 ## Status
 
@@ -105,6 +108,14 @@ acceptance evidence; this table summarises it.
 | M3.5 · Vertical slice | ⏳ planned, after M6 | — | One tool end to end — CLI → runtime → kernel → sandbox — with published latency, cold-start and approval-count measurements; before M7, because its results can still change what follows |
 | M7–M18 · to V1.0 | ⏳ planned | — | Model providers and egress (M7); storage and run state, the agent loop, tools, skills, context, artifacts, memory, subagents, the task graph and MCP (M8–M16); the CLI (M17); V1 hardening (M18) |
 | Post-V1 | ⏳ planned | — | Channels, a scheduler, a browser, plugins, a web UI and remote workers; interoperability with external coding agents, ACP first (M29, [ADR-0051](docs/adr/0051-external-agent-interoperability.md), Proposed) |
+
+**Between M5 and M6**, a security remediation that is not a milestone and does not
+change the order: findings F-01 to F-19 of the review of 2026-11-11/12, each fixed
+with its own adversarial cases and, where it changed a decision, a Proposed ADR
+(ADR-0060 to ADR-0074). F-05 is partially completed: every environment still runs as
+one host uid, because no supported runtime offers a user namespace per container.
+[docs/PRE_M6_REMEDIATION.md](docs/PRE_M6_REMEDIATION.md) has each finding's record and
+what a hosted run exercised.
 
 **What that means in practice.** A client can connect to `dwkd-authority`, be admitted
 to a run, and ask the authority to read, list, search, stat, write, patch, move or delete
@@ -135,7 +146,12 @@ profiles ([ADR-0054](docs/adr/0054-m5e-npm-hygiene-profile.md),
   the authority's model egress;
 - the **agent runtime** — the loop, tools an agent calls, context, memory, skills,
   subagents, MCP (M8–M16) — so the runtime's own confinement is not built either (M9);
-- the full **CLI** (M17): `direwolf` supports `--version` and `doctor`, and nothing else;
+- the full **CLI** (M17): `direwolf` supports `--version`, `doctor` and `models`, and
+  nothing else;
+- model **downloads** (after M7, [ADR-0072](docs/adr/0072-the-operators-model-library-is-offline-and-a-download-is-egress-the-authority-decides.md) OM-2) and inference from the
+  model library (M7);
+- a user namespace per environment (F-05: every environment runs as uid 10001), and
+  the broker's posture in the authority's audit record (protocol 13, deferred);
 - channels, a scheduler, a browser, plugins, a web UI and remote workers (post-V1), and
   interoperability with external coding agents — ACP first, each one a contained workload
   or a client, never an authority (M29, post-V1;
@@ -260,6 +276,8 @@ three are design properties whose mechanisms arrive with model egress (M7), appr
 [ARCHITECTURE](docs/ARCHITECTURE.md) ·
 [COMPETITIVE_ANALYSIS](docs/COMPETITIVE_ANALYSIS.md) ·
 [ROADMAP](docs/ROADMAP.md) ·
+[OPERATIONS](docs/OPERATIONS.md) ·
+[MODELS](docs/MODELS.md) ·
 [M5E_ASSURANCE_PLAN](docs/M5E_ASSURANCE_PLAN.md) ·
 [LANGUAGE_SELECTION](docs/LANGUAGE_SELECTION.md)
 
@@ -299,7 +317,8 @@ three are design properties whose mechanisms arrive with model egress (M7), appr
 
 **Review**
 [PHASE0_REVIEW](docs/PHASE0_REVIEW.md) — 62 findings from three independent adversarial review tracks, with dispositions ·
-[M5E2_FINAL_CLOSURE_REVIEW](docs/M5E2_FINAL_CLOSURE_REVIEW.md) — M5e.2's closure assessment of 2026-11-03.
+[M5E2_FINAL_CLOSURE_REVIEW](docs/M5E2_FINAL_CLOSURE_REVIEW.md) — M5e.2's closure assessment of 2026-11-03 ·
+[PRE_M6_REMEDIATION](docs/PRE_M6_REMEDIATION.md) — the pre-M6 findings, each with its record and hosted evidence.
 
 **Checkpoint handoffs** — each a checkpoint's plan, kept as it was written, its last status line current:
 [M5D5_IMPLEMENTATION_HANDOFF](docs/M5D5_IMPLEMENTATION_HANDOFF.md) ·
@@ -308,7 +327,7 @@ three are design properties whose mechanisms arrive with model egress (M7), appr
 [M5E5_IMPLEMENTATION_HANDOFF](docs/M5E5_IMPLEMENTATION_HANDOFF.md) ·
 [M5E6_PREPARATION_HANDOFF](docs/M5E6_PREPARATION_HANDOFF.md)
 
-**Decisions**: [docs/adr/](docs/adr/) — 61 architecture decision records (0000–0060): 55 accepted, four superseded and kept as history (0001, 0002, 0007, 0057), and two Proposed (0051, 0060). Start with [ADR-0000](docs/adr/0000-authority-plane-separation.md), then [ADR-0018](docs/adr/0018-authority-broker-split.md); everything else is downstream. The [index](docs/adr/README.md) says which are current.
+**Decisions**: [docs/adr/](docs/adr/) — 75 architecture decision records (0000–0074): 55 accepted, 4 superseded and kept as history (0001, 0002, 0007, 0057), and 16 Proposed (0051, 0060–0074). Start with [ADR-0000](docs/adr/0000-authority-plane-separation.md), then [ADR-0018](docs/adr/0018-authority-broker-split.md); everything else is downstream. The [index](docs/adr/README.md) says which are current.
 
 ---
 

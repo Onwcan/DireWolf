@@ -1,11 +1,12 @@
 //! The `direwolf` binary.
 //!
-//! # Scope at M1
+//! # Scope
 //!
-//! M1 is the repository foundation. The DireWolf command surface — `run`,
-//! `chat`, `agent`, `approve`, `memory`, `policy` — belongs to the milestones
-//! that build the subsystems behind it (see `docs/ROADMAP.md`), and none of it
-//! is stubbed here. A command that exists but cannot work is worse than one
+//! The DireWolf command surface — `run`, `chat`, `agent`, `approve`,
+//! `memory`, `policy` — belongs to the milestones that build the subsystems
+//! behind it (see `docs/ROADMAP.md`), and none of it is stubbed here. The
+//! authority plane that exists is operated through `dwkd-authority` and
+//! `dwkd-broker` (`docs/OPERATIONS.md`), not through this binary. A command that exists but cannot work is worse than one
 //! that does not exist: it invites callers, scripts and documentation to form
 //! around a shape nobody has designed yet.
 //!
@@ -43,8 +44,9 @@ OPTIONS:
     -h, --help       Print this message
 
 The agent command surface (run, chat, agent, approve, memory, policy) is
-not implemented: DireWolf is at milestone M1, the repository foundation.
-See docs/ROADMAP.md for what each later milestone adds.
+not implemented: each part belongs to a later milestone. The authority
+plane runs as dwkd-authority and dwkd-broker (docs/OPERATIONS.md); see
+docs/ROADMAP.md for what is built and what each milestone adds.
 ";
 
 fn main() -> ExitCode {

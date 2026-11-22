@@ -27,9 +27,10 @@
 //! authority's uid, and it speaks only the private protocol
 //! ([`dwk_proto::brokerp`]), which no cognition-side code can name.
 //!
-//! # Status: M5d — sandboxed workloads (in progress); M5c — `net.http`; M5b —
-//! `PROXY_ONLY` egress; M5a — execution environments; M4e — secret handoff;
-//! M4d — process execution, the filesystem tools
+//! # Built: M5d — sandboxed workloads; M5c — `net.http`; M5b — `PROXY_ONLY`
+//! egress; M5a — execution environments; M4e — secret handoff; M4d — process
+//! execution, the filesystem tools. M5 is complete; `docs/ROADMAP.md` has the
+//! status and `docs/OPERATIONS.md` how to run it.
 //!
 //! [ADR-0043]: one private Unix-domain listener (`listener`), one exchange per
 //! connection (`exchange`): a hello naming a fresh channel, one authorisation
@@ -99,7 +100,7 @@
 //! roots with a test authority, loudly, and only beside
 //! `--allow-evidence-egress`'s fixture resolver; production has none.
 //!
-//! [ADR-0052] (M5d, in progress) runs one workload at a time in each `READY`
+//! [ADR-0052] (M5d) runs one workload at a time in each `READY`
 //! environment (`sandbox`, `workload_start`): the recorded container
 //! re-judged from the runtime's record and the executable's bytes proved in
 //! the image before the start is answered; then, on the supervisor's own
@@ -625,10 +626,10 @@ fn help() -> String {
          uid; not addressable from the cognition plane.\n\
          \n\
          USAGE:\n    \
-             {NAME} serve --socket <PATH> --authority-uid <UID> [--allow-shared-authority-uid] [--allow-dumpable]\n    \
-                              [--allow-traceable-workers] [--allow-swappable-workers]\n    \
-                              [--allow-evidence-topology] [--allow-unverified-workspace]\n    \
-                              [--allow-evidence-egress <FILE>]\n    \
+             {NAME} serve --socket <PATH> --authority-uid <UID> [--allow-shared-authority-uid] [--allow-dumpable]\n                      \
+                              [--allow-traceable-workers] [--allow-swappable-workers]\n                      \
+                              [--allow-evidence-topology] [--allow-unverified-workspace]\n                      \
+                              [--allow-evidence-egress <FILE>]\n                      \
                               [--allow-evidence-trust <PEM>] [--require-lsm apparmor|selinux]\n    \
              {NAME} [-V | --version] [-h | --help]\n\
          \n\
@@ -649,8 +650,8 @@ fn help() -> String {
          patch, move, delete) and process execution (start, status, kill) of the\n\
          executable the authority checked, by its descriptor, on the HOST with\n\
          the broker's own privileges. M4e - one secret per invocation, handed\n\
-         over in a pipe: an egress header rendered and dropped, or a value\n\
-         injected into a launch; no secret store. M5a - execution environments:\n\
+         over in a pipe: composed into one net.http request (M5c) or injected\n\
+         into a launch; no secret store. M5a - execution environments:\n\
          an oci-strict container prepared, measured, destroyed and listed\n\
          through the runtime client the authority checked, with nothing run\n\
          inside but the trusted probe. M5b - PROXY_ONLY: the runtime's none\n\
@@ -660,11 +661,16 @@ fn help() -> String {
          NO_NETWORK only for evidence. M5c - net.http: one HTTPS exchange\n\
          per authorised hop to the pinned addresses, re-judged, with TLS\n\
          verification always on; no redirect followed, nothing re-resolved,\n\
-         pooled or proxied; a credential composed into its one request. M5d\n\
-         (in progress) - one authorised workload at a time in each READY\n\
-         oci-strict environment, started then collected, as uid 10001,\n\
-         bounded, every process it left then ended; no daemon with an environment's uid; no traceable start-up\n\
-         window. Linux only.\n",
+         pooled or proxied; a credential composed into its one request. M5d -\n\
+         one authorised workload at a time in each READY oci-strict\n\
+         environment, started then collected, as uid 10001, bounded, every\n\
+         process it left then ended; no daemon with an environment's uid; no\n\
+         traceable start-up window. Since M5: the proxy admits only the\n\
+         relay's uid (F-04); each environment's user namespace and security\n\
+         module measured, a module required with --require-lsm (F-05); the\n\
+         decided name resolved absolute and no other (F-16); each control's\n\
+         effective posture said at start (F-03). Linux only. See\n\
+         docs/ROADMAP.md for status and docs/OPERATIONS.md for running it.\n",
         env!("CARGO_PKG_VERSION")
     )
 }
@@ -920,6 +926,16 @@ mod tests {
         assert!(h.contains("M5a") && h.contains("oci-strict") && h.contains("NO_NETWORK only"));
         assert!(h.contains("--allow-evidence-topology"));
         assert!(h.contains("--allow-unverified-workspace"));
+        // What is complete is not called in progress, and a usage line
+        // continued is indented under its command.
+        assert!(!h.contains("in progress"), "{h}");
+        assert!(!h.contains("rendered and dropped"), "{h}");
+        assert!(
+            h.lines()
+                .filter(|l| l.trim_start().starts_with("[--"))
+                .all(|l| l.starts_with(&" ".repeat(22))),
+            "{h}"
+        );
     }
 
     /// The broker's defining property, asserted as a test so that a future

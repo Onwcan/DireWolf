@@ -604,14 +604,15 @@ hooks must not acquire CRLF.
 | | Status |
 |---|---|
 | **Linux** | Primary. Everything works. |
-| **macOS** | Supported. The container sandbox will run in a Linux VM. |
-| **Windows + WSL2** | Supported, and the recommended Windows path. |
+| **macOS** | Builds and tests (CI). The daemons do not serve: `serve` refuses to start, and the container sandbox in a Linux VM is the design, not built. |
+| **Windows + WSL2** | Supported, and the recommended Windows path: the daemons serve there as on Linux. |
 | **Native Windows** | Development only, reduced assurance, loudly stated. |
 
 Native Windows builds and tests — CI covers it — but it lacks the uid model the
 two-identity install assumes, and path resolution differs from `openat2`. It is
 a real target and it is labelled rather than quietly downgraded;
-`direwolf doctor` says so on every run.
+`direwolf doctor` says so on every run, and that the daemons refuse to start
+there. How a deployment is run is [docs/OPERATIONS.md](docs/OPERATIONS.md).
 
 We do not add platform-specific workarounds to claim parity that does not
 exist.
