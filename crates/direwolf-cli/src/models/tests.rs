@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 
 use super::format::{self, Format};
 use super::hardware::{self, Facts, Headroom};
-use super::library::{FileState, Library, Manifest, is_model_name};
+use super::library::{FileState, Library, Manifest, copy_hashing, is_model_name};
 use super::{EXIT_REFUSED, EXIT_USAGE, json_line, run, shown};
 
 /// A directory removed when dropped, read-only files included.
@@ -576,6 +576,63 @@ fn a_refused_file_refuses_its_model_and_leaves_nothing() {
             .unwrap_err()
             .contains("twice")
     );
+}
+
+/// SR-04: the file imported is the file checked, and exactly its length. A
+/// source that grows after its check -- past the quota judged on its old
+/// length -- is refused and leaves nothing at the target.
+#[test]
+fn a_source_that_changes_after_its_check_is_refused_and_leaves_nothing() {
+    let s = Scratch::new("changed");
+    let source = s.file("m.gguf", b"GGUF0123");
+    let checked = fs::symlink_metadata(&source).unwrap();
+    let kept = s.0.join("kept");
+    let (digest, length) = copy_hashing(&source, &kept, &checked).unwrap();
+    assert_eq!(length, 8);
+    assert_eq!(digest.len(), 64);
+    fs::write(&source, b"GGUF0123 and more after the check").unwrap();
+    let grown = s.0.join("grown");
+    let refused = copy_hashing(&source, &grown, &checked).unwrap_err();
+    assert!(
+        refused.contains("changed while it was imported"),
+        "{refused}"
+    );
+    assert!(fs::symlink_metadata(&grown).is_err(), "nothing kept");
+    // It shrinks after the check: refused too, and nothing is kept.
+    let shrinking = s.file("s.gguf", b"GGUF0123GGUF4567");
+    let before = fs::symlink_metadata(&shrinking).unwrap();
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&shrinking)
+        .unwrap()
+        .set_len(4)
+        .unwrap();
+    let shrunk = s.0.join("shrunk");
+    let refused = copy_hashing(&shrinking, &shrunk, &before).unwrap_err();
+    assert!(
+        refused.contains("changed while it was imported"),
+        "{refused}"
+    );
+    assert!(fs::symlink_metadata(&shrunk).is_err(), "nothing kept");
+}
+
+/// SR-04: a source swapped for a symlink after its check is not followed.
+#[cfg(unix)]
+#[test]
+fn a_source_swapped_for_a_symlink_after_its_check_is_refused() {
+    let s = Scratch::new("swapped");
+    let source = s.file("m.gguf", b"GGUF0123");
+    let checked = fs::symlink_metadata(&source).unwrap();
+    let elsewhere = s.file("elsewhere.gguf", b"GGUF4567");
+    fs::remove_file(&source).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, &source).unwrap();
+    let target = s.0.join("target");
+    let refused = copy_hashing(&source, &target, &checked).unwrap_err();
+    assert!(
+        refused.contains("changed while it was imported"),
+        "{refused}"
+    );
+    assert!(fs::symlink_metadata(&target).is_err(), "nothing kept");
 }
 
 #[cfg(unix)]

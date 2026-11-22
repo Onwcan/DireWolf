@@ -171,10 +171,42 @@ fn fresh(tag: &str) -> String {
     )
 }
 
+/// Whether `opened` is the file `checked` described: the same inode on the
+/// same device where the platform says so; the same length and modification
+/// time elsewhere.
+#[cfg(unix)]
+fn same_file(checked: &fs::Metadata, opened: &fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt as _;
+    checked.dev() == opened.dev() && checked.ino() == opened.ino()
+}
+
+#[cfg(not(unix))]
+fn same_file(checked: &fs::Metadata, opened: &fs::Metadata) -> bool {
+    checked.len() == opened.len() && checked.modified().ok() == opened.modified().ok()
+}
+
 /// Copy `from` into a new file at `to`, hashing what is written: the digest
 /// is of the bytes the library holds, never of a second read of the source.
-fn copy_hashing(from: &Path, to: &Path) -> Result<(String, u64), String> {
+///
+/// The file opened must be the regular file `checked` describes -- a path
+/// swapped for a symlink or another file after its check is refused -- and
+/// exactly `checked`'s length is copied: a file that grows or shrinks while
+/// it is read is refused and nothing of it is kept, so the quota judged
+/// before the copy holds after it (SR-04).
+pub(crate) fn copy_hashing(
+    from: &Path,
+    to: &Path,
+    checked: &fs::Metadata,
+) -> Result<(String, u64), String> {
+    let changed = || format!("{}: changed while it was imported", from.display());
     let mut source = File::open(from).map_err(|e| format!("{}: {e}", from.display()))?;
+    let opened = source
+        .metadata()
+        .map_err(|e| format!("{}: {e}", from.display()))?;
+    if !opened.is_file() || !same_file(checked, &opened) {
+        return Err(changed());
+    }
+    let expected = checked.len();
     let mut target = OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -190,12 +222,22 @@ fn copy_hashing(from: &Path, to: &Path) -> Result<(String, u64), String> {
             Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
             Err(e) => return Err(format!("{}: {e}", from.display())),
         };
+        total = total.saturating_add(u64::try_from(n).unwrap_or(u64::MAX));
+        if total > expected {
+            drop(target);
+            let _ = fs::remove_file(to);
+            return Err(changed());
+        }
         let chunk = buffer.get(..n).unwrap_or_default();
         hasher.update(chunk);
         target
             .write_all(chunk)
             .map_err(|e| format!("writing the library: {e}"))?;
-        total = total.saturating_add(u64::try_from(n).unwrap_or(u64::MAX));
+    }
+    if total != expected {
+        drop(target);
+        let _ = fs::remove_file(to);
+        return Err(changed());
     }
     target
         .sync_all()
@@ -334,6 +376,7 @@ impl Library {
             ));
         }
         let mut names: Vec<String> = Vec::new();
+        let mut checked: Vec<fs::Metadata> = Vec::new();
         let mut total = 0u64;
         for file in files {
             let plain = file
@@ -354,6 +397,7 @@ impl Library {
                 ));
             }
             total = total.saturating_add(meta.len());
+            checked.push(meta);
         }
         if let Some(quota) = quota {
             let held = self.held_bytes();
@@ -365,7 +409,7 @@ impl Library {
         }
         let mut kept: Vec<Staged> = Vec::new();
         let manifest = self
-            .stage(files, &names, &mut kept)
+            .stage(files, &names, &checked, &mut kept)
             .and_then(|()| whole(name, &kept));
         let manifest = match manifest {
             Ok(manifest) => manifest,
@@ -391,11 +435,12 @@ impl Library {
         &self,
         files: &[PathBuf],
         names: &[String],
+        checked: &[fs::Metadata],
         kept: &mut Vec<Staged>,
     ) -> Result<(), String> {
-        for (file, plain) in files.iter().zip(names) {
+        for ((file, plain), checked) in files.iter().zip(names).zip(checked) {
             let staged = self.root.join("tmp").join(fresh("import"));
-            let (digest, bytes) = copy_hashing(file, &staged)?;
+            let (digest, bytes) = copy_hashing(file, &staged, checked)?;
             let object = self.object(&digest);
             let fresh_object = if fs::symlink_metadata(&object).is_ok() {
                 let _ = fs::remove_file(&staged);
