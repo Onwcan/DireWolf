@@ -3,7 +3,8 @@
 **Research date:** 2026-09-28 (verification pass completed 2026-09-29). **Provider-coverage
 pass:** 2026-10-07, at the same snapshot commits (§7a); the one vendor document it also
 consults is dated where it is used. **Qoder pass:** 2026-11-06 (§7c), with its date and
-sources kept apart from that snapshot.
+sources kept apart from that snapshot. **November 2026 refresh:** 2026-11-21 (§22), at
+heads re-pinned that day and kept apart from every earlier pass.
 **Replaces:** the 2026-09-11 analysis, which compared a specification against two projects.
 **Method:** each project's own documentation, source files read one at a time at a pinned
 commit, its licence file, and advisories in the GitHub advisory database. No repository was
@@ -42,6 +43,8 @@ reimplemented from described behaviour, under DireWolf's own design.
 ---
 
 ## 1. What DireWolf is today
+
+> **Dated 2026-09-28.** DireWolf -- M5 complete, the pre-M6 remediation, the offline model library -- as of 2026-11-21 is §22.1; this section is kept as the snapshot's.
 
 DireWolf's thesis is that **the component that reasons is not the component that is
 trusted**: authorization, credentials and side effects live in privileged processes the
@@ -1033,6 +1036,8 @@ sites, one of which is wrong.
 
 ## 13. What is now real in DireWolf
 
+> **Dated 2026-09-28.** What is real as of 2026-11-21 is §22.1; this section is kept as the snapshot's.
+
 Each item is exercised by tests or evidence targets that run the real code, and the
 M4 closing hosted run (§1) was green.
 
@@ -1073,6 +1078,8 @@ approval flow; a statement that DireWolf "sandboxes" anything today would be fal
 ---
 
 ## 14. Where DireWolf is behind today
+
+> **Dated 2026-09-28.** Where DireWolf is behind as of 2026-11-21 is §22.10 (questions 2-4); this section is kept as the snapshot's.
 
 Stated plainly, so no one is misled:
 
@@ -1325,6 +1332,8 @@ Every candidate idea from the research, with its decision. Fields: **SOURCE** ·
 | G19 | Qoder CLI | Never persist a rule for a network path; confirm alternate data streams, 8.3 names, device paths, trailing dots and reserved names | Listed as attacks with defences in [SANDBOX.md](SANDBOX.md); native Windows serving refuses | ALREADY PLANNED (the own ADR for other platforms; the persistent-rule point is an input to it) |
 | G20 | Qoder Mobile & Web | Approve an agent's actions from a phone | Remote approval designed, off by default, with high-risk classes keepable local ([APPROVALS.md](APPROVALS.md)) | ALREADY PLANNED (M6 and later surfaces) |
 
+**G21-G26** (2026-11-21, from the November refresh): §22.8.
+
 ---
 
 ## 18. Gap → roadmap traceability
@@ -1380,6 +1389,9 @@ after M10 (tools) and M5 (sandbox); publication is a V2.x item.
 
 ## 21. Analyst conclusion
 
+> **Dated 2026-09-28, after M4.** The conclusions as of 2026-11-21, M5 complete, are
+> §22.10; this one is kept as the snapshot's.
+
 DireWolf is no longer merely a paper architecture: M4 has demonstrated its local
 authority/broker narrow waist on real hosted identities. However, it is not yet a complete
 autonomous-agent platform, and it currently trails mature competitors substantially in
@@ -1396,3 +1408,379 @@ of narrower mechanisms — decisions on canonical objects, an authority/broker s
 made durable before the answer, every policy input held by the authority — which M3 and M4
 built and measured. Whether they add up to a safer *agent* is the question M5–M10 exist to
 answer, and until then this document makes no claim that they do.
+
+---
+
+## 22. November 2026 refresh (2026-11-21)
+
+A dated pass, kept apart from the 2026-09-28 snapshot. Nothing in §§1-21 was
+rewritten: the header, §1, §13, §14, §17 and §21 gained one dated pointer each.
+Every table above stays tied to the commit it was read at.
+
+### 22.0 Scope, finding and method
+
+**The finding.** F-14 of the security review of 2026-11-11/12 is recorded as
+"COMPETITIVE_ANALYSIS stale since M4 (G21-G25 proposed)". The text of the five
+proposed entries is not in the repository and was not available to this pass,
+so their scope is not reconstructed: this pass refreshes the report and numbers
+its own new ledger entries G21 onward (§22.8), independently of them.
+
+**Method.** As §2: no repository cloned, forked, mirrored or downloaded as an
+archive; no competitor software run; nothing copied into DireWolf. Each head
+was resolved on 2026-11-21 through the GitHub API, its file tree listed at that
+commit, and individual files read at that commit; release counts, licences and
+advisories are the GitHub API's for the project's own repository. A line
+reference is to the file at the pinned commit.
+
+**Labels in this section** -- the assignment's set, mapped onto §2's:
+**VERIFIED IMPLEMENTED** (read in source at the pin), **VERIFIED OPTIONAL**
+(present, off unless enabled), **VERIFIED DEFAULT** (on as shipped),
+**VERIFIED NOT PRESENT IN THE INSPECTED PATH**, **PARTIAL**, **NOT FOUND** (not
+in the sources inspected; never proof of absence), **UNVERIFIED**, **N/A**,
+**PLANNED** (DireWolf only). A label marked *(doc)* rests on the project's own
+documentation at the pinned commit, not on its code.
+
+**What this pass does not re-verify.** §20 requires a refresh to re-verify every
+label or mark it UNVERIFIED. The matrices of §§6-10 are the 2026-09-28
+snapshot's, at the commits §4 names; at the 2026-11-21 heads they are
+**UNVERIFIED** except where §22.4 re-reads a dimension.
+
+### 22.1 DireWolf, 2026-11-21
+
+- **Complete:** M1, M2, M2.5, M3, M4 and M5 ([ROADMAP.md](ROADMAP.md)). The
+  authority and the broker in separate OS identities, brokered filesystem and
+  process effects, secrets by handle, a measured `oci-strict` sandbox, `PROXY_ONLY`
+  egress through the broker's CONNECT proxy, the kernel's own `net.http`.
+- **Since M5:** the pre-M6 security remediation, finding by finding, with what
+  a hosted run exercised ([PRE_M6_REMEDIATION.md](PRE_M6_REMEDIATION.md)) --
+  among it an operator egress allowlist that is a ceiling over every policy
+  (ADR-0073) and a resolver that asks for the decided name and no other
+  (ADR-0074, NOT EXERCISED in hosted CI); and an offline model library
+  (`direwolf models`, ADR-0072) that downloads nothing and serves no inference.
+- **Not built:** approvals and budgets (M6), the vertical slice (M3.5), model
+  providers (M7), the agent loop and everything above it (M8-M17), releases
+  (M18), online model downloads (after M7), a user namespace per environment
+  (F-05, blocked), Landlock and host execution (M6). ADR-0060 to ADR-0074 are
+  Proposed.
+
+DireWolf is an authority plane with a sandbox, not an agent. Every subject
+below that runs agents is ahead of it as a product.
+
+### 22.2 The subjects, re-pinned
+
+| Project | What it is | Snapshot (§4) | Head read 2026-11-21 | Latest release | Releases since 2026-09-29 (stable / pre) | Licence (API) |
+|---|---|---|---|---|---|---|
+| Hermes Agent | autonomous agent runtime | `bca2e3c` | [`15806b3`](https://github.com/NousResearch/hermes-agent/tree/15806b32b394b4bdb270bc195fa99ccc056a3eb4) (2026-11-21) | v0.23.3 (2026-11-20) | 14 / 8 | MIT |
+| OpenClaw | autonomous agent runtime | `876334d` | [`2821214`](https://github.com/openclaw/openclaw/tree/282121402940c47c87a68bf08bb6e66097818884) (2026-11-21) | v2026.11.6 (2026-11-19) | 28 / 16 | MIT |
+| IronSecCo/IronClaw | security enforcement layer | `0b741b1` | [`18c5e72`](https://github.com/IronSecCo/ironclaw/tree/18c5e726b518577e9938ae6a3c9e23568f68db72) (2026-11-12) | v0.1.569 (2026-11-02) | 17 / 0 | AGPL-3.0 |
+| NEAR AI/IronClaw | autonomous agent runtime | `b0b999d` | `b0b999d`, unchanged (2026-09-10) | ironclaw-v1.4.1 (2026-09-29) | 1 / 0 | Apache-2.0 |
+| OpenFang | autonomous agent runtime | `acf2587` | `acf2587`, unchanged (2026-05-12) | v0.6.9 (2026-05-12) | 0 / 0 | Apache-2.0 |
+| OpenLegion | security enforcement layer | `24efd6e` | [`edac2ac`](https://github.com/openlegion-ai/openlegion/tree/edac2ac898909a273d11354f05cc7912714f4f2a) (2026-11-03) | none | 0 / 0 | NOASSERTION (§4: PolyForm Perimeter) |
+| Capgate | security enforcement layer | `95c2bd6` | [`df8d192`](https://github.com/jersonboydmilan/Capgate/tree/df8d1929b4ad7d75a505bd43385557f57ec5ff3b) (2026-10-17) | none | 0 / 0 | MIT |
+| Claude Code | coding agent (proprietary) | `dec92bc` | [`928ac13`](https://github.com/anthropics/claude-code/tree/928ac132a30dbe1ccf1f800cc93c4e8a65e4c449) (2026-11-21) | v2.1.330 (2026-11-20) | 40 / 0 | none (proprietary) |
+| OpenAI Codex | coding agent | `c248f6d` | [`a0436d6`](https://github.com/openai/codex/tree/a0436d69ffd9a6d943d9b56175ba2968c5e698af) (2026-11-21) | rust-v0.171.0 (2026-11-20) | 21 / 125 | Apache-2.0 |
+| Daytona | managed cloud platform | frozen v0.190.0 | [`ec4c21b`](https://github.com/daytonaio/daytona/tree/ec4c21b2d597091ac09ecc278f3bcc172575a987) (2026-06-25); **repository archived** | v0.190.0 (2026-06-23) | 0 / 0 | none reported |
+| OpenHands | coding agent and agent platform | `b9d174c` | [`0f4cb6a`](https://github.com/OpenHands/OpenHands/tree/0f4cb6af95915fee776913c4aa8694e7c4b76033) (2026-11-21) | v1.43.0 (2026-11-20) | 23 / 0 | MIT |
+| Qoder | coding agent (proprietary) | no source (§7c) | not re-read | -- | -- | proprietary |
+
+**What changed that matters here** (read at the new heads):
+
+- **Codex** now builds its Linux sandbox on bubblewrap for filesystem and
+  namespace isolation and seccomp for system calls, keeping Landlock as a legacy
+  path (`codex-rs/linux-sandbox/README.md` L10-13); macOS and Windows sandboxes
+  are in the tree (`codex-rs/cli/src/debug_sandbox/seatbelt.rs`,
+  `codex-rs/core/src/config/windows_sandbox_config.rs`); built-in profiles are
+  read-only, workspace and danger-full-access
+  (`codex-rs/core/src/config/permission_profile_catalog.rs` L57-59). New since
+  the snapshot is a managed network proxy with a host allowlist, refusal of
+  private addresses and a "limited" mode that intercepts HTTPS with a CA of its
+  own (`codex-rs/network-proxy/README.md` L3-60); a permission profile does not
+  start it by itself (`codex-rs/core/src/config/permissions.rs` L151-154).
+- **OpenClaw**'s documentation at the head says sandboxing "is off by default"
+  (`docs/gateway/sandboxing.md` L9), names Docker, Podman, SSH, OpenShell and
+  Crabbox backends (L23-29), and describes `tools.elevated` as "an explicit
+  escape hatch that runs `exec` outside the sandbox" (L66).
+- **Hermes Agent**'s `SECURITY.md` states that the default terminal backend
+  "runs commands directly on the host" (L44) and that "the only security
+  boundary against an adversarial LLM is the operating system" (L60); its
+  whole-process wrapping is the operator's choice (L67-100).
+- **OpenHands** at `0f4cb6a` is a TypeScript application (Electron, a Helm
+  chart, Docker workflows); the Python runtime read at `b9d174c` is not in this
+  tree. Its README says it "runs locally on your machine by default" (L34), and
+  that running without a sandbox gives the agent "full access to your
+  filesystem" (L62-65); a Docker sandbox is an option (L81).
+- **Claude Code**'s repository still holds plugins, examples and the changelog,
+  not the CLI's source (root listing at `928ac13`): its internals stay
+  UNVERIFIED.
+- **Daytona**'s public repository is now archived.
+- **Moved repositories:** Goose answers at `aaif-goose/goose` (was
+  `block/goose`), OpenCode at `anomalyco/opencode` (was `sst/opencode`).
+
+### 22.3 Candidates considered
+
+| Project | What it is | Pin (2026-11-21) | Added? | Why |
+|---|---|---|---|---|
+| OpenCode | coding agent | [`anomalyco/opencode@2ae1910`](https://github.com/anomalyco/opencode/tree/2ae1910140804547378da9a266cddf0708aaaf58), v1.19.6, MIT | **yes**, to §§22.4-22.5 | active (26 releases since 2026-09-29), a published security record, a permission system of its own |
+| Goose | coding and general agent | [`aaif-goose/goose@36b2911`](https://github.com/aaif-goose/goose/tree/36b29113aff691e1a46a21a5c25900824caf9949), v1.60.2, Apache-2.0 | **yes**, to §§22.4-22.5 | active (13 releases), an approval design that differs from DireWolf's in kind |
+| Aider | coding assistant | [`Aider-AI/aider@5dc9490`](https://github.com/Aider-AI/aider/tree/5dc9490bb35f9729ef2c95d00a19ccd30c26339c) (last commit 2026-05-22), Apache-2.0 | no | no release since v0.86.0 (2025-08-09); no isolation or authority design to compare |
+| Continue | IDE coding assistant | [`continuedev/continue@5522c6f`](https://github.com/continuedev/continue/tree/5522c6f44ca0ac3528b37244818fbfa39b5af470) (2026-07-21), Apache-2.0 | no | an editor extension, not an agent runtime; no release since 2026-06-19 |
+| Ollama, llama.cpp, Hugging Face Hub, LM Studio | local model managers and inference servers | §22.6 | separately | they manage model artifacts and serve inference; compared with DireWolf's model library, not with its authority plane |
+
+### 22.4 Security architecture at the new heads
+
+Only dimensions re-read in this pass; everything else is §6's snapshot, UNVERIFIED now.
+
+| Dimension | DireWolf | Codex | Claude Code | OpenClaw | Hermes Agent | OpenHands | OpenCode | Goose |
+|---|---|---|---|---|---|---|---|---|
+| Execution sandbox | VERIFIED DEFAULT once an environment is attached: `process.exec` runs only there, never on the host ([OPERATIONS.md](OPERATIONS.md) §4) | VERIFIED IMPLEMENTED (bubblewrap + seccomp; Seatbelt; Windows); which profile applies by default: UNVERIFIED | UNVERIFIED (proprietary); its advisories describe a sandbox and escapes fixed in it (§22.5) | VERIFIED OPTIONAL *(doc)*: off by default | VERIFIED OPTIONAL *(doc)*: host by default | VERIFIED OPTIONAL *(doc)*: local by default | NOT FOUND (no sandbox path in the tree) | NOT FOUND (no sandbox path in the tree) |
+| Egress mediation | VERIFIED DEFAULT: one CONNECT proxy in the broker; no network action without the operator's allowlist, a ceiling over every policy | VERIFIED OPTIONAL: a managed proxy with a host allowlist, behind a feature gate | UNVERIFIED | UNVERIFIED at this head | UNVERIFIED at this head | UNVERIFIED at this head | NOT FOUND | NOT FOUND |
+| Who decides an action | a separate process with its own OS identity, by deterministic policy | the agent process, by its permission profile and approvals; a separate identity NOT FOUND in the files read | UNVERIFIED | the gateway, by tool policy *(doc)* | the agent process; the project says only the OS is a boundary *(doc)* | UNVERIFIED at this head | the agent process, by `ask`/`allow`/`deny` rules, last match wins (`packages/core/src/v1/config/permission.ts` L5-9) | the agent process; "Autonomous" by default, "Smart Approval" judged by a model (`crates/goose/src/permission/permission_judge.rs`; *(doc)* `goose-permissions.md` L29-34) |
+| Approval binding | PLANNED (M6; ADR-0021) | VERIFIED IMPLEMENTED (approvals exist); binding UNVERIFIED | UNVERIFIED | UNVERIFIED at this head | UNVERIFIED at this head | UNVERIFIED | VERIFIED IMPLEMENTED (`ask` rules); binding UNVERIFIED | VERIFIED OPTIONAL |
+
+No row of this table is a score. A permission prompt is not an authority
+boundary, and an optional sandbox is not a default one; equally, DireWolf has
+no agent whose prompt-injection blast radius could be measured yet.
+
+### 22.5 The security record since 2026-09-28
+
+Each entry is the project's own published repository advisory, read 2026-11-21.
+Every fix named was in a release no later than the project's latest release on
+that date (§22.2).
+
+| Advisory | Project | Severity | Published | What it was | Affected -> fixed | DireWolf |
+|---|---|---|---|---|---|---|
+| GHSA-5j29-h97v-84ch / CVE-2026-103435 | Claude Code | high | 2026-10-05 | arbitrary file write by following a symlink at write time | < 2.1.129 -> 2.1.129 | mutation by descriptor beneath an opened directory, never replacing an object it did not prove (ADR-0044); TOCTOU campaigns in its evidence: VERIFIED IMPLEMENTED. G21 |
+| GHSA-pq7j-f95f-qfcv / CVE-2026-86063 | Claude Code | high | 2026-10-09 | a plugin's commit-SHA pin could be bypassed | < 2.1.179 -> 2.1.179 | no plugins in V1 (ADR-0015); skills pinned by content: PLANNED (M11a). G22 |
+| GHSA-4p2j-qj3c-6x84 / CVE-2026-88066 | Claude Desktop | high | 2026-10-13 | an uncontrolled search path ran a malicious `git` | < 1.8089.0 -> 1.8089.0 | executables resolved and hashed by the authority, run by descriptor, with an environment built from nothing (ADR-0045): VERIFIED IMPLEMENTED. G24 |
+| GHSA-5xjx-9qx6-jcrv / CVE-2026-88968 | Claude Code | high | 2026-10-26 | a race in the edit tool wrote outside the workspace | < 2.1.251 -> 2.1.251 | as CVE-2026-103435. G21 |
+| GHSA-gfvf-j8jh-jxxw / CVE-2026-103012 | Claude Code | low | 2026-09-29 | managed settings were not applied when a stored API key was preferred | >= 2.0.68, < 2.1.260 -> 2.1.260 | the security settings are the authority's start-up flags, and each incarnation records its effective posture (ADR-0065): VERIFIED IMPLEMENTED |
+| GHSA-pw3x-g8v8-fvj2 | OpenClaw | high | 2026-11-19 | delegation could skip approval for restricted agents | >= 2026.9.2, < 2026.10.33 -> 2026.10.33; >= 2026.11.1, < 2026.11.4 -> 2026.11.4 | no approvals yet (M6); delegation only attenuates, 10⁶ chains (M3): approval half PLANNED. G23 |
+| GHSA-p22p-9ph6-gmrh / CVE-2026-130164 | Hermes Agent | high | 2026-11-19 | an environment file from the terminal backend set arbitrary variables for agent-machine processes | >= 0.21.6, < 0.23.2 -> 0.23.2 | a launch's environment is built from nothing, and a workload cannot write a daemon's: VERIFIED IMPLEMENTED. G24 |
+
+Earlier in 2026, outside the 2026-09-28 record and recorded here for the two
+candidates: OpenCode's GHSA-vxw4-wv6m-9hhh (CVE-2026-22812, an unauthenticated
+HTTP server allowed command execution, < 1.0.216) and GHSA-c83v-7274-4vgp
+(CVE-2026-22813, critical, XSS in the web UI, < 1.1.10), both 2026-01-12, and
+GHSA-632h-h47v-g4x4 (2026-09-24, a cross-site upgrade request could install
+packages); Goose's GHSA-r5pp-p5r8-466r (CVE-2026-72718, 2026-07-24, `goose
+review` ran code through a repository's `core.fsmonitor`, < 1.44.0).
+
+### 22.6 Local model ecosystems: artifacts and inference, apart
+
+DireWolf's model library manages files offline; it **does not search, download
+or serve inference**, and a `model_download` operation is PLANNED
+(ADR-0071 OF-3, ADR-0072 OM-2, after M7).
+
+| Dimension | DireWolf `direwolf models` | Ollama [`2bd4d6a`](https://github.com/ollama/ollama/tree/2bd4d6aabdf4caa39e7095e201dcda4cc1a3a406) | llama.cpp [`19bc41d`](https://github.com/ggml-org/llama.cpp/tree/19bc41dbb41e858eebc269b49ccdec1f0d28880c) | Hugging Face Hub [`905aee8`](https://github.com/huggingface/huggingface_hub/tree/905aee877a2e9776b16ff67289a47cbd8d80bfca) | LM Studio `lms` [`138dcff`](https://github.com/lmstudio-ai/lms/tree/138dcffbc40e5fe3d9c0d38cf75dcdc1d883d849) |
+|---|---|---|---|---|---|
+| What it is | offline model library | local model manager and inference server | inference engine and server | model repository client library | CLI for the LM Studio application (the application is proprietary) |
+| Search, discovery | PLANNED | UNVERIFIED (not read) | UNVERIFIED | UNVERIFIED | VERIFIED IMPLEMENTED (`src/subcommands/get.ts`: search results and staff picks) |
+| Direct download | PLANNED | VERIFIED IMPLEMENTED (`server/images.go` `PullModel`, L1193) | VERIFIED IMPLEMENTED (`common/download.cpp`; Hugging Face and OCI registries) | VERIFIED IMPLEMENTED (`file_download.py`) | VERIFIED IMPLEMENTED, performed by the application (`get.ts` download plans) |
+| GGUF / safetensors | VERIFIED IMPLEMENTED, identified by header; pickle and zip checkpoints refused ([MODELS.md](MODELS.md)) | UNVERIFIED (not read) | GGUF native | format-agnostic files | VERIFIED IMPLEMENTED: GGUF and MLX choices (`get.ts` L32-33) |
+| Download recovery | N/A (no download) | VERIFIED IMPLEMENTED: up to 16 resumable parts (`server/download.go` L101-140) | VERIFIED IMPLEMENTED: HTTP `Range` resume (`common/download.cpp` L178-201) | VERIFIED IMPLEMENTED: resume (`file_download.py` L338-350) | UNVERIFIED (in the application) |
+| Artifact integrity | VERIFIED IMPLEMENTED: SHA-256 per file at import, `verify` again later | VERIFIED IMPLEMENTED: SHA-256 digest checked, a mismatch downloaded again (`server/images.go` L1868-1884) | PARTIAL: ETag cache (L44-64), OCI digest format validated (L955-975); a content check not seen in the lines read | PARTIAL: an LFS file's ETag is its SHA-256 (`file_download.py` L268-270); a local recheck not seen in the lines read | UNVERIFIED |
+| Revision pinning | PLANNED | PARTIAL: blobs by digest; tags UNVERIFIED | UNVERIFIED | VERIFIED OPTIONAL: `revision`, `main` when unset (L237-238, L287-288) | UNVERIFIED |
+| Licence visibility | NOT FOUND ([MODELS.md](MODELS.md) names none) | UNVERIFIED | UNVERIFIED | UNVERIFIED | UNVERIFIED |
+| Hardware estimate | VERIFIED IMPLEMENTED (`recommend`) | UNVERIFIED (`server/model_recommendations.go` is in the tree; not read) | UNVERIFIED | N/A | VERIFIED IMPLEMENTED (fit estimation type, `get.ts` L11) |
+| Inference server | PLANNED (M7) | its purpose; not re-read | its purpose (`llama-server`); not re-read | N/A | VERIFIED IMPLEMENTED (`src/subcommands/server.ts`) |
+| Download egress decided by an authority | the decision exists (egress is the authority's, under the operator's ceiling); the download is PLANNED | N/A: the process that downloads decides | N/A | N/A | N/A |
+
+### 22.7 Quantitative comparison, where it is comparable
+
+**Repository activity, 2026-11-21** (GitHub API; repository advisories are the
+project's own published list -- a measure of disclosure, not of security; star
+counts are not used).
+
+| Project | Releases since 2026-09-29 (stable / pre) | Published repository advisories (total / since 2026-09-29) |
+|---|---|---|
+| OpenClaw | 28 / 16 | 723 / 1 |
+| Claude Code | 40 / 0 | 36 / 5 |
+| Hermes Agent | 14 / 8 | 1 / 1 |
+| OpenAI Codex | 21 / 125 | 1 / 0 |
+| OpenHands | 23 / 0 | 1 / 0 |
+| OpenCode | 26 / 0 | 3 / 0 |
+| Goose | 13 / 0 | 1 / 0 |
+| Daytona (archived) | 0 / 0 | 6 / 0 |
+| llama.cpp | 5 / 884 | 13 / 0 |
+| Ollama | 18 / 0 | 0 / 0 |
+| Hugging Face Hub | 5 / 0 | 0 / 0 |
+| IronSecCo/IronClaw | 17 / 0 | 0 / 0 |
+| NEAR AI/IronClaw | 1 / 0 | 0 / 0 |
+| OpenFang | 0 / 0 | 0 / 0 |
+| DireWolf | no release (M18) | private reporting enabled; none published |
+
+**DireWolf's own evidence** (CI #201, run 44818094052 at `3998de2`; CI #202, run
+44902937921 at `6a0acea`: every job succeeded, 33 job records each):
+
+| Evidence | Count |
+|---|---|
+| `make test`, pytest, passed (Linux / macOS / Windows) | 2148 / 2111 / 2095 |
+| `net.http` evidence cases | 193 |
+| `sandbox-egress`, real OCI / in process | 133 / 19 |
+| `sandbox-foundation`, real OCI | 109 |
+| `sandbox-agent` | 51 and 26 |
+| `sandbox-registry` / `sandbox-hygiene`, end to end | 20 / 44 |
+| `broker-fs-read` broker evidence | 53 and 6 |
+| `filesystem-operations` | 117 and 14 |
+| `authority-transport` cross-uid / approver, three identities | 7 / 6 |
+| `proxy-peer-evidence`, a real foreign uid | 2 |
+| Fuzz targets PASS (run 43602590762, 2026-11-14) | 8 of 8 |
+
+**Not compared, and why.** No other subject publishes evidence counts that
+measure the same properties; test counts across projects of different size and
+language measure nothing comparable; and no benchmark here exercises the same
+workload on DireWolf and a competitor. No ranking follows from these tables.
+
+### 22.8 Gap ledger, G21 onward
+
+Fields: SOURCE · OBSERVED MECHANISM · DIREWOLF NOW · GAP · WHY IT MATTERS ·
+DECISION · TARGET · DEPENDENCIES · ACCEPTANCE · ADVERSARIAL · DOCS · OWNER
+DECISION. Ideas that only confirm an existing entry are in §22.9, not here.
+
+**G21 -- Write-time path races, as named cases**
+- SOURCE: Claude Code GHSA-5j29-h97v-84ch and GHSA-5xjx-9qx6-jcrv (§22.5).
+- OBSERVED MECHANISM: a write that followed a symlink, or a target changed between check and write, landed outside the workspace; fixed in 2.1.129 and 2.1.251.
+- DIREWOLF NOW: mutation by descriptor beneath a directory the authority opened, atomic, never replacing an object it did not prove (ADR-0044); real-filesystem TOCTOU campaigns (`make filesystem-canonicalization-evidence`, `make broker-fs-read-evidence`).
+- GAP: small -- the property is held and campaigned; neither published pattern is a case by name.
+- WHY IT MATTERS: the agent-facing file tools (M10) will be driven by a model; a published regression is the cheapest proof it stays closed.
+- DECISION: **ADOPT WITH MODIFICATION** -- two named cases in the existing filesystem-operations evidence, no new mechanism.
+- TARGET: M10. DEPENDENCIES: M4c's harness.
+- ACCEPTANCE: a final component swapped for a symlink between decision and write, and a parent directory replaced mid-operation, are each refused with the proved object unchanged; a mutant that resolves by path instead of by descriptor fails both.
+- ADVERSARIAL: the swap under contention, from a second identity.
+- DOCS: [tests/README.md](../tests/README.md), [SANDBOX.md](SANDBOX.md) §3. OWNER DECISION: none.
+
+**G22 -- Pins verified by content, not by name**
+- SOURCE: Claude Code GHSA-pq7j-f95f-qfcv.
+- OBSERVED MECHANISM: a plugin pinned to a commit could be installed with other code.
+- DIREWOLF NOW: no plugins in V1 (ADR-0015); M11a's static skills plan content-hash verification.
+- GAP: none today; the published case sharpens M11a's acceptance.
+- WHY IT MATTERS: a pin is only as strong as what it is checked against at load.
+- DECISION: **ADOPT** as an M11a acceptance case.
+- TARGET: M11a. DEPENDENCIES: M11.
+- ACCEPTANCE: a skill whose bytes differ from its recorded digest is refused before any trust is assigned; a pin that names a mutable reference (branch or tag) is refused.
+- ADVERSARIAL: content changed behind an unchanged reference; a symlink inside the skill's directory.
+- DOCS: [SKILLS.md](SKILLS.md), ROADMAP M11a. OWNER DECISION: none.
+
+**G23 -- Delegation never skips an approval**
+- SOURCE: OpenClaw GHSA-pw3x-g8v8-fvj2.
+- OBSERVED MECHANISM: delegation let a restricted agent reach what needed approval; fixed in 2026.10.33 and 2026.11.4.
+- DIREWOLF NOW: delegation only attenuates (I2, M3: 10⁶ chains, no escalation); approvals do not exist (M6); M6's adversarial list already names "laundering parent↔child".
+- GAP: the approval half is unbuilt; the case confirms M6's list from a second source.
+- WHY IT MATTERS: an approval bound to the wrong principal is the drift [PRODUCT_SPEC.md](PRODUCT_SPEC.md) §3 names as the dominant failure class.
+- DECISION: **ADOPT** -- the published shape as a named M6 case and an M14 acceptance case.
+- TARGET: M6 (binding), M14 (subagents). DEPENDENCIES: ADR-0021, F-18's principals (ADR-0063).
+- ACCEPTANCE: a child run, a delegated agent or a restricted profile reaching an approval-requiring action is denied, or asks for an approval bound to its own principal and canonical action -- never served by a parent's approval or standing grant.
+- ADVERSARIAL: delegate from an approved parent; a restricted agent spawning an unrestricted child; a parent's approval replayed in a child.
+- DOCS: [APPROVALS.md](APPROVALS.md) §10, ROADMAP M6 and M14. OWNER DECISION: none.
+
+**G24 -- Configuration a workspace controls, executed by a tool**
+- SOURCE: Claude Desktop GHSA-4p2j-qj3c-6x84 (search path), Hermes GHSA-p22p-9ph6-gmrh (environment file), Goose GHSA-r5pp-p5r8-466r (`core.fsmonitor`).
+- OBSERVED MECHANISM: a tool ran a program, or took variables, that the repository or a backend supplied.
+- DIREWOLF NOW: executables resolved and hashed by the authority and run by descriptor, environment built from nothing (ADR-0045); workloads in `oci-strict`; no host launch before M6.
+- GAP: not established. The search-path and environment classes are closed by construction; whether a future git-aware tool (M10) or M6's host execution would run `git` with a workspace's own configuration is not.
+- WHY IT MATTERS: `core.fsmonitor`, hooks and similar settings turn reading a repository into running its code.
+- DECISION: **INVESTIGATE** -- a written answer for every path that would run `git` or read its configuration, and a case for each that does.
+- TARGET: M6 (host execution's ADR), M10 (tools). DEPENDENCIES: none.
+- ACCEPTANCE: the answer recorded in the tool's ADR; a workspace whose `.git/config` sets `core.fsmonitor`, `core.hooksPath` or `diff.external` runs nothing outside the workload.
+- ADVERSARIAL: the same with `includeIf` and a global configuration path.
+- DOCS: [SANDBOX.md](SANDBOX.md) §4, [TOOL_SYSTEM.md](TOOL_SYSTEM.md). OWNER DECISION: none.
+
+**G25 -- Advisories with affected and fixed versions**
+- SOURCE: every subject above that publishes (§22.5).
+- OBSERVED MECHANISM: each fix is a repository advisory with affected and fixed ranges, a CVE where assigned.
+- DIREWOLF NOW: private vulnerability reporting is enabled (2026-11-21) and [SECURITY.md](../SECURITY.md) describes the process; with no release, no range can be stated.
+- GAP: process, from the first release.
+- WHY IT MATTERS: an operator decides whether to upgrade from ranges, not from commit messages.
+- DECISION: **ADOPT WITH MODIFICATION** -- before releases, a fix names its commit; from M18, a repository advisory with ranges per fixed vulnerability.
+- TARGET: M18. DEPENDENCIES: releases (G3).
+- ACCEPTANCE: the release checklist requires it; SECURITY.md says so.
+- ADVERSARIAL: n/a. DOCS: [SECURITY.md](../SECURITY.md), [CONTRIBUTING.md](../CONTRIBUTING.md). OWNER DECISION: none.
+
+**G26 -- Model artifacts: immutable revision, digest, resume**
+- SOURCE: Ollama `2bd4d6a`, llama.cpp `19bc41d`, Hugging Face Hub `905aee8` (§22.6).
+- OBSERVED MECHANISM: pulls resumable in parts and checked by digest (Ollama); `Range` resume and ETag cache (llama.cpp); a revision parameter and SHA-256 ETags for LFS files (Hub).
+- DIREWOLF NOW: offline import with SHA-256 per file and identification by header; no download.
+- GAP: a real product gap, and a security one: a download is egress.
+- WHY IT MATTERS: a model that cannot be fetched is not used; one fetched by name rather than revision cannot be reproduced.
+- DECISION: **DEFER**, with its acceptance recorded now.
+- TARGET: after M7 (ADR-0072 OM-2). DEPENDENCIES: M7; ADR-0071 OF-3's `model_download` path.
+- ACCEPTANCE: a download names an immutable revision (a commit or a digest); every file's SHA-256 is checked against the source's own record before the manifest is written; a resumed file is checked whole; the destination is the authority's decision under the egress ceiling; pickle and zip checkpoints stay refused.
+- ADVERSARIAL: a server that changes bytes behind an unchanged name; a truncated part resumed; a redirect to an unlisted host.
+- DOCS: [MODELS.md](MODELS.md), ADR-0072. OWNER DECISION: recorded (OM-2).
+
+| # | Source | Decision | Target |
+|---|---|---|---|
+| G21 | Claude Code advisories | ADOPT WITH MODIFICATION | M10 |
+| G22 | Claude Code advisory | ADOPT | M11a |
+| G23 | OpenClaw advisory | ADOPT | M6, M14 |
+| G24 | Claude Desktop, Hermes, Goose advisories | INVESTIGATE | M6, M10 |
+| G25 | every publishing subject | ADOPT WITH MODIFICATION | M18 |
+| G26 | Ollama, llama.cpp, Hugging Face Hub | DEFER | after M7 |
+
+No new milestone, and no change to the build order: every target above already
+exists in [ROADMAP.md](ROADMAP.md).
+
+### 22.9 Confirmed, and studied but not taken
+
+- **The operating system is the boundary.** Hermes Agent's own policy says so
+  in the words §5 uses; OpenClaw, Hermes and OpenHands ship their sandboxes off
+  or optional. Nothing here changes §5's finding.
+- **A model does not decide authority.** Goose's "Smart Approval" is judged by
+  a model; §16's rejection of model-judged approvals stands.
+- **No CA in the proxy.** Codex's "limited" mode intercepts HTTPS with a CA of
+  its own; DireWolf's proxy terminates no TLS and holds no CA (ADR-0048), and
+  method-level control belongs to `net.http`, which the kernel performs.
+  Studied, not taken, for the reason ADR-0048 gives.
+- **Unauthenticated local servers are a class.** OpenCode's two January
+  advisories are the class ADR-0041's kernel-reported peer check exists for.
+
+### 22.10 Strategic conclusions
+
+1. **Where DireWolf's security advantage is verifiable.** Deciding and doing
+   are separate processes in separate OS identities, the peer checked by the
+   kernel's uid and shown on three real identities in hosted CI; effects are
+   performed by descriptor on objects the authority opened; egress leaves
+   through one proxy under an operator ceiling that denies by default; the
+   sandbox is measured at runtime, with a weakened-profile meta-test per hard
+   rule; the audit record is hash-chained and durable before the answer; and
+   NOT EXERCISED fails. Among the subjects read here, none was found to put
+   its decision in a separate OS identity from its agent (NOT FOUND in the
+   inspected paths; proprietary internals UNVERIFIED).
+2. **Where it is only planned.** Approvals and budgets (M6), model egress and
+   privacy routing (M7), the runtime's own confinement (M9), the
+   prompt-injection blast radius of a real agent (M9 onward), latency and
+   approval counts (M3.5), a user namespace per environment (F-05), and F-16's
+   hosted evidence.
+3. **Who is stronger today.** As products, every agent subject: they run agent
+   loops with providers, tools, approvals of their own and user interfaces.
+   Codex ships an operating-system sandbox on three platforms and an egress
+   proxy; Ollama, llama.cpp and LM Studio download and serve models.
+4. **What DireWolf lacks for an end-to-end workflow.** Approvals (M6), a
+   provider (M7), the runtime and its loop (M8-M9), tools and context
+   (M10-M11), a command line (M17) and an installer (M18); model downloads.
+5. **Designs to avoid.** A sandbox off by default with an escape hatch beside
+   it; host execution as the default; approvals judged by a model; local
+   servers without peer authentication; trust keyed to a mutable reference;
+   tools that execute a repository's own configuration.
+6. **Practices to adopt.** G21-G26: published regressions as named cases,
+   advisories with ranges, immutable revisions and digests for models, and a
+   one-paragraph statement of where the boundary is, as Hermes's policy has.
+7. **What stays deferred.** Online model downloads (after M7), a browser,
+   channels, plugins, a scheduler, remote workers, Landlock with M6's host
+   execution; a TLS-intercepting proxy mode stays rejected.
+8. **Decisions before M6.** Accept, revise or reject ADR-0060 to ADR-0074;
+   whether F-16 should be exercised in hosted CI (a workflow change); the
+   independent security review; M6's adversarial list carrying G23's case by
+   name.
+9. **Decisions after M3.5.** Provider breadth and its order (M7), the model
+   download path (OM-2), how much approval friction the measured counts allow,
+   and skills' trust model (M11a) -- each is cheaper to decide once M3.5 has
+   measured latency and approval counts.
+10. **What would most improve credibility.** Hosted evidence for every claim
+    that has only local evidence (F-16 first); formal acceptance of the Proposed
+    records; the independent review's result published; and, from M18,
+    reproducible releases with advisories that state ranges.
+
+The aim of this section is priorities, not a winner: DireWolf is behind as a
+product and specific about what its boundary holds, and §22 says which of
+those statements a reader can check.
