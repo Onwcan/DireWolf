@@ -447,7 +447,14 @@ fn a_passphrase_identity_decrypts_an_scrypt_file() {
 /// read through. A directory on the path that is a symlink is refused, even
 /// one to a directory the walk would trust; so is a file with a set-uid or
 /// set-gid bit. The same file reached through its real directory, without
-/// the bit, is read, so each refusal is the guard's.
+/// the bit, is read, so each refusal is the guard's. The documented exception
+/// holds too: the authority's own file in a sticky directory everyone can
+/// write is read, and a symlink for a directory planted there -- the case a
+/// directory followed would let another uid redirect -- is refused.
+///
+/// Linux only, as the walk is (elsewhere every operator file is refused). The
+/// kernel clears a set-gid bit its owner is not entitled to; each case checks
+/// its bits stuck, so none passes by proving nothing.
 #[test]
 fn the_operator_file_walk_refuses_a_symlinked_directory_and_a_set_id_file() {
     const TEXT: &str = "# an operator file\n";
@@ -481,4 +488,19 @@ fn the_operator_file_walk_refuses_a_symlinked_directory_and_a_set_id_file() {
         let refused = read_file(&put(name, mode)).unwrap_err();
         assert!(refused.contains("STORE_UNTRUSTED"), "{name}: {refused}");
     }
+
+    // A sticky directory everyone can write: the walk's one exception.
+    let sticky = dir.join("sticky");
+    std::fs::create_dir(&sticky).unwrap();
+    std::fs::set_permissions(&sticky, std::fs::Permissions::from_mode(0o1777)).unwrap();
+    assert_eq!(std::fs::metadata(&sticky).unwrap().mode() & 0o7777, 0o1777);
+    let own = sticky.join("own.toml");
+    std::fs::write(&own, TEXT).unwrap();
+    std::fs::set_permissions(&own, std::fs::Permissions::from_mode(0o644)).unwrap();
+    assert_eq!(read_file(own.to_str().unwrap()).as_deref(), Ok(TEXT));
+    // In it, a symlink for a directory: what another uid could plant there.
+    let planted = sticky.join("planted");
+    symlink(&real, &planted).unwrap();
+    let refused = read_file(planted.join("good.toml").to_str().unwrap()).unwrap_err();
+    assert!(refused.contains("STORE_UNTRUSTED"), "{refused}");
 }

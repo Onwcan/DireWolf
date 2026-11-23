@@ -14,6 +14,8 @@ use std::path::{Path, PathBuf};
 
 use super::format::{self, Format};
 use super::hardware::{self, Facts, Headroom};
+#[cfg(unix)]
+use super::library::AFTER_CHECK;
 use super::library::{FileState, Library, Manifest, copy_hashing, is_model_name};
 use super::{EXIT_REFUSED, EXIT_USAGE, json_line, run, shown};
 
@@ -666,6 +668,61 @@ fn a_source_extended_after_its_check_is_never_copied_past_its_checked_length() {
         peak <= CHECKED,
         "the partial copy reached {peak} bytes, past the checked {CHECKED}"
     );
+}
+
+/// ISR2-02, through the whole import: a model's weights, its second file,
+/// extended (sparse, 64 MiB) between the import's checks and its copies --
+/// the window, entered by the test-only hook there -- refuse the import, and
+/// nothing of it is published: no manifest, not the object its first, intact
+/// file made, and nothing left in the library's `tmp/`. The same library then
+/// imports the same files unchanged, so the refusal was the growth's.
+#[cfg(unix)]
+#[test]
+fn an_import_whose_source_grows_after_its_check_publishes_nothing() {
+    let s = Scratch::new("import-grown");
+    let config = s.file("config.json", b"{\"grown\":true}");
+    let weights = s.file("m.gguf", &llama(15, vec![]));
+    let checked = fs::metadata(&weights).unwrap().len();
+    let lib = s.library();
+    AFTER_CHECK.with(|hook| {
+        hook.set(Some(|files: &[PathBuf]| {
+            let last = files.last().unwrap();
+            let len = fs::metadata(last).unwrap().len();
+            fs::OpenOptions::new()
+                .write(true)
+                .open(last)
+                .unwrap()
+                .set_len(len + (64 << 20))
+                .unwrap();
+        }));
+    });
+    let refused = lib
+        .import("grown", &[config.clone(), weights.clone()], None)
+        .unwrap_err();
+    assert!(
+        refused.contains("changed while it was imported"),
+        "{refused}"
+    );
+    assert!(
+        AFTER_CHECK.with(std::cell::Cell::take).is_none(),
+        "the hook ran"
+    );
+    assert!(lib.read("grown").is_err(), "no manifest");
+    assert!(lib.list().unwrap().is_empty(), "no manifest");
+    assert!(s.objects().is_empty(), "no object: {:?}", s.objects());
+    let tmp: Vec<_> = fs::read_dir(s.0.join("library/tmp")).unwrap().collect();
+    assert!(tmp.is_empty(), "nothing left in tmp: {tmp:?}");
+    // The same files, the extension undone: imported, so nothing above was
+    // the library refusing them for any other reason.
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&weights)
+        .unwrap()
+        .set_len(checked)
+        .unwrap();
+    let manifest = lib.import("grown", &[config, weights], None).unwrap();
+    assert_eq!(manifest.name, "grown");
+    assert_eq!(s.objects().len(), 2);
 }
 
 /// SR-04: a source swapped for a symlink after its check is not followed.

@@ -26,6 +26,17 @@ use sha2::{Digest as _, Sha256};
 
 use super::format::{self, Format};
 
+// What runs between an import's checks and its copies, in tests only: the
+// window a source changed after its check falls in (ISR2-02). A build that
+// is not a test has no hook, and an import runs straight on.
+#[cfg(test)]
+pub(crate) type AfterCheck = Option<fn(&[PathBuf])>;
+#[cfg(test)]
+thread_local! {
+    pub(crate) static AFTER_CHECK: std::cell::Cell<AfterCheck> =
+        const { std::cell::Cell::new(None) };
+}
+
 /// The manifest's schema.
 const SCHEMA: &str = "direwolf.model-library.manifest";
 
@@ -406,6 +417,10 @@ impl Library {
                     "the library holds {held} bytes; {total} more would pass its quota of {quota}"
                 ));
             }
+        }
+        #[cfg(test)]
+        if let Some(hook) = AFTER_CHECK.with(std::cell::Cell::take) {
+            hook(files);
         }
         let mut kept: Vec<Staged> = Vec::new();
         let manifest = self
