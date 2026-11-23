@@ -667,6 +667,11 @@ FS_ADMISSION_CASES = (
 # needs privileges, a cross-device hard link is impossible by construction, and
 # an inode recycled with the same birth time depends on the allocator. They are
 # printed as NOT EXERCISED, never counted. Any OTHER case not exercised fails.
+# The bind mount is exercised where unprivileged user and mount namespaces
+# are (WSL2; the hosted `sandbox-egress` job, where `make namespace-evidence`
+# requires it, SR-06); a casefold filesystem needs a kernel built with Unicode
+# casefolding and a filesystem made with it, which the development kernel
+# (WSL2) lacks and no job here makes.
 FS_ENVIRONMENTAL = (
     "bind-mount-inside-workspace",
     "casefold-filesystem",
@@ -9367,6 +9372,24 @@ NAMESPACE_EVIDENCE: tuple[tuple[str, tuple[str, ...]], ...] = (
         ("exercised in a hidden pid namespace: HIDDEN-PEER ",),
     ),
 )
+# SR-06: the authority's namespace-dependent test, under the same rule -- a
+# bind mount inside a workspace, crossed by no resolution (ADR-0042), made in
+# a user and mount namespace the test starts for itself. It is an integration
+# test of the authority's (TX010 keeps process starts out of its src/), named
+# by test binary; its one marker is the case line it prints only after the
+# namespace child's every assertion held. Elsewhere -- `make test`, the
+# `canonical filesystem` job -- the same test reports the case not exercised,
+# which `make filesystem-canonicalization-evidence` lists (FS_ENVIRONMENTAL).
+AUTHORITY_NAMESPACE_EVIDENCE: tuple[tuple[str, str, tuple[str, ...]], ...] = (
+    (
+        "resource_workspace",
+        "linux::a_bind_mount_inside_a_workspace_is_never_crossed",
+        (
+            'FS-EVIDENCE {"category":"mount-crossing","case":"bind-mount-inside-workspace",'
+            '"outcome":"refused:MOUNT_CROSSING","count":1}',
+        ),
+    ),
+)
 NAMESPACE_HINT = (
     "kernel.apparmor_restrict_unprivileged_userns=0 on a disposable runner, as the hosted "
     "sandbox-egress job sets it"
@@ -9390,21 +9413,30 @@ def require_namespace_evidence(output: str, test: str, markers: Sequence[str]) -
 
 
 def task_namespace_evidence() -> None:
-    """The broker's namespace-dependent tests, each required to be exercised:
-    F-16's hostile resolver (six cases, ADR-0074), F-05's real kernel maps
-    (two cases, ADR-0069/0070), the hidden-pid peer reader (ADR-0049). Each
-    runs alone with its output shown; NOT EXERCISED, a missing marker or a
-    failure fails the task. Linux, with unprivileged user namespaces: WSL2,
-    or a disposable hosted runner after its AppArmor restriction is lifted.
+    """The namespace-dependent tests, each required to be exercised: the
+    broker's -- F-16's hostile resolver (six cases, ADR-0074), F-05's real
+    kernel maps (two cases, ADR-0069/0070), the hidden-pid peer reader
+    (ADR-0049) -- and the authority's bind mount inside a workspace (SR-06,
+    ADR-0042). Each runs alone with its output shown; NOT EXERCISED, a missing
+    marker or a failure fails the task. Linux, with unprivileged user
+    namespaces: WSL2, or a disposable hosted runner after its AppArmor
+    restriction is lifted.
     """
     if not sys.platform.startswith("linux"):
-        raise TaskError("NOT EXERCISED: the broker's namespace tests run only on Linux; use WSL2")
+        raise TaskError("NOT EXERCISED: the namespace tests run only on Linux; use WSL2")
     broker = ("cargo", "test", "--locked", "-p", "dwkd-broker", "--bin", "dwkd-broker", "--")
     for test, markers in NAMESPACE_EVIDENCE:
         output = run_captured(*broker, "--exact", "--nocapture", "--test-threads=1", test)
         require_namespace_evidence(output, test, markers)
-    count = sum(len(required) for _, required in NAMESPACE_EVIDENCE)
-    print(f"namespace evidence: {len(NAMESPACE_EVIDENCE)} tests, {count} markers, each exercised")
+    for binary, test, markers in AUTHORITY_NAMESPACE_EVIDENCE:
+        authority = ("cargo", "test", "--locked", "-p", "dwkd-authority", "--test", binary, "--")
+        output = run_captured(*authority, "--exact", "--nocapture", "--test-threads=1", test)
+        require_namespace_evidence(output, test, markers)
+    tests = len(NAMESPACE_EVIDENCE) + len(AUTHORITY_NAMESPACE_EVIDENCE)
+    count = sum(len(required) for _, required in NAMESPACE_EVIDENCE) + sum(
+        len(required) for _, _, required in AUTHORITY_NAMESPACE_EVIDENCE
+    )
+    print(f"namespace evidence: {tests} tests, {count} markers, each exercised")
 
 
 # F-04 (ADR-0068, Proposed): each guard of the proxy's peer check weakened in

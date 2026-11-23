@@ -637,6 +637,157 @@ mod linux {
         drop(b);
         evidence("m4a-store-migrates", "migrated:2-to-4");
     }
+
+    // -----------------------------------------------------------------------
+    // SR-06: a bind mount inside a workspace, on the real kernel.
+    // -----------------------------------------------------------------------
+
+    /// Set for the child this test starts in namespaces of its own.
+    const BIND_CHILD: &str = "DW_SR06_BIND_MOUNT";
+    const BIND_TEST: &str = "linux::a_bind_mount_inside_a_workspace_is_never_crossed";
+    const NAMESPACES: [&str; 5] = [
+        "--user",
+        "--map-root-user",
+        "--mount",
+        "--propagation",
+        "private",
+    ];
+    /// What the child prints once every assertion in it held.
+    const BIND_HELD: &str = "BIND-MOUNT-REFUSED crossing=MOUNT_CROSSING beneath=MOUNT_CROSSING same-device=true \
+         control=resolved";
+
+    /// The case this test reports, by the name the evidence task knows.
+    const BIND_CASE: &str = "bind-mount-inside-workspace";
+
+    fn mount_evidence(outcome: &str, count: u64) {
+        println!(
+            "FS-EVIDENCE {{\"category\":\"mount-crossing\",\"case\":\"{BIND_CASE}\",\"outcome\":\"{outcome}\",\"count\":{count}}}"
+        );
+    }
+
+    fn not_exercised(why: &str) {
+        println!("NOT EXERCISED: {why}");
+        mount_evidence("not-exercised:needs-mount-privileges", 0);
+    }
+
+    /// A run's resolution does not cross a bind mount inside its workspace
+    /// (ADR-0042 §5, `RESOLVE_NO_XDEV`): a directory outside the workspace,
+    /// bind-mounted onto one inside it on the **same** filesystem -- the case
+    /// a comparison of devices alone would miss -- is `MOUNT_CROSSING` at
+    /// the mount point and beneath it, while the rest of the workspace still
+    /// resolves.
+    ///
+    /// The mount is the test's own: it starts itself again in an unprivileged
+    /// user and mount namespace (`unshare --user --map-root-user --mount
+    /// --propagation private`), so nothing of the host's changes and the
+    /// mount goes with the namespace. Where no such namespace or bind mount
+    /// can be made -- Ubuntu's hosted runner restricts unprivileged user
+    /// namespaces outside the jobs that lift it -- it says NOT EXERCISED and
+    /// reports the case so; `make namespace-evidence` refuses that, and
+    /// `make filesystem-canonicalization-evidence` lists it. The case line is
+    /// printed only after the child's every assertion held.
+    #[test]
+    fn a_bind_mount_inside_a_workspace_is_never_crossed() {
+        use std::process::{Command, Stdio};
+        if std::env::var_os(BIND_CHILD).is_some() {
+            bind_mount_in_the_namespace();
+            return;
+        }
+        let available = Command::new("unshare")
+            .args(NAMESPACES)
+            .arg("true")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success());
+        if !available {
+            not_exercised(
+                "no unprivileged user and mount namespace here (`unshare --user \
+                 --map-root-user --mount` failed), so no bind mount of the test's own",
+            );
+            return;
+        }
+        let output = Command::new("unshare")
+            .args(NAMESPACES)
+            .arg(std::env::current_exe().unwrap())
+            .args(["--exact", BIND_TEST, "--nocapture", "--test-threads=1"])
+            .env(BIND_CHILD, "1")
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&output.stdout);
+        // libtest writes `test <name> ... ` before the child's own output, on
+        // the same line: each line the child prints is found within one.
+        if let Some(at) = text.find("BIND-MOUNT-UNAVAILABLE") {
+            let line = text.get(at..).and_then(|rest| rest.lines().next());
+            not_exercised(line.unwrap_or_default());
+            return;
+        }
+        assert!(
+            output.status.success(),
+            "{text}{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(text.contains(BIND_HELD), "{text}");
+        mount_evidence("refused:MOUNT_CROSSING", 1);
+    }
+
+    /// Unmounts its mount point when dropped -- before the harness removes
+    /// the scratch directory, which would otherwise walk into the mount.
+    struct Unmount(PathBuf);
+
+    impl Drop for Unmount {
+        fn drop(&mut self) {
+            let _ = std::process::Command::new("umount").arg(&self.0).status();
+        }
+    }
+
+    /// Inside the namespaces: a workspace, a directory beside it, the one
+    /// bind-mounted into the other, and the run's resolutions.
+    fn bind_mount_in_the_namespace() {
+        let mut h = Harness::new("ws-bind-mount");
+        let b = bound_run(&mut h, "proj", 1);
+        let outside = h.dir.path().join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("secret"), b"outside the workspace").unwrap();
+        let point = b.root.join("mnt");
+        fs::create_dir(&point).unwrap();
+        let mounted = std::process::Command::new("mount")
+            .arg("--bind")
+            .arg(&outside)
+            .arg(&point)
+            .status();
+        if !mounted
+            .as_ref()
+            .is_ok_and(std::process::ExitStatus::success)
+        {
+            println!("BIND-MOUNT-UNAVAILABLE: `mount --bind` in the namespace: {mounted:?}");
+            return;
+        }
+        let _unmount = Unmount(point.clone());
+        // The kernel shows the outside through the mount point, on the
+        // workspace's own device.
+        assert_eq!(
+            fs::read(point.join("secret")).unwrap(),
+            b"outside the workspace"
+        );
+        let same_device =
+            fs::metadata(&point).unwrap().dev() == fs::metadata(&b.root).unwrap().dev();
+        assert!(same_device, "a bind mount of the same filesystem");
+        let mut resolve = |path: &str| {
+            h.authority()
+                .resolve_for_run(&b.run, &declared(path), Access::Observe, Expect::Any)
+                .err()
+        };
+        let crossing = Some(ResolutionRefused::Resolve(ResolveError::MountCrossing {
+            depth: 1,
+        }));
+        assert_eq!(resolve("/workspace/mnt/secret"), crossing);
+        assert_eq!(resolve("/workspace/mnt"), crossing);
+        assert_eq!(resolve("/workspace/src/main.rs"), None);
+        println!("{BIND_HELD}");
+    }
 }
 
 #[cfg(not(target_os = "linux"))]

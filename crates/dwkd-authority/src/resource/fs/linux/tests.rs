@@ -435,14 +435,11 @@ fn a_mount_point_is_never_crossed() {
             Some(&ResolveError::MountCrossing { depth: 1 })
         );
     }
-    // A bind mount inside a workspace needs mount privileges this suite does
-    // not take.
-    evidence(
-        "mount-crossing",
-        "bind-mount-inside-workspace",
-        "not-exercised:needs-mount-privileges",
-        0,
-    );
+    // A bind mount inside a workspace needs a mount namespace, which this
+    // module may not start a process to make (TX010): the case
+    // `bind-mount-inside-workspace` is `tests/resource_workspace.rs`'s, which
+    // makes one in a user and mount namespace of its own and reports it
+    // exercised, or not, from there (SR-06).
 }
 
 // ---------------------------------------------------------------------------

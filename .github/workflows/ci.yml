@@ -436,11 +436,12 @@ jobs:
       # pid namespace this runner's AppArmor restricts by default. Last, so
       # the egress evidence above ran on an unchanged host. Disposable runner
       # only. Nothing here may be skipped: NOT EXERCISED fails.
-      # The same lifted restriction runs the broker's other namespace tests
-      # by name (`make namespace-evidence`): F-16's hostile resolver
-      # (ADR-0074), F-05's real kernel maps and the hidden-pid peer reader
-      # (ADR-0049), each printing NOT EXERCISED in every other job.
-      - name: Let a test have a namespace of its own (F-04, F-05, F-16)
+      # The same lifted restriction runs the other namespace tests by name
+      # (`make namespace-evidence`): F-16's hostile resolver (ADR-0074),
+      # F-05's real kernel maps, the hidden-pid peer reader (ADR-0049) and the
+      # authority's bind mount inside a workspace (SR-06, ADR-0042), each
+      # printing NOT EXERCISED in every other job.
+      - name: Let a test have a namespace of its own (F-04, F-05, F-16, SR-06)
         run: |
           if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
             sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
