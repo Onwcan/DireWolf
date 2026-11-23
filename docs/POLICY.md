@@ -66,7 +66,7 @@ An `ALLOW` may carry requirements the kernel then enforces:
 | `redact_profile(p)` | Stricter redaction on the return path |
 | `network_deny` | Allow the exec but with no egress route |
 | `read_only_workspace` | Mount the workspace read-only for this invocation |
-| `audit_level(full)` | Record full canonical arguments, not just the hash |
+| `audit_level(full)` | Record full canonical arguments, not just the hash. Kept on a launch, whose record holds its full argv, and on a workload's tunnels as [ADR-0061](adr/0061-workload-egress-decided-by-policy-novelty-and-exposure.md) decides; not on a `net.http` hop, whose record holds the URL as its digest and no header value or body, so a hop under it is `OBLIGATION_UNENFORCEABLE` ([ADR-0076](adr/0076-isr2-01-audit-level-full-is-not-kept-on-a-net-http-hop.md), Proposed) |
 | `single_use_only` | The resulting approval, if any, cannot be reused |
 | `force_quarantined_read` | Result is delivered to a freshly-minted reader run with no side-effect capabilities; the requester gets a reference only |
 | `workspace_exec_hygiene` | Neutralise interpreter auto-loaded config for this invocation (see [SANDBOX.md](SANDBOX.md) §4a). Unenforceable on the host (M4d). In an execution environment (M5d.2, [ADR-0052](adr/0052-m5d-sandboxed-process-exec.md) §5a) kept by the pinned probe as a trusted launcher, with the tool's own arguments first; an invocation that undoes it, and `npm`-family tools and `cargo` until evidenced (directly or through a wrapper), are `OBLIGATION_UNENFORCEABLE`. It never neutralises the workspace's own code; OCI containment is the boundary |

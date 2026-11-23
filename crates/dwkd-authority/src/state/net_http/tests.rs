@@ -92,7 +92,7 @@ id = "capped"
 effect = "ALLOW"
 when.verb = ["network.https"]
 when.host_matches = ["capped.example.com"]
-obligations = ["max_output_bytes=16", "audit_level=full"]
+obligations = ["max_output_bytes=16"]
 
 [[rule]]
 id = "unenforceable"
@@ -100,6 +100,13 @@ effect = "ALLOW"
 when.verb = ["network.https"]
 when.host_matches = ["sandboxed.example.com"]
 obligations = ["network_deny"]
+
+[[rule]]
+id = "audited"
+effect = "ALLOW"
+when.verb = ["network.https"]
+when.host_matches = ["audited.example.com"]
+obligations = ["audit_level=full"]
 
 [[rule]]
 id = "allow-https"
@@ -427,6 +434,7 @@ fn config(policy: &str, budget: NetBudget) -> StartupConfig {
 const ORIGINS: &[(&str, u16)] = &[
     ("api.example.com", 443),
     ("api.example.com", 8443),
+    ("audited.example.com", 443),
     ("cdn.example.com", 443),
     ("capped.example.com", 443),
     ("denied.example.com", 443),
@@ -1599,6 +1607,29 @@ fn a_tainted_run_reaches_no_new_origin_and_obligations_narrow_or_deny() {
         denied_reason(&reply),
         NetDecisionReason::ObligationUnenforceable
     );
+    // `audit_level=full` asks for the request in full on record; a hop keeps
+    // its URL only as a digest and nothing of its headers or body (ADR-0050
+    // §13), so the obligation is not kept and the hop denies, before any
+    // exchange (ISR2-01, ADR-0076).
+    let exchanges = |fx: &Fixture| {
+        fx.fake
+            .operations()
+            .iter()
+            .filter(|o| **o == "http.exchange")
+            .count()
+    };
+    let before = exchanges(&fx);
+    let audited = fx.run("r4", &[GRANT]);
+    let reply = fx.invoke(
+        &audited,
+        call(HttpMethod::Get, "https://audited.example.com/a?q=1"),
+        "k-audited",
+    );
+    assert_eq!(
+        denied_reason(&reply),
+        NetDecisionReason::ObligationUnenforceable
+    );
+    assert_eq!(exchanges(&fx), before, "nothing reached the origin");
     evidence("taint-novel-destination", "APPROVAL_REQUIRED-denied");
     evidence("taint-seen-destination", "allowed");
     evidence("obligation-max-output-bytes", "narrowed");

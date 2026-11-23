@@ -16,10 +16,12 @@
 //! The injection action, when the call names a credential, requires
 //! `secret.use:<handle>` through both gates, as M4e's mode A does.
 //!
-//! Every obligation must be one a hop keeps: `max_output_bytes` (the response
-//! bound, never widened) and `audit_level`. Anything else denies
-//! (`OBLIGATION_UNENFORCEABLE`). `REQUIRE_APPROVAL` denies: approvals arrive
-//! at M6.
+//! Every obligation must be one a hop keeps, and a hop keeps one:
+//! `max_output_bytes` (the response bound, never widened). Anything else
+//! denies (`OBLIGATION_UNENFORCEABLE`), `audit_level=full` among them: it
+//! asks for the canonical request on record, and a hop's record holds its
+//! URL as a digest and no path, query, header value or body (ADR-0050 §13;
+//! ADR-0076, Proposed). `REQUIRE_APPROVAL` denies: approvals arrive at M6.
 
 use dwk_proto::dwkp::netops::{HttpMethod, NetDecisionReason};
 use dwk_proto::wire::guard::Address;
@@ -194,7 +196,10 @@ fn required(
 }
 
 /// Whether every obligation is one a hop keeps, narrowing `limit` by
-/// `max_output_bytes`.
+/// `max_output_bytes`. `audit_level=full` is not one (ADR-0076): the hop's
+/// record keeps the URL as its digest and nothing of the request's headers
+/// or body, so a rule that asks for them on record is not kept and the hop
+/// denies.
 fn obligations(record: &DecisionRecord, limit: &mut u32) -> bool {
     let mut enforced = true;
     for obligation in record.policy().obligations().as_slice() {
@@ -203,7 +208,6 @@ fn obligations(record: &DecisionRecord, limit: &mut u32) -> bool {
                 *limit = (*limit).min(u32::try_from(*bound).unwrap_or(u32::MAX));
                 true
             }
-            Obligation::AuditLevel(_) => true,
             _ => false,
         };
     }

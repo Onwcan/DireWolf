@@ -76,3 +76,12 @@ found that operator policy files were read without the contract the other
 operator files keep (SR-01): the fix is
 [ADR-0075](adr/0075-sr01-operator-policy-files-are-read-as-the-other-operator-files-are.md),
 Proposed, built 2026-11-22, hosted evidence pending.
+
+## Since the second security review of 2026-11-22
+
+That review (its report is `docs/INDEPENDENT_SECURITY_REREVIEW_2026-11-22.md`)
+found that `audit_level=full` was counted as kept on a `net.http` hop whose
+record holds the URL only as its digest (ISR2-01): the fix is
+[ADR-0076](adr/0076-isr2-01-audit-level-full-is-not-kept-on-a-net-http-hop.md),
+Proposed, built 2026-11-23, hosted evidence pending. The finding stays
+open until a verification pass separate from the fix confirms it.
