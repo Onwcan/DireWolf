@@ -16,6 +16,14 @@ review by an independent person, and it does not satisfy a requirement for
 one. The agent is the same kind of model as the one that wrote the code under
 review, so it may share that model's blind spots.
 
+**Correction (2026-11-23).** §C.3 and §C.6 first said that only the
+`sandbox-egress` job lifts the runner's restriction on unprivileged user
+namespaces. Two jobs do: `sandbox-workspace` also lifts it
+(`.github/workflows/ci.yml:557-558`), before its evidence task, for the
+broker's full-filesystem case. Both run on disposable runners, each for a
+stated case; no classification in this report changes. The first review's
+§1 and the ledger's F-16 row say the same as the uncorrected text (ISR2-08).
+
 ---
 
 ## A. Executive summary
@@ -237,12 +245,15 @@ missing, the test run twice, a filter that matched nothing (`0 passed`), an
 ignored test beside it, and a failed run are each refused — **33 of 33
 cases as expected**. The task's own count is 4 tests and 9 markers.
 
-**Workflow.** In `.github/workflows/ci.yml`, only the `sandbox-egress` job
-lifts `kernel.apparmor_restrict_unprivileged_userns`; it does so after every
-egress evidence step and its artifact upload, then runs
-`make namespace-evidence`, then `make proxy-peer-evidence` last. No step is
-conditional and no step has `continue-on-error`; the aggregate `ci` job fails
-unless all 30 required jobs report `success`. The workflow keeps `contents:
+**Workflow.** In `.github/workflows/ci.yml`, two jobs lift
+`kernel.apparmor_restrict_unprivileged_userns`, each on a disposable runner
+and each for a stated case: `sandbox-workspace`, before its evidence task,
+for the broker's full-filesystem case (a tmpfs in an unprivileged user and
+mount namespace); and `sandbox-egress`, after every egress evidence step and
+its artifact upload, then `make namespace-evidence`, then
+`make proxy-peer-evidence` last. In `sandbox-egress` no step is conditional
+and no step has `continue-on-error`; the aggregate `ci` job fails unless all
+30 required jobs report `success`. The workflow keeps `contents:
 read`, `pull_request` (not `pull_request_target`) and no secrets.
 
 **Hosted (CI #209, job `sandbox egress`, 137311929226).** Lines in order:
@@ -363,8 +374,8 @@ exercise casefold either: this WSL kernel has no `CONFIG_UNICODE`.
 **Cheaper closure than the first review proposed.** No privileged runner
 step or casefold image is needed: Linux ≥ 6.13 mounts `tmpfs -o casefold`
 inside an unprivileged user and mount namespace, where a bind mount is also
-allowed. Both cases could join `make namespace-evidence` in the one job that
-already lifts the namespace restriction (§J, action 6).
+allowed. Both cases could join `make namespace-evidence` in `sandbox-egress`,
+which already lifts the namespace restriction for it (§J, action 6).
 
 ### C.7 SR-09 — local-only campaigns
 
@@ -569,9 +580,11 @@ documentation, governance and M6-design items.
 
 Listed in §H items 1, 3 and 4. They describe the state before CI #209
 (F-16 and the namespace tests `NOT EXERCISED`, ADR-0075's evidence pending)
-and one source comment that predates `--sandbox-config`. Reconcile them
-together, because `test_docs_truth.py` ties the ledger to the ADR status
-lines and the roadmap.
+and one source comment that predates `--sandbox-config`. The ledger's F-16
+row and the first review's §1 also say that only `sandbox-egress` lifts the
+runner's namespace restriction; `sandbox-workspace` lifts it too. Reconcile
+them together, because `test_docs_truth.py` ties the ledger to the ADR
+status lines and the roadmap.
 
 ### ISR2-09 — model-library hardening
 
