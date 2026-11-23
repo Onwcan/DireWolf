@@ -85,3 +85,13 @@ record holds the URL only as its digest (ISR2-01): the fix is
 [ADR-0076](adr/0076-isr2-01-audit-level-full-is-not-kept-on-a-net-http-hop.md),
 Proposed, built 2026-11-23, hosted evidence pending. The finding stays
 open until a verification pass separate from the fix confirms it.
+
+The same review found three guards that no repository test held (ISR2-02,
+ISR2-03): the model import's bound inside its copy loop, and the trusted
+file walk's refusal of a symlinked directory and of a set-id file. Since
+2026-11-23 each has a test that fails when its guard is removed --
+`a_source_extended_after_its_check_is_never_copied_past_its_checked_length`
+(`direwolf-cli`) and
+`the_operator_file_walk_refuses_a_symlinked_directory_and_a_set_id_file`
+(the secret backend). Both findings stay open until a hosted `make test`
+runs those tests.

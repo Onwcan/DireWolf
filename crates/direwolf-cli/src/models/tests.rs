@@ -616,6 +616,58 @@ fn a_source_that_changes_after_its_check_is_refused_and_leaves_nothing() {
     assert!(fs::symlink_metadata(&shrunk).is_err(), "nothing kept");
 }
 
+/// ISR2-02: the copy is bound to the checked length while it reads, not only
+/// once it ends. A source extended after its check -- sparse, so extending it
+/// costs nothing -- is refused, and the partial copy, watched while it is
+/// made, never passes the checked length. Without the bound in the loop the
+/// copy writes the whole extension before the check after it refuses, and a
+/// source appended to without end never reaches that check.
+#[cfg(unix)]
+#[test]
+fn a_source_extended_after_its_check_is_never_copied_past_its_checked_length() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    const CHECKED: u64 = 1 << 20;
+    let s = Scratch::new("extended");
+    let source = s.file("m.gguf", &vec![7u8; 1 << 20]);
+    let checked = fs::symlink_metadata(&source).unwrap();
+    assert_eq!(checked.len(), CHECKED);
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&source)
+        .unwrap()
+        .set_len(CHECKED + (64 << 20))
+        .unwrap();
+    let target = s.0.join("target");
+    let done = Arc::new(AtomicBool::new(false));
+    let peak = Arc::new(AtomicU64::new(0));
+    let watcher = {
+        let (target, done, peak) = (target.clone(), Arc::clone(&done), Arc::clone(&peak));
+        std::thread::spawn(move || {
+            while !done.load(Ordering::SeqCst) {
+                if let Ok(partial) = fs::metadata(&target) {
+                    peak.fetch_max(partial.len(), Ordering::SeqCst);
+                }
+                std::thread::yield_now();
+            }
+        })
+    };
+    let copied = copy_hashing(&source, &target, &checked);
+    done.store(true, Ordering::SeqCst);
+    watcher.join().unwrap();
+    let refused = copied.unwrap_err();
+    assert!(
+        refused.contains("changed while it was imported"),
+        "{refused}"
+    );
+    assert!(fs::symlink_metadata(&target).is_err(), "nothing kept");
+    let peak = peak.load(Ordering::SeqCst);
+    assert!(
+        peak <= CHECKED,
+        "the partial copy reached {peak} bytes, past the checked {CHECKED}"
+    );
+}
+
 /// SR-04: a source swapped for a symlink after its check is not followed.
 #[cfg(unix)]
 #[test]

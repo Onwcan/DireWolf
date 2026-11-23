@@ -17,7 +17,7 @@ use linux_keyutils::{Key, KeyPermissions, KeyPermissionsBuilder, Permission};
 use sha2::{Digest as _, Sha256};
 
 use super::keychain::test_support;
-use super::read;
+use super::{read, read_operator_file};
 use crate::scratch::Scratch;
 use crate::secret::SecretError;
 use crate::secret::material::{MAX_SECRET_BYTES, SecretMaterial};
@@ -440,4 +440,45 @@ fn a_passphrase_identity_decrypts_an_scrypt_file() {
     let got = read(&storage, Some(&source), own_uid(scratch.path()));
     assert_eq!(exposed_digest(&got), Some(digest(&secret)));
     evidence("secret-backend", "age-scrypt-passphrase", "digest-equal");
+}
+
+/// ISR2-03: two guards of the trusted walk (ADR-0046 §8) that every operator
+/// file -- secrets metadata, sandbox config, egress allowlist, policy -- is
+/// read through. A directory on the path that is a symlink is refused, even
+/// one to a directory the walk would trust; so is a file with a set-uid or
+/// set-gid bit. The same file reached through its real directory, without
+/// the bit, is read, so each refusal is the guard's.
+#[test]
+fn the_operator_file_walk_refuses_a_symlinked_directory_and_a_set_id_file() {
+    const TEXT: &str = "# an operator file\n";
+    let scratch = Scratch::new("operator-walk");
+    let dir = std::fs::canonicalize(scratch.path()).unwrap();
+    let owner = own_uid(&dir);
+    let real = dir.join("real");
+    std::fs::create_dir(&real).unwrap();
+    std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let put = |name: &str, mode: u32| -> String {
+        let path = real.join(name);
+        std::fs::write(&path, TEXT).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+        // The bits must be on the file, or its case would prove nothing.
+        assert_eq!(std::fs::metadata(&path).unwrap().mode() & 0o7777, mode);
+        path.to_str().unwrap().to_owned()
+    };
+    let read_file = |path: &str| read_operator_file(path, owner, 1024, "--test-file");
+
+    let good = put("good.toml", 0o644);
+    assert_eq!(read_file(&good).as_deref(), Ok(TEXT));
+
+    // A symlink in place of a directory on the path, to that same directory.
+    let alias = dir.join("alias");
+    symlink(&real, &alias).unwrap();
+    let through_alias = alias.join("good.toml");
+    let refused = read_file(through_alias.to_str().unwrap()).unwrap_err();
+    assert!(refused.contains("STORE_UNTRUSTED"), "{refused}");
+
+    for (name, mode) in [("setuid.toml", 0o4644), ("setgid.toml", 0o2644)] {
+        let refused = read_file(&put(name, mode)).unwrap_err();
+        assert!(refused.contains("STORE_UNTRUSTED"), "{name}: {refused}");
+    }
 }
