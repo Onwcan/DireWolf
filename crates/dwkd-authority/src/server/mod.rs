@@ -170,11 +170,12 @@ pub fn serve(config: &ServeConfig) -> Result<Stopped, ServeError> {
 /// peer policy, the connection limit, the worker, the strict connection
 /// protocol — so what the harness proves over it is what a peer meets.
 ///
-/// It is the one way an authority with an execution environment attached is
-/// reached over DWKP: [`serve`] has no option that attaches one (ADR-0047
-/// §3), and nothing in this module names how one is attached (TX035). A
-/// production deployment of the sandboxed `process.exec` needs that option,
-/// which is an owner decision this milestone does not make.
+/// An authority with an execution environment attached is reached over DWKP
+/// this way in the evidence harness, and through [`serve`] in production:
+/// `serve --sandbox-config` attaches the operator's environment at start
+/// (M5d.2, ADR-0052 §2a; `sandbox.rs`, the one place in this module that
+/// names the attachment, TX035). Nothing here prepares, measures or destroys
+/// an environment.
 #[cfg(unix)]
 #[derive(Debug)]
 pub struct Served {

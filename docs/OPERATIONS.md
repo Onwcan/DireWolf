@@ -94,8 +94,47 @@ root or the authority's uid and writable by nobody else, reached without a
 symlink through directories only they can change (sticky ones too); one
 that is not is refused before it is read
 ([ADR-0075](adr/0075-sr01-operator-policy-files-are-read-as-the-other-operator-files-are.md),
-Proposed, for policy files). A change to any of them takes effect at the
+accepted, for policy files). A change to any of them takes effect at the
 next start, and a restart reaps every run.
+
+#### Making an operator file trusted
+
+The authority judges a file's owner and mode when it reads it. Linux checks
+write permission when a descriptor is opened, not each time it is written
+through: a process that opened a file for writing while it could keeps
+writing after `chmod go-w`. So a file another uid has ever been able to
+write is **replaced, not re-moded** -- the same for policy files,
+`--secrets-file`, `--sandbox-config` and `--egress-allowlist`:
+
+1. **The directories first.** Every directory from `/` to the file is owned
+   by root or the authority's uid and writable by nobody else, or is sticky.
+   `chown` and `chmod go-w` suffice here: a directory's write permission is
+   checked on every entry created, renamed or removed. Then look for entries
+   another uid left while it could write: anything you did not put there
+   goes.
+2. **A fresh file, restricted from its first byte.** As root (or the
+   authority's user), into the file's own directory, from the reviewed
+   content:
+   `install -m 0644 -o root -g root reviewed.toml /etc/direwolf/.balanced.toml.new`.
+   It is a new inode that no other uid ever had open, nor could open for
+   writing.
+3. **Over the old name, atomically.**
+   `mv -T /etc/direwolf/.balanced.toml.new /etc/direwolf/balanced.toml`
+   (one `rename` in one directory). A descriptor still open on the old file
+   now writes to an inode no name reaches; it changes nothing the authority
+   reads.
+4. **Absolute and symlink-free.** Name the file by its real absolute path; a
+   symlink anywhere on the path, or a relative path, refuses the start.
+5. **Start, and see it refuse what it should.** The authority loads the new
+   file at its next start, and the audit's `policy.installed` record carries
+   the revision it read. A start that names `--policy-file` (or the other
+   flag) and its reason is a file or directory still not trusted.
+
+This assumes the operator's two identities are what they are: nothing
+another uid runs holds root or the authority's uid, and the authority's uid
+is never a runtime's (§3). Against a process that already has either, which
+can write any of these files whatever their mode, the check promises
+nothing.
 
 ### Policy
 
@@ -161,6 +200,11 @@ approver's endpoint, identity boundary only: no approval operation exists
 before M6
 ([F18_APPROVER_IDENTITY.md](F18_APPROVER_IDENTITY.md),
 [ADR-0067](adr/0067-f18-approver-endpoint-identity-boundary.md), Proposed).
+An approver uid is a principal, not a person: give it an account of its own
+that no agent, automation or runtime runs as, or a decision made under it is
+not a human's
+([ADR-0077](adr/0077-the-approval-channel-is-the-approver-endpoint-and-an-approver-uid-is-a-principal-not-a-person.md),
+Proposed).
 
 ## 5. What the daemons say
 

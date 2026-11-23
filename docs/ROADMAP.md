@@ -870,7 +870,7 @@ ADR — [ADR-0052](adr/0052-m5d-sandboxed-process-exec.md) OD-7, accepted).
 **Adversarial:** full escape suite; full SSRF suite; resource exhaustion; cross-run persistence attempts; a configuration that looks hardened while the running environment differs; a tampered or substituted assurance probe; a fronted request through an allowlisted shared host, which must stay within its byte budget and connection count.
 **Deferred:** gVisor/Kata/Firecracker, SSH, remote workers.
 
-**Pre-M6 security remediation (a separate effort, not a milestone; status 2026-11-21).**
+**Pre-M6 security remediation (a separate effort, not a milestone; status 2026-11-23).**
 Findings F-01 to F-19 of the review of 2026-11-11/12; each one's record, and
 what a hosted run exercised, is [PRE_M6_REMEDIATION.md](PRE_M6_REMEDIATION.md).
 Built, with hosted evidence observed (CI #201, run 44818094052 at `3998de2`,
@@ -883,18 +883,23 @@ judgement and opt-in required LSM (ADR-0069, ADR-0070: OD-A and OD-B approved
 as implemented) are hosted-observed too, and **F-05 is partially completed**:
 per-environment user-namespace remapping is blocked on a runtime that offers
 per-container user namespaces ([F05_USERNS_LSM.md](F05_USERNS_LSM.md) §13).
-Built and passing, hosted NOT EXERCISED: F-16, the broker resolving the
-decided name and no other ([ADR-0074](adr/0074-f16-the-broker-resolves-the-decided-name-and-no-other.md)), whose test has no unprivileged
-namespaces on the hosted runner; a required hosted step for it, added
-2026-11-22, has not run yet. F-08 to F-10 are settings and tooling, and
-F-13 to F-15 documentation, on the same page. Deferred: protocol 13 with
-F-03's D6 (ADR-0070 OD-C), Landlock with M6's host execution (OD-D), a
+F-16, the broker resolving the decided name and no other
+([ADR-0074](adr/0074-f16-the-broker-resolves-the-decided-name-and-no-other.md)),
+is hosted-observed from CI #209 (run 45056220111 at `f7f5aae`) on, by the
+step added 2026-11-22 that runs its test where the runner's namespace
+restriction is lifted. F-08 to F-10 are settings and tooling, and F-13 to
+F-15 documentation, on the same page. Deferred: protocol 13 with F-03's D6
+(ADR-0070 OD-C), Landlock with M6's host execution (OD-D), a
 `model_download` path and per-entry quotas (ADR-0071 OF-3), online model
 downloads after M7 (ADR-0072 OM-2). The security review of 2026-11-22
-([INDEPENDENT_SECURITY_REVIEW_2026-11-22.md](INDEPENDENT_SECURITY_REVIEW_2026-11-22.md)) added one Proposed record,
-ADR-0075 (operator policy files). Remaining before M6: that review's
-conditions, an independent review of the remediation, and the final pre-M6
-handoff; M6 has not started. Every ADR named here stays Proposed until accepted.
+([INDEPENDENT_SECURITY_REVIEW_2026-11-22.md](INDEPENDENT_SECURITY_REVIEW_2026-11-22.md))
+added ADR-0075 (operator policy files), accepted; the second review of that
+day ([INDEPENDENT_SECURITY_REREVIEW_2026-11-22.md](INDEPENDENT_SECURITY_REREVIEW_2026-11-22.md))
+added ADR-0076 (`audit_level` on a `net.http` hop) and ADR-0077 (the
+approval channel), both Proposed. The final pre-M6 handoff is
+[M6_PREPARATION_HANDOFF.md](M6_PREPARATION_HANDOFF.md); M6 has not started,
+and M6.0 is the owner's decisions on the approval channel. Every other ADR
+named here stays Proposed until accepted.
 
 ### M6 · Approvals and budgets
 **Deps:** M3. **Deliverables:** binding hash; approval registry with scopes, expiry, single-use burn; standing grants with the 90-day cap and `require_untainted_run`; kernel-rendered approval prompts; hierarchical subtractive budget ledger; unattended degradation to DENY.

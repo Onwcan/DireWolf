@@ -687,13 +687,18 @@ def test_a_ledger_a_record_or_the_roadmap_that_disagrees_is_found() -> None:
     index, roadmap = _read("docs/adr/README.md"), _read("docs/ROADMAP.md")
     pending = {**statuses, "0060": "Proposed · (built; its hosted evidence is pending)"}
     assert ledger_disagreements(ledger, pending, index, roadmap)
-    hidden = {**statuses, "0074": "Proposed · (built; hosted evidence observed)"}
-    assert ledger_disagreements(ledger, hidden, index, roadmap)
-    claimed = _broken(
-        roadmap, "F-18, F-19, and the TLS floor", "F-16, F-18, F-19, and the TLS floor"
+    # A row the ledger says was not exercised: here F-16's, made so, since
+    # every row is OBSERVED or n/a today. Its record and the roadmap must say
+    # NOT EXERCISED too.
+    unexercised = _broken(
+        ledger,
+        "-no-other.md) | OBSERVED |",
+        "-no-other.md) | NOT EXERCISED |",
     )
-    assert ledger_disagreements(ledger, statuses, index, claimed) == [
-        "ROADMAP.md: F-16 named without NOT EXERCISED"
+    hidden = {**statuses, "0074": "Proposed · (built; hosted evidence observed)"}
+    assert ledger_disagreements(unexercised, hidden, index, roadmap) == [
+        "F-16: ADR-0074's status line hides NOT EXERCISED",
+        "ROADMAP.md: F-16 named without NOT EXERCISED",
     ]
     unlisted = _broken(ledger, "[ADR-0060](adr/0060-", "[the record](records/0060-")
     assert ledger_disagreements(unlisted, statuses, index, roadmap)

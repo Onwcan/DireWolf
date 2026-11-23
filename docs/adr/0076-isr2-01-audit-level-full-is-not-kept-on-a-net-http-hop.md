@@ -1,6 +1,6 @@
 # ADR-0076: ISR2-01 -- `audit_level=full` is not kept on a `net.http` hop
 
-**Status:** Proposed · **Date:** 2026-11-23 (found by the second security review of 2026-11-22 as ISR2-01; built and tested locally; hosted evidence pending; nothing here is accepted) · **Would amend (on acceptance):** [ADR-0050](0050-m5c-kernel-performed-net-http-ssrf-redirects-and-credential-egress.md) §5 step 6 (which obligations a hop keeps) · **Leaves unchanged:** ADR-0050 §11 and §13 (a hop's record keeps no path, query, header value or body), DWKP, the private protocol, the store, the shipped packs, and every other route's obligations
+**Status:** Proposed · **Date:** 2026-11-23 (found by the second security review of 2026-11-22 as ISR2-01; built 2026-11-23 and committed as `85ddb7d`; hosted evidence observed on CI #212 (run 45240438449, `02bb256`) and CI #213 (run 45250010413, `8b771a7`): the regression test and its `obligation-unenforceable` case in `make net-http-evidence`; nothing here is accepted) · **Would amend (on acceptance):** [ADR-0050](0050-m5c-kernel-performed-net-http-ssrf-redirects-and-credential-egress.md) §5 step 6 (which obligations a hop keeps) · **Leaves unchanged:** ADR-0050 §11 and §13 (a hop's record keeps no path, query, header value or body), DWKP, the private protocol, the store, the shipped packs, and every other route's obligations
 
 > **A hop keeps `max_output_bytes` and nothing else.** `audit_level=full`
 > asks for the canonical request on record; a hop's record holds its URL as
@@ -94,7 +94,16 @@ this record does not revisit them.
   `max_output_bytes` rule still narrows the response bound. The test's
   `obligation-unenforceable` evidence case, required by
   `make net-http-evidence`, is printed only after both hold.
-- Hosted evidence pending.
+- Hosted: in CI #212 (run 45240438449, `02bb256`) and CI #213 (run
+  45250010413, `8b771a7`) the `net.http` job printed
+  `NET-EVIDENCE {"suite":"authority-net-pipeline","case":"obligation-unenforceable","outcome":"OBLIGATION_UNENFORCEABLE","count":1}`
+  among its 193 cases. That one case line covers both of the test's
+  unenforceable obligations, `network_deny` and `audit_level=full`: it is
+  printed only after the two assertions above it held, so it is this
+  record's evidence, though not by a name of its own.
+- CI #211 at `85ddb7d` shows failed: its macOS `make test` job was
+  cancelled when the next push started CI #212 (`cancel-in-progress`), not
+  by a test.
 
 ## Rollback and deployment
 

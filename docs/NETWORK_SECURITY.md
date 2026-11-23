@@ -89,7 +89,8 @@ The runtime process likewise has no sockets (enforced by banned-import lint *and
 ```
 
 **Step 3, as built (F-16, [ADR-0074](adr/0074-f16-the-broker-resolves-the-decided-name-and-no-other.md), Proposed; built
-2026-11-20; its hostile-resolver test NOT EXERCISED in hosted CI,
+2026-11-20; its hostile-resolver test hosted-observed from CI #209 on, in
+`sandbox-egress`'s `make namespace-evidence`,
 [PRE_M6_REMEDIATION.md](PRE_M6_REMEDIATION.md)).** The broker resolves through the host's
 own resolver (glibc's `getaddrinfo`), once per hop or tunnel, under a deadline,
 and caches nothing: no answer outlives the hop or tunnel that asked. It asks

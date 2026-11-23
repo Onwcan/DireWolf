@@ -1455,7 +1455,7 @@ snapshot's, at the commits §4 names; at the 2026-11-21 heads they are
   a hosted run exercised ([PRE_M6_REMEDIATION.md](PRE_M6_REMEDIATION.md)) --
   among it an operator egress allowlist that is a ceiling over every policy
   (ADR-0073) and a resolver that asks for the decided name and no other
-  (ADR-0074, NOT EXERCISED in hosted CI); and an offline model library
+  (ADR-0074, hosted-observed since CI #209); and an offline model library
   (`direwolf models`, ADR-0072) that downloads nothing and serves no inference.
 - **Not built:** approvals and budgets (M6), the vertical slice (M3.5), model
   providers (M7), the agent loop and everything above it (M8-M17), releases

@@ -1,6 +1,7 @@
 # Pre-M6 security remediation: state and hosted evidence
 
-**As of 2026-11-21.** Between M5 and M6, the findings of the security review
+**As of 2026-11-21; F-16's row and the sections after "What is open" brought
+to CI #213 (run 45250010413, `8b771a7`) on 2026-11-23.** Between M5 and M6, the findings of the security review
 of 2026-11-11/12 (F-01 to F-19) were remediated one by one. This is not a
 milestone and does not change the build order ([ROADMAP.md](ROADMAP.md): M6
 is next). This page is the one place that says, for each finding, which
@@ -17,8 +18,9 @@ passes is listed as not exercised.
 **Reading the Hosted column.** `OBSERVED`: the cases that carry the property
 ran in a hosted job and held. `NOT EXERCISED`: the hosted job ran the test,
 and the test could not exercise the property there. `n/a`: no hosted case
-applies. Every decision record named here is **Proposed**; none is accepted
-by this page, by a green run or by a commit.
+applies. Every decision record named in the table is **Proposed**; none is
+accepted by this page, by a green run or by a commit. The one record below
+that is accepted is ADR-0075 (accepted 2026-11-22, recorded 2026-11-23).
 
 ## Findings
 
@@ -39,7 +41,7 @@ by this page, by a green run or by a commit.
 | F-13 | the product specification against the deployment as built | this page's change: [OPERATIONS.md](OPERATIONS.md), [PRODUCT_SPEC.md](PRODUCT_SPEC.md) | n/a | documentation; `tests/architecture/test_docs_truth.py` | hosted run of the new checks: pending |
 | F-14 | the competitive analysis since M4 | [COMPETITIVE_ANALYSIS.md](COMPETITIVE_ANALYSIS.md) §22 | n/a | documentation | -- |
 | F-15 | roadmap and records against each other | this page; [ROADMAP.md](ROADMAP.md) | n/a | documentation; `tests/architecture/test_docs_truth.py` | hosted run of the new checks: pending |
-| F-16 | the broker resolves the decided name and no other | [ADR-0074](adr/0074-f16-the-broker-resolves-the-decided-name-and-no-other.md) | NOT EXERCISED | the test ran and passed in the hosted broker unit run (`filesystem-operations`), printing "NOT EXERCISED: unprivileged user, mount and network namespaces are not available here"; Ubuntu's runner restricts them, and only the `sandbox-egress` job lifts the restriction, for F-04 alone | the whole hostile-resolver property; exercised locally (WSL2, 2026-11-20) with `make resolver-mutations` 3 of 3 killed. Since 2026-11-22, `make namespace-evidence` in `sandbox-egress` requires its six cases; its first hosted run is pending |
+| F-16 | the broker resolves the decided name and no other | [ADR-0074](adr/0074-f16-the-broker-resolves-the-decided-name-and-no-other.md) | OBSERVED | CI #209 (run 45056220111, `f7f5aae`) and every run since, latest CI #213 (run 45250010413, `8b771a7`): `sandbox-egress`, `make namespace-evidence` after the job lifts Ubuntu's restriction on unprivileged user namespaces -- all six `F16-EVIDENCE` cases, no NOT EXERCISED. On CI #201 the test ran only in the broker unit run, which has no such namespaces, and passed as NOT EXERCISED | the mutation review (`make resolver-mutations`, 3 of 3 killed) is local |
 | F-17 | each workload's egress decided by policy | [ADR-0061](adr/0061-workload-egress-decided-by-policy-novelty-and-exposure.md) | OBSERVED | `sandbox-egress`, real OCI: `a_workloads_egress_authorisation_holds_in_the_real_topology`; `sandbox-registry`, 20 cases; the agent suite's three-identity half | -- |
 | F-18 | sessions, workspaces and profiles owned by principals; the approver's own endpoint | [ADR-0063](adr/0063-principal-ownership-of-sessions-workspaces-and-profiles.md), [ADR-0067](adr/0067-f18-approver-endpoint-identity-boundary.md) | OBSERVED | `authority-transport`, three identities (uid 1001, `DW_PEER_AS`, `DW_APPROVER_AS` uid 999): `transport_foreign`'s cross-uid test and six `cross-uid-*` approver cases; `sandbox-agent`: `i09-runtime-holds-only-what-the-operator-declared` at `hosted-three-identity` | approvals themselves: M6 |
 | F-19 | a constrained network grant gives a `PROXY_ONLY` environment no destination | [ADR-0060](adr/0060-a-constrained-network-grant-gives-no-proxy-only-destination.md) | OBSERVED | `sandbox-egress`, real OCI: `grant-constrained-https-not-destinations`, `constrained-grant-name-not-granted` | -- |
@@ -58,16 +60,22 @@ platforms.
 
 - **F-05**, partially completed: every environment runs as one host uid until
   a runtime offers a user namespace per container.
-- **F-16**, NOT EXERCISED in hosted CI until `make namespace-evidence` --
-  added 2026-11-22 to the `sandbox-egress` job, after the step that lifts
-  Ubuntu's restriction on unprivileged user namespaces -- reports its six
-  cases. The same step requires F-05's two real-kernel-map cases and the
-  hidden-pid peer reader (ADR-0049), which also printed NOT EXERCISED in
-  every hosted job before.
+- **F-16** is no longer open: `make namespace-evidence`, added 2026-11-22 to
+  the `sandbox-egress` job after the step that lifts Ubuntu's restriction,
+  reported its six cases from CI #209 on, with F-05's two real-kernel-map
+  cases and the hidden-pid peer reader (ADR-0049), which also printed NOT
+  EXERCISED in every hosted job before.
+- **SR-06**, the filesystem resolver's two environmental cases: a bind mount
+  inside a workspace is exercised since 2026-11-23 on WSL2 and, once
+  committed, in `sandbox-egress` (below); a casefold filesystem stays NOT
+  EXERCISED -- the development kernel (WSL2) has no Unicode casefolding, and
+  no hosted job makes such a filesystem.
 - **Deferred by decision:** protocol 13 with F-03's D6 (ADR-0070 OD-C),
   Landlock with M6's host execution (OD-D), F-06's OF-3, model downloads after
   M7 (ADR-0072 OM-2), F-12's artifact capture (M8).
-- **Acceptance:** every record above stays Proposed until it is accepted.
+- **Acceptance:** every record in the table stays Proposed until it is
+  accepted; the approval channel (ADR-0063, ADR-0067, ADR-0077) is M6.0's to
+  decide ([M6_PREPARATION_HANDOFF.md](M6_PREPARATION_HANDOFF.md)).
 
 ## Since the security review of 2026-11-22
 
@@ -75,7 +83,10 @@ That review (its report is `docs/INDEPENDENT_SECURITY_REVIEW_2026-11-22.md`)
 found that operator policy files were read without the contract the other
 operator files keep (SR-01): the fix is
 [ADR-0075](adr/0075-sr01-operator-policy-files-are-read-as-the-other-operator-files-are.md),
-Proposed, built 2026-11-22, hosted evidence pending.
+built 2026-11-22, its two regression tests hosted from CI #209 (run
+45056220111, `f7f5aae`) on; **accepted** (OD-1, 2026-11-22; recorded
+2026-11-23). Making a file that another uid could once write trusted means
+replacing it, not re-moding it ([OPERATIONS.md](OPERATIONS.md) §4).
 
 ## Since the second security review of 2026-11-22
 
@@ -83,7 +94,8 @@ That review (its report is `docs/INDEPENDENT_SECURITY_REREVIEW_2026-11-22.md`)
 found that `audit_level=full` was counted as kept on a `net.http` hop whose
 record holds the URL only as its digest (ISR2-01): the fix is
 [ADR-0076](adr/0076-isr2-01-audit-level-full-is-not-kept-on-a-net-http-hop.md),
-Proposed, built 2026-11-23, hosted evidence pending. The finding stays
+Proposed, built 2026-11-23, hosted evidence observed on CI #212 and CI #213
+(`net-http-evidence`'s `obligation-unenforceable` case). The finding stays
 open until a verification pass separate from the fix confirms it.
 
 The same review found three guards that no repository test held (ISR2-02,
@@ -93,5 +105,30 @@ file walk's refusal of a symlinked directory and of a set-id file. Since
 `a_source_extended_after_its_check_is_never_copied_past_its_checked_length`
 (`direwolf-cli`) and
 `the_operator_file_walk_refuses_a_symlinked_directory_and_a_set_id_file`
-(the secret backend). Both findings stay open until a hosted `make test`
-runs those tests.
+(the secret backend) -- and both ran and passed in CI #213's `make test`
+(the walk's on Linux only, as the walk is). Later the same day the walk's
+test gained the sticky-directory cases, and the import gained a test of the
+whole import (`an_import_whose_source_grows_after_its_check_publishes_nothing`:
+no manifest, no object, nothing in `tmp/`), entered through a hook compiled
+into tests only; their mutants (TF-1, TF-2, TF-3, SR-04b, SR-04bc, SR-04d)
+are each killed locally, and their hosted run follows the commit.
+
+It also found ADR-0022's local approval paths still prescribed by an
+Accepted record (ISR2-05) and that an approver uid is a principal, not a
+person (ISR2-06):
+[ADR-0077](adr/0077-the-approval-channel-is-the-approver-endpoint-and-an-approver-uid-is-a-principal-not-a-person.md),
+Proposed, a decision record with nothing built, withdraws those paths and
+states the assurance levels.
+
+**SR-06's bind mount.** `a_bind_mount_inside_a_workspace_is_never_crossed`
+(`crates/dwkd-authority/tests/resource_workspace.rs`) starts itself in a
+user and mount namespace of its own, bind-mounts a directory from outside a
+workspace onto one inside it on the same filesystem, and requires
+`MOUNT_CROSSING` at the mount point and beneath it from the production
+resolution path; `make namespace-evidence` now requires its case line
+beside the broker's nine markers (5 tests, 10 markers). Exercised on WSL2
+on 2026-11-23, with the mutant that drops `RESOLVE_NO_XDEV` killed; hosted
+from the first `sandbox-egress` run after the commit. The casefold case
+stays NOT EXERCISED: WSL2's kernel has no Unicode casefolding, and no
+hosted job makes a casefold filesystem
+([M6_PREPARATION_HANDOFF.md](M6_PREPARATION_HANDOFF.md) §G has the plan).

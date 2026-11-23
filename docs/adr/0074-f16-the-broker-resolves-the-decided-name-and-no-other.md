@@ -1,6 +1,6 @@
 # ADR-0074: F-16 -- the broker resolves the name the authority decided and no other: an absolute query, a bounded answer, nothing cached
 
-**Status:** Proposed · **Date:** 2026-11-20 (designed, built and tested locally 2026-11-20 for finding F-16; hosted: NOT EXERCISED on CI #201 (run 44818094052, `3998de2`), no unprivileged namespaces on the runner, recorded in [PRE_M6_REMEDIATION.md](../PRE_M6_REMEDIATION.md); nothing here is accepted) · **Builds on:** [ADR-0048](0048-m5b-proxy-only-topology-and-connect-proxy.md) (the broker resolves, once per tunnel), [ADR-0050](0050-m5c-kernel-performed-net-http-ssrf-redirects-and-credential-egress.md) (once per hop, pinned), [ADR-0073](0073-f06-of2-the-operators-egress-allowlist-is-a-ceiling-every-policy-is-under.md) (the destination decided exactly) · **Leaves unchanged:** DWKP, the private broker protocol, the address guard, pinning, the fixture resolver the evidence uses, and every decision
+**Status:** Proposed · **Date:** 2026-11-20 (designed, built and tested locally 2026-11-20 for finding F-16; hosted: NOT EXERCISED on CI #201 (run 44818094052, `3998de2`), no unprivileged namespaces on the runner; exercised from CI #209 (run 45056220111, `f7f5aae`) on, all six cases, by `make namespace-evidence` in the `sandbox-egress` job, the latest CI #213 (run 45250010413, `8b771a7`); recorded in [PRE_M6_REMEDIATION.md](../PRE_M6_REMEDIATION.md); nothing here is accepted) · **Builds on:** [ADR-0048](0048-m5b-proxy-only-topology-and-connect-proxy.md) (the broker resolves, once per tunnel), [ADR-0050](0050-m5c-kernel-performed-net-http-ssrf-redirects-and-credential-egress.md) (once per hop, pinned), [ADR-0073](0073-f06-of2-the-operators-egress-allowlist-is-a-ceiling-every-policy-is-under.md) (the destination decided exactly) · **Leaves unchanged:** DWKP, the private broker protocol, the address guard, pinning, the fixture resolver the evidence uses, and every decision
 
 > **The broker asks the host's resolver for exactly the name the authority
 > decided.** The query is the name made absolute -- a trailing dot -- so no
@@ -106,11 +106,17 @@ whose address the guard then judged.
   as NOT EXERCISED ("unprivileged user, mount and network namespaces are
   not available here"): the hosted runner restricts them, and only the
   `sandbox-egress` job lifts the restriction, for F-04's case alone. The
-  property is shown locally, not by a hosted run.
+  property is shown locally, not by a hosted run. (The `sandbox-workspace`
+  job lifts it too, for its full-filesystem case; it runs no F-16 test.)
 - Since 2026-11-22, `make namespace-evidence` runs this test by name in the
   hosted `sandbox-egress` job, after that job lifts the restriction, and
-  requires its six cases: NOT EXERCISED fails the step. Its first hosted
-  run is pending; until it reports, the hosted state stays NOT EXERCISED.
+  requires its six cases: NOT EXERCISED fails the step.
+- Hosted, CI #209 (run 45056220111, `f7f5aae`), the step's first run, and
+  every run since -- CI #212 (run 45240438449, `02bb256`) and CI #213 (run
+  45250010413, `8b771a7`) among them: all six `F16-EVIDENCE` cases printed,
+  no NOT EXERCISED, and `namespace evidence: 4 tests, 9 markers, each
+  exercised`. The hostile-resolver property is hosted-observed from CI #209
+  on.
 
 ## Rollback and deployment
 
