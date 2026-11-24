@@ -26,17 +26,18 @@ The phase labels M6.1 to M6.7 are this plan's, not roadmap milestones.
 | `net.http` | 193 cases, `obligation-unenforceable` among them |
 | Not exercised hosted | a casefold filesystem (`canonical filesystem` lists it NOT EXERCISED, with the cross-device link; the bind mount is NOT EXERCISED in that job by design and exercised in `sandbox egress`) |
 | Store schema | 14 (`state/schema.rs` `CURRENT_VERSION`) |
-| Records | ADR-0075 Accepted; ADR-0063, ADR-0067, ADR-0077 (OD-1) accepted 2026-11-24 and recorded by this change; ADR-0078 (OD-2), ADR-0062, ADR-0064, ADR-0076 Proposed |
+| Records | ADR-0075 Accepted; ADR-0063, ADR-0067, ADR-0077 (OD-1) accepted 2026-11-24, recorded in `5520ab8`; ADR-0078 (OD-2) accepted 2026-11-24; ADR-0062, ADR-0064, ADR-0076 Proposed |
 
 ## 2. The M6.0 gate
 
 | Gate | Needs | State |
 |---|---|---|
-| **M6.0a** the channel and the principal | ADR-0063, ADR-0067, ADR-0077 OD-1 | met on commit of this change |
-| **M6.0b** the assurance policy | ADR-0078 (OD-1 to OD-3) | **pending**; needed before M6.3, not before M6.1 |
+| **M6.0a** the channel and the principal | ADR-0063, ADR-0067, ADR-0077 OD-1 | **met**: recorded in `5520ab8`; CI #218 at `6475172`, 33 of 33 |
+| **M6.0b** the assurance policy | ADR-0078 (OD-1 to OD-3) | **met**: accepted 2026-11-24, as recommended |
 | M6.1's own record | a new ADR amending ADR-0021 (§4 below) | proposed at M6.1's start |
 
-M6.1 may start once M6.0a is committed. M6.3 may not start before M6.0b.
+Both are met: M6.1 may start, and M6.3 starts with its assurance policy
+decided.
 
 ## 3. Security invariants for M6.1 to M6.7
 
@@ -198,10 +199,11 @@ earlier one's exit holds.
 | Exit | an A1 class approvable and spent once; every A2 class still `DENY` |
 | Forbidden | any A2 class approvable without a verified factor; a remote channel; a terminal descriptor |
 
-If ADR-0078 OD-3 brings the presence factor into M6, **M6.3b** is its own
-checkpoint here: the factor's ADR and dependency review, its verification in
-the authority over the binding hash and nonce, enrolment and recovery, and
-hosted evidence -- before any A2 class is enabled anywhere.
+ADR-0078 OD-3 keeps the presence factor out of M6. If a later decision brings
+it in, **M6.3b** is its own checkpoint here: the factor's ADR and dependency
+review, its verification in the authority over the binding hash and nonce,
+enrolment and recovery, and hosted evidence -- before any A2 class is enabled
+anywhere.
 
 ### M6.4 -- standing grants
 
@@ -212,7 +214,7 @@ hosted evidence -- before any A2 class is enabled anywhere.
 | New | grant records (principal, agent profile, scope, `not_after` ≤ 90 days, uses); `grant.*` audit kinds; `StandingGrantState` gains its first real variant (`policy/context.rs`) |
 | Tests | no grant from a prompt; the cap enforced at creation and use; `require_untainted_run` default; revoked or expired never used; a scope never widened |
 | Adversarial | creating a grant through DWKP; a grant spent by another principal or profile; a grant surviving a policy change it should not |
-| Exit | the above; creating a grant for an A2 class needs A2, so stays refused under ADR-0078's recommendation |
+| Exit | the above; creating a grant for an A2 class needs A2, so stays refused (ADR-0078) |
 | Forbidden | an implicit grant; a grant with no expiry |
 
 ### M6.5 -- hierarchical budgets
@@ -236,7 +238,7 @@ hosted evidence -- before any A2 class is enabled anywhere.
 | Depends on | M6.3; ADR-0078; ADR-0070 OD-D (Landlock) |
 | Tests | without `--allow-host-execution`: `DENY`; without an approval: `DENY`; with an A1 approval: `DENY` (host execution is an A2 class); binary or environment drift: `DENY`; no sandbox-to-host escalation |
 | Hosted | `process-broker` evidence |
-| Exit under ADR-0078's recommendation | **wired and shown to deny**; host execution is not enabled and M6 does not call it complete |
+| Exit (ADR-0078 §3) | **wired and shown to deny**; host execution is not enabled and M6 does not call it complete |
 | Exit if M6.3b exists | the same, plus a launch with a verified A2 approval, its own evidence, and the Landlock decision applied |
 
 ### M6.7 -- adversarial verification and closeout
@@ -269,13 +271,13 @@ the owner's.
 
 ## 7. A1, A2, and what M6 delivers
 
-Under ADR-0078 as recommended, M6 delivers approvals at A1 for sandboxed,
-non-credential, non-deleting actions; `secret.use`, `fs.delete`, host
-execution and standing grants for them stay `DENY` until a verified presence
-factor exists. That is a smaller M6 than "everything approvable", stated so;
-it is not a deferral hidden behind a completed phase. If the owner brings the
-factor into M6 (ADR-0078 OD-3), M6.3b adds it and M6.4 and M6.6 gain their
-A2 exits.
+Under ADR-0078, accepted 2026-11-24, M6 delivers approvals at A1 for
+sandboxed, non-credential, non-deleting actions; `secret.use`, `fs.delete`,
+host execution and standing grants for them stay `DENY` until a verified
+presence factor exists, and M6 builds none (OD-3). That is a smaller M6 than
+"everything approvable", stated so; it is not a deferral hidden behind a
+completed phase. If a later decision brings the factor into M6, M6.3b adds it
+and M6.4 and M6.6 gain their A2 exits.
 
 ## 8. Evidence plan
 
@@ -293,10 +295,9 @@ A2 exits.
 
 | Risk | Owner of the decision | Closed when |
 |---|---|---|
-| ADR-0078 undecided | the owner | accepted, before M6.3 |
 | the binding's two mismatches (environment profile, agent) | M6.1's ADR | decided and tested |
 | standing grants across a policy change | M6.4's ADR | decided |
-| no presence factor | ADR-0078 OD-3 | a factor's ADR, or the A2 classes accepted as `DENY` for M6 |
+| no presence factor: the four A2 classes `DENY` through M6 | ADR-0078 OD-3 (accepted) | a factor's ADR, after M6 |
 | casefold filesystem evidence | engineering | the hosted plan in the handoff §G runs |
 | ISR2-07 branch protection | the owner | a ruleset, or a recorded decision |
 | F-05 per-environment user namespace | upstream runtimes | partially completed, unchanged |

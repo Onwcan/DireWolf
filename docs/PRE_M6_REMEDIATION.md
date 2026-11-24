@@ -21,8 +21,9 @@ and the test could not exercise the property there. `n/a`: no hosted case
 applies. Every decision record named in the table is **Proposed** but
 F-18's two, ADR-0063 and ADR-0067, accepted 2026-11-24; none is accepted
 by this page, by a green run or by a commit. Of the records below, ADR-0075
-(accepted 2026-11-22, recorded 2026-11-23) and ADR-0077 (OD-1, accepted
-2026-11-24) are accepted.
+(accepted 2026-11-22, recorded 2026-11-23), ADR-0077 (OD-1, accepted
+2026-11-24) and ADR-0078 (ADR-0077's OD-2, accepted 2026-11-24) are
+accepted.
 
 ## Findings
 
@@ -79,7 +80,7 @@ platforms.
   is accepted. The approval channel -- ADR-0063, ADR-0067 and ADR-0077's
   OD-1 -- was accepted on 2026-11-24, M6.0's first gate
   ([M6_PREPARATION_HANDOFF.md](M6_PREPARATION_HANDOFF.md)); which classes
-  need A2 is [ADR-0078](adr/0078-approval-assurance-which-classes-need-a2-and-the-presence-factor.md), Proposed.
+  need A2 is [ADR-0078](adr/0078-approval-assurance-which-classes-need-a2-and-the-presence-factor.md), accepted the same day.
 
 ## Since the security review of 2026-11-22
 
@@ -123,7 +124,7 @@ person (ISR2-06):
 [ADR-0077](adr/0077-the-approval-channel-is-the-approver-endpoint-and-an-approver-uid-is-a-principal-not-a-person.md),
 a decision record with nothing built, withdraws those paths and states the
 assurance levels; its OD-1 was accepted on 2026-11-24, and its OD-2 -- which
-classes need A2 -- moved to [ADR-0078](adr/0078-approval-assurance-which-classes-need-a2-and-the-presence-factor.md), Proposed.
+classes need A2 -- moved to [ADR-0078](adr/0078-approval-assurance-which-classes-need-a2-and-the-presence-factor.md), accepted the same day.
 
 **SR-06's bind mount.** `a_bind_mount_inside_a_workspace_is_never_crossed`
 (`crates/dwkd-authority/tests/resource_workspace.rs`) starts itself in a

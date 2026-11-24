@@ -10,7 +10,7 @@ M6 → M3.5 → M7 → M8 → M9.
 > **Since (2026-11-24).** The three decisions §C lists as blocking M6.0 have
 > moved: ADR-0063, ADR-0067 and ADR-0077's OD-1 are accepted, and OD-2 is a
 > record of its own, [ADR-0078](adr/0078-approval-assurance-which-classes-need-a2-and-the-presence-factor.md),
-> Proposed. The plan this page proposed in §E is carried, bounded and
+> accepted the same day. The plan this page proposed in §E is carried, bounded and
 > corrected against the code, in [M6_IMPLEMENTATION_PLAN.md](M6_IMPLEMENTATION_PLAN.md),
 > with its decisions in [M6_0_DECISION_PACKAGE.md](M6_0_DECISION_PACKAGE.md).
 > The rest of this page is as it was on 2026-11-23.

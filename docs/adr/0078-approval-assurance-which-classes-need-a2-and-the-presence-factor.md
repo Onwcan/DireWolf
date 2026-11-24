@@ -1,6 +1,6 @@
 # ADR-0078: Approval assurance -- which classes need A2, and the presence factor
 
-**Status:** Proposed · **Date:** 2026-11-24 (ADR-0077's OD-2, moved here so that ADR-0077 could be accepted without deciding it; a decision record only -- nothing is built, and no approval operation exists; nothing here is accepted) · **Builds on:** [ADR-0077](0077-the-approval-channel-is-the-approver-endpoint-and-an-approver-uid-is-a-principal-not-a-person.md) §3 (assurance levels A0, A1, A2), [ADR-0067](0067-f18-approver-endpoint-identity-boundary.md) §7 (what M6 builds on the endpoint), [ADR-0045](0045-m4d-process-execution-broker.md) (the host floor) · **Leaves unchanged:** DWKP, the private protocol, the store, the shipped packs and every decision made today
+**Status:** Accepted · **Date:** 2026-11-24 (proposed 2026-11-24 as ADR-0077's OD-2, moved here so that ADR-0077 could be accepted without deciding it; accepted 2026-11-24, OD-1 to OD-3 as recommended below: the four A2 classes of §1, `DENY` until a verified presence factor exists with no override, and no presence factor built in M6; a decision record only -- nothing is built, and no approval operation exists) · **Builds on:** [ADR-0077](0077-the-approval-channel-is-the-approver-endpoint-and-an-approver-uid-is-a-principal-not-a-person.md) §3 (assurance levels A0, A1, A2), [ADR-0067](0067-f18-approver-endpoint-identity-boundary.md) §7 (what M6 builds on the endpoint), [ADR-0045](0045-m4d-process-execution-broker.md) (the host floor) · **Leaves unchanged:** DWKP, the private protocol, the store, the shipped packs and every decision made today
 
 > **High-risk classes need a person, not only a principal.** Host execution,
 > `secret.use`, `fs.delete` and a standing grant's creation are approvable
@@ -89,9 +89,9 @@ the authority, with the dependency review ADR-0019's rule requires.
 - An operator can approve sandboxed, non-credential, non-deleting actions at
   A1 once M6.3 is built.
 - `secret.use`, `fs.delete`, host execution and standing grants are denied
-  through all of M6 unless the presence-factor decision is taken and built
-  inside it; the shipped packs' `deny-approval-needed-when-unattended` and
-  the host floor keep deciding them.
+  through all of M6 (OD-3); the shipped packs'
+  `deny-approval-needed-when-unattended` and the host floor keep deciding
+  them.
 - Every approval's record names its level.
 
 ## Alternatives considered
@@ -103,9 +103,8 @@ the authority, with the dependency review ADR-0019's rule requires.
   authenticator is built, and the A1 classes are bounded by the sandbox,
   the egress ceiling and their obligations already.
 - **Build FIDO2 inside M6.** Possible, as a separately verifiable M6.3b
-  checkpoint before any A2 class is enabled; not chosen here, because it
-  grows the authority's dependency set and that needs its own review. The
-  owner may choose it (OD-3).
+  checkpoint before any A2 class is enabled; not chosen (OD-3), because it
+  grows the authority's dependency set and that needs its own review.
 
 ## Residuals
 
@@ -116,12 +115,13 @@ the authority, with the dependency review ADR-0019's rule requires.
 
 ## Owner decisions
 
-- **OD-1** the A2 classes of §1 (recommended as written).
+- **OD-1** the A2 classes of §1, as written. **Accepted 2026-11-24.**
 - **OD-2** A2 classes `DENY` until a verified factor exists, with no
-  override (recommended).
-- **OD-3** whether M6 builds the presence factor (recommended: no -- a
-  decision of its own after M6, with FIDO2 user presence the candidate) and,
-  if it does, as M6.3b before M6.4's high-risk grants and M6.6's enablement.
+  override. **Accepted 2026-11-24.**
+- **OD-3** M6 does not build the presence factor: it is a decision of its
+  own after M6, with FIDO2 user presence the candidate; a decision that
+  brings it into M6 places it as M6.3b, before M6.4's high-risk grants and
+  M6.6's enablement. **Accepted 2026-11-24.**
 
 ## Evidence
 

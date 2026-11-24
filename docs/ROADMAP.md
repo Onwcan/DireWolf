@@ -897,15 +897,15 @@ added ADR-0075 (operator policy files), accepted; the second review of that
 day ([INDEPENDENT_SECURITY_REREVIEW_2026-11-22.md](INDEPENDENT_SECURITY_REREVIEW_2026-11-22.md))
 added ADR-0076 (`audit_level` on a `net.http` hop), Proposed, and ADR-0077
 (the approval channel), whose OD-1 was accepted on 2026-11-24 with ADR-0063
-and ADR-0067; its OD-2 is ADR-0078, Proposed. The final pre-M6 handoff is
-[M6_PREPARATION_HANDOFF.md](M6_PREPARATION_HANDOFF.md). Every other ADR
+and ADR-0067; its OD-2 is ADR-0078, accepted the same day. The final pre-M6
+handoff is [M6_PREPARATION_HANDOFF.md](M6_PREPARATION_HANDOFF.md). Every other ADR
 named here stays Proposed until accepted.
 
 ### M6 · Approvals and budgets
 **Deps:** M3. **Deliverables:** binding hash; approval registry with scopes, expiry, single-use burn; standing grants with the 90-day cap and `require_untainted_run`; kernel-rendered approval prompts; hierarchical subtractive budget ledger; unattended degradation to DENY.
 **Acceptance:** every property test in [APPROVALS.md](APPROVALS.md) §10; burn is atomic under concurrency; prompts contain no model-authored text in the authoritative region.
 **Adversarial:** replay, substitution, drift (file/DNS/binary swap), laundering parent↔child, environment swap, fatigue spam, budget amplification via fan-out; an external agent's own approval, auto-approve or "yolo" claim presented as an operator approval ([ADR-0051](adr/0051-external-agent-interoperability.md)).
-**Plan (M6.0, 2026-11-24; nothing built):** [M6_IMPLEMENTATION_PLAN.md](M6_IMPLEMENTATION_PLAN.md) -- the invariants, the binding contract and phases M6.1 to M6.7; its decisions are [M6_0_DECISION_PACKAGE.md](M6_0_DECISION_PACKAGE.md). The approval channel and the principal model are accepted (ADR-0063, ADR-0067, ADR-0077 OD-1); which approvals need a presence factor is ADR-0078, Proposed, and is needed before M6.3.
+**Plan (M6.0, 2026-11-24; nothing built):** [M6_IMPLEMENTATION_PLAN.md](M6_IMPLEMENTATION_PLAN.md) -- the invariants, the binding contract and phases M6.1 to M6.7; its decisions are [M6_0_DECISION_PACKAGE.md](M6_0_DECISION_PACKAGE.md). The approval channel and the principal model are accepted (ADR-0063, ADR-0067, ADR-0077 OD-1); which approvals need a presence factor is ADR-0078, accepted the same day: host execution, `secret.use`, `fs.delete` and a standing grant's creation stay `DENY` through M6, and M6 does not enable host execution.
 
 ---
 
