@@ -10133,6 +10133,361 @@ def task_resolver_mutations() -> None:
     resolver_review()
 
 
+# M6.1 (ADR-0079, Proposed): the approval binding. Each hashed member
+# dropped from the canonical object in turn, each nested member that makes
+# an identity, and each encoding and refusal guard weakened. The detector
+# is the binding's own tests -- the golden vectors, the property and
+# adversarial cases, the Linux real-authority cases -- and every mutant
+# must be KILLED by a named failing test, the file restored
+# byte-identically. Two mutants are not in the table because no test can
+# kill them: see APPROVAL_BINDING_EQUIVALENT.
+_M61_BINDING = "crates/dwkd-authority/src/state/binding.rs"
+APPROVAL_BINDING_MUTATIONS = (
+    (
+        "B01: schema dropped",
+        _M61_BINDING,
+        '\n            ("schema", text(SCHEMA)),\n',
+        "\n",
+    ),
+    (
+        "B02: verb dropped",
+        _M61_BINDING,
+        '\n            ("verb", text(&verb.to_string())),\n',
+        "\n",
+    ),
+    (
+        "B03: resource_identity dropped",
+        _M61_BINDING,
+        '\n            ("resource_identity", resource.value()?),\n',
+        "\n",
+    ),
+    (
+        "B04: canonical_args dropped",
+        _M61_BINDING,
+        '\n            ("canonical_args", arguments.value()?),\n',
+        "\n",
+    ),
+    (
+        "B05: workspace dropped",
+        _M61_BINDING,
+        '\n            ("workspace", run.workspace.value()?),\n',
+        "\n",
+    ),
+    (
+        "B06: environment_profile dropped",
+        _M61_BINDING,
+        ('\n            ("environment_profile", environment.value()?),\n'),
+        "\n",
+    ),
+    (
+        "B07: credential_handles dropped",
+        _M61_BINDING,
+        ('\n            ("credential_handles", credentials.value()?),\n'),
+        "\n",
+    ),
+    (
+        "B08: agent dropped",
+        _M61_BINDING,
+        '\n            ("agent", run.agent.value()?),\n',
+        "\n",
+    ),
+    (
+        "B09: requester dropped",
+        _M61_BINDING,
+        ('\n            ("requester", text(&run.requester.storage_key())),\n'),
+        "\n",
+    ),
+    (
+        "B10: scope dropped",
+        _M61_BINDING,
+        '\n            ("scope", scope.value()?),\n',
+        "\n",
+    ),
+    (
+        "B11: taint_level dropped",
+        _M61_BINDING,
+        '\n            ("taint_level", text(run.taint.as_str())),\n',
+        "\n",
+    ),
+    (
+        "B12: privacy_class dropped",
+        _M61_BINDING,
+        '\n            ("privacy_class", privacy),\n',
+        "\n",
+    ),
+    (
+        "B13: obligations dropped",
+        _M61_BINDING,
+        ('\n            ("obligations", obligations(decision.obligations())?),\n'),
+        "\n",
+    ),
+    (
+        "B14: a file's inode dropped",
+        _M61_BINDING,
+        ('\n                    ("inode", unsigned(identity.inode())),\n'),
+        "\n",
+    ),
+    (
+        "B15: the workspace root's inode dropped",
+        _M61_BINDING,
+        ('\n                    ("inode", unsigned(self.root.inode())),\n'),
+        "\n",
+    ),
+    (
+        "B16: a host's pinned addresses dropped",
+        _M61_BINDING,
+        '\n            ("addresses", set(addresses, true)?),\n',
+        "\n",
+    ),
+    (
+        "B17: a write's content digest dropped",
+        _M61_BINDING,
+        ('\n                    ("content_sha256", text(&content.to_hex())),\n'),
+        "\n",
+    ),
+    (
+        "B18: a request body's digest dropped",
+        _M61_BINDING,
+        ('\n                    ("body_sha256", text(&body.to_hex())),\n'),
+        "\n",
+    ),
+    (
+        "B19: a credential's revision dropped",
+        _M61_BINDING,
+        ('\n                    ("revision", unsigned(c.revision)),\n'),
+        "\n",
+    ),
+    (
+        "B20: a credential's metadata digest dropped",
+        _M61_BINDING,
+        ('\n                    ("metadata_sha256", text(&c.metadata.to_hex())),\n'),
+        "\n",
+    ),
+    (
+        "B21: the profile's revision dropped",
+        _M61_BINDING,
+        '\n            ("revision", unsigned(self.revision)),\n',
+        "\n",
+    ),
+    (
+        "B22: the sandbox's assurance dropped",
+        _M61_BINDING,
+        ('\n                    ("assurance", text(sandbox.assurance.as_str())),\n'),
+        "\n",
+    ),
+    (
+        "B23: a path set's files dropped",
+        _M61_BINDING,
+        '\n                        ("files", set(files, true)?),\n',
+        "\n",
+    ),
+    (
+        "B24: an integer rounded through a double",
+        _M61_BINDING,
+        ("\nfn unsigned(value: u64) -> Value {\n    Value::String(value.to_string())\n}\n"),
+        (
+            "\nfn unsigned(value: u64) -> Value {\n    #[allow(clippy::"
+            "as_conversions, clippy::cast_precision_loss, clippy::cas"
+            "t_possible_truncation, clippy::cast_sign_loss)]\n    let "
+            "lossy = (value as f64) as u64;\n    Value::String(lossy.t"
+            "o_string())\n}\n"
+        ),
+    ),
+    (
+        "B25: a set left in input order",
+        _M61_BINDING,
+        "\n    keyed.sort_by(|a, b| a.0.cmp(&b.0));\n",
+        "\n",
+    ),
+    (
+        "B26: a set member accepted twice",
+        _M61_BINDING,
+        ("\n        .any(|pair| matches!(pair, [a, b] if a.0 == b.0))\n"),
+        "\n        .any(|_| false)\n",
+    ),
+    (
+        "B27: an obligation's parameter dropped",
+        _M61_BINDING,
+        ('\n        Obligation::MaxOutputBytes(bytes) => vec![("bytes", unsigned(*bytes))],\n'),
+        "\n        Obligation::MaxOutputBytes(_) => Vec::new(),\n",
+    ),
+    (
+        "B28: argv bound as a set",
+        _M61_BINDING,
+        (
+            "\n                    Value::Array(args.iter().map(|a| Va"
+            "lue::String(a.clone())).collect()),\n"
+        ),
+        (
+            "\n                    set(args.iter().map(|a| Value::Stri"
+            "ng(a.clone())).collect(), false)?,\n"
+        ),
+    ),
+    (
+        "B29: the requester taken as a constant",
+        _M61_BINDING,
+        ('\n            ("requester", text(&run.requester.storage_key())),\n'),
+        '\n            ("requester", text("uid:0")),\n',
+    ),
+    (
+        "B30: the taint taken as clean",
+        _M61_BINDING,
+        '\n            ("taint_level", text(run.taint.as_str())),\n',
+        '\n            ("taint_level", text("NONE")),\n',
+    ),
+    (
+        "B31: the action not checked against the decision",
+        _M61_BINDING,
+        ("\n        if action.capability() != decision.required_capability() {\n"),
+        "\n        if false {\n",
+    ),
+    (
+        "B32: the environment not checked against the action",
+        _M61_BINDING,
+        ("\n        if environment.environment() != *action.environment() {\n"),
+        "\n        if false {\n",
+    ),
+    (
+        "B33: a resource or argument that does not fit the verb kept",
+        _M61_BINDING,
+        "\n        fits(verb, resource, arguments)?;\n",
+        "\n        let _ = fits(verb, resource, arguments);\n",
+    ),
+    (
+        "B34: a write bound by its byte count alone",
+        _M61_BINDING,
+        ("\n        (Namespace::Fs, Arguments::Fs { .. }) => action != Action::Write,\n"),
+        "\n        (Namespace::Fs, Arguments::Fs { .. }) => true,\n",
+    ),
+    (
+        "B35: the scope's kind not checked against the rule's",
+        _M61_BINDING,
+        "\n        if scope.kind() != spec.scope() {\n",
+        "\n        if false {\n",
+    ),
+    (
+        "B36: an action outside its scope bound",
+        _M61_BINDING,
+        ("\n        if !scope.admits(verb, resource, arguments, credentials) {\n"),
+        "\n        if false {\n",
+    ),
+    (
+        "B37: an obligation the route does not keep bound",
+        _M61_BINDING,
+        "\n        if !obligations_kept {\n",
+        "\n        if false {\n",
+    ),
+    (
+        "B38: an unusable sandbox bound",
+        _M61_BINDING,
+        "\n        if !judgement.usable(EnvironmentKind::Oci) {\n",
+        "\n        if false {\n",
+    ),
+    (
+        "B39: a revoked credential bound",
+        _M61_BINDING,
+        "\n            if current.state != CONFIGURED {\n",
+        "\n            if false {\n",
+    ),
+    (
+        "B40: a handle bound twice",
+        _M61_BINDING,
+        ("\n            .any(|pair| matches!(pair, [a, b] if a.handle == b.handle))\n"),
+        "\n            .any(|_| false)\n",
+    ),
+    (
+        "B41: a stored subject read loosely",
+        _M61_BINDING,
+        ("\n    (subject.storage_key() == stored).then_some(subject)\n"),
+        "\n    Some(subject)\n",
+    ),
+    (
+        "B42: a host name not checked",
+        _M61_BINDING,
+        "\n        if !host_name(name) || port == 0 {\n",
+        "\n        if port == 0 {\n",
+    ),
+    (
+        "B43: a vacant name not checked",
+        _M61_BINDING,
+        "\n        if !leaf_name(name) {\n",
+        "\n        if false {\n",
+    ),
+)
+# The equivalent mutants, and why: neither can change an outcome.
+APPROVAL_BINDING_EQUIVALENT = (
+    (
+        "E1: the REQUIRE_APPROVAL check removed",
+        "a decision names an approval shape only when its effect is "
+        "REQUIRE_APPROVAL (policy::Decision), and the next line refuses one "
+        "with no shape: defence in depth, and no input reaches past it",
+    ),
+    (
+        "E2: the canonical size bound removed",
+        "every input is bounded below it: the largest argv DWKP admits, "
+        "escaped, is within it "
+        "(the_largest_argv_dwkp_admits_stays_within_the_binding_bound)",
+    ),
+)
+APPROVAL_BINDING_EVIDENCE_DIR = ROOT / "target" / "m6-1-evidence"
+APPROVAL_BINDING_RECORD_SCHEMA = "direwolf.m6-1.mutation-review"
+
+
+def _approval_binding_stages() -> tuple[MutationStage, ...]:
+    """The review's detector: the binding's unit, property and Linux
+    real-authority tests."""
+    return (
+        MutationStage(
+            "approval-binding",
+            (
+                "cargo",
+                "test",
+                "--locked",
+                "-p",
+                "dwkd-authority",
+                "--lib",
+                "--",
+                "state::binding::",
+                "state::workload_route::tests::binding::",
+                "state::workload_route::tests::taint::m6_1_",
+            ),
+        ),
+    )
+
+
+def approval_binding_review(
+    mutations: Sequence[tuple[str, str, str, str]] = APPROVAL_BINDING_MUTATIONS,
+    *,
+    root: Path | None = None,
+    tests: Callable[..., SuiteRun] = run_tests,
+) -> dict[str, object]:
+    """M6.1's mutation review, as F-16's: see `_finding_review`."""
+    return _finding_review(
+        ("M6.1", "0079", "approval-binding-mutations", APPROVAL_BINDING_RECORD_SCHEMA),
+        "approval binding",
+        mutations,
+        stages=_approval_binding_stages(),
+        build=("cargo", "test", "--locked", "-p", "dwkd-authority", "--lib", "--no-run"),
+        directory=APPROVAL_BINDING_EVIDENCE_DIR if root is None else root,
+        tests=tests,
+    )
+
+
+def task_approval_binding_mutations() -> None:
+    """Drop each hashed member of the approval binding, and weaken each
+    encoding and refusal guard, in turn (M6.1, ADR-0079, Proposed); the
+    binding's tests must catch every one.
+
+    The unmutated baseline must pass first; every file is restored
+    byte-identically whatever happens, and checked; the record is kept in
+    target/m6-1-evidence/. Linux (the real-authority cases), local, and never
+    run beside another build.
+    """
+    if not sys.platform.startswith("linux"):
+        raise TaskError("NOT EXERCISED: the real-authority cases need Linux; run it in WSL2")
+    approval_binding_review()
+
+
 # M5d.3 (ADR-0052 §7): a sandboxed `process.exec` that consumes a credential.
 SECRET_SANDBOX_BROKER_TESTS = (
     "linux::a_descriptor_secret_reaches_the_program_on_descriptor_three_and_nowhere_else",
@@ -16739,6 +17094,7 @@ TASKS = {
     "sandbox-identity-mutations": task_sandbox_identity_mutations,
     "egress-allowlist-mutations": task_egress_allowlist_mutations,
     "resolver-mutations": task_resolver_mutations,
+    "approval-binding-mutations": task_approval_binding_mutations,
     "sandbox-neighbour-mutations": task_sandbox_neighbour_mutations,
     "sandbox-secret-evidence": task_sandbox_secret_evidence,
     "sandbox-secret-mutations": task_sandbox_secret_mutations,

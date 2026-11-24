@@ -2514,6 +2514,55 @@ lease, an owner: the outcome the migration exists to prevent. Every other
 source file is kept from naming it.
 """
 
+[[text_rules]]
+id = "TX066-the-approval-binding-grants-nothing"
+paths = ["crates/dwkd-authority/src/state/binding.rs"]
+exempt_paths = []
+suffixes = [".rs"]
+patterns = [
+    # It writes no row: its one statement reads.
+    '^(?!\s*//).*\b(INSERT|UPDATE|DELETE|REPLACE)\b',
+    '^(?!\s*//).*\.execute(_batch)?\s*\(',
+    # It decides and permits nothing.
+    '^(?!\s*//).*\bEffect::Allow\b',
+    '^(?!\s*//).*\b(permits|policy_satisfied|capability_satisfied)\s*\(',
+    # It reaches no broker, dispatcher or audit writer, and reads no clock and
+    # no randomness: a binding is a function of its inputs.
+    '^(?!\s*//).*\b(broker|dispatch\w*|AuditWriter|Clock|now_ms|getrandom|SystemTime|Instant)\b',
+    # It builds and reads no protocol message.
+    '^(?!\s*//).*\bDwkp(Body|Message)\b',
+]
+reason = """
+M6.1 (ADR-0079, Proposed): an approval binding states what a future approval
+would cover, and nothing more. It is built from a decision and never makes
+one; it reads a run's record and writes no row; it is computed in the state
+layer and handed to nobody -- no broker, no dispatcher, no audit record, no
+protocol message -- and it reads no clock or randomness, so the same inputs
+are the same binding. A binding module that could allow, record or reach
+would be a second authorization path beside policy's, before M6.2's registry
+and its single-use burn exist. M6.2 changes this rule under a decision of
+its own.
+"""
+
+[[text_rules]]
+id = "TX067-only-the-state-layer-names-the-approval-binding"
+paths = ["crates", "runtime/src"]
+exempt_paths = ["crates/dwkd-authority/src/state"]
+suffixes = [".rs", ".py"]
+patterns = [
+    '^(?!\s*(//|#)).*\b(ApprovalBinding|BindingInput|RunContext)\b',
+    '^(?!\s*(//|#)).*direwolf\.approval\.binding\b',
+]
+reason = """
+M6.1 (ADR-0079, Proposed): the binding is computed by the authority's state
+layer from values it decided, resolved or recorded. The runtime never
+computes one (APPROVALS.md section 2), the DWKP server never builds one from
+what a request says, the broker never sees one, and the wire contract has no
+field for one. A name for it anywhere else -- the type, its input, the run
+context it reads, or the schema string -- would be the first step of a
+binding assembled from a claim.
+"""
+
 # ===========================================================================
 # Documentation
 # ===========================================================================

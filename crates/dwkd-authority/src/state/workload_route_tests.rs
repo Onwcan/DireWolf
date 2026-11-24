@@ -1982,6 +1982,10 @@ mod release;
 #[path = "taint_route_tests.rs"]
 mod taint;
 
+/// M6.1: the approval binding, built from the real authority's records.
+#[path = "binding_route_tests.rs"]
+mod binding;
+
 /// F-18: a revocation's two phases.
 #[path = "ownership_route_tests.rs"]
 mod ownership;

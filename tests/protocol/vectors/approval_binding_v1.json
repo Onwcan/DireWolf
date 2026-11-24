@@ -1,0 +1,42 @@
+{
+  "schema": "direwolf.approval.binding.v1",
+  "about": "M6.1 (ADR-0079, Proposed): the approval binding's golden vectors. Each canonical object is written by hand in tests/protocol/test_approval_binding_vectors.py from the record, encoded with RFC 8785 and hashed with SHA-256 there; the Rust binding must reproduce both from typed authority values (crates/dwkd-authority/src/state/binding_tests.rs).",
+  "vectors": [
+    {
+      "name": "fs-write-exact-action",
+      "property": "A write is bound to the file's identity (device, inode), never its path, and to its content by SHA-256 and length; an obligation is a tagged object with its parameter as a decimal string.",
+      "canonical": "{\"agent\":{\"profile\":\"operator\",\"revision\":\"1\"},\"canonical_args\":{\"byte_count\":\"6\",\"content_sha256\":\"5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03\",\"kind\":\"fs_content\"},\"credential_handles\":[],\"environment_profile\":{\"kind\":\"host\"},\"obligations\":[{\"bytes\":\"262144\",\"kind\":\"max_output_bytes\"}],\"privacy_class\":null,\"requester\":\"uid:1000\",\"resource_identity\":{\"device\":\"2049\",\"inode\":\"131074\",\"kind\":\"file\"},\"schema\":\"direwolf.approval.binding.v1\",\"scope\":{\"kind\":\"exact_action\"},\"taint_level\":\"NONE\",\"verb\":\"fs.write\",\"workspace\":{\"id\":\"ws\",\"root\":{\"birth\":{\"nanoseconds\":\"123456789\",\"seconds\":\"1700000000\"},\"device\":\"2049\",\"inode\":\"2\"}}}",
+      "sha256": "34dbee4a9782fa53cf70512f3570c646f665a3b1ce2ac2b73014c0e97cfe95a7"
+    },
+    {
+      "name": "process-exec-credentials-tainted",
+      "property": "An executable by canonical path and SHA-256; argv in its own order; credentials as a set sorted by canonical bytes, each with its revision and metadata digest; the run's taint at grant time.",
+      "canonical": "{\"agent\":{\"profile\":\"operator\",\"revision\":\"1\"},\"canonical_args\":{\"argv\":[\"push\",\"--force\",\"origin\"],\"kind\":\"argv\"},\"credential_handles\":[{\"handle\":\"ci-token\",\"metadata_sha256\":\"cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd\",\"revision\":\"1\"},{\"handle\":\"gh-token\",\"metadata_sha256\":\"abababababababababababababababababababababababababababababababab\",\"revision\":\"3\"}],\"environment_profile\":{\"kind\":\"host\"},\"obligations\":[{\"kind\":\"network_deny\"}],\"privacy_class\":null,\"requester\":\"uid:1000\",\"resource_identity\":{\"kind\":\"executable\",\"path\":\"/usr/bin/git\",\"sha256\":\"0707070707070707070707070707070707070707070707070707070707070707\"},\"schema\":\"direwolf.approval.binding.v1\",\"scope\":{\"kind\":\"exact_action\"},\"taint_level\":\"EXTERNAL_UNTRUSTED\",\"verb\":\"process.exec\",\"workspace\":{\"id\":\"ws\",\"root\":{\"birth\":{\"nanoseconds\":\"123456789\",\"seconds\":\"1700000000\"},\"device\":\"2049\",\"inode\":\"2\"}}}",
+      "sha256": "1ead57fe22c453eebde65d3cb8f917f7a63260b144b5862e445193a226938545"
+    },
+    {
+      "name": "net-https-host-and-methods",
+      "property": "A host by decided name, port and every pinned address (IPv6 fully expanded); the request by method, URL digest and body digest -- never the URL's path or query; a host-and-methods scope with its own address and method sets.",
+      "canonical": "{\"agent\":{\"profile\":\"operator\",\"revision\":\"1\"},\"canonical_args\":{\"body_bytes\":\"7\",\"body_sha256\":\"015abd7f5cc57a2dd94b7590f04ad8084273905ee33ec5cebeae62276a97f862\",\"kind\":\"http\",\"method\":\"POST\",\"url_sha256\":\"c7cf6e178717903852a0273717fd3486335da37f34148f078d40ba1698f478a4\"},\"credential_handles\":[],\"environment_profile\":{\"kind\":\"host\"},\"obligations\":[{\"bytes\":\"16\",\"kind\":\"max_output_bytes\"}],\"privacy_class\":null,\"requester\":\"uid:1000\",\"resource_identity\":{\"addresses\":[\"2606:2800:0220:0001:0248:1893:25c8:1946\",\"93.184.216.34\"],\"host\":\"api.example.com\",\"kind\":\"host\",\"port\":\"443\"},\"schema\":\"direwolf.approval.binding.v1\",\"scope\":{\"addresses\":[\"2606:2800:0220:0001:0248:1893:25c8:1946\",\"93.184.216.34\"],\"host\":\"api.example.com\",\"kind\":\"host_and_methods\",\"methods\":[\"GET\",\"POST\"],\"port\":\"443\"},\"taint_level\":\"LOCAL_UNVERIFIED\",\"verb\":\"network.https\",\"workspace\":{\"id\":\"ws\",\"root\":{\"birth\":{\"nanoseconds\":\"123456789\",\"seconds\":\"1700000000\"},\"device\":\"2049\",\"inode\":\"2\"}}}",
+      "sha256": "c12baf23e2d13da4c4f4e9b48c4f0713f336caf8e74e606c7ebb7660a68be2dc"
+    },
+    {
+      "name": "sandbox-exec",
+      "property": "A sandboxed action binds the operator's runtime, socket, image, probe, topology and relay (null with no proxy) and the assurance the measurement earned -- never a profile name alone.",
+      "canonical": "{\"agent\":{\"profile\":\"operator\",\"revision\":\"1\"},\"canonical_args\":{\"argv\":[\"-c\",\"print(1)\"],\"kind\":\"argv\"},\"credential_handles\":[],\"environment_profile\":{\"assurance\":\"CONTAINER_ISOLATION\",\"image\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"kind\":\"sandbox\",\"probe_sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"relay_sha256\":null,\"runtime\":\"/usr/bin/podman\",\"socket\":\"/run/podman/podman.sock\",\"topology\":\"NO_NETWORK\"},\"obligations\":[],\"privacy_class\":null,\"requester\":\"uid:1000\",\"resource_identity\":{\"kind\":\"executable\",\"path\":\"/usr/bin/python3\",\"sha256\":\"0909090909090909090909090909090909090909090909090909090909090909\"},\"schema\":\"direwolf.approval.binding.v1\",\"scope\":{\"kind\":\"exact_action\"},\"taint_level\":\"NONE\",\"verb\":\"process.exec\",\"workspace\":{\"id\":\"ws\",\"root\":{\"birth\":{\"nanoseconds\":\"123456789\",\"seconds\":\"1700000000\"},\"device\":\"2049\",\"inode\":\"2\"}}}",
+      "sha256": "4a65e50f2dadae530e31dd676387312620c45fad5e72cb7063836ad828adec17"
+    },
+    {
+      "name": "fs-delete-path-set-past-2-53",
+      "property": "Integers past 2^53 - 1 are decimal strings and stay exact: devices, inodes and a revision at and beyond the double's exact range, u64 and u32 maxima; a path set sorted by canonical bytes.",
+      "canonical": "{\"agent\":{\"profile\":\"operator\",\"revision\":\"9007199254740993\"},\"canonical_args\":{\"byte_count\":\"0\",\"kind\":\"fs\"},\"credential_handles\":[],\"environment_profile\":{\"kind\":\"host\"},\"obligations\":[],\"privacy_class\":null,\"requester\":\"uid:4294967295\",\"resource_identity\":{\"device\":\"18446744073709551615\",\"inode\":\"9007199254740993\",\"kind\":\"file\"},\"schema\":\"direwolf.approval.binding.v1\",\"scope\":{\"files\":[{\"device\":\"1\",\"inode\":\"9007199254740992\"},{\"device\":\"18446744073709551615\",\"inode\":\"9007199254740993\"},{\"device\":\"9007199254740991\",\"inode\":\"1\"}],\"kind\":\"path_set\",\"verb\":\"fs.delete\"},\"taint_level\":\"NONE\",\"verb\":\"fs.delete\",\"workspace\":{\"id\":\"ws-big\",\"root\":{\"birth\":null,\"device\":\"9007199254740991\",\"inode\":\"18446744073709551615\"}}}",
+      "sha256": "373ee6c8bad23da3ff0773c33b0d3eb460f7d1f69d250531adf3fb022da5a04e"
+    },
+    {
+      "name": "secret-use-credential-use",
+      "property": "A credential's use is bound to its handle as the resource and to its current revision; the credential-use scope names the upstream.",
+      "canonical": "{\"agent\":{\"profile\":\"operator\",\"revision\":\"1\"},\"canonical_args\":{\"kind\":\"none\"},\"credential_handles\":[{\"handle\":\"gh-token\",\"metadata_sha256\":\"efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef\",\"revision\":\"2\"}],\"environment_profile\":{\"kind\":\"host\"},\"obligations\":[],\"privacy_class\":null,\"requester\":\"uid:1000\",\"resource_identity\":{\"handle\":\"gh-token\",\"kind\":\"credential\"},\"schema\":\"direwolf.approval.binding.v1\",\"scope\":{\"handle\":\"gh-token\",\"host\":\"api.github.com\",\"kind\":\"credential_use\",\"port\":\"443\"},\"taint_level\":\"NONE\",\"verb\":\"secret.use\",\"workspace\":{\"id\":\"ws\",\"root\":{\"birth\":{\"nanoseconds\":\"123456789\",\"seconds\":\"1700000000\"},\"device\":\"2049\",\"inode\":\"2\"}}}",
+      "sha256": "bb050387f48c31b0824bc57f0a47038c5c7856e1209b968c373d54ab737cb838"
+    }
+  ]
+}

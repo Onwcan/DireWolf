@@ -65,6 +65,8 @@ Notes on what is and is not included:
 - **`obligations` are included**, so an approval granted under a rule carrying `network_deny` or `read_only_workspace` cannot be spent under a later match lacking them. `environment_profile_id` was already included for exactly this reason; obligations are the remainder of that argument.
 - The model's natural-language description is **excluded**, because it must never be able to influence what a hash matches.
 
+> **Encoded (M6.1, [ADR-0079](adr/0079-the-approval-binding-v1-what-it-binds-and-how-it-is-encoded.md), Proposed).** The first version is built in the authority's state layer: the thirteen members above, with `requester` (the run's subject) and `schema` added, `environment_profile` the host or the operator's sandbox with its measured assurance, and `agent` the run's profile and its revision -- no agent id exists before the agent loop. Every integer is a decimal string and every set sorted and duplicate-free; a binding that cannot name a member is refused. Nothing stores, asks for or spends one before M6.2's registry.
+
 ## 3. Scopes
 
 ```rust

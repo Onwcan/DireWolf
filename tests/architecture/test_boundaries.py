@@ -917,6 +917,34 @@ def test_history_is_never_read_as_authority(violation_rules: list[str]) -> None:
     assert {line for _, line, _ in _findings(rule)} == {4}
 
 
+def test_the_approval_binding_grants_nothing(violation_rules: list[str]) -> None:
+    """M6.1 (ADR-0079, Proposed): the binding module reads, encodes and
+    hashes. An allowance, a store write, a permit check, a reach into the
+    broker or a protocol message in it is caught on every line; the
+    fixture's doc comment naming them is not."""
+    rule = "TX066-the-approval-binding-grants-nothing"
+    assert rule in violation_rules
+    assert _paths(rule) == {"crates/dwkd-authority/src/state/binding.rs"}
+    assert {line for _, line, _ in _findings(rule)} == {5, 6, 7, 8, 9}
+
+
+def test_only_the_state_layer_names_the_approval_binding(violation_rules: list[str]) -> None:
+    """M6.1 (ADR-0079, Proposed): the DWKP server building a binding from a
+    request, or the runtime spelling the binding's schema, is caught; the
+    comments naming them are not."""
+    rule = "TX067-only-the-state-layer-names-the-approval-binding"
+    assert rule in violation_rules
+    assert _paths(rule) == {
+        "crates/dwkd-authority/src/server/binding_shortcut.rs",
+        "runtime/src/direwolf/binding_claim.py",
+    }
+    assert {(path, line) for path, line, _ in _findings(rule)} == {
+        ("crates/dwkd-authority/src/server/binding_shortcut.rs", 4),
+        ("crates/dwkd-authority/src/server/binding_shortcut.rs", 5),
+        ("runtime/src/direwolf/binding_claim.py", 3),
+    }
+
+
 def test_the_server_seam_is_named_only_by_the_server(violation_rules: list[str]) -> None:
     """M5d.2 (ADR-0052 §17): `serve_authority` and `Served::operate` -- the
     evidence's door -- are named by the server module alone; the CLI fixture
@@ -1170,6 +1198,8 @@ def test_the_required_boundary_rules_are_all_declared() -> None:
         "TX063-the-runtime-endpoint-takes-its-subject-from-the-kernel",
         "TX064-history-is-never-read-as-authority",
         "TX065-the-approver-endpoint-holds-no-operation-before-m6",
+        "TX066-the-approval-binding-grants-nothing",
+        "TX067-only-the-state-layer-names-the-approval-binding",
         "DEP001-no-agent-framework-dependency",
         "DEP002-runtime-has-no-transport-dependency",
         "RS001-authority-depends-on-nothing-in-tree",

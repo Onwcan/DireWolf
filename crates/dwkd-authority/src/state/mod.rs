@@ -59,6 +59,7 @@ mod admission;
 mod adoption;
 mod anchors;
 mod audit;
+mod binding;
 mod clock;
 mod config;
 mod crash;

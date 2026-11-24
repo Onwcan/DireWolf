@@ -311,6 +311,31 @@ pub(crate) struct Current {
     digest: String,
 }
 
+impl Current {
+    /// The revision's metadata digest as stored: sixty-four lowercase hex
+    /// digits (M6.1: what an approval binding names a credential by).
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the approval binding reads it; M6.2's registry is its first production caller"
+        )
+    )]
+    pub(crate) fn metadata_sha256(&self) -> &str {
+        &self.digest
+    }
+
+    /// A current revision as a store row would read, for a test.
+    #[cfg(test)]
+    pub(crate) fn synthetic(revision: i64, state: &str, digest: &str) -> Self {
+        Self {
+            revision,
+            state: state.to_owned(),
+            digest: digest.to_owned(),
+        }
+    }
+}
+
 /// Every handle's current revision.
 fn latest(work: &Work<'_>) -> Result<BTreeMap<String, Current>, AuthorityError> {
     let mut statement = work.db(work.tx.prepare(

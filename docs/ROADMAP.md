@@ -906,6 +906,7 @@ named here stays Proposed until accepted.
 **Acceptance:** every property test in [APPROVALS.md](APPROVALS.md) §10; burn is atomic under concurrency; prompts contain no model-authored text in the authoritative region.
 **Adversarial:** replay, substitution, drift (file/DNS/binary swap), laundering parent↔child, environment swap, fatigue spam, budget amplification via fan-out; an external agent's own approval, auto-approve or "yolo" claim presented as an operator approval ([ADR-0051](adr/0051-external-agent-interoperability.md)).
 **Plan (M6.0, 2026-11-24; nothing built):** [M6_IMPLEMENTATION_PLAN.md](M6_IMPLEMENTATION_PLAN.md) -- the invariants, the binding contract and phases M6.1 to M6.7; its decisions are [M6_0_DECISION_PACKAGE.md](M6_0_DECISION_PACKAGE.md). The approval channel and the principal model are accepted (ADR-0063, ADR-0067, ADR-0077 OD-1); which approvals need a presence factor is ADR-0078, accepted the same day: host execution, `secret.use`, `fs.delete` and a standing grant's creation stay `DENY` through M6, and M6 does not enable host execution.
+**M6.1 (2026-11-24; implemented locally, hosted evidence pending):** the canonical approval binding, [ADR-0079](adr/0079-the-approval-binding-v1-what-it-binds-and-how-it-is-encoded.md) (Proposed), reported in [M6_1_IMPLEMENTATION.md](M6_1_IMPLEMENTATION.md); nothing stores, asks for or spends a binding, and M6.2 waits for M6.1's closeout.
 
 ---
 

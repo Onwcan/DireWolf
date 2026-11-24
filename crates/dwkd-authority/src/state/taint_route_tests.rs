@@ -684,3 +684,54 @@ fn f18_exposure_and_taint_follow_the_root_whichever_principal_reaches_it() {
     );
     fx.history_holds();
 }
+
+/// M6.1 (ADR-0079, Proposed): a binding's taint is the run's, as the store
+/// holds it and the authority's own producer reads it. Approved clean, spent
+/// tainted: after the run's rise the same write of the same file is another
+/// binding.
+#[test]
+fn m6_1_a_binding_takes_the_runs_taint_as_the_store_holds_it() {
+    use crate::resource::fs::{Access, Expect, PinnedRoot};
+
+    let mut fx = taint_fixture();
+    let run = fx.run("r1", ASKED);
+    fx.ready(&run);
+    let root = fx.scratch.path().join("ws");
+    std::fs::write(root.join("notes.txt"), b"hello\n").unwrap();
+    let (pinned, _) = PinnedRoot::install(root.to_str().unwrap()).unwrap();
+    let declared = crate::capability::DeclaredPath::new("/workspace/notes.txt").unwrap();
+    let resolved = pinned
+        .resolve(&declared, Access::Modify, Expect::RegularFile)
+        .unwrap();
+    let write = |context: &crate::state::binding::RunContext| {
+        super::binding::write_binding(
+            context,
+            resolved.canonical_path(),
+            resolved.identity(),
+            b"hello\n",
+        )
+    };
+    let clean = super::binding::context(&mut fx, &run).unwrap();
+    let approved = write(&clean);
+    assert!(
+        String::from_utf8(approved.canonical_bytes().to_vec())
+            .unwrap()
+            .contains(r#""taint_level":"NONE""#)
+    );
+
+    fx.reporting(&run, "k1", b"", &[("allowed.example.com", 10)]);
+    assert_eq!(fx.taint(&run), 2, "an origin byte reached the workload");
+    let tainted = super::binding::context(&mut fx, &run).unwrap();
+    assert_ne!(clean, tainted);
+    let spent = write(&tainted);
+    assert_ne!(
+        approved, spent,
+        "the patient attack: approve clean, spend tainted"
+    );
+    assert!(
+        String::from_utf8(spent.canonical_bytes().to_vec())
+            .unwrap()
+            .contains(r#""taint_level":"EXTERNAL_UNTRUSTED""#)
+    );
+    taint_evidence("m6-1-binding-follows-the-runs-taint", "external");
+}

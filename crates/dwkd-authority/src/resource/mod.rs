@@ -439,6 +439,13 @@ pub(crate) mod synthetic {
     pub(crate) fn executable(components: &[&str], fill: u8) -> Option<ExecutableIdentity> {
         Some(ExecutableIdentity::new(path(components)?, digest(fill)))
     }
+
+    /// A synthetic file identity: a device and an inode nothing opened.
+    /// The approval binding's tests (M6.1) name files by identity on every
+    /// platform; their real-resolver counterparts are Linux's.
+    pub(crate) const fn file(device: u64, inode: u64) -> super::fs::FileIdentity {
+        super::fs::FileIdentity::new(device, inode)
+    }
 }
 
 #[cfg(test)]

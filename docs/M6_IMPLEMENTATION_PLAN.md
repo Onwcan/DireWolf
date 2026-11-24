@@ -34,7 +34,7 @@ The phase labels M6.1 to M6.7 are this plan's, not roadmap milestones.
 |---|---|---|
 | **M6.0a** the channel and the principal | ADR-0063, ADR-0067, ADR-0077 OD-1 | **met**: recorded in `5520ab8`; CI #218 at `6475172`, 33 of 33 |
 | **M6.0b** the assurance policy | ADR-0078 (OD-1 to OD-3) | **met**: accepted 2026-11-24, as recommended |
-| M6.1's own record | a new ADR amending ADR-0021 (§4 below) | proposed at M6.1's start |
+| M6.1's own record | [ADR-0079](adr/0079-the-approval-binding-v1-what-it-binds-and-how-it-is-encoded.md), amending ADR-0021 on acceptance (§4 below) | **Proposed** 2026-11-24; accepted at M6.1's closeout on hosted evidence |
 
 Both are met: M6.1 may start, and M6.3 starts with its assurance policy
 decided.
@@ -99,9 +99,10 @@ principal, and the schema member.
   the one canonical encoding (ADR-0032, key rule per ADR-0034); **SHA-256**
   through the authority's own `Sha256Hash` (`state/digest.rs`). No new
   dependency.
-- **Domain separation:** the object's first-sorted member
-  `"schema": "direwolf.approval.binding.v1"`; a later field set is a new
-  schema string, never a reinterpretation.
+- **Domain separation:** the object's member
+  `"schema": "direwolf.approval.binding.v1"` (JCS sorts it among the
+  others; ADR-0079 §2); a later field set is a new schema string, never a
+  reinterpretation.
 - **Integers past 2^53 - 1** -- a device or inode number, a byte count --
   are decimal strings: DWKP's integers stop there (`wire::scalar`), and a
   JCS number is an IEEE-754 double.
@@ -166,6 +167,15 @@ earlier one's exit holds.
 | Hosted | `make test` on three platforms |
 | Exit | the above; no registry, endpoint operation or spend |
 | Forbidden | any persistence, any DWKP or approver operation, any spend |
+
+**State (2026-11-24): implemented locally, not yet committed or hosted.**
+[ADR-0079](adr/0079-the-approval-binding-v1-what-it-binds-and-how-it-is-encoded.md) (Proposed) is the record and
+[M6_1_IMPLEMENTATION.md](M6_1_IMPLEMENTATION.md) the report: the binding in
+`state/binding.rs`, golden vectors against an independent test-only
+oracle, property and adversarial tests, Linux real-authority tests,
+`make approval-binding-mutations` and TX066/TX067. M6.1 closes on a green
+hosted `make test` on three platforms and the acceptance of ADR-0062,
+ADR-0076 and ADR-0079; until then M6.2 does not start.
 
 ### M6.2 -- the kernel-owned registry
 

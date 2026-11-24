@@ -157,7 +157,7 @@ pub struct FileIdentity {
 
 impl FileIdentity {
     #[cfg_attr(
-        not(target_os = "linux"),
+        not(any(target_os = "linux", test)),
         expect(dead_code, reason = "only the Linux resolver observes an identity")
     )]
     pub(in crate::resource) const fn new(device: u64, inode: u64) -> Self {

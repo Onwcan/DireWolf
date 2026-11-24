@@ -81,6 +81,10 @@ platforms.
   OD-1 -- was accepted on 2026-11-24, M6.0's first gate
   ([M6_PREPARATION_HANDOFF.md](M6_PREPARATION_HANDOFF.md)); which classes
   need A2 is [ADR-0078](adr/0078-approval-assurance-which-classes-need-a2-and-the-presence-factor.md), accepted the same day.
+  M6's own records are M6's, not this ledger's: [ADR-0079](adr/0079-the-approval-binding-v1-what-it-binds-and-how-it-is-encoded.md)
+  (M6.1's approval binding), Proposed, is tracked in
+  [M6_IMPLEMENTATION_PLAN.md](M6_IMPLEMENTATION_PLAN.md) and
+  [M6_1_IMPLEMENTATION.md](M6_1_IMPLEMENTATION.md).
 
 ## Since the security review of 2026-11-22
 
