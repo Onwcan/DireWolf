@@ -128,10 +128,15 @@ def test_no_serve_flag_lets_an_approver_share_an_identity() -> None:
     assert "no approval operation before M6" in usage
 
 
-def test_adr_0067_is_proposed_and_adr_0063_is_not_silently_accepted() -> None:
+def test_adr_0067_and_adr_0063_are_accepted_with_their_record() -> None:
+    """Accepted on 2026-11-24 -- by the record, never by a status word alone:
+    the status line carries the date and the evidence, the index row is an
+    accepted one, and the report says so."""
     text = _read(ADR)
     assert text.startswith("# ADR-0067:")
-    assert re.search(r"^\*\*Status:\*\* Proposed ", text, re.M)
+    accepted = r"^\*\*Status:\*\* Accepted · \*\*Date:\*\* 2026-11-24 "
+    assert re.search(accepted, text, re.M)
+    assert "OD-5's condition met" in text and "CI #216" in text
     for evidence in (
         "transport_approver.rs",
         "approver-identity-mutations",
@@ -140,20 +145,24 @@ def test_adr_0067_is_proposed_and_adr_0063_is_not_silently_accepted() -> None:
         "F18_APPROVER_IDENTITY.md",
     ):
         assert evidence in text, evidence
-    assert re.search(r"^\*\*Status:\*\* Proposed ", _read(ADR_0063), re.M)
+    assert re.search(accepted, _read(ADR_0063), re.M)
     index = _read(REPO_ROOT / "docs" / "adr" / "README.md")
-    assert "[0067](0067-f18-approver-endpoint-identity-boundary.md)" in index
+    assert "| **[0067](0067-f18-approver-endpoint-identity-boundary.md)** |" in index
+    assert (
+        "| **[0063](0063-principal-ownership-of-sessions-workspaces-and-profiles.md)** |" in index
+    )
     report = _read(REPORT)
     for marker in (
         "IMPLEMENTATION PARTIAL",
         "HOSTED EVIDENCE VERIFIED",
-        "ARCHITECTURAL ACCEPTANCE PENDING",
+        "| ADR-0067 | **ACCEPTED** 2026-11-24",
         "M6 APPROVAL REGISTRY DEFERRED",
         "F-12 ARTIFACT CAPTURE DEFERRED",
     ):
         assert marker in report, marker
     assert "IMPLEMENTATION COMPLETE" not in report
-    # CI #201 ran the three-identity cases; acceptance is still the owner's.
+    assert "ARCHITECTURAL ACCEPTANCE PENDING" not in report
+    # CI #201 and every run since ran the three-identity cases.
     assert "HOSTED EVIDENCE PENDING" not in report
 
 

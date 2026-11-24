@@ -199,12 +199,12 @@ keyring or an age file; provisioning a keyring entry is in
 approver's endpoint, identity boundary only: no approval operation exists
 before M6
 ([F18_APPROVER_IDENTITY.md](F18_APPROVER_IDENTITY.md),
-[ADR-0067](adr/0067-f18-approver-endpoint-identity-boundary.md), Proposed).
+[ADR-0067](adr/0067-f18-approver-endpoint-identity-boundary.md), accepted).
 An approver uid is a principal, not a person: give it an account of its own
 that no agent, automation or runtime runs as, or a decision made under it is
 not a human's
 ([ADR-0077](adr/0077-the-approval-channel-is-the-approver-endpoint-and-an-approver-uid-is-a-principal-not-a-person.md),
-Proposed).
+accepted).
 
 ## 5. What the daemons say
 

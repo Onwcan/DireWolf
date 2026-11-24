@@ -18,9 +18,11 @@ passes is listed as not exercised.
 **Reading the Hosted column.** `OBSERVED`: the cases that carry the property
 ran in a hosted job and held. `NOT EXERCISED`: the hosted job ran the test,
 and the test could not exercise the property there. `n/a`: no hosted case
-applies. Every decision record named in the table is **Proposed**; none is
-accepted by this page, by a green run or by a commit. The one record below
-that is accepted is ADR-0075 (accepted 2026-11-22, recorded 2026-11-23).
+applies. Every decision record named in the table is **Proposed** but
+F-18's two, ADR-0063 and ADR-0067, accepted 2026-11-24; none is accepted
+by this page, by a green run or by a commit. Of the records below, ADR-0075
+(accepted 2026-11-22, recorded 2026-11-23) and ADR-0077 (OD-1, accepted
+2026-11-24) are accepted.
 
 ## Findings
 
@@ -73,9 +75,11 @@ platforms.
 - **Deferred by decision:** protocol 13 with F-03's D6 (ADR-0070 OD-C),
   Landlock with M6's host execution (OD-D), F-06's OF-3, model downloads after
   M7 (ADR-0072 OM-2), F-12's artifact capture (M8).
-- **Acceptance:** every record in the table stays Proposed until it is
-  accepted; the approval channel (ADR-0063, ADR-0067, ADR-0077) is M6.0's to
-  decide ([M6_PREPARATION_HANDOFF.md](M6_PREPARATION_HANDOFF.md)).
+- **Acceptance:** every other record in the table stays Proposed until it
+  is accepted. The approval channel -- ADR-0063, ADR-0067 and ADR-0077's
+  OD-1 -- was accepted on 2026-11-24, M6.0's first gate
+  ([M6_PREPARATION_HANDOFF.md](M6_PREPARATION_HANDOFF.md)); which classes
+  need A2 is [ADR-0078](adr/0078-approval-assurance-which-classes-need-a2-and-the-presence-factor.md), Proposed.
 
 ## Since the security review of 2026-11-22
 
@@ -117,8 +121,9 @@ It also found ADR-0022's local approval paths still prescribed by an
 Accepted record (ISR2-05) and that an approver uid is a principal, not a
 person (ISR2-06):
 [ADR-0077](adr/0077-the-approval-channel-is-the-approver-endpoint-and-an-approver-uid-is-a-principal-not-a-person.md),
-Proposed, a decision record with nothing built, withdraws those paths and
-states the assurance levels.
+a decision record with nothing built, withdraws those paths and states the
+assurance levels; its OD-1 was accepted on 2026-11-24, and its OD-2 -- which
+classes need A2 -- moved to [ADR-0078](adr/0078-approval-assurance-which-classes-need-a2-and-the-presence-factor.md), Proposed.
 
 **SR-06's bind mount.** `a_bind_mount_inside_a_workspace_is_never_crossed`
 (`crates/dwkd-authority/tests/resource_workspace.rs`) starts itself in a

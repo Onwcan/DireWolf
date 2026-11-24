@@ -3,7 +3,7 @@
     "0060": "Proposed",
     "0061": "Proposed",
     "0062": "Proposed",
-    "0063": "Proposed"
+    "0063": "Accepted"
   },
   "as_of": "2026-11-15",
   "baseline": {
@@ -59,7 +59,7 @@
       "property_exercised": "VERIFIED: every real-OCI case (run 43640168802), the unit tests by name and the M5e.5 manual workflow on F-17's code (runs 43658092468, 43658104419)"
     },
     "F-18": {
-      "adr_acceptance": "PENDING (Proposed)",
+      "adr_acceptance": "ACCEPTED 2026-11-24",
       "implemented": "d8eb736, e62c597",
       "mutation_control": "VERIFIED (run 43658092468: 27 of 27 killed)",
       "ordinary_hosted_ci": "run 43591381367 (#166) and every run since, latest 43648487347 (#173)",

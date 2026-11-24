@@ -37,9 +37,11 @@ committed: C3's mechanism is `6aa9245`, its archive fix `8a64a9f`.
 
 **HOSTED EVIDENCE PENDING.** No row. What the matrix does not claim is in §8.
 
-**ADR ACCEPTANCE PENDING.** ADR-0060 to ADR-0063 stay Proposed. Hosted evidence
+**ADR ACCEPTANCE PENDING.** ADR-0060 to ADR-0062 stay Proposed. Hosted evidence
 is a necessary input to their acceptance, not the acceptance itself: that is
-the owner's separate decision, recorded in the ADRs.
+the owner's separate decision, recorded in the ADRs. ADR-0063 (F-18) was
+accepted on 2026-11-24, on this evidence and every hosted run since (CI #216
+among them), as its status line records.
 
 ## 2. The runs, and how each was read
 

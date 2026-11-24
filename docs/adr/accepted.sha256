@@ -30,7 +30,7 @@ e31e87f3662f3e07c10586e8cedb6745ba13aa168f70bbca8f54c91af84cbfa4  0017-observabi
 7dd806047bdb4fcfb4883d5835f44dc0e9a03bd0eac314c032db6003a3a25882  0019-language-rationale-v2.md
 93c9db4cb3b4f1a42d27b002d81d1be97ee5c15983da3c2f55f61ad4e10559cb  0020-provider-request-path-v2.md
 8f1fce1ca94191262f17bd5e9e0353a89b646c81740c4f372be46cb60e0c5768  0021-approval-binding-v2.md
-9f91fcd73c0bbc975c068f3e6aa68799eba0405f287305dd9c8dc48962459e9e  0022-approval-response-authentication.md
+db0283fcbeea7c6305e2901f83dd9f29310f4a9827f0544fd9cbcafce0bf3c9c  0022-approval-response-authentication.md
 4ecfaf6c2b77bddc6ce37452cf3cb990f71664179e2a83c449b0a0b5da25fb01  0023-dwkp-strict-schema.md
 c3872466600125cbe0335ea85d7be90b650f1ef27f20d22268e14bd40a01557b  0024-sandbox-network-topology.md
 261654e97018ae339e2be24869cd81a698adbfb29f5412ea0cb5264013aa4106  0025-subagent-workspace-clone.md
@@ -67,4 +67,7 @@ a5dcf7c529379c8bd60e033884c50f1a40d60c949123896f69f3362925d786f4  0056-m5e-cross
 9fe524f30adf6f5a331f9ad2be327a7519171cbaaba0941422825ba80970d6ef  0057-m5e-proxy-only-real-container-evidence-residual.md
 a2fc103e8e36802c93c2f8e4fb5d8bc334478c649a82bdba9c303e9846811c46  0058-m5e-proxy-only-hard-rules-weakened-in-a-real-environment.md
 173958a5b21e258ff754734123448468d67d70aa5a930b4f9d110e77375ea6ba  0059-m5e-proxy-only-peer-joins-only-its-own-network-namespace.md
+4349b7f7ca0471c39e57622126d9d8923f5783ea0c81c7ed98effd58f46bd1aa  0063-principal-ownership-of-sessions-workspaces-and-profiles.md
+2ba53ce05021d9baa0d536241eccdb7177ad79928bd166957d8cc11ed72df6a0  0067-f18-approver-endpoint-identity-boundary.md
 43a31616ccce7dd4c9384afca5ce25cdb409d4ccb40162c322cd26b360b580a8  0075-sr01-operator-policy-files-are-read-as-the-other-operator-files-are.md
+e8be4d4ad310dd51d5dbc576802e7ee425040027e9d86160e85cd91474f65cbd  0077-the-approval-channel-is-the-approver-endpoint-and-an-approver-uid-is-a-principal-not-a-person.md

@@ -2,15 +2,15 @@
 
 What F-18's principal ownership left to M6, what is built now, and what M6
 still has to build. The decision is
-[ADR-0067](adr/0067-f18-approver-endpoint-identity-boundary.md) (Proposed);
+[ADR-0067](adr/0067-f18-approver-endpoint-identity-boundary.md) (accepted 2026-11-24);
 this is its inventory, its adversarial matrix and its evidence.
 
 | | Status |
 |---|---|
 | The approver endpoint's identity boundary | **IMPLEMENTATION PARTIAL**: built; the approval operations it will carry are not |
 | Its same-identity evidence | local: passing (§11) |
-| Its three-identity evidence | **HOSTED EVIDENCE VERIFIED** on CI #201 (run 44818094052): `authority-transport`, `DW_PEER_AS` + `DW_APPROVER_AS`, six `cross-uid-*` cases contained |
-| ADR-0067 | **ARCHITECTURAL ACCEPTANCE PENDING** (Proposed) |
+| Its three-identity evidence | **HOSTED EVIDENCE VERIFIED** on CI #201 (run 44818094052) and every run since, among them CI #216 (run 45276662436): `authority-transport`, `DW_PEER_AS` + `DW_APPROVER_AS`, six `cross-uid-*` cases contained |
+| ADR-0067 | **ACCEPTED** 2026-11-24, with ADR-0063 and ADR-0077's single approval channel |
 | The approval registry, rendering, consumption, standing grants | **M6 APPROVAL REGISTRY DEFERRED** |
 | A terminal-based approval | design only: none is accepted (§6) |
 | F-12's `require_artifact_capture` | **F-12 ARTIFACT CAPTURE DEFERRED**: unchanged here ([F12_POLICY_PACK_USABILITY.md](F12_POLICY_PACK_USABILITY.md) §8); BALANCED's writes still refuse |

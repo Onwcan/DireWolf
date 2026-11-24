@@ -1,6 +1,6 @@
 # ADR-0077: Every local approval arrives on the approver endpoint, and an approver uid is a principal, not a person
 
-**Status:** Proposed · **Date:** 2026-11-23 (found by the second security review of 2026-11-22 as ISR2-05 and ISR2-06; a decision record only -- nothing is built, and no approval operation exists before M6; nothing here is accepted) · **Would amend (on acceptance):** [ADR-0022](0022-approval-response-authentication.md) ("CLI-local (default)" and "Detached-local": both withdrawn) · **Refines:** [ADR-0063](0063-principal-ownership-of-sessions-workspaces-and-profiles.md) §8, [ADR-0067](0067-f18-approver-endpoint-identity-boundary.md) §§5 and 7, [APPROVALS.md](../APPROVALS.md) §7 · **Leaves unchanged:** ADR-0022's remote channel (a response MAC keyed by a paired device, over the binding hash), [ADR-0021](0021-approval-binding-v2.md)'s binding, DWKP, the private protocol, the store and every decision
+**Status:** Accepted · **Date:** 2026-11-24 (proposed 2026-11-23, found by the second security review of 2026-11-22 as ISR2-05 and ISR2-06; OD-1 accepted 2026-11-24; OD-2 is not decided by this record -- which classes need A2, and whether M6 builds a presence factor, are [ADR-0078](0078-approval-assurance-which-classes-need-a2-and-the-presence-factor.md)'s (Proposed); a decision record only -- nothing is built, and no approval operation exists before M6) · **Amends:** [ADR-0022](0022-approval-response-authentication.md) ("CLI-local (default)" and "Detached-local": both withdrawn) · **Refines:** [ADR-0063](0063-principal-ownership-of-sessions-workspaces-and-profiles.md) §8, [ADR-0067](0067-f18-approver-endpoint-identity-boundary.md) §§5 and 7, [APPROVALS.md](../APPROVALS.md) §7 · **Leaves unchanged:** ADR-0022's remote channel (a response MAC keyed by a paired device, over the binding hash), [ADR-0021](0021-approval-binding-v2.md)'s binding, DWKP, the private protocol, the store and every decision
 
 > **There is one door for a local approval: the approver endpoint.** A
 > terminal passed over the runtime's socket and a `direwolf approve` that
@@ -100,11 +100,13 @@ what else runs as that uid, which the authority cannot see:
   documentation says so ([OPERATIONS.md](../OPERATIONS.md) §4). The
   authority checks what it can (the uid is disjoint from every runtime's,
   the broker's and the authority's) and cannot check the rest.
-- Which classes need A2 is an owner decision (OD-2); the recommended set is
-  the high-risk classes ADR-0022 already names -- `DESTRUCTIVE`,
-  `secret.use`, host execution -- and the creation of a standing grant. Until
-  a presence factor exists, a class that needs A2 is not approvable: its
-  `REQUIRE_APPROVAL` stays `DENY`.
+- A0 is never sufficient: a decision from it is not a human's.
+- Which classes need A2, and whether M6 builds a presence factor, is OD-2,
+  decided by a record of its own
+  ([ADR-0078](0078-approval-assurance-which-classes-need-a2-and-the-presence-factor.md)).
+  Whatever it decides, a class that needs A2 is not approvable until a
+  presence factor exists and is verified: its `REQUIRE_APPROVAL` stays
+  `DENY`, and A1 is never relabelled A2.
 
 ### 4. What no channel accepts
 
@@ -146,8 +148,8 @@ approval operation (ADR-0067 §6, TX065), every run a runtime admits is
   that uid passes the same check, and the record would claim what nothing
   measured.
 - **Require a presence factor for every approval now.** Not decided here: it
-  makes M6 depend on an authenticator before any approval works. OD-2 is the
-  owner's.
+  makes M6 depend on an authenticator before any approval works. OD-2 is
+  ADR-0078's.
 - **Amend ADR-0022 inside ADR-0063 or ADR-0067.** Rejected: both are
   Proposed records about ownership and the endpoint's identity; the
   withdrawal of an Accepted record's paths, and the meaning of an approver
@@ -165,21 +167,22 @@ approval operation (ADR-0067 §6, TX065), every run a runtime admits is
 ## Owner decisions
 
 - **OD-1** accept the withdrawal of ADR-0022's CLI-local and detached-local
-  paths: one approval channel, the approver endpoint. Recommended; M6.0's
-  prerequisite, with ADR-0063 and ADR-0067.
+  paths: one approval channel, the approver endpoint. M6.0's prerequisite,
+  with ADR-0063 and ADR-0067. **Accepted 2026-11-24.**
 - **OD-2** which classes need A2 before they are approvable, and whether M6
-  builds a presence factor or leaves those classes `DENY` until one exists.
-  Recommended: the high-risk classes and standing grants need A2; M6 ships
-  A1 for the rest and leaves the A2 classes denied until the factor exists.
+  builds a presence factor or leaves those classes `DENY` until one exists:
+  moved to [ADR-0078](0078-approval-assurance-which-classes-need-a2-and-the-presence-factor.md)
+  (Proposed), so that this record could be accepted without deciding it.
 
 ## Evidence
 
 A decision record; nothing is built. The boundary it builds on is evidenced
 in ADR-0067: the approver endpoint's three-identity suite ("approver
-evidence: 1 test, 6 cases contained, three identities") in CI #213's
-`authority boundary` job (run 45250010413, `8b771a7`), and
-`transport_approver` with `make approver-identity-mutations` 13 of 13 killed
-(re-run by the second security review).
+evidence: 1 test, 6 cases contained, three identities") in the
+`authority boundary` job of CI #213 (run 45250010413, `8b771a7`) and of
+CI #216 (run 45276662436, `0bd727d`), and `transport_approver` with
+`make approver-identity-mutations` 13 of 13 killed (re-run by the second
+security review).
 
 ## Revisit if
 

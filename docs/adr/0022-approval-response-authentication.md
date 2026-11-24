@@ -1,6 +1,6 @@
 # ADR-0022: Approval responses are authenticated independently of the relay
 
-**Status:** Accepted · **Date:** 2026-09-12 · **Amends:** [ADR-0004](0004-gateway-boundary.md)
+**Status:** Accepted · "CLI-local (default)" and "Detached-local" withdrawn by [ADR-0077](0077-the-approval-channel-is-the-approver-endpoint-and-an-approver-uid-is-a-principal-not-a-person.md) (2026-11-24): every local approval arrives on the approver endpoint of [ADR-0067](0067-f18-approver-endpoint-identity-boundary.md); the remote channel stands · **Date:** 2026-09-12 · **Amends:** [ADR-0004](0004-gateway-boundary.md)
 
 ## Context
 

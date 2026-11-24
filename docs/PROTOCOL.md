@@ -143,7 +143,7 @@ Each message declares every optional envelope field as required, optional or **f
     because a run is admitted only under an epoch its caller presents. A live
     lease held by another connection is `LEASE_HELD`, and an exhausted epoch
     counter fails closed. So is a session the caller's subject may not hold
-    (F-18, [ADR-0063](adr/0063-principal-ownership-of-sessions-workspaces-and-profiles.md), Proposed):
+    (F-18, [ADR-0063](adr/0063-principal-ownership-of-sessions-workspaces-and-profiles.md), accepted):
     one owned by another subject that has not delegated it, a legacy or bound
     session no owner has been declared for, a retired one, or one bound to a
     workspace the subject is not a principal of -- decided before anything of

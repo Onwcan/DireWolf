@@ -325,13 +325,26 @@ def test_no_adr_of_phase_1_is_accepted_without_the_owners_record() -> None:
     """ADR acceptance is the owner's separate decision: a status change here
     must come with the matrix and the report saying so, never alone."""
     matrix = _matrix()
-    assert matrix["adr_status"] == dict.fromkeys(("0060", "0061", "0062", "0063"), "Proposed")
-    for number in ("0060", "0061", "0062", "0063"):
-        assert dw.adr_status(REPO_ROOT, number) == _d(matrix["adr_status"])[number]
-    for milestone in _d(matrix["milestones"]).values():
-        assert _d(milestone)["adr_acceptance"] == "PENDING (Proposed)"
+    # ADR-0063 (F-18) was accepted on 2026-11-24; the other three stay
+    # Proposed. Every status is pinned: a change needs this, the matrix and
+    # the report together.
+    statuses = {"0060": "Proposed", "0061": "Proposed", "0062": "Proposed", "0063": "Accepted"}
+    assert matrix["adr_status"] == statuses
+    for number, status in statuses.items():
+        assert dw.adr_status(REPO_ROOT, number) == status, number
+    acceptance = {
+        "F-01": "PENDING (Proposed)",
+        "F-17": "PENDING (Proposed)",
+        "F-18": "ACCEPTED 2026-11-24",
+        "F-19": "PENDING (Proposed)",
+    }
+    milestones = _d(matrix["milestones"])
+    assert sorted(milestones) == sorted(acceptance)
+    for finding, milestone in milestones.items():
+        assert _d(milestone)["adr_acceptance"] == acceptance[finding], finding
     report = REPORT.read_text(encoding="utf-8")
     assert "ADR ACCEPTANCE PENDING" in report and "Proposed" in report
+    assert "ADR-0063 (F-18) was\naccepted on 2026-11-24" in report
 
 
 def test_the_report_names_every_row_and_what_is_pending() -> None:
