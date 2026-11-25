@@ -67,8 +67,11 @@ a5dcf7c529379c8bd60e033884c50f1a40d60c949123896f69f3362925d786f4  0056-m5e-cross
 9fe524f30adf6f5a331f9ad2be327a7519171cbaaba0941422825ba80970d6ef  0057-m5e-proxy-only-real-container-evidence-residual.md
 a2fc103e8e36802c93c2f8e4fb5d8bc334478c649a82bdba9c303e9846811c46  0058-m5e-proxy-only-hard-rules-weakened-in-a-real-environment.md
 173958a5b21e258ff754734123448468d67d70aa5a930b4f9d110e77375ea6ba  0059-m5e-proxy-only-peer-joins-only-its-own-network-namespace.md
+2a8b75c329b0578f201eb94e51808973447ace7798803babb67f46f8606eaf6d  0062-taint-follows-delivered-content.md
 4349b7f7ca0471c39e57622126d9d8923f5783ea0c81c7ed98effd58f46bd1aa  0063-principal-ownership-of-sessions-workspaces-and-profiles.md
 2ba53ce05021d9baa0d536241eccdb7177ad79928bd166957d8cc11ed72df6a0  0067-f18-approver-endpoint-identity-boundary.md
 43a31616ccce7dd4c9384afca5ce25cdb409d4ccb40162c322cd26b360b580a8  0075-sr01-operator-policy-files-are-read-as-the-other-operator-files-are.md
+f3667c0c9d628f80cfc7cd137ca0b004f2cb1d5c92abad5de120abc70769fa9c  0076-isr2-01-audit-level-full-is-not-kept-on-a-net-http-hop.md
 832aa76aeabce3bdb11fb2cab1d79cfb0c0b4a3673e37c01fdc5d776d8c6e134  0077-the-approval-channel-is-the-approver-endpoint-and-an-approver-uid-is-a-principal-not-a-person.md
 ca78e7dee5a7bb87eeee98c80a293076602e2a9b54d111828b248c410c310017  0078-approval-assurance-which-classes-need-a2-and-the-presence-factor.md
+9c57556860c947089879a0b7b1f1483c75f1b106b4cc9e297f581dadf45877a6  0079-the-approval-binding-v1-what-it-binds-and-how-it-is-encoded.md

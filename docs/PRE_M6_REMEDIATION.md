@@ -19,11 +19,12 @@ passes is listed as not exercised.
 ran in a hosted job and held. `NOT EXERCISED`: the hosted job ran the test,
 and the test could not exercise the property there. `n/a`: no hosted case
 applies. Every decision record named in the table is **Proposed** but
-F-18's two, ADR-0063 and ADR-0067, accepted 2026-11-24; none is accepted
-by this page, by a green run or by a commit. Of the records below, ADR-0075
-(accepted 2026-11-22, recorded 2026-11-23), ADR-0077 (OD-1, accepted
-2026-11-24) and ADR-0078 (ADR-0077's OD-2, accepted 2026-11-24) are
-accepted.
+F-18's two, ADR-0063 and ADR-0067, accepted 2026-11-24, and F-01's,
+ADR-0062, accepted 2026-11-25; none is accepted by this page, by a green
+run or by a commit. Of the records below, ADR-0075 (accepted 2026-11-22,
+recorded 2026-11-23), ADR-0076 (OD-1, accepted 2026-11-25), ADR-0077
+(OD-1, accepted 2026-11-24) and ADR-0078 (ADR-0077's OD-2, accepted
+2026-11-24) are accepted.
 
 ## Findings
 
@@ -82,7 +83,7 @@ platforms.
   ([M6_PREPARATION_HANDOFF.md](M6_PREPARATION_HANDOFF.md)); which classes
   need A2 is [ADR-0078](adr/0078-approval-assurance-which-classes-need-a2-and-the-presence-factor.md), accepted the same day.
   M6's own records are M6's, not this ledger's: [ADR-0079](adr/0079-the-approval-binding-v1-what-it-binds-and-how-it-is-encoded.md)
-  (M6.1's approval binding), Proposed, is tracked in
+  (M6.1's approval binding), accepted 2026-11-25, is tracked in
   [M6_IMPLEMENTATION_PLAN.md](M6_IMPLEMENTATION_PLAN.md) and
   [M6_1_IMPLEMENTATION.md](M6_1_IMPLEMENTATION.md).
 
@@ -103,8 +104,9 @@ That review (its report is `docs/INDEPENDENT_SECURITY_REREVIEW_2026-11-22.md`)
 found that `audit_level=full` was counted as kept on a `net.http` hop whose
 record holds the URL only as its digest (ISR2-01): the fix is
 [ADR-0076](adr/0076-isr2-01-audit-level-full-is-not-kept-on-a-net-http-hop.md),
-Proposed, built 2026-11-23, hosted evidence observed on CI #212 and CI #213
-(`net-http-evidence`'s `obligation-unenforceable` case). The finding stays
+built 2026-11-23, hosted evidence observed on CI #212, CI #213 and every run
+since (`net-http-evidence`'s `obligation-unenforceable` case), accepted on
+2026-11-25 (OD-1). The finding stays
 open until a verification pass separate from the fix confirms it.
 
 The same review found three guards that no repository test held (ISR2-02,

@@ -918,7 +918,7 @@ def test_history_is_never_read_as_authority(violation_rules: list[str]) -> None:
 
 
 def test_the_approval_binding_grants_nothing(violation_rules: list[str]) -> None:
-    """M6.1 (ADR-0079, Proposed): the binding module reads, encodes and
+    """M6.1 (ADR-0079): the binding module reads, encodes and
     hashes. An allowance, a store write, a permit check, a reach into the
     broker or a protocol message in it is caught on every line; the
     fixture's doc comment naming them is not."""
@@ -929,7 +929,7 @@ def test_the_approval_binding_grants_nothing(violation_rules: list[str]) -> None
 
 
 def test_only_the_state_layer_names_the_approval_binding(violation_rules: list[str]) -> None:
-    """M6.1 (ADR-0079, Proposed): the DWKP server building a binding from a
+    """M6.1 (ADR-0079): the DWKP server building a binding from a
     request, or the runtime spelling the binding's schema, is caught; the
     comments naming them are not."""
     rule = "TX067-only-the-state-layer-names-the-approval-binding"

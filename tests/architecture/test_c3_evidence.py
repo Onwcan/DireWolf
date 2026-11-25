@@ -325,15 +325,15 @@ def test_no_adr_of_phase_1_is_accepted_without_the_owners_record() -> None:
     """ADR acceptance is the owner's separate decision: a status change here
     must come with the matrix and the report saying so, never alone."""
     matrix = _matrix()
-    # ADR-0063 (F-18) was accepted on 2026-11-24; the other three stay
-    # Proposed. Every status is pinned: a change needs this, the matrix and
-    # the report together.
-    statuses = {"0060": "Proposed", "0061": "Proposed", "0062": "Proposed", "0063": "Accepted"}
+    # ADR-0063 (F-18) was accepted on 2026-11-24 and ADR-0062 (F-01) on
+    # 2026-11-25; the other two stay Proposed. Every status is pinned: a
+    # change needs this, the matrix and the report together.
+    statuses = {"0060": "Proposed", "0061": "Proposed", "0062": "Accepted", "0063": "Accepted"}
     assert matrix["adr_status"] == statuses
     for number, status in statuses.items():
         assert dw.adr_status(REPO_ROOT, number) == status, number
     acceptance = {
-        "F-01": "PENDING (Proposed)",
+        "F-01": "ACCEPTED 2026-11-25",
         "F-17": "PENDING (Proposed)",
         "F-18": "ACCEPTED 2026-11-24",
         "F-19": "PENDING (Proposed)",
@@ -345,6 +345,7 @@ def test_no_adr_of_phase_1_is_accepted_without_the_owners_record() -> None:
     report = REPORT.read_text(encoding="utf-8")
     assert "ADR ACCEPTANCE PENDING" in report and "Proposed" in report
     assert "ADR-0063 (F-18) was\naccepted on 2026-11-24" in report
+    assert "ADR-0062 (F-01) was\naccepted on 2026-11-25" in report
 
 
 def test_the_report_names_every_row_and_what_is_pending() -> None:

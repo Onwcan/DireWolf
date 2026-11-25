@@ -2,7 +2,7 @@
   "adr_status": {
     "0060": "Proposed",
     "0061": "Proposed",
-    "0062": "Proposed",
+    "0062": "Accepted",
     "0063": "Accepted"
   },
   "as_of": "2026-11-15",
@@ -45,7 +45,7 @@
   },
   "milestones": {
     "F-01": {
-      "adr_acceptance": "PENDING (Proposed)",
+      "adr_acceptance": "ACCEPTED 2026-11-25",
       "implemented": "c2353e8",
       "mutation_control": "VERIFIED (run 43658092468: 20 of 20 killed)",
       "ordinary_hosted_ci": "run 43510375285 (#164) and every run since, latest 43648487347 (#173)",

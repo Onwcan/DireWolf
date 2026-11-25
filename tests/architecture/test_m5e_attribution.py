@@ -371,7 +371,7 @@ def test_every_required_case_is_attributed_and_every_rule_is_used() -> None:
     # from a PROXY_ONLY environment's destinations, and its name refused by
     # the proxy; and F-17's 21 (ADR-0061, Proposed): 11 at the broker and 9
     # through the authority on a real runtime, and the registry's standing
-    # control, hosted only; and F-01's 7 (ADR-0062, Proposed), through the
+    # control, hosted only; and F-01's 7 (ADR-0062, accepted), through the
     # authority on a real runtime. A smaller one is a lost case.
     assert len(dw.BROKER_ASSURANCE_CASES) == 20
     assert len(dw.CAPTURED_ASSURANCE_CASES) == 19
@@ -421,7 +421,7 @@ def test_no_case_before_f17_is_lost_renamed_or_reattributed() -> None:
 
 
 def test_no_case_before_f01_is_lost_renamed_or_reattributed() -> None:
-    """F-01 (ADR-0062, Proposed) adds cases too: every case attributed before
+    """F-01 (ADR-0062, accepted) adds cases too: every case attributed before
     it -- F-17's included -- is still required, at the level and with the
     mechanisms it had. One F-17 case's assertion is made stricter by F-01 and
     keeps its identity, level and mechanism; the guarantee it no longer shows

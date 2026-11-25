@@ -1,6 +1,6 @@
 # ADR-0062: A run's taint follows the content it receives -- a workload's broker-observed reach and its workspace root's exposure raise it to `EXTERNAL_UNTRUSTED`
 
-**Status:** Proposed · **Date:** 2026-11-13 (designed and reviewed 2026-11-13, built 2026-11-13 for finding F-01; hosted evidence observed on CI #201 (run 44818094052, `3998de2`), recorded in [PRE_M6_REMEDIATION.md](../PRE_M6_REMEDIATION.md); nothing here is accepted) · **Would amend (on acceptance):** [ADR-0039](0039-durable-authority-state.md) §10 (the producers of taint, and schema version 13), [ADR-0043](0043-m4b-private-broker-channel-and-brokered-fs-read.md) §9 and [ADR-0044](0044-m4c-filesystem-operations-plans-and-atomic-mutation.md) §11 (a read-family result is `LOCAL_UNVERIFIED`, or `EXTERNAL_UNTRUSTED` from an exposed root), [ADR-0045](0045-m4d-process-execution-broker.md) (a host process's output, likewise), [ADR-0052](0052-m5d-sandboxed-process-exec.md) §8 item 8 and its residuals (a workload's outcome, and later reads of what it wrote) · **Amends (Proposed):** [ADR-0061](0061-workload-egress-decided-by-policy-novelty-and-exposure.md) (a root is exposed by F-01's marks too, and a run holding external content starts its workloads exposed; its "decides no taint" is replaced) · **Refines:** [CONTEXT.md](../CONTEXT.md) §5 (downloads are `EXTERNAL_UNTRUSTED`), [ADR-0028](0028-policy-input-ownership.md) (the kernel derives taint)
+**Status:** Accepted · **Date:** 2026-11-25 (proposed 2026-11-13; designed, reviewed and built 2026-11-13 for finding F-01; accepted 2026-11-25 on hosted evidence observed from CI #201 (run 44818094052, `3998de2`) to CI #225 (run 45492684496, `b87f2d4`) -- the `f01_` authority tests in `make test` and the real-OCI `taint-*` cases in `sandbox-egress` -- recorded in [PRE_M6_REMEDIATION.md](../PRE_M6_REMEDIATION.md)) · **Amends:** [ADR-0039](0039-durable-authority-state.md) §10 (the producers of taint, and schema version 13), [ADR-0043](0043-m4b-private-broker-channel-and-brokered-fs-read.md) §9 and [ADR-0044](0044-m4c-filesystem-operations-plans-and-atomic-mutation.md) §11 (a read-family result is `LOCAL_UNVERIFIED`, or `EXTERNAL_UNTRUSTED` from an exposed root), [ADR-0045](0045-m4d-process-execution-broker.md) (a host process's output, likewise), [ADR-0052](0052-m5d-sandboxed-process-exec.md) §8 item 8 and its residuals (a workload's outcome, and later reads of what it wrote) · **Amends (Proposed):** [ADR-0061](0061-workload-egress-decided-by-policy-novelty-and-exposure.md) (a root is exposed by F-01's marks too, and a run holding external content starts its workloads exposed; its "decides no taint" is replaced) · **Refines:** [CONTEXT.md](../CONTEXT.md) §5 (downloads are `EXTERNAL_UNTRUSTED`), [ADR-0028](0028-policy-input-ownership.md) (the kernel derives taint)
 
 > **A run's taint is raised by what the kernel delivers to it, from where
 > that content may have come -- never by what the run was merely allowed to
@@ -236,7 +236,10 @@ sandbox-taint-mutations`. Every earlier evidence case is kept, pinned in
 of its now-external run (`np=0/2`), and the guarantee it no longer shows --
 the exposed cell, not the run's taint, deciding on an exposed root -- is a
 case of its own at a fresh run (`taint-fresh-run-decided-by-the-exposed-cell`).
-Hosted CI is the acceptance gate; this record stays Proposed until accepted.
+Hosted CI was the acceptance gate: accepted on 2026-11-25, with every
+hosted run from CI #201 to CI #225 (run 45492684496, `b87f2d4`) as its
+evidence -- on CI #225, 15 `f01_` tests in `make test` and seven real-OCI
+`taint-*` cases in `sandbox-egress`.
 
 ## Revisit if
 

@@ -18,9 +18,9 @@ Push #36, [run 45382110559](https://github.com/Onwcan/DireWolf/actions/runs/4538
 | [ADR-0067](adr/0067-f18-approver-endpoint-identity-boundary.md) | the approver endpoint, identity boundary only; its §7 binds what M6 builds on it | **Accepted** 2026-11-24 | built 2026-11-16; "approver evidence: 1 test, 6 cases contained, three identities" from CI #201 to CI #216; `make approver-identity-mutations` 13/13 | M6.3 |
 | [ADR-0077](adr/0077-the-approval-channel-is-the-approver-endpoint-and-an-approver-uid-is-a-principal-not-a-person.md) OD-1 | one approval channel: ADR-0022's CLI-local and detached-local paths withdrawn | **Accepted** 2026-11-24 | a decision record; the boundary is ADR-0067's | M6.3 |
 | ADR-0077 OD-2 → [ADR-0078](adr/0078-approval-assurance-which-classes-need-a2-and-the-presence-factor.md) | which classes need A2; whether M6 builds a presence factor | **Accepted** 2026-11-24, OD-1 to OD-3 as recommended -- a record of its own so ADR-0077 could be accepted first | a decision record | M6.3 (which classes are approvable) |
-| [ADR-0062](adr/0062-taint-follows-delivered-content.md) (F-01) | a run's taint follows the content it receives | Proposed | hosted-observed (the ledger, F-01) | M6.1 (taint in the binding) |
+| [ADR-0062](adr/0062-taint-follows-delivered-content.md) (F-01) | a run's taint follows the content it receives | **Accepted** 2026-11-25 | hosted-observed (the ledger, F-01), CI #201 to CI #225 | M6.1 (taint in the binding) |
 | [ADR-0064](adr/0064-f02-authority-endings-serialised-with-decided-effects.md) (F-02) | an end of authority waits for every effect already decided | Proposed | `make test` on three platforms; `make authority-concurrency-mutations` 20/20 | M6.2 (the burn inside the gate) |
-| [ADR-0076](adr/0076-isr2-01-audit-level-full-is-not-kept-on-a-net-http-hop.md) (ISR2-01) | `audit_level=full` is not kept on a `net.http` hop | Proposed | CI #212, #213, #216: `net-http-evidence`'s `obligation-unenforceable` case | M6.1 (obligations in the binding) |
+| [ADR-0076](adr/0076-isr2-01-audit-level-full-is-not-kept-on-a-net-http-hop.md) (ISR2-01) | `audit_level=full` is not kept on a `net.http` hop | **Accepted** 2026-11-25, OD-1 | CI #212, #213, #216, #225: `net-http-evidence`'s `obligation-unenforceable` case | M6.1 (obligations in the binding) |
 
 **What "Accepted" here means.** ADR-0063, ADR-0067 and ADR-0077's OD-1 were
 accepted on 2026-11-24 and recorded in `5520ab8`; CI #218 at `6475172`,
@@ -97,7 +97,8 @@ M6 report may call host execution complete.
 | ADR-0076 | accept before M6.1 closes | the binding carries the decision's obligations; one must never be bound or shown as kept where it is not |
 
 None of the three blocks starting M6.1. Each is hosted-observed; none is
-accepted by this package.
+accepted by this package. ADR-0062 and ADR-0076 were accepted on
+2026-11-25, at M6.1's closeout; ADR-0064 stays Proposed.
 
 ## 5. Acceptance order
 
@@ -105,11 +106,11 @@ accepted by this package.
    `5520ab8`.
 2. ADR-0078 -- accepted 2026-11-24, before M6.3 as required (it decides
    what M6.3 may make approvable).
-3. ADR-0062 and ADR-0076 -- before M6.1's closeout.
+3. ADR-0062 and ADR-0076 -- accepted 2026-11-25, at M6.1's closeout.
 4. ADR-0064 -- before M6.2's closeout.
 5. M6.1's own binding record (a new ADR amending ADR-0021: the requester's
-   principal and the schema member join the hash) -- proposed at M6.1's
-   start, accepted at its closeout on hosted evidence.
+   principal and the schema member join the hash) -- ADR-0079, proposed
+   2026-11-24 and accepted 2026-11-25 on CI #225's evidence.
 
 ## 6. What ADR-0078's acceptance changed
 

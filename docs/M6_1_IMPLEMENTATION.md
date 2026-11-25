@@ -1,12 +1,13 @@
 # M6.1 implementation report: the canonical approval binding
 
-**As of 2026-11-24.** M6.1 of [M6_IMPLEMENTATION_PLAN.md](M6_IMPLEMENTATION_PLAN.md):
-the binding type and its hash, built and tested locally. Its record is
-[ADR-0079](adr/0079-the-approval-binding-v1-what-it-binds-and-how-it-is-encoded.md)
-(Proposed). **Nothing stores, asks for or spends a binding; no approval
-operation exists; every `REQUIRE_APPROVAL` still denies.** M6.1 closes on a
-green hosted `make test` on three platforms and the acceptance of ADR-0062,
-ADR-0076 and ADR-0079; M6.2 does not start before.
+**As of 2026-11-24; closed 2026-11-25 (§17).** M6.1 of
+[M6_IMPLEMENTATION_PLAN.md](M6_IMPLEMENTATION_PLAN.md): the binding type and
+its hash. Its record is [ADR-0079](adr/0079-the-approval-binding-v1-what-it-binds-and-how-it-is-encoded.md),
+accepted 2026-11-25. **Nothing stores, asks for or spends a binding; no
+approval operation exists; every `REQUIRE_APPROVAL` still denies.** It was
+committed as `b87f2d4` and verified on CI #225, and ADR-0062, ADR-0076 and
+ADR-0079 were accepted on 2026-11-25; M6.2 starts once those acceptance
+records are committed and their CI is green.
 
 ## 1. Baseline
 
@@ -216,7 +217,10 @@ the binding where its request record is written.
   verb)" makes every fs and `net.http` approval an A2 class -- `DENY` through
   M6. Recorded in ADR-0079's residuals; nothing changed.
 
-## 14. Pending acceptances
+## 14. Acceptances
+
+Recommended on 2026-11-24 as below; all three accepted on 2026-11-25 as
+recommended (§17).
 
 **ADR-0062 (F-01, taint follows delivered content) -- recommendation: accept.**
 
@@ -269,16 +273,56 @@ Required for M6.1's closeout: `make test` on ubuntu, windows and macos with
 `state::binding::` passing (the vectors and properties, every platform) and,
 on ubuntu, `state::workload_route::tests::binding::` and
 `taint::m6_1_a_binding_takes_the_runs_taint_as_the_store_holds_it`; `make
-arch` with TX066 and TX067; the oracle in `make test`'s pytest. **Pending:**
-nothing here is hosted until the change is committed and its CI run read.
+arch` with TX066 and TX067; the oracle in `make test`'s pytest. **Verified**
+on CI #225 at `b87f2d4` (§17).
 
 ## 16. M6.2 prerequisites
 
-1. M6.1's commit, its hosted run green and read.
-2. ADR-0062, ADR-0076 and ADR-0079 accepted; ADR-0064 accepted by M6.2's
-   closeout.
+1. M6.1's commit, its hosted run green and read -- done: `b87f2d4`, CI #225.
+2. ADR-0062, ADR-0076 and ADR-0079 accepted -- done, 2026-11-25; their
+   records committed and that commit's CI green; ADR-0064 accepted by
+   M6.2's closeout.
 3. M6.2's own ADR: the registry's schema (store version 15), the request and
    approval records, the burn inside ADR-0064's gate, and where a route
    records a request with its binding.
 4. The §5 table's registry obligations, each built and tested; TX062 and
    TX066 amended under that decision, not before.
+
+## 17. Closeout (2026-11-25)
+
+**Hosted evidence, at `b87f2d4`** (the M6.1 commit, byte-identical to the
+change this report describes):
+
+| | |
+|---|---|
+| CI #225, [run 45492684496](https://github.com/Onwcan/DireWolf/actions/runs/45492684496) | 33 of 33 jobs |
+| `make test`, ubuntu | 33 `state::binding::` tests; the five real-authority tests (`state::workload_route::tests::binding::` and `taint::m6_1_...`); the oracle's five tests; 15 `f01_` tests |
+| `make test`, windows and macos | 33 `state::binding::` tests each; the oracle's five tests each |
+| the golden vectors | six, reproduced on every platform |
+| `make arch` | TX066 and TX067 fire on their fixtures, and the tree has no finding |
+| `net.http` | the `obligation-unenforceable` case among 193 |
+| `sandbox egress` | seven real-OCI `taint-*` cases |
+| M5 gate | passed |
+| Push workflow (CodeQL), [run 45492684058](https://github.com/Onwcan/DireWolf/actions/runs/45492684058) | 4 of 4 |
+
+`make approval-binding-mutations` (43 of 43, two equivalent mutants
+recorded) is local evidence, not hosted.
+
+**Accepted on 2026-11-25:** ADR-0062 (F-01, taint follows delivered
+content); ADR-0076 OD-1 (`audit_level=full` is not kept on a hop, and
+denies); ADR-0079 OD-1 to OD-5 (the binding's field set, encoding and
+producers; a file bound by identity, hard links aliasing; TTL, `max_uses`
+and the run id outside the hash; the executable-and-argv payload; a
+request body bound by digest and length). ADR-0064 stays Proposed, for
+M6.2's closeout. The records: each Status line and its decisions,
+the index and the rows of the records each amends (0021, 0039, 0043, 0044,
+0045, 0050, 0052), `docs/adr/accepted.sha256`, the README's count (63
+accepted, 13 Proposed), ADR-0062's C3 tripwires, the ledger and the
+documents that named them Proposed.
+
+**Not changed:** the M6.1 implementation and every dependency. Its Rust
+comments still name ADR-0062, ADR-0076 and ADR-0079 as Proposed; they are
+left for the next change to the code rather than edited in an
+acceptance-only change.
+
+**Pending:** this closeout's own commit and its CI run.

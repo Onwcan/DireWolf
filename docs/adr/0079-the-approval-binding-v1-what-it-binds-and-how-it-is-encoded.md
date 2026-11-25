@@ -1,6 +1,6 @@
 # ADR-0079: The approval binding v1 -- what it binds, and how it is encoded
 
-**Status:** Proposed · **Date:** 2026-11-24 (M6.1; built and tested locally, hosted evidence pending; nothing stores, asks for or spends a binding) · **Amends, on acceptance:** [ADR-0021](0021-approval-binding-v2.md) (its field set: `requester` and `schema` join it, and `environment_profile` and `agent` are defined as the code can produce them) · **Builds on:** [ADR-0032](0032-wire-contract-framing-strict-json-and-jcs.md) (RFC 8785), [ADR-0063](0063-principal-ownership-of-sessions-workspaces-and-profiles.md) (the requester is a principal), [ADR-0067](0067-f18-approver-endpoint-identity-boundary.md) §7 (the requester's principal proposed for the binding), [ADR-0062](0062-taint-follows-delivered-content.md) (taint), [ADR-0076](0076-isr2-01-audit-level-full-is-not-kept-on-a-net-http-hop.md) (an obligation a route cannot keep), [ADR-0078](0078-approval-assurance-which-classes-need-a2-and-the-presence-factor.md) (assurance) · **Leaves unchanged:** DWKP, the private protocol, the store (schema 14), the audit log, the shipped packs, every route's decision and every accepted decision
+**Status:** Accepted · **Date:** 2026-11-25 (proposed 2026-11-24 for M6.1; built and committed as `b87f2d4`; accepted 2026-11-25, OD-1 to OD-5 as written, on hosted evidence: CI #225 (run 45492684496, `b87f2d4`), 33 of 33 jobs -- the binding's 33 tests on Linux, Windows and macOS, its five Linux real-authority tests, the oracle's five tests on each platform, TX066 and TX067; nothing stores, asks for or spends a binding) · **Amends:** [ADR-0021](0021-approval-binding-v2.md) (its field set: `requester` and `schema` join it, and `environment_profile` and `agent` are defined as the code can produce them) · **Builds on:** [ADR-0032](0032-wire-contract-framing-strict-json-and-jcs.md) (RFC 8785), [ADR-0063](0063-principal-ownership-of-sessions-workspaces-and-profiles.md) (the requester is a principal), [ADR-0067](0067-f18-approver-endpoint-identity-boundary.md) §7 (the requester's principal proposed for the binding), [ADR-0062](0062-taint-follows-delivered-content.md) (taint), [ADR-0076](0076-isr2-01-audit-level-full-is-not-kept-on-a-net-http-hop.md) (an obligation a route cannot keep), [ADR-0078](0078-approval-assurance-which-classes-need-a2-and-the-presence-factor.md) (assurance) · **Leaves unchanged:** DWKP, the private protocol, the store (schema 14), the audit log, the shipped packs, every route's decision and every accepted decision
 
 > **A binding names exactly what an approval would cover, and grants
 > nothing.** Thirteen members, each from a value the authority decided,
@@ -254,15 +254,15 @@ keeps every other module, the runtime included, from naming it.
 
 ## Owner decisions
 
-- **OD-1** The field set, encoding and producers of §§1-7 (recommended as
-  written).
-- **OD-2** A file bound by identity alone (hard links alias) (recommended).
+- **OD-1** The field set, encoding and producers of §§1-7, as written.
+  **Accepted 2026-11-25.**
+- **OD-2** A file bound by identity alone (hard links alias). **Accepted 2026-11-25.**
 - **OD-3** TTL, `max_uses` and the run id outside the hash, as §8's registry
-  obligations (recommended).
+  obligations. **Accepted 2026-11-25.**
 - **OD-4** `executable_and_argv`'s payload as the executable identity and an
-  argv allowlist, its policy source left to M6.4 (recommended).
-- **OD-5** A `net.http` request's body bound by digest and length
-  (recommended).
+  argv allowlist, its policy source left to M6.4. **Accepted 2026-11-25.**
+- **OD-5** A `net.http` request's body bound by digest and length.
+  **Accepted 2026-11-25.**
 
 ## Evidence
 
@@ -270,8 +270,12 @@ Local, 2026-11-24 (WSL2, Linux): the golden vectors agree with an
 independent, test-only oracle (`tests/protocol/test_approval_binding_vectors.py`);
 the property, adversarial and refusal tests and the Linux real-authority
 tests pass; the mutation campaign is recorded in
-[M6_1_IMPLEMENTATION.md](../M6_1_IMPLEMENTATION.md). Hosted: pending -- `make
-test` on Linux, Windows and macOS after the change is committed.
+[M6_1_IMPLEMENTATION.md](../M6_1_IMPLEMENTATION.md); it is local evidence, not
+hosted. Hosted, at `b87f2d4`: CI #225 (run 45492684496), 33 of 33 jobs --
+`make test` ran the binding's 33 tests on Linux, Windows and macOS and its
+five real-authority tests on Linux, the oracle's five tests on each platform
+(six vectors), and `make arch` TX066 and TX067; the Push workflow (CodeQL,
+run 45492684058) 4 of 4.
 
 ## Revisit if
 

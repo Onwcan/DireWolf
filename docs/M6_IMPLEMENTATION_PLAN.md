@@ -26,7 +26,7 @@ The phase labels M6.1 to M6.7 are this plan's, not roadmap milestones.
 | `net.http` | 193 cases, `obligation-unenforceable` among them |
 | Not exercised hosted | a casefold filesystem (`canonical filesystem` lists it NOT EXERCISED, with the cross-device link; the bind mount is NOT EXERCISED in that job by design and exercised in `sandbox egress`) |
 | Store schema | 14 (`state/schema.rs` `CURRENT_VERSION`) |
-| Records | ADR-0075 Accepted; ADR-0063, ADR-0067, ADR-0077 (OD-1) accepted 2026-11-24, recorded in `5520ab8`; ADR-0078 (OD-2) accepted 2026-11-24; ADR-0062, ADR-0064, ADR-0076 Proposed |
+| Records | ADR-0075 Accepted; ADR-0063, ADR-0067, ADR-0077 (OD-1) accepted 2026-11-24, recorded in `5520ab8`; ADR-0078 (OD-2) accepted 2026-11-24; ADR-0062, ADR-0076 and ADR-0079 accepted 2026-11-25; ADR-0064 Proposed |
 
 ## 2. The M6.0 gate
 
@@ -34,7 +34,7 @@ The phase labels M6.1 to M6.7 are this plan's, not roadmap milestones.
 |---|---|---|
 | **M6.0a** the channel and the principal | ADR-0063, ADR-0067, ADR-0077 OD-1 | **met**: recorded in `5520ab8`; CI #218 at `6475172`, 33 of 33 |
 | **M6.0b** the assurance policy | ADR-0078 (OD-1 to OD-3) | **met**: accepted 2026-11-24, as recommended |
-| M6.1's own record | [ADR-0079](adr/0079-the-approval-binding-v1-what-it-binds-and-how-it-is-encoded.md), amending ADR-0021 on acceptance (§4 below) | **Proposed** 2026-11-24; accepted at M6.1's closeout on hosted evidence |
+| M6.1's own record | [ADR-0079](adr/0079-the-approval-binding-v1-what-it-binds-and-how-it-is-encoded.md), amending ADR-0021 (§4 below) | **Accepted** 2026-11-25, OD-1 to OD-5, on CI #225's evidence |
 
 Both are met: M6.1 may start, and M6.3 starts with its assurance policy
 decided.
@@ -168,14 +168,16 @@ earlier one's exit holds.
 | Exit | the above; no registry, endpoint operation or spend |
 | Forbidden | any persistence, any DWKP or approver operation, any spend |
 
-**State (2026-11-24): implemented locally, not yet committed or hosted.**
-[ADR-0079](adr/0079-the-approval-binding-v1-what-it-binds-and-how-it-is-encoded.md) (Proposed) is the record and
-[M6_1_IMPLEMENTATION.md](M6_1_IMPLEMENTATION.md) the report: the binding in
-`state/binding.rs`, golden vectors against an independent test-only
-oracle, property and adversarial tests, Linux real-authority tests,
-`make approval-binding-mutations` and TX066/TX067. M6.1 closes on a green
-hosted `make test` on three platforms and the acceptance of ADR-0062,
-ADR-0076 and ADR-0079; until then M6.2 does not start.
+**State (2026-11-25): hosted-verified and accepted.** Committed as
+`b87f2d4`; CI #225 ([run 45492684496](https://github.com/Onwcan/DireWolf/actions/runs/45492684496)) passed 33 of 33 jobs --
+the binding's 33 tests on Linux, Windows and macOS, its five Linux
+real-authority tests, the oracle's five tests on each platform, TX066 and
+TX067 -- and the Push workflow ([run 45492684058](https://github.com/Onwcan/DireWolf/actions/runs/45492684058)) 4 of 4.
+[ADR-0079](adr/0079-the-approval-binding-v1-what-it-binds-and-how-it-is-encoded.md) is the record, accepted 2026-11-25 with ADR-0062
+and ADR-0076; [M6_1_IMPLEMENTATION.md](M6_1_IMPLEMENTATION.md) is the
+report. `make approval-binding-mutations` (43 of 43) is local evidence.
+M6.2 starts once these acceptance records are committed and their own CI
+is green.
 
 ### M6.2 -- the kernel-owned registry
 
@@ -305,7 +307,6 @@ and M6.4 and M6.6 gain their A2 exits.
 
 | Risk | Owner of the decision | Closed when |
 |---|---|---|
-| the binding's two mismatches (environment profile, agent) | M6.1's ADR | decided and tested |
 | standing grants across a policy change | M6.4's ADR | decided |
 | no presence factor: the four A2 classes `DENY` through M6 | ADR-0078 OD-3 (accepted) | a factor's ADR, after M6 |
 | casefold filesystem evidence | engineering | the hosted plan in the handoff §G runs |
@@ -317,8 +318,9 @@ and M6.4 and M6.6 gain their A2 exits.
 
 ## 10. Next engineering task
 
-**M6.1's record and its first test.** Propose the binding ADR (amending
-ADR-0021: the schema member, the requester, the two definitions §4.2 calls
-mismatches, integers as strings), then build `ApprovalBinding` and its
-property tests in `dwkd-authority` with no store, protocol or endpoint
-change. Nothing in it can grant authority.
+**M6.2's record.** Once M6.1's acceptance records are committed and their
+CI is green: propose M6.2's ADR -- the registry's schema (store version
+15), the request, approval and use records, the burn inside ADR-0064's
+gate, and where a route records a request with its binding -- then build
+the registry against §5's M6.2 table. ADR-0064 is accepted by M6.2's
+closeout. Nothing in it is approvable before M6.3's approver operations.

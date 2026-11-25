@@ -1,4 +1,4 @@
-"""M6.1 (ADR-0079, Proposed): the approval binding's record, its mutation
+"""M6.1 (ADR-0079): the approval binding's record, its mutation
 review and its architecture rules agree with the code."""
 
 from __future__ import annotations
@@ -70,7 +70,7 @@ def test_the_binding_spells_every_member_the_record_names() -> None:
     text = _read(BINDING)
     adr = _read(ADR)
     assert adr.startswith("# ADR-0079:")
-    assert "**Status:** Proposed" in adr
+    assert "**Status:** Accepted · **Date:** 2026-11-25" in adr
     assert 'pub(crate) const SCHEMA: &str = "direwolf.approval.binding.v1";' in text
     for member in MEMBERS:
         assert f'("{member}", ' in text, member

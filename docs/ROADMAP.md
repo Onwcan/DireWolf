@@ -895,7 +895,7 @@ downloads after M7 (ADR-0072 OM-2). The security review of 2026-11-22
 ([INDEPENDENT_SECURITY_REVIEW_2026-11-22.md](INDEPENDENT_SECURITY_REVIEW_2026-11-22.md))
 added ADR-0075 (operator policy files), accepted; the second review of that
 day ([INDEPENDENT_SECURITY_REREVIEW_2026-11-22.md](INDEPENDENT_SECURITY_REREVIEW_2026-11-22.md))
-added ADR-0076 (`audit_level` on a `net.http` hop), Proposed, and ADR-0077
+added ADR-0076 (`audit_level` on a `net.http` hop), accepted on 2026-11-25, and ADR-0077
 (the approval channel), whose OD-1 was accepted on 2026-11-24 with ADR-0063
 and ADR-0067; its OD-2 is ADR-0078, accepted the same day. The final pre-M6
 handoff is [M6_PREPARATION_HANDOFF.md](M6_PREPARATION_HANDOFF.md). Every other ADR
@@ -906,7 +906,7 @@ named here stays Proposed until accepted.
 **Acceptance:** every property test in [APPROVALS.md](APPROVALS.md) §10; burn is atomic under concurrency; prompts contain no model-authored text in the authoritative region.
 **Adversarial:** replay, substitution, drift (file/DNS/binary swap), laundering parent↔child, environment swap, fatigue spam, budget amplification via fan-out; an external agent's own approval, auto-approve or "yolo" claim presented as an operator approval ([ADR-0051](adr/0051-external-agent-interoperability.md)).
 **Plan (M6.0, 2026-11-24; nothing built):** [M6_IMPLEMENTATION_PLAN.md](M6_IMPLEMENTATION_PLAN.md) -- the invariants, the binding contract and phases M6.1 to M6.7; its decisions are [M6_0_DECISION_PACKAGE.md](M6_0_DECISION_PACKAGE.md). The approval channel and the principal model are accepted (ADR-0063, ADR-0067, ADR-0077 OD-1); which approvals need a presence factor is ADR-0078, accepted the same day: host execution, `secret.use`, `fs.delete` and a standing grant's creation stay `DENY` through M6, and M6 does not enable host execution.
-**M6.1 (2026-11-24; implemented locally, hosted evidence pending):** the canonical approval binding, [ADR-0079](adr/0079-the-approval-binding-v1-what-it-binds-and-how-it-is-encoded.md) (Proposed), reported in [M6_1_IMPLEMENTATION.md](M6_1_IMPLEMENTATION.md); nothing stores, asks for or spends a binding, and M6.2 waits for M6.1's closeout.
+**M6.1 (2026-11-25: hosted-verified and accepted):** the canonical approval binding, committed as `b87f2d4` and verified on CI #225 ([run 45492684496](https://github.com/Onwcan/DireWolf/actions/runs/45492684496), 33 of 33); [ADR-0079](adr/0079-the-approval-binding-v1-what-it-binds-and-how-it-is-encoded.md) accepted 2026-11-25 with ADR-0062 and ADR-0076; reported in [M6_1_IMPLEMENTATION.md](M6_1_IMPLEMENTATION.md). Nothing stores, asks for or spends a binding. M6.2 starts once these acceptance records are committed and their CI is green.
 
 ---
 
