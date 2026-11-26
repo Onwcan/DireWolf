@@ -945,6 +945,28 @@ def test_only_the_state_layer_names_the_approval_binding(violation_rules: list[s
     }
 
 
+def test_only_the_registry_writes_approvals_and_nothing_reaches_its_decision(
+    violation_rules: list[str],
+) -> None:
+    """M6.2 (ADR-0080): the CLI deciding an approval, attaching an approver
+    set or reaching the set past its attachment, and the runtime resetting a
+    spent approval or forging a use, are caught on every line; the comments
+    naming them are not."""
+    rule = "TX068-only-the-registry-writes-approvals-and-nothing-reaches-its-decision"
+    assert rule in violation_rules
+    assert _paths(rule) == {
+        "crates/direwolf-cli/src/approve.rs",
+        "runtime/src/direwolf/approval_reset.py",
+    }
+    assert {(path, line) for path, line, _ in _findings(rule)} == {
+        ("crates/direwolf-cli/src/approve.rs", 4),
+        ("crates/direwolf-cli/src/approve.rs", 5),
+        ("crates/direwolf-cli/src/approve.rs", 6),
+        ("runtime/src/direwolf/approval_reset.py", 3),
+        ("runtime/src/direwolf/approval_reset.py", 4),
+    }
+
+
 def test_the_server_seam_is_named_only_by_the_server(violation_rules: list[str]) -> None:
     """M5d.2 (ADR-0052 §17): `serve_authority` and `Served::operate` -- the
     evidence's door -- are named by the server module alone; the CLI fixture
@@ -1200,6 +1222,7 @@ def test_the_required_boundary_rules_are_all_declared() -> None:
         "TX065-the-approver-endpoint-holds-no-operation-before-m6",
         "TX066-the-approval-binding-grants-nothing",
         "TX067-only-the-state-layer-names-the-approval-binding",
+        "TX068-only-the-registry-writes-approvals-and-nothing-reaches-its-decision",
         "DEP001-no-agent-framework-dependency",
         "DEP002-runtime-has-no-transport-dependency",
         "RS001-authority-depends-on-nothing-in-tree",

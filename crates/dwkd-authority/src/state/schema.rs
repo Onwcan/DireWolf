@@ -51,7 +51,7 @@ use rusqlite::Connection;
 pub(super) const APPLICATION_ID: i64 = 0x4457_4B44;
 
 /// The schema version this build creates and understands.
-pub(super) const CURRENT_VERSION: i64 = 14;
+pub(super) const CURRENT_VERSION: i64 = 15;
 
 /// Schema version 1, the first. Static text: nothing in it is assembled from a
 /// value, and every value the authority stores is bound as a parameter.
@@ -1800,6 +1800,176 @@ CREATE TRIGGER ownership_revocation_run_no_delete BEFORE DELETE ON ownership_rev
 BEGIN SELECT RAISE(ABORT, 'a revocation''s runs are never forgotten'); END;
 ";
 
+/// Schema version 15 (M6.2, ADR-0080, Proposed): the approval registry --
+/// requests, the approvals decided on them, and each use.
+///
+/// **The migration grants nothing.** Every table starts empty but the
+/// registry's clock, whose high-water mark starts at zero: no history of a
+/// store -- a run, a lease, a past `REQUIRE_APPROVAL` -- is an approval.
+///
+/// What the database itself holds, beside what the registry's Rust checks:
+///
+/// * A request is its run's own: its requester, session and epoch are the
+///   run's, and the run is `ACTIVE`, when it is recorded. It is immutable but
+///   for its one decision (`PENDING` to `GRANTED`, `DENIED` or `EXPIRED`), and
+///   a run holds at most one pending request per binding.
+/// * An approval is decided on a pending, unexpired request of a run still
+///   `ACTIVE`; never by its requester; with the request's use limit; within
+///   the request's TTL; at no lower assurance than the request needs. It starts `OPEN` with no use,
+///   and ends once: `EXHAUSTED`, `EXPIRED` or `REVOKED`.
+/// * A use spends an `OPEN`, unexpired approval of its own run, names the
+///   workload intent it was spent on -- an intent that exists, in the same
+///   run -- and is counted by the database: an approval's `uses` is the count
+///   of its use rows, no update can say otherwise, and the use that reaches
+///   `max_uses` ends it `EXHAUSTED`. A use is recorded after its intent, in
+///   the intent's transaction, so neither commits without the other.
+/// * The registry's clock only rises: an instant it has passed is never
+///   current again, whatever the host clock says afterwards.
+///
+/// Nothing is ever deleted.
+pub(super) const SCHEMA_V15: &str = r"
+CREATE TABLE approval_clock (
+    singleton      INTEGER PRIMARY KEY CHECK (singleton = 1),
+    high_water_ms  INTEGER NOT NULL CHECK (high_water_ms >= 0)
+) STRICT;
+INSERT INTO approval_clock (singleton, high_water_ms) VALUES (1, 0);
+CREATE TRIGGER approval_clock_no_delete BEFORE DELETE ON approval_clock
+BEGIN SELECT RAISE(ABORT, 'the approval clock is permanent'); END;
+CREATE TRIGGER approval_clock_only_rises BEFORE UPDATE ON approval_clock
+WHEN NEW.singleton != OLD.singleton OR NEW.high_water_ms < OLD.high_water_ms
+BEGIN SELECT RAISE(ABORT, 'the approval clock never falls'); END;
+
+CREATE TABLE approval_request (
+    request_id          TEXT    PRIMARY KEY CHECK (length(request_id) = 64
+                                                   AND request_id NOT GLOB '*[^0-9a-f]*'),
+    run_id              TEXT    NOT NULL REFERENCES run(run_id) ON DELETE RESTRICT,
+    session_id          TEXT    NOT NULL,
+    requester           TEXT    NOT NULL CHECK (length(requester) BETWEEN 5 AND 14
+                                                AND substr(requester, 1, 4) = 'uid:'
+                                                AND substr(requester, 5) NOT GLOB '*[^0-9]*'),
+    epoch               INTEGER NOT NULL CHECK (epoch >= 1),
+    incarnation         INTEGER NOT NULL CHECK (incarnation >= 1),
+    idempotency_key     TEXT    NOT NULL CHECK (length(idempotency_key) BETWEEN 1 AND 128),
+    binding_schema      TEXT    NOT NULL CHECK (binding_schema = 'direwolf.approval.binding.v1'),
+    binding_sha256      TEXT    NOT NULL CHECK (length(binding_sha256) = 64
+                                                AND binding_sha256 NOT GLOB '*[^0-9a-f]*'),
+    binding             BLOB    NOT NULL CHECK (length(binding) BETWEEN 2 AND 1048576),
+    scope               TEXT    NOT NULL CHECK (scope IN ('exact_action', 'path_set',
+                                        'executable_and_argv', 'path_subtree',
+                                        'host_and_methods', 'credential_use')),
+    ttl_s               INTEGER NOT NULL CHECK (ttl_s BETWEEN 1 AND 86400),
+    max_uses            INTEGER NOT NULL CHECK (max_uses BETWEEN 1 AND 1000),
+    assurance_required  TEXT    NOT NULL CHECK (assurance_required IN ('A1', 'A2')),
+    policy_revision     TEXT    NOT NULL CHECK (length(policy_revision) = 64
+                                                AND policy_revision NOT GLOB '*[^0-9a-f]*'),
+    rule_id             TEXT    NOT NULL CHECK (length(rule_id) BETWEEN 1 AND 128),
+    requested_ms        INTEGER NOT NULL CHECK (requested_ms >= 0),
+    not_after_ms        INTEGER NOT NULL CHECK (not_after_ms > requested_ms),
+    state               TEXT    NOT NULL CHECK (state IN ('PENDING', 'GRANTED', 'DENIED',
+                                                          'EXPIRED')),
+    decided_ms          INTEGER,
+    CHECK ((state = 'PENDING') = (decided_ms IS NULL))
+) STRICT;
+CREATE UNIQUE INDEX approval_request_one_pending ON approval_request(run_id, binding_sha256)
+WHERE state = 'PENDING';
+CREATE INDEX approval_request_by_run ON approval_request(run_id, state);
+CREATE TRIGGER approval_request_no_delete BEFORE DELETE ON approval_request
+BEGIN SELECT RAISE(ABORT, 'an approval request is never deleted'); END;
+CREATE TRIGGER approval_request_fixed BEFORE UPDATE OF request_id, run_id, session_id,
+    requester, epoch, incarnation, idempotency_key, binding_schema, binding_sha256, binding,
+    scope, ttl_s, max_uses, assurance_required, policy_revision, rule_id, requested_ms,
+    not_after_ms ON approval_request
+BEGIN SELECT RAISE(ABORT, 'an approval request is immutable'); END;
+CREATE TRIGGER approval_request_decided_once BEFORE UPDATE OF state, decided_ms
+ON approval_request
+WHEN OLD.state != 'PENDING' OR NEW.state = 'PENDING' OR NEW.decided_ms IS NULL
+BEGIN SELECT RAISE(ABORT, 'an approval request is decided once'); END;
+CREATE TRIGGER approval_request_its_runs_own BEFORE INSERT ON approval_request
+WHEN NEW.state != 'PENDING'
+  OR NOT EXISTS (SELECT 1 FROM run WHERE run_id = NEW.run_id AND state = 'ACTIVE'
+                 AND subject = NEW.requester AND session_id = NEW.session_id
+                 AND epoch = NEW.epoch)
+BEGIN SELECT RAISE(ABORT, 'an approval request is a pending request of an active run''s own'); END;
+
+CREATE TABLE approval (
+    approval_id   TEXT    PRIMARY KEY CHECK (length(approval_id) = 64
+                                             AND approval_id NOT GLOB '*[^0-9a-f]*'),
+    request_id    TEXT    NOT NULL UNIQUE REFERENCES approval_request(request_id)
+                                          ON DELETE RESTRICT,
+    approver      TEXT    NOT NULL CHECK (length(approver) BETWEEN 5 AND 14
+                                          AND substr(approver, 1, 4) = 'uid:'
+                                          AND substr(approver, 5) NOT GLOB '*[^0-9]*'),
+    channel       TEXT    NOT NULL CHECK (channel = 'APPROVER_ENDPOINT'),
+    assurance     TEXT    NOT NULL CHECK (assurance IN ('A1', 'A2')),
+    granted_ms    INTEGER NOT NULL CHECK (granted_ms >= 0),
+    not_after_ms  INTEGER NOT NULL CHECK (not_after_ms > granted_ms
+                                          AND not_after_ms - granted_ms <= 86400000),
+    max_uses      INTEGER NOT NULL CHECK (max_uses BETWEEN 1 AND 1000),
+    uses          INTEGER NOT NULL CHECK (uses >= 0 AND uses <= max_uses),
+    state         TEXT    NOT NULL CHECK (state IN ('OPEN', 'EXHAUSTED', 'EXPIRED', 'REVOKED')),
+    ended_ms      INTEGER,
+    ended_reason  TEXT    CHECK (ended_reason IS NULL OR (length(ended_reason) BETWEEN 1 AND 64
+                                                          AND ended_reason NOT GLOB '*[^A-Z0-9_]*')),
+    CHECK ((state = 'OPEN') = (ended_ms IS NULL)),
+    CHECK ((state = 'OPEN') = (ended_reason IS NULL)),
+    CHECK (state != 'EXHAUSTED' OR uses = max_uses)
+) STRICT;
+CREATE TRIGGER approval_no_delete BEFORE DELETE ON approval
+BEGIN SELECT RAISE(ABORT, 'an approval is never deleted'); END;
+CREATE TRIGGER approval_fixed BEFORE UPDATE OF approval_id, request_id, approver, channel,
+    assurance, granted_ms, not_after_ms, max_uses ON approval
+BEGIN SELECT RAISE(ABORT, 'an approval is immutable but for its uses and its end'); END;
+CREATE TRIGGER approval_decided_on_a_pending_request BEFORE INSERT ON approval
+WHEN NEW.uses != 0 OR NEW.state != 'OPEN'
+  OR NOT EXISTS (SELECT 1 FROM approval_request r WHERE r.request_id = NEW.request_id
+                 AND r.state = 'PENDING' AND NEW.granted_ms < r.not_after_ms
+                 AND NEW.max_uses = r.max_uses
+                 AND NEW.not_after_ms - NEW.granted_ms <= r.ttl_s * 1000
+                 AND (r.assurance_required = 'A1' OR NEW.assurance = 'A2')
+                 AND EXISTS (SELECT 1 FROM run WHERE run_id = r.run_id AND state = 'ACTIVE'))
+BEGIN SELECT RAISE(ABORT, 'an approval is decided once, on a pending request, within its bounds'); END;
+CREATE TRIGGER approval_never_by_its_requester BEFORE INSERT ON approval
+WHEN NEW.approver = (SELECT requester FROM approval_request WHERE request_id = NEW.request_id)
+BEGIN SELECT RAISE(ABORT, 'an approver never approves its own request'); END;
+CREATE TRIGGER approval_uses_are_its_records BEFORE UPDATE OF uses ON approval
+WHEN NEW.uses != (SELECT count(*) FROM approval_use WHERE approval_id = NEW.approval_id)
+BEGIN SELECT RAISE(ABORT, 'an approval''s uses are its use records'); END;
+CREATE TRIGGER approval_ends_once BEFORE UPDATE OF state, ended_ms, ended_reason ON approval
+WHEN OLD.state != 'OPEN'
+BEGIN SELECT RAISE(ABORT, 'an approval ends once'); END;
+
+CREATE TABLE approval_use (
+    approval_id    TEXT    NOT NULL REFERENCES approval(approval_id) ON DELETE RESTRICT,
+    seq            INTEGER NOT NULL CHECK (seq BETWEEN 1 AND 1000),
+    invocation_id  TEXT    NOT NULL UNIQUE REFERENCES workload(invocation_id) ON DELETE RESTRICT,
+    run_id         TEXT    NOT NULL REFERENCES run(run_id) ON DELETE RESTRICT,
+    action_sha256  TEXT    NOT NULL CHECK (length(action_sha256) = 64
+                                           AND action_sha256 NOT GLOB '*[^0-9a-f]*'),
+    used_ms        INTEGER NOT NULL CHECK (used_ms >= 0),
+    PRIMARY KEY (approval_id, seq)
+) STRICT;
+CREATE TRIGGER approval_use_no_update BEFORE UPDATE ON approval_use
+BEGIN SELECT RAISE(ABORT, 'an approval use is immutable'); END;
+CREATE TRIGGER approval_use_no_delete BEFORE DELETE ON approval_use
+BEGIN SELECT RAISE(ABORT, 'an approval use is never deleted'); END;
+CREATE TRIGGER approval_use_spends_an_open_approval_of_its_run BEFORE INSERT ON approval_use
+WHEN NOT EXISTS (SELECT 1 FROM approval a JOIN approval_request r ON r.request_id = a.request_id
+                 WHERE a.approval_id = NEW.approval_id AND a.state = 'OPEN'
+                 AND NEW.seq = a.uses + 1 AND NEW.used_ms < a.not_after_ms
+                 AND r.run_id = NEW.run_id AND r.binding_sha256 = NEW.action_sha256)
+  OR NOT EXISTS (SELECT 1 FROM workload WHERE invocation_id = NEW.invocation_id
+                 AND run_id = NEW.run_id AND state = 'LAUNCHING')
+BEGIN SELECT RAISE(ABORT, 'an approval use spends an open approval of its own run, once, on its intent'); END;
+CREATE TRIGGER approval_use_counts AFTER INSERT ON approval_use
+BEGIN
+UPDATE approval SET uses = uses + 1,
+    state = CASE WHEN uses + 1 = max_uses THEN 'EXHAUSTED' ELSE state END,
+    ended_ms = CASE WHEN uses + 1 = max_uses THEN NEW.used_ms ELSE ended_ms END,
+    ended_reason = CASE WHEN uses + 1 = max_uses THEN 'EXHAUSTED' ELSE ended_reason END
+WHERE approval_id = NEW.approval_id;
+END;
+";
+
 /// One step from a version to the next.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct Migration {
@@ -1866,6 +2036,10 @@ pub(super) const MIGRATIONS: &[Migration] = &[
     Migration {
         to: 14,
         sql: SCHEMA_V14,
+    },
+    Migration {
+        to: 15,
+        sql: SCHEMA_V15,
     },
 ];
 
@@ -2022,7 +2196,8 @@ mod tests {
     use super::{
         APPLICATION_ID, CURRENT_VERSION, MIGRATIONS, Migration, SCHEMA_V1, SCHEMA_V2, SCHEMA_V3,
         SCHEMA_V4, SCHEMA_V5, SCHEMA_V6, SCHEMA_V7, SCHEMA_V8, SCHEMA_V9, SCHEMA_V10, SCHEMA_V11,
-        SCHEMA_V12, SCHEMA_V13, SCHEMA_V14, Shape, ShapeError, decide, migrate, verify_exact,
+        SCHEMA_V12, SCHEMA_V13, SCHEMA_V14, SCHEMA_V15, Shape, ShapeError, decide, migrate,
+        verify_exact,
     };
     use rusqlite::Connection;
 
@@ -2095,6 +2270,7 @@ mod tests {
         assert!(conn.execute_batch(SCHEMA_V12).is_ok());
         assert!(conn.execute_batch(SCHEMA_V13).is_ok());
         assert!(conn.execute_batch(SCHEMA_V14).is_ok());
+        assert!(conn.execute_batch(SCHEMA_V15).is_ok());
         assert!(
             conn.execute_batch("DROP TRIGGER run_never_resurrects")
                 .is_ok()
@@ -2124,6 +2300,7 @@ mod tests {
         assert!(conn.execute_batch(SCHEMA_V12).is_ok());
         assert!(conn.execute_batch(SCHEMA_V13).is_ok());
         assert!(conn.execute_batch(SCHEMA_V14).is_ok());
+        assert!(conn.execute_batch(SCHEMA_V15).is_ok());
         assert!(
             conn.execute_batch("CREATE TABLE backdoor (x INTEGER)")
                 .is_ok()
@@ -3688,5 +3865,97 @@ mod tests {
         ] {
             assert!(conn.execute(bad, []).is_err(), "{bad}");
         }
+    }
+
+    /// M6.2 (ADR-0080): version 15 adds the approval registry, empty, to a
+    /// version-14 store -- the migration grants nothing -- and the
+    /// database refuses an approval with no pending request and a clock that
+    /// falls.
+    #[test]
+    fn version_15_adds_an_empty_registry_and_grants_nothing() {
+        let Ok(conn) = Connection::open_in_memory() else {
+            unreachable!("in-memory SQLite")
+        };
+        let Ok(tx) = conn.unchecked_transaction() else {
+            unreachable!("a transaction")
+        };
+        let fourteen: Vec<Migration> = MIGRATIONS.iter().copied().filter(|m| m.to <= 14).collect();
+        assert_eq!(migrate(&tx, 0, &fourteen).ok(), Some(14));
+        assert_eq!(migrate(&tx, 14, MIGRATIONS).ok(), Some(CURRENT_VERSION));
+        assert_eq!(CURRENT_VERSION, 15);
+        let count = |sql: &str| tx.query_row(sql, [], |row| row.get::<_, i64>(0)).ok();
+        for sql in [
+            "SELECT count(*) FROM approval_request",
+            "SELECT count(*) FROM approval",
+            "SELECT count(*) FROM approval_use",
+        ] {
+            assert_eq!(count(sql), Some(0), "{sql}: nothing is inherited");
+        }
+        assert_eq!(count("SELECT high_water_ms FROM approval_clock"), Some(0));
+        assert!(
+            tx.execute("UPDATE approval_clock SET high_water_ms = 5", [])
+                .is_ok(),
+            "the clock rises"
+        );
+        assert!(
+            tx.execute("UPDATE approval_clock SET high_water_ms = 4", [])
+                .is_err(),
+            "the clock never falls"
+        );
+        assert!(
+            tx.execute("DELETE FROM approval_clock", []).is_err(),
+            "the clock is kept"
+        );
+        assert!(
+            tx.execute(
+                "INSERT INTO approval (approval_id, request_id, approver, channel, assurance,                  granted_ms, not_after_ms, max_uses, uses, state) VALUES                  (?1, ?1, 'uid:2001', 'APPROVER_ENDPOINT', 'A1', 1, 2, 1, 0, 'OPEN')",
+                ["a".repeat(64)],
+            )
+            .is_err(),
+            "no approval without a pending request"
+        );
+        assert_eq!(verify_exact(&tx).ok(), Some(Ok(())));
+    }
+
+    /// M6.2: a version-15 migration that fails part-way -- the store holds an
+    /// object named like the registry's last table -- leaves the store at 14
+    /// with none of the registry: one transaction, rolled back whole.
+    #[test]
+    fn a_version_15_migration_that_fails_midway_leaves_none_of_it() {
+        let Ok(conn) = Connection::open_in_memory() else {
+            unreachable!("in-memory SQLite")
+        };
+        let fourteen: Vec<Migration> = MIGRATIONS.iter().copied().filter(|m| m.to <= 14).collect();
+        {
+            let Ok(tx) = conn.unchecked_transaction() else {
+                unreachable!("a transaction")
+            };
+            assert_eq!(migrate(&tx, 0, &fourteen).ok(), Some(14));
+            assert!(
+                tx.execute_batch("CREATE TABLE approval_use (x INTEGER) STRICT;")
+                    .is_ok()
+            );
+            assert!(tx.commit().is_ok());
+        }
+        {
+            let Ok(tx) = conn.unchecked_transaction() else {
+                unreachable!("a transaction")
+            };
+            assert!(migrate(&tx, 14, MIGRATIONS).is_err(), "the step must fail");
+            // Dropped without commit: rolled back.
+        }
+        let version: i64 = conn
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap_or(-1);
+        assert_eq!(version, 14, "the version did not move");
+        let registry = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_schema WHERE name IN \
+                 ('approval_clock', 'approval_request', 'approval')",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .ok();
+        assert_eq!(registry, Some(0), "nothing of version 15 remains");
     }
 }

@@ -13,11 +13,14 @@
 //!
 //! A binding is not a capability, a lease, an approval, a token, a standing
 //! grant, a permit or a decision. Nothing reads one to allow anything:
-//! computing a hash never turns a denial into an allowance, and no route
-//! consults this module. It is stored nowhere, crosses no protocol and is
-//! audited nowhere. M6.2's registry is its first consumer; until then the
-//! production build carries it with no caller, which is said below rather
-//! than hidden behind a call that does nothing. TX066 keeps it that way.
+//! computing a hash never turns a denial into an allowance. The approval
+//! registry (M6.2, `approvals.rs`, ADR-0080) is its one consumer: it builds a
+//! sandboxed launch's binding, stores a request's canonical bytes, and
+//! compares a later launch's with them -- equality is one of its guards,
+//! never an allowance by itself. This module writes nothing, crosses no
+//! protocol and is audited nowhere; its other producers have no caller until
+//! their routes' approvals do, which is said below rather than hidden behind
+//! a call that does nothing. TX066 keeps it that way.
 //!
 //! # The canonical object
 //!
@@ -56,7 +59,7 @@
     not(test),
     expect(
         dead_code,
-        reason = "M6.1 builds and proves the binding; M6.2's request record is its first production caller"
+        reason = "M6.2 builds a sandboxed launch's binding; the other routes' producers join with their approvals"
     )
 )]
 
@@ -1108,13 +1111,6 @@ impl RunContext {
     ///
     /// [`AuthorityError`] for a store that cannot be read, or that holds a
     /// value it could not have written.
-    #[cfg_attr(
-        not(all(test, target_os = "linux")),
-        expect(
-            dead_code,
-            reason = "its tests drive a real admission, which the Linux fixture makes"
-        )
-    )]
     pub(in crate::state) fn load(
         work: &Work<'_>,
         run: &RunId,

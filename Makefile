@@ -23,6 +23,7 @@ DW := $(PY) scripts/dw.py
         policy-anchor-mutations approver-identity-mutations proxy-peer-evidence \
         proxy-peer-mutations sandbox-identity-mutations egress-allowlist-mutations \
         resolver-mutations namespace-evidence approval-binding-mutations \
+        approval-registry-mutations approval-registry-evidence \
         sandbox-workload-evidence \
         net-http-evidence net-http-mutations sandbox-workload-mutations sandbox-secret-evidence \
         sandbox-secret-mutations sandbox-workspace-evidence sandbox-workspace-mutations \
@@ -156,6 +157,12 @@ resolver-mutations: ## F-16 mutation review (ADR-0074, Proposed): each guard of 
 
 approval-binding-mutations: ## M6.1 mutation review (ADR-0079, Proposed): each hashed member of the approval binding dropped in turn, and each encoding and refusal guard -- integers kept exact, sets sorted and duplicate-free, obligations with their parameters, credentials at their revisions, the environment, the requester, the scope -- weakened in turn must fail the binding's tests (Linux)
 	@$(DW) approval-binding-mutations
+
+approval-registry-mutations: ## M6.2 mutation review (ADR-0080, Proposed): each spend-time guard of the approval registry -- requester, session, tenure, policy revision, binding, approver set, self-approval, assurance, uses, expiry, the clock's high-water mark -- each A2 class, bound and decision check, the use's place in its intent's transaction and each database trigger weakened in turn must fail the registry's tests (Linux)
+	@$(DW) approval-registry-mutations
+
+approval-registry-evidence: ## M6.2 authority-state evidence (ADR-0080, Proposed): the approval registry's route tests on a real authority and store -- one spend among a hundred contenders, K uses, exact expiry, the clock moved back, revocation, restart, crash windows, the database's refusals, an A2 launch never asked for -- each case required once (Linux; a fake broker, no containment claimed)
+	@$(DW) approval-registry-evidence
 
 sandbox-workload-evidence: ## M5d.1-M5d.2 workloads in real OCI environments: identity, bounds, wall clock, process trees ended, digests, drift, escapes, an agent-shaped workload, the authority's gates, ledger and crash windows; the public process.exec over real DWKP, serve --sandbox-config, the hygiene launcher with real git/Python/pytest; M5e.2 cross-run isolation
 	@$(DW) sandbox-workload-evidence

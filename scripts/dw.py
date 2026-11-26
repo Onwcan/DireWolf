@@ -10488,6 +10488,511 @@ def task_approval_binding_mutations() -> None:
     approval_binding_review()
 
 
+# M6.2 (ADR-0080, Proposed): the approval registry. Each spend-time guard,
+# each assurance class, each bound and each decision check weakened in
+# turn; the use's placement in its intent's transaction and the registry's
+# writes on a decided launch removed; and each database trigger that refuses
+# what no guard would write disabled. The detector is the registry's own
+# tests -- its unit tests, the Linux real-authority route tests (concurrency,
+# expiry, revocation, restart, crash windows, the triggers on a real store),
+# the A2 credential case and schema 15's migration -- and every mutant must
+# be KILLED by a named failing test, the file restored byte-identically.
+# Three mutants are not in the table because no test can kill them: see
+# APPROVAL_REGISTRY_EQUIVALENT.
+_M62_REGISTRY = "crates/dwkd-authority/src/state/approvals.rs"
+_M62_ROUTE = "crates/dwkd-authority/src/state/workload.rs"
+_M62_SCHEMA = "crates/dwkd-authority/src/state/schema.rs"
+APPROVAL_REGISTRY_MUTATIONS = (
+    (
+        "A01: the host environment not A2",
+        _M62_REGISTRY,
+        "\n    if *action.environment() == Environment::Host\n        || injects_credential\n",
+        "\n    if injects_credential\n",
+    ),
+    (
+        "A02: a credential injection not A2",
+        _M62_REGISTRY,
+        '\n        || injects_credential\n        || verb == "secret.use"\n',
+        '\n        || verb == "secret.use"\n',
+    ),
+    (
+        "A03: secret.use not A2",
+        _M62_REGISTRY,
+        '\n        || verb == "secret.use"\n        || verb == "fs.delete"\n',
+        '\n        || verb == "fs.delete"\n',
+    ),
+    (
+        "A04: fs.delete not A2",
+        _M62_REGISTRY,
+        '\n        || verb == "fs.delete"\n    {\n',
+        "\n    {\n",
+    ),
+    (
+        "A05: an A2 launch considered",
+        _M62_REGISTRY,
+        "\n        || required(asked.action, asked.injects_credential) != Assurance::A1\n",
+        "\n",
+    ),
+    (
+        "A06: a launch without its capability considered",
+        _M62_REGISTRY,
+        "\n        || !asked.capability_satisfied\n",
+        "\n",
+    ),
+    (
+        "A07: an approval spendable at its instant",
+        _M62_REGISTRY,
+        "\n        if now >= open.not_after {\n",
+        "\n        if now > open.not_after {\n",
+    ),
+    (
+        "A08: an expired approval left open",
+        _M62_REGISTRY,
+        "\n    for approval in &considered.stale {\n        expire(work, approval, now)?;\n    }\n",
+        "\n",
+    ),
+    (
+        "A09: the clock's high-water mark ignored",
+        _M62_REGISTRY,
+        "\n    Ok(work.now.max(high))\n",
+        "\n    Ok(work.now)\n",
+    ),
+    (
+        "A10: the clock's high-water mark never recorded",
+        _M62_REGISTRY,
+        "\n    work.db(work.tx.execute(\n"
+        '        "UPDATE approval_clock SET high_water_ms = ?1 WHERE singleton = 1 AND '
+        'high_water_ms < ?1",\n'
+        "        [to_sql(now)?],\n    ))?;\n",
+        "\n",
+    ),
+    (
+        "A11: the requester not checked",
+        _M62_REGISTRY,
+        "\n    open.requester == tenure.subject\n",
+        "\n    true\n",
+    ),
+    (
+        "A12: the session not checked",
+        _M62_REGISTRY,
+        "\n        && open.session == tenure.session.as_str()\n",
+        "\n",
+    ),
+    (
+        "A13: the epoch not checked",
+        _M62_REGISTRY,
+        "\n        && open.epoch == tenure.epoch.get()\n",
+        "\n",
+    ),
+    (
+        "A14: the incarnation not checked",
+        _M62_REGISTRY,
+        "\n        && open.incarnation == tenure.incarnation\n",
+        "\n",
+    ),
+    (
+        "A15: the policy revision not checked",
+        _M62_REGISTRY,
+        "\n        && open.policy_revision == revision\n",
+        "\n",
+    ),
+    (
+        "A16: the binding's bytes not compared",
+        _M62_REGISTRY,
+        "\n        && open.binding.as_slice() == canonical\n",
+        "\n",
+    ),
+    (
+        "A17: a self-approval spendable",
+        _M62_REGISTRY,
+        "\n        && open.approver != open.requester\n",
+        "\n",
+    ),
+    (
+        "A18: an approval's assurance not checked",
+        _M62_REGISTRY,
+        "\n        && open.assurance == Assurance::A1.as_str()\n",
+        "\n",
+    ),
+    (
+        "A19: a request's required assurance not checked",
+        _M62_REGISTRY,
+        "\n        && open.assurance_required == Assurance::A1.as_str()\n",
+        "\n",
+    ),
+    (
+        "A20: a use past the limit",
+        _M62_REGISTRY,
+        "\n        && open.uses < open.max_uses\n",
+        "\n        && open.uses <= open.max_uses\n",
+    ),
+    (
+        "A21: the approver set not checked at the spend",
+        _M62_REGISTRY,
+        "\n            && approver_known(work, &open.approver)\n",
+        "\n",
+    ),
+    (
+        "A22: a drift not detected",
+        _M62_REGISTRY,
+        "\n    let drift = if spendable.is_none() {\n",
+        "\n    let drift = if false {\n",
+    ),
+    (
+        "A23: a request recorded twice",
+        _M62_REGISTRY,
+        "\n    if pending.is_some() {\n        return Ok(Requested::Pending);\n    }\n",
+        "\n",
+    ),
+    (
+        "A24: the run's pending bound removed",
+        _M62_REGISTRY,
+        "\n    in_run < MAX_PENDING_PER_RUN && in_store < MAX_PENDING\n",
+        "\n    in_store < MAX_PENDING\n",
+    ),
+    (
+        "A25: the store's pending bound removed",
+        _M62_REGISTRY,
+        "\n    in_run < MAX_PENDING_PER_RUN && in_store < MAX_PENDING\n",
+        "\n    in_run < MAX_PENDING_PER_RUN\n",
+    ),
+    (
+        "A26: a request's window not bounded",
+        _M62_REGISTRY,
+        ".map_or(MAX_REQUEST_WINDOW_MS, |ttl| ttl.min(MAX_REQUEST_WINDOW_MS));",
+        ".map_or(MAX_REQUEST_WINDOW_MS, |ttl| ttl);",
+    ),
+    (
+        "A27: a request past its window left pending",
+        _M62_REGISTRY,
+        "\n    expire_requests(work, &considered.run, now)?;\n",
+        "\n",
+    ),
+    (
+        "A28: a request decided at its window's end",
+        _M62_REGISTRY,
+        "\n    if now >= pending.not_after {\n",
+        "\n    if now > pending.not_after {\n",
+    ),
+    (
+        "A29: a decision by an approver outside the set",
+        _M62_REGISTRY,
+        "\n    if !approver_known(work, &approver) {\n",
+        "\n    if false {\n",
+    ),
+    (
+        "A30: a decision by the requester",
+        _M62_REGISTRY,
+        "\n    if approver == pending.requester {\n",
+        "\n    if false {\n",
+    ),
+    (
+        "A31: an A2 decision recorded",
+        _M62_REGISTRY,
+        "if assurance != Assurance::A1 || pending.needed != Assurance::A1.as_str() {",
+        "if false {",
+    ),
+    (
+        "A32: a request decided twice",
+        _M62_REGISTRY,
+        '\n    if pending.state != "PENDING" {\n',
+        "\n    if false {\n",
+    ),
+    (
+        "A33: a revocation not serialised with decided effects",
+        _M62_REGISTRY,
+        "\n        let ending = self.shared.gate.ending()?;\n",
+        "\n        let ending = ();\n",
+    ),
+    (
+        "A34: a revocation that ends nothing",
+        _M62_REGISTRY,
+        "SET state = 'REVOKED', ended_ms",
+        "SET state = 'OPEN', ended_ms",
+    ),
+    (
+        "A35: an approval permits nothing",
+        _M62_ROUTE,
+        "\n            && (self.record.policy_satisfied() || self.approved())\n",
+        "\n            && self.record.policy_satisfied()\n",
+    ),
+    (
+        "A36: an approved launch spends no use",
+        _M62_ROUTE,
+        "\n        Some(considered) => super::approvals::consume(work, considered, invocation),\n",
+        "\n        Some(_) => Ok(()),\n",
+    ),
+    (
+        "A37: a denied launch records no request",
+        _M62_ROUTE,
+        "\n            super::approvals::request(work, considered)?;\n",
+        "\n",
+    ),
+    (
+        "A38: a decided launch's expiries and drift never recorded",
+        _M62_ROUTE,
+        "\n        super::approvals::settle(work, considered)?;\n",
+        "\n",
+    ),
+    (
+        "A39: the clock may fall (schema)",
+        _M62_SCHEMA,
+        "\nWHEN NEW.singleton != OLD.singleton OR NEW.high_water_ms < OLD.high_water_ms\n",
+        "\nWHEN NEW.singleton != OLD.singleton\n",
+    ),
+    (
+        "A40: a decided request reopened (schema)",
+        _M62_SCHEMA,
+        "\nWHEN OLD.state != 'PENDING' OR NEW.state = 'PENDING' OR NEW.decided_ms IS NULL\n",
+        "\nWHEN 0\n",
+    ),
+    (
+        "A41: a self-approval recorded (schema)",
+        _M62_SCHEMA,
+        "\nWHEN NEW.approver = (SELECT requester FROM approval_request "
+        "WHERE request_id = NEW.request_id)\n",
+        "\nWHEN 0\n",
+    ),
+    (
+        "A42: an approval's uses not its records (schema)",
+        _M62_SCHEMA,
+        "\nWHEN NEW.uses != (SELECT count(*) FROM approval_use "
+        "WHERE approval_id = NEW.approval_id)\n",
+        "\nWHEN 0\n",
+    ),
+    (
+        "A43: a use with no intent (schema)",
+        _M62_SCHEMA,
+        "\n  OR NOT EXISTS (SELECT 1 FROM workload WHERE invocation_id = NEW.invocation_id\n"
+        "                 AND run_id = NEW.run_id AND state = 'LAUNCHING')\n",
+        "\n",
+    ),
+    (
+        "A44: the database's use count not raised (schema)",
+        _M62_SCHEMA,
+        "\nUPDATE approval SET uses = uses + 1,\n",
+        "\nUPDATE approval SET uses = uses,\n",
+    ),
+    (
+        "A45: a refused use swallowed, its intent kept",
+        _M62_ROUTE,
+        "\n        Some(considered) => super::approvals::consume(work, considered, invocation),\n",
+        "\n        Some(considered) => {\n"
+        "            let _ = super::approvals::consume(work, considered, invocation);\n"
+        "            Ok(())\n"
+        "        }\n",
+    ),
+    (
+        "A46: a request's deadline wrapped",
+        _M62_REGISTRY,
+        "\n    now.checked_add(window)\n",
+        "\n    Some(now.wrapping_add(window))\n",
+    ),
+    (
+        "A47: an approval's deadline wrapped",
+        _M62_REGISTRY,
+        "\n    life_s\n        .checked_mul(1000)\n"
+        "        .and_then(|life| now.checked_add(life))\n",
+        "\n    Some(now.wrapping_add(life_s.wrapping_mul(1000)))\n",
+    ),
+    (
+        "A48: a request whose run has ended decided",
+        _M62_REGISTRY,
+        "\n    if !run_active(work, &pending.run)? {\n",
+        "\n    if false {\n",
+    ),
+    (
+        "A49: an approval of an ended run's request recorded (schema)",
+        _M62_SCHEMA,
+        "\n                 AND EXISTS (SELECT 1 FROM run WHERE run_id = r.run_id "
+        "AND state = 'ACTIVE'))\n",
+        ")\n",
+    ),
+)
+# The equivalent mutants, and why: none can change an outcome.
+APPROVAL_REGISTRY_EQUIVALENT = (
+    (
+        "E1: consider's REQUIRE_APPROVAL check removed",
+        "a decision carries an approval shape only when its effect is "
+        "REQUIRE_APPROVAL (policy::Decision), and the next line returns nothing "
+        "for a decision with no shape",
+    ),
+    (
+        "E2: consider's kept-obligations check removed",
+        "the binding refuses an obligation the route does not keep "
+        "(BindingError::ObligationUnenforceable, ADR-0079), and consider returns "
+        "nothing for a binding that cannot be built",
+    ),
+    (
+        "E3: consider's exact_action check removed",
+        "the binding refuses a scope other than the one it is given "
+        "(BindingError::ScopeMismatch), and consider gives exact_action alone",
+    ),
+)
+APPROVAL_REGISTRY_EVIDENCE_DIR = ROOT / "target" / "m6-2-evidence"
+APPROVAL_REGISTRY_RECORD_SCHEMA = "direwolf.m6-2.mutation-review"
+APPROVAL_REGISTRY_FILTERS = (
+    "state::approvals::",
+    "state::workload_route::tests::approval::",
+    "state::workload_route::tests::secret::m6_2_",
+    "state::schema::tests::version_15_",
+)
+
+
+def _approval_registry_stages() -> tuple[MutationStage, ...]:
+    """The review's detector: the registry's unit tests, its Linux
+    real-authority route tests, the A2 credential case and the migration."""
+    return (
+        MutationStage(
+            "approval-registry",
+            (
+                "cargo",
+                "test",
+                "--locked",
+                "-p",
+                "dwkd-authority",
+                "--lib",
+                "--",
+                *APPROVAL_REGISTRY_FILTERS,
+            ),
+        ),
+    )
+
+
+def approval_registry_review(
+    mutations: Sequence[tuple[str, str, str, str]] = APPROVAL_REGISTRY_MUTATIONS,
+    *,
+    root: Path | None = None,
+    tests: Callable[..., SuiteRun] = run_tests,
+) -> dict[str, object]:
+    """M6.2's mutation review, as M6.1's: see `_finding_review`."""
+    return _finding_review(
+        ("M6.2", "0080", "approval-registry-mutations", APPROVAL_REGISTRY_RECORD_SCHEMA),
+        "approval registry",
+        mutations,
+        stages=_approval_registry_stages(),
+        build=("cargo", "test", "--locked", "-p", "dwkd-authority", "--lib", "--no-run"),
+        directory=APPROVAL_REGISTRY_EVIDENCE_DIR if root is None else root,
+        tests=tests,
+    )
+
+
+def task_approval_registry_mutations() -> None:
+    """Weaken each guard of the approval registry in turn (M6.2, ADR-0080,
+    Proposed); the registry's tests must catch every one.
+
+    The unmutated baseline must pass first; every file is restored
+    byte-identically whatever happens, and checked; the record is kept in
+    target/m6-2-evidence/. Linux (the real-authority cases and the kernel
+    keyring's A2 case), local, and never run beside another build.
+    """
+    if not sys.platform.startswith("linux"):
+        raise TaskError("NOT EXERCISED: the real-authority cases need Linux; run it in WSL2")
+    approval_registry_review()
+
+
+# M6.2 (ADR-0080, Proposed): the registry's authority-state evidence. Each
+# case's line is printed by its test only after the assertions before it
+# held: a request recorded once, a use spent once with its intent, K uses and
+# no more, one spend among a hundred contenders, the exact expiry and the
+# clock moved back, the decision refusals, drift, revocation against a spend,
+# restart, both crash windows, the database's refusals, the audit's links and
+# privacy, the bounds, and an A2 launch never asked for. The route tests'
+# fake broker runs and contains nothing: these are the authority's
+# decisions, orderings and records, not containment.
+APPROVAL_EVIDENCE_PREFIX = "APPROVAL-EVIDENCE "
+APPROVAL_EVIDENCE_SUITE = "authority-approval-registry"
+APPROVAL_EVIDENCE_CASES = (
+    "request-recorded-once-nothing-runs",
+    "granted-spent-once-with-its-intent",
+    "k-uses-and-no-more",
+    "taint-rise-is-another-binding",
+    "single-use-100-contenders",
+    "multi-use-contended",
+    "expiry-exact-and-durable",
+    "clock-rollback-refused",
+    "decision-refusals",
+    "no-approver-set-no-decision",
+    "drift-detected",
+    "revoked-never-spent",
+    "restart-refused",
+    "crash-windows",
+    "crash-while-requesting",
+    "crash-while-revoking",
+    "run-or-lease-end-beside-a-spend",
+    "replay-and-another-run",
+    "ended-run-never-decided",
+    "revocation-spend-race",
+    "database-refuses",
+    "audit-linked-no-binding-text",
+    "no-capability-or-other-scope-no-request",
+    "approver-outside-the-set-never-spent",
+    "pending-bound-per-run",
+    "request-window-bounded",
+    "a2-credential-launch-not-requested",
+)
+
+
+def require_approval_evidence(output: str) -> list[dict[str, object]]:
+    """Every registry case reported once, with an outcome, in its suite.
+
+    A line fails the task when its JSON is unreadable, its suite is another,
+    its case is in no inventory, it has no outcome, or it is reported twice;
+    a case that never reports -- a test filtered away, renamed or that said
+    NOT EXERCISED -- fails as NOT EXERCISED.
+    """
+    seen: dict[str, dict[str, object]] = {}
+    for line in output.splitlines():
+        at = line.find(APPROVAL_EVIDENCE_PREFIX)
+        if at < 0:
+            continue
+        try:
+            record = json.loads(line[at + len(APPROVAL_EVIDENCE_PREFIX) :])
+        except json.JSONDecodeError as error:
+            raise TaskError(f"approval evidence: an unreadable line: {line!r}") from error
+        if not isinstance(record, dict) or record.get("suite") != APPROVAL_EVIDENCE_SUITE:
+            raise TaskError(f"approval evidence: a line of another suite: {line!r}")
+        case = record.get("case")
+        if not isinstance(case, str) or case not in APPROVAL_EVIDENCE_CASES:
+            raise TaskError(f"approval evidence: a case in no inventory: {case!r}")
+        if case in seen:
+            raise TaskError(f"approval evidence: {case} reported twice")
+        if not record.get("outcome"):
+            raise TaskError(f"approval evidence: {case} has no outcome")
+        seen[case] = record
+    missing = [case for case in APPROVAL_EVIDENCE_CASES if case not in seen]
+    if missing:
+        raise TaskError(f"approval evidence: NOT EXERCISED: {', '.join(missing)}")
+    return [seen[case] for case in APPROVAL_EVIDENCE_CASES]
+
+
+def task_approval_registry_evidence() -> None:
+    """M6.2's authority-state evidence (ADR-0080, Proposed): the registry's
+    route tests on a real authority and store, each case required once.
+
+    Linux (the route tests, and the A2 case in a fresh session keyring of its
+    own, as the M5d.3 tasks run theirs); a fake broker, so no containment is
+    claimed.
+    """
+    if not sys.platform.startswith("linux"):
+        raise TaskError("NOT EXERCISED: the real-authority cases need Linux; run it in WSL2")
+    output = run_captured(
+        "cargo",
+        "test",
+        "--locked",
+        "-p",
+        "dwkd-authority",
+        "--lib",
+        "--",
+        "--nocapture",
+        "state::workload_route::tests::approval::",
+        "state::workload_route::tests::secret::m6_2_",
+        fresh_keyring=True,
+    )
+    records = require_approval_evidence(output)
+    print(f"approval registry evidence: {len(records)} cases, each once")
+
+
 # M5d.3 (ADR-0052 §7): a sandboxed `process.exec` that consumes a credential.
 SECRET_SANDBOX_BROKER_TESTS = (
     "linux::a_descriptor_secret_reaches_the_program_on_descriptor_three_and_nowhere_else",
@@ -17095,6 +17600,8 @@ TASKS = {
     "egress-allowlist-mutations": task_egress_allowlist_mutations,
     "resolver-mutations": task_resolver_mutations,
     "approval-binding-mutations": task_approval_binding_mutations,
+    "approval-registry-mutations": task_approval_registry_mutations,
+    "approval-registry-evidence": task_approval_registry_evidence,
     "sandbox-neighbour-mutations": task_sandbox_neighbour_mutations,
     "sandbox-secret-evidence": task_sandbox_secret_evidence,
     "sandbox-secret-mutations": task_sandbox_secret_mutations,

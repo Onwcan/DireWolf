@@ -1986,6 +1986,10 @@ mod taint;
 #[path = "binding_route_tests.rs"]
 mod binding;
 
+/// M6.2: the approval registry -- requests, decisions, atomic use.
+#[path = "approval_route_tests.rs"]
+mod approval;
+
 /// F-18: a revocation's two phases.
 #[path = "ownership_route_tests.rs"]
 mod ownership;

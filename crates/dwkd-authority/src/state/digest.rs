@@ -74,9 +74,16 @@ pub(crate) const WORKLOAD_REQUEST: &str = "direwolf.workload.request.v1";
 /// resolved against -- every executable's path and pinned SHA-256, in order.
 pub(crate) const IMAGE_MANIFEST: &str = "direwolf.sandbox.image_manifest.v1";
 
+/// An approval request's id (M6.2): its run, its binding's hash and how
+/// many requests that run made for that binding before.
+pub(crate) const APPROVAL_REQUEST: &str = "direwolf.approval.request.v1";
+
+/// An approval's id (M6.2): the request it was decided on.
+pub(crate) const APPROVAL: &str = "direwolf.approval.v1";
+
 /// Every domain, for the test that they are pairwise distinct.
 #[cfg(test)]
-const ALL_DOMAINS: [&str; 13] = [
+const ALL_DOMAINS: [&str; 15] = [
     POLICY_REVISION,
     ADMIT_REQUEST,
     AUDIT_RECORD,
@@ -90,6 +97,8 @@ const ALL_DOMAINS: [&str; 13] = [
     PROCESS_ARGV,
     NET_REQUEST,
     WORKLOAD_REQUEST,
+    APPROVAL_REQUEST,
+    APPROVAL,
 ];
 
 /// The plain SHA-256 of `bytes`, **not** domain-separated: for a digest an

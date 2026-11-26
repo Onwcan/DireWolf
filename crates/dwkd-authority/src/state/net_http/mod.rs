@@ -809,7 +809,11 @@ impl Authority {
         );
         let answer = perform(shared, order);
         shared.crash(CrashPoint::NetAfterResolve)?;
-        let exceptions = shared.net_exceptions.get().map_or(&[][..], Vec::as_slice);
+        let exceptions = shared
+            .attachments
+            .net_exceptions
+            .get()
+            .map_or(&[][..], Vec::as_slice);
         let resolution = judge_resolution(&answer, exceptions);
         self.transact(|work| {
             ledger::record_resolution(work, ctx, &chain.invocation, hop, &resolution)

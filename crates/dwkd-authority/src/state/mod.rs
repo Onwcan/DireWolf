@@ -58,6 +58,7 @@
 mod admission;
 mod adoption;
 mod anchors;
+mod approvals;
 mod audit;
 mod binding;
 mod clock;
@@ -350,6 +351,21 @@ impl<T> Reply<T> {
     }
 }
 
+/// What may be attached once to a started authority -- by an evidence
+/// harness or a test -- and that no production start-up path attaches.
+#[derive(Default)]
+struct Attachments {
+    /// Addresses the authority's own guard lets through although blocked:
+    /// the `net.http` evidence's fixture origins, attached once through
+    /// [`Authority::attach_net_evidence`]. No production start-up path sets
+    /// it, so in production the guard has no exception (ADR-0050 §6).
+    net_exceptions: OnceLock<Vec<dwk_proto::wire::guard::Address>>,
+    /// The approvers an approval may be decided by and spent under (M6.2,
+    /// ADR-0080). Attached by tests alone in this build: in production it
+    /// is empty, so no approval is decided or spent before M6.3.
+    approvers: OnceLock<Vec<u32>>,
+}
+
 /// What every handle shares.
 struct Shared {
     paths: StatePaths,
@@ -377,11 +393,9 @@ struct Shared {
     sandbox: OnceLock<crate::sandbox::SandboxConfig>,
     /// Each run's `net.http` budgets (M5c).
     net_budget: NetBudget,
-    /// Addresses the authority's own guard lets through although blocked:
-    /// the `net.http` evidence's fixture origins, attached once through
-    /// [`Authority::attach_net_evidence`]. No production start-up path sets
-    /// it, so in production the guard has no exception (ADR-0050 §6).
-    net_exceptions: OnceLock<Vec<dwk_proto::wire::guard::Address>>,
+    /// What may be attached once to a started authority, and no production
+    /// start-up path attaches ([`Attachments`]).
+    attachments: Attachments,
     /// F-02 (ADR-0064, Proposed): every handle's effects and every end of
     /// authority, ordered ([`gate`]).
     gate: Arc<gate::Gate>,
@@ -693,7 +707,7 @@ impl Authority {
             secrets: secret_state,
             sandbox: OnceLock::new(),
             net_budget: config.net_budget,
-            net_exceptions: OnceLock::new(),
+            attachments: Attachments::default(),
             gate: Arc::new(gate::Gate::new(gate::WAIT_LIMIT)),
             anchors,
             _lock: lock,
@@ -1789,6 +1803,7 @@ impl Authority {
         exceptions: Vec<dwk_proto::wire::guard::Address>,
     ) -> Result<(), AuthorityError> {
         self.shared
+            .attachments
             .net_exceptions
             .set(exceptions)
             .map_err(|_| AuthorityError::Invariant("net.http exceptions are attached once"))

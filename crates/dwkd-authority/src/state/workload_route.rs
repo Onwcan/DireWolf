@@ -416,6 +416,8 @@ fn route(
         subject: &subject,
         session: asked.session,
         version: asked.version,
+        epoch: asked.epoch,
+        incarnation: asked.caller.holder().incarnation(),
     };
     if asked.key.is_none() {
         return Ok(

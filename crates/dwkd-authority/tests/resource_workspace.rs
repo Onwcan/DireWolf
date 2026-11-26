@@ -543,7 +543,7 @@ mod linux {
         {
             let conn = raw(&h.state());
             conn.execute_batch(
-                "DROP TABLE ownership_revocation_run; DROP TABLE ownership_revocation; \
+                "DROP TABLE approval_use; DROP TABLE approval; DROP TABLE approval_request; DROP TABLE approval_clock; DROP TABLE ownership_revocation_run; DROP TABLE ownership_revocation; \
                  DROP TABLE session_delegate; \
                  DROP TRIGGER session_workspace_bound_with_its_owner; \
                  DROP TABLE session_owner; DROP TABLE profile_principal; \
@@ -601,7 +601,7 @@ mod linux {
         {
             let conn = raw(&h.state());
             conn.execute_batch(
-                "DROP TABLE ownership_revocation_run; DROP TABLE ownership_revocation; \
+                "DROP TABLE approval_use; DROP TABLE approval; DROP TABLE approval_request; DROP TABLE approval_clock; DROP TABLE ownership_revocation_run; DROP TABLE ownership_revocation; \
                  DROP TABLE session_delegate; \
                  DROP TRIGGER session_workspace_bound_with_its_owner; \
                  DROP TABLE session_owner; DROP TABLE profile_principal; \

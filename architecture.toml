@@ -2432,7 +2432,16 @@ operator identities; it is not this module, and this rule stays.
 [[text_rules]]
 id = "TX062-the-runtime-path-selects-no-origin-and-records-no-approval"
 paths = ["crates/dwkd-authority/src/state", "crates/dwkd-authority/src/server"]
-exempt_paths = []
+exempt_paths = [
+    # M6.2 (ADR-0080, Proposed): the approval registry -- a request recorded
+    # on a denial, a use spent in its intent's transaction, and the decision
+    # seam no runtime path reaches (TX068).
+    "crates/dwkd-authority/src/state/approvals.rs",
+    # The registry's tables, their triggers and the clock's one row.
+    "crates/dwkd-authority/src/state/schema.rs",
+    # The writes the registry's database must refuse, made raw by its tests.
+    "crates/dwkd-authority/src/state/approval_route_tests.rs",
+]
 suffixes = [".rs"]
 patterns = [
     '^(?!\s*//).*\bOrigin::(Interactive|Scheduled|Channel|Subagent)\b',
@@ -2447,6 +2456,13 @@ approver endpoint whose identities the operator keeps disjoint from the
 runtime's. A spelling of an attended origin, or an insert into an approval
 record, in the runtime's state or server path would be a requester approving
 itself.
+
+M6.2 (ADR-0080, Proposed) adds the registry under the three exemptions above
+and no other. A request records that a decision was reached, not an
+approval; a use spends one only inside its launch's intent transaction; an
+approval is recorded only through the registry's decision seam, which no
+runtime, DWKP or approver-endpoint path names (TX068) and whose approver set
+no production start-up attaches.
 """
 
 [[text_rules]]
@@ -2561,6 +2577,41 @@ what a request says, the broker never sees one, and the wire contract has no
 field for one. A name for it anywhere else -- the type, its input, the run
 context it reads, or the schema string -- would be the first step of a
 binding assembled from a claim.
+"""
+
+[[text_rules]]
+id = "TX068-only-the-registry-writes-approvals-and-nothing-reaches-its-decision"
+paths = ["crates", "runtime/src"]
+exempt_paths = [
+    # The registry itself.
+    "crates/dwkd-authority/src/state/approvals.rs",
+    # The registry's tables, their triggers and the clock's one row.
+    "crates/dwkd-authority/src/state/schema.rs",
+    # Its route tests: the seam's test-only callers, and the raw writes its
+    # database must refuse.
+    "crates/dwkd-authority/src/state/approval_route_tests.rs",
+]
+suffixes = [".rs", ".py"]
+patterns = [
+    # A write to a registry table: a request, an approval, a use, the clock.
+    '^(?!\s*(//|#)).*\b(INSERT\s+(OR\s+\w+\s+)?INTO|REPLACE\s+INTO|UPDATE|DELETE\s+FROM)\s+approval\w*\b',
+    # The decision seam, the revocation and the approver set.
+    '^(?!\s*(//|#)).*\b(decide_approval|revoke_approval|attach_approvers)\b',
+    # The approver set itself, reached past its one attachment.
+    '^(?!\s*(//|#)).*\.approvers\b',
+]
+reason = """
+M6.2 (ADR-0080, Proposed): the approval registry's rows are written by
+`state/approvals.rs` alone -- a request on a denial, a use in its launch's
+intent transaction, an expiry, a revocation, a decision -- each behind the
+guards that module states and the database's own triggers. A write anywhere
+else would be a record no guard decided: an approval granted, a use undone or
+a clock moved back by a path that never checked who asked, for what, or
+whether any use was left. The decision seam (`decide_approval`), the
+revocation and the approver set have no production caller in M6.2: M6.3's
+approver operations call the first two under a decision of their own; until
+then no runtime, DWKP, approver-endpoint, broker or CLI path names any of
+them, and `attach_approvers` exists in test builds only.
 """
 
 # ===========================================================================

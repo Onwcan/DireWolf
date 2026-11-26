@@ -77,9 +77,16 @@ def test_the_binding_spells_every_member_the_record_names() -> None:
         assert f"`{member}`" in adr, member
 
 
-def test_the_binding_module_declares_no_caller_before_m6_2() -> None:
-    """The production build carries the binding with no caller, said in its
-    code -- not hidden behind a call that does nothing."""
+def test_the_binding_module_names_its_one_production_caller() -> None:
+    """The production build builds a binding for one route -- M6.2's
+    sandboxed launch (ADR-0080) -- and says in its code that the other
+    producers have no caller yet, rather than hiding them behind a call that
+    does nothing."""
     text = _read(BINDING)
-    assert "M6.2's request record is its first production caller" in text
+    assert (
+        "M6.2 builds a sandboxed launch's binding; the other routes' producers "
+        "join with their approvals" in text
+    )
     assert "expect(\n        dead_code," in text
+    registry = _read(BINDING.parent / "approvals.rs")
+    assert "ApprovalBinding::new(&BindingInput {" in registry

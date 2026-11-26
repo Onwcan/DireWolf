@@ -85,7 +85,11 @@ platforms.
   M6's own records are M6's, not this ledger's: [ADR-0079](adr/0079-the-approval-binding-v1-what-it-binds-and-how-it-is-encoded.md)
   (M6.1's approval binding), accepted 2026-11-25, is tracked in
   [M6_IMPLEMENTATION_PLAN.md](M6_IMPLEMENTATION_PLAN.md) and
-  [M6_1_IMPLEMENTATION.md](M6_1_IMPLEMENTATION.md).
+  [M6_1_IMPLEMENTATION.md](M6_1_IMPLEMENTATION.md);
+  [ADR-0080](adr/0080-the-approval-registry-durable-requests-and-atomic-consumption.md)
+  (M6.2's approval registry), Proposed, in the plan and
+  [M6_2_IMPLEMENTATION.md](M6_2_IMPLEMENTATION.md). ADR-0064 (F-02), this
+  ledger's, is offered for acceptance in M6.2's report (§20).
 
 ## Since the security review of 2026-11-22
 

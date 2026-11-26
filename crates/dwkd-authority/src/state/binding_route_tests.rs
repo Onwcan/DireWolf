@@ -153,10 +153,14 @@ fn m6_1_a_binding_is_built_from_the_runs_own_record_and_the_resolvers_identity()
 
     // Building one changed nothing the authority records.
     assert_eq!(fx.events(), events_before, "no audit record");
+    // M6.2 (ADR-0080): the registry exists; building a binding writes no
+    // row of it -- a request is the workload route's, on a denial.
     assert_eq!(
-        fx.count("SELECT count(*) FROM sqlite_master WHERE name LIKE '%approv%'"),
+        fx.count(
+            "SELECT (SELECT count(*) FROM approval_request) + (SELECT count(*) FROM approval)              + (SELECT count(*) FROM approval_use)"
+        ),
         0,
-        "no approval table exists"
+        "no registry row"
     );
 }
 

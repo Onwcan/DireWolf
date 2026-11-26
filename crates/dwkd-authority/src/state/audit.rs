@@ -291,6 +291,22 @@ pub enum AuditEvent {
     /// closed the connection, reading nothing: no approval operation exists
     /// before M6 (F-18 Phase 3.4, ADR-0067). Never an approval.
     ApproverPeerAuthenticated,
+    /// M6.2 (ADR-0080): a sandboxed launch denied `REQUIRE_APPROVAL` was
+    /// recorded as a pending request.
+    ApprovalRequested,
+    /// An approver granted a request: an approval, with its life and uses.
+    ApprovalGranted,
+    /// An approver denied a request.
+    ApprovalDenied,
+    /// A request's window, or an approval's life, was observed to have
+    /// passed. Not a denial.
+    ApprovalExpired,
+    /// One use of an approval was spent, on the intent it names.
+    ApprovalUsed,
+    /// An approval was revoked.
+    ApprovalRevoked,
+    /// An open approval's call was asked again under another binding.
+    ApprovalDriftDetected,
     /// The effective start-up posture of a served incarnation: each control's
     /// condition and the acknowledgement that reduced it (F-03).
     AuthorityPosture,
@@ -298,7 +314,7 @@ pub enum AuditEvent {
 
 impl AuditEvent {
     /// Every kind, in declaration order.
-    pub const ALL: [Self; 75] = [
+    pub const ALL: [Self; 82] = [
         Self::StoreCreated,
         Self::StoreOpened,
         Self::PolicyInstalled,
@@ -373,6 +389,13 @@ impl AuditEvent {
         Self::LeaseRevoked,
         Self::ApproverPeerRefused,
         Self::ApproverPeerAuthenticated,
+        Self::ApprovalRequested,
+        Self::ApprovalGranted,
+        Self::ApprovalDenied,
+        Self::ApprovalExpired,
+        Self::ApprovalUsed,
+        Self::ApprovalRevoked,
+        Self::ApprovalDriftDetected,
         Self::AuthorityPosture,
     ];
 
@@ -454,6 +477,13 @@ impl AuditEvent {
             Self::LeaseRevoked => "lease.revoked",
             Self::ApproverPeerRefused => "approver.peer_refused",
             Self::ApproverPeerAuthenticated => "approver.peer_authenticated",
+            Self::ApprovalRequested => "approval.requested",
+            Self::ApprovalGranted => "approval.granted",
+            Self::ApprovalDenied => "approval.denied",
+            Self::ApprovalExpired => "approval.expired",
+            Self::ApprovalUsed => "approval.used",
+            Self::ApprovalRevoked => "approval.revoked",
+            Self::ApprovalDriftDetected => "approval.drift_detected",
             Self::AuthorityPosture => "authority.posture",
         }
     }

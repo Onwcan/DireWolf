@@ -47,7 +47,7 @@ use dwk_proto::brokerp::workload::{
 use dwk_proto::brokerp::{ProcessArgs, StreamLimit};
 use dwk_proto::limits::{MAX_PROCESS_ARG_BYTES, MAX_PROCESS_ARGV_BYTES};
 use dwk_proto::wire::id::{EnvironmentId, InvocationId, RunId, SessionId};
-use dwk_proto::wire::scalar::{ContentDigest, ProcessArg};
+use dwk_proto::wire::scalar::{ContentDigest, Epoch, ProcessArg};
 use rusqlite::OptionalExtension as _;
 
 use crate::capability::{
@@ -363,7 +363,7 @@ fn decision_reason(record: &DecisionRecord, enforced: bool, permits: bool) -> &'
         Effect::Deny => "DENIED_BY_RULE",
         _ if !record.capability_satisfied() => "NO_CAPABILITY",
         Effect::Allow if !enforced => "OBLIGATION_UNENFORCEABLE",
-        // REQUIRE_APPROVAL: no approval exists before M6.
+        // REQUIRE_APPROVAL, with no approval that passes every guard (M6.2).
         _ => "APPROVAL_REQUIRED",
     }
 }
@@ -387,6 +387,10 @@ pub(super) struct WorkloadPlan {
     pub(super) prefix_at: usize,
     /// The spawn injection, when the launch names a credential (M5d.3).
     pub(super) injection: Option<SpawnGate>,
+    /// M6.2 (ADR-0080): what the approval registry found for a launch
+    /// denied only `REQUIRE_APPROVAL`, at A1 -- its binding, and the
+    /// approval it may spend, if one passes every guard.
+    pub(super) approval: Option<Box<super::approvals::Considered>>,
 }
 
 impl WorkloadPlan {
@@ -414,8 +418,16 @@ impl WorkloadPlan {
     /// The launch's own action: both gates, and every obligation enforced.
     pub(super) fn workload_permits(&self) -> bool {
         self.record.capability_satisfied()
-            && self.record.policy_satisfied()
+            && (self.record.policy_satisfied() || self.approved())
             && self.obligations_enforced
+    }
+
+    /// Whether an approval allows what policy asked an approval for: the
+    /// registry found one that passes every guard (M6.2).
+    pub(super) fn approved(&self) -> bool {
+        self.approval
+            .as_ref()
+            .is_some_and(|considered| considered.approved())
     }
 
     /// The whole plan: the launch's action and, when it names a credential,
@@ -579,6 +591,7 @@ fn decide_plan(
         prefix: kept.prefix,
         prefix_at: kept.prefix_at,
         injection,
+        approval: None,
     })
 }
 
@@ -933,7 +946,33 @@ pub(super) enum Binding<'a> {
         session: &'a SessionId,
         /// The tool messages' version it was asked at: 5, or 6 (M5d.3).
         version: u16,
+        /// The caller's lease epoch (M6.2: what a request is bound to).
+        epoch: Epoch,
+        /// The lease holder's incarnation (M6.2: likewise).
+        incarnation: u64,
     },
+}
+
+impl Binding<'_> {
+    /// The caller's tenure, for the approval registry: the public route's
+    /// alone. The in-process API's launches are never approvable.
+    fn tenure(&self) -> Option<super::approvals::Tenure<'_>> {
+        match self {
+            Binding::Run => None,
+            Binding::Session {
+                subject,
+                session,
+                epoch,
+                incarnation,
+                ..
+            } => Some(super::approvals::Tenure {
+                subject,
+                session,
+                epoch: *epoch,
+                incarnation: *incarnation,
+            }),
+        }
+    }
 }
 
 /// The workload as the broker is told it: the checked request, with the
@@ -1055,11 +1094,32 @@ fn decide(
     (checked, secret): (&Checked, Option<&SpawnPrepared>),
     (budget, active, image): (WorkloadBudget, &ActiveAuthority, &ImageBinding),
     (binding, busy_matters): (RootBinding, bool),
+    tenure: Option<super::approvals::Tenure<'_>>,
 ) -> Result<Result<Decided, &'static str>, AuthorityError> {
     let admission = super::admission::load(work, run.as_str())?;
     let context = query::policy_context(work, run.as_str(), active)?;
-    let plan = decide_plan(checked, &admission, (&context, active), secret)?;
+    let mut plan = decide_plan(checked, &admission, (&context, active), secret)?;
     let found = ready_environment(work, run)?;
+    // M6.2 (ADR-0080): a launch denied only `REQUIRE_APPROVAL` is
+    // considered by the registry -- in this transaction, read-only -- and
+    // goes on to every check below only if an approval passes every guard.
+    plan.approval = super::approvals::consider(
+        work,
+        &super::approvals::Asked {
+            run,
+            action: &plan.action,
+            decision: plan.record.policy(),
+            capability_satisfied: plan.record.capability_satisfied(),
+            obligations_kept: plan.obligations_enforced,
+            injects_credential: plan.injection.is_some(),
+            executable: &checked.identity,
+            args: &checked.args,
+            key: &checked.key,
+            environment: found.as_ref().ok().map(|environment| environment.level),
+            tenure,
+            active,
+        },
+    )?;
     if !plan.permits() {
         return Ok(Ok(Decided {
             binding,
@@ -1129,6 +1189,7 @@ fn caller_fields(binding_key: &Binding<'_>) -> Fields {
             subject,
             session,
             version,
+            ..
         } => Fields::new()
             .text("subject", *subject)
             .text("session_id", session.as_str())
@@ -1170,6 +1231,7 @@ pub(super) fn preview(
         (checked, secret),
         (budget, active, image),
         (binding.clone(), false),
+        binding_key.tenure(),
     )? {
         Ok(decided) => decided,
         // Nothing to run in yet: the plan an invocation would decide on, in
@@ -1249,12 +1311,12 @@ pub(super) fn begin(
             .ok_or(AuthorityError::Invariant("a bound key names no workload"))?;
         return Ok(Begun::Replayed(Box::new(found)));
     }
-    let decided = match decide(
+    let decided = match decide_launch(
         work,
         run,
         (checked, secret.map(|(_, prepared)| prepared)),
         (budget, active, image),
-        (binding, true),
+        (binding, binding_key),
     )? {
         Ok(decided) => decided,
         // Permitted, and nothing to run in: the public route prepares the
@@ -1320,7 +1382,7 @@ pub(super) fn begin(
             .text("container", environment.container.as_str()),
     );
     fields.extend(recorded);
-    work.audit(AuditEvent::WorkloadIntentRecorded, fields)?;
+    intent_recorded(work, fields, &plan, &invocation)?;
     let secret = secret_intent(work, secret, (active, &plan), &invocation)?;
     Ok(Begun::Intent(Box::new(Intent {
         invocation,
@@ -1331,6 +1393,53 @@ pub(super) fn begin(
         secret,
         egress: egress.map(|decided| decided.egress),
     })))
+}
+
+/// [`decide`] for a launch, and what the approval registry records of it
+/// before the launch is denied or its intent recorded (M6.2, ADR-0080): the
+/// approvals of its binding found past their life, a drift, and -- for a
+/// launch denied for want of an approval -- its request. A preview decides
+/// through [`decide`] alone and writes none of these.
+fn decide_launch(
+    work: &mut Work<'_>,
+    run: &RunId,
+    (checked, secret): (&Checked, Option<&SpawnPrepared>),
+    (budget, active, image): (WorkloadBudget, &ActiveAuthority, &ImageBinding),
+    (binding, binding_key): (RootBinding, &Binding<'_>),
+) -> Result<Result<Decided, &'static str>, AuthorityError> {
+    let decided = decide(
+        work,
+        run,
+        (checked, secret),
+        (budget, active, image),
+        (binding, true),
+        binding_key.tenure(),
+    )?;
+    if let Ok(decided) = &decided
+        && let Some(considered) = decided.plan.approval.as_deref()
+    {
+        super::approvals::settle(work, considered)?;
+        if !decided.plan.permits() {
+            super::approvals::request(work, considered)?;
+        }
+    }
+    Ok(decided)
+}
+
+/// The intent's record and -- M6.2 (ADR-0080) -- an approved launch's use,
+/// spent after its intent and in its intent's transaction, so that neither
+/// commits without the other.
+fn intent_recorded(
+    work: &mut Work<'_>,
+    fields: Fields,
+    plan: &WorkloadPlan,
+    invocation: &InvocationId,
+) -> Result<(), AuthorityError> {
+    work.audit(AuditEvent::WorkloadIntentRecorded, fields)?;
+    match plan.approval.as_deref().filter(|c| c.approved()) {
+        Some(considered) => super::approvals::consume(work, considered, invocation),
+        None => Ok(()),
+    }
 }
 
 /// A workload's credential's intent (M5d.3), in the workload's own

@@ -131,6 +131,12 @@ pub enum CrashPoint {
     /// the destruction of their live environments -- is durable, in one
     /// transaction; the broker has been told nothing.
     ReapAfterIntent,
+    /// M6.2: inside a launch's intent transaction, after its intent and
+    /// before the approval use spent on it -- neither committed.
+    ApprovalBeforeUse,
+    /// M6.2: inside a denied launch's transaction, before its approval
+    /// request is written -- nothing of the request committed.
+    ApprovalBeforeRequest,
 }
 
 impl CrashPoint {
@@ -184,6 +190,8 @@ impl CrashPoint {
             Self::WorkloadAfterOutcome => 's',
             Self::ReleaseAfterIntent => 'u',
             Self::ReapAfterIntent => 'v',
+            Self::ApprovalBeforeUse => 'w',
+            Self::ApprovalBeforeRequest => 'x',
         }
     }
 }
@@ -249,6 +257,11 @@ impl CrashPoint {
         Self::WorkloadAfterBroker,
         Self::WorkloadAfterOutcome,
     ];
+
+    /// The registry's points (M6.2): inside an approved launch's intent
+    /// transaction, after the intent and before the use; inside a denied
+    /// launch's, before its request. A stop at either leaves nothing of it.
+    pub const APPROVAL: [Self; 2] = [Self::ApprovalBeforeUse, Self::ApprovalBeforeRequest];
 }
 
 impl fmt::Display for CrashPoint {

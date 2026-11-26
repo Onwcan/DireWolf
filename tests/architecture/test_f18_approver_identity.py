@@ -73,7 +73,14 @@ def test_the_runtime_endpoint_rules_still_cover_the_whole_server() -> None:
         assert rule["exempt_paths"] == [], f"{rule_id} gained an exemption"
     tx062 = _rule("TX062-the-runtime-path-selects-no-origin-and-records-no-approval")
     assert tx062["paths"] == ["crates/dwkd-authority/src/state", "crates/dwkd-authority/src/server"]
-    assert tx062["exempt_paths"] == []
+    # M6.2 (ADR-0080): the registry, its tables and its route tests, and
+    # nothing in the server -- every other state file still records no
+    # approval, and TX068 keeps every other path from writing one.
+    assert tx062["exempt_paths"] == [
+        "crates/dwkd-authority/src/state/approvals.rs",
+        "crates/dwkd-authority/src/state/schema.rs",
+        "crates/dwkd-authority/src/state/approval_route_tests.rs",
+    ]
     tx065 = _rule("TX065-the-approver-endpoint-holds-no-operation-before-m6")
     assert tx065["paths"] == ["crates/dwkd-authority/src/server/approver.rs"]
     assert tx065["exempt_paths"] == []

@@ -219,6 +219,15 @@ fn secret_fixture(
     rule: &str,
     hook: Option<CrashHook>,
 ) -> Option<(Fixture, Seeded, Values)> {
+    secret_fixture_in(tag, secret_policy(rule), hook)
+}
+
+/// [`secret_fixture`] under a policy of the test's own.
+fn secret_fixture_in(
+    tag: &str,
+    policy: PolicySet,
+    hook: Option<CrashHook>,
+) -> Option<(Fixture, Seeded, Values)> {
     let prefix = format!("direwolf-test/m5d3-{tag}-{}", salt());
     let values = Values {
         deploy: value(1, 40),
@@ -246,7 +255,7 @@ fn secret_fixture(
     let root = scratch.path().join("ws");
     std::fs::create_dir_all(&root).unwrap();
     let mut config = StartupConfig::new(
-        secret_policy(rule),
+        policy,
         Mode::Balanced,
         vec![
             "process.exec:*".to_owned(),
@@ -787,6 +796,76 @@ fn policy_must_allow_the_use_in_a_sandbox_and_approvals_stay_closed_until_m6() {
             "authority-policy"
         };
         secret_evidence(case, reason.as_str(), enforcement);
+    }
+}
+
+/// M6.2 (ADR-0080; ADR-0078 §1): a launch that injects a credential is an
+/// A2 class -- its injection is a `secret.use` -- and no presence factor
+/// exists. A `REQUIRE_APPROVAL` on its launch records no request, so no
+/// approval can ever be decided or spent for it; the same launch without the
+/// credential is A1, and asked for.
+#[test]
+fn m6_2_a_launch_injecting_a_credential_is_a2_and_asks_for_nothing() {
+    const APPROVE_EXEC: &str = "[[rule]]\nid = \"approve-fixture\"\n\
+                                effect = \"REQUIRE_APPROVAL\"\nreason = \"SENSITIVE_PATH\"\n\
+                                when.verb = \"process.exec\"\nwhen.environment = \"sandbox\"\n\
+                                when.executable_in = [\"fixture\"]\n\
+                                approval.scope = \"exact_action\"\napproval.ttl = \"10m\"\n\
+                                approval.max_uses = 1\n\n";
+    let first = "[[rule]]\nid = \"hygiene\"";
+    let mut policy = secret_policy(ALLOW);
+    assert!(policy.sources[0].text.contains(first));
+    policy.sources[0].text =
+        policy.sources[0]
+            .text
+            .replacen(first, &format!("{APPROVE_EXEC}{first}"), 1);
+    let Some((mut fx, _seeded, _values)) = secret_fixture_in("m62-a2", policy, None) else {
+        return;
+    };
+    let run = fx.run("s1", GRANTS);
+    fx.ready(&run);
+    let requests = |fx: &Fixture| fx.count("SELECT count(*) FROM approval_request");
+    // No credential: A1, approvable, asked for.
+    let body = fx.launch6(&run, "s1-0", &launch_call(FIXTURE, &["x"], None));
+    assert!(matches!(body, DwkpBody::ToolDeniedV6(_)), "{body:?}");
+    assert_eq!(requests(&fx), 1, "an A1 launch is asked for");
+    // A credential: A2 -- denied, nothing asked for, nothing read.
+    let before = reads_on_this_thread();
+    let body = fx.launch6(&run, "s1-1", &launch_call(FIXTURE, &["y"], Some(DEPLOY)));
+    assert!(matches!(body, DwkpBody::ToolDeniedV6(_)), "{body:?}");
+    let launch = plan6(&body).actions.as_slice()[0]
+        .workload
+        .as_ref()
+        .unwrap();
+    assert_eq!(
+        launch.decision.reason,
+        ProcessDecisionReason::ApprovalRequired
+    );
+    assert_eq!(requests(&fx), 1, "an A2 launch is never asked for");
+    assert_eq!(reads_on_this_thread() - before, 0);
+    assert_eq!(fx.count("SELECT count(*) FROM workload"), 0);
+    assert_eq!(fx.count("SELECT count(*) FROM secret_injection"), 0);
+    // The registry's line (`make approval-registry-evidence`), as canonical
+    // JSON like every line this module prints.
+    {
+        use dwk_proto::json::{Number, Object, Value, to_canonical_string};
+        let mut fields = Object::new();
+        for (key, value) in [
+            ("suite", "authority-approval-registry"),
+            ("case", "a2-credential-launch-not-requested"),
+            ("outcome", "denied+no-request"),
+        ] {
+            fields
+                .insert(key.to_owned(), Value::String(value.to_owned()))
+                .unwrap();
+        }
+        fields
+            .insert("count".to_owned(), Value::Number(Number::Int(1)))
+            .unwrap();
+        println!(
+            "APPROVAL-EVIDENCE {}",
+            to_canonical_string(&Value::Object(fields))
+        );
     }
 }
 

@@ -195,6 +195,19 @@ is green.
 | Exit | the above; no approver operation yet, so nothing grants |
 | Forbidden | any operation that creates an approval from outside the authority |
 
+**State (2026-11-26): built locally, not committed; hosted evidence pending.**
+[ADR-0080](adr/0080-the-approval-registry-durable-requests-and-atomic-consumption.md) is the record
+(Proposed); [M6_2_IMPLEMENTATION.md](M6_2_IMPLEMENTATION.md) is the report.
+Store schema 15 holds requests, approvals and uses; a sandboxed launch
+denied `REQUIRE_APPROVAL` at A1 records a request, and an approved one spends
+its use after its intent, in its intent's transaction. The decision seam has
+no production caller and the shipped build attaches no approver: nothing is
+approvable before M6.3. Its hosted evidence is `make test` and
+`make approval-registry-evidence`, a step of the `authority-transport` job;
+its crash windows are in-process hooks on a reopened store, real process
+termination not exercised (the report's §12). ADR-0064's acceptance package
+is the report's §20.
+
 ### M6.3 -- the approver endpoint's operations and the trusted client
 
 | | |
@@ -274,7 +287,7 @@ the owner's.
 | resources | `resource/fs` (`FileIdentity`, the resolver), `resource/exec` (`ExecutableIdentity`, argv) | resource identity and args |
 | principals, ownership | `state/identity.rs`, `state/ownership.rs`, `state/adoption.rs` | requester; self-approval refusal |
 | the gate, crash windows | `state/gate.rs`, `state/crash.rs`, `state/interleave.rs` | the burn's transaction |
-| store, audit | `state/schema.rs` (schema 14), `state/audit.rs` | the registry; `approval.*`, `grant.*` |
+| store, audit | `state/schema.rs` (schema 15 since M6.2), `state/audit.rs` | the registry; `approval.*`, `grant.*` |
 | approver endpoint | `server/approver.rs`, `server/config.rs`, `server/peer.rs` | M6.3's operations |
 | secrets | `secret/metadata.rs` (`SecretHandle`), `secret_revision` | credential handles in the binding |
 | existing bounds | `state/net_http` (`NetBudget`), process stream limits, the sandbox's byte budgets | budget consumers |
@@ -318,9 +331,8 @@ and M6.4 and M6.6 gain their A2 exits.
 
 ## 10. Next engineering task
 
-**M6.2's record.** Once M6.1's acceptance records are committed and their
-CI is green: propose M6.2's ADR -- the registry's schema (store version
-15), the request, approval and use records, the burn inside ADR-0064's
-gate, and where a route records a request with its binding -- then build
-the registry against §5's M6.2 table. ADR-0064 is accepted by M6.2's
-closeout. Nothing in it is approvable before M6.3's approver operations.
+**M6.2's closeout.** M6.2 is built ([M6_2_IMPLEMENTATION.md](M6_2_IMPLEMENTATION.md)):
+its commits and their hosted run, then the owner's decisions on ADR-0080
+and ADR-0064 (the report's §14). M6.3 -- the approver endpoint's operations
+and the trusted client -- starts only after that closeout; nothing in M6.2
+is approvable before it.
