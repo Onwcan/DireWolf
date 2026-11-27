@@ -19,7 +19,7 @@ Push #36, [run 45382110559](https://github.com/Onwcan/DireWolf/actions/runs/4538
 | [ADR-0077](adr/0077-the-approval-channel-is-the-approver-endpoint-and-an-approver-uid-is-a-principal-not-a-person.md) OD-1 | one approval channel: ADR-0022's CLI-local and detached-local paths withdrawn | **Accepted** 2026-11-24 | a decision record; the boundary is ADR-0067's | M6.3 |
 | ADR-0077 OD-2 → [ADR-0078](adr/0078-approval-assurance-which-classes-need-a2-and-the-presence-factor.md) | which classes need A2; whether M6 builds a presence factor | **Accepted** 2026-11-24, OD-1 to OD-3 as recommended -- a record of its own so ADR-0077 could be accepted first | a decision record | M6.3 (which classes are approvable) |
 | [ADR-0062](adr/0062-taint-follows-delivered-content.md) (F-01) | a run's taint follows the content it receives | **Accepted** 2026-11-25 | hosted-observed (the ledger, F-01), CI #201 to CI #225 | M6.1 (taint in the binding) |
-| [ADR-0064](adr/0064-f02-authority-endings-serialised-with-decided-effects.md) (F-02) | an end of authority waits for every effect already decided | Proposed | `make test` on three platforms; `make authority-concurrency-mutations` 20/20 | M6.2 (the burn inside the gate) |
+| [ADR-0064](adr/0064-f02-authority-endings-serialised-with-decided-effects.md) (F-02) | an end of authority waits for every effect already decided | **Accepted** 2026-11-27 | `make test` on three platforms; `make authority-concurrency-mutations` 20/20 (local); M6.2's revocation ordering (CI #227) and M6.2.1's lease takeover and revocation crash windows (CI #228) | M6.2 (the burn inside the gate) |
 | [ADR-0076](adr/0076-isr2-01-audit-level-full-is-not-kept-on-a-net-http-hop.md) (ISR2-01) | `audit_level=full` is not kept on a `net.http` hop | **Accepted** 2026-11-25, OD-1 | CI #212, #213, #216, #225: `net-http-evidence`'s `obligation-unenforceable` case | M6.1 (obligations in the binding) |
 
 **What "Accepted" here means.** ADR-0063, ADR-0067 and ADR-0077's OD-1 were
@@ -98,7 +98,8 @@ M6 report may call host execution complete.
 
 None of the three blocks starting M6.1. Each is hosted-observed; none is
 accepted by this package. ADR-0062 and ADR-0076 were accepted on
-2026-11-25, at M6.1's closeout; ADR-0064 stays Proposed.
+2026-11-25, at M6.1's closeout; ADR-0064 on 2026-11-27, at M6.2's
+closeout.
 
 ## 5. Acceptance order
 
@@ -107,10 +108,13 @@ accepted by this package. ADR-0062 and ADR-0076 were accepted on
 2. ADR-0078 -- accepted 2026-11-24, before M6.3 as required (it decides
    what M6.3 may make approvable).
 3. ADR-0062 and ADR-0076 -- accepted 2026-11-25, at M6.1's closeout.
-4. ADR-0064 -- before M6.2's closeout.
+4. ADR-0064 -- accepted 2026-11-27, at M6.2's closeout, as written.
 5. M6.1's own binding record (a new ADR amending ADR-0021: the requester's
    principal and the schema member join the hash) -- ADR-0079, proposed
    2026-11-24 and accepted 2026-11-25 on CI #225's evidence.
+6. M6.2's registry record -- ADR-0080, proposed 2026-11-26 and accepted
+   2026-11-27, OD-1 to OD-6 as written, on CI #227's and CI #228's
+   evidence.
 
 ## 6. What ADR-0078's acceptance changed
 

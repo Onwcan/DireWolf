@@ -9,6 +9,10 @@ evidence pending.** No path outside the authority can decide an approval,
 and the shipped build attaches no approver: every `REQUIRE_APPROVAL` still
 denies in production, and nothing is approvable before M6.3.
 
+**Closeout (2026-11-27).** Committed, hosted-verified with M6.2.1's
+evidence, and its records accepted: §22. What follows is the report as
+written for M6.2.
+
 ## 1. Baseline
 
 | | |
@@ -486,12 +490,15 @@ which requires each of the registry's evidence cases once.
 
 Acceptance needs M6.2's commits on `main` with a green hosted run, then a
 status line, its digest (`dwcheck adr --record`), the index row, the README
-count and the plan's state, in one change.
+count and the plan's state, in one change. (2026-11-27: OD-1 to OD-6
+accepted as written -- §22.)
 
 **ADR-0064's acceptance package.**
 [ADR-0064](adr/0064-f02-authority-endings-serialised-with-decided-effects.md)
 (F-02) is Proposed; the M6 plan offers it for acceptance with M6.2's
-closeout. It is **not** accepted here.
+closeout. It is **not** accepted here. (2026-11-27: accepted as written,
+after this report -- its status line and
+[PRE_M6_REMEDIATION.md](PRE_M6_REMEDIATION.md).)
 
 - *Why the gate is sufficient.* Every effect the registry can authorise is a
   sandboxed start, already an effect section from before its decision
@@ -539,6 +546,13 @@ changes with it; and the documents that say Proposed
 (2026-11-27: item 1 is met for M6.2 at `b8414fd`, CI #227; M6.2.1's own
 commits and hosted run join it -- [M6_2_1_SECURITY_EVIDENCE.md](M6_2_1_SECURITY_EVIDENCE.md) §17.)
 
+(2026-11-27, at the formal closeout: item 1 is met -- M6.2 at `b8414fd`,
+CI #227, and M6.2.1 at `f81b898`, CI #228; item 2 is recorded --
+ADR-0064 accepted as written and ADR-0080's OD-1 to OD-6 accepted as
+written, each its own change. M6.3 starts only once those two changes
+are committed and their hosted CI is green; item 3 is then M6.3's first
+step.)
+
 1. M6.2's commits on `main`, and their hosted run green -- the route tests
    and `make approval-registry-evidence` among it.
 2. ADR-0080 decided, and ADR-0064 accepted, each its own change.
@@ -546,3 +560,63 @@ commits and hosted run join it -- [M6_2_1_SECURITY_EVIDENCE.md](M6_2_1_SECURITY_
    `decide_approval` and `revoke_approval`; the approver set attached from
    the operator's configuration; the request rendered from canonical data to
    the trusted client; TX065 replaced under that decision.
+
+## 22. Formal closeout (2026-11-27)
+
+M6.2 is complete. Its implementation was committed as `b8414fd`; M6.2.1
+hardened its evidence at `f81b898`
+([M6_2_1_SECURITY_EVIDENCE.md](M6_2_1_SECURITY_EVIDENCE.md)); and its two
+records were accepted on 2026-11-27, each its own change:
+[ADR-0064](adr/0064-f02-authority-endings-serialised-with-decided-effects.md)
+as written, and
+[ADR-0080](adr/0080-the-approval-registry-durable-requests-and-atomic-consumption.md)'s
+OD-1 to OD-6 as written -- §20's recommendations, unchanged. The sections
+above are kept as written for M6.2; this one says what holds now.
+
+| | |
+|---|---|
+| Implementation | `b8414fd`; CI #227 ([run 45859307449](https://github.com/Onwcan/DireWolf/actions/runs/45859307449)) 33 of 33; Push #43 ([run 45859308380](https://github.com/Onwcan/DireWolf/actions/runs/45859308380)) 4 of 4; `authority boundary`: the 27 registry cases, each once |
+| Evidence hardening | `f81b898`; CI #228 ([run 45985130343](https://github.com/Onwcan/DireWolf/actions/runs/45985130343)) 33 of 33, attempt 1; Push #44 ([run 45985130381](https://github.com/Onwcan/DireWolf/actions/runs/45985130381)) 4 of 4 |
+| Registry evidence (hosted) | `approval registry evidence: 34 cases, each once` -- M6.2's 27 and M6.2.1's seven; by category end-to-end 17, end-to-end-drift 6, fail-closed 5, in-process-hook 3, structural 2, component 1 |
+| Real-process crash evidence (hosted, Linux) | 34 of 34 `APPROVAL-CRASH` records, each with its window's handshake, `SIGKILL (9)`, a verified audit and its case's counts |
+| Release separation (hosted) | `approval registry separation: 7 release artifacts, no test-only seam` -- one check among the source pins, compilation conditions, architecture rules and negative tests |
+| `make test` (hosted) | Linux: cargo 1,790 passed, 0 failed, 128 ignored; pytest 2,228 passed, 20 skipped. Windows: cargo 1,039 passed, 0 failed, 8 ignored; pytest 2,166 passed, 82 skipped. macOS: cargo 1,079 passed, 0 failed, 8 ignored; pytest 2,182 passed, 66 skipped |
+| Architecture (hosted) | `make arch` and `make adr-history` ok; the violation fixtures caught by TX006, TX010, TX061, TX062, TX065, TX066, TX067 and TX068 |
+| M5 gate (hosted) | inventory COMPLETE, 14 bundles of run 45985130343 attempt 1 at `f81b898`; M5e acceptance verdict READY; evals 2 passed and 2 pending -- `approval-binding-drift` (requires M6, the milestone) and `model-egress-privacy` (M7), neither a pass |
+| Local only | the mutation reviews, 49 of 49 (M6.2) and 54 of 54 (M6.2.1, after a first campaign of 53 of 54 whose survivor was equivalent mutant E2 written again) |
+
+The three evidence lines this report left open now read:
+
+- **Crash recovery: PASS** within M6.2's supported contract -- request and
+  decision persistence, consumption and intent together, pre-commit
+  rollback, post-commit durability, the audit outbox, revocation, dispatch
+  and settlement, a migration interrupted, restart fencing, and an expiry
+  committed before a clock moved back (M6.2.1 §§5-7). It is process-crash
+  durability, not power-loss durability.
+- **Real-process crash evidence: PASS** -- local, and hosted on CI #228; on
+  Linux. §12's windows were in-process hooks and stay so; the real-process
+  cases are M6.2.1's.
+- **Scope and binding drift: PASS -- M6.2 supported scope.** The thirteen
+  members and the twenty-five guards by the matrices of M6.2.1 §§8-12: five
+  members end to end, the others by component tests, structural invariants
+  and fail-closed refusals. Positive broad-scope consumption is not enabled.
+
+**What stays as it was.** A1 is an authenticated approver principal, not a
+verified human presence; A2 needs a presence factor M6 does not build, and
+every `Environment::Host` class, a credential injection, `secret.use`,
+`fs.delete` and a standing grant's creation keep their A2 requirement
+(ADR-0078), with no override. Only the sandboxed launch under `exact_action`
+is spent; `executable_and_argv`'s allowlist producer and standing grants are
+future work. A killed process is not a power loss; the gate is in memory;
+the concurrency evidence is the authority's ordering against the test broker
+and SQLite contention; exactly-once consumption is not exactly-once
+execution -- an interrupted outcome is `UNKNOWN` or `COMPLETED`, never
+redispatched or refunded. The clock's floor is the highest instant a
+registry transaction committed. F-05's per-environment user namespace,
+casefold evidence (NOT EXERCISED), F-12's artifact capture (fail-closed
+until M8), per-tunnel mediation and concurrency within a run, the
+repository's owner-controlled governance, and M5e.2's tracking are
+unchanged.
+
+**Next: M6.3 -- the trusted approver endpoint and client.** Not started.
+Its entry gate is §21.

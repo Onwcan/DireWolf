@@ -1,4 +1,4 @@
-"""F-02's authority gate stays where ADR-0064 (Proposed) puts it.
+"""F-02's authority gate stays where ADR-0064 (accepted 2026-11-27) puts it.
 
 **Every broker hand-off in the state layer is accounted for.** An effect the
 authority decides reaches the broker only inside an effect section, so an end
@@ -14,7 +14,8 @@ judge is C3's (`_judge_mutant`): a build failure, a stage stopped at its limit
 or a selection that ran nothing is never a kill, and every file is restored
 byte-identically -- the harness below drives it with a stand-in for cargo.
 
-**The decision is the owner's.** ADR-0064 is Proposed, and stays so here.
+**The decision is recorded.** ADR-0064 was accepted on 2026-11-27, as
+written; this file pins that, the records it amends and its evidence.
 """
 
 from __future__ import annotations
@@ -132,16 +133,37 @@ def test_the_mutation_table_matches_the_source_once_per_mutant_and_names_every_g
     assert all(s.evidence is None for s in stages)
 
 
-def test_adr_0064_is_proposed_and_records_its_evidence() -> None:
+def test_adr_0064_is_accepted_and_records_its_evidence() -> None:
     text = ADR.read_text(encoding="utf-8")
     assert text.startswith("# ADR-0064:")
-    assert re.search(r"^\*\*Status:\*\* Proposed ", text, re.MULTILINE)
+    assert re.search(r"^\*\*Status:\*\* Accepted ", text, re.MULTILINE)
+    status = text.splitlines()[2]
+    # Accepted as written, on the hosted runs it names; what it amends is
+    # definite now, and recorded in those records' index rows.
+    assert "accepted 2026-11-27 as written" in status
+    assert "CI #201 (run 44818094052, `3998de2`)" in status
+    assert "CI #228 (run 45985130343, `f81b898`)" in status
+    assert "**Amends:** [ADR-0011](0011-session-concurrency.md) point 5" in status
+    assert "[ADR-0039](0039-durable-authority-state.md) (the handles onto one store" in status
+    assert "Would amend" not in status
+    assert "**Refines:** [ADR-0063]" in status
+    index = (REPO_ROOT / "docs" / "adr" / "README.md").read_text(encoding="utf-8")
+    assert "point 5 (an epoch fences the effects a request has decided" in index
+    assert "share an in-memory gate, by 0064" in index
+    assert "its concurrency residual refined by 0064" in index
     for evidence in (
         "concurrency_route_tests.rs",
         "state_concurrency.rs",
         "authority-concurrency-mutations",
+        "revocation-spend-race",
+        "lease-takeover-refused",
     ):
         assert evidence in text, evidence
+    # What stays true: the mutation review is local, the evidence is not
+    # real-process concurrency, the store schema it was built at is history.
+    assert "(20 of 20) is local evidence" in text
+    assert "not real-process concurrency" in text
+    assert "Store schema 14, the private broker protocol (12) and public DWKP." in text
 
 
 # --- the review's machinery, driven with a stand-in for cargo ----------------

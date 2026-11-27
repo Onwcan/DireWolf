@@ -1,4 +1,4 @@
-"""M6.2.1 (ADR-0080, Proposed): the approval registry's real-process crash
+"""M6.2.1 (ADR-0080, accepted 2026-11-27): the approval registry's real-process crash
 evidence -- its children, its supervisor, its judging and its separation
 from every release artifact -- agrees with the code.
 

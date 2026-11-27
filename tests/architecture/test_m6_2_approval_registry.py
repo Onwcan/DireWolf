@@ -26,10 +26,26 @@ def _read(path: Path) -> str:
     return path.read_bytes().decode("utf-8")
 
 
-def test_the_record_is_proposed_and_names_its_schema() -> None:
+def test_the_record_is_accepted_and_names_its_schema() -> None:
     adr = _read(ADR)
     assert adr.startswith("# ADR-0080:")
-    assert "**Status:** Proposed" in adr
+    assert "**Status:** Accepted" in adr
+    status = adr.splitlines()[2]
+    assert "accepted 2026-11-27, OD-1 to OD-6 as written" in status
+    assert "**Amends:** [ADR-0039](0039-durable-authority-state.md) (store schema version 15" in (
+        status
+    )
+    assert "Would amend" not in status
+    # Each decision accepted on its own, as written.
+    decisions = adr[adr.index("\n## Owner decisions\n") : adr.index("\n## Evidence\n")]
+    items = re.findall(r"^- \*\*(OD-\d)\*\* (.*?)(?=\n- \*\*|\n*\Z)", decisions, re.M | re.S)
+    assert [od for od, _ in items] == ["OD-1", "OD-2", "OD-3", "OD-4", "OD-5", "OD-6"]
+    for od, text in items:
+        assert text.rstrip().endswith("**Accepted 2026-11-27.**"), od
+    # Hosted and local evidence stay apart.
+    assert "CI #227 (run 45859307449)" in adr
+    assert "CI #228 (run 45985130343)" in adr
+    assert "are local evidence, not hosted" in adr
     schema = _read(STATE / "schema.rs")
     assert "pub(super) const CURRENT_VERSION: i64 = 15;" in schema
     for table in ("approval_clock", "approval_request", "approval", "approval_use"):

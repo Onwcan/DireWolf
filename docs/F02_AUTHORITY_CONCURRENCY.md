@@ -2,7 +2,7 @@
 
 Phase 3.1's implementation and evidence report. The decision is
 [ADR-0064](adr/0064-f02-authority-endings-serialised-with-decided-effects.md)
-(**Proposed**); this document holds the map it rests on, the per-operation
+(**Accepted** 2026-11-27, as written -- §13); this document holds the map it rests on, the per-operation
 contracts, the design left for a later decision, and the evidence. Baseline:
 `main` at `1c0224b`, CI #178 green (33/33).
 
@@ -261,7 +261,9 @@ The change needs no new workflow and no manual dispatch: every new test runs
 in the existing jobs (`make test` on Linux, Windows and macOS for the Python
 architecture tests; the authority's Rust suites on Linux). The mutation
 review is local, like the other `*-mutations` reviews outside C3. Hosted
-status: **pending** until a pushed run passes.
+status: **pending** until a pushed run passes. (Since observed: CI #201
+(run 44818094052, `3998de2`) and every run since --
+[PRE_M6_REMEDIATION.md](PRE_M6_REMEDIATION.md); §13.)
 
 ## 11. Results
 
@@ -295,3 +297,27 @@ Filled from the local runs of 2026-11-15:
 - The gate is in memory; a crash is handled by start-up reconciliation.
 - An ending may wait up to one broker exchange; the server never waits.
 - Per-tunnel mediation (§9) needs its own decision.
+
+## 13. Acceptance (2026-11-27)
+
+ADR-0064 was accepted on 2026-11-27, as written: one in-memory gate per
+store, effect sections over the decision-to-effect interval, ending sections
+that wait for every effect section already admitted and hold back new ones,
+the existing order of ownership revocation, lease takeover, lease release
+and run release, and M6.2's approval revocation as one more ending section
+(ADR-0080 OD-4). Chosen alternative D stands; no durable gate, concurrency,
+protocol or schema came with the acceptance.
+
+Its evidence: CI #201 (run 44818094052, `3998de2`) and every hosted run
+since -- the gate's unit tests and `tests/state_concurrency.rs` in `make
+test` on Linux, macOS and Windows, §7's route tests on Linux; M6.2's
+revocation against a decided spend and run and lease endings beside one, in
+`authority boundary` from CI #227 (run 45859307449, `b8414fd`); M6.2.1's
+lease taken over against an open approval and the revocation's crash windows
+with real process termination, and a fresh process's restart fencing in all
+34 crash cases, on CI #228 (run 45985130343, `f81b898`)
+([M6_2_1_SECURITY_EVIDENCE.md](M6_2_1_SECURITY_EVIDENCE.md)). §11's 20-of-20
+mutation review is local. §12's limits are unchanged: the concurrency
+evidence is the authority's ordering against a fake broker and SQLite
+contention between handles, and a process killed and recovered is crash
+evidence, not real-process concurrency.

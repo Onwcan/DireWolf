@@ -26,7 +26,7 @@ The phase labels M6.1 to M6.7 are this plan's, not roadmap milestones.
 | `net.http` | 193 cases, `obligation-unenforceable` among them |
 | Not exercised hosted | a casefold filesystem (`canonical filesystem` lists it NOT EXERCISED, with the cross-device link; the bind mount is NOT EXERCISED in that job by design and exercised in `sandbox egress`) |
 | Store schema | 14 (`state/schema.rs` `CURRENT_VERSION`) |
-| Records | ADR-0075 Accepted; ADR-0063, ADR-0067, ADR-0077 (OD-1) accepted 2026-11-24, recorded in `5520ab8`; ADR-0078 (OD-2) accepted 2026-11-24; ADR-0062, ADR-0076 and ADR-0079 accepted 2026-11-25; ADR-0064 Proposed |
+| Records | ADR-0075 Accepted; ADR-0063, ADR-0067, ADR-0077 (OD-1) accepted 2026-11-24, recorded in `5520ab8`; ADR-0078 (OD-2) accepted 2026-11-24; ADR-0062, ADR-0076 and ADR-0079 accepted 2026-11-25; ADR-0064 and ADR-0080 accepted 2026-11-27 |
 
 ## 2. The M6.0 gate
 
@@ -220,6 +220,18 @@ on its real route, the release build's separation from every test seam, and
 54 of 54 mutants killed. It adds no authority; ADR-0080 and ADR-0064 stay
 Proposed. Its hosted run is pending.
 
+**State (2026-11-27): hosted-verified and accepted -- M6.2 is complete.**
+M6.2.1 was committed as `f81b898`; CI #228 ([run 45985130343](https://github.com/Onwcan/DireWolf/actions/runs/45985130343))
+passed 33 of 33 and the Push workflow 4 of 4: 34 registry cases, each
+once, and 34 real-process crash cases in `authority boundary`, the
+release build's separation, `make test` on three platforms.
+[ADR-0080](adr/0080-the-approval-registry-durable-requests-and-atomic-consumption.md) is accepted, OD-1 to OD-6 as written, and
+[ADR-0064](adr/0064-f02-authority-endings-serialised-with-decided-effects.md) as written, on 2026-11-27, each its own change. Crash
+recovery, real-process crash evidence and scope and binding drift each
+pass within M6.2's supported scope; positive broad-scope consumption is
+not enabled, and nothing is approvable before M6.3. The closeout is
+[M6_2_IMPLEMENTATION.md](M6_2_IMPLEMENTATION.md) §22; the mutation reviews are local.
+
 ### M6.3 -- the approver endpoint's operations and the trusted client
 
 | | |
@@ -343,9 +355,18 @@ and M6.4 and M6.6 gain their A2 exits.
 
 ## 10. Next engineering task
 
-**M6.2's closeout.** M6.2 is committed (`b8414fd`, CI #227 green) and
-M6.2.1's evidence is built ([M6_2_1_SECURITY_EVIDENCE.md](M6_2_1_SECURITY_EVIDENCE.md)): M6.2.1's
-commits and their hosted run, then the owner's decisions on ADR-0080 and
-ADR-0064 ([M6_2_IMPLEMENTATION.md](M6_2_IMPLEMENTATION.md) §20; M6.2.1's §17). M6.3 -- the
-approver endpoint's operations and the trusted client -- starts only after
-that closeout; nothing in M6.2 is approvable before it.
+**M6.3 -- the trusted approver endpoint and client. Not started.** M6.2 is
+complete ([M6_2_IMPLEMENTATION.md](M6_2_IMPLEMENTATION.md) §22). M6.3 starts once the two
+acceptance changes of 2026-11-27 -- ADR-0064, and ADR-0080's OD-1 to OD-6
+-- are committed and their hosted CI is green. Its first step is its own
+record replacing TX065 under an explicitly justified contract; then the
+phase in §5: the approver endpoint's list, show and decide operations, the
+trusted `direwolf approve` client, the decision and revocation seams'
+first production callers, the approver set from the operator's
+configuration, the request rendered from canonical data with its request
+id and nonce verified, agent prose kept apart from it and labelled,
+terminal control, ANSI and bidi characters stripped, rendering bounded and
+truncation shown, three-identity adversarial evidence, A1 approval
+evidence, and every A2 class still refused. Nothing of it exists today:
+no approver frame, client command, production approver set or decision
+path.

@@ -1,7 +1,8 @@
 # Pre-M6 security remediation: state and hosted evidence
 
 **As of 2026-11-21; F-16's row and the sections after "What is open" brought
-to CI #213 (run 45250010413, `8b771a7`) on 2026-11-23.** Between M5 and M6, the findings of the security review
+to CI #213 (run 45250010413, `8b771a7`) on 2026-11-23; F-02's acceptance
+recorded 2026-11-27.** Between M5 and M6, the findings of the security review
 of 2026-11-11/12 (F-01 to F-19) were remediated one by one. This is not a
 milestone and does not change the build order ([ROADMAP.md](ROADMAP.md): M6
 is next). This page is the one place that says, for each finding, which
@@ -19,8 +20,9 @@ passes is listed as not exercised.
 ran in a hosted job and held. `NOT EXERCISED`: the hosted job ran the test,
 and the test could not exercise the property there. `n/a`: no hosted case
 applies. Every decision record named in the table is **Proposed** but
-F-18's two, ADR-0063 and ADR-0067, accepted 2026-11-24, and F-01's,
-ADR-0062, accepted 2026-11-25; none is accepted by this page, by a green
+F-18's two, ADR-0063 and ADR-0067, accepted 2026-11-24, F-01's,
+ADR-0062, accepted 2026-11-25, and F-02's, ADR-0064, accepted 2026-11-27;
+none is accepted by this page, by a green
 run or by a commit. Of the records below, ADR-0075 (accepted 2026-11-22,
 recorded 2026-11-23), ADR-0076 (OD-1, accepted 2026-11-25), ADR-0077
 (OD-1, accepted 2026-11-24) and ADR-0078 (ADR-0077's OD-2, accepted
@@ -31,7 +33,7 @@ recorded 2026-11-23), ADR-0076 (OD-1, accepted 2026-11-25), ADR-0077
 | Finding | What changed | Record | Hosted | Hosted evidence (CI #201 unless stated) | Not shown by a hosted run |
 |---|---|---|---|---|---|
 | F-01 | a run's taint follows the content it receives | [ADR-0062](adr/0062-taint-follows-delivered-content.md) | OBSERVED | `sandbox-egress`, real OCI: the `taint-*` cases, `taint-fresh-run-decided-by-the-exposed-cell` among them | -- |
-| F-02 | an end of authority waits for every effect already decided | [ADR-0064](adr/0064-f02-authority-endings-serialised-with-decided-effects.md) | OBSERVED | `make test` on Linux, macOS and Windows: the gate's unit tests and `tests/state_concurrency.rs` | the mutation review is local |
+| F-02 | an end of authority waits for every effect already decided | [ADR-0064](adr/0064-f02-authority-endings-serialised-with-decided-effects.md) | OBSERVED | `make test` on Linux, macOS and Windows: the gate's unit tests and `tests/state_concurrency.rs`; accepted 2026-11-27 on that and on M6.2's revocation ordering (CI #227) and M6.2.1's lease takeover and revocation crash windows (CI #228) | the mutation review is local |
 | F-03 | each daemon reports its effective posture, control by control | [ADR-0065](adr/0065-f03-effective-posture-is-reported-and-recorded.md) | OBSERVED | `authority-transport`: `each_incarnation_records_its_effective_posture_and_a_restart_records_the_change` against the real binary; the broker's posture tests in `make test` | the broker's posture in the authority's record (D6, protocol 13): deferred |
 | F-04 | the CONNECT proxy admits only the relay's kernel uid | [ADR-0068](adr/0068-f04-connect-proxy-peers-are-authenticated-by-kernel-uid.md) | OBSERVED | `sandbox-egress`, `make proxy-peer-evidence` with a real foreign uid (`DW_PEER_AS=nobody`, uid 65534): `foreign-uid-refused-through-a-loosened-directory`, `foreign-uid-served-only-when-it-is-the-relay` | -- (the hidden-pid case, `kernel-hidden-pid`, ran here too: the job lifts the runner's restriction on unprivileged user namespaces first; corrected 2026-11-22) |
 | F-05 | an environment's user namespace and security module measured; a module required on request | [ADR-0069](adr/0069-f05-user-namespace-and-lsm-assurance-are-measured-not-assumed.md), [ADR-0070](adr/0070-adr-0069-decisions-host-vantage-required-lsm-and-what-stays-deferred.md) | OBSERVED | CI #198 (run 44706359028): the `required-apparmor-*` cases; on CI #198 and again on CI #201, `sandbox-foundation` reports `userns=UNSUPPORTED:both:shared apparmor=ENFORCED:both:docker-default` | **partially completed**: a user namespace per environment is not built -- no supported runtime offers one per container ([F05_USERNS_LSM.md](F05_USERNS_LSM.md) §13) |
@@ -87,13 +89,14 @@ platforms.
   [M6_IMPLEMENTATION_PLAN.md](M6_IMPLEMENTATION_PLAN.md) and
   [M6_1_IMPLEMENTATION.md](M6_1_IMPLEMENTATION.md);
   [ADR-0080](adr/0080-the-approval-registry-durable-requests-and-atomic-consumption.md)
-  (M6.2's approval registry), Proposed, in the plan and
+  (M6.2's approval registry), accepted 2026-11-27, in the plan and
   [M6_2_IMPLEMENTATION.md](M6_2_IMPLEMENTATION.md). ADR-0064 (F-02), this
-  ledger's, is offered for acceptance in M6.2's report (§20); M6.2.1's
-  evidence for it -- the revocation's crash windows with real process
-  termination, a lease takeover against an open approval -- is
-  [M6_2_1_SECURITY_EVIDENCE.md](M6_2_1_SECURITY_EVIDENCE.md) §17 (2026-11-27,
-  local; still Proposed).
+  ledger's, was accepted on 2026-11-27, as written, on hosted evidence from
+  CI #201 to CI #228: M6.2's revocation and run- and lease-end races (CI
+  #227) and M6.2.1's lease takeover against an open approval and the
+  revocation's crash windows with real process termination (CI #228;
+  [M6_2_1_SECURITY_EVIDENCE.md](M6_2_1_SECURITY_EVIDENCE.md) §17); its
+  mutation review is local.
 
 ## Since the security review of 2026-11-22
 

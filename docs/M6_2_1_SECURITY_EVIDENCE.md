@@ -9,6 +9,10 @@ stay Proposed. The shipped build still attaches no approver set and has no
 decision path: nothing is approvable before M6.3. The milestone order stays
 M6 → M3.5 → M7 → M8 → M9; M6.3 has not started.
 
+**Hosted-verified and closed (2026-11-27):** committed as `f81b898`, CI
+#228 green, both records accepted -- §20. The sections before it say
+what held when this report was written.
+
 M6.2 left three evidence lines open: crash recovery PARTIAL, scope and
 binding drift PARTIAL, and real process termination NOT EXERCISED for the
 registry. This report records how each was closed, case by case, within
@@ -513,6 +517,7 @@ The first hosted run of this change carries:
 
 The evidence lines are canonical JSON (`to_canonical_string`), each printed
 after its test's assertions. **M6.2.1 HOSTED EVIDENCE: PENDING.**
+(2026-11-27: verified on CI #228 -- §20.)
 
 ## 16. Validation
 
@@ -561,7 +566,8 @@ the revocation's crash windows with real process termination (§5, B, C, D);
 the lease takeover against an open approval, end to end
 (`lease-takeover-refused`); and a restart's fencing of every run in a fresh
 process, 34 times. The recommendation is unchanged: accept as written once
-M6.2's and M6.2.1's commits have a green hosted run.
+M6.2's and M6.2.1's commits have a green hosted run. (2026-11-27: both
+accepted as written, each its own change -- §20.)
 
 ## 18. Not changed
 
@@ -587,4 +593,59 @@ ADR-0080: PROPOSED
 M6.2.1 HOSTED EVIDENCE: PENDING
 M6.2 FORMAL CLOSEOUT: PENDING
 READY FOR M6.3: NO
+```
+
+(As delivered for commit; §20 records the hosted verification and the
+closeout.)
+
+## 20. Hosted verification and closeout (2026-11-27)
+
+M6.2.1 was committed as `f81b898`. Its hosted run, CI #228 ([run
+45985130343](https://github.com/Onwcan/DireWolf/actions/runs/45985130343)),
+attempt 1, passed 33 of 33 jobs, and the Push workflow (CodeQL, [run
+45985130381](https://github.com/Onwcan/DireWolf/actions/runs/45985130381)) 4 of
+4, both at `f81b898`. Its job logs, read line by line against this report's
+tables:
+
+| | hosted result |
+|---|---|
+| `make approval-registry-evidence` (`authority boundary`) | 34 `APPROVAL-EVIDENCE` lines, 34 distinct cases, each required case once -- M6.2's 27 and the seven of §15; the categories printed as §15 says (end-to-end 17, end-to-end-drift 6, fail-closed 5, in-process-hook 3, structural 2, component 1) |
+| `make approval-registry-crash-evidence` (the same job) | 34 `APPROVAL-CRASH` records, 34 distinct cases; every one `SIGKILL (9)`, its handshake naming its case and window, `audit` verified, `category` real-process; every non-migration case fenced `refused`, every migration case `migrated`; every field equal to the case's expectation (§5) |
+| consumption | before the transaction (A), after the intent before the use (w), the use before commit (B): 0 uses and 0 intents; after commit (C) and every later audit and dispatch window (D-G, q, t, r, s): 1 use and its 1 intent |
+| migration | before the transaction, after the schema, before the commit: version 14; after the commit: 15; nothing between |
+| requests, decisions, revocation, expiry | as §5's table, each case's counts exactly |
+| `make approval-registry-separation` (`release build`) | each of the 7 release artifacts "none of 12 test-only traces"; `approval registry separation: 7 release artifacts, no test-only seam` |
+| `make test` | Linux: cargo 1,790 passed, 0 failed, 128 ignored; pytest 2,228 passed, 20 skipped (the stand-in supervisor tests among them). Windows: cargo 1,039 / 0 / 8; pytest 2,166 passed, 82 skipped. macOS: cargo 1,079 / 0 / 8; pytest 2,182 passed, 66 skipped |
+
+The local totals of §16 are WSL2's and stay local; the mutation campaigns
+(§14) are local, not hosted. The real-process supervisor runs on Linux: no
+native Windows or macOS SIGKILL crash evidence is claimed. The separation
+scan is one check among the source pins, compilation conditions,
+architecture rules and negative tests of §4, not by itself proof that no
+bypass can exist.
+
+**A precision note on §8** (2026-11-27). Its closing sentence says a run's
+workspace root "cannot change" while its approval is open. What holds is
+narrower: the binding's `workspace` member is the run's recorded root
+identity, which no operation changes; the directory at that path can still
+be replaced in the world, and a later pin or environment preparation then
+refuses it (`RootError::Replaced`; `HOST_WORKSPACE_IDENTITY` fails at the
+broker), while an environment already prepared keeps the directory it was
+given. The member's classification -- COMPONENT + STRUCTURAL INVARIANT --
+is unchanged, and the real-OCI workspace guarantees are `sandbox
+workspace`'s.
+
+**Closeout.** On this evidence ADR-0080 (OD-1 to OD-6) and ADR-0064 were
+accepted on 2026-11-27, as written, each its own change
+([M6_2_IMPLEMENTATION.md](M6_2_IMPLEMENTATION.md) §22).
+
+```
+M6.2.1 HOSTED EVIDENCE: VERIFIED (CI #228)
+CRASH RECOVERY: PASS
+REAL-PROCESS CRASH EVIDENCE: PASS (local; hosted on Linux, CI #228)
+SCOPE AND BINDING DRIFT: PASS -- M6.2 SUPPORTED SCOPE
+POSITIVE BROAD-SCOPE SUPPORT: NOT ENABLED
+ADR-0064: ACCEPTED 2026-11-27
+ADR-0080: ACCEPTED 2026-11-27 (OD-1 to OD-6)
+M6.3: NOT STARTED
 ```
