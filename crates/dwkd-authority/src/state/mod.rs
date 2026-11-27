@@ -676,7 +676,7 @@ impl Authority {
             conn,
             created,
             store_instance,
-        } = open_store(&paths, layout, clock.now_ms())?;
+        } = open_store(&paths, layout, clock.now_ms(), options.crash_hook.as_ref())?;
 
         let recovered = audit::recover(&conn, &paths.audit).map_err(|error| match error {
             audit::RecoveryError::Diverged(fault) => {
@@ -2579,7 +2579,12 @@ fn opened(paths: &StatePaths, error: &rusqlite::Error) -> StartError {
 
 /// Open `kernel.db`, create, migrate or verify it, and prove its critical
 /// state is present. Never recreates anything that was there.
-fn open_store(paths: &StatePaths, layout: Layout, now_ms: u64) -> Result<Opened, StartError> {
+fn open_store(
+    paths: &StatePaths,
+    layout: Layout,
+    now_ms: u64,
+    hook: Option<&CrashHook>,
+) -> Result<Opened, StartError> {
     let quarantine = |why: String| quarantined(paths, why);
     let open_error = |error: rusqlite::Error| opened(paths, &error);
 
@@ -2609,7 +2614,7 @@ fn open_store(paths: &StatePaths, layout: Layout, now_ms: u64) -> Result<Opened,
             })?;
             created = true;
         }
-        Ok(Shape::Older(version)) => migrate_store(&mut conn, version, now_ms)?,
+        Ok(Shape::Older(version)) => migrate_store(&mut conn, version, now_ms, hook)?,
         Ok(Shape::Current) => {}
         Err(ShapeError::Foreign) => return Err(StartError::ForeignDatabase),
         Err(ShapeError::Future(found)) => {
@@ -2735,12 +2740,19 @@ fn create_store(conn: &mut Connection, now_ms: u64) -> Result<(), StoreCreation>
 /// `audit.log` through the startup reconciliation that follows, so a
 /// structural change to the store is on the chain before anything is served
 /// from it (ADR-0042 §8).
-fn migrate_store(conn: &mut Connection, from: i64, now_ms: u64) -> Result<(), StartError> {
+fn migrate_store(
+    conn: &mut Connection,
+    from: i64,
+    now_ms: u64,
+    hook: Option<&CrashHook>,
+) -> Result<(), StartError> {
     let failed = |error: rusqlite::Error| StartError::Migration(error.to_string());
+    stop_migration(hook, CrashPoint::MigrationBeforeTransaction)?;
     let tx = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(failed)?;
     let to = schema::migrate(&tx, from, schema::MIGRATIONS).map_err(failed)?;
+    stop_migration(hook, CrashPoint::MigrationAfterSchema)?;
     audit::append(
         &tx,
         now_ms,
@@ -2753,5 +2765,19 @@ fn migrate_store(conn: &mut Connection, from: i64, now_ms: u64) -> Result<(), St
         audit::AuditAppendError::Sqlite(error) => failed(error),
         audit::AuditAppendError::Authority(error) => StartError::Migration(error.to_string()),
     })?;
-    tx.commit().map_err(failed)
+    stop_migration(hook, CrashPoint::MigrationBeforeCommit)?;
+    tx.commit().map_err(failed)?;
+    stop_migration(hook, CrashPoint::MigrationAfterCommit)
+}
+
+/// A start's crash hook at one of the migration's points (M6.2.1). Only a
+/// test starts with a hook; a stop fails the start closed, as every other
+/// point fails its operation (`crash.rs`).
+fn stop_migration(hook: Option<&CrashHook>, point: CrashPoint) -> Result<(), StartError> {
+    match hook.map(|hook| hook(point)) {
+        Some(HookAction::Stop) => Err(StartError::Migration(format!(
+            "stopped at crash point {point}"
+        ))),
+        Some(HookAction::Continue) | None => Ok(()),
+    }
 }

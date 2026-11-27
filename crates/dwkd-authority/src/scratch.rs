@@ -20,7 +20,10 @@ static UNIQUE: AtomicU64 = AtomicU64::new(0);
 /// refuses a socket below a directory another user may write — which a
 /// directory left to a umask of `0002` is. A test that needs more widens it
 /// itself.
-pub(crate) struct Scratch(PathBuf);
+pub(crate) struct Scratch {
+    path: PathBuf,
+    remove: bool,
+}
 
 impl Scratch {
     pub(crate) fn new(tag: &str) -> Self {
@@ -33,17 +36,30 @@ impl Scratch {
         if let Err(error) = private_dir(&path) {
             unreachable!("a scratch directory: {error}");
         }
-        Self(path)
+        Self { path, remove: true }
+    }
+
+    /// A directory someone else made and keeps (M6.2.1): the real-process
+    /// crash supervisor's, which a crash child and its recovery child both
+    /// work in, and which the supervisor -- not a drop -- removes.
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) const fn kept(path: PathBuf) -> Self {
+        Self {
+            path,
+            remove: false,
+        }
     }
 
     pub(crate) fn path(&self) -> &Path {
-        &self.0
+        &self.path
     }
 }
 
 impl Drop for Scratch {
     fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
+        if self.remove {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
     }
 }
 

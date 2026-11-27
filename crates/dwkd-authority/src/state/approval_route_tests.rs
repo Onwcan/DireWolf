@@ -610,6 +610,16 @@ fn m6_2_a_restart_leaves_no_approval_spendable() {
 /// a commit, the audit outbox's steps -- is crossed by every transaction;
 /// counting from a registry point makes each window that transaction's.
 fn stop_after(marker: Option<CrashPoint>, point: CrashPoint) -> (CrashHook, Arc<AtomicBool>) {
+    hook_after(marker, point, |_| HookAction::Stop)
+}
+
+/// [`stop_after`], doing `act` at the point instead of stopping: a real crash
+/// child stands still there until the supervisor ends it (M6.2.1).
+fn hook_after(
+    marker: Option<CrashPoint>,
+    point: CrashPoint,
+    act: impl Fn(CrashPoint) -> HookAction + Send + Sync + 'static,
+) -> (CrashHook, Arc<AtomicBool>) {
     let armed = Arc::new(AtomicBool::new(false));
     let seen = Arc::new(AtomicBool::new(marker.is_none()));
     let (on, past) = (Arc::clone(&armed), Arc::clone(&seen));
@@ -621,7 +631,7 @@ fn stop_after(marker: Option<CrashPoint>, point: CrashPoint) -> (CrashHook, Arc<
             past.store(true, Ordering::SeqCst);
         }
         if past.load(Ordering::SeqCst) && at == point {
-            HookAction::Stop
+            act(at)
         } else {
             HookAction::Continue
         }
@@ -1318,4 +1328,1052 @@ fn m6_2_a_request_whose_run_has_ended_is_never_decided() {
     drop(db);
     assert_eq!(fx.count("SELECT count(*) FROM approval"), 0);
     approval_evidence("ended-run-never-decided", "refused+expired");
+}
+
+// ---------------------------------------------------------------------------
+// M6.2.1: real-process crash children. Started only by the external
+// supervisor (`make approval-registry-crash-evidence`, `scripts/dw.py`): it
+// runs this executable, selects one child by its exact name, waits for the
+// window's handshake, ends the child with SIGKILL, and starts the recovery
+// child on the files the dead process left. Nothing here starts, signals or
+// waits for a process (TX010), and nothing reads the environment
+// (`crate::crash_child` does, outside `state/`, TX006).
+// ---------------------------------------------------------------------------
+
+/// What a crash case does before its window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Scenario {
+    /// An approved launch spends its use.
+    Spend,
+    /// A launch denied for want of an approval records its request.
+    Request,
+    /// An approver grants a pending request.
+    Grant,
+    /// An approver denies one.
+    Deny,
+    /// A decision on a request whose run has ended.
+    EndedRunDecision,
+    /// An approval is revoked.
+    Revoke,
+    /// A launch finds its approval past its instant and ends it.
+    Expiry,
+    /// A start migrates a schema-14 store.
+    Migration,
+}
+
+/// One real-process crash case.
+#[derive(Debug, Clone, Copy)]
+struct CrashCase {
+    name: &'static str,
+    scenario: Scenario,
+    /// The point the window is counted from: the first `point` at or after it.
+    marker: Option<CrashPoint>,
+    point: CrashPoint,
+    /// Whether what the case was doing is durable at the window.
+    durable: bool,
+}
+
+const fn crash_case(
+    name: &'static str,
+    scenario: Scenario,
+    marker: Option<CrashPoint>,
+    point: CrashPoint,
+    durable: bool,
+) -> CrashCase {
+    CrashCase {
+        name,
+        scenario,
+        marker,
+        point,
+        durable,
+    }
+}
+
+const AT_USE: Option<CrashPoint> = Some(CrashPoint::ApprovalBeforeUse);
+const AT_REQUEST: Option<CrashPoint> = Some(CrashPoint::ApprovalBeforeRequest);
+
+/// Every real-process crash case. `scripts/dw.py`'s `APPROVAL_CRASH_CASES`
+/// names the same, in the same order, with the same windows.
+const CRASH_CASES: [CrashCase; 34] = [
+    crash_case(
+        "spend-before-transaction",
+        Scenario::Spend,
+        None,
+        CrashPoint::BeforeTransaction,
+        false,
+    ),
+    crash_case(
+        "spend-after-intent-before-use",
+        Scenario::Spend,
+        None,
+        CrashPoint::ApprovalBeforeUse,
+        false,
+    ),
+    crash_case(
+        "spend-use-before-commit",
+        Scenario::Spend,
+        AT_USE,
+        CrashPoint::BeforeCommit,
+        false,
+    ),
+    crash_case(
+        "spend-after-commit",
+        Scenario::Spend,
+        AT_USE,
+        CrashPoint::AfterCommitBeforeAudit,
+        true,
+    ),
+    crash_case(
+        "spend-mid-audit-record",
+        Scenario::Spend,
+        AT_USE,
+        CrashPoint::MidAuditRecord,
+        true,
+    ),
+    crash_case(
+        "spend-audit-written-not-synced",
+        Scenario::Spend,
+        AT_USE,
+        CrashPoint::AfterAuditWriteBeforeSync,
+        true,
+    ),
+    crash_case(
+        "spend-audit-synced-not-marked",
+        Scenario::Spend,
+        AT_USE,
+        CrashPoint::AfterAuditSyncBeforeMark,
+        true,
+    ),
+    crash_case(
+        "spend-audit-marked",
+        Scenario::Spend,
+        AT_USE,
+        CrashPoint::AfterAuditMark,
+        true,
+    ),
+    crash_case(
+        "spend-before-dispatch",
+        Scenario::Spend,
+        AT_USE,
+        CrashPoint::WorkloadAfterIntent,
+        true,
+    ),
+    crash_case(
+        "spend-after-start",
+        Scenario::Spend,
+        AT_USE,
+        CrashPoint::WorkloadAfterStart,
+        true,
+    ),
+    crash_case(
+        "spend-after-collect",
+        Scenario::Spend,
+        AT_USE,
+        CrashPoint::WorkloadAfterBroker,
+        true,
+    ),
+    crash_case(
+        "spend-after-outcome",
+        Scenario::Spend,
+        AT_USE,
+        CrashPoint::WorkloadAfterOutcome,
+        true,
+    ),
+    crash_case(
+        "request-before-insert",
+        Scenario::Request,
+        None,
+        CrashPoint::ApprovalBeforeRequest,
+        false,
+    ),
+    crash_case(
+        "request-before-commit",
+        Scenario::Request,
+        AT_REQUEST,
+        CrashPoint::BeforeCommit,
+        false,
+    ),
+    crash_case(
+        "request-after-commit",
+        Scenario::Request,
+        AT_REQUEST,
+        CrashPoint::AfterCommitBeforeAudit,
+        true,
+    ),
+    crash_case(
+        "request-mid-audit-record",
+        Scenario::Request,
+        AT_REQUEST,
+        CrashPoint::MidAuditRecord,
+        true,
+    ),
+    crash_case(
+        "request-audit-synced-not-marked",
+        Scenario::Request,
+        AT_REQUEST,
+        CrashPoint::AfterAuditSyncBeforeMark,
+        true,
+    ),
+    crash_case(
+        "grant-before-transaction",
+        Scenario::Grant,
+        None,
+        CrashPoint::BeforeTransaction,
+        false,
+    ),
+    crash_case(
+        "grant-before-commit",
+        Scenario::Grant,
+        None,
+        CrashPoint::BeforeCommit,
+        false,
+    ),
+    crash_case(
+        "grant-after-commit",
+        Scenario::Grant,
+        None,
+        CrashPoint::AfterCommitBeforeAudit,
+        true,
+    ),
+    crash_case(
+        "grant-mid-audit-record",
+        Scenario::Grant,
+        None,
+        CrashPoint::MidAuditRecord,
+        true,
+    ),
+    crash_case(
+        "deny-before-commit",
+        Scenario::Deny,
+        None,
+        CrashPoint::BeforeCommit,
+        false,
+    ),
+    crash_case(
+        "deny-after-commit",
+        Scenario::Deny,
+        None,
+        CrashPoint::AfterCommitBeforeAudit,
+        true,
+    ),
+    crash_case(
+        "ended-run-decision-before-commit",
+        Scenario::EndedRunDecision,
+        None,
+        CrashPoint::BeforeCommit,
+        false,
+    ),
+    crash_case(
+        "ended-run-decision-after-commit",
+        Scenario::EndedRunDecision,
+        None,
+        CrashPoint::AfterCommitBeforeAudit,
+        true,
+    ),
+    crash_case(
+        "revoke-before-commit",
+        Scenario::Revoke,
+        None,
+        CrashPoint::BeforeCommit,
+        false,
+    ),
+    crash_case(
+        "revoke-after-commit",
+        Scenario::Revoke,
+        None,
+        CrashPoint::AfterCommitBeforeAudit,
+        true,
+    ),
+    crash_case(
+        "revoke-mid-audit-record",
+        Scenario::Revoke,
+        None,
+        CrashPoint::MidAuditRecord,
+        true,
+    ),
+    crash_case(
+        "expiry-before-commit",
+        Scenario::Expiry,
+        AT_REQUEST,
+        CrashPoint::BeforeCommit,
+        false,
+    ),
+    crash_case(
+        "expiry-after-commit",
+        Scenario::Expiry,
+        AT_REQUEST,
+        CrashPoint::AfterCommitBeforeAudit,
+        true,
+    ),
+    crash_case(
+        "migration-before-transaction",
+        Scenario::Migration,
+        None,
+        CrashPoint::MigrationBeforeTransaction,
+        false,
+    ),
+    crash_case(
+        "migration-after-schema",
+        Scenario::Migration,
+        None,
+        CrashPoint::MigrationAfterSchema,
+        false,
+    ),
+    crash_case(
+        "migration-before-commit",
+        Scenario::Migration,
+        None,
+        CrashPoint::MigrationBeforeCommit,
+        false,
+    ),
+    crash_case(
+        "migration-after-commit",
+        Scenario::Migration,
+        None,
+        CrashPoint::MigrationAfterCommit,
+        true,
+    ),
+];
+
+fn crash_case_named(name: &str) -> CrashCase {
+    CRASH_CASES
+        .into_iter()
+        .find(|case| case.name == name)
+        .unwrap_or_else(|| panic!("no crash case {name}"))
+}
+
+/// A case's rule: an expiry needs a short life and uses to spare.
+fn case_policy(case: CrashCase) -> PolicySet {
+    if case.scenario == Scenario::Expiry {
+        approval_policy(5, "1m")
+    } else {
+        approval_policy(1, "10m")
+    }
+}
+
+/// What the crash must leave in the store: requests, approvals, uses and
+/// workload intents.
+fn crash_left(case: CrashCase) -> (i64, i64, i64, i64) {
+    let d = i64::from(case.durable);
+    match case.scenario {
+        Scenario::Spend => (1, 1, d, d),
+        Scenario::Request => (d, 0, 0, 0),
+        Scenario::Grant => (1, d, 0, 0),
+        Scenario::Deny | Scenario::EndedRunDecision => (1, 0, 0, 0),
+        Scenario::Revoke => (1, 1, 0, 0),
+        Scenario::Expiry => (1 + d, 1, 0, 0),
+        Scenario::Migration => (0, 0, 0, 0),
+    }
+}
+
+/// The store as the dead process left it, read raw before any new
+/// incarnation writes.
+#[derive(Debug, Clone, Copy)]
+struct Left {
+    version: i64,
+    requests: i64,
+    approvals: i64,
+    uses: i64,
+    intents: i64,
+    runs: i64,
+    registry_objects: i64,
+}
+
+fn left_in(state: &std::path::Path) -> Left {
+    let db = rusqlite::Connection::open(state.join("kernel.db")).unwrap();
+    let integrity: String = db
+        .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(integrity, "ok", "the store's integrity");
+    let mut dangling = db.prepare("PRAGMA foreign_key_check").unwrap();
+    assert!(
+        dangling.query([]).unwrap().next().unwrap().is_none(),
+        "a dangling reference"
+    );
+    drop(dangling);
+    let count = |sql: &str| -> i64 { db.query_row(sql, [], |row| row.get(0)).unwrap() };
+    let version = count("PRAGMA user_version");
+    let registry_objects = count("SELECT count(*) FROM sqlite_schema WHERE name LIKE 'approval%'");
+    let of = |sql: &str| if version >= 15 { count(sql) } else { 0 };
+    Left {
+        version,
+        requests: of("SELECT count(*) FROM approval_request"),
+        approvals: of("SELECT count(*) FROM approval"),
+        uses: of("SELECT count(*) FROM approval_use"),
+        intents: count("SELECT count(*) FROM workload"),
+        runs: count("SELECT count(*) FROM run"),
+        registry_objects,
+    }
+}
+
+/// A crash case's authority, in the supervisor's directory.
+fn crash_fixture(scratch: Scratch, case: CrashCase, hook: Option<CrashHook>) -> Fixture {
+    let mut fx = Fixture::with_declared_in(scratch, case_policy(case), hook, DECLARED);
+    fx.attach(IMAGE);
+    assert!(fx.authority().attach_approvers(&[APPROVER]));
+    fx
+}
+
+/// The real-process crash child: builds its case in the supervisor's
+/// directory, arms the window, and does what the case does -- standing still
+/// at the window, where the supervisor ends it. Returning means the window
+/// was never reached, which fails.
+#[test]
+#[ignore = "a real-process crash child: started only by `make approval-registry-crash-evidence`"]
+fn m6_2_1_crash_child() {
+    let Some(assignment) = crate::crash_child::crash() else {
+        return;
+    };
+    let case = crash_case_named(&assignment.case);
+    let reach = assignment.clone();
+    let (hook, armed) = hook_after(case.marker, case.point, move |at| reach.reached(at));
+    let scratch = Scratch::kept(assignment.dir().to_owned());
+    if case.scenario == Scenario::Migration {
+        // A schema-14 store with a run on it; then a start that migrates it.
+        let mut fx = Fixture::with_declared_in(scratch, case_policy(case), None, DECLARED);
+        fx.attach(IMAGE);
+        ready_run(&mut fx, "r1");
+        drop(fx.authority.take());
+        fx.db()
+            .execute_batch(
+                "DROP TABLE approval_use; DROP TABLE approval; DROP TABLE approval_request; \
+                 DROP TABLE approval_clock; PRAGMA user_version = 14;",
+            )
+            .unwrap();
+        armed.store(true, Ordering::SeqCst);
+        fx.start(Some(hook));
+        panic!("{}: the window was never reached", case.name);
+    }
+    let mut fx = crash_fixture(scratch, case, Some(hook));
+    let run = ready_run(&mut fx, "r1");
+    let caller = fx.caller.unwrap();
+    match case.scenario {
+        Scenario::Spend => {
+            fx.requested_and_granted(&run, "k0");
+            armed.store(true, Ordering::SeqCst);
+            let message = fx.message(
+                &run,
+                5,
+                "direwolf.tool.invoke",
+                Some("k1"),
+                &format!(r#"{{"process_exec":{}}}"#, launch()),
+            );
+            if let Ok(Dispatched::Parked(mut parked)) =
+                fx.authority().dispatch_parkable(&caller, &message)
+            {
+                for _ in 0..100 {
+                    let _ = fx.authority().resume(&mut parked);
+                }
+            }
+        }
+        Scenario::Request => {
+            armed.store(true, Ordering::SeqCst);
+            let _ = fx.exec(&run, "k1", &launch());
+        }
+        Scenario::Grant | Scenario::Deny | Scenario::EndedRunDecision => {
+            denied(&fx.answered(&run, "k1", &launch()));
+            let request = fx.pending().remove(0);
+            if case.scenario == Scenario::EndedRunDecision {
+                let (session, epoch) = (fx.session.clone(), fx.epoch);
+                let released = fx
+                    .authority()
+                    .release_run(&caller, &session, &run, epoch)
+                    .unwrap();
+                assert!(matches!(released, Reply::Done(())), "{released:?}");
+            }
+            let decision = if case.scenario == Scenario::Deny {
+                ApproverDecision::Deny {
+                    approver: AuthenticatedSubject::unix_uid(APPROVER),
+                }
+            } else {
+                grant(APPROVER)
+            };
+            armed.store(true, Ordering::SeqCst);
+            let _ = fx.authority().decide_approval(&request, decision);
+        }
+        Scenario::Revoke => {
+            let approval = fx.requested_and_granted(&run, "k0");
+            armed.store(true, Ordering::SeqCst);
+            let _ = fx.authority().revoke_approval(&approval);
+        }
+        Scenario::Expiry => {
+            fx.requested_and_granted(&run, "k0");
+            fx.tick(60_000);
+            armed.store(true, Ordering::SeqCst);
+            let _ = fx.exec(&run, "k1", &launch());
+        }
+        Scenario::Migration => unreachable!("handled above"),
+    }
+    panic!("{}: the window was never reached", case.name);
+}
+
+/// The recovery child: the files a killed crash child left, read raw first,
+/// then a new incarnation on them; every invariant of the case asserted,
+/// and its evidence line printed only after.
+#[test]
+#[ignore = "a real-process recovery child: started only by `make approval-registry-crash-evidence`"]
+fn m6_2_1_recovery_child() {
+    let Some(assignment) = crate::crash_child::recovery() else {
+        return;
+    };
+    let case = crash_case_named(&assignment.case);
+    let state = assignment.dir().join("state");
+    // 1. What the dead process left, before anything writes.
+    let left = left_in(&state);
+    if case.scenario == Scenario::Migration {
+        // Never a partial schema: the whole of 14, or the whole of 15.
+        if case.durable {
+            assert_eq!(left.version, 15, "{}", case.name);
+            assert!(left.registry_objects > 0, "{}", case.name);
+        } else {
+            assert_eq!(left.version, 14, "{}", case.name);
+            assert_eq!(
+                left.registry_objects, 0,
+                "{}: no partial registry",
+                case.name
+            );
+        }
+        assert_eq!(left.runs, 1, "{}: no record lost", case.name);
+    } else {
+        assert_eq!(left.version, 15, "{}", case.name);
+    }
+    assert_eq!(
+        (left.requests, left.approvals, left.uses, left.intents),
+        crash_left(case),
+        "{}: what the crash left",
+        case.name
+    );
+    // 2. A new incarnation on those files: its audit recovered, every lease
+    // invalidated, every run reaped. Its clock is earlier than the dead
+    // process's last instant: the clock moved back.
+    let mut fx = Fixture::reopen(
+        Scratch::kept(assignment.dir().to_owned()),
+        case_policy(case),
+        START_MS + 2_000,
+    );
+    fx.attach(IMAGE);
+    assert!(fx.authority().attach_approvers(&[APPROVER]));
+    fx.lease();
+    crate::state::verify_audit_log(&state.join("audit.log")).unwrap();
+    let compared = crate::state::verify_audit_against_store(&state).unwrap();
+    assert_eq!(compared.pending(), 0, "{}: nothing left pending", case.name);
+    assert_eq!(compared.log_records, compared.store_head, "{}", case.name);
+    assert_eq!(compared.store_flushed, compared.store_head, "{}", case.name);
+    // 3. The case's own invariants.
+    let fenced = recovered(&mut fx, case);
+    crash_evidence(case, &left, fenced);
+}
+
+fn approval_events_of(fx: &Fixture, event: &str) -> i64 {
+    i64::try_from(fx.approval_events().iter().filter(|e| *e == event).count()).unwrap()
+}
+
+/// What a recovery must find of its case, after the new incarnation started.
+fn recovered(fx: &mut Fixture, case: CrashCase) -> &'static str {
+    let (d, name) = (i64::from(case.durable), case.name);
+    if case.scenario == Scenario::Migration {
+        // The start verified the exact schema 15; the migration is recorded
+        // once, whichever process committed it.
+        assert_eq!(fx.count("SELECT count(*) FROM run"), 1, "{name}");
+        let migrated = fx
+            .events()
+            .iter()
+            .filter(|e| *e == "store.migrated")
+            .count();
+        assert_eq!(migrated, 1, "{name}: the migration recorded once");
+        assert_eq!(fx.count("SELECT count(*) FROM approval"), 0, "{name}");
+        return "migrated";
+    }
+    let run = RunId::parse(&fx.one("SELECT run_id FROM run ORDER BY run_id LIMIT 1")).unwrap();
+    let not_pending = |durable: bool| {
+        if durable {
+            DecisionRefused::NotPending
+        } else {
+            DecisionRefused::RunEnded
+        }
+    };
+    match case.scenario {
+        Scenario::Spend => {
+            let approval = fx.one("SELECT approval_id FROM approval");
+            let state = if case.durable { "EXHAUSTED" } else { "OPEN" };
+            assert_eq!(fx.approval(&approval), (d, state.to_owned()), "{name}");
+            assert_eq!(
+                approval_events_of(fx, "approval.used"),
+                d,
+                "{name}: audited once"
+            );
+            if case.durable {
+                let settled = if case.point == CrashPoint::WorkloadAfterOutcome {
+                    "COMPLETED"
+                } else {
+                    "UNKNOWN"
+                };
+                assert_eq!(
+                    fx.strings(
+                        "SELECT w.state FROM workload w JOIN approval_use u \
+                         ON u.invocation_id = w.invocation_id AND u.run_id = w.run_id"
+                    ),
+                    [settled],
+                    "{name}: the use names its intent"
+                );
+                let records = crate::state::read_audit_log(&fx.state().join("audit.log")).unwrap();
+                let used: Vec<String> = records
+                    .iter()
+                    .filter(|r| r.event() == "approval.used")
+                    .filter_map(|r| r.text("invocation_id").map(str::to_owned))
+                    .collect();
+                let intents = records
+                    .iter()
+                    .filter(|r| r.event() == "workload.intent_recorded")
+                    .filter(|r| r.text("invocation_id") == used.first().map(String::as_str))
+                    .count();
+                assert_eq!(intents, 1, "{name}: the use's record names its intent's");
+            }
+            // The old run is fenced; the key on a run of the new tenure starts
+            // nothing; nothing reaches this process's broker; nothing more is
+            // spent.
+            assert_eq!(
+                refused(&fx.answered(&run, "k1", &launch())),
+                R::UnknownRun,
+                "{name}"
+            );
+            let again = ready_run(fx, "r2");
+            let replay = fx.answered(&again, "k1", &launch());
+            assert!(
+                !matches!(replay, DwkpBody::ToolResultV5(_)),
+                "{name}: {replay:?}"
+            );
+            assert!(
+                fx.fake.asked_for("workload.start").is_empty(),
+                "{name}: redispatched"
+            );
+            assert_eq!(fx.count("SELECT count(*) FROM approval_use"), d, "{name}");
+        }
+        Scenario::Request => {
+            assert_eq!(approval_events_of(fx, "approval.requested"), d, "{name}");
+            assert_eq!(
+                refused(&fx.answered(&run, "k2", &launch())),
+                R::UnknownRun,
+                "{name}"
+            );
+            assert_eq!(
+                fx.count("SELECT count(*) FROM approval"),
+                0,
+                "{name}: no implicit grant"
+            );
+        }
+        Scenario::Grant | Scenario::Deny | Scenario::EndedRunDecision => {
+            let request = fx.one("SELECT request_id FROM approval_request");
+            let state = match (case.scenario, case.durable) {
+                (_, false) => "PENDING",
+                (Scenario::Grant, true) => "GRANTED",
+                (Scenario::Deny, true) => "DENIED",
+                (_, true) => "EXPIRED",
+            };
+            assert_eq!(
+                fx.one("SELECT state FROM approval_request"),
+                state,
+                "{name}"
+            );
+            assert_eq!(
+                fx.count(
+                    "SELECT count(*) FROM approval_request r WHERE r.state = 'GRANTED' AND NOT \
+                     EXISTS (SELECT 1 FROM approval a WHERE a.request_id = r.request_id)"
+                ),
+                0,
+                "{name}: no grant without its approval"
+            );
+            let event = match case.scenario {
+                Scenario::Grant => "approval.granted",
+                Scenario::Deny => "approval.denied",
+                _ => "approval.expired",
+            };
+            assert_eq!(approval_events_of(fx, event), d, "{name}: audited once");
+            // Decided again after the restart: once only, and never for the
+            // run the restart ended.
+            let again = fx
+                .authority()
+                .decide_approval(&request, grant(APPROVER))
+                .unwrap();
+            assert_eq!(again, Err(not_pending(case.durable)), "{name}");
+            let approvals = i64::from(case.durable && case.scenario == Scenario::Grant);
+            assert_eq!(
+                fx.count("SELECT count(*) FROM approval"),
+                approvals,
+                "{name}"
+            );
+        }
+        Scenario::Revoke => {
+            let approval = fx.one("SELECT approval_id FROM approval");
+            let state = if case.durable { "REVOKED" } else { "OPEN" };
+            assert_eq!(fx.approval(&approval), (0, state.to_owned()), "{name}");
+            assert_eq!(approval_events_of(fx, "approval.revoked"), d, "{name}");
+            assert_eq!(
+                refused(&fx.answered(&run, "k1", &launch())),
+                R::UnknownRun,
+                "{name}"
+            );
+            assert_eq!(fx.count("SELECT count(*) FROM approval_use"), 0, "{name}");
+        }
+        Scenario::Expiry => {
+            let approval = fx.one("SELECT approval_id FROM approval");
+            let state = if case.durable { "EXPIRED" } else { "OPEN" };
+            assert_eq!(fx.approval(&approval), (0, state.to_owned()), "{name}");
+            let high = fx.count("SELECT high_water_ms FROM approval_clock");
+            let instant = fx.count("SELECT not_after_ms FROM approval");
+            assert_eq!(high >= instant, case.durable, "{name}: the clock's floor");
+            // This process's clock is before the instant: an expiry once
+            // committed stays, and an OPEN row of a fenced run spends nothing.
+            assert_eq!(
+                refused(&fx.answered(&run, "k2", &launch())),
+                R::UnknownRun,
+                "{name}"
+            );
+            assert_eq!(fx.approval(&approval).1, state, "{name}: not revived");
+            assert_eq!(fx.count("SELECT count(*) FROM approval_use"), 0, "{name}");
+        }
+        Scenario::Migration => unreachable!("handled above"),
+    }
+    "refused"
+}
+
+/// The recovery's evidence line, canonical JSON, printed only after every
+/// assertion above held. The supervisor adds what it observed of the crash
+/// child -- the handshake and the signal -- and accepts neither alone.
+fn crash_evidence(case: CrashCase, left: &Left, fenced: &str) {
+    use dwk_proto::json::{Number, Object, Value, to_canonical_string};
+    let point = case.point.letter().to_string();
+    let mut fields = Object::new();
+    for (key, value) in [
+        ("suite", "authority-approval-registry-crash"),
+        ("case", case.name),
+        ("point", point.as_str()),
+        ("audit", "verified"),
+        ("fenced", fenced),
+    ] {
+        fields
+            .insert(key.to_owned(), Value::String(value.to_owned()))
+            .unwrap();
+    }
+    fields
+        .insert("durable".to_owned(), Value::Bool(case.durable))
+        .unwrap();
+    for (key, value) in [
+        ("version", left.version),
+        ("requests", left.requests),
+        ("approvals", left.approvals),
+        ("uses", left.uses),
+        ("intents", left.intents),
+        ("count", 1),
+    ] {
+        fields
+            .insert(key.to_owned(), Value::Number(Number::Int(value)))
+            .unwrap();
+    }
+    println!(
+        "APPROVAL-CRASH-EVIDENCE {}",
+        to_canonical_string(&Value::Object(fields))
+    );
+}
+
+// ---------------------------------------------------------------------------
+// M6.2.1: drift, scope and A2, end to end on the sandboxed route.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn m6_2_1_an_approved_command_never_widens_to_another_argv() {
+    let mut fx = approval_fixture(1);
+    let run = ready_run(&mut fx, "r1");
+    let approved = call(FIXTURE, &["--a", "--b"]);
+    denied(&fx.answered(&run, "k0", &approved));
+    let request = fx.pending().remove(0);
+    let approval = fx
+        .authority()
+        .decide_approval(&request, grant(APPROVER))
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let bound = fx.one("SELECT binding_sha256 FROM approval_request");
+    let variants = [
+        ("a changed value", call(FIXTURE, &["--a", "--c"])),
+        ("reordered", call(FIXTURE, &["--b", "--a"])),
+        ("an added argument", call(FIXTURE, &["--a", "--b", "--c"])),
+        ("a removed argument", call(FIXTURE, &["--a"])),
+        ("no argument", call(FIXTURE, &[])),
+    ];
+    for (n, (what, variant)) in variants.iter().enumerate() {
+        let (_, reason, _) = denied(&fx.answered(&run, &format!("v{n}"), variant));
+        assert_eq!(reason, ProcessDecisionReason::ApprovalRequired, "{what}");
+        assert_eq!(fx.approval(&approval), (0, "OPEN".to_owned()), "{what}");
+    }
+    // Each variant is its own binding, asked for apart; none is the approved.
+    let pending = fx.strings("SELECT binding_sha256 FROM approval_request WHERE state = 'PENDING'");
+    assert_eq!(pending.len(), variants.len());
+    assert!(pending.iter().all(|hash| *hash != bound));
+    // The exact approved command spends its one use.
+    assert!(ran_or_denied(&fx.ran(&run, "k1", &approved)));
+    assert_eq!(fx.approval(&approval), (1, "EXHAUSTED".to_owned()));
+    approval_evidence("argv-drift-each-form", "5-refused+exact-spent");
+}
+
+#[test]
+fn m6_2_1_the_same_binding_through_another_connection_of_the_principal_spends_nothing() {
+    let mut fx = approval_fixture(1);
+    let run = ready_run(&mut fx, "r1");
+    let approval = fx.requested_and_granted(&run, "k0");
+    // The same uid on another connection: another holder, not the lease's.
+    let other = fx
+        .authority()
+        .connect(AuthenticatedSubject::unix_uid(RUNTIME));
+    let message = fx.message(
+        &run,
+        5,
+        "direwolf.tool.invoke",
+        Some("k1"),
+        &format!(r#"{{"process_exec":{}}}"#, launch()),
+    );
+    let body = match fx.authority().dispatch_parkable(&other, &message).unwrap() {
+        Dispatched::Answer(body) => body,
+        Dispatched::Parked(_) => panic!("parked"),
+    };
+    assert_eq!(refused(&body), R::StaleEpoch, "not the lease's holder");
+    assert_eq!(fx.approval(&approval), (0, "OPEN".to_owned()));
+    // The holder's own launch of the same call spends it.
+    assert!(ran_or_denied(&fx.ran(&run, "k1", &launch())));
+    assert_eq!(fx.approval(&approval), (1, "EXHAUSTED".to_owned()));
+    approval_evidence("another-connection-refused", "stale-epoch");
+}
+
+#[test]
+fn m6_2_1_a_lease_taken_over_after_it_expired_leaves_the_approval_unspent() {
+    let mut fx = approval_fixture(3);
+    let run = ready_run(&mut fx, "r1");
+    let approval = fx.requested_and_granted(&run, "k0");
+    fx.clock.advance(DEFAULT_LEASE_TTL_MS + 1);
+    let session = fx.session.clone();
+    let taker = fx
+        .authority()
+        .connect(AuthenticatedSubject::unix_uid(RUNTIME));
+    let Reply::Done(epoch) = fx.authority().acquire_lease(&taker, &session).unwrap() else {
+        panic!("a takeover of an expired lease")
+    };
+    // The old holder is fenced at its epoch.
+    assert_eq!(refused(&fx.answered(&run, "k1", &launch())), R::StaleEpoch);
+    // The new holder does not hold the old tenure's run.
+    fx.caller = Some(taker);
+    fx.epoch = epoch;
+    assert_eq!(refused(&fx.answered(&run, "k2", &launch())), R::UnknownRun);
+    assert_eq!(fx.approval(&approval), (0, "OPEN".to_owned()));
+    assert_eq!(fx.count("SELECT count(*) FROM approval_use"), 0);
+    approval_evidence("lease-takeover-refused", "stale-epoch+unknown-run");
+}
+
+#[test]
+fn m6_2_1_no_scope_but_exact_action_creates_any_authority() {
+    for scope in [
+        "executable_and_argv",
+        "path_set",
+        "path_subtree",
+        "host_and_methods",
+        "credential_use",
+    ] {
+        let mut fx = Fixture::new(scoped_policy(scope, 3, "10m"));
+        fx.attach(IMAGE);
+        assert!(fx.authority().attach_approvers(&[APPROVER]));
+        let run = ready_run(&mut fx, "r1");
+        let (_, reason, _) = denied(&fx.answered(&run, "k1", &launch()));
+        assert_eq!(reason, ProcessDecisionReason::ApprovalRequired, "{scope}");
+        assert_eq!(
+            fx.count("SELECT count(*) FROM approval_request"),
+            0,
+            "{scope}"
+        );
+        assert_eq!(fx.count("SELECT count(*) FROM approval"), 0, "{scope}");
+        assert!(fx.fake.asked_for("workload.start").is_empty(), "{scope}");
+    }
+    approval_evidence("unsupported-scopes-no-authority", "5-scopes-no-request");
+}
+
+/// A2 file operations under `REQUIRE_APPROVAL` (ADR-0078 §1: decided on the
+/// host, and a deletion besides). **Not** a shipped pack.
+fn file_approval_policy() -> PolicySet {
+    PolicySet {
+        profile: "m621".to_owned(),
+        sources: vec![PolicySource {
+            name: "m621.toml".to_owned(),
+            text: r#"schema_version = 1
+
+[meta]
+name = "m621"
+
+[[rule]]
+id = "approve-writes"
+effect = "REQUIRE_APPROVAL"
+reason = "SENSITIVE_PATH"
+when.verb = "fs.write"
+approval.scope = "exact_action"
+approval.ttl = "10m"
+approval.max_uses = 1
+
+[[rule]]
+id = "approve-deletes"
+effect = "REQUIRE_APPROVAL"
+reason = "DESTRUCTIVE_IN_WORKSPACE"
+when.verb = "fs.delete"
+approval.scope = "path_set"
+approval.ttl = "10m"
+approval.max_uses = 1
+
+[[rule]]
+id = "allow-sandbox-exec"
+effect = "ALLOW"
+when.verb = "process.exec"
+when.environment = "sandbox"
+
+[[rule]]
+id = "default"
+effect = "DENY"
+reason = "NO_MATCHING_RULE"
+"#
+            .to_owned(),
+        }],
+    }
+}
+
+#[test]
+fn m6_2_1_a_file_operation_needing_an_approval_is_a2_and_asks_for_nothing() {
+    let declared: Vec<&str> = super::workspace::WRITES
+        .iter()
+        .copied()
+        .chain(["fs.delete:*"])
+        .collect();
+    let mut fx = Fixture::with_declared(file_approval_policy(), None, &declared);
+    fx.attach(IMAGE);
+    assert!(fx.authority().attach_approvers(&[APPROVER]));
+    let run = fx.run("r1", &declared);
+    std::fs::write(fx.scratch.path().join("ws").join("old.txt"), b"x").unwrap();
+    for (key, call) in [
+        ("w1", super::workspace::write("/workspace/new.txt")),
+        (
+            "d1",
+            r#"{"fs_delete":{"path":"/workspace/old.txt"}}"#.to_owned(),
+        ),
+    ] {
+        let body = fx.tool(&run, key, &call);
+        assert!(matches!(body, DwkpBody::ToolDeniedV2(_)), "{key}: {body:?}");
+    }
+    assert_eq!(fx.count("SELECT count(*) FROM approval_request"), 0);
+    assert_eq!(fx.count("SELECT count(*) FROM approval"), 0);
+    assert!(fx.fake.asked_for("fs.write").is_empty());
+    assert!(fx.fake.asked_for("fs.delete").is_empty());
+    assert!(fx.scratch.path().join("ws").join("old.txt").exists());
+    approval_evidence("a2-file-operations-not-requested", "write+delete-denied");
+}
+
+#[test]
+fn m6_2_1_a_matching_hash_alone_is_never_authority_and_the_schema_is_fixed() {
+    let mut fx = approval_fixture(1);
+    let run = ready_run(&mut fx, "r1");
+    denied(&fx.answered(&run, "k0", &launch()));
+    let genuine = fx.pending().remove(0);
+    // The genuine request denied; a forged one under the same hash with other
+    // bytes, granted by an approver in the set -- rows no guard would write.
+    let denial = ApproverDecision::Deny {
+        approver: AuthenticatedSubject::unix_uid(APPROVER),
+    };
+    assert_eq!(
+        fx.authority().decide_approval(&genuine, denial).unwrap(),
+        Ok(None)
+    );
+    let db = fx.db();
+    let copy = |id: &str, schema: &str, bytes: &[u8]| {
+        db.execute(
+            "INSERT INTO approval_request (request_id, run_id, session_id, requester, epoch, \
+             incarnation, idempotency_key, binding_schema, binding_sha256, binding, scope, ttl_s, \
+             max_uses, assurance_required, policy_revision, rule_id, requested_ms, not_after_ms, \
+             state, decided_ms) SELECT ?1, run_id, session_id, requester, epoch, incarnation, \
+             idempotency_key, ?2, binding_sha256, ?3, scope, ttl_s, max_uses, \
+             assurance_required, policy_revision, rule_id, requested_ms, not_after_ms, \
+             'PENDING', NULL FROM approval_request WHERE request_id = ?4",
+            rusqlite::params![id, schema, bytes, genuine],
+        )
+    };
+    // Another binding schema is refused by the table itself.
+    assert!(
+        copy(&"9".repeat(64), "direwolf.approval.binding.v2", b"{}").is_err(),
+        "another binding schema"
+    );
+    let forged = "8".repeat(64);
+    copy(
+        &forged,
+        "direwolf.approval.binding.v1",
+        b"{\"forged\":true}",
+    )
+    .unwrap();
+    db.execute(
+        "INSERT INTO approval (approval_id, request_id, approver, channel, assurance, \
+         granted_ms, not_after_ms, max_uses, uses, state) VALUES \
+         (?1, ?2, 'uid:2001', 'APPROVER_ENDPOINT', 'A1', ?3, ?4, 1, 0, 'OPEN')",
+        rusqlite::params![
+            "7".repeat(64),
+            forged,
+            i64::try_from(START_MS).unwrap(),
+            i64::try_from(START_MS + 600_000).unwrap()
+        ],
+    )
+    .unwrap();
+    db.execute(
+        "UPDATE approval_request SET state = 'GRANTED', decided_ms = ?2 WHERE request_id = ?1",
+        rusqlite::params![forged, i64::try_from(START_MS).unwrap()],
+    )
+    .unwrap();
+    drop(db);
+    // The launch's binding hashes to the forged row's hash; its bytes are
+    // not the forged row's: nothing is spent, nothing runs.
+    assert!(!ran_or_denied(&fx.answered(&run, "k1", &launch())));
+    assert_eq!(fx.approval(&"7".repeat(64)), (0, "OPEN".to_owned()));
+    assert!(fx.fake.asked_for("workload.start").is_empty());
+    approval_evidence("hash-is-not-authority", "bytes-compared+schema-fixed");
+}
+
+#[test]
+fn m6_2_1_an_obligation_the_launch_cannot_keep_asks_for_nothing_and_a_kept_one_is_bound() {
+    let obligated = |obligation: &str| {
+        let mut policy = approval_policy(1, "10m");
+        let text = &mut policy.sources[0].text;
+        let marker = "reason = \"SENSITIVE_PATH\"\n";
+        assert!(text.contains(marker));
+        *text = text.replacen(
+            marker,
+            &format!("{marker}obligations = [\"{obligation}\"]\n"),
+            1,
+        );
+        policy
+    };
+    // Half a byte a stream is no bound a launch can keep.
+    let mut fx = Fixture::new(obligated("max_output_bytes=1"));
+    fx.attach(IMAGE);
+    assert!(fx.authority().attach_approvers(&[APPROVER]));
+    let run = ready_run(&mut fx, "r1");
+    denied(&fx.answered(&run, "k1", &launch()));
+    assert_eq!(fx.count("SELECT count(*) FROM approval_request"), 0);
+    // A bound it can keep is in the binding, and the approval spends under it.
+    let mut fx = Fixture::new(obligated("max_output_bytes=64"));
+    fx.attach(IMAGE);
+    assert!(fx.authority().attach_approvers(&[APPROVER]));
+    let run = ready_run(&mut fx, "r1");
+    let approval = fx.requested_and_granted(&run, "k0");
+    let binding: Vec<u8> = fx
+        .db()
+        .query_row("SELECT binding FROM approval_request", [], |row| row.get(0))
+        .unwrap();
+    assert!(
+        String::from_utf8(binding)
+            .unwrap()
+            .contains("max_output_bytes"),
+        "the kept obligation is bound"
+    );
+    assert!(ran_or_denied(&fx.ran(&run, "k1", &launch())));
+    assert_eq!(fx.approval(&approval), (1, "EXHAUSTED".to_owned()));
+    approval_evidence("obligations-unkept-refused-kept-bound", "no-request+bound");
 }

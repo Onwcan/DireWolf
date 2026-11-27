@@ -547,6 +547,12 @@ fn the_host_floor_refuses_every_launch_without_an_approval_whatever_policy_allow
             .is_empty()
     );
     assert!(f.rows("SELECT process_id FROM tool_process").is_empty());
+    // M6.2.1: host execution is an A2 class (ADR-0078 §1) -- no presence
+    // factor exists, so its REQUIRE_APPROVAL records no request either.
+    assert!(
+        f.rows("SELECT request_id FROM approval_request").is_empty(),
+        "an A2 launch is never asked for"
+    );
     evidence(
         "production-floor-opted-out",
         "HOST_EXECUTION_DISABLED-zero-broker",

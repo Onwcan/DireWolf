@@ -1,6 +1,6 @@
 # ADR-0080: The approval registry -- durable requests and approvals, each use spent in its effect's own transaction
 
-**Status:** Proposed · **Date:** 2026-11-26 (proposed for M6.2; built and reviewed locally 2026-11-26, not committed; hosted evidence pending; nothing here is accepted) · **Builds on:** [ADR-0079](0079-the-approval-binding-v1-what-it-binds-and-how-it-is-encoded.md) (the binding, and its §8 registry obligations), [ADR-0078](0078-approval-assurance-which-classes-need-a2-and-the-presence-factor.md) (A1 and A2), [ADR-0077](0077-the-approval-channel-is-the-approver-endpoint-and-an-approver-uid-is-a-principal-not-a-person.md) (the channel), [ADR-0067](0067-f18-approver-endpoint-identity-boundary.md) §7 (`approval.*` audit kinds), [ADR-0064](0064-f02-authority-endings-serialised-with-decided-effects.md) (the gate, Proposed), [ADR-0063](0063-principal-ownership-of-sessions-workspaces-and-profiles.md) (principals), [ADR-0062](0062-taint-follows-delivered-content.md) (taint), [ADR-0052](0052-m5d-sandboxed-process-exec.md) (the sandboxed launch and its intent) · **Would amend (on acceptance):** [ADR-0039](0039-durable-authority-state.md) (store schema version 15: the registry) · **Leaves unchanged:** DWKP, the private broker protocol, the approver endpoint (TX065), the shipped packs, the binding (TX066), every accepted decision
+**Status:** Proposed · **Date:** 2026-11-26 (proposed for M6.2; built and reviewed locally 2026-11-26; committed as `b8414fd`, CI #227 green; M6.2.1's evidence built locally 2026-11-27, its hosted run pending; nothing here is accepted) · **Builds on:** [ADR-0079](0079-the-approval-binding-v1-what-it-binds-and-how-it-is-encoded.md) (the binding, and its §8 registry obligations), [ADR-0078](0078-approval-assurance-which-classes-need-a2-and-the-presence-factor.md) (A1 and A2), [ADR-0077](0077-the-approval-channel-is-the-approver-endpoint-and-an-approver-uid-is-a-principal-not-a-person.md) (the channel), [ADR-0067](0067-f18-approver-endpoint-identity-boundary.md) §7 (`approval.*` audit kinds), [ADR-0064](0064-f02-authority-endings-serialised-with-decided-effects.md) (the gate, Proposed), [ADR-0063](0063-principal-ownership-of-sessions-workspaces-and-profiles.md) (principals), [ADR-0062](0062-taint-follows-delivered-content.md) (taint), [ADR-0052](0052-m5d-sandboxed-process-exec.md) (the sandboxed launch and its intent) · **Would amend (on acceptance):** [ADR-0039](0039-durable-authority-state.md) (store schema version 15: the registry) · **Leaves unchanged:** DWKP, the private broker protocol, the approver endpoint (TX065), the shipped packs, the binding (TX066), every accepted decision
 
 > **An approval is a record the authority keeps, and a use is spent only in
 > the transaction that records the effect it allows.** A launch denied
@@ -222,11 +222,15 @@ its decision seam.
   broker, its handles waiting longer than production's five seconds; the
   server never runs two writers, and a production handle past its wait is
   refused `Busy`, spending nothing.
-- The crash evidence is the in-process crash hooks on a reopened store;
-  real process termination is not exercised for the registry (TX010 keeps
-  process starts out of the authority's source, and an integration test,
-  where the real-process harness lives, cannot hold an approval). The shared
-  transaction and audit-outbox windows are real-process tested.
+- The crash evidence was, in M6.2, the in-process crash hooks on a
+  reopened store; real process termination was not exercised for the
+  registry (TX010 keeps process starts out of the authority's source, and
+  an integration test, where the real-process harness lives, cannot hold an
+  approval). Since M6.2.1 it is: an external supervisor kills the library's
+  unit-test executable's child with SIGKILL at each of 34 windows and
+  another process recovers its files
+  ([M6_2_1_SECURITY_EVIDENCE.md](../M6_2_1_SECURITY_EVIDENCE.md)). A process
+  kill is not a power loss: written but unsynced bytes survive it.
 
 ## Owner decisions
 
@@ -252,7 +256,11 @@ schema 15's migration test; `make approval-registry-evidence`; the mutation
 review `make approval-registry-mutations`; TX062 and TX068 on their fixtures.
 Its results and hosted evidence are recorded in
 [M6_2_IMPLEMENTATION.md](../M6_2_IMPLEMENTATION.md); hosted CI is the
-acceptance gate, and this record stays Proposed until accepted.
+acceptance gate, and this record stays Proposed until accepted. M6.2.1
+(2026-11-27, local): `make approval-registry-crash-evidence` (34 windows,
+real process termination), `make approval-registry-separation`, seven more
+route cases and mutants A50 to A54 -- recorded in
+[M6_2_1_SECURITY_EVIDENCE.md](../M6_2_1_SECURITY_EVIDENCE.md).
 
 ## Revisit if
 

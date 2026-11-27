@@ -24,6 +24,7 @@ DW := $(PY) scripts/dw.py
         proxy-peer-mutations sandbox-identity-mutations egress-allowlist-mutations \
         resolver-mutations namespace-evidence approval-binding-mutations \
         approval-registry-mutations approval-registry-evidence \
+        approval-registry-crash-evidence approval-registry-separation \
         sandbox-workload-evidence \
         net-http-evidence net-http-mutations sandbox-workload-mutations sandbox-secret-evidence \
         sandbox-secret-mutations sandbox-workspace-evidence sandbox-workspace-mutations \
@@ -163,6 +164,12 @@ approval-registry-mutations: ## M6.2 mutation review (ADR-0080, Proposed): each 
 
 approval-registry-evidence: ## M6.2 authority-state evidence (ADR-0080, Proposed): the approval registry's route tests on a real authority and store -- one spend among a hundred contenders, K uses, exact expiry, the clock moved back, revocation, restart, crash windows, the database's refusals, an A2 launch never asked for -- each case required once (Linux; a fake broker, no containment claimed)
 	@$(DW) approval-registry-evidence
+
+approval-registry-crash-evidence: ## M6.2.1 real-process crash evidence (ADR-0080, Proposed): each case's child -- a spend, a request, a decision, a revocation, an expiry, a migrating start -- killed with SIGKILL at its window by this supervisor, and the files it left recovered by another process, every invariant asserted (Linux)
+	@$(DW) approval-registry-crash-evidence
+
+approval-registry-separation: ## M6.2.1: no release artifact holds the approval registry's test-only seams -- the approver set's attachment, the crash children's variables and entry points -- each first found in the unit-test build (Linux)
+	@$(DW) approval-registry-separation
 
 sandbox-workload-evidence: ## M5d.1-M5d.2 workloads in real OCI environments: identity, bounds, wall clock, process trees ended, digests, drift, escapes, an agent-shaped workload, the authority's gates, ledger and crash windows; the public process.exec over real DWKP, serve --sandbox-config, the hygiene launcher with real git/Python/pytest; M5e.2 cross-run isolation
 	@$(DW) sandbox-workload-evidence

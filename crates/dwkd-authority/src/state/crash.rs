@@ -137,6 +137,17 @@ pub enum CrashPoint {
     /// M6.2: inside a denied launch's transaction, before its approval
     /// request is written -- nothing of the request committed.
     ApprovalBeforeRequest,
+    /// M6.2.1: a start that migrates an older store, before the migration's
+    /// transaction begins -- nothing has happened.
+    MigrationBeforeTransaction,
+    /// M6.2.1: inside the migration's transaction, every step's schema
+    /// written and the version set, nothing committed.
+    MigrationAfterSchema,
+    /// M6.2.1: inside the migration's transaction, its `store.migrated`
+    /// record written to the store's outbox, nothing committed.
+    MigrationBeforeCommit,
+    /// M6.2.1: the migration committed; its record only in `kernel.db`.
+    MigrationAfterCommit,
 }
 
 impl CrashPoint {
@@ -192,6 +203,10 @@ impl CrashPoint {
             Self::ReapAfterIntent => 'v',
             Self::ApprovalBeforeUse => 'w',
             Self::ApprovalBeforeRequest => 'x',
+            Self::MigrationBeforeTransaction => 'y',
+            Self::MigrationAfterSchema => 'z',
+            Self::MigrationBeforeCommit => 'H',
+            Self::MigrationAfterCommit => 'I',
         }
     }
 }
@@ -262,6 +277,16 @@ impl CrashPoint {
     /// transaction, after the intent and before the use; inside a denied
     /// launch's, before its request. A stop at either leaves nothing of it.
     pub const APPROVAL: [Self; 2] = [Self::ApprovalBeforeUse, Self::ApprovalBeforeRequest];
+
+    /// The points of a start that migrates an older store (M6.2.1), in
+    /// order. The migration is one transaction: a stop at the first three
+    /// leaves the store as it was, at the last the store migrated.
+    pub const MIGRATION: [Self; 4] = [
+        Self::MigrationBeforeTransaction,
+        Self::MigrationAfterSchema,
+        Self::MigrationBeforeCommit,
+        Self::MigrationAfterCommit,
+    ];
 }
 
 impl fmt::Display for CrashPoint {

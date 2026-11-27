@@ -744,7 +744,17 @@ impl Fixture {
 
     /// A fixture whose operator profile, and ceiling, declare `declared`.
     fn with_declared(policy: PolicySet, hook: Option<CrashHook>, declared: &[&str]) -> Self {
-        let scratch = Scratch::new("workload-route");
+        Self::with_declared_in(Scratch::new("workload-route"), policy, hook, declared)
+    }
+
+    /// [`Fixture::with_declared`] in `scratch`: a directory of the caller's
+    /// (M6.2.1's real-process crash children build in the supervisor's).
+    fn with_declared_in(
+        scratch: Scratch,
+        policy: PolicySet,
+        hook: Option<CrashHook>,
+        declared: &[&str],
+    ) -> Self {
         let root = scratch.path().join("ws");
         std::fs::create_dir_all(&root).unwrap();
         let fake = Arc::new(Fake::default());
@@ -798,6 +808,26 @@ impl Fixture {
                 .unwrap();
         }
         fx.lease();
+        fx
+    }
+
+    /// A new incarnation on the store a fixture left in `scratch` -- installed
+    /// already, so nothing is installed again -- its clock at `now_ms`
+    /// (M6.2.1's recovery children). Its image is not attached and it holds
+    /// no lease: the caller attaches and leases, as [`Fixture::restart`] does.
+    fn reopen(scratch: Scratch, policy: PolicySet, now_ms: u64) -> Self {
+        let mut fx = Self {
+            scratch,
+            authority: None,
+            fake: Arc::new(Fake::default()),
+            clock: Arc::new(ManualClock::new(now_ms)),
+            caller: None,
+            session: SessionId::from_uuid(uuid(1)).unwrap(),
+            epoch: Epoch::new(1).unwrap(),
+            config: startup(policy, DECLARED),
+        };
+        fx.start(None);
+        *fx.fake.store.lock().unwrap() = Some(fx.state().join("kernel.db"));
         fx
     }
 

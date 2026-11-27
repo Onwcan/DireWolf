@@ -85,6 +85,12 @@ pub mod state;
 #[cfg(test)]
 mod scratch;
 
+// The real-process crash children's assignment and handshake (M6.2.1): Linux
+// unit-test builds only, outside `state/` (TX006); it starts, signals and
+// waits for no process (TX010) -- the external supervisor does.
+#[cfg(all(test, target_os = "linux"))]
+mod crash_child;
+
 // `proptest` is a dev-dependency used by the integration tests in `tests/`, not
 // by the library. `unused_crate_dependencies` sees the manifest edge and not
 // the test crates that consume it, so it is acknowledged here rather than

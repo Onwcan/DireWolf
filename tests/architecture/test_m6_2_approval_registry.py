@@ -39,11 +39,14 @@ def test_the_record_is_proposed_and_names_its_schema() -> None:
 
 def test_the_mutation_table_matches_the_source_once_per_mutant() -> None:
     names = [m[0] for m in dw.APPROVAL_REGISTRY_MUTATIONS]
-    assert [n.split(":")[0] for n in names] == [f"A{n:02d}" for n in range(1, 50)]
+    # A01-A49 are M6.2's; A50-A54 M6.2.1's.
+    assert [n.split(":")[0] for n in names] == [f"A{n:02d}" for n in range(1, 55)]
     files = {
         "crates/dwkd-authority/src/state/approvals.rs",
         "crates/dwkd-authority/src/state/workload.rs",
         "crates/dwkd-authority/src/state/schema.rs",
+        "crates/dwkd-authority/src/state/mod.rs",
+        "crates/dwkd-authority/src/lib.rs",
     }
     for what, rel, old, new in dw.APPROVAL_REGISTRY_MUTATIONS:
         assert rel in files, what
@@ -51,7 +54,11 @@ def test_the_mutation_table_matches_the_source_once_per_mutant() -> None:
         assert old != new, what
     assert dw.TASKS["approval-registry-mutations"] is dw.task_approval_registry_mutations
     assert dw.TASKS["approval-registry-evidence"] is dw.task_approval_registry_evidence
-    assert [s.name for s in dw._approval_registry_stages()] == ["approval-registry"]
+    assert [s.name for s in dw._approval_registry_stages()] == [
+        "approval-registry",
+        "approval-registry-record",
+        "approval-registry-crash",
+    ]
     makefile = _read(REPO_ROOT / "Makefile")
     assert "\napproval-registry-mutations: ## M6.2" in makefile
     assert "\t@$(DW) approval-registry-mutations\n" in makefile

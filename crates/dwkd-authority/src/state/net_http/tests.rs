@@ -1547,6 +1547,9 @@ fn a_tainted_run_reaches_no_new_origin_and_obligations_narrow_or_deny() {
         "k2",
     );
     assert_eq!(denied_reason(&reply), NetDecisionReason::ApprovalRequired);
+    // M6.2.1: a hop is decided on the host, an A2 class (ADR-0078 §1): its
+    // REQUIRE_APPROVAL records no request, and nothing could approve it.
+    assert_eq!(fx.count("SELECT count(*) FROM approval_request"), 0);
     assert!(matches!(
         fx.invoke(
             &run,

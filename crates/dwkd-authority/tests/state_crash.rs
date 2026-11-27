@@ -138,8 +138,8 @@ fn assert_recovered(state: &Path, point: CrashPoint, report: &StartReport) {
         // Crossed only between the phases of a tool invocation (M4b), a
         // secret use (M4e), an environment's lifecycle (M5a), a `net.http`
         // hop (M5c), a workload (M5d), a run's release (M5d.6) or an
-        // approval's use (M6.2), never by an admission: `CrashPoint::ALL`
-        // does not contain them.
+        // approval's use (M6.2) or a migrating start (M6.2.1), never by an
+        // admission: `CrashPoint::ALL` does not contain them.
         CrashPoint::ToolAfterIntent
         | CrashPoint::ToolAfterOpen
         | CrashPoint::ToolAfterBroker
@@ -169,7 +169,11 @@ fn assert_recovered(state: &Path, point: CrashPoint, report: &StartReport) {
         | CrashPoint::ReleaseAfterIntent
         | CrashPoint::ReapAfterIntent
         | CrashPoint::ApprovalBeforeUse
-        | CrashPoint::ApprovalBeforeRequest => {
+        | CrashPoint::ApprovalBeforeRequest
+        | CrashPoint::MigrationBeforeTransaction
+        | CrashPoint::MigrationAfterSchema
+        | CrashPoint::MigrationBeforeCommit
+        | CrashPoint::MigrationAfterCommit => {
             unreachable!("{point} is not a transaction crash point")
         }
     }

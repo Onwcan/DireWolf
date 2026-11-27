@@ -89,7 +89,11 @@ platforms.
   [ADR-0080](adr/0080-the-approval-registry-durable-requests-and-atomic-consumption.md)
   (M6.2's approval registry), Proposed, in the plan and
   [M6_2_IMPLEMENTATION.md](M6_2_IMPLEMENTATION.md). ADR-0064 (F-02), this
-  ledger's, is offered for acceptance in M6.2's report (§20).
+  ledger's, is offered for acceptance in M6.2's report (§20); M6.2.1's
+  evidence for it -- the revocation's crash windows with real process
+  termination, a lease takeover against an open approval -- is
+  [M6_2_1_SECURITY_EVIDENCE.md](M6_2_1_SECURITY_EVIDENCE.md) §17 (2026-11-27,
+  local; still Proposed).
 
 ## Since the security review of 2026-11-22
 

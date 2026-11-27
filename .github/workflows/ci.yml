@@ -226,6 +226,10 @@ jobs:
       # evidence -- the route tests on a real authority and store, each case's
       # line required once; a fake broker, so no containment is claimed.
       - run: make approval-registry-evidence
+      # M6.2.1: the registry's crash windows with real process termination --
+      # each child killed with SIGKILL at its window by the supervisor, the
+      # files it left recovered by another process; every case required.
+      - run: make approval-registry-crash-evidence
       # M3's authority properties, strictly and with the real second user:
       # this job's own suite, compared with the reviewed baseline. The full
       # M3 + M4 gate is the dedicated `evals` job's; running it here too made
@@ -966,6 +970,9 @@ jobs:
       # discovered at release time is a bad day.
       - run: cargo build --workspace --release
       - run: ./target/release/direwolf --version
+      # M6.2.1: no release artifact holds the approval registry's test-only
+      # seams (each first found in the unit-test build, the scan's control).
+      - run: make approval-registry-separation
 
   # M5e.6 (G2, G3): the M5 gate. It runs no evidence and starts no container.
   # It downloads the bundles the jobs it needs uploaded in THIS run -- no

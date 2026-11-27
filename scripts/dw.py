@@ -10502,6 +10502,8 @@ def task_approval_binding_mutations() -> None:
 _M62_REGISTRY = "crates/dwkd-authority/src/state/approvals.rs"
 _M62_ROUTE = "crates/dwkd-authority/src/state/workload.rs"
 _M62_SCHEMA = "crates/dwkd-authority/src/state/schema.rs"
+_M62_STATE_MOD = "crates/dwkd-authority/src/state/mod.rs"
+_M62_LIB = "crates/dwkd-authority/src/lib.rs"
 APPROVAL_REGISTRY_MUTATIONS = (
     (
         "A01: the host environment not A2",
@@ -10808,6 +10810,36 @@ APPROVAL_REGISTRY_MUTATIONS = (
         "AND state = 'ACTIVE'))\n",
         ")\n",
     ),
+    (
+        "A50: the approver set attachable in every build",
+        _M62_REGISTRY,
+        '\n    #[cfg(all(test, target_os = "linux"))]\n    pub(crate) fn attach_approvers(',
+        "\n    pub(crate) fn attach_approvers(",
+    ),
+    (
+        "A51: the crash children compiled into every build",
+        _M62_LIB,
+        '\n#[cfg(all(test, target_os = "linux"))]\nmod crash_child;\n',
+        "\nmod crash_child;\n",
+    ),
+    (
+        "A52: a migrating start reaches none of its schema point",
+        _M62_STATE_MOD,
+        "\n    stop_migration(hook, CrashPoint::MigrationAfterSchema)?;\n",
+        "\n",
+    ),
+    (
+        "A53: a request of another binding schema recorded (schema)",
+        _M62_SCHEMA,
+        "TEXT    NOT NULL CHECK (binding_schema = 'direwolf.approval.binding.v1'),",
+        "TEXT    NOT NULL,",
+    ),
+    (
+        "A54: the route reports every obligation kept to the registry",
+        _M62_ROUTE,
+        "\n            obligations_kept: plan.obligations_enforced,\n",
+        "\n            obligations_kept: true,\n",
+    ),
 )
 # The equivalent mutants, and why: none can change an outcome.
 APPROVAL_REGISTRY_EQUIVALENT = (
@@ -10839,9 +10871,61 @@ APPROVAL_REGISTRY_FILTERS = (
 )
 
 
+# The record tests the M6.2.1 record stage runs: each reads a compilation
+# condition, an ordering or a case table in the code -- never the mutation
+# table, whose own test every mutant fails by construction (its anchor is
+# gone), and never a test whose failure a source edit alone guarantees.
+APPROVAL_REGISTRY_RECORD_TESTS = (
+    "tests/architecture/test_m6_2_approval_registry.py::test_the_seams_have_no_production_caller",
+    "tests/architecture/test_m6_2_approval_registry.py"
+    "::test_a_use_is_spent_after_its_intent_in_the_intents_transaction",
+    "tests/architecture/test_m6_2_1_crash_evidence.py"
+    "::test_the_crash_children_are_compiled_into_linux_unit_test_builds_only",
+    "tests/architecture/test_m6_2_1_crash_evidence.py"
+    "::test_the_crash_tables_agree_between_the_children_and_the_supervisor",
+)
+
+
+def _approval_registry_record() -> None:
+    """The registry's record tests as a detector (M6.2.1): they pin what no
+    Rust test sees -- a seam's compilation condition, the use after its
+    intent, the crash children's build and their case table."""
+    result = subprocess.run(
+        [
+            _uv_bin(),
+            "run",
+            "--frozen",
+            "python",
+            "-m",
+            "pytest",
+            "-q",
+            "-p",
+            "no:cacheprovider",
+            *APPROVAL_REGISTRY_RECORD_TESTS,
+        ],
+        cwd=str(ROOT),
+        capture_output=True,
+        text=True,
+        errors="replace",
+        timeout=C3_STAGE_LIMIT,
+        check=False,
+    )
+    failed = [line.split()[1] for line in result.stdout.splitlines() if line.startswith("FAILED ")]
+    if result.returncode == 0:
+        passed = re.search(r"(\d+) passed", result.stdout)
+        if passed is None or int(passed.group(1)) != len(APPROVAL_REGISTRY_RECORD_TESTS):
+            raise TaskError("NOT EXERCISED: the record tests did not all run")
+        return
+    if not failed:
+        raise TaskError(f"NOT EXERCISED: the record tests could not run (exit {result.returncode})")
+    raise TaskError(f"{len(failed)} record test(s) failed: {', '.join(failed[:5])}")
+
+
 def _approval_registry_stages() -> tuple[MutationStage, ...]:
     """The review's detector: the registry's unit tests, its Linux
-    real-authority route tests, the A2 credential case and the migration."""
+    real-authority route tests, the A2 credential case and the migration;
+    then (M6.2.1) the record tests, and the real-process crash evidence --
+    each run only for a mutant every earlier stage let through."""
     return (
         MutationStage(
             "approval-registry",
@@ -10856,6 +10940,8 @@ def _approval_registry_stages() -> tuple[MutationStage, ...]:
                 *APPROVAL_REGISTRY_FILTERS,
             ),
         ),
+        MutationStage("approval-registry-record", evidence=_approval_registry_record),
+        MutationStage("approval-registry-crash", evidence=task_approval_registry_crash_evidence),
     )
 
 
@@ -10922,6 +11008,13 @@ APPROVAL_EVIDENCE_CASES = (
     "run-or-lease-end-beside-a-spend",
     "replay-and-another-run",
     "ended-run-never-decided",
+    "argv-drift-each-form",
+    "another-connection-refused",
+    "lease-takeover-refused",
+    "unsupported-scopes-no-authority",
+    "a2-file-operations-not-requested",
+    "hash-is-not-authority",
+    "obligations-unkept-refused-kept-bound",
     "revocation-spend-race",
     "database-refuses",
     "audit-linked-no-binding-text",
@@ -10931,6 +11024,46 @@ APPROVAL_EVIDENCE_CASES = (
     "request-window-bounded",
     "a2-credential-launch-not-requested",
 )
+
+
+# Each case's evidence category (M6.2.1): what kind of evidence its test is
+# -- never a real process, which only the crash evidence above is.
+APPROVAL_EVIDENCE_CATEGORIES: dict[str, str] = {
+    "request-recorded-once-nothing-runs": "end-to-end",
+    "granted-spent-once-with-its-intent": "end-to-end",
+    "k-uses-and-no-more": "end-to-end",
+    "taint-rise-is-another-binding": "end-to-end-drift",
+    "single-use-100-contenders": "end-to-end",
+    "multi-use-contended": "end-to-end",
+    "expiry-exact-and-durable": "end-to-end",
+    "clock-rollback-refused": "end-to-end",
+    "decision-refusals": "component",
+    "no-approver-set-no-decision": "fail-closed",
+    "drift-detected": "end-to-end-drift",
+    "revoked-never-spent": "end-to-end",
+    "restart-refused": "end-to-end",
+    "crash-windows": "in-process-hook",
+    "crash-while-requesting": "in-process-hook",
+    "crash-while-revoking": "in-process-hook",
+    "run-or-lease-end-beside-a-spend": "end-to-end",
+    "revocation-spend-race": "end-to-end",
+    "database-refuses": "structural",
+    "audit-linked-no-binding-text": "end-to-end",
+    "no-capability-or-other-scope-no-request": "fail-closed",
+    "approver-outside-the-set-never-spent": "end-to-end",
+    "pending-bound-per-run": "end-to-end",
+    "request-window-bounded": "end-to-end",
+    "replay-and-another-run": "end-to-end",
+    "ended-run-never-decided": "end-to-end",
+    "argv-drift-each-form": "end-to-end-drift",
+    "another-connection-refused": "end-to-end-drift",
+    "lease-takeover-refused": "end-to-end-drift",
+    "unsupported-scopes-no-authority": "fail-closed",
+    "a2-file-operations-not-requested": "fail-closed",
+    "hash-is-not-authority": "structural",
+    "obligations-unkept-refused-kept-bound": "end-to-end-drift",
+    "a2-credential-launch-not-requested": "fail-closed",
+}
 
 
 def require_approval_evidence(output: str) -> list[dict[str, object]]:
@@ -10990,7 +11123,426 @@ def task_approval_registry_evidence() -> None:
         fresh_keyring=True,
     )
     records = require_approval_evidence(output)
+    by_category: dict[str, int] = {}
+    for record in records:
+        category = APPROVAL_EVIDENCE_CATEGORIES[str(record["case"])]
+        by_category[category] = by_category.get(category, 0) + 1
+    for category, n in sorted(by_category.items()):
+        print(f"  {category}: {n}")
     print(f"approval registry evidence: {len(records)} cases, each once")
+
+
+# M6.2.1: real-process crash evidence for the approval registry. The
+# supervisor lives here, outside the authority: the authority's source starts,
+# signals and waits for no process (TX010), and its state layer reads no
+# environment (TX006). It builds the library's unit-test executable -- the one
+# build in which an approver set can be attached, which no release holds --
+# finds it in cargo's own JSON messages, runs one `#[ignore]`d crash child per
+# case, waits for the child's handshake at the case's window, ends that exact
+# process with SIGKILL (no unwinding, destructor, rollback or flush), and runs a
+# separate recovery child on the files the dead process left. A case counts
+# only if the supervisor saw the handshake for that window, saw its own SIGKILL
+# end the child, and the recovery passed with an evidence line whose every
+# field is the case's expectation. A process kill is not a power loss: written
+# but unsynced bytes survive it in the page cache.
+APPROVAL_CRASH_PREFIX = "APPROVAL-CRASH-EVIDENCE "
+APPROVAL_CRASH_SUITE = "authority-approval-registry-crash"
+APPROVAL_CRASH_CHILD = "state::workload_route::tests::approval::m6_2_1_crash_child"
+APPROVAL_RECOVERY_CHILD = "state::workload_route::tests::approval::m6_2_1_recovery_child"
+# The signal the supervisor ends a child with (Linux's number: the task runs
+# only there; a constant, so the judging functions are testable anywhere).
+APPROVAL_CRASH_SIGKILL = 9
+APPROVAL_CRASH_READY_LIMIT = 120.0
+APPROVAL_CRASH_RECOVERY_LIMIT = 300.0
+APPROVAL_CRASH_EVIDENCE_DIR = ROOT / "target" / "m6-2-1-evidence"
+# (case, scenario, point letter, durable): the Rust table's, in its order.
+APPROVAL_CRASH_CASES: tuple[tuple[str, str, str, bool], ...] = (
+    ("spend-before-transaction", "spend", "A", False),
+    ("spend-after-intent-before-use", "spend", "w", False),
+    ("spend-use-before-commit", "spend", "B", False),
+    ("spend-after-commit", "spend", "C", True),
+    ("spend-mid-audit-record", "spend", "D", True),
+    ("spend-audit-written-not-synced", "spend", "E", True),
+    ("spend-audit-synced-not-marked", "spend", "F", True),
+    ("spend-audit-marked", "spend", "G", True),
+    ("spend-before-dispatch", "spend", "q", True),
+    ("spend-after-start", "spend", "t", True),
+    ("spend-after-collect", "spend", "r", True),
+    ("spend-after-outcome", "spend", "s", True),
+    ("request-before-insert", "request", "x", False),
+    ("request-before-commit", "request", "B", False),
+    ("request-after-commit", "request", "C", True),
+    ("request-mid-audit-record", "request", "D", True),
+    ("request-audit-synced-not-marked", "request", "F", True),
+    ("grant-before-transaction", "grant", "A", False),
+    ("grant-before-commit", "grant", "B", False),
+    ("grant-after-commit", "grant", "C", True),
+    ("grant-mid-audit-record", "grant", "D", True),
+    ("deny-before-commit", "deny", "B", False),
+    ("deny-after-commit", "deny", "C", True),
+    ("ended-run-decision-before-commit", "ended-run-decision", "B", False),
+    ("ended-run-decision-after-commit", "ended-run-decision", "C", True),
+    ("revoke-before-commit", "revoke", "B", False),
+    ("revoke-after-commit", "revoke", "C", True),
+    ("revoke-mid-audit-record", "revoke", "D", True),
+    ("expiry-before-commit", "expiry", "B", False),
+    ("expiry-after-commit", "expiry", "C", True),
+    ("migration-before-transaction", "migration", "y", False),
+    ("migration-after-schema", "migration", "z", False),
+    ("migration-before-commit", "migration", "H", False),
+    ("migration-after-commit", "migration", "I", True),
+)
+
+
+def approval_crash_expected(case: tuple[str, str, str, bool]) -> dict[str, object]:
+    """Every field a case's recovery line must carry: what the crash must have
+    left in the store, and what the recovery must have found."""
+    name, scenario, point, durable = case
+    d = int(durable)
+    left = {
+        "spend": (1, 1, d, d),
+        "request": (d, 0, 0, 0),
+        "grant": (1, d, 0, 0),
+        "deny": (1, 0, 0, 0),
+        "ended-run-decision": (1, 0, 0, 0),
+        "revoke": (1, 1, 0, 0),
+        "expiry": (1 + d, 1, 0, 0),
+        "migration": (0, 0, 0, 0),
+    }[scenario]
+    return {
+        "suite": APPROVAL_CRASH_SUITE,
+        "case": name,
+        "point": point,
+        "durable": durable,
+        "version": 15 if scenario != "migration" or durable else 14,
+        "requests": left[0],
+        "approvals": left[1],
+        "uses": left[2],
+        "intents": left[3],
+        "audit": "verified",
+        "fenced": "migrated" if scenario == "migration" else "refused",
+        "count": 1,
+    }
+
+
+def select_unit_test_executable(lines: Sequence[str]) -> Path:
+    """The authority library's unit-test executable, from cargo's JSON
+    messages: exactly one compiler artifact of the library target
+    `dwkd_authority`, built with the test profile, with an executable -- never
+    a glob over `target/`, which can name a stale build or a release one."""
+    found: list[Path] = []
+    for line in lines:
+        text = line.strip()
+        if not text.startswith("{"):
+            continue
+        try:
+            message = json.loads(text)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(message, dict) or message.get("reason") != "compiler-artifact":
+            continue
+        target = message.get("target") or {}
+        if target.get("name") != "dwkd_authority" or "lib" not in (target.get("kind") or []):
+            continue
+        if not (message.get("profile") or {}).get("test"):
+            continue
+        executable = message.get("executable")
+        if executable:
+            found.append(Path(executable))
+    if len(found) != 1:
+        raise TaskError(
+            f"approval crash evidence: expected one library unit-test executable, found {found}"
+        )
+    return found[0]
+
+
+def judge_crash_child(
+    case: tuple[str, str, str, bool], ready: str | None, returncode: int | None, timed_out: bool
+) -> None:
+    """A real crash, or not evidence: the child said it stood at this case's
+    window, and the supervisor's SIGKILL -- nothing else -- ended it."""
+    name, _, point, _ = case
+    if timed_out:
+        raise TaskError(f"{name}: the child never reached its window before the limit")
+    if ready is None:
+        raise TaskError(f"{name}: the child ended (exit {returncode}) before its window")
+    if ready.strip() != f"{name} {point}":
+        raise TaskError(f"{name}: the child stood at another window: {ready.strip()!r}")
+    if returncode != -APPROVAL_CRASH_SIGKILL:
+        raise TaskError(f"{name}: the child ended with {returncode}, not the supervisor's SIGKILL")
+
+
+def judge_crash_recovery(
+    case: tuple[str, str, str, bool], returncode: int | None, output: str
+) -> dict[str, object]:
+    """The recovery child ran its one test, passed, and printed one line for
+    the case whose every field is the case's expectation."""
+    name = case[0]
+    if returncode != 0:
+        raise TaskError(f"{name}: the recovery child failed (exit {returncode})")
+    summaries = [line for line in output.splitlines() if line.startswith("test result: ")]
+    if len(summaries) != 1 or not summaries[0].startswith("test result: ok. 1 passed; 0 failed"):
+        raise TaskError(f"{name}: the recovery ran no test, or more than one: {summaries}")
+    lines = [
+        line[line.index(APPROVAL_CRASH_PREFIX) + len(APPROVAL_CRASH_PREFIX) :]
+        for line in output.splitlines()
+        if APPROVAL_CRASH_PREFIX in line
+    ]
+    if len(lines) != 1:
+        raise TaskError(f"{name}: expected one recovery evidence line, found {len(lines)}")
+    try:
+        record = json.loads(lines[0])
+    except json.JSONDecodeError as error:
+        raise TaskError(f"{name}: an unreadable recovery evidence line") from error
+    if not isinstance(record, dict):
+        raise TaskError(f"{name}: an unreadable recovery evidence line")
+    for key, value in approval_crash_expected(case).items():
+        if record.get(key) != value:
+            raise TaskError(
+                f"{name}: the recovery found {key}={record.get(key)!r}, expected {value!r}"
+            )
+    return record
+
+
+def require_crash_children(listing: str) -> None:
+    """The executable's `--list --ignored` names both children, each once: a
+    child renamed, filtered away or no longer ignored is no evidence."""
+    lines = listing.splitlines()
+    for child in (APPROVAL_CRASH_CHILD, APPROVAL_RECOVERY_CHILD):
+        if lines.count(f"{child}: test") != 1:
+            raise TaskError(f"NOT EXERCISED: the unit-test executable lists no ignored {child}")
+
+
+def _no_core_dump() -> None:
+    """In the child, before it runs: no core file (this process only)."""
+    import resource
+
+    resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+
+
+def run_approval_crash_case(
+    executable: Path, case: tuple[str, str, str, bool], base: Path
+) -> dict[str, object]:
+    """One case: a crash child killed at its window, a recovery child on what
+    it left."""
+    name = case[0]
+    work = base / name
+    shutil.rmtree(work, ignore_errors=True)
+    work.mkdir(parents=True, mode=0o700)
+    ready = work / "ready"
+    environ = {key: value for key, value in os.environ.items() if not key.startswith("DW_M621_")}
+    child_env = {
+        **environ,
+        "DW_M621_CRASH_CASE": name,
+        "DW_M621_DIR": str(work),
+        "DW_M621_READY": str(ready),
+    }
+    command = [str(executable), "--ignored", "--exact", "--test-threads=1", "--nocapture"]
+    with (work / "crash-child.log").open("wb") as log:
+        child = subprocess.Popen(
+            [*command, APPROVAL_CRASH_CHILD],
+            cwd=str(work),
+            env=child_env,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+            preexec_fn=_no_core_dump,
+        )
+        said: str | None = None
+        timed_out = False
+        deadline = time.monotonic() + APPROVAL_CRASH_READY_LIMIT
+        try:
+            # The handshake is the file the child renames into place at its
+            # window; the poll only notices it.
+            while True:
+                if ready.exists():
+                    said = ready.read_text(encoding="utf-8")
+                    break
+                if child.poll() is not None:
+                    break
+                if time.monotonic() > deadline:
+                    timed_out = True
+                    break
+                time.sleep(0.02)
+            if child.poll() is None:
+                os.kill(child.pid, APPROVAL_CRASH_SIGKILL)
+            returncode = child.wait(timeout=60)
+        finally:
+            if child.poll() is None:
+                child.kill()
+                child.wait()
+    judge_crash_child(case, said, returncode, timed_out)
+    recovery = subprocess.run(
+        [*command, APPROVAL_RECOVERY_CHILD],
+        cwd=str(work),
+        env={**environ, "DW_M621_RECOVER_CASE": name, "DW_M621_DIR": str(work)},
+        capture_output=True,
+        text=True,
+        errors="replace",
+        timeout=APPROVAL_CRASH_RECOVERY_LIMIT,
+        preexec_fn=_no_core_dump,
+        check=False,
+    )
+    output = recovery.stdout + recovery.stderr
+    (work / "recovery-child.log").write_text(output, encoding="utf-8")
+    record = judge_crash_recovery(case, recovery.returncode, output)
+    record["handshake"] = (said or "").strip()
+    record["termination"] = f"SIGKILL ({-returncode})"
+    record["category"] = "real-process"
+    return record
+
+
+def _cargo_json(*args: str) -> list[str]:
+    """A cargo command's JSON messages, its human output left on stderr."""
+    command = ["cargo", *args, "--message-format=json"]
+    print(f"{DIM}$ {' '.join(command)}{OFF}", flush=True)
+    result = subprocess.run(
+        command, cwd=str(ROOT), stdout=subprocess.PIPE, text=True, errors="replace", check=False
+    )
+    if result.returncode != 0:
+        raise TaskError(f"`{' '.join(command)}` failed with exit code {result.returncode}")
+    return result.stdout.splitlines()
+
+
+def task_approval_registry_crash_evidence() -> None:
+    """M6.2.1's real-process crash evidence (ADR-0080, Proposed): every case's
+    child killed at its window by this process, and recovered by another.
+
+    Linux: the children are the Linux unit-test build's. Each case's files are
+    kept under target/m6-2-1-evidence/ until the case passes; the record is
+    target/m6-2-1-evidence/record.json.
+    """
+    if not sys.platform.startswith("linux"):
+        raise TaskError("NOT EXERCISED: the crash children are Linux unit tests; run it in WSL2")
+    executable = select_unit_test_executable(
+        _cargo_json("test", "--locked", "-p", "dwkd-authority", "--lib", "--no-run")
+    )
+    listing = subprocess.run(
+        [str(executable), "--list", "--ignored"],
+        capture_output=True,
+        text=True,
+        check=False,
+    ).stdout
+    require_crash_children(listing)
+    base = APPROVAL_CRASH_EVIDENCE_DIR / "cases"
+    shutil.rmtree(base, ignore_errors=True)
+    records = []
+    for case in APPROVAL_CRASH_CASES:
+        record = run_approval_crash_case(executable, case, base)
+        print(f"APPROVAL-CRASH {json.dumps(record, sort_keys=True)}", flush=True)
+        records.append(record)
+        shutil.rmtree(base / case[0], ignore_errors=True)
+    (APPROVAL_CRASH_EVIDENCE_DIR / "record.json").write_text(
+        json.dumps({"executable": str(executable), "cases": records}, indent=2, sort_keys=True)
+        + "\n",
+        encoding="utf-8",
+    )
+    print(
+        f"approval registry crash evidence: {len(records)} cases, each a real process killed "
+        "at its window by this supervisor and recovered by another"
+    )
+
+
+# M6.2.1: the test-only seams are in no release artifact. The approver set's
+# attachment, the crash children's module, entry points and environment
+# variables, and the pre-M6 host-launch test approval (`with_test_approval`,
+# its thread-local `TEST_APPROVAL`) are compiled only into unit-test builds.
+# The scan reads each release artifact for two kinds of trace: a seam's
+# compiled symbol -- an identifier as both Rust manglings spell it, its length
+# then its bytes, which only object code, bitcode and symbol tables hold -- and
+# a seam's string literal. It never matches a bare name: the release library's
+# metadata records the names of the items a `cfg` removed (rustc keeps them for
+# its diagnostics), with none of their code. Before it may pass, the scan must
+# find every trace in the unit-test executable, and a production symbol and a
+# production literal in the release artifacts it read, so a blind scan -- a
+# stripped file, a wrong file, a changed mangling -- cannot pass for a clean
+# one. Complementary to the record tests, which pin the compilation conditions
+# in the source.
+APPROVAL_TEST_SYMBOLS: tuple[str, ...] = (
+    "attach_approvers",
+    "with_test_approval",
+    "TEST_APPROVAL",
+    "crash_child",
+    "m6_2_1_crash_child",
+    "m6_2_1_recovery_child",
+)
+APPROVAL_TEST_LITERALS: tuple[bytes, ...] = (
+    b"DW_M621_CRASH_CASE",
+    b"DW_M621_RECOVER_CASE",
+    b"DW_M621_DIR",
+    b"DW_M621_READY",
+    APPROVAL_CRASH_CHILD.encode(),
+    APPROVAL_RECOVERY_CHILD.encode(),
+)
+# What a release artifact must show for its scan to count: the registry's
+# compiled code in the release library (a method of the authority's state),
+# and the registry's binding schema in the release daemon (stripped of its
+# symbols, it still holds its literals).
+APPROVAL_RELEASE_SYMBOL_CONTROL = b"14dwkd_authority5state9Authority"
+APPROVAL_RELEASE_LITERAL_CONTROL = b"direwolf.approval.binding.v1"
+
+
+def _symbol(name: str) -> bytes:
+    """An identifier as legacy and v0 Rust symbol mangling both spell it."""
+    return f"{len(name)}{name}".encode()
+
+
+def approval_test_seams() -> tuple[bytes, ...]:
+    """Every trace the separation scan looks for."""
+    return (*(_symbol(name) for name in APPROVAL_TEST_SYMBOLS), *APPROVAL_TEST_LITERALS)
+
+
+def judge_seam_separation(control: bytes, release: Sequence[tuple[str, bytes]]) -> list[str]:
+    """Every trace in the control, none in a release artifact, and each
+    release-side control in the artifact that must hold it."""
+    seams = approval_test_seams()
+    absent = [seam.decode() for seam in seams if seam not in control]
+    if absent:
+        raise TaskError(f"approval separation: the test build lacks {absent}: the scan is blind")
+    if not release:
+        raise TaskError("approval separation: no release artifact to scan")
+    library = [data for name, data in release if name.endswith(".rlib")]
+    daemon = [data for name, data in release if name == "dwkd-authority"]
+    if not any(APPROVAL_RELEASE_SYMBOL_CONTROL in data for data in library):
+        raise TaskError("approval separation: no release library shows a compiled symbol: blind")
+    if not any(APPROVAL_RELEASE_LITERAL_CONTROL in data for data in daemon):
+        raise TaskError("approval separation: the release daemon shows no registry literal: blind")
+    lines = []
+    for name, data in release:
+        found = [seam.decode() for seam in seams if seam in data]
+        if found:
+            raise TaskError(f"approval separation: {name} holds test-only seams {found}")
+        lines.append(f"{name}: none of {len(seams)} test-only traces")
+    return lines
+
+
+def task_approval_registry_separation() -> None:
+    """M6.2.1: no release artifact holds the approval registry's test-only
+    seams; the unit-test executable, the scan's control, holds every one."""
+    if not sys.platform.startswith("linux"):
+        raise TaskError("NOT EXERCISED: the control is the Linux unit-test build; run it in WSL2")
+    control = select_unit_test_executable(
+        _cargo_json("test", "--locked", "-p", "dwkd-authority", "--lib", "--no-run")
+    )
+    artifacts: list[Path] = []
+    for line in _cargo_json("build", "--locked", "--workspace", "--release"):
+        if not line.startswith("{"):
+            continue
+        message = json.loads(line)
+        if message.get("reason") != "compiler-artifact":
+            continue
+        if message.get("executable"):
+            artifacts.append(Path(message["executable"]))
+        if (message.get("target") or {}).get("name") == "dwkd_authority":
+            artifacts.extend(Path(f) for f in message.get("filenames") or [] if f.endswith(".rlib"))
+    names = {path.name for path in artifacts}
+    for required in ("dwkd-authority", "direwolf"):
+        if required not in names:
+            raise TaskError(f"approval separation: no release `{required}` among {sorted(names)}")
+    release = [(path.name, path.read_bytes()) for path in sorted(set(artifacts))]
+    for line in judge_seam_separation(control.read_bytes(), release):
+        print(line)
+    print(f"approval registry separation: {len(release)} release artifacts, no test-only seam")
 
 
 # M5d.3 (ADR-0052 §7): a sandboxed `process.exec` that consumes a credential.
@@ -17602,6 +18154,8 @@ TASKS = {
     "approval-binding-mutations": task_approval_binding_mutations,
     "approval-registry-mutations": task_approval_registry_mutations,
     "approval-registry-evidence": task_approval_registry_evidence,
+    "approval-registry-crash-evidence": task_approval_registry_crash_evidence,
+    "approval-registry-separation": task_approval_registry_separation,
     "sandbox-neighbour-mutations": task_sandbox_neighbour_mutations,
     "sandbox-secret-evidence": task_sandbox_secret_evidence,
     "sandbox-secret-mutations": task_sandbox_secret_mutations,

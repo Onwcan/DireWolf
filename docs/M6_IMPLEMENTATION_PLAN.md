@@ -208,6 +208,18 @@ its crash windows are in-process hooks on a reopened store, real process
 termination not exercised (the report's §12). ADR-0064's acceptance package
 is the report's §20.
 
+**State (2026-11-27): committed; M6.2.1 evidence built locally.** M6.2 was
+committed as `b8414fd`; CI #227 ([run 45859307449](https://github.com/Onwcan/DireWolf/actions/runs/45859307449)) passed 33 of 33,
+its 27 registry cases each once. M6.2.1 --
+[M6_2_1_SECURITY_EVIDENCE.md](M6_2_1_SECURITY_EVIDENCE.md) -- closes the three
+evidence lines M6.2 left open, locally: 34 crash windows with real process
+termination (an external supervisor kills the unit-test executable's child
+with SIGKILL at each and another process recovers its files), the
+thirteen binding members' drift, every unsupported scope and every A2 class
+on its real route, the release build's separation from every test seam, and
+54 of 54 mutants killed. It adds no authority; ADR-0080 and ADR-0064 stay
+Proposed. Its hosted run is pending.
+
 ### M6.3 -- the approver endpoint's operations and the trusted client
 
 | | |
@@ -309,7 +321,7 @@ and M6.4 and M6.6 gain their A2 exits.
 | Phase | Required hosted evidence |
 |---|---|
 | M6.1 | `make test` on three platforms with the binding's property and vector tests |
-| M6.2 | the registry's concurrency and crash tests in `make test`; the burn's mutation review recorded |
+| M6.2 | the registry's concurrency and crash tests in `make test`; the burn's mutation review recorded; M6.2.1: `make approval-registry-crash-evidence` (real process termination) and `make approval-registry-separation` |
 | M6.3 | the three-identity approver suite in `authority boundary`, extended to every operation and refusal |
 | M6.4 | grant creation, use, expiry and revocation in `make test`; the DWKP refusal in `authority boundary` |
 | M6.5 | the ledger's property and concurrency tests in `make test` |
@@ -331,8 +343,9 @@ and M6.4 and M6.6 gain their A2 exits.
 
 ## 10. Next engineering task
 
-**M6.2's closeout.** M6.2 is built ([M6_2_IMPLEMENTATION.md](M6_2_IMPLEMENTATION.md)):
-its commits and their hosted run, then the owner's decisions on ADR-0080
-and ADR-0064 (the report's §14). M6.3 -- the approver endpoint's operations
-and the trusted client -- starts only after that closeout; nothing in M6.2
-is approvable before it.
+**M6.2's closeout.** M6.2 is committed (`b8414fd`, CI #227 green) and
+M6.2.1's evidence is built ([M6_2_1_SECURITY_EVIDENCE.md](M6_2_1_SECURITY_EVIDENCE.md)): M6.2.1's
+commits and their hosted run, then the owner's decisions on ADR-0080 and
+ADR-0064 ([M6_2_IMPLEMENTATION.md](M6_2_IMPLEMENTATION.md) §20; M6.2.1's §17). M6.3 -- the
+approver endpoint's operations and the trusted client -- starts only after
+that closeout; nothing in M6.2 is approvable before it.

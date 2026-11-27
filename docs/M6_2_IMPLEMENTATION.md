@@ -251,6 +251,16 @@ transaction and audit-outbox mechanism every registry transaction uses:
 `a_real_process_killed_in_each_audit_window_recovers` (an admission aborted
 in windows B to F). A power loss is not simulated by either.
 
+**Follow-up (2026-11-27, M6.2.1).** Real process termination is now
+exercised for the registry, from outside the authority: an external
+supervisor (`make approval-registry-crash-evidence`) runs the library's
+unit-test executable as a child, kills it with SIGKILL at each of 34
+windows -- this table's, the decisions', the expiry's, and a migrating
+start's -- and recovers the files it left in another process. TX010, TX006
+and the shipped build's lack of an approver set are unchanged. The design,
+the matrix and its results are [M6_2_1_SECURITY_EVIDENCE.md](M6_2_1_SECURITY_EVIDENCE.md) §§3-7; the
+paragraph above is kept as M6.2 found it.
+
 This is exactly-once *consumption* -- a property of one database transaction.
 It is not exactly-once execution: a workload interrupted after its start is
 `UNKNOWN` under the existing contract, never retried and never refunded.
@@ -449,6 +459,13 @@ run by their tasks, and platform guards. NOT EXERCISED: real process
 termination for the registry (§12), and every hosted run. `Cargo.lock`,
 dependency pins, deny rules and the authority's allowlists are unchanged.
 
+**Follow-up (2026-11-27).** M6.2 was committed as `b8414fd`; CI #227
+([run 45859307449](https://github.com/Onwcan/DireWolf/actions/runs/45859307449)) passed 33 of 33 job records, its `authority boundary`
+job printing each of the 27 cases once. M6.2.1's evidence -- the
+real-process crash matrix, the release build's separation scan, seven more
+route cases -- is [M6_2_1_SECURITY_EVIDENCE.md](M6_2_1_SECURITY_EVIDENCE.md); its hosted run is pending.
+What follows is the paragraph as written before that commit.
+
 Hosted: none yet -- this change is not committed. Its first hosted run carries `make test` (the route tests on
 Linux; the unit and schema tests on Linux, macOS and Windows) and the new
 `make approval-registry-evidence` step in the `authority-transport` job,
@@ -518,6 +535,9 @@ changes with it; and the documents that say Proposed
 (`F02_AUTHORITY_CONCURRENCY.md`, the M6 plan, this report).
 
 ## 21. M6.3 entry prerequisites
+
+(2026-11-27: item 1 is met for M6.2 at `b8414fd`, CI #227; M6.2.1's own
+commits and hosted run join it -- [M6_2_1_SECURITY_EVIDENCE.md](M6_2_1_SECURITY_EVIDENCE.md) §17.)
 
 1. M6.2's commits on `main`, and their hosted run green -- the route tests
    and `make approval-registry-evidence` among it.
