@@ -127,6 +127,8 @@ pub use crate::policy::ConfigFlags;
 pub use admission::{Admission, Grant, Withheld, WithheldCause, request_digest};
 pub use adoption::Adoption;
 pub use anchors::HostAnchors;
+#[cfg(unix)]
+pub(crate) use approvals::{ApproverPrincipal, ApproverSet};
 pub use audit::{
     AUDIT_FORMAT_VERSION, AuditEvent, AuditLogFault, AuditLogSummary, AuditRecord,
     MAX_RECORD_BYTES, RecordFault, StoreAuditFault, StoreComparison, read_audit_log,
@@ -351,8 +353,8 @@ impl<T> Reply<T> {
     }
 }
 
-/// What may be attached once to a started authority -- by an evidence
-/// harness or a test -- and that no production start-up path attaches.
+/// What may be attached once to a started authority, and by whom: each is
+/// set at most once, and nothing replaces it while the authority runs.
 #[derive(Default)]
 struct Attachments {
     /// Addresses the authority's own guard lets through although blocked:
@@ -361,8 +363,11 @@ struct Attachments {
     /// it, so in production the guard has no exception (ADR-0050 §6).
     net_exceptions: OnceLock<Vec<dwk_proto::wire::guard::Address>>,
     /// The approvers an approval may be decided by and spent under (M6.2,
-    /// ADR-0080). Attached by tests alone in this build: in production it
-    /// is empty, so no approval is decided or spent before M6.3.
+    /// ADR-0080): attached once, at start, by the server's start-up from the
+    /// operator's `--approver-uid` (M6.3, ADR-0081,
+    /// `Authority::attach_approver_set`) -- the one production path that
+    /// attaches anything here -- or by a test. Unset, no approval is decided
+    /// or spent.
     approvers: OnceLock<Vec<u32>>,
 }
 
@@ -393,8 +398,7 @@ struct Shared {
     sandbox: OnceLock<crate::sandbox::SandboxConfig>,
     /// Each run's `net.http` budgets (M5c).
     net_budget: NetBudget,
-    /// What may be attached once to a started authority, and no production
-    /// start-up path attaches ([`Attachments`]).
+    /// What may be attached once to a started authority ([`Attachments`]).
     attachments: Attachments,
     /// F-02 (ADR-0064, Proposed): every handle's effects and every end of
     /// authority, ordered ([`gate`]).

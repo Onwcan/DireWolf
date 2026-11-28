@@ -274,6 +274,7 @@ fn secret_fixture_in(
         session: SessionId::from_uuid(uuid(1)).unwrap(),
         epoch: Epoch::new(1).unwrap(),
         config,
+        runtime: 1000,
     };
     fx.start(hook);
     *fx.fake.store.lock().unwrap() = Some(fx.state().join("kernel.db"));

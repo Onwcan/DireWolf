@@ -248,6 +248,20 @@ not enabled, and nothing is approvable before M6.3. The closeout is
 | Exit | an A1 class approvable and spent once; every A2 class still `DENY` |
 | Forbidden | any A2 class approvable without a verified factor; a remote channel; a terminal descriptor |
 
+**State (2026-11-28): built locally, not committed; hosted evidence pending.**
+[ADR-0081](adr/0081-the-approver-endpoints-operations-and-the-trusted-approver-client.md) is the record
+(Proposed); [M6_3_IMPLEMENTATION.md](M6_3_IMPLEMENTATION.md) is the report.
+The approver endpoint answers one bounded `approver.list`, `approver.show` or
+`approver.decide` per connection, after the kernel's judgement and through
+the authority's worker; the start-up attaches the operator's set once; a
+decision names its request id -- the challenge, no separate nonce, schema 15
+unchanged -- and echoes the binding hash; `direwolf approve` renders the
+authority's record escaped and whole and decides only on a typed line. A
+sandboxed `process.exec` under `exact_action` is approvable at A1 and spent
+once; every A2 class still denies. TX065 has its successor; TX069-TX071 hold
+the new production seams. No revocation operation (ADR-0081 OD-4). The
+genuine-identity and real-OCI evidence runs hosted only.
+
 ADR-0078 OD-3 keeps the presence factor out of M6. If a later decision brings
 it in, **M6.3b** is its own checkpoint here: the factor's ADR and dependency
 review, its verification in the authority over the binding hash and nonce,
@@ -316,7 +330,7 @@ the owner's.
 | secrets | `secret/metadata.rs` (`SecretHandle`), `secret_revision` | credential handles in the binding |
 | existing bounds | `state/net_http` (`NetBudget`), process stream limits, the sandbox's byte budgets | budget consumers |
 | canonical JSON | `dwk-proto/src/json/jcs.rs` | the binding's encoding |
-| the client | `crates/direwolf-cli` (`doctor`, `models` today) | `direwolf approve` |
+| the client | `crates/direwolf-cli` (`doctor`, `models`; `approve` since M6.3) | `direwolf approve` |
 
 ## 7. A1, A2, and what M6 delivers
 
@@ -355,18 +369,13 @@ and M6.4 and M6.6 gain their A2 exits.
 
 ## 10. Next engineering task
 
-**M6.3 -- the trusted approver endpoint and client. Not started.** M6.2 is
-complete ([M6_2_IMPLEMENTATION.md](M6_2_IMPLEMENTATION.md) §22). M6.3 starts once the two
-acceptance changes of 2026-11-27 -- ADR-0064, and ADR-0080's OD-1 to OD-6
--- are committed and their hosted CI is green. Its first step is its own
-record replacing TX065 under an explicitly justified contract; then the
-phase in §5: the approver endpoint's list, show and decide operations, the
-trusted `direwolf approve` client, the decision and revocation seams'
-first production callers, the approver set from the operator's
-configuration, the request rendered from canonical data with its request
-id and nonce verified, agent prose kept apart from it and labelled,
-terminal control, ANSI and bidi characters stripped, rendering bounded and
-truncation shown, three-identity adversarial evidence, A1 approval
-evidence, and every A2 class still refused. Nothing of it exists today:
-no approver frame, client command, production approver set or decision
-path.
+**M6.3 -- the trusted approver endpoint and client. Built locally
+(2026-11-28); its hosted evidence and formal closeout are pending.** M6.2's
+closeout was committed as `f9ce26a`, CI #229 green. M6.3 is
+[M6_3_IMPLEMENTATION.md](M6_3_IMPLEMENTATION.md) and
+[ADR-0081](adr/0081-the-approver-endpoints-operations-and-the-trusted-approver-client.md)
+(Proposed). Its closeout needs the owner's commit, a hosted run with
+`approver-operations-evidence` (four identities) and
+`approver-production-evidence` (real OCI) green, and ADR-0081's decisions
+accepted. **M6.4 -- standing grants -- is not started** and starts only
+after that closeout (§5).

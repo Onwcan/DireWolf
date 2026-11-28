@@ -2,8 +2,11 @@
 
 **The approver is never the runtime.** The approver endpoint is a socket of
 its own for the uids the operator names; none is a DWKP peer, the broker or
-the authority, and no `serve` flag overrides that. It holds no approval
-operation before M6: it reads, answers and dispatches nothing (TX065).
+the authority, and no `serve` flag overrides that. Before M6.3 it held no
+approval operation; since M6.3 (ADR-0081, Proposed) it judges a peer by the
+kernel's report before reading a byte and then reaches the approver
+protocol alone -- no dispatch, no subject, no decision seam of its own
+(TX065's successor).
 
 **The runtime's endpoint is unchanged.** TX061 and TX063 still cover the whole
 server directory with no exemption, every runtime admission is `api`, and
@@ -81,33 +84,43 @@ def test_the_runtime_endpoint_rules_still_cover_the_whole_server() -> None:
         "crates/dwkd-authority/src/state/schema.rs",
         "crates/dwkd-authority/src/state/approval_route_tests.rs",
     ]
-    tx065 = _rule("TX065-the-approver-endpoint-holds-no-operation-before-m6")
+    tx065 = _rule("TX065-the-approver-endpoint-reaches-only-the-approver-protocol")
     assert tx065["paths"] == ["crates/dwkd-authority/src/server/approver.rs"]
     assert tx065["exempt_paths"] == []
 
 
-def test_the_endpoint_holds_no_operation() -> None:
-    # TX065's statement, read off the module's code (its comments and its
-    # tests aside); the module's own Rust test says the same.
+def test_the_endpoint_reaches_only_the_approver_protocol() -> None:
+    # TX065's successor (M6.3, ADR-0081), read off the module's code (its
+    # comments and its tests aside); the module's own Rust test says the
+    # same. Before M6.3 this test forbade any read, write or decode: the
+    # endpoint held no operation at all.
     source = _read(SERVER / "approver.rs")
-    code = source[: source.index("#[cfg(test)]")]
+    code = source[: source.index("#[cfg(all(test")]
     lines = [line for line in code.splitlines() if not line.lstrip().startswith("//")]
     text = "\n".join(lines)
     assert "fn accept(" in text
     for token in (
-        "std::io::Read",
-        "std::io::Write",
-        ".read(",
-        ".write",
         "dispatch",
         ".connect(",
         "unix_uid",
         "AuthenticatedSubject",
         "CallerContext",
-        "decode",
+        "LeaseHolder",
         "connection::",
+        "dwkp::",
+        "decide_approval",
+        "revoke_approval",
+        "attach_approver",
+        "Assurance::",
+        "recvmsg",
+        "SCM_RIGHTS",
     ):
         assert token not in text, f"the approver endpoint spells {token}"
+    # The kernel's judgement precedes the one read; the request is bounded
+    # from its header; the approver is the kernel's uid.
+    assert text.index("authenticate(policy, credentials)") < text.index("serve(stream, context")
+    assert "FrameDecoder::bounded(approverp::MAX_REQUEST_BODY)" in text
+    assert "ApproverPrincipal::kernel_reported(self.uid)" in text
 
 
 def test_a_standing_grant_has_one_value_and_a_runtime_admission_one_origin() -> None:
@@ -132,7 +145,7 @@ def test_no_serve_flag_lets_an_approver_share_an_identity() -> None:
     overrides = {flag for flag in usage_flags if flag.startswith("--allow") and "approv" in flag}
     assert not overrides, overrides
     assert "never a DWKP peer's, the broker's or the authority's" in usage
-    assert "no approval operation before M6" in usage
+    assert "lists, shows and decides approval requests there, at A1" in usage
 
 
 def test_adr_0067_and_adr_0063_are_accepted_with_their_record() -> None:

@@ -63,11 +63,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, sync_channel};
 use std::time::{Duration, Instant};
 
+use dwk_proto::approverp;
 use dwk_proto::dwkp::{DwkpBody, DwkpMessage};
 
 use crate::state::{
-    AuthenticatedSubject, Authority, AuthorityError, CallerContext, Dispatched, MAX_PARKED, Parked,
-    PoisonReason, TransportClass, TransportEvent,
+    ApproverPrincipal, AuthenticatedSubject, Authority, AuthorityError, CallerContext, Dispatched,
+    MAX_PARKED, Parked, PoisonReason, TransportClass, TransportEvent,
 };
 
 /// Most jobs the worker's queue holds before a sender waits.
@@ -97,6 +98,15 @@ enum Job {
         reply: SyncSender<Result<DwkpBody, Failure>>,
     },
     Audit(TransportEvent),
+    /// One approver-protocol request (M6.3, ADR-0081), from a connection the
+    /// approver endpoint authenticated: answered by the registry in one short
+    /// transaction, like any other job. No human is waited for here -- the
+    /// approver reads and decides between connections.
+    Approver {
+        approver: ApproverPrincipal,
+        request: Box<approverp::Request>,
+        reply: SyncSender<Option<approverp::Response>>,
+    },
     /// In-process work on the authority, between requests: the evidence
     /// harness's own operations ([`super::Served::operate`]). No peer sends
     /// one.
@@ -159,6 +169,7 @@ impl fmt::Debug for Job {
             Self::Connect { .. } => "Connect",
             Self::Dispatch { .. } => "Dispatch",
             Self::Audit(_) => "Audit",
+            Self::Approver { .. } => "Approver",
             Self::Operate(_) => "Operate",
         })
     }
@@ -188,6 +199,25 @@ impl WorkerHandle {
             })
             .map_err(|_| Failure::Stopped)?;
         answer.recv().unwrap_or(Err(Failure::Stopped))
+    }
+
+    /// Answer one approver-protocol request for `approver` (M6.3). `None` if
+    /// the authority could not answer truthfully, or has stopped: the
+    /// connection is closed unanswered, and nothing was decided.
+    pub(crate) fn approver(
+        &self,
+        approver: ApproverPrincipal,
+        request: approverp::Request,
+    ) -> Option<approverp::Response> {
+        let (reply, answer) = sync_channel(1);
+        self.jobs
+            .send(Job::Approver {
+                approver,
+                request: Box::new(request),
+                reply,
+            })
+            .ok()?;
+        answer.recv().ok().flatten()
     }
 
     /// Run `work` on the authority between requests, and return what it
@@ -376,6 +406,20 @@ impl Worker {
                     if admission.write {
                         self.record(&event);
                     }
+                }
+                Ok(Job::Approver {
+                    approver,
+                    request,
+                    reply,
+                }) => {
+                    let answer = match self.authority.serve_approver(approver, &request) {
+                        Ok(response) => Some(response),
+                        Err(error) => {
+                            let _ = self.failure(&error);
+                            None
+                        }
+                    };
+                    let _ = reply.send(answer);
                 }
                 Ok(Job::Operate(work)) => work(&mut self.authority),
                 Err(RecvTimeoutError::Timeout) => {}

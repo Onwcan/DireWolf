@@ -196,8 +196,7 @@ keyring or an age file; provisioning a keyring entry is in
 ### The approver endpoint
 
 `--approver-socket <PATH>` with `--approver-uid <UID>` opens the human
-approver's endpoint, identity boundary only: no approval operation exists
-before M6
+approver's endpoint
 ([F18_APPROVER_IDENTITY.md](F18_APPROVER_IDENTITY.md),
 [ADR-0067](adr/0067-f18-approver-endpoint-identity-boundary.md), accepted).
 An approver uid is a principal, not a person: give it an account of its own
@@ -205,6 +204,27 @@ that no agent, automation or runtime runs as, or a decision made under it is
 not a human's
 ([ADR-0077](adr/0077-the-approval-channel-is-the-approver-endpoint-and-an-approver-uid-is-a-principal-not-a-person.md),
 accepted).
+
+Since M6.3 ([ADR-0081](adr/0081-the-approver-endpoints-operations-and-the-trusted-approver-client.md),
+Proposed; [M6_3_IMPLEMENTATION.md](M6_3_IMPLEMENTATION.md)) the endpoint
+answers the trusted approver client, run as that approver uid:
+
+```sh
+direwolf approve list   --socket /run/dw-approve/approver.sock
+direwolf approve show   --socket /run/dw-approve/approver.sock <REQUEST_ID>
+direwolf approve review --socket /run/dw-approve/approver.sock <REQUEST_ID>
+```
+
+`review` needs an interactive terminal; it shows the authority's record of
+the request -- every bound member, escaped -- and decides only on the typed
+line `approve <code>` (the code it prints: the first eight characters of the
+binding hash) or `deny`. Anything else decides nothing; the request then ends
+`EXPIRED` at its window. An approval is A1 and covers the sandboxed
+`process.exec` under an `exact_action` rule only; every A2 class -- the host
+environment, a credential, `fs.delete`, a standing grant -- still denies. If
+`review` reports an unknown outcome, `show` reads back what was recorded. The
+set changes only with a restart; there is no revocation command yet
+(ADR-0081 OD-4).
 
 ## 5. What the daemons say
 
@@ -302,8 +322,10 @@ rule `operator-egress-ceiling`.
 - An init command, layered configuration and a configuration validator
   ([PRODUCT_SPEC.md](PRODUCT_SPEC.md) §§6a, 7): the operator creates the
   identities, writes the files and passes the flags above.
-- The agent runtime and its command line (M8-M17); approvals and budgets
-  (M6); model providers and model egress (M7); host execution (M6).
+- The agent runtime and its command line (M8-M17); approvals beyond M6.3's
+  A1 sandboxed `process.exec` -- standing grants (M6.4), a presence factor
+  (none in M6), revocation by an approver (ADR-0081 OD-4) -- and budgets
+  (M6.5); model providers and model egress (M7); host execution (M6.6).
 - Model search and download (ADR-0072 OM-2, after M7).
 - Per-environment uid remapping (F-05, blocked on the runtime); the broker's
   posture in the authority's record (protocol 13, deferred); Landlock (with

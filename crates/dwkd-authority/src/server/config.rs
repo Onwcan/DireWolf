@@ -135,7 +135,7 @@ pub struct BrokerConfig {
     pub shared_uid_permitted: bool,
 }
 
-/// The approver endpoint (F-18 Phase 3.4, [ADR-0067], Proposed): a second
+/// The approver endpoint (F-18 Phase 3.4, [ADR-0067], accepted): a second
 /// socket, apart from the runtime's DWKP socket, and the closed set of uids
 /// the kernel must report for a peer to be an approver there.
 ///
@@ -146,11 +146,14 @@ pub struct BrokerConfig {
 /// uid: a runtime that is also an approver can approve its own requests,
 /// and that is the one thing this endpoint exists to prevent.
 ///
-/// The endpoint holds **no approval operation** until M6's approval
-/// registry exists: a peer it authenticates is recorded and closed, nothing
-/// it sends is read, and every `REQUIRE_APPROVAL` still denies.
+/// Since M6.3 ([ADR-0081], Proposed) an approver it authenticates may send
+/// one request per connection -- list the waiting approval requests, show
+/// one, approve or deny one at A1 -- and this set is the one the registry is
+/// attached at start: what the endpoint admits is what a decision and a
+/// spend recognise. It changes only with a restart.
 ///
 /// [ADR-0067]: ../../../../../docs/adr/0067-f18-approver-endpoint-identity-boundary.md
+/// [ADR-0081]: ../../../../../docs/adr/0081-the-approver-endpoints-operations-and-the-trusted-approver-client.md
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApproverConfig {
     /// The approver endpoint's socket. Absolute, and never the DWKP socket.
@@ -262,7 +265,7 @@ pub const SERVE_USAGE: &str = "    \
     --sandbox-config <PATH>    the operator's execution environment (absolute; needs a broker)
     --allow-dumpable           leave the process dumpable, its memory readable by its uid (development only)
     --path-anchor <NAME>=<DIR> what a policy anchor stands for on the host: home|direwolf-home|direwolf-config|direwolf-install; repeat
-    --approver-socket <PATH>   absolute path of the approver endpoint's socket (with --approver-uid; no approval operation before M6)
+    --approver-socket <PATH>   absolute path of the approver endpoint's socket (with --approver-uid): `direwolf approve` lists, shows and decides approval requests there, at A1
     --approver-uid <UID>       a uid that may connect to the approver endpoint; repeat; never a DWKP peer's, the broker's or the authority's
     --egress-allowlist <PATH>  the operator's exact network destinations (absolute): the ceiling every policy is under; without it no network action is allowed
 ";

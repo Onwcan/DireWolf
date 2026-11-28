@@ -114,6 +114,7 @@ def usage_texts(read: Callable[[str], str] = _read) -> dict[str, str]:
     return {
         "direwolf": rust_const(read("crates/direwolf-cli/src/main.rs"), "USAGE"),
         "direwolf models": rust_const(read("crates/direwolf-cli/src/models/mod.rs"), "USAGE"),
+        "direwolf approve": rust_const(read("crates/direwolf-cli/src/approve/mod.rs"), "USAGE"),
         "dwkd-authority": authority.replace("{SERVE_USAGE}", serve).replace(
             "{NAME}", "dwkd-authority"
         ),
@@ -141,6 +142,9 @@ def surface(usages: Mapping[str, str], cli_source: str) -> Surface:
         "direwolf": cli,
         "direwolf models": frozenset(
             re.findall(r"^\s*direwolf models ([a-z]+)", usages["direwolf models"], re.M)
+        ),
+        "direwolf approve": frozenset(
+            re.findall(r"^\s*direwolf approve ([a-z]+)", usages["direwolf approve"], re.M)
         ),
         "dwkd-authority": frozenset(
             re.findall(r"^\s*dwkd-authority ([a-z][a-z-]*)", usages["dwkd-authority"], re.M)
@@ -215,8 +219,8 @@ def stale_commands(docs: Mapping[str, str], shape: Surface) -> list[str]:
                     if tokens[0] not in shape.commands[binary]:
                         findings.append(f"{rel}:{line}: `{binary} {tokens[0]}` does not exist")
                         continue
-                    if binary == "direwolf" and tokens[0] == "models":
-                        scope = "direwolf models"
+                    if binary == "direwolf" and tokens[0] in ("models", "approve"):
+                        scope = f"direwolf {tokens[0]}"
                         rest = tokens[1:]
                         if rest and _WORD.match(rest[0]) and rest[0] not in shape.commands[scope]:
                             findings.append(f"{rel}:{line}: `{scope} {rest[0]}` does not exist")
@@ -511,7 +515,7 @@ def _docs(names: Iterable[str] = AS_BUILT_DOCS) -> dict[str, str]:
 def test_the_usage_texts_are_read_from_source_and_agree_with_dispatch() -> None:
     usages = usage_texts()
     shape = the_surface()
-    assert shape.commands["direwolf"] == {"doctor", "models", "help", "version"}
+    assert shape.commands["direwolf"] == {"approve", "doctor", "models", "help", "version"}
     listed = set(re.findall(r"^    ([a-z]+)\s{2,}", usages["direwolf"], re.M))
     assert listed == shape.commands["direwolf"] - {"help", "version"}, listed
     assert shape.commands["direwolf models"] == {
@@ -534,6 +538,8 @@ def test_the_usage_texts_are_read_from_source_and_agree_with_dispatch() -> None:
     for flag in ("--authority-uid", "--require-lsm", "--allow-evidence-trust"):
         assert flag in shape.flags["dwkd-broker"], flag
     assert "--library" in shape.flags["direwolf models"]
+    assert shape.commands["direwolf approve"] == {"list", "show", "review"}
+    assert "--socket" in shape.flags["direwolf approve"]
 
 
 def test_every_command_and_flag_an_as_built_document_shows_exists() -> None:
@@ -598,6 +604,8 @@ def test_a_command_or_flag_that_does_not_exist_is_found() -> None:
             "`dwkd-authority serve --allow-everything`",
         ),
         ("direwolf models verify --library", "direwolf models fetch --library"),
+        ("direwolf approve review --socket", "direwolf approve grant --socket"),
+        ("direwolf approve list   --socket", "direwolf approve list   --yes"),
         ("dwkd-broker serve --socket /run", "dwkd-broker start --socket /run"),
         (
             "  --egress-allowlist /etc/direwolf/egress.toml \\",
@@ -633,10 +641,12 @@ def test_a_readme_that_forgets_a_cli_command_is_found() -> None:
     # The README as it read before F-13: it named `doctor` alone.
     readme = _broken(
         _read("README.md"),
-        "`direwolf` supports `--version`, `doctor` and `models`.\n",
+        "`direwolf` supports `--version`, `doctor`, `models` and `approve`.\n",
         "`direwolf` supports `--version` and `doctor`.\n",
     )
-    assert any("without `models`" in f for f in cli_commands_unnamed(readme, the_surface()))
+    findings = cli_commands_unnamed(readme, the_surface())
+    assert any("without `models`" in f for f in findings)
+    assert any("without `approve`" in f for f in findings)
 
 
 def test_a_readme_milestone_that_disagrees_with_the_roadmap_is_found() -> None:

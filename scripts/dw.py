@@ -848,7 +848,9 @@ FOREIGN_CASES = (
 APPROVER_TESTS = ("linux::an_approver_is_its_own_identity_and_a_runtime_is_never_one",)
 APPROVER_CASES = (
     "cross-uid-runtime-refused",
-    "cross-uid-approver-authenticated-holds-nothing",
+    # M6.3 (ADR-0081): authenticated and admitted to one approver-protocol
+    # request; before M6.3, "authenticated, holds nothing" -- closed unread.
+    "cross-uid-approver-authenticated-and-admitted",
     "cross-uid-approver-not-a-runtime",
     "cross-uid-runtime-served-at-its-own-door",
     "cross-uid-authority-refused",
@@ -9098,8 +9100,8 @@ APPROVER_MUTATIONS = (
     (
         "P2: a refusal names a configured approver, not the kernel's uid",
         _P34_APPROVER,
-        "        TransportEvent::ApproverRefused {\n            uid: credentials.uid,\n",
-        "        TransportEvent::ApproverRefused {\n"
+        "        Err(TransportEvent::ApproverRefused {\n            uid: credentials.uid,\n",
+        "        Err(TransportEvent::ApproverRefused {\n"
         "            uid: policy.uids().first().copied().unwrap_or(0),\n",
     ),
     (
@@ -9133,35 +9135,37 @@ APPROVER_MUTATIONS = (
         "    if resolved.as_deref() == Some(dwkp.path()) {\n",
         "    if resolved.as_deref() == Some(dwkp.path()) && resolved.is_none() {\n",
     ),
+    # P8-P11 restated for M6.3 (ADR-0081): the endpoint now reads and answers
+    # an approver by design, so the property is the one before authentication
+    # -- a refused peer recorded, never read, never answered -- and an
+    # admitted approver never recorded as an approval.
     (
         "P8: a refused peer is not recorded",
         _P34_APPROVER,
-        "        record(judge(policy, credentials));\n",
-        "        let verdict = judge(policy, credentials);\n"
-        "        if matches!(verdict, TransportEvent::ApproverAuthenticated { .. }) {\n"
-        "            record(verdict);\n"
-        "        }\n",
+        "            Err(refused) => {\n                approvals.record(refused);\n",
+        "            Err(refused) => {\n                let _ = refused;\n",
     ),
     (
-        "P9: the endpoint reads what a peer sends",
+        "P9: the endpoint reads what a refused peer sends",
         _P34_APPROVER,
-        "        drop(stream);\n    }\n}\n",
-        "        let mut sink = [0u8; 1];\n"
-        "        let _ = std::io::Read::read(&mut &stream, &mut sink);\n"
-        "        drop(stream);\n    }\n}\n",
+        "                approvals.record(refused);\n                drop(stream);\n",
+        "                approvals.record(refused);\n"
+        "                let _ = std::io::Read::read(&mut &stream, &mut [0u8; 4096]);\n"
+        "                drop(stream);\n",
     ),
     (
-        "P10: the endpoint answers a peer",
+        "P10: the endpoint answers a refused peer",
         _P34_APPROVER,
-        "        drop(stream);\n    }\n}\n",
-        '        let _ = std::io::Write::write_all(&mut &stream, b"approved");\n'
-        "        drop(stream);\n    }\n}\n",
+        "                approvals.record(refused);\n                drop(stream);\n",
+        "                approvals.record(refused);\n"
+        '                let _ = std::io::Write::write_all(&mut &stream, b"approved");\n'
+        "                drop(stream);\n",
     ),
     (
         "P11: an authenticated approver is recorded as an approval",
         _P34_TRANSPORT,
-        '                        .text("reason", "no_approval_operation"),\n',
-        '                        .text("reason", "approved"),\n',
+        '                            .text("outcome", "admitted")\n',
+        '                            .text("outcome", "approved")\n',
     ),
     (
         "P12: a runtime's admission is attended",
@@ -11191,6 +11195,12 @@ APPROVAL_CRASH_CASES: tuple[tuple[str, str, str, bool], ...] = (
     ("migration-after-schema", "migration", "z", False),
     ("migration-before-commit", "migration", "H", False),
     ("migration-after-commit", "migration", "I", True),
+    # M6.3 (ADR-0081): the approver endpoint's decision -- the echoed
+    # binding checked, then the state machine -- committed or not.
+    ("endpoint-grant-before-commit", "endpoint-grant", "B", False),
+    ("endpoint-grant-after-commit", "endpoint-grant", "C", True),
+    ("endpoint-deny-before-commit", "endpoint-deny", "B", False),
+    ("endpoint-deny-after-commit", "endpoint-deny", "C", True),
 )
 
 
@@ -11208,6 +11218,8 @@ def approval_crash_expected(case: tuple[str, str, str, bool]) -> dict[str, objec
         "revoke": (1, 1, 0, 0),
         "expiry": (1 + d, 1, 0, 0),
         "migration": (0, 0, 0, 0),
+        "endpoint-grant": (1, d, 0, 0),
+        "endpoint-deny": (1, 0, 0, 0),
     }[scenario]
     return {
         "suite": APPROVAL_CRASH_SUITE,
@@ -11458,6 +11470,13 @@ def task_approval_registry_crash_evidence() -> None:
 # stripped file, a wrong file, a changed mangling -- cannot pass for a clean
 # one. Complementary to the record tests, which pin the compilation conditions
 # in the source.
+#
+# M6.3 (ADR-0081 §18) adds production approval code -- the start-up's
+# `attach_approver_set`, the registry's `serve_approver`, the endpoint -- which
+# belongs in the release build and is not listed; its in-process endpoint for
+# the route tests (`server::testing::approver_endpoint`) is test-only and is.
+# The approver protocol is a release-side control in both daemons' binaries:
+# the authority's endpoint and the trusted client must each speak it.
 APPROVAL_TEST_SYMBOLS: tuple[str, ...] = (
     "attach_approvers",
     "with_test_approval",
@@ -11465,6 +11484,7 @@ APPROVAL_TEST_SYMBOLS: tuple[str, ...] = (
     "crash_child",
     "m6_2_1_crash_child",
     "m6_2_1_recovery_child",
+    "approver_endpoint",
 )
 APPROVAL_TEST_LITERALS: tuple[bytes, ...] = (
     b"DW_M621_CRASH_CASE",
@@ -11480,6 +11500,7 @@ APPROVAL_TEST_LITERALS: tuple[bytes, ...] = (
 # symbols, it still holds its literals).
 APPROVAL_RELEASE_SYMBOL_CONTROL = b"14dwkd_authority5state9Authority"
 APPROVAL_RELEASE_LITERAL_CONTROL = b"direwolf.approval.binding.v1"
+APPROVER_RELEASE_LITERAL_CONTROL = b"approver.decide"
 
 
 def _symbol(name: str) -> bytes:
@@ -11507,6 +11528,14 @@ def judge_seam_separation(control: bytes, release: Sequence[tuple[str, bytes]]) 
         raise TaskError("approval separation: no release library shows a compiled symbol: blind")
     if not any(APPROVAL_RELEASE_LITERAL_CONTROL in data for data in daemon):
         raise TaskError("approval separation: the release daemon shows no registry literal: blind")
+    for speaker in ("dwkd-authority", "direwolf"):
+        if not any(
+            APPROVER_RELEASE_LITERAL_CONTROL in data for name, data in release if name == speaker
+        ):
+            raise TaskError(
+                f"approval separation: the release {speaker} does not speak the approver "
+                "protocol: blind"
+            )
     lines = []
     for name, data in release:
         found = [seam.decode() for seam in seams if seam in data]
@@ -11543,6 +11572,690 @@ def task_approval_registry_separation() -> None:
     for line in judge_seam_separation(control.read_bytes(), release):
         print(line)
     print(f"approval registry separation: {len(release)} release artifacts, no test-only seam")
+
+
+# M6.3 (ADR-0081, Proposed): the approver endpoint's operations. The
+# registry-level route tests print one APPROVER-EVIDENCE line per case after
+# its assertions, with its level: `component` (the registry's operation on a
+# real authority and store) or `end-to-end-fake-broker` (through the real
+# endpoint and worker on a real socket, or a launch spent through the real
+# route, the route tests' fake broker running nothing). Each must be reported
+# once, at its level -- a component case labelled end-to-end fails the task.
+APPROVER_OPERATIONS_PREFIX = "APPROVER-EVIDENCE "
+APPROVER_OPERATIONS_SUITE = "authority-approver-operations"
+APPROVER_OPERATIONS_CASES: dict[str, str] = {
+    "list-waiting-only-read-only": "component",
+    "list-excludes-ended-run": "component",
+    "show-canonical-binding": "component",
+    "decision-binding-mismatch-refused": "component",
+    "decision-a1-recorded": "component",
+    "replayed-approval-refused": "component",
+    "replayed-denial-refused": "component",
+    "decision-after-expiry-refused": "component",
+    "decision-after-run-end-refused": "component",
+    "self-approval-refused": "component",
+    "unknown-approver-refused": "component",
+    "removed-approver-refused": "component",
+    "fatigue-denials-not-asked-again": "component",
+    "fatigue-expiry-not-counted": "component",
+    "concurrent-decisions-one-recorded": "component",
+    "endpoint-approval-spent-once": "end-to-end-fake-broker",
+    "exhausted-approval-not-reused": "end-to-end-fake-broker",
+    "changed-action-not-approved": "end-to-end-fake-broker",
+    "endpoint-list-show-decide": "end-to-end-fake-broker",
+    "endpoint-approval-consumed": "end-to-end-fake-broker",
+    "lost-answer-read-back": "end-to-end-fake-broker",
+    "concurrent-endpoint-decisions-one": "end-to-end-fake-broker",
+}
+# The unit suites the task runs by name, and how many tests each must run:
+# the protocol's own, the endpoint's (against a recording registry, on a real
+# socket), the trusted client's.
+APPROVER_UNIT_SUITES: tuple[tuple[str, tuple[str, ...], int], ...] = (
+    (
+        "approver protocol",
+        ("cargo", "test", "--locked", "-p", "dwk-proto", "--lib", "--", "approverp::"),
+        8,
+    ),
+    (
+        "approver endpoint",
+        ("cargo", "test", "--locked", "-p", "dwkd-authority", "--lib", "--", "server::approver::"),
+        9,
+    ),
+    (
+        "trusted client",
+        ("cargo", "test", "--locked", "-p", "direwolf-cli", "--bin", "direwolf", "--", "approve::"),
+        15,
+    ),
+)
+# The hosted half: four genuine identities -- this runner (the authority), the
+# runtime (DW_PEER_AS), the approver (DW_APPROVER_AS) and an unrelated uid
+# (DW_OTHER_AS) -- against the released `serve` and the released trusted
+# client. Every case must be reported contained.
+APPROVER_OPERATIONS_TESTS = (
+    "linux::the_approver_protocol_answers_the_approver_alone_across_identities",
+)
+APPROVER_OPERATIONS_IDENTITY_CASES = (
+    "cross-uid-runtime-cannot-list",
+    "cross-uid-runtime-cannot-show",
+    "cross-uid-runtime-cannot-decide",
+    "cross-uid-other-cannot-list",
+    "cross-uid-other-cannot-show",
+    "cross-uid-other-cannot-decide",
+    "cross-uid-runtime-descriptor-refused",
+    "cross-uid-approver-lists",
+    "cross-uid-approver-reaches-the-registry",
+    "cross-uid-approver-descriptor-not-trusted",
+    "cross-uid-runtime-no-approver-operation-on-dwkp",
+)
+
+
+def require_approver_cases(
+    output: str,
+    *,
+    prefix: str,
+    suite: str,
+    cases: dict[str, str],
+) -> list[dict[str, object]]:
+    """Every case of `cases` reported once, at its level, in `suite`.
+
+    A line fails the task when its JSON is unreadable, its suite is another,
+    its case is in no inventory, it has no outcome, its level is not the
+    case's, or it is reported twice; a case that never reports fails as NOT
+    EXERCISED.
+    """
+    seen: dict[str, dict[str, object]] = {}
+    for line in output.splitlines():
+        at = line.find(prefix)
+        if at < 0:
+            continue
+        try:
+            record = json.loads(line[at + len(prefix) :])
+        except json.JSONDecodeError as error:
+            raise TaskError(f"approver evidence: an unreadable line: {line!r}") from error
+        if not isinstance(record, dict) or record.get("suite") != suite:
+            raise TaskError(f"approver evidence: a line of another suite: {line!r}")
+        case = record.get("case")
+        if not isinstance(case, str) or case not in cases:
+            raise TaskError(f"approver evidence: a case in no inventory: {case!r}")
+        if case in seen:
+            raise TaskError(f"approver evidence: {case} reported twice")
+        if not record.get("outcome"):
+            raise TaskError(f"approver evidence: {case} has no outcome")
+        if record.get("level") != cases[case]:
+            raise TaskError(
+                f"approver evidence: {case} is {record.get('level')!r}, not {cases[case]!r}"
+            )
+        seen[case] = record
+    missing = [case for case in cases if case not in seen]
+    if missing:
+        raise TaskError(f"approver evidence: NOT EXERCISED: {', '.join(missing)}")
+    return [seen[case] for case in cases]
+
+
+def require_suite_count(output: str, name: str, count: int) -> None:
+    """The suite ran exactly `count` tests and every one passed: no zero-test
+    filter, no ignored or skipped test, no extra one passing for a missing
+    one."""
+    summaries = [line for line in output.splitlines() if line.startswith("test result: ")]
+    passing = [s for s in summaries if not s.startswith("test result: ok. 0 passed")]
+    expected = f"test result: ok. {count} passed; 0 failed; 0 ignored"
+    if len(passing) != 1 or not passing[0].startswith(expected):
+        raise TaskError(f"the {name} suite: expected `{expected}`, got {passing or 'no summary'}")
+
+
+def task_approver_operations_evidence() -> None:
+    """M6.3's evidence (ADR-0081, Proposed): the protocol's, the endpoint's
+    and the trusted client's own suites, each case of the registry's route
+    tests once at its level, and -- hosted -- the approver protocol across four
+    genuine identities. Linux; the identities' half is NOT EXERCISED without
+    DW_PEER_AS, DW_APPROVER_AS and DW_OTHER_AS, and fails the task.
+    """
+    if not sys.platform.startswith("linux"):
+        raise TaskError("NOT EXERCISED: the approver endpoint is Linux's; run it in WSL2")
+    for name, command, count in APPROVER_UNIT_SUITES:
+        require_suite_count(run_captured(*command), name, count)
+        print(f"{name}: {count} tests")
+    output = run_captured(
+        "cargo",
+        "test",
+        "--locked",
+        "-p",
+        "dwkd-authority",
+        "--lib",
+        "--",
+        "--nocapture",
+        "state::workload_route::tests::approver::",
+    )
+    records = require_approver_cases(
+        output,
+        prefix=APPROVER_OPERATIONS_PREFIX,
+        suite=APPROVER_OPERATIONS_SUITE,
+        cases=APPROVER_OPERATIONS_CASES,
+    )
+    levels: dict[str, int] = {}
+    for record in records:
+        level = str(record["level"])
+        levels[level] = levels.get(level, 0) + 1
+    print(
+        f"approver operations: {len(records)} registry cases, each once ("
+        + ", ".join(f"{level} {n}" for level, n in sorted(levels.items()))
+        + ")"
+    )
+    for variable in ("DW_PEER_AS", "DW_APPROVER_AS", "DW_OTHER_AS"):
+        if not os.environ.get(variable):
+            raise TaskError(
+                f"NOT EXERCISED: {variable} is not set; the approver protocol's identity "
+                "half needs four genuine identities (hosted `authority boundary`)"
+            )
+    run("cargo", "build", "--locked", "-p", "direwolf-cli")
+    output = run_captured(
+        "cargo",
+        "test",
+        "--locked",
+        "-p",
+        "dwkd-authority",
+        "--test",
+        "transport_approver",
+        "--",
+        "--ignored",
+        "--exact",
+        "--nocapture",
+        "--test-threads=1",
+        *APPROVER_OPERATIONS_TESTS,
+    )
+    require_suite_count(output, "approver identities", len(APPROVER_OPERATIONS_TESTS))
+    reported: set[str] = set()
+    for line in output.splitlines():
+        at = line.find(EVIDENCE_PREFIX)
+        if at < 0:
+            continue
+        try:
+            evidence = json.loads(line[at + len(EVIDENCE_PREFIX) :])
+        except json.JSONDecodeError as exc:
+            raise TaskError(f"unreadable evidence line: {line[:200]}") from exc
+        if (
+            isinstance(evidence, dict)
+            and evidence.get("suite") == "approver-operations"
+            and evidence.get("contained") is True
+        ):
+            case = str(evidence.get("case"))
+            if case in reported:
+                raise TaskError(f"approver identities: {case} reported twice")
+            reported.add(case)
+    missing = sorted(set(APPROVER_OPERATIONS_IDENTITY_CASES) - reported)
+    unexpected = sorted(reported - set(APPROVER_OPERATIONS_IDENTITY_CASES))
+    if missing or unexpected:
+        raise TaskError(
+            f"approver identities: not reported {missing}, not in the inventory {unexpected}"
+        )
+    print(
+        f"approver identities: {len(APPROVER_OPERATIONS_TESTS)} test, "
+        f"{len(APPROVER_OPERATIONS_IDENTITY_CASES)} cases contained, four identities"
+    )
+
+
+# M6.3's production A1 approval (ADR-0081 §19): the released `serve` with the
+# operator's runtime and approver identities, the released broker, a REAL OCI
+# environment, and the released trusted client run as DW_APPROVER_AS on a
+# terminal. Its own task and its own inventory, apart from the M5d workload
+# suite's (and so from the M5e gate's), run in the `sandbox workload` job.
+APPROVER_PRODUCTION_TESTS = (
+    "linux::m6_3::production_serve_approves_one_sandboxed_launch_once_at_a1",
+)
+APPROVER_PRODUCTION_CASES: dict[str, str] = dict.fromkeys(
+    (
+        "require-approval-denied-and-requested",
+        "approver-lists-and-shows-canonical",
+        "approver-decides-a1-through-the-client",
+        "approved-launch-spent-once-real-oci",
+        "exhausted-approval-not-reused-real-oci",
+        "changed-action-not-approved-real-oci",
+        "audit-chain-intact",
+    ),
+    "real-oci-production",
+)
+
+
+def task_approver_production_evidence() -> None:
+    """M6.3's first production A1 approval through a real OCI environment
+    (ADR-0081, Proposed), every case required once. Linux; needs the OCI
+    runtime the workload evidence uses and DW_APPROVER_AS -- without them, NOT
+    EXERCISED, which fails. No container it made may remain.
+    """
+    if not sys.platform.startswith("linux"):
+        raise TaskError("NOT EXERCISED: the sandbox is Linux's; run it in WSL2")
+    if not os.environ.get("DW_APPROVER_AS"):
+        raise TaskError("NOT EXERCISED: DW_APPROVER_AS is not set (hosted `sandbox workload`)")
+    client, socket_path, variables, before, images = _workload_setup()
+    os.environ.update(variables)
+    try:
+        run("cargo", "build", "--locked", "-p", "dwkd-broker", "-p", "direwolf-cli")
+        output = run_captured(
+            "cargo",
+            "test",
+            "--locked",
+            "-p",
+            "dwkd-authority",
+            "--test",
+            "sandbox_workload",
+            "--",
+            "--ignored",
+            "--exact",
+            "--nocapture",
+            "--test-threads=1",
+            *APPROVER_PRODUCTION_TESTS,
+        )
+    finally:
+        after = set(
+            _docker(
+                client, socket_path, "container", "ls", "--all", "--no-trunc", "--quiet"
+            ).split()
+        )
+        for image in set(images.values()):
+            _docker(client, socket_path, "image", "rm", "--force", image, check=False)
+    left = sorted(after - before)
+    if left:
+        raise TaskError(f"the evidence left {len(left)} container(s) behind: {left}")
+    require_suite_count(output, "approver production", len(APPROVER_PRODUCTION_TESTS))
+    records = require_approver_cases(
+        output,
+        prefix=APPROVER_OPERATIONS_PREFIX,
+        suite="approver-production",
+        cases=APPROVER_PRODUCTION_CASES,
+    )
+    print(
+        f"approver production: {len(records)} cases, real OCI, the released serve, broker and "
+        "trusted client, two identities"
+    )
+
+
+# M6.3 (ADR-0081, Proposed): each guard of the approver endpoint's operations
+# and the trusted client weakened in turn. The detectors are the registry's
+# route tests and unit tests, the endpoint's, the protocol's, the client's and
+# the record tests; every mutant must be KILLED by a named failing test, and
+# every file restored byte-identically. Equivalents are APPROVER_OPERATIONS_
+# EQUIVALENT, each with why no test can kill it.
+_M63_REGISTRY = "crates/dwkd-authority/src/state/approvals.rs"
+_M63_ENDPOINT = "crates/dwkd-authority/src/server/approver.rs"
+_M63_SERVER = "crates/dwkd-authority/src/server/mod.rs"
+_M63_TRANSPORT = "crates/dwkd-authority/src/state/transport.rs"
+_M63_PROTOCOL = "crates/dwk-proto/src/approverp.rs"
+_M63_CLIENT = "crates/direwolf-cli/src/approve/mod.rs"
+_M63_RENDER = "crates/direwolf-cli/src/approve/render.rs"
+APPROVER_OPERATIONS_MUTATIONS = (
+    (
+        "M01: the approver not checked again at the operation",
+        _M63_REGISTRY,
+        "\n            if !approver_known(work, &approver.subject().storage_key()) {\n",
+        "\n            if false {\n",
+    ),
+    (
+        "M02: the echoed binding hash not compared",
+        _M63_REGISTRY,
+        "\n    if echoed != hash {\n        return Ok(Err(DecisionRefused::BindingMismatch));\n",
+        "\n    if false {\n        return Ok(Err(DecisionRefused::BindingMismatch));\n",
+    ),
+    (
+        "M03: the echo checked against another request's binding",
+        _M63_REGISTRY,
+        '"SELECT binding_sha256, binding FROM approval_request WHERE request_id = ?1",',
+        '"SELECT binding_sha256, binding FROM approval_request WHERE request_id = ?1 \\\n'
+        '             OR request_id != ?1 ORDER BY requested_ms DESC, rowid DESC LIMIT 1",',
+    ),
+    (
+        "M04: a decided request decided again",
+        _M63_REGISTRY,
+        '\n    if pending.state != "PENDING" {\n',
+        "\n    if false {\n",
+    ),
+    (
+        "M05: a grant leaves its request pending",
+        _M63_REGISTRY,
+        "        \"UPDATE approval_request SET state = 'GRANTED', decided_ms = ?2 \\\n",
+        '        "UPDATE approval_request SET decided_ms = ?2 \\\n',
+    ),
+    (
+        "M06: an expired request decided",
+        _M63_REGISTRY,
+        "\n    if now >= pending.not_after {\n",
+        "\n    if false {\n",
+    ),
+    (
+        "M07: the approver's self-approval not refused",
+        _M63_REGISTRY,
+        "\n    if approver == pending.requester {\n",
+        "\n    if false {\n",
+    ),
+    (
+        "M08: the endpoint's decision recorded at A2",
+        _M63_REGISTRY,
+        "            approver,\n            assurance: Assurance::A1,\n        },\n"
+        "        approverp::Verdict::Deny",
+        "            approver,\n            assurance: Assurance::A2,\n        },\n"
+        "        approverp::Verdict::Deny",
+    ),
+    (
+        "M09: an approval's use limit widened",
+        _M63_REGISTRY,
+        "            to_sql(not_after)?,\n            pending.max_uses,\n",
+        "            to_sql(not_after)?,\n            pending.max_uses + 9,\n",
+    ),
+    (
+        "M10: an expiry counted as a denial",
+        _M63_REGISTRY,
+        "AND state = 'DENIED'\",\n        rusqlite::params![run.as_str(), hash],",
+        "AND state IN ('DENIED', 'EXPIRED')\",\n        rusqlite::params![run.as_str(), hash],",
+    ),
+    (
+        "M11: a binding denied three times asked again",
+        _M63_REGISTRY,
+        "\n    if denials(work, &considered.run, &hash)? >= MAX_DENIALS_PER_BINDING {\n",
+        "\n    if false {\n",
+    ),
+    (
+        "M12: a request past its window listed",
+        _M63_REGISTRY,
+        "         WHERE r.state = 'PENDING' AND r.not_after_ms > ?1 AND run.state = 'ACTIVE' \\\n"
+        "         ORDER BY r.requested_ms",
+        "         WHERE r.state = 'PENDING' AND ?1 >= 0 AND run.state = 'ACTIVE' \\\n"
+        "         ORDER BY r.requested_ms",
+    ),
+    (
+        "M13: an ended run's request listed",
+        _M63_REGISTRY,
+        "         WHERE r.state = 'PENDING' AND r.not_after_ms > ?1 AND run.state = 'ACTIVE' \\\n"
+        "         ORDER BY r.requested_ms",
+        "         WHERE r.state = 'PENDING' AND r.not_after_ms > ?1 AND 1 = 1 \\\n"
+        "         ORDER BY r.requested_ms",
+    ),
+    (
+        "M14: a non-approver authenticated",
+        _M63_ENDPOINT,
+        "    if policy.admits(credentials.uid) {\n",
+        "    if policy.admits(credentials.uid) || credentials.uid != u32::MAX {\n",
+    ),
+    (
+        "M15: a refused peer's request read before the judgement closes it",
+        _M63_ENDPOINT,
+        "            Err(refused) => {\n                approvals.record(refused);\n",
+        "            Err(refused) => {\n"
+        "                let _ = std::io::Read::read(&mut &stream, &mut [0u8; 4096]);\n"
+        "                approvals.record(refused);\n",
+    ),
+    (
+        "M16: the approver named from something other than the kernel's uid",
+        _M63_ENDPOINT,
+        "        ApproverPrincipal::kernel_reported(self.uid)\n",
+        "        ApproverPrincipal::kernel_reported(self.pid.unwrap_or(self.uid))\n",
+    ),
+    (
+        "M17: a request's length not bounded from its header",
+        _M63_ENDPOINT,
+        "    let mut decoder = FrameDecoder::bounded(approverp::MAX_REQUEST_BODY);\n",
+        "    let mut decoder = FrameDecoder::new();\n",
+    ),
+    (
+        "M18: bytes past the one request accepted",
+        _M63_ENDPOINT,
+        "                if !rest.is_empty() {\n",
+        "                if rest.len() > usize::MAX - 1 {\n",
+    ),
+    (
+        "M19: the connection limit removed",
+        _M63_ENDPOINT,
+        "        if active.load(Ordering::SeqCst) >= MAX_APPROVER_CONNECTIONS {\n",
+        "        if active.load(Ordering::SeqCst) >= usize::MAX {\n",
+    ),
+    (
+        "M20: a refused request left unrecorded",
+        _M63_ENDPOINT,
+        "    if let Response::Refused(code) = &response {\n",
+        "    if let Some(code) = None::<&RefusalCode> {\n",
+    ),
+    (
+        "M21: the request deadline removed",
+        _M63_ENDPOINT,
+        "        if now >= deadline {\n            return Err(Unread::Gone);\n        }\n"
+        "        stream\n            .set_read_timeout(Some(deadline - now))\n",
+        "        let _ = deadline;\n        stream\n            .set_read_timeout(None)\n",
+    ),
+    (
+        "M22: the start-up attaches no approver set",
+        _M63_SERVER,
+        "    if !authority.attach_approver_set(&set) {\n",
+        "    if false {\n",
+    ),
+    (
+        "M23: the refusal record names another approver",
+        _M63_TRANSPORT,
+        "            super::identity::AuthenticatedSubject::unix_uid(uid).storage_key(),\n",
+        "            super::identity::AuthenticatedSubject::unix_uid(0).storage_key(),\n",
+    ),
+    (
+        "M24: an admitted approver recorded as an approval",
+        _M63_TRANSPORT,
+        '                            .text("outcome", "admitted")\n',
+        '                            .text("outcome", "approved")\n',
+    ),
+    (
+        "M25: another protocol version read as this one",
+        _M63_PROTOCOL,
+        "        Some(Value::Number(Number::Int(n))) if *n == i64::from(PROTOCOL) => {}\n",
+        "        Some(Value::Number(Number::Int(n))) if *n >= 0 => {}\n",
+    ),
+    (
+        "M26: a request's body not bounded when decoded",
+        _M63_PROTOCOL,
+        "    if bytes.len() > max {\n",
+        "    if bytes.len() > max.saturating_mul(1024) {\n",
+    ),
+    (
+        "M27: a decision answer naming an approval for a denial accepted",
+        _M63_PROTOCOL,
+        "                if granted != decided.approval_id.is_some() {\n",
+        "                if granted && decided.approval_id.is_none() {\n",
+    ),
+    (
+        "M28: any line beginning `approve` approves",
+        _M63_CLIENT,
+        '    if line == format!("approve {code}") {\n',
+        '    if line.starts_with("approve") {\n',
+    ),
+    (
+        "M29: the end of input approves",
+        _M63_CLIENT,
+        '        Typed::Closed => {\n            say(out, "");\n'
+        '            say(out, "The input ended: nothing was decided.");\n'
+        "            return EXIT_NOTHING;\n        }\n",
+        "        Typed::Closed => Some(Verdict::Approve),\n",
+    ),
+    (
+        "M30: approval offered for what could not be verified or shown",
+        _M63_CLIENT,
+        "    let approvable = verified.is_ok() && rendered.complete;\n",
+        "    let approvable = true;\n",
+    ),
+    (
+        "M31: the binding's hash not checked by the client",
+        _M63_CLIENT,
+        "    if hex(&sha2::Sha256::digest(text.as_bytes())) != detail.binding_sha256.as_str() {\n",
+        "    if false {\n",
+    ),
+    (
+        "M32: the untrusted region not labelled",
+        _M63_RENDER,
+        '    region.section("7. UNTRUSTED: FROM THE AGENT -- NOT PART OF THIS DECISION");\n',
+        '    region.section("7. FROM THE AGENT");\n',
+    ),
+    (
+        "M33: control characters, ESC and ANSI shown raw",
+        _M63_RENDER,
+        "            other => {\n"
+        '                text.push_str(&format!("\\\\u{{{:x}}}", u32::from(other)));\n',
+        "            other if (other as u32) < 0x80 => {\n                text.push(other);\n"
+        "            }\n            other => {\n"
+        '                text.push_str(&format!("\\\\u{{{:x}}}", u32::from(other)));\n',
+    ),
+    (
+        "M34: bidirectional controls shown raw",
+        _M63_RENDER,
+        "            '!'..='~' => text.push(c),\n",
+        "            '!'..='~' | '\\u{202a}'..='\\u{202e}' | '\\u{2066}'..='\\u{2069}' => {\n"
+        "                text.push(c);\n            }\n",
+    ),
+    (
+        "M35: a newline shown raw",
+        _M63_RENDER,
+        "            '\\n' => {\n                text.push_str(\"\\\\n\");\n",
+        "            '\\n' => {\n                text.push('\\n');\n",
+    ),
+    (
+        "M36: a cut security value does not block approval",
+        _M63_RENDER,
+        "            if critical {\n                self.complete = false;\n            }\n",
+        "            if critical && self.lines.len() > usize::MAX - 1 {\n"
+        "                self.complete = false;\n            }\n",
+    ),
+    (
+        "M37: the endpoint's test helper compiled into every build",
+        _M63_SERVER,
+        '\n#[cfg(all(test, target_os = "linux"))]\npub(crate) mod testing {\n',
+        "\npub(crate) mod testing {\n",
+    ),
+)
+APPROVER_OPERATIONS_EQUIVALENT = (
+    (
+        "E1: decide_echoed's stored-binding hash check removed",
+        "schema 15 refuses any change to a request's binding or digest after its insert "
+        "(ADR-0080 §2), and the insert writes the binding's own hash: no stored request can "
+        "disagree, so the check is defence in depth no test can reach",
+    ),
+    (
+        "E2: decide's own approver check removed",
+        "serve_approver checks the same set first in the same transaction (M01), and the set "
+        "cannot change while the authority runs: decide's check can refuse nothing the first "
+        "has not",
+    ),
+)
+APPROVER_OPERATIONS_EVIDENCE_DIR = ROOT / "target" / "m6-3-evidence"
+APPROVER_OPERATIONS_RECORD_SCHEMA = "direwolf.m6-3.mutation-review"
+# The record tests the review's last stage runs: each reads a compilation
+# condition or an ordering in the code, never the mutation table.
+APPROVER_OPERATIONS_RECORD_TESTS = (
+    "tests/architecture/test_m6_3_approver_operations.py"
+    "::test_the_endpoints_test_helper_is_test_only",
+    "tests/architecture/test_m6_3_approver_operations.py"
+    "::test_the_start_up_attaches_the_set_before_the_endpoint_accepts",
+    "tests/architecture/test_f18_approver_identity.py"
+    "::test_the_endpoint_reaches_only_the_approver_protocol",
+)
+
+
+def _approver_operations_record() -> None:
+    """The record tests as a detector (M6.3): BLOCKED, never passed, when they
+    cannot run; KILLED when any fails."""
+    result = subprocess.run(
+        [
+            "uv",
+            "run",
+            "--frozen",
+            "python",
+            "-m",
+            "pytest",
+            "-q",
+            "-p",
+            "no:cacheprovider",
+            *APPROVER_OPERATIONS_RECORD_TESTS,
+        ],
+        cwd=str(ROOT),
+        capture_output=True,
+        text=True,
+        errors="replace",
+        timeout=C3_STAGE_LIMIT,
+        check=False,
+    )
+    if result.returncode == 0:
+        passed = re.search(r"(\d+) passed", result.stdout)
+        if passed is None or int(passed.group(1)) != len(APPROVER_OPERATIONS_RECORD_TESTS):
+            raise TaskError("NOT EXERCISED: the record tests did not all run")
+        return
+    failed = [line.split()[1] for line in result.stdout.splitlines() if line.startswith("FAILED ")]
+    if not failed:
+        raise TaskError(f"BLOCKED: the record tests did not run: {result.stdout[-400:]}")
+    raise TaskError(f"record test failed: {', '.join(failed)}")
+
+
+def _approver_operations_stages() -> tuple[MutationStage, ...]:
+    """The review's detectors, cheapest first: the registry's route tests and
+    unit tests and the endpoint's; the transport records; the protocol's; the
+    client's; then the record tests."""
+    return (
+        MutationStage(
+            "approver-authority",
+            (
+                "cargo",
+                "test",
+                "--locked",
+                "-p",
+                "dwkd-authority",
+                "--lib",
+                "--",
+                "server::approver::",
+                "state::workload_route::tests::approver::",
+                "state::transport::",
+            ),
+        ),
+        MutationStage(
+            "approver-protocol",
+            ("cargo", "test", "--locked", "-p", "dwk-proto", "--lib", "--", "approverp::"),
+        ),
+        MutationStage(
+            "approver-client",
+            ("cargo", "test", "--locked", "-p", "direwolf-cli", "--bin", "direwolf"),
+        ),
+        MutationStage("approver-record", evidence=_approver_operations_record),
+    )
+
+
+def approver_operations_review(
+    mutations: Sequence[tuple[str, str, str, str]] = APPROVER_OPERATIONS_MUTATIONS,
+    *,
+    root: Path | None = None,
+    tests: Callable[..., SuiteRun] = run_tests,
+) -> dict[str, object]:
+    """M6.3's mutation review, as M6.2's: see `_finding_review`."""
+    return _finding_review(
+        ("M6.3", "0081", "approver-operations-mutations", APPROVER_OPERATIONS_RECORD_SCHEMA),
+        "approver operations",
+        mutations,
+        stages=_approver_operations_stages(),
+        build=(
+            "cargo",
+            "build",
+            "--locked",
+            "-p",
+            "dwk-proto",
+            "-p",
+            "dwkd-authority",
+            "-p",
+            "direwolf-cli",
+        ),
+        directory=APPROVER_OPERATIONS_EVIDENCE_DIR if root is None else root,
+        tests=tests,
+    )
+
+
+def task_approver_operations_mutations() -> None:
+    """Weaken each guard of M6.3's approver operations and trusted client in
+    turn (ADR-0081, Proposed); the tests must catch every one.
+
+    The unmutated baseline must pass first; every file is restored
+    byte-identically whatever happens, and checked; the record is kept in
+    target/m6-3-evidence/. Linux, local, and never run beside another build.
+    """
+    if not sys.platform.startswith("linux"):
+        raise TaskError("NOT EXERCISED: the endpoint's tests need Linux; run it in WSL2")
+    approver_operations_review()
 
 
 # M5d.3 (ADR-0052 §7): a sandboxed `process.exec` that consumes a credential.
@@ -18156,6 +18869,9 @@ TASKS = {
     "approval-registry-evidence": task_approval_registry_evidence,
     "approval-registry-crash-evidence": task_approval_registry_crash_evidence,
     "approval-registry-separation": task_approval_registry_separation,
+    "approver-operations-evidence": task_approver_operations_evidence,
+    "approver-production-evidence": task_approver_production_evidence,
+    "approver-operations-mutations": task_approver_operations_mutations,
     "sandbox-neighbour-mutations": task_sandbox_neighbour_mutations,
     "sandbox-secret-evidence": task_sandbox_secret_evidence,
     "sandbox-secret-mutations": task_sandbox_secret_mutations,

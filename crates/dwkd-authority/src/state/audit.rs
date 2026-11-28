@@ -287,10 +287,16 @@ pub enum AuditEvent {
     /// is not an operator-declared approver, before reading a byte (F-18
     /// Phase 3.4, ADR-0067).
     ApproverPeerRefused,
-    /// The approver endpoint authenticated an operator-declared approver and
-    /// closed the connection, reading nothing: no approval operation exists
-    /// before M6 (F-18 Phase 3.4, ADR-0067). Never an approval.
+    /// The approver endpoint authenticated an operator-declared approver by
+    /// the kernel's report (F-18 Phase 3.4, ADR-0067): before M6.3 it closed
+    /// the connection unread; since M6.3 (ADR-0081) it admits it to one
+    /// approver-protocol request, or closes it at the connection limit.
+    /// Never an approval.
     ApproverPeerAuthenticated,
+    /// M6.3 (ADR-0081): the approver endpoint refused an authenticated
+    /// approver's request -- undecodable, or one the registry did not answer
+    /// as asked -- with the authority's code. Nothing was decided.
+    ApproverRequestRefused,
     /// M6.2 (ADR-0080): a sandboxed launch denied `REQUIRE_APPROVAL` was
     /// recorded as a pending request.
     ApprovalRequested,
@@ -314,7 +320,7 @@ pub enum AuditEvent {
 
 impl AuditEvent {
     /// Every kind, in declaration order.
-    pub const ALL: [Self; 82] = [
+    pub const ALL: [Self; 83] = [
         Self::StoreCreated,
         Self::StoreOpened,
         Self::PolicyInstalled,
@@ -389,6 +395,7 @@ impl AuditEvent {
         Self::LeaseRevoked,
         Self::ApproverPeerRefused,
         Self::ApproverPeerAuthenticated,
+        Self::ApproverRequestRefused,
         Self::ApprovalRequested,
         Self::ApprovalGranted,
         Self::ApprovalDenied,
@@ -477,6 +484,7 @@ impl AuditEvent {
             Self::LeaseRevoked => "lease.revoked",
             Self::ApproverPeerRefused => "approver.peer_refused",
             Self::ApproverPeerAuthenticated => "approver.peer_authenticated",
+            Self::ApproverRequestRefused => "approver.request_refused",
             Self::ApprovalRequested => "approval.requested",
             Self::ApprovalGranted => "approval.granted",
             Self::ApprovalDenied => "approval.denied",

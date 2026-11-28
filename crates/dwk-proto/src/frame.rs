@@ -94,23 +94,46 @@ pub fn encode(content_type: ContentType, body: &[u8]) -> Result<Vec<u8>, Protoco
 /// Incremental, bounded frame decoder.
 ///
 /// Memory held at any moment is at most one header plus one declared body, and
-/// the declared body is validated against [`MAX_FRAME_BODY`] before the first
-/// body byte is stored. The body buffer grows only as bytes actually arrive, so
-/// a peer that declares a megabyte and sends nothing costs nothing.
-#[derive(Debug, Default)]
+/// the declared body is validated against [`MAX_FRAME_BODY`] -- or a smaller
+/// bound the decoder was made with ([`FrameDecoder::bounded`]) -- before the
+/// first body byte is stored. The body buffer grows only as bytes actually
+/// arrive, so a peer that declares a megabyte and sends nothing costs nothing.
+#[derive(Debug)]
 pub struct FrameDecoder {
     header: [u8; HEADER_LEN],
     header_filled: usize,
     pending: Option<(ContentType, usize)>,
     body: Vec<u8>,
     poisoned: Option<ProtocolError>,
+    max_body: usize,
+}
+
+impl Default for FrameDecoder {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl FrameDecoder {
-    /// A decoder at a frame boundary.
+    /// A decoder at a frame boundary, for frames of up to [`MAX_FRAME_BODY`].
     #[must_use]
     pub fn new() -> Self {
-        Self::default()
+        Self::bounded(MAX_FRAME_BODY)
+    }
+
+    /// A decoder for frames of up to `max_body` bytes -- never more than
+    /// [`MAX_FRAME_BODY`] -- refusing a larger declaration from the header
+    /// alone: the approver endpoint's requests are a kilobyte (ADR-0081).
+    #[must_use]
+    pub fn bounded(max_body: usize) -> Self {
+        Self {
+            header: [0; HEADER_LEN],
+            header_filled: 0,
+            pending: None,
+            body: Vec::new(),
+            poisoned: None,
+            max_body: max_body.min(MAX_FRAME_BODY),
+        }
     }
 
     /// Feed bytes from the transport.
@@ -137,7 +160,7 @@ impl FrameDecoder {
             if self.header_filled < HEADER_LEN {
                 return Ok((consumed, None));
             }
-            match Self::parse_header(self.header) {
+            match Self::parse_header(self.header, self.max_body) {
                 Ok(pending) => self.pending = Some(pending),
                 Err(err) => {
                     self.poisoned = Some(err.clone());
@@ -197,7 +220,10 @@ impl FrameDecoder {
         Err(ProtocolError::new(ErrorCode::FrameTruncated, detail))
     }
 
-    fn parse_header(header: [u8; HEADER_LEN]) -> Result<(ContentType, usize), ProtocolError> {
+    fn parse_header(
+        header: [u8; HEADER_LEN],
+        max_body: usize,
+    ) -> Result<(ContentType, usize), ProtocolError> {
         let [a, b, c, d, content] = header;
         let declared = u32::from_be_bytes([a, b, c, d]);
         let length = usize::try_from(declared).unwrap_or(usize::MAX);
@@ -207,10 +233,10 @@ impl FrameDecoder {
                 "frame declares an empty body",
             ));
         }
-        if length > MAX_FRAME_BODY {
+        if length > max_body {
             return Err(ProtocolError::new(
                 ErrorCode::FrameTooLarge,
-                format!("frame declares {declared} body bytes; the limit is {MAX_FRAME_BODY}"),
+                format!("frame declares {declared} body bytes; the limit is {max_body}"),
             ));
         }
         let content_type = ContentType::from_byte(content).ok_or_else(|| {

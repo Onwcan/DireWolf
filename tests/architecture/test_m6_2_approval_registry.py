@@ -113,25 +113,40 @@ def test_every_evidence_case_is_printed_by_exactly_one_test() -> None:
 
 
 def test_the_seams_have_no_production_caller() -> None:
-    """The approver set is attached in test builds only; the decision and the
-    revocation say in their code that M6.3 is their first caller."""
+    """The test-only approver attachment stays in test builds; the decision's
+    test seam and the revocation keep no production caller, and say so in
+    their code. M6.3 (ADR-0081) evolved the second half: before it, both
+    said M6.3 would be their first caller; now the endpoint decides through
+    `serve_approver` -- the echo checked, then the same state machine -- and
+    the operator's set is attached by `attach_approver_set` at start, each a
+    reviewed path of its own (TX069, TX071), while `decide_approval` stays the
+    tests' seam and no revocation operation exists until ADR-0081 OD-4."""
     registry = _read(REGISTRY)
     at = registry.index("pub(crate) fn attach_approvers(")
     before = registry[:at].rstrip().splitlines()[-1].strip()
     assert before == '#[cfg(all(test, target_os = "linux"))]', before
     for seam, reason in (
-        ("pub(crate) fn decide_approval(", "M6.3's approver operations are its first production"),
-        ("pub(crate) fn revoke_approval(", "M6.3's operator revocation is its first production"),
+        (
+            "pub(crate) fn decide_approval(",
+            "the test seam; the endpoint decides through serve_approver",
+        ),
+        (
+            "pub(crate) fn revoke_approval(",
+            "no production revocation operation before ADR-0081 OD-4",
+        ),
     ):
         at = registry.index(seam)
         attributes = registry[registry.rindex("    #[cfg_attr(", 0, at) : at]
         assert 'not(all(test, target_os = "linux"))' in attributes, seam
         assert "dead_code" in attributes, seam
         assert reason in attributes, seam
-    # The approver endpoint still holds no operation (TX065, unchanged).
+    # The approver endpoint reaches neither (TX065's successor).
     approver = _read(REPO_ROOT / "crates" / "dwkd-authority" / "src" / "server" / "approver.rs")
     assert "decide_approval" not in approver
     assert "revoke_approval" not in approver
+    # The production attachment is the Unix start-up's (M6.3).
+    at = registry.index("pub(crate) fn attach_approver_set(")
+    assert registry[:at].rstrip().splitlines()[-1].strip() == "#[cfg(unix)]"
 
 
 def test_a_use_is_spent_after_its_intent_in_the_intents_transaction() -> None:

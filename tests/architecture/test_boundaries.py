@@ -894,16 +894,50 @@ def test_the_runtime_endpoint_takes_its_subject_from_the_kernel(
     assert {line for _, line, _ in _findings(rule)} == {5}
 
 
-def test_the_approver_endpoint_holds_no_operation_before_m6(
+def test_the_approver_endpoint_reaches_only_the_approver_protocol(
     violation_rules: list[str],
 ) -> None:
-    """F-18 Phase 3.4 (ADR-0067, Proposed): in the approver endpoint, a way to
-    read a peer's bytes, answer it, make it a subject or dispatch it is caught
-    on every line; the fixture's doc comment naming them is not."""
-    rule = "TX065-the-approver-endpoint-holds-no-operation-before-m6"
+    """M6.3 (ADR-0081), TX065's successor under ADR-0067 §7: in the approver
+    endpoint, a DWKP decode, a dispatch and a level of its own are caught on
+    every line; the fixture's doc comment naming them is not. (Before M6.3
+    the rule caught any read, write or decode at all: the endpoint held no
+    operation.)"""
+    rule = "TX065-the-approver-endpoint-reaches-only-the-approver-protocol"
     assert rule in violation_rules
     assert _paths(rule) == {"crates/dwkd-authority/src/server/approver.rs"}
-    assert {line for _, line, _ in _findings(rule)} == {4, 6, 7, 8, 9}
+    assert {line for _, line, _ in _findings(rule)} == {5, 6, 7}
+
+
+def test_only_the_worker_reaches_the_approver_operations(violation_rules: list[str]) -> None:
+    """M6.3 (ADR-0081): a server path other than the worker naming
+    `serve_approver` is caught; the comment naming it is not."""
+    rule = "TX069-only-the-worker-reaches-the-approver-operations"
+    assert rule in violation_rules
+    assert {(path, line) for path, line, _ in _findings(rule)} == {
+        ("crates/dwkd-authority/src/server/approver_shortcut.rs", 6)
+    }
+
+
+def test_only_the_approver_endpoint_names_an_approver(violation_rules: list[str]) -> None:
+    """M6.3 (ADR-0081): an approver made outside the endpoint -- from any uid
+    a caller holds -- is caught; the comment naming the constructor is not."""
+    rule = "TX070-only-the-approver-endpoint-names-an-approver"
+    assert rule in violation_rules
+    assert {(path, line) for path, line, _ in _findings(rule)} == {
+        ("crates/dwkd-authority/src/server/approver_shortcut.rs", 6)
+    }
+
+
+def test_only_the_start_up_attaches_the_operators_approvers(
+    violation_rules: list[str],
+) -> None:
+    """M6.3 (ADR-0081): the state layer attaching an approver set of its own
+    is caught; the comment naming the attachment is not."""
+    rule = "TX071-only-the-start-up-attaches-the-operators-approvers"
+    assert rule in violation_rules
+    assert {(path, line) for path, line, _ in _findings(rule)} == {
+        ("crates/dwkd-authority/src/state/approver_attach.rs", 4)
+    }
 
 
 def test_history_is_never_read_as_authority(violation_rules: list[str]) -> None:
@@ -1219,10 +1253,13 @@ def test_the_required_boundary_rules_are_all_declared() -> None:
         "TX062-the-runtime-path-selects-no-origin-and-records-no-approval",
         "TX063-the-runtime-endpoint-takes-its-subject-from-the-kernel",
         "TX064-history-is-never-read-as-authority",
-        "TX065-the-approver-endpoint-holds-no-operation-before-m6",
+        "TX065-the-approver-endpoint-reaches-only-the-approver-protocol",
         "TX066-the-approval-binding-grants-nothing",
         "TX067-only-the-state-layer-names-the-approval-binding",
         "TX068-only-the-registry-writes-approvals-and-nothing-reaches-its-decision",
+        "TX069-only-the-worker-reaches-the-approver-operations",
+        "TX070-only-the-approver-endpoint-names-an-approver",
+        "TX071-only-the-start-up-attaches-the-operators-approvers",
         "DEP001-no-agent-framework-dependency",
         "DEP002-runtime-has-no-transport-dependency",
         "RS001-authority-depends-on-nothing-in-tree",

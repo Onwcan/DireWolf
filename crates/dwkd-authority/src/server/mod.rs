@@ -49,14 +49,18 @@
 //!
 //! An operator may give the server a second socket, `--approver-socket`, for
 //! the uids named by `--approver-uid` (F-18 Phase 3.4, [ADR-0067],
-//! Proposed). It is a door of its own: none of its uids is a DWKP peer, the
+//! accepted). It is a door of its own: none of its uids is a DWKP peer, the
 //! broker or the authority, with no override; its place is checked as this
 //! socket's is; its peers are judged by the kernel's report before a byte is
-//! read. It holds no approval operation before M6 -- a peer it authenticates
-//! is recorded and closed -- and this endpoint never takes an approver's
-//! decision either. See `approver.rs`.
+//! read. Since M6.3 ([ADR-0081], Proposed) an approver it authenticates may
+//! send one request -- list the waiting approval requests, show one, decide
+//! one -- answered by the registry through the worker; the start-up attaches
+//! the operator's approver set to the registry once, and the endpoint admits
+//! that same set. This endpoint never takes an approver's decision. See
+//! `approver.rs`.
 //!
 //! [ADR-0067]: ../../../../docs/adr/0067-f18-approver-endpoint-identity-boundary.md
+//! [ADR-0081]: ../../../../docs/adr/0081-the-approver-endpoints-operations-and-the-trusted-approver-client.md
 //!
 //! # Platforms
 //!
@@ -74,8 +78,9 @@
 //!
 //! [ADR-0041]: ../../../../docs/adr/0041-m3e-authenticated-dwkp-transport.md
 
-// The approver endpoint (F-18 Phase 3.4, ADR-0067): an identity boundary
-// that holds no approval operation before M6 (TX065).
+// The approver endpoint (F-18 Phase 3.4, ADR-0067; M6.3, ADR-0081): an
+// identity boundary, then the approver protocol's three operations and
+// nothing else (TX065).
 #[cfg(unix)]
 mod approver;
 mod config;
@@ -357,19 +362,18 @@ fn run(config: &ServeConfig) -> Result<Stopped, ServeError> {
         Some((approver_place, approver_bound, policy)) => {
             log(&format!(
                 "approver endpoint at {} for uids {:?}: it authenticates approvers by the \
-                 kernel's report and holds no approval operation before M6; every \
-                 REQUIRE_APPROVAL still denies",
+                 kernel's report before reading a byte, then answers one request -- list, \
+                 show or decide an approval request, at A1 (ADR-0081); A1 is a dedicated \
+                 approver account, not a proven person, and every A2 class still denies",
                 approver_place.path().display(),
                 policy.uids()
             ));
-            let recorder = handle.clone();
+            let worker = handle.clone();
             let stopping = Arc::clone(&shutdown);
             let thread = std::thread::Builder::new()
                 .name("dwkp-approver-accept".to_owned())
                 .spawn(move || {
-                    approver::accept(approver_bound.listener(), &policy, &stopping, |event| {
-                        recorder.audit(event);
-                    });
+                    approver::accept(approver_bound.listener(), &policy, &worker, &stopping);
                     drop(approver_bound);
                     drop(approver_place);
                 })
@@ -412,22 +416,23 @@ fn run(config: &ServeConfig) -> Result<Stopped, ServeError> {
     ))
 }
 
-/// The approver endpoint's checked place and its approvers (F-18 Phase 3.4,
-/// ADR-0067). Unix only, as `start` is.
+/// The approver endpoint's checked place and the policy it admits (F-18
+/// Phase 3.4, ADR-0067; M6.3, ADR-0081). Unix only, as `start` is.
 #[cfg(unix)]
 type Approver = (socket::SocketPlace, approver::ApproverPolicy);
 
 /// The approver endpoint's place, if one is configured, checked, locked and
-/// cleared as the DWKP socket's is, and its approvers: none the authority's
-/// own uid -- the parser has already kept out the runtime's and the
-/// broker's -- and never the DWKP socket's name, however it is spelled.
+/// cleared as the DWKP socket's is, and its approvers, checked into the
+/// registry's set: none the authority's own uid -- the parser has already
+/// kept out the runtime's and the broker's -- none repeated, at most the
+/// parser's bound, and never the DWKP socket's name, however it is spelled.
 /// Unix only, as `start` is, its one caller.
 #[cfg(unix)]
 fn approver_place(
     config: &ServeConfig,
     authority_uid: u32,
     dwkp: &socket::SocketPlace,
-) -> Result<Option<Approver>, ServeError> {
+) -> Result<Option<(socket::SocketPlace, crate::state::ApproverSet)>, ServeError> {
     let Some(approver) = &config.approver else {
         return Ok(None);
     };
@@ -438,6 +443,9 @@ fn approver_place(
              override"
         )));
     }
+    let uids: Vec<u32> = approver.uids.iter().copied().collect();
+    let set = crate::state::ApproverSet::new(&uids, authority_uid)
+        .map_err(|why| ServeError::Configuration(format!("--approver-uid: {why}")))?;
     let resolved = approver
         .socket
         .parent()
@@ -458,10 +466,27 @@ fn approver_place(
             place.path().display()
         ));
     }
-    Ok(Some((
-        place,
-        approver::ApproverPolicy::new(approver.uids.clone()),
-    )))
+    Ok(Some((place, set)))
+}
+
+/// M6.3 (ADR-0081 §5): the operator's approvers, attached to the registry
+/// once, by the start-up, before the endpoint accepts anything; the endpoint
+/// admits the same set. No other production path attaches one (TX068). Unix
+/// only, as `start` is, its one caller.
+#[cfg(unix)]
+fn attach_operator_approvers(
+    authority: &crate::state::Authority,
+    approver: Option<(socket::SocketPlace, crate::state::ApproverSet)>,
+) -> Result<Option<Approver>, ServeError> {
+    let Some((place, set)) = approver else {
+        return Ok(None);
+    };
+    if !authority.attach_approver_set(&set) {
+        return Err(ServeError::Configuration(
+            "the approver set was already attached: it is attached once, at start".to_owned(),
+        ));
+    }
+    Ok(Some((place, approver::ApproverPolicy::from_set(&set))))
 }
 
 /// Everything before the socket is bound: the socket's place checked, locked
@@ -568,6 +593,7 @@ fn start(
     };
     let (mut authority, report) =
         Authority::start(&config.state_dir, &startup, options).map_err(ServeError::Start)?;
+    let approver = attach_operator_approvers(&authority, approver)?;
     let workspace = sandbox::attach(
         &mut authority,
         config.sandbox_config.as_deref(),
@@ -840,5 +866,74 @@ struct ActiveGuard(std::sync::Arc<std::sync::atomic::AtomicUsize>);
 impl Drop for ActiveGuard {
     fn drop(&mut self) {
         self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// M6.3's approver endpoint in process, for the state layer's route tests
+/// (`state/approver_route_tests.rs`): the real accept loop, the real worker
+/// and the real registry for `authority`, its socket at `path`, admitting
+/// `uids` -- which the test also attaches to the registry, test-only. **Test
+/// builds only** (Linux); no production path reaches it.
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) mod testing {
+    #![allow(clippy::expect_used)]
+
+    use std::os::unix::net::{UnixListener, UnixStream};
+    use std::path::{Path, PathBuf};
+    use std::sync::Arc;
+    use std::thread::JoinHandle;
+
+    use super::{approver, worker};
+
+    /// A served approver endpoint; stopped when dropped.
+    pub(crate) struct Endpoint {
+        path: PathBuf,
+        shutdown: Arc<worker::Shutdown>,
+        handle: worker::WorkerHandle,
+        accept: Option<JoinHandle<()>>,
+        worker: Option<JoinHandle<()>>,
+    }
+
+    /// Serve the approver endpoint for `authority` at `path`.
+    pub(crate) fn approver_endpoint(
+        authority: crate::state::Authority,
+        path: &Path,
+        uids: &[u32],
+    ) -> Endpoint {
+        let listener = UnixListener::bind(path).expect("the approver socket");
+        let shutdown = Arc::new(worker::Shutdown::default());
+        let wake = path.to_path_buf();
+        let (handle, worker_thread) = worker::spawn(authority, Arc::clone(&shutdown), move || {
+            let _ = UnixStream::connect(&wake);
+        })
+        .expect("the worker");
+        let set = crate::state::ApproverSet::new(uids, u32::MAX).expect("an approver set");
+        let policy = approver::ApproverPolicy::from_set(&set);
+        let accepting = handle.clone();
+        let stopping = Arc::clone(&shutdown);
+        let accept = std::thread::spawn(move || {
+            approver::accept(&listener, &policy, &accepting, &stopping);
+        });
+        Endpoint {
+            path: path.to_path_buf(),
+            shutdown,
+            handle,
+            accept: Some(accept),
+            worker: Some(worker_thread),
+        }
+    }
+
+    impl Drop for Endpoint {
+        fn drop(&mut self) {
+            self.shutdown.request_stop();
+            let _ = UnixStream::connect(&self.path);
+            let _ = self.handle.operate(|_| ());
+            if let Some(accept) = self.accept.take() {
+                let _ = accept.join();
+            }
+            if let Some(worker) = self.worker.take() {
+                let _ = worker.join();
+            }
+        }
     }
 }

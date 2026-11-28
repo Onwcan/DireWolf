@@ -103,9 +103,10 @@ $ direwolf run authority run_01J8...
   Budget  $0.31 / $5.00 · 6/50 calls · 2m14s / 30m
 ```
 
-**As built (2026-11-21).** None of the commands above exists yet: `direwolf` has
-`--version`, `doctor` and `models`, and the agent, its chat, its approvals and its
-budgets are M6 to M17. What runs is the authority plane, `dwkd-authority serve`
+**As built (2026-11-28).** None of the commands above exists yet: `direwolf` has
+`--version`, `doctor`, `models` and `approve` (M6.3's approver client, which lists,
+shows and decides approval requests), and the agent, its chat, the rest of its
+approvals and its budgets are M6 to M17. What runs is the authority plane, `dwkd-authority serve`
 and `dwkd-broker serve`, which a DWKP client addresses directly
 ([OPERATIONS.md](OPERATIONS.md)).
 
@@ -131,8 +132,10 @@ and `dwkd-broker serve`, which a DWKP client addresses directly
 lattice, the secret, filesystem and execution brokers, the egress proxy, the OCI
 sandbox supervisor and the audit record exist (M3 to M5); the approval registry
 and the budget ledger are M6's, model egress M7's. Of the interface row,
-`direwolf doctor` exists as its foundation subset; `direwolf run --detach`,
-`direwolf approve --list` and every other command are M17's. Nothing in the
+`direwolf doctor` exists as its foundation subset, and `direwolf approve` as
+M6.3's approver client (`list`, `show` and `review`, at the approver endpoint;
+there is no `--list` flag); `direwolf run --detach` and every other command are
+M17's. Nothing in the
 runtime row is built yet (M8 to M16). Nothing is released: DireWolf is built from
 source ([OPERATIONS.md](OPERATIONS.md) §2).
 

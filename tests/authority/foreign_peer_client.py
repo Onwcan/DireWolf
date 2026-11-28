@@ -16,6 +16,12 @@ Cases:
     impersonate <socket>                try to remove, replace or shadow the socket
     converse <socket> <hex-frame>...    on one connection, send each frame and
                                         read one answer frame after it
+    with-fd <socket> <hex-frame>        send one frame with a descriptor attached
+                                        (SCM_RIGHTS: the read end of a pipe, as a
+                                        terminal would be) and read until the end:
+                                        M6.3's approver endpoint must refuse a
+                                        non-approver unread, and answer an
+                                        approver as if nothing were attached
 
 It prints one JSON object on stdout: what it is (uid, euid, pid) and what it
 observed. It asserts nothing; the harness does, against the audit log.
@@ -26,6 +32,7 @@ with no environment of its own.
 
 from __future__ import annotations
 
+import array
 import errno
 import json
 import os
@@ -74,6 +81,56 @@ def _exchange(path: str, frame: bytes) -> dict[str, object]:
         result["error"] = errno.errorcode.get(exc.errno or 0, str(exc.errno))
     finally:
         client.close()
+    return result
+
+
+def _exchange_with_fd(path: str, frame: bytes) -> dict[str, object]:
+    """Connect, send `frame` with one descriptor attached, read until the
+    server closes; the answer, if any, split into frames as hex."""
+    result: dict[str, object] = {
+        "connected": False,
+        "received": 0,
+        "eof": False,
+        "replies": [],
+        "error": None,
+    }
+    client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    client.settimeout(TIMEOUT_S)
+    read_end, write_end = os.pipe()
+    data = b""
+    try:
+        client.connect(path)
+        result["connected"] = True
+        try:
+            rights = array.array("i", [read_end]).tobytes()
+            client.sendmsg([frame], [(socket.SOL_SOCKET, socket.SCM_RIGHTS, rights)])
+        except OSError as exc:
+            result["error"] = errno.errorcode.get(exc.errno or 0, str(exc.errno))
+        while True:
+            try:
+                chunk = client.recv(65536)
+            except ConnectionResetError:
+                result["eof"] = True
+                break
+            if not chunk:
+                result["eof"] = True
+                break
+            data += chunk
+    except TimeoutError:
+        result["error"] = "timeout"
+    except OSError as exc:
+        result["error"] = errno.errorcode.get(exc.errno or 0, str(exc.errno))
+    finally:
+        client.close()
+        os.close(read_end)
+        os.close(write_end)
+    result["received"] = len(data)
+    replies: list[str] = []
+    while len(data) >= 5:
+        length = int.from_bytes(data[:4], "big")
+        replies.append(data[: 5 + length].hex())
+        data = data[5 + length :]
+    result["replies"] = replies
     return result
 
 
@@ -200,6 +257,8 @@ def main(argv: list[str]) -> int:
         report["attempts"] = outcomes
     elif case == "converse" and len(argv) >= 4:
         report.update(_converse(path, [bytes.fromhex(frame) for frame in argv[3:]]))
+    elif case == "with-fd" and len(argv) == 4:
+        report.update(_exchange_with_fd(path, bytes.fromhex(argv[3])))
     else:
         print(__doc__, file=sys.stderr)
         return 2

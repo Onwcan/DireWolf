@@ -12,7 +12,9 @@
 //! It also holds [`brokerp`], the private authority → broker protocol (M4b,
 //! ADR-0043): the one other thing both daemons must agree on. It is not DWKP,
 //! it is emitted into no schema and no binding, and the cognition side cannot
-//! name it.
+//! name it. And [`approverp`], the approver protocol (M6.3, ADR-0081,
+//! Proposed) between the trusted approver client and the authority's approver
+//! endpoint: not DWKP either, in no schema and no binding.
 //!
 //! # What this crate must never contain
 //!
@@ -46,6 +48,7 @@
 // the same error on each would bury the documentation that matters.
 #![allow(clippy::missing_errors_doc)]
 
+pub mod approverp;
 pub mod brokerp;
 pub mod dwcp;
 pub mod dwkp;

@@ -2294,6 +2294,434 @@ reason = "NO_MATCHING_RULE"
         );
     }
 
+    /// M6.3 (ADR-0081, Proposed): the first production A1 approval -- the
+    /// released `serve` with the operator's runtime and approver identities,
+    /// the released broker, a real OCI environment, the released trusted
+    /// client run as the approver uid. Its own task
+    /// (`make approver-production-evidence`), apart from this suite's.
+    mod m6_3 {
+        use std::os::unix::fs::PermissionsExt as _;
+        use std::path::{Path, PathBuf};
+        use std::process::Command;
+
+        use dwk_proto::dwkp::DwkpBody;
+        use dwkd_authority::sandbox::WorkloadBudget;
+        use dwkd_authority::state::WorkspaceId;
+
+        use super::{FIXTURE, Lab, Peer, TRUE, call, plan_action, sandboxed, var};
+        use crate::state_support::{TempDir, output, session};
+        use crate::transport_support::{BIN, Server, own_uid};
+
+        /// One line of M6.3's production evidence, after its assertions --
+        /// canonical JSON, as every emitter here writes it.
+        fn approver_evidence(case: &str, outcome: &str) {
+            use dwk_proto::json::{Number, Object, Value, to_canonical_string};
+            let mut fields = Object::new();
+            for (key, value) in [
+                ("suite", "approver-production"),
+                ("case", case),
+                ("outcome", outcome),
+                ("level", "real-oci-production"),
+            ] {
+                fields
+                    .insert(key.to_owned(), Value::String(value.to_owned()))
+                    .unwrap();
+            }
+            fields
+                .insert("count".to_owned(), Value::Number(Number::Int(1)))
+                .unwrap();
+            println!(
+                "APPROVER-EVIDENCE {}",
+                to_canonical_string(&Value::Object(fields))
+            );
+        }
+
+        /// The approver: a user `sudo -n -u` can switch to, proven a distinct,
+        /// non-root uid by number.
+        fn approver() -> (String, u32) {
+            let user = std::env::var("DW_APPROVER_AS").unwrap_or_default();
+            assert!(
+                !user.is_empty(),
+                "NOT EXERCISED: set DW_APPROVER_AS to a user `sudo -n -u` can switch to"
+            );
+            let probe = output(Command::new("sudo").args(["-n", "-u", &user, "id", "-u"]))
+                .expect("sudo runs");
+            assert!(
+                probe.status.success(),
+                "NOT EXERCISED: `sudo -n -u {user}` cannot start a process here"
+            );
+            let uid: u32 = String::from_utf8_lossy(&probe.stdout)
+                .trim()
+                .parse()
+                .unwrap();
+            assert_ne!(uid, own_uid(), "the approver is not the runtime's uid");
+            assert_ne!(uid, 0, "root is outside the threat model");
+            (user, uid)
+        }
+
+        /// The sandbox fixture behind an approval: an `exact_action` rule,
+        /// once, for ten minutes; `/usr/bin/true` allowed, so a run's
+        /// environment can be prepared; nothing on the host. **Not** a
+        /// shipped pack.
+        fn approval_policy(fixture: &str) -> String {
+            format!(
+                r#"schema_version = 1
+
+[meta]
+name = "m63"
+
+[[rule]]
+id = "approve-the-fixture"
+effect = "REQUIRE_APPROVAL"
+reason = "SENSITIVE_PATH"
+when.verb = "process.exec"
+when.environment = "sandbox"
+when.executable_in = ["{FIXTURE}@{fixture}"]
+obligations = ["max_output_bytes=65536"]
+approval.scope = "exact_action"
+approval.ttl = "10m"
+approval.max_uses = 1
+
+[[rule]]
+id = "prepare-with-true"
+effect = "ALLOW"
+when.verb = "process.exec"
+when.environment = "sandbox"
+when.executable_in = ["{TRUE}"]
+
+[[rule]]
+id = "never-on-the-host"
+effect = "DENY"
+reason = "HOST_EXECUTION_DISABLED"
+when.verb = "process.exec"
+when.environment = "host"
+
+[[rule]]
+id = "default"
+effect = "DENY"
+reason = "NO_MATCHING_RULE"
+"#
+            )
+        }
+
+        /// The released trusted client and the terminal driver, copied
+        /// where the approver can run and read them.
+        fn staged(dir: &TempDir) -> (PathBuf, PathBuf) {
+            let built = std::env::current_exe()
+                .unwrap()
+                .parent()
+                .and_then(Path::parent)
+                .unwrap()
+                .join("direwolf");
+            assert!(
+                built.exists(),
+                "NOT EXERCISED: build the trusted client first: {}",
+                built.display()
+            );
+            let client = dir.path().join("direwolf");
+            std::fs::copy(&built, &client).unwrap();
+            std::fs::set_permissions(&client, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let driver = dir.path().join("approver_tty_driver.py");
+            std::fs::copy(
+                Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../tests/authority/approver_tty_driver.py"),
+                &driver,
+            )
+            .unwrap();
+            std::fs::set_permissions(&driver, std::fs::Permissions::from_mode(0o644)).unwrap();
+            (client, driver)
+        }
+
+        fn traversable(dir: &Path) {
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o711)).unwrap();
+        }
+
+        /// `program args` as `user`: exit code and what it printed.
+        fn as_user(user: &str, program: &str, args: &[&str]) -> (Option<i32>, String) {
+            let out = output(
+                Command::new("sudo")
+                    .args(["-n", "-u", user, program])
+                    .args(args)
+                    .current_dir("/"),
+            )
+            .expect("sudo runs");
+            (
+                out.status.code(),
+                String::from_utf8_lossy(&out.stdout).into_owned(),
+            )
+        }
+
+        fn denied_for_approval(body: &DwkpBody) {
+            assert!(matches!(body, DwkpBody::ToolDeniedV5(_)), "{body:?}");
+            assert_eq!(
+                plan_action(body).decision.reason.as_str(),
+                "APPROVAL_REQUIRED"
+            );
+        }
+
+        fn count(state: &Path, sql: &str) -> i64 {
+            crate::state_support::raw(state)
+                .query_row(sql, [], |row| row.get(0))
+                .unwrap()
+        }
+
+        #[test]
+        #[ignore = "needs a real OCI runtime and an approver identity: make approver-production-evidence"]
+        fn production_serve_approves_one_sandboxed_launch_once_at_a1() {
+            let (approver, approver_uid) = approver();
+            let mut lab = Lab::new("m63-approve", WorkloadBudget::default());
+            let fixture = var("DW_SANDBOX_FIXTURE_SHA256");
+            let probe = var("DW_SANDBOX_PROBE_SHA256");
+            crate::state_support::bind_owned(
+                lab.authority(),
+                own_uid(),
+                &session(1),
+                &WorkspaceId::new("ws").unwrap(),
+            );
+            lab.authority = None;
+            let config = lab.dir.path().join("sandbox.toml");
+            std::fs::write(
+                &config,
+                format!(
+                    "schema_version = 1\nruntime = \"{runtime}\"\nsocket = \"{socket}\"\n\
+                     image = \"{image}\"\nprobe_sha256 = \"{probe}\"\nnetwork = \"NO_NETWORK\"\n\
+                     [executables]\n\"{FIXTURE}\" = \"{fixture}\"\n\"{TRUE}\" = \"{fixture}\"\n\
+                     [workspace]\nunverified_evidence = true\n",
+                    runtime = var("DW_SANDBOX_RUNTIME"),
+                    socket = var("DW_SANDBOX_SOCKET"),
+                    image = var("DW_SANDBOX_WORKLOAD_IMAGE"),
+                ),
+            )
+            .unwrap();
+            std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600)).unwrap();
+            let policy_file = lab.dir.path().join("m63.toml");
+            std::fs::write(&policy_file, approval_policy(&fixture)).unwrap();
+            let socket = lab.dir.path().join("ipc").join("kernel.sock");
+            // The approver's door, and its client, where the approver uid
+            // can reach them; nothing there is writable by it.
+            let door = TempDir::new("m63-door");
+            traversable(door.path());
+            let (client, driver) = staged(&door);
+            let approve = door.path().join("approve").join("approver.sock");
+            let approve_text = approve.to_str().unwrap().to_owned();
+            let mut args: Vec<String> = [
+                "serve",
+                "--state-dir",
+                lab.dir.state().to_str().unwrap(),
+                "--socket",
+                socket.to_str().unwrap(),
+                "--policy-file",
+                policy_file.to_str().unwrap(),
+                "--policy-profile",
+                "m63",
+                "--mode",
+                "balanced",
+                "--allow-uid",
+                &own_uid().to_string(),
+                "--allow-authority-uid",
+                "--broker-socket",
+                lab.broker_socket.to_str().unwrap(),
+                "--broker-uid",
+                &own_uid().to_string(),
+                "--allow-shared-broker-uid",
+                "--sandbox-config",
+                config.to_str().unwrap(),
+                "--approver-socket",
+                &approve_text,
+                "--approver-uid",
+                &approver_uid.to_string(),
+            ]
+            .iter()
+            .map(|a| (*a).to_owned())
+            .collect();
+            for capability in crate::state_support::ceiling()
+                .into_iter()
+                .chain(["process.exec:*".to_owned()])
+            {
+                args.push("--ceiling".to_owned());
+                args.push(capability);
+            }
+            let mut server = Server::start(&args);
+            assert!(
+                server.stderr().contains("approver endpoint at"),
+                "{}",
+                server.stderr()
+            );
+            let state = lab.dir.state();
+            let bind = |_: dwk_proto::wire::id::SessionId| {};
+            let mut runtime = Peer::admit(&socket, 1, &["process.exec:*"], bind);
+
+            // 1-6. The run's environment prepared by an allowed launch; then
+            //      the fixture, which needs an approval: denied, one durable
+            //      request, nothing run, nothing spent.
+            let prepared = runtime.exec("prepare", &call(TRUE, &["workload-identity"]));
+            let environment = sandboxed(&prepared).environment_id.clone();
+            let container: String = crate::state_support::raw(&state)
+                .query_row(
+                    "SELECT container FROM environment WHERE environment_id = ?1",
+                    [environment.as_str()],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            lab.reap_later(&container);
+            let action = call(FIXTURE, &["workload-identity"]);
+            denied_for_approval(&runtime.exec("k-1", &action));
+            let (request, hash): (String, String) = crate::state_support::raw(&state)
+                .query_row(
+                    "SELECT request_id, binding_sha256 FROM approval_request \
+                     WHERE state = 'PENDING'",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(count(&state, "SELECT count(*) FROM approval"), 0);
+            assert_eq!(count(&state, "SELECT count(*) FROM approval_use"), 0);
+            assert_eq!(
+                count(
+                    &state,
+                    "SELECT count(*) FROM workload WHERE idempotency_key = 'k-1'"
+                ),
+                0,
+                "nothing ran"
+            );
+            approver_evidence("require-approval-denied-and-requested", "APPROVAL_REQUIRED");
+
+            // 7-9. The approver, with the released client: lists and shows the
+            //      request, its binding verified and rendered.
+            let client_text = client.to_str().unwrap();
+            let (code, listed) = as_user(
+                &approver,
+                client_text,
+                &["approve", "list", "--socket", &approve_text],
+            );
+            assert_eq!(code, Some(0), "{listed}");
+            assert!(listed.contains(&request), "{listed}");
+            let (code, shown) = as_user(
+                &approver,
+                client_text,
+                &["approve", "show", "--socket", &approve_text, &request],
+            );
+            assert_eq!(code, Some(0), "{shown}");
+            for needle in [
+                hash.as_str(),
+                "bound.canonical_args.argv",
+                "workload-identity",
+                "7. UNTRUSTED",
+                "assurance required: \"A1",
+            ] {
+                assert!(shown.contains(needle), "{needle}: {shown}");
+            }
+            assert!(!shown.contains("WARNING"), "{shown}");
+            approver_evidence("approver-lists-and-shows-canonical", "verified");
+
+            // 10-11. A deliberate decision, typed at the client's prompt on a
+            //        terminal: an approval at A1, recorded and audited.
+            let typed = format!("approve {}", &hash[..8]);
+            let (code, driven) = as_user(
+                &approver,
+                "/usr/bin/python3",
+                &[
+                    driver.to_str().unwrap(),
+                    client_text,
+                    &typed,
+                    "approve",
+                    "review",
+                    "--socket",
+                    &approve_text,
+                    &request,
+                ],
+            );
+            assert_eq!(code, Some(0), "{driven}");
+            assert!(
+                driven.contains("\"exit\": 0") && driven.contains("Approved, at A1"),
+                "{driven}"
+            );
+            let (approver_key, assurance, channel): (String, String, String) =
+                crate::state_support::raw(&state)
+                    .query_row(
+                        "SELECT approver, assurance, channel FROM approval WHERE request_id = ?1",
+                        [request.as_str()],
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                    )
+                    .unwrap();
+            assert_eq!(approver_key, format!("uid:{approver_uid}"));
+            assert_eq!(
+                (assurance.as_str(), channel.as_str()),
+                ("A1", "APPROVER_ENDPOINT")
+            );
+            approver_evidence("approver-decides-a1-through-the-client", "GRANTED");
+
+            // 12-16. The exact action again, through the runtime's own route:
+            //        its binding fresh and equal, every guard held, the use spent
+            //        with its intent, then run in the real environment.
+            let ran = runtime.exec("k-2", &action);
+            let out = sandboxed(&ran);
+            let stdout = String::from_utf8(out.stdout.content.to_bytes()).unwrap();
+            assert!(stdout.contains("uid=10001"), "{stdout}");
+            let (uses, state_word): (i64, String) = crate::state_support::raw(&state)
+                .query_row(
+                    "SELECT uses, state FROM approval WHERE request_id = ?1",
+                    [request.as_str()],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!((uses, state_word.as_str()), (1, "EXHAUSTED"));
+            let records = dwkd_authority::state::read_audit_log(&state.join("audit.log")).unwrap();
+            let order: Vec<&str> = records
+                .iter()
+                .map(dwkd_authority::state::AuditRecord::event)
+                .filter(|e| {
+                    matches!(
+                        *e,
+                        "workload.intent_recorded" | "approval.used" | "workload.outcome"
+                    )
+                })
+                .collect();
+            let used = order.iter().position(|e| *e == "approval.used").unwrap();
+            assert!(
+                order[..used].contains(&"workload.intent_recorded")
+                    && order[used..].contains(&"workload.outcome"),
+                "the use after its intent, the effect after both: {order:?}"
+            );
+            approver_evidence("approved-launch-spent-once-real-oci", "COMPLETED-1-of-1");
+
+            // 17. Replayed, and asked again: no second use, no second run.
+            // The replayed key is answered from its record, whatever its
+            // shape: never a second workload, never a second use.
+            let _ = runtime.exec("k-2", &action);
+            assert_eq!(
+                count(
+                    &state,
+                    "SELECT count(*) FROM workload WHERE idempotency_key = 'k-2'"
+                ),
+                1,
+                "the replay ran nothing"
+            );
+            assert_eq!(count(&state, "SELECT count(*) FROM approval_use"), 1);
+            denied_for_approval(&runtime.exec("k-3", &action));
+            assert_eq!(count(&state, "SELECT count(*) FROM approval_use"), 1);
+            approver_evidence(
+                "exhausted-approval-not-reused-real-oci",
+                "APPROVAL_REQUIRED",
+            );
+
+            // 18. Another action never borrows the old approval.
+            denied_for_approval(&runtime.exec("k-4", &call(FIXTURE, &["workload-identity", "x"])));
+            assert_eq!(count(&state, "SELECT count(*) FROM approval_use"), 1);
+            approver_evidence("changed-action-not-approved-real-oci", "APPROVAL_REQUIRED");
+
+            server.kill();
+            let verified = output(Command::new(BIN).arg("verify-audit").arg(&state))
+                .expect("verify-audit runs");
+            assert!(
+                verified.status.success(),
+                "{}",
+                String::from_utf8_lossy(&verified.stderr)
+            );
+            approver_evidence("audit-chain-intact", "chain-intact");
+        }
+    }
+
     /// R8 through the authority (M5e.2; ADR-0056 §6, the owner's Option B):
     /// one run's workload holds its environment's task bound while another
     /// run, over its own DWKP connection, has the authority prepare, measure

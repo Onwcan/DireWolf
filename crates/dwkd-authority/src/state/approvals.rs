@@ -1,6 +1,9 @@
-//! M6.2: the kernel-owned approval registry ([ADR-0080], Proposed) --
+//! M6.2: the kernel-owned approval registry ([ADR-0080], accepted) --
 //! durable requests, the approvals decided on them, and each use, spent in
-//! the transaction that records its effect's intent.
+//! the transaction that records its effect's intent. M6.3 ([ADR-0081],
+//! Proposed): the approver endpoint's three operations -- list, show,
+//! decide -- answered here, the decision's binding echo checked in the
+//! decision's own transaction.
 //!
 //! # What a registry row is, and is not
 //!
@@ -17,17 +20,30 @@
 //!
 //! | write | by | when |
 //! |---|---|---|
-//! | a request | [`request`] | a sandboxed launch denied `REQUIRE_APPROVAL`, at A1, exact action, with a `READY` environment |
-//! | an approval or a denial | [`decide`] | **no production caller**: M6.3's approver operations; tests drive this state machine |
+//! | a request | [`request`] | a sandboxed launch denied `REQUIRE_APPROVAL`, at A1, exact action, with a `READY` environment, unless an approver has already denied its binding [`MAX_DENIALS_PER_BINDING`] times in its run |
+//! | an approval or a denial | [`decide`] | M6.3: the approver endpoint's `approver.decide`, through [`decide_echoed`], from an approver the endpoint authenticated by the kernel's report; tests drive the state machine directly too |
 //! | a use | [`consume`] | the launch's intent transaction, after the intent |
-//! | an end | [`expire`], [`revoke`], the use that exhausts it | an expiry observed; a revocation (M6.3's operator act; tests); the last use |
+//! | an end | [`expire`], [`revoke`], the use that exhausts it | an expiry observed; a revocation (tests: no production caller, ADR-0081 OD-4); the last use |
 //!
-//! No DWKP or approver-endpoint operation reaches [`decide`] or [`revoke`],
-//! and the approver set they check against is attached only by tests in this
-//! build ([`super::Authority::attach_approvers`]): in the shipped M6.2 build
-//! the set is empty, so no approval can be granted and none can be spent.
+//! No DWKP operation reaches [`decide`] or [`revoke`]. The approver set they
+//! check against is attached once, at start, by the server's start-up from
+//! the operator's `--approver-uid` ([`Authority::attach_approver_set`]), or
+//! by a test ([`Authority::attach_approvers`], test builds only); without
+//! one the set is empty, and no approval can be granted and none spent.
 //! TX062's exemption names this module alone; TX068 keeps every other module
 //! from writing the registry's tables.
+//!
+//! # The approver endpoint's operations (M6.3)
+//!
+//! [`Authority::serve_approver`] answers one `approver.list`, `approver.show`
+//! or `approver.decide` for an [`ApproverPrincipal`] -- the uid the kernel
+//! reported for a connection the endpoint authenticated before reading a
+//! byte. Listing and showing read; a decision is one transaction that checks
+//! the echoed binding hash against the stored request, then runs [`decide`]:
+//! a request decided once, by an approver still in the set who is not its
+//! requester, at A1 -- the level is this module's, never the client's. A
+//! decision is not an effect: nothing runs until a later launch spends the
+//! approval under every guard of [`consider`].
 //!
 //! # Assurance (ADR-0078)
 //!
@@ -41,7 +57,10 @@
 //!
 //! [ADR-0080]: ../../../../../docs/adr/0080-the-approval-registry-durable-requests-and-atomic-consumption.md
 //! [ADR-0079]: ../../../../../docs/adr/0079-the-approval-binding-v1-what-it-binds-and-how-it-is-encoded.md
+//! [ADR-0081]: ../../../../../docs/adr/0081-the-approver-endpoints-operations-and-the-trusted-approver-client.md
 
+#[cfg(unix)]
+use dwk_proto::approverp;
 use dwk_proto::brokerp::sandbox::AssuranceLevel;
 use dwk_proto::wire::id::{InvocationId, RunId, SessionId};
 use dwk_proto::wire::scalar::Epoch;
@@ -73,6 +92,16 @@ pub(crate) const MAX_PENDING: i64 = 1024;
 /// How long a request waits for a decision: the rule's TTL, and never more
 /// than this. No decision in the window is no execution (APPROVALS.md §8).
 pub(crate) const MAX_REQUEST_WINDOW_MS: u64 = 10 * 60 * 1000;
+
+/// How many explicit denials of one binding a run may draw before it is not
+/// asked again (M6.3, ADR-0081 §14, APPROVALS.md §8): its launch is denied
+/// as before, and no approver sees the same request a fourth time. Only a
+/// denial counts -- an expiry, a run's end, an unattended window never do.
+pub(crate) const MAX_DENIALS_PER_BINDING: i64 = 3;
+
+/// The most approvers one authority attaches: the operator's set
+/// (`--approver-uid`, at most [`crate::server::MAX_APPROVER_UIDS`]).
+pub(crate) const MAX_APPROVERS: usize = 16;
 
 /// The one channel a local approval arrives on (ADR-0077 OD-1).
 const CHANNEL: &str = "APPROVER_ENDPOINT";
@@ -549,6 +578,21 @@ pub(super) enum Requested {
     Pending,
     /// The run, or the store, holds as many pending requests as it may.
     Exhausted,
+    /// An approver has denied this binding in this run
+    /// [`MAX_DENIALS_PER_BINDING`] times: it is not asked again (M6.3,
+    /// ADR-0081 §14). The launch is denied as before.
+    Declined,
+}
+
+/// How many times an approver has explicitly denied `hash` in `run`. An
+/// expired request is not a denial and is never counted.
+fn denials(work: &Work<'_>, run: &RunId, hash: &str) -> Result<i64, AuthorityError> {
+    work.db(work.tx.query_row(
+        "SELECT count(*) FROM approval_request WHERE run_id = ?1 AND binding_sha256 = ?2 \
+         AND state = 'DENIED'",
+        rusqlite::params![run.as_str(), hash],
+        |row| row.get(0),
+    ))
 }
 
 /// When a request asked at `now` stops waiting: its rule's TTL, never more
@@ -618,6 +662,9 @@ pub(super) fn request(
         .optional())?;
     if pending.is_some() {
         return Ok(Requested::Pending);
+    }
+    if denials(work, &considered.run, &hash)? >= MAX_DENIALS_PER_BINDING {
+        return Ok(Requested::Declined);
     }
     let in_run = waiting(work, Some(&considered.run), now)?;
     let in_store = waiting(work, None, now)?;
@@ -732,15 +779,15 @@ pub(super) fn consume(
     work.audit(AuditEvent::ApprovalUsed, fields)
 }
 
-/// What an approver decided on a request. Built by M6.3's approver
-/// operations from the approver endpoint's kernel report; in this build, by
-/// tests alone.
+/// What an approver decided on a request. Built by [`decide_echoed`] from
+/// the approver endpoint's kernel report and the level this module records
+/// (A1), and by tests.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(
-    not(all(test, target_os = "linux")),
+    not(unix),
     expect(
         dead_code,
-        reason = "M6.3's approver operations build the first production decision"
+        reason = "the approver endpoint, its one production caller, is Unix-only"
     )
 )]
 pub(crate) enum ApproverDecision {
@@ -776,6 +823,9 @@ pub(crate) enum DecisionRefused {
     SelfApproval,
     /// An A2 decision, or a request that needs A2: no presence factor exists.
     AssuranceUnavailable,
+    /// M6.3: the binding hash a decision echoed is not the request's -- the
+    /// client showed another request, or none. Nothing is decided.
+    BindingMismatch,
 }
 
 /// A pending request, as a decision reads it.
@@ -789,6 +839,9 @@ struct Pending {
     life_s: u64,
     max_uses: i64,
     needed: String,
+    binding_sha256: String,
+    policy_revision: String,
+    rule_id: String,
 }
 
 fn pending(work: &Work<'_>, request: &str) -> Result<Option<Pending>, AuthorityError> {
@@ -796,7 +849,8 @@ fn pending(work: &Work<'_>, request: &str) -> Result<Option<Pending>, AuthorityE
         .tx
         .query_row(
             "SELECT run_id, requester, state, requested_ms, not_after_ms, ttl_s, max_uses, \
-             assurance_required FROM approval_request WHERE request_id = ?1",
+             assurance_required, binding_sha256, policy_revision, rule_id \
+             FROM approval_request WHERE request_id = ?1",
             [request],
             |row| {
                 Ok((
@@ -812,11 +866,20 @@ fn pending(work: &Work<'_>, request: &str) -> Result<Option<Pending>, AuthorityE
                         row.get::<_, i64>(6)?,
                         row.get::<_, String>(7)?,
                     ),
+                    (
+                        row.get::<_, String>(8)?,
+                        row.get::<_, String>(9)?,
+                        row.get::<_, String>(10)?,
+                    ),
                 ))
             },
         )
         .optional())?;
-    let Some(((run, requester, state), (asked_ms, not_after, life_s, max_uses, needed))) = row
+    let Some((
+        (run, requester, state),
+        (asked_ms, not_after, life_s, max_uses, needed),
+        (binding_sha256, policy_revision, rule_id),
+    )) = row
     else {
         return Ok(None);
     };
@@ -830,6 +893,9 @@ fn pending(work: &Work<'_>, request: &str) -> Result<Option<Pending>, AuthorityE
         life_s: u64::try_from(life_s).map_err(|_| malformed())?,
         max_uses,
         needed,
+        binding_sha256,
+        policy_revision,
+        rule_id,
     }))
 }
 
@@ -900,8 +966,13 @@ fn deny(
     let fields = Fields::new()
         .text("request_id", request)
         .text("run_id", pending.run.as_str())
+        .text("requester", pending.requester.as_str())
         .text("approver", approver)
-        .text("channel", CHANNEL);
+        .text("channel", CHANNEL)
+        .text("binding_sha256", pending.binding_sha256.as_str())
+        .text("rule_id", pending.rule_id.as_str())
+        .text("policy_revision", pending.policy_revision.as_str())
+        .int("latency_ms", now.saturating_sub(pending.asked_ms));
     work.audit(AuditEvent::ApprovalDenied, fields)
 }
 
@@ -947,9 +1018,13 @@ fn grant(
         .text("approval_id", id.as_str())
         .text("request_id", request)
         .text("run_id", pending.run.as_str())
+        .text("requester", pending.requester.as_str())
         .text("approver", approver)
         .text("channel", CHANNEL)
         .text("assurance", Assurance::A1.as_str())
+        .text("binding_sha256", pending.binding_sha256.as_str())
+        .text("rule_id", pending.rule_id.as_str())
+        .text("policy_revision", pending.policy_revision.as_str())
         .int("not_after_ms", not_after)
         .int("max_uses", u64::try_from(pending.max_uses).unwrap_or(0))
         .int("latency_ms", now.saturating_sub(pending.asked_ms));
@@ -983,19 +1058,491 @@ pub(super) fn revoke(
     Ok(true)
 }
 
+// ---------------------------------------------------------------------------
+// M6.3 (ADR-0081, Proposed): the approver endpoint's operations.
+// ---------------------------------------------------------------------------
+
+/// The operator's approvers, checked: one to [`MAX_APPROVERS`] uids, none
+/// repeated, never the authority's own. The server's start-up makes it from
+/// `--approver-uid` -- whose parser has already kept out every runtime's and
+/// the broker's uid -- attaches it once ([`Authority::attach_approver_set`])
+/// and makes the endpoint's admitted set from the same value, so that what
+/// the endpoint admits and what a decision or a spend recognises never
+/// diverge. A changed set takes a restart (ADR-0067's residual).
+#[cfg(unix)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ApproverSet {
+    uids: Vec<u32>,
+}
+
+#[cfg(unix)]
+impl ApproverSet {
+    /// The set of `uids`, for an authority running as `authority_uid`.
+    ///
+    /// # Errors
+    ///
+    /// Why the set is not one: empty, over [`MAX_APPROVERS`], a uid repeated,
+    /// or the authority's own uid among them.
+    pub(crate) fn new(uids: &[u32], authority_uid: u32) -> Result<Self, &'static str> {
+        if uids.is_empty() {
+            return Err("an approver set names at least one uid: there is no default approver");
+        }
+        if uids.len() > MAX_APPROVERS {
+            return Err("an approver set names at most 16 uids");
+        }
+        let mut sorted = uids.to_vec();
+        sorted.sort_unstable();
+        sorted.dedup();
+        if sorted.len() != uids.len() {
+            return Err("an approver uid is repeated");
+        }
+        if sorted.contains(&authority_uid) {
+            return Err("the authority's own uid is never an approver");
+        }
+        Ok(Self { uids: sorted })
+    }
+
+    /// The approvers, in order.
+    pub(crate) fn uids(&self) -> &[u32] {
+        &self.uids
+    }
+}
+
+/// An approver the approver endpoint authenticated: the uid the kernel
+/// reported for its connection, found in the operator's set before a byte of
+/// it was read. Made only by the endpoint (`server/approver.rs`, TX065); it
+/// carries no level -- a decision's is the one this module records, A1 --
+/// and no runtime path makes or holds one.
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ApproverPrincipal {
+    uid: u32,
+}
+
+#[cfg(unix)]
+impl ApproverPrincipal {
+    /// The approver the kernel reported as `uid` for a connection on the
+    /// approver socket, once the endpoint found it in the operator's set.
+    pub(crate) const fn kernel_reported(uid: u32) -> Self {
+        Self { uid }
+    }
+
+    /// The approver as a decision records it.
+    fn subject(self) -> AuthenticatedSubject {
+        AuthenticatedSubject::unix_uid(self.uid)
+    }
+}
+
+/// The refusal a decision the registry did not record is answered with.
+#[cfg(unix)]
+const fn refusal(refused: DecisionRefused) -> approverp::RefusalCode {
+    use approverp::RefusalCode as Code;
+    match refused {
+        DecisionRefused::UnknownRequest => Code::UnknownRequest,
+        DecisionRefused::NotPending => Code::NotPending,
+        DecisionRefused::Expired => Code::Expired,
+        DecisionRefused::RunEnded => Code::RunEnded,
+        DecisionRefused::UnknownApprover => Code::UnknownApprover,
+        DecisionRefused::SelfApproval => Code::SelfApproval,
+        DecisionRefused::AssuranceUnavailable => Code::AssuranceUnavailable,
+        DecisionRefused::BindingMismatch => Code::BindingMismatch,
+    }
+}
+
+/// A stored value that does not fit the approver protocol: the store's, not
+/// the approver's, fault -- answered with nothing.
+#[cfg(unix)]
+const fn unshowable() -> AuthorityError {
+    AuthorityError::Invariant("a stored request does not fit the approver protocol")
+}
+
+#[cfg(unix)]
+fn millis(value: i64) -> Result<approverp::Millis, AuthorityError> {
+    u64::try_from(value)
+        .ok()
+        .and_then(approverp::Millis::new)
+        .ok_or_else(unshowable)
+}
+
+#[cfg(unix)]
+fn uses(value: i64) -> Result<approverp::Uses, AuthorityError> {
+    u32::try_from(value)
+        .ok()
+        .and_then(approverp::Uses::new)
+        .ok_or_else(unshowable)
+}
+
+#[cfg(unix)]
+fn assurance(value: &str) -> Result<approverp::Assurance, AuthorityError> {
+    match value {
+        "A1" => Ok(approverp::Assurance::A1),
+        "A2" => Ok(approverp::Assurance::A2),
+        _ => Err(unshowable()),
+    }
+}
+
+/// The requests that wait: pending, inside their window, their run still
+/// `ACTIVE` -- the ones a decision could be recorded on now -- oldest first,
+/// at most [`approverp::MAX_LISTED`], and how many wait in all. Read-only: a
+/// request past its window is not listed and is not ended here.
+#[cfg(unix)]
+fn listing(work: &Work<'_>) -> Result<approverp::Response, AuthorityError> {
+    let now = clock(work)?;
+    let at = to_sql(now)?;
+    let waiting: i64 = work.db(work.tx.query_row(
+        "SELECT count(*) FROM approval_request r JOIN run ON run.run_id = r.run_id \
+         WHERE r.state = 'PENDING' AND r.not_after_ms > ?1 AND run.state = 'ACTIVE'",
+        [at],
+        |row| row.get(0),
+    ))?;
+    let limit = i64::try_from(approverp::MAX_LISTED).unwrap_or(0);
+    let mut statement = work.db(work.tx.prepare(
+        "SELECT r.request_id, r.run_id, r.requester, r.rule_id, r.binding_sha256, \
+         r.requested_ms, r.not_after_ms FROM approval_request r JOIN run ON run.run_id = r.run_id \
+         WHERE r.state = 'PENDING' AND r.not_after_ms > ?1 AND run.state = 'ACTIVE' \
+         ORDER BY r.requested_ms, r.request_id LIMIT ?2",
+    ))?;
+    let rows = work.db(statement.query_map(rusqlite::params![at, limit], |row| {
+        Ok((
+            (
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ),
+            (
+                row.get::<_, String>(4)?,
+                row.get::<_, i64>(5)?,
+                row.get::<_, i64>(6)?,
+            ),
+        ))
+    }))?;
+    let mut summaries = Vec::new();
+    for row in rows {
+        let ((id, run, requester, rule), (hash, asked, until)) = work.db(row)?;
+        summaries.push(approverp::Summary {
+            request_id: approverp::RequestId::new(id).ok_or_else(unshowable)?,
+            run_id: RunId::parse(&run).ok_or_else(unshowable)?,
+            requester: approverp::Principal::new(requester).ok_or_else(unshowable)?,
+            rule_id: approverp::Label::new(rule).ok_or_else(unshowable)?,
+            binding_sha256: approverp::Digest::new(hash).ok_or_else(unshowable)?,
+            requested_ms: millis(asked)?,
+            not_after_ms: millis(until)?,
+        });
+    }
+    drop(statement);
+    Ok(approverp::Response::listed(
+        u16::try_from(waiting)
+            .ok()
+            .and_then(approverp::Waiting::new)
+            .ok_or_else(unshowable)?,
+        approverp::Summaries::new(summaries).ok_or_else(unshowable)?,
+        approverp::Millis::new(now).ok_or_else(unshowable)?,
+    ))
+}
+
+/// One request's row, as stored.
+#[cfg(unix)]
+struct Stored {
+    request_id: String,
+    state: String,
+    run_id: String,
+    session_id: String,
+    requester: String,
+    epoch: i64,
+    rule_id: String,
+    policy_revision: String,
+    scope: String,
+    ttl_s: i64,
+    max_uses: i64,
+    assurance_required: String,
+    requested_ms: i64,
+    not_after_ms: i64,
+    decided_ms: Option<i64>,
+    binding_schema: String,
+    binding_sha256: String,
+    binding: Vec<u8>,
+}
+
+/// The approval a request's grant recorded, as stored.
+#[cfg(unix)]
+fn approval_view(
+    work: &Work<'_>,
+    request: &str,
+) -> Result<Option<approverp::ApprovalView>, AuthorityError> {
+    let row = work.db(work
+        .tx
+        .query_row(
+            "SELECT approval_id, approver, channel, assurance, state, uses, max_uses, \
+             not_after_ms FROM approval WHERE request_id = ?1",
+            [request],
+            |row| {
+                Ok((
+                    (
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                    ),
+                    (
+                        row.get::<_, String>(4)?,
+                        row.get::<_, i64>(5)?,
+                        row.get::<_, i64>(6)?,
+                        row.get::<_, i64>(7)?,
+                    ),
+                ))
+            },
+        )
+        .optional())?;
+    let Some(((id, approver, channel, level), (state, spent, limit, until))) = row else {
+        return Ok(None);
+    };
+    if channel != CHANNEL {
+        return Err(unshowable());
+    }
+    let state = match state.as_str() {
+        "OPEN" => approverp::ApprovalState::Open,
+        "EXHAUSTED" => approverp::ApprovalState::Exhausted,
+        "EXPIRED" => approverp::ApprovalState::Expired,
+        "REVOKED" => approverp::ApprovalState::Revoked,
+        _ => return Err(unshowable()),
+    };
+    Ok(Some(approverp::ApprovalView {
+        approval_id: approverp::Digest::new(id).ok_or_else(unshowable)?,
+        approver: approverp::Principal::new(approver).ok_or_else(unshowable)?,
+        channel: approverp::Channel::ApproverEndpoint,
+        assurance: assurance(&level)?,
+        state,
+        uses: uses(spent)?,
+        max_uses: uses(limit)?,
+        not_after_ms: millis(until)?,
+    }))
+}
+
+/// One request as stored, whatever its state: an approver who lost a
+/// decision's answer reads what was recorded here. Read-only. `None` for an
+/// unknown id. A stored binding that does not hash to its digest is the
+/// store's fault, never shown.
+#[cfg(unix)]
+fn showing(
+    work: &Work<'_>,
+    request: &str,
+) -> Result<Option<approverp::RequestDetail>, AuthorityError> {
+    let now = clock(work)?;
+    let row = work.db(work
+        .tx
+        .query_row(
+            "SELECT request_id, state, run_id, session_id, requester, epoch, rule_id, \
+             policy_revision, scope, ttl_s, max_uses, assurance_required, requested_ms, \
+             not_after_ms, decided_ms, binding_schema, binding_sha256, binding \
+             FROM approval_request WHERE request_id = ?1",
+            [request],
+            |row| {
+                Ok(Stored {
+                    request_id: row.get(0)?,
+                    state: row.get(1)?,
+                    run_id: row.get(2)?,
+                    session_id: row.get(3)?,
+                    requester: row.get(4)?,
+                    epoch: row.get(5)?,
+                    rule_id: row.get(6)?,
+                    policy_revision: row.get(7)?,
+                    scope: row.get(8)?,
+                    ttl_s: row.get(9)?,
+                    max_uses: row.get(10)?,
+                    assurance_required: row.get(11)?,
+                    requested_ms: row.get(12)?,
+                    not_after_ms: row.get(13)?,
+                    decided_ms: row.get(14)?,
+                    binding_schema: row.get(15)?,
+                    binding_sha256: row.get(16)?,
+                    binding: row.get(17)?,
+                })
+            },
+        )
+        .optional())?;
+    let Some(stored) = row else {
+        return Ok(None);
+    };
+    if digest::plain(&stored.binding).to_hex() != stored.binding_sha256 {
+        return Err(AuthorityError::Invariant(
+            "a stored request's binding does not hash to its digest",
+        ));
+    }
+    let state = match stored.state.as_str() {
+        "PENDING" => approverp::RequestState::Pending,
+        "GRANTED" => approverp::RequestState::Granted,
+        "DENIED" => approverp::RequestState::Denied,
+        "EXPIRED" => approverp::RequestState::Expired,
+        _ => return Err(unshowable()),
+    };
+    let window = u64::try_from(stored.not_after_ms).map_err(|_| unshowable())?;
+    let decidable = state == approverp::RequestState::Pending
+        && now < window
+        && run_active(work, &stored.run_id)?;
+    let text = String::from_utf8(stored.binding).map_err(|_| unshowable())?;
+    Ok(Some(approverp::RequestDetail {
+        request_id: approverp::RequestId::new(stored.request_id).ok_or_else(unshowable)?,
+        state,
+        decidable,
+        run_id: RunId::parse(&stored.run_id).ok_or_else(unshowable)?,
+        session_id: SessionId::parse(&stored.session_id).ok_or_else(unshowable)?,
+        requester: approverp::Principal::new(stored.requester).ok_or_else(unshowable)?,
+        epoch: u64::try_from(stored.epoch)
+            .ok()
+            .and_then(approverp::EpochNumber::new)
+            .ok_or_else(unshowable)?,
+        rule_id: approverp::Label::new(stored.rule_id).ok_or_else(unshowable)?,
+        policy_revision: approverp::Digest::new(stored.policy_revision).ok_or_else(unshowable)?,
+        scope: approverp::Label::new(stored.scope).ok_or_else(unshowable)?,
+        ttl_s: u32::try_from(stored.ttl_s)
+            .ok()
+            .and_then(approverp::Seconds::new)
+            .ok_or_else(unshowable)?,
+        max_uses: uses(stored.max_uses)?,
+        assurance_required: assurance(&stored.assurance_required)?,
+        requested_ms: millis(stored.requested_ms)?,
+        not_after_ms: millis(stored.not_after_ms)?,
+        decided_ms: stored.decided_ms.map(millis).transpose()?,
+        binding_schema: approverp::Label::new(stored.binding_schema).ok_or_else(unshowable)?,
+        binding_sha256: approverp::Digest::new(stored.binding_sha256).ok_or_else(unshowable)?,
+        binding: approverp::BindingText::new(text).ok_or_else(unshowable)?,
+        approval: approval_view(work, request)?,
+        now_ms: approverp::Millis::new(now).ok_or_else(unshowable)?,
+    }))
+}
+
+/// Record an approver's decision on `request`, bound to what they were
+/// shown: in this one transaction, the request's stored binding is hashed
+/// again and must be its digest, and the hash the decision echoed must be
+/// that digest -- else nothing is decided -- and then [`decide`] records it
+/// once, at A1, by `approver`, its every guard read again. The challenge is
+/// the request's id: unique, and decided once (ADR-0081 §6).
+///
+/// # Errors
+///
+/// [`AuthorityError`] for a store that cannot be read or written, or a
+/// stored binding that does not hash to its digest.
+#[cfg(unix)]
+fn decide_echoed(
+    work: &mut Work<'_>,
+    approver: ApproverPrincipal,
+    request: &str,
+    echoed: &str,
+    verdict: approverp::Verdict,
+) -> Result<Result<Option<String>, DecisionRefused>, AuthorityError> {
+    let stored: Option<(String, Vec<u8>)> = work.db(work
+        .tx
+        .query_row(
+            "SELECT binding_sha256, binding FROM approval_request WHERE request_id = ?1",
+            [request],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional())?;
+    let Some((hash, bytes)) = stored else {
+        return Ok(Err(DecisionRefused::UnknownRequest));
+    };
+    if digest::plain(&bytes).to_hex() != hash {
+        return Err(AuthorityError::Invariant(
+            "a stored request's binding does not hash to its digest",
+        ));
+    }
+    if echoed != hash {
+        return Ok(Err(DecisionRefused::BindingMismatch));
+    }
+    let approver = approver.subject();
+    let decision = match verdict {
+        approverp::Verdict::Approve => ApproverDecision::Grant {
+            approver,
+            assurance: Assurance::A1,
+        },
+        approverp::Verdict::Deny => ApproverDecision::Deny { approver },
+    };
+    decide(work, request, decision)
+}
+
 impl Authority {
     /// Attach the approvers an approval may be decided by and spent under.
-    /// **Test-only in M6.2** -- the Linux route tests', its one caller: no
-    /// production path attaches a set, so in the shipped build no approval can
-    /// be decided or spent. M6.3 attaches the approver endpoint's set under a
-    /// decision of its own.
+    /// **Test-only** -- the Linux route tests' and crash children's: the
+    /// shipped build attaches the operator's set through
+    /// [`Authority::attach_approver_set`] alone, from its start-up.
     #[cfg(all(test, target_os = "linux"))]
     pub(crate) fn attach_approvers(&self, uids: &[u32]) -> bool {
         self.shared.attachments.approvers.set(uids.to_vec()).is_ok()
     }
 
+    /// Attach the operator's approvers (M6.3, ADR-0081 §5): once, by the
+    /// server's start-up (`server::start`, its one caller, TX068), before the
+    /// approver endpoint accepts a connection. `false` if a set is already
+    /// attached; nothing replaces one while the authority runs.
+    #[cfg(unix)]
+    pub(crate) fn attach_approver_set(&self, set: &ApproverSet) -> bool {
+        self.shared
+            .attachments
+            .approvers
+            .set(set.uids.clone())
+            .is_ok()
+    }
+
+    /// Answer one approver-protocol request for `approver` (M6.3, ADR-0081):
+    /// in one transaction, the approver is checked still one of the
+    /// operator's -- the second statement of the endpoint's own check -- and
+    /// the request listed, shown or decided. Listing and showing write
+    /// nothing; a decision writes only what [`decide`] records. The only
+    /// production caller is the server's worker, for a connection the
+    /// approver endpoint authenticated (TX065).
+    ///
+    /// # Errors
+    ///
+    /// [`AuthorityError`] when the authority cannot answer truthfully: the
+    /// connection is closed with no answer, and nothing was decided.
+    #[cfg(unix)]
+    pub(crate) fn serve_approver(
+        &mut self,
+        approver: ApproverPrincipal,
+        request: &approverp::Request,
+    ) -> Result<approverp::Response, AuthorityError> {
+        use approverp::{Outcome, RefusalCode, Request, Response};
+        self.transact(|work| {
+            if !approver_known(work, &approver.subject().storage_key()) {
+                return Ok(Response::Refused(RefusalCode::UnknownApprover));
+            }
+            match request {
+                Request::List => listing(work),
+                Request::Show(id) => Ok(match showing(work, id.as_str())? {
+                    Some(detail) => Response::shown(detail),
+                    None => Response::Refused(RefusalCode::UnknownRequest),
+                }),
+                Request::Decide {
+                    request_id,
+                    binding_sha256,
+                    decision,
+                } => {
+                    let decided = decide_echoed(
+                        work,
+                        approver,
+                        request_id.as_str(),
+                        binding_sha256.as_str(),
+                        *decision,
+                    )?;
+                    Ok(match decided {
+                        Ok(Some(approval)) => Response::decided(
+                            request_id.clone(),
+                            Outcome::Granted,
+                            Some(approverp::Digest::new(approval).ok_or_else(unshowable)?),
+                        ),
+                        Ok(None) => Response::decided(request_id.clone(), Outcome::Denied, None),
+                        Err(refused) => Response::Refused(refusal(refused)),
+                    })
+                }
+            }
+        })
+    }
+
     /// Record an approver's decision on a pending request ([`decide`]), in
-    /// one transaction. M6.3's seam: no production caller in M6.2.
+    /// one transaction: the state machine, driven directly by tests. The
+    /// production path is [`Authority::serve_approver`], which checks the
+    /// decision's echoed binding first ([`decide_echoed`]).
     ///
     /// # Errors
     ///
@@ -1004,7 +1551,7 @@ impl Authority {
         not(all(test, target_os = "linux")),
         expect(
             dead_code,
-            reason = "M6.3's approver operations are its first production caller"
+            reason = "the test seam; the endpoint decides through serve_approver"
         )
     )]
     pub(crate) fn decide_approval(
@@ -1027,7 +1574,7 @@ impl Authority {
         not(all(test, target_os = "linux")),
         expect(
             dead_code,
-            reason = "M6.3's operator revocation is its first production caller"
+            reason = "no production revocation operation before ADR-0081 OD-4 is decided"
         )
     )]
     pub(crate) fn revoke_approval(&mut self, approval: &str) -> Result<bool, AuthorityError> {

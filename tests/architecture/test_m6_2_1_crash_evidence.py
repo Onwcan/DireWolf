@@ -115,7 +115,15 @@ def test_the_matrix_covers_every_window_it_claims() -> None:
     assert by["spend"] == set("AwBCDEFGqtrs")
     assert by["migration"] == set("yzHI")
     assert by["request"] >= set("xBC")
-    for scenario in ("grant", "deny", "ended-run-decision", "revoke", "expiry"):
+    for scenario in (
+        "grant",
+        "deny",
+        "ended-run-decision",
+        "revoke",
+        "expiry",
+        "endpoint-grant",
+        "endpoint-deny",
+    ):
         assert {"B", "C"} <= by[scenario], scenario
     assert set(by) == {
         "spend",
@@ -126,6 +134,9 @@ def test_the_matrix_covers_every_window_it_claims() -> None:
         "revoke",
         "expiry",
         "migration",
+        # M6.3 (ADR-0081): the approver endpoint's decision.
+        "endpoint-grant",
+        "endpoint-deny",
     }
 
 
@@ -426,9 +437,15 @@ def test_the_supervisor_ends_only_its_own_child() -> None:
 
 def _release(
     rlib: bytes = b"..." + dw.APPROVAL_RELEASE_SYMBOL_CONTROL,
-    daemon: bytes = b"..." + dw.APPROVAL_RELEASE_LITERAL_CONTROL,
+    daemon: bytes = b"..."
+    + dw.APPROVAL_RELEASE_LITERAL_CONTROL
+    + b"."
+    + dw.APPROVER_RELEASE_LITERAL_CONTROL,
+    client: bytes = b"clean." + dw.APPROVER_RELEASE_LITERAL_CONTROL,
 ) -> list[tuple[str, bytes]]:
-    return [("direwolf", b"clean"), ("dwkd-authority", daemon), ("libdwkd_authority.rlib", rlib)]
+    # M6.3 (ADR-0081): both the daemon and the trusted client must speak
+    # the approver protocol for the scan to count.
+    return [("direwolf", client), ("dwkd-authority", daemon), ("libdwkd_authority.rlib", rlib)]
 
 
 def test_the_separation_scan_needs_its_controls_and_finds_a_seam() -> None:
@@ -449,10 +466,19 @@ def test_the_separation_scan_needs_its_controls_and_finds_a_seam() -> None:
         dw.judge_seam_separation(control, _release(rlib=b"stripped"))
     with pytest.raises(dw.TaskError, match="no registry literal"):
         dw.judge_seam_separation(control, _release(daemon=b"other"))
+    # M6.3: a client or a daemon that does not speak the approver protocol
+    # is the wrong file, or a stripped one: blind.
+    with pytest.raises(dw.TaskError, match="direwolf does not speak the approver protocol"):
+        dw.judge_seam_separation(control, _release(client=b"clean"))
+    with pytest.raises(dw.TaskError, match="dwkd-authority does not speak"):
+        dw.judge_seam_separation(
+            control, _release(daemon=b"..." + dw.APPROVAL_RELEASE_LITERAL_CONTROL)
+        )
     for seam in seams:
         with pytest.raises(dw.TaskError, match="holds test-only seams"):
             dw.judge_seam_separation(control, [*_release(), ("dwkd-broker", b"." + seam + b".")])
     assert b"16attach_approvers" in seams
+    assert b"17approver_endpoint" in seams, "M6.3's in-process endpoint for the route tests"
     assert b"18with_test_approval" in seams
     assert b"13TEST_APPROVAL" in seams
     assert b"DW_M621_CRASH_CASE" in seams

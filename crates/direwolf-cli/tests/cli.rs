@@ -81,12 +81,11 @@ fn unknown_command_fails_with_a_usage_error() {
 
 /// M1 must not ship a command whose subsystem does not exist. If any of these
 /// starts succeeding, either a milestone landed (update this test) or someone
-/// added a stub (do not).
+/// added a stub (do not). `approve` landed with M6.3 (ADR-0081): the trusted
+/// approver client, tested below.
 #[test]
 fn the_agent_command_surface_is_not_stubbed() {
-    for cmd in [
-        "run", "chat", "agent", "approve", "memory", "policy", "init",
-    ] {
+    for cmd in ["run", "chat", "agent", "memory", "policy", "init"] {
         let out = direwolf(&[cmd]);
         assert_eq!(
             out.status.code(),
@@ -94,4 +93,21 @@ fn the_agent_command_surface_is_not_stubbed() {
             "`direwolf {cmd}` must not exist before its owning milestone"
         );
     }
+}
+
+/// M6.3: the released `direwolf approve` prints its usage, names the
+/// approver endpoint and A1, and refuses an option that would approve
+/// without asking -- with no approver endpoint to reach.
+#[test]
+fn approve_is_the_trusted_approver_client() {
+    let out = direwolf(&["approve"]);
+    assert_eq!(out.status.code(), Some(0));
+    let usage = String::from_utf8_lossy(&out.stdout);
+    assert!(usage.contains("--approver-socket"), "{usage}");
+    assert!(usage.contains("recorded at A1"), "{usage}");
+    let out = direwolf(&["approve", "review", "--yes"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("no option that approves without asking")
+    );
 }

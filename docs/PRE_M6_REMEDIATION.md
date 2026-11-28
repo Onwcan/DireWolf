@@ -90,7 +90,10 @@ platforms.
   [M6_1_IMPLEMENTATION.md](M6_1_IMPLEMENTATION.md);
   [ADR-0080](adr/0080-the-approval-registry-durable-requests-and-atomic-consumption.md)
   (M6.2's approval registry), accepted 2026-11-27, in the plan and
-  [M6_2_IMPLEMENTATION.md](M6_2_IMPLEMENTATION.md). ADR-0064 (F-02), this
+  [M6_2_IMPLEMENTATION.md](M6_2_IMPLEMENTATION.md);
+  [ADR-0081](adr/0081-the-approver-endpoints-operations-and-the-trusted-approver-client.md)
+  (M6.3's approver endpoint operations and client), Proposed, in the plan and
+  [M6_3_IMPLEMENTATION.md](M6_3_IMPLEMENTATION.md). ADR-0064 (F-02), this
   ledger's, was accepted on 2026-11-27, as written, on hosted evidence from
   CI #201 to CI #228: M6.2's revocation and run- and lease-end races (CI
   #227) and M6.2.1's lease takeover against an open approval and the

@@ -1,23 +1,26 @@
 //! The approver endpoint as a real process (F-18 Phase 3.4, ADR-0067,
-//! Proposed): `dwkd-authority serve --approver-socket --approver-uid`, a
-//! second socket, peers the kernel identifies.
+//! accepted; its operations M6.3, ADR-0081, Proposed): `dwkd-authority
+//! serve --approver-socket --approver-uid`, a second socket, peers the kernel
+//! identifies.
 //!
-//! What is proved here is an identity boundary and nothing more, because
-//! nothing more exists: the endpoint holds no approval operation before M6's
-//! registry, so a peer it authenticates is recorded and closed, a peer it
-//! does not is refused and recorded, and neither has a byte read or
-//! answered.
+//! A peer that is not an approver is refused and recorded with nothing it
+//! sent read or answered -- whatever it sends, an approver-protocol request
+//! included. Since M6.3 an approver the endpoint authenticates is admitted to
+//! one approver-protocol request (list, show, decide) and answered; before,
+//! it was recorded and closed.
 //!
 //! **Two halves.** The same-uid tests run everywhere `cargo test` runs on
 //! Linux: this process is the runtime the operator lets speak DWKP, and the
 //! approver endpoint refuses it by the uid the kernel reports; a start that
 //! would make a runtime, the broker or the authority an approver, or put the
-//! endpoint on the DWKP socket, starts nothing. The three-identity test is
-//! `#[ignore]`d and run by name by `make authority-transport-evidence` with
-//! `DW_PEER_AS` (the runtime) and `DW_APPROVER_AS` (the approver), each
-//! proven a distinct, non-root uid by number: the harness switches users
-//! through `sudo -n -u`, never the authority. Without both it is NOT
-//! EXERCISED, and the task fails rather than passing.
+//! endpoint on the DWKP socket, starts nothing. The three-identity tests are
+//! `#[ignore]`d and run by name -- the identity boundary by `make
+//! authority-transport-evidence`, M6.3's operations by `make
+//! approver-operations-evidence` -- with `DW_PEER_AS` (the runtime),
+//! `DW_APPROVER_AS` (the approver) and, for the operations, `DW_OTHER_AS` (an
+//! unrelated uid), each proven a distinct, non-root uid by number: the
+//! harness switches users through `sudo -n -u`, never the authority. Without
+//! them a case is NOT EXERCISED, and the task fails rather than passing.
 //!
 //! The eval `peer-credential-check` runs every ignored test in
 //! `transport_foreign.rs` with one second identity; this file is apart from
@@ -61,6 +64,7 @@ mod linux {
     use std::process::Command;
     use std::time::{Duration, Instant};
 
+    use dwk_proto::approverp;
     use dwk_proto::dwkp::DwkpBody;
     use dwk_proto::json::{self, ParseOptions, Value};
     use dwkd_authority::state::AuditRecord;
@@ -134,7 +138,7 @@ mod linux {
         ]));
         let stderr = stderr_with(&server, "approver endpoint at");
         assert!(
-            stderr.contains("holds no approval operation before M6"),
+            stderr.contains("before reading a byte") && stderr.contains("not a proven person"),
             "{stderr}"
         );
         let place = std::fs::metadata(approver.parent().unwrap()).unwrap();
@@ -154,8 +158,24 @@ mod linux {
         let mut client = Client::connect(&approver);
         let _ = client.raw(b"\x00\x00\x00\x05\x01{bad}");
         assert!(client.recv(PROMPT).is_closed(), "nothing is sent back");
+        // M6.3 (ADR-0081): each approver-protocol request, well formed --
+        // list, show, decide -- refused the same way, by the kernel's uid.
+        let id = "0".repeat(64);
+        for request in [
+            approverp::Request::List,
+            approverp::Request::Show(approverp::RequestId::new(&id).unwrap()),
+            approverp::Request::Decide {
+                request_id: approverp::RequestId::new(&id).unwrap(),
+                binding_sha256: approverp::Digest::new(&id).unwrap(),
+                decision: approverp::Verdict::Approve,
+            },
+        ] {
+            let mut client = Client::connect(&approver);
+            let _ = client.raw(&request.encode_frame().unwrap());
+            assert!(client.recv(PROMPT).is_closed(), "{request:?} answered");
+        }
 
-        let refused = await_events(&fx, "approver.peer_refused", 2);
+        let refused = await_events(&fx, "approver.peer_refused", 5);
         for record in &refused {
             assert_eq!(record.int("uid"), Some(u64::from(me)), "the kernel's uid");
             assert_eq!(
@@ -172,6 +192,10 @@ mod linux {
         assert!(
             fx.events("transport.protocol_violation").is_empty(),
             "nothing it sent was parsed"
+        );
+        assert!(
+            fx.events("approver.request_refused").is_empty(),
+            "no request of its was read"
         );
         evidence(
             "approver",
@@ -191,7 +215,7 @@ mod linux {
         );
         assert_eq!(
             fx.events("approver.peer_refused").len(),
-            2,
+            5,
             "the DWKP endpoint records nothing as the approver's"
         );
         evidence(
@@ -529,7 +553,10 @@ mod linux {
         assert!(output.status.success());
         assert!(text.contains("--approver-socket"), "{text}");
         assert!(text.contains("--approver-uid"), "{text}");
-        assert!(text.contains("no approval operation before M6"), "{text}");
+        assert!(
+            text.contains("lists, shows and decides approval requests there, at A1"),
+            "{text}"
+        );
         assert!(
             text.contains("never a DWKP peer's, the broker's or the authority's"),
             "{text}"
@@ -668,6 +695,22 @@ mod linux {
         dwk_proto::dwkp::decode_body(&bytes[5..]).unwrap().body
     }
 
+    /// One answer frame the client read on the approver socket, decoded by
+    /// the approver protocol's own decoder (M6.3).
+    fn approver_reply(report: &json::Object, index: usize) -> approverp::Response {
+        let Some(Value::Array(replies)) = report.get("replies") else {
+            panic!("replies: {report:?}")
+        };
+        let Some(Value::String(hex)) = replies.get(index) else {
+            panic!("reply {index}: {report:?}")
+        };
+        let bytes: Vec<u8> = (0..hex.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap())
+            .collect();
+        approverp::Response::decode_frame_body(&bytes[5..]).unwrap()
+    }
+
     /// The client was refused at `report`'s socket: it connected, read
     /// nothing, and saw the server close.
     fn closed_unanswered(report: &json::Object, euid: u32) {
@@ -758,22 +801,25 @@ mod linux {
         );
 
         // 2. The approver at the approver endpoint: authenticated by the
-        //    kernel's report, recorded, closed. Nothing it sent was read and
-        //    nothing was answered: there is no approval operation yet.
-        let hello = run_as(&approver, &script, &["hello", &approve, &frame]);
-        closed_unanswered(&hello, approver_uid);
+        //    kernel's report and admitted to one request (M6.3, ADR-0081). A
+        //    DWKP handshake is not the approver protocol: it is read, refused
+        //    MALFORMED_REQUEST, and reaches nothing. (Before M6.3 it was
+        //    closed unread: there was no operation to admit it to.)
+        let talk = run_as(&approver, &script, &["converse", &approve, &frame]);
+        assert_eq!(u32::try_from(int(&talk, "euid")).unwrap(), approver_uid);
+        assert_eq!(
+            approver_reply(&talk, 0),
+            approverp::Response::Refused(approverp::RefusalCode::MalformedRequest)
+        );
         let authenticated = await_events(&fx, "approver.peer_authenticated", 1);
         assert_eq!(authenticated.len(), 1);
         assert_eq!(authenticated[0].int("uid"), Some(u64::from(approver_uid)));
-        assert_eq!(authenticated[0].int("pid"), Some(int(&hello, "pid")));
-        assert_eq!(authenticated[0].text("outcome"), Some("closed"));
-        assert_eq!(
-            authenticated[0].text("reason"),
-            Some("no_approval_operation")
-        );
+        assert_eq!(authenticated[0].int("pid"), Some(int(&talk, "pid")));
+        assert_eq!(authenticated[0].text("outcome"), Some("admitted"));
+        assert!(fx.events("approval.granted").is_empty());
         evidence(
             "approver",
-            "cross-uid-approver-authenticated-holds-nothing",
+            "cross-uid-approver-authenticated-and-admitted",
             "approver-gate",
             true,
             true,
@@ -841,6 +887,209 @@ mod linux {
         assert!(fx.events("run.admitted").is_empty());
         assert!(fx.events("transport.protocol_violation").is_empty());
         assert_eq!(fx.events("approver.peer_authenticated").len(), 1);
+        server.kill();
+        let verified =
+            super::state_support::output(Command::new(BIN).arg("verify-audit").arg(fx.state()))
+                .expect("verify-audit runs");
+        assert!(
+            verified.status.success(),
+            "{}",
+            String::from_utf8_lossy(&verified.stderr)
+        );
+        assert!(String::from_utf8_lossy(&verified.stdout).contains("chain intact"));
+    }
+
+    // ---------------------------------------------------------------------
+    // M6.3 (ADR-0081): the approver protocol across real identities.
+    // ---------------------------------------------------------------------
+
+    /// The released trusted client, copied where the other users can run it.
+    fn staged_direwolf(dir: &TempDir) -> PathBuf {
+        let built = std::env::current_exe()
+            .unwrap()
+            .parent()
+            .and_then(Path::parent)
+            .unwrap()
+            .join("direwolf");
+        assert!(
+            built.exists(),
+            "NOT EXERCISED: build the trusted client first (cargo build -p direwolf-cli): {}",
+            built.display()
+        );
+        let staged = dir.path().join("direwolf");
+        std::fs::copy(&built, &staged).unwrap();
+        std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o755)).unwrap();
+        staged
+    }
+
+    /// `program args` run as `user`: its exit code and what it printed.
+    fn run_program_as(user: &str, program: &Path, args: &[&str]) -> (Option<i32>, String) {
+        let output = super::state_support::output(
+            Command::new("sudo")
+                .args(["-n", "-u", user])
+                .arg(program)
+                .args(args)
+                .current_dir(program.parent().unwrap()),
+        )
+        .expect("sudo runs the client");
+        (
+            output.status.code(),
+            String::from_utf8_lossy(&output.stdout).into_owned(),
+        )
+    }
+
+    fn operations_evidence(case: &str) {
+        evidence("approver-operations", case, "approver-gate", true, true);
+    }
+
+    #[test]
+    #[ignore = "needs four OS identities (DW_PEER_AS, DW_APPROVER_AS, DW_OTHER_AS); run by `make approver-operations-evidence`"]
+    fn the_approver_protocol_answers_the_approver_alone_across_identities() {
+        let (runtime, runtime_uid) = identity("DW_PEER_AS", &[]);
+        let (approver, approver_uid) = identity("DW_APPROVER_AS", &[runtime_uid]);
+        let (other, other_uid) = identity("DW_OTHER_AS", &[runtime_uid, approver_uid]);
+        let fx = Fixture::new("a-ops");
+        traversable_only(fx.dir.path());
+        let staging = TempDir::new("a-ops-client");
+        traversable_only(staging.path());
+        let script = staged_client(&staging);
+        let direwolf = staged_direwolf(&staging);
+        let approver_path = approver_socket(&fx);
+        let mut server = Server::start(&fx.args_for(
+            &[runtime_uid],
+            &[
+                "--approver-socket",
+                &text(&approver_path),
+                "--approver-uid",
+                &approver_uid.to_string(),
+            ],
+        ));
+        let approve = text(&approver_path);
+        let dwkp = text(&fx.socket());
+        let id = "0".repeat(64);
+        let requests = [
+            ("list", approverp::Request::List),
+            (
+                "show",
+                approverp::Request::Show(approverp::RequestId::new(&id).unwrap()),
+            ),
+            (
+                "decide",
+                approverp::Request::Decide {
+                    request_id: approverp::RequestId::new(&id).unwrap(),
+                    binding_sha256: approverp::Digest::new(&id).unwrap(),
+                    decision: approverp::Verdict::Approve,
+                },
+            ),
+        ];
+        let frames: Vec<(&str, String)> = requests
+            .iter()
+            .map(|(name, request)| (*name, hex(&request.encode_frame().unwrap())))
+            .collect();
+
+        // 1-2. The runtime and an unrelated uid: every operation refused by
+        //      the uid the kernel reported, none of it read or answered.
+        for (who, user, uid) in [
+            ("runtime", &runtime, runtime_uid),
+            ("other", &other, other_uid),
+        ] {
+            for (name, frame) in &frames {
+                let hello = run_as(user, &script, &["hello", &approve, frame]);
+                closed_unanswered(&hello, uid);
+                operations_evidence(&format!("cross-uid-{who}-cannot-{name}"));
+            }
+        }
+        let refused = await_events(&fx, "approver.peer_refused", 6);
+        let uids: Vec<u64> = refused.iter().filter_map(|r| r.int("uid")).collect();
+        assert_eq!(
+            uids.iter()
+                .filter(|u| **u == u64::from(runtime_uid))
+                .count(),
+            3
+        );
+        assert_eq!(
+            uids.iter().filter(|u| **u == u64::from(other_uid)).count(),
+            3
+        );
+        assert!(
+            fx.events("approver.request_refused").is_empty(),
+            "nothing they sent was read"
+        );
+
+        // 3. The runtime passing a descriptor with a decision: refused unread.
+        let passed = run_as(&runtime, &script, &["with-fd", &approve, &frames[2].1]);
+        closed_unanswered(&passed, runtime_uid);
+        operations_evidence("cross-uid-runtime-descriptor-refused");
+
+        // 4. The approver, with the released trusted client: authenticated
+        //    and answered -- nothing waits.
+        let (code, out) = run_program_as(
+            &approver,
+            &direwolf,
+            &["approve", "list", "--socket", &approve],
+        );
+        assert_eq!(code, Some(0), "{out}");
+        assert!(out.contains("0 request(s) wait for a decision"), "{out}");
+        operations_evidence("cross-uid-approver-lists");
+
+        // 5. The approver shows and decides a request that does not exist:
+        //    the registry answers, and the refusal is recorded under the
+        //    uid the kernel reported.
+        let (code, out) = run_program_as(
+            &approver,
+            &direwolf,
+            &["approve", "show", "--socket", &approve, &id],
+        );
+        assert_eq!(code, Some(1), "{out}");
+        assert!(out.contains("no such request"), "{out}");
+        let decided = run_as(&approver, &script, &["converse", &approve, &frames[2].1]);
+        assert_eq!(
+            approver_reply(&decided, 0),
+            approverp::Response::Refused(approverp::RefusalCode::UnknownRequest)
+        );
+        let refusals = await_events(&fx, "approver.request_refused", 2);
+        for record in &refusals {
+            assert_eq!(
+                record.text("approver"),
+                Some(format!("uid:{approver_uid}").as_str())
+            );
+            assert_eq!(record.text("code"), Some("UNKNOWN_REQUEST"));
+        }
+        operations_evidence("cross-uid-approver-reaches-the-registry");
+
+        // 6. The approver passing a descriptor with its request: answered as
+        //    without one -- nothing in the endpoint receives a descriptor.
+        let passed = run_as(&approver, &script, &["with-fd", &approve, &frames[0].1]);
+        match approver_reply(&passed, 0) {
+            approverp::Response::Listed(listed) => assert_eq!(listed.waiting.get(), 0),
+            other => panic!("not a listing: {other:?}"),
+        }
+        operations_evidence("cross-uid-approver-descriptor-not-trusted");
+
+        // 7. The approver protocol on the runtime's own door: not DWKP, so not
+        //    an operation there -- nothing answers it as the registry would.
+        let talk = run_as(&runtime, &script, &["converse", &dwkp, &frames[2].1]);
+        if let Some(Value::Array(replies)) = talk.get("replies") {
+            for index in 0..replies.len() {
+                let Some(Value::String(hex)) = replies.get(index) else {
+                    continue;
+                };
+                let bytes: Vec<u8> = (0..hex.len())
+                    .step_by(2)
+                    .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap())
+                    .collect();
+                assert!(
+                    approverp::Response::decode_frame_body(&bytes[5..]).is_err(),
+                    "the DWKP door answered as the approver endpoint"
+                );
+            }
+        }
+        operations_evidence("cross-uid-runtime-no-approver-operation-on-dwkp");
+
+        // Nothing was decided, granted or approved anywhere, and the chain
+        // holds every record.
+        assert!(fx.events("approval.granted").is_empty());
+        assert!(fx.events("approval.denied").is_empty());
         server.kill();
         let verified =
             super::state_support::output(Command::new(BIN).arg("verify-audit").arg(fx.state()))

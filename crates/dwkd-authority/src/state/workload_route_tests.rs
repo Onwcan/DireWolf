@@ -648,6 +648,10 @@ struct Fixture {
     session: SessionId,
     epoch: Epoch,
     config: StartupConfig,
+    /// The runtime's uid: 1000, unless a test needs it apart from this
+    /// process's own (M6.3's approver endpoint authenticates by the kernel's
+    /// report, and an approver is never the requester).
+    runtime: u32,
 }
 
 /// What every fixture's operator profile declares, unless a test asks for
@@ -755,6 +759,17 @@ impl Fixture {
         hook: Option<CrashHook>,
         declared: &[&str],
     ) -> Self {
+        Self::with_declared_in_as(scratch, policy, hook, declared, 1000)
+    }
+
+    /// [`Fixture::with_declared_in`], the runtime's uid `runtime`.
+    fn with_declared_in_as(
+        scratch: Scratch,
+        policy: PolicySet,
+        hook: Option<CrashHook>,
+        declared: &[&str],
+        runtime: u32,
+    ) -> Self {
         let root = scratch.path().join("ws");
         std::fs::create_dir_all(&root).unwrap();
         let fake = Arc::new(Fake::default());
@@ -769,6 +784,7 @@ impl Fixture {
             session: SessionId::from_uuid(uuid(1)).unwrap(),
             epoch: Epoch::new(1).unwrap(),
             config,
+            runtime,
         };
         fx.start(hook);
         *fx.fake.store.lock().unwrap() = Some(fx.state().join("kernel.db"));
@@ -792,16 +808,16 @@ impl Fixture {
                 .unwrap();
             // F-18: the operator's explicit declarations, in order.
             operator
-                .grant_workspace_principal(&workspace, AuthenticatedSubject::unix_uid(1000))
+                .grant_workspace_principal(&workspace, AuthenticatedSubject::unix_uid(runtime))
                 .unwrap();
             operator
                 .grant_profile_principal(
                     &AgentProfileName::new("operator").unwrap(),
-                    AuthenticatedSubject::unix_uid(1000),
+                    AuthenticatedSubject::unix_uid(runtime),
                 )
                 .unwrap();
             operator
-                .declare_session_owner(&session, AuthenticatedSubject::unix_uid(1000))
+                .declare_session_owner(&session, AuthenticatedSubject::unix_uid(runtime))
                 .unwrap();
             operator
                 .bind_session_workspace(&session, &workspace)
@@ -825,6 +841,7 @@ impl Fixture {
             session: SessionId::from_uuid(uuid(1)).unwrap(),
             epoch: Epoch::new(1).unwrap(),
             config: startup(policy, DECLARED),
+            runtime: 1000,
         };
         fx.start(None);
         *fx.fake.store.lock().unwrap() = Some(fx.state().join("kernel.db"));
@@ -859,9 +876,10 @@ impl Fixture {
     }
 
     fn lease(&mut self) {
+        let runtime = self.runtime;
         let caller = self
             .authority()
-            .connect(AuthenticatedSubject::unix_uid(1000));
+            .connect(AuthenticatedSubject::unix_uid(runtime));
         let session = self.session.clone();
         let Reply::Done(epoch) = self.authority().acquire_lease(&caller, &session).unwrap() else {
             panic!("a lease")
@@ -2019,6 +2037,11 @@ mod binding;
 /// M6.2: the approval registry -- requests, decisions, atomic use.
 #[path = "approval_route_tests.rs"]
 mod approval;
+
+/// M6.3: the approver endpoint's operations -- list, show, decide -- on the
+/// real registry, and through the real endpoint and worker.
+#[path = "approver_route_tests.rs"]
+mod approver;
 
 /// F-18: a revocation's two phases.
 #[path = "ownership_route_tests.rs"]

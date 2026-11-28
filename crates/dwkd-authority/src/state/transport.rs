@@ -19,14 +19,19 @@
 //! same transactional outbox as every other event, and `fsync`ed before the
 //! call returns.
 //!
-//! The approver endpoint (F-18 Phase 3.4, [ADR-0067], Proposed) records here
-//! too, and only what the kernel reported: who it refused, and which
-//! operator-declared approver it authenticated and closed. It has no other
-//! record to make -- it holds no approval operation before M6.
+//! The approver endpoint (F-18 Phase 3.4, [ADR-0067], accepted) records here
+//! too: who it refused, and which operator-declared approver it
+//! authenticated -- and, since M6.3 ([ADR-0081], Proposed), whether that
+//! connection was admitted to its one request or closed at the connection
+//! limit, and each approver request it refused, with the authority's own code
+//! for why. A decision the registry recorded is the registry's record
+//! (`approval.granted`, `approval.denied`), not this module's.
 //!
 //! [ADR-0041]: ../../../../../docs/adr/0041-m3e-authenticated-dwkp-transport.md
 //! [ADR-0067]: ../../../../../docs/adr/0067-f18-approver-endpoint-identity-boundary.md
+//! [ADR-0081]: ../../../../../docs/adr/0081-the-approver-endpoints-operations-and-the-trusted-approver-client.md
 
+use dwk_proto::approverp::{ApproverKind, RefusalCode};
 use dwk_proto::error::ErrorCode;
 
 use super::audit::{AuditEvent, Fields};
@@ -97,16 +102,19 @@ pub enum TransportClass {
     ApproverRefused,
     /// [`TransportEvent::ApproverAuthenticated`].
     ApproverAuthenticated,
+    /// [`TransportEvent::ApproverRequestRefused`].
+    ApproverRequestRefused,
 }
 
 impl TransportClass {
     /// Every class, in declaration order.
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::PeerRefused,
         Self::ConnectionRefused,
         Self::ProtocolViolation,
         Self::ApproverRefused,
         Self::ApproverAuthenticated,
+        Self::ApproverRequestRefused,
     ];
 
     /// The spelling in a suppression record's `class` field.
@@ -118,6 +126,7 @@ impl TransportClass {
             Self::ProtocolViolation => "protocol_violation",
             Self::ApproverRefused => "approver_refused",
             Self::ApproverAuthenticated => "approver_authenticated",
+            Self::ApproverRequestRefused => "approver_request_refused",
         }
     }
 }
@@ -163,14 +172,33 @@ pub enum TransportEvent {
         pid: Option<u32>,
     },
     /// The approver endpoint authenticated an operator-declared approver by
-    /// its kernel-reported uid and closed the connection: there is no
-    /// approval operation before M6, so nothing it sent was read and nothing
-    /// was answered. Not an approval, and nothing else either.
+    /// its kernel-reported uid, before reading a byte: admitted to one
+    /// approver-protocol request (M6.3), or -- the endpoint at its connection
+    /// limit -- closed unread. Not an approval, and nothing else either.
     ApproverAuthenticated {
         /// The approver's uid, as the kernel reported it.
         uid: u32,
         /// The approver's pid at connect time. Diagnostic only.
         pid: Option<u32>,
+        /// Whether the connection was admitted to its request; `false` at the
+        /// endpoint's connection limit, where nothing was read.
+        admitted: bool,
+    },
+    /// The approver endpoint refused an authenticated approver's request
+    /// (M6.3, ADR-0081): one that did not decode, or one the registry did not
+    /// answer as asked -- an unknown request, one decided already, expired or
+    /// of a run that ended, a binding hash that is not the request's, a
+    /// self-approval, an approver no longer in the set, a level no approver
+    /// can give. Nothing was decided.
+    ApproverRequestRefused {
+        /// The approver's uid, as the kernel reported it.
+        uid: u32,
+        /// The operation, if the request decoded.
+        operation: Option<ApproverKind>,
+        /// The authority's code for why.
+        code: RefusalCode,
+        /// The request it named, if it decoded and named one.
+        request: Option<[u8; 32]>,
     },
     /// Records of one class that the rate limit withheld since the last one it
     /// wrote. A count, so that suppression is itself on the record.
@@ -193,6 +221,7 @@ impl TransportEvent {
             Self::ProtocolViolation { .. } => Some(TransportClass::ProtocolViolation),
             Self::ApproverRefused { .. } => Some(TransportClass::ApproverRefused),
             Self::ApproverAuthenticated { .. } => Some(TransportClass::ApproverAuthenticated),
+            Self::ApproverRequestRefused { .. } => Some(TransportClass::ApproverRequestRefused),
             Self::Suppressed { .. } => None,
         }
     }
@@ -248,15 +277,34 @@ impl TransportEvent {
                     peer,
                 ),
             ),
-            Self::ApproverAuthenticated { uid, pid: peer } => (
+            Self::ApproverAuthenticated {
+                uid,
+                pid: peer,
+                admitted,
+            } => (
                 AuditEvent::ApproverPeerAuthenticated,
                 pid(
-                    Fields::new()
-                        .int("uid", u64::from(uid))
-                        .text("outcome", "closed")
-                        .text("reason", "no_approval_operation"),
+                    if admitted {
+                        Fields::new()
+                            .int("uid", u64::from(uid))
+                            .text("outcome", "admitted")
+                    } else {
+                        Fields::new()
+                            .int("uid", u64::from(uid))
+                            .text("outcome", "closed")
+                            .text("reason", "connection_limit")
+                    },
                     peer,
                 ),
+            ),
+            Self::ApproverRequestRefused {
+                uid,
+                operation,
+                code,
+                request,
+            } => (
+                AuditEvent::ApproverRequestRefused,
+                refused_fields(uid, operation, code, request),
             ),
             Self::Suppressed { class, count } => (
                 AuditEvent::TransportAuditSuppressed,
@@ -268,9 +316,42 @@ impl TransportEvent {
     }
 }
 
+/// An `approver.request_refused` record's fields: the approver as the kernel
+/// reported them, the operation, the authority's code, the channel, and the
+/// request the decoded message named.
+fn refused_fields(
+    uid: u32,
+    operation: Option<ApproverKind>,
+    code: RefusalCode,
+    request: Option<[u8; 32]>,
+) -> Fields {
+    use core::fmt::Write as _;
+    let fields = Fields::new()
+        .text(
+            "approver",
+            super::identity::AuthenticatedSubject::unix_uid(uid).storage_key(),
+        )
+        .text(
+            "operation",
+            operation.map_or("unreadable", ApproverKind::as_str),
+        )
+        .text("code", code.as_str())
+        .text("channel", "APPROVER_ENDPOINT");
+    match request {
+        Some(bytes) => fields.text(
+            "request_id",
+            bytes.iter().fold(String::with_capacity(64), |mut out, b| {
+                let _ = write!(out, "{b:02x}");
+                out
+            }),
+        ),
+        None => fields,
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{TransportClass, TransportEvent, Violation};
+    use super::{ApproverKind, RefusalCode, TransportClass, TransportEvent, Violation};
     use crate::state::audit::AuditEvent;
     use crate::state::identity::LeaseHolder;
     use dwk_proto::error::ErrorCode;
@@ -313,8 +394,18 @@ mod tests {
                 TransportEvent::ApproverAuthenticated {
                     uid: 8,
                     pid: Some(9),
+                    admitted: true,
                 },
                 AuditEvent::ApproverPeerAuthenticated,
+            ),
+            (
+                TransportEvent::ApproverRequestRefused {
+                    uid: 8,
+                    operation: Some(ApproverKind::Decide),
+                    code: RefusalCode::SelfApproval,
+                    request: Some([7; 32]),
+                },
+                AuditEvent::ApproverRequestRefused,
             ),
         ];
         for (event, kind) in cases {
@@ -324,10 +415,11 @@ mod tests {
 
     #[test]
     fn an_approver_record_says_who_the_kernel_reported_and_that_nothing_was_approved() {
-        // F-18 Phase 3.4 (ADR-0067): the approver endpoint's two records carry
-        // the kernel's uid and the authority's own words, never a peer's
-        // bytes; the authenticated one says the connection was closed with
-        // no approval operation.
+        // F-18 Phase 3.4 (ADR-0067), M6.3 (ADR-0081): the approver endpoint's
+        // records carry the kernel's uid and the authority's own words, never
+        // a peer's bytes; the authenticated one says whether the connection
+        // was admitted to its request or closed at the limit, and neither is
+        // an approval.
         let (kind, fields) = TransportEvent::ApproverRefused {
             uid: 1001,
             pid: Some(4),
@@ -342,24 +434,75 @@ mod tests {
         let (kind, fields) = TransportEvent::ApproverAuthenticated {
             uid: 2001,
             pid: None,
+            admitted: true,
         }
         .record();
         assert_eq!(kind.as_str(), "approver.peer_authenticated");
         let text = format!("{fields:?}");
-        assert!(text.contains("2001"), "{text}");
+        assert!(text.contains("2001") && text.contains("admitted"), "{text}");
+        assert!(!text.contains("approved"), "{text}");
+        let (_, fields) = TransportEvent::ApproverAuthenticated {
+            uid: 2001,
+            pid: None,
+            admitted: false,
+        }
+        .record();
+        let text = format!("{fields:?}");
         assert!(
-            text.contains("closed") && text.contains("no_approval_operation"),
+            text.contains("closed") && text.contains("connection_limit"),
             "{text}"
         );
-        assert!(!text.contains("approved"), "{text}");
-        // Both are rate-limited, each in a class of its own.
+        // Every class is rate-limited, each in a class of its own.
         assert_eq!(
             TransportEvent::ApproverRefused { uid: 1, pid: None }.class(),
             Some(TransportClass::ApproverRefused)
         );
         assert_eq!(
-            TransportEvent::ApproverAuthenticated { uid: 1, pid: None }.class(),
+            TransportEvent::ApproverAuthenticated {
+                uid: 1,
+                pid: None,
+                admitted: true
+            }
+            .class(),
             Some(TransportClass::ApproverAuthenticated)
+        );
+    }
+
+    #[test]
+    fn a_refused_approver_request_is_the_authoritys_words_never_the_peers() {
+        // M6.3 (ADR-0081): the record names the approver as the kernel
+        // reported them, the operation, the authority's code and the request
+        // the decoded message named -- never a byte the peer chose otherwise.
+        let event = TransportEvent::ApproverRequestRefused {
+            uid: 2001,
+            operation: Some(ApproverKind::Decide),
+            code: RefusalCode::BindingMismatch,
+            request: Some([0xab; 32]),
+        };
+        assert_eq!(event.class(), Some(TransportClass::ApproverRequestRefused));
+        let (kind, fields) = event.record();
+        assert_eq!(kind.as_str(), "approver.request_refused");
+        let text = format!("{fields:?}");
+        for word in [
+            "uid:2001",
+            "approver.decide",
+            "BINDING_MISMATCH",
+            "APPROVER_ENDPOINT",
+            &"ab".repeat(32),
+        ] {
+            assert!(text.contains(word), "{word}: {text}");
+        }
+        let (_, fields) = TransportEvent::ApproverRequestRefused {
+            uid: 2001,
+            operation: None,
+            code: RefusalCode::MalformedRequest,
+            request: None,
+        }
+        .record();
+        let text = format!("{fields:?}");
+        assert!(
+            text.contains("unreadable") && !text.contains("request_id"),
+            "{text}"
         );
     }
 

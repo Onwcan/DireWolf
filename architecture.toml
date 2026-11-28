@@ -470,6 +470,10 @@ exempt_paths = [
     # D11 hardening's tests (ADR-0053 §18), under `cfg(test)`: real workers,
     # stand-ins, observers and cgroups -- exempt as `http/tests.rs` is.
     "crates/dwkd-broker/src/http/hardening_tests.rs",
+    # M6.3 (ADR-0081): the trusted approver client's unit tests, under
+    # `cfg(test)`, whose scripted endpoint is the far end of a test exchange.
+    # The client listens to nothing.
+    "crates/direwolf-cli/src/approve/tests.rs",
 ]
 suffixes = [".rs"]
 patterns = [
@@ -2482,30 +2486,39 @@ runtime say who it is.
 """
 
 [[text_rules]]
-id = "TX065-the-approver-endpoint-holds-no-operation-before-m6"
+id = "TX065-the-approver-endpoint-reaches-only-the-approver-protocol"
 paths = ["crates/dwkd-authority/src/server/approver.rs"]
 exempt_paths = []
 suffixes = [".rs"]
 patterns = [
-    '^(?!\s*//).*\bstd::io::(Read|Write)\b',
-    '^(?!\s*//).*\.(read|read_exact|read_to_end|read_to_string|peek|write|write_all|set_read_timeout)\(',
+    # No way into the runtime's door: no dispatch, no DWKP decoder or
+    # connection module, no subject, caller context or lease holder.
     '^(?!\s*//).*\b(dispatch|dispatch_parkable)\b',
-    '^(?!\s*//).*\.connect\(',
-    '^(?!\s*//).*\b(unix_uid|AuthenticatedSubject|CallerContext|LeaseHolder)\b',
+    '^(?!\s*//).*\bdwkp::',
     '^(?!\s*//).*\bconnection::',
-    '^(?!\s*//).*\bdecode\w*\(',
+    '^(?!\s*//).*\b(unix_uid|AuthenticatedSubject|CallerContext|LeaseHolder)\b',
+    # No connection of its own to anything.
+    '^(?!\s*//).*\.connect\(',
+    # No decision, revocation or approver attachment past the registry's
+    # operations, and no level of its own.
+    '^(?!\s*//).*\b(decide_approval|revoke_approval|attach_approvers|attach_approver_set|ApproverDecision)\b',
+    '^(?!\s*//).*\bAssurance::',
+    # No descriptor received, and none trusted.
+    '^(?!\s*//).*\b(recvmsg|recv_with_fd|RecvAncillary\w*|SCM_RIGHTS|OwnedFd|from_raw_fd)\b',
 ]
 reason = """
-F-18 Phase 3.4 (ADR-0067, Proposed): the approver endpoint is an identity
-boundary and nothing else until M6's approval registry exists. It judges a
-peer by the uid the kernel reports, records it, and closes the connection:
-it reads no byte a peer sends, writes no answer, makes no subject or lease
-holder, decodes no frame and reaches no dispatch. An endpoint that accepted a
-decision before the registry could only approve by fiat -- with no binding,
-expiry, single use or record behind it. M6 changes this module, and this
-rule, under a decision of its own. The module's own test
-(`the_endpoint_reads_answers_and_dispatches_nothing`) states the same, where
-a mutation review sees it.
+M6.3 (ADR-0081, Proposed), TX065's successor under ADR-0067 §7: the approver
+endpoint judges a peer by the uid the kernel reports before reading a byte,
+then reads one bounded approver-protocol request, has the registry answer it
+through the worker, writes one answer and closes. It reaches nothing else: no
+DWKP dispatch, decoder or connection module, no subject, caller context or
+lease holder, no connection of its own, no decision, revocation or approver
+attachment seam -- the registry's `serve_approver` is its one way in (TX069),
+and the approver it names is the kernel's uid (TX070) -- no assurance level
+of its own, and no descriptor received. Before M6.3 (F-18 Phase 3.4,
+ADR-0067) this rule kept the module reading, writing and decoding nothing;
+the module's own test (`the_endpoint_reaches_only_the_approver_protocol`)
+states the successor, where a mutation review sees it.
 """
 
 [[text_rules]]
@@ -2590,6 +2603,8 @@ exempt_paths = [
     # Its route tests: the seam's test-only callers, and the raw writes its
     # database must refuse.
     "crates/dwkd-authority/src/state/approval_route_tests.rs",
+    # M6.3's route tests (ADR-0081): the test-only attachment's callers.
+    "crates/dwkd-authority/src/state/approver_route_tests.rs",
 ]
 suffixes = [".rs", ".py"]
 patterns = [
@@ -2601,17 +2616,88 @@ patterns = [
     '^(?!\s*(//|#)).*\.approvers\b',
 ]
 reason = """
-M6.2 (ADR-0080, Proposed): the approval registry's rows are written by
+M6.2 (ADR-0080, accepted): the approval registry's rows are written by
 `state/approvals.rs` alone -- a request on a denial, a use in its launch's
 intent transaction, an expiry, a revocation, a decision -- each behind the
 guards that module states and the database's own triggers. A write anywhere
 else would be a record no guard decided: an approval granted, a use undone or
 a clock moved back by a path that never checked who asked, for what, or
-whether any use was left. The decision seam (`decide_approval`), the
-revocation and the approver set have no production caller in M6.2: M6.3's
-approver operations call the first two under a decision of their own; until
-then no runtime, DWKP, approver-endpoint, broker or CLI path names any of
-them, and `attach_approvers` exists in test builds only.
+whether any use was left. The test seam (`decide_approval`), the revocation
+and the test-only attachment (`attach_approvers`) are named by the registry
+and its route tests alone. M6.3 (ADR-0081, Proposed) adds the decision's
+first production path inside this module -- `serve_approver`, which checks the
+echoed binding and then runs the same state machine -- and three narrower
+rules for its production callers: the worker alone reaches it (TX069), the
+endpoint alone makes the approver it names (TX070), and the start-up alone
+attaches the operator's set (TX071).
+"""
+
+[[text_rules]]
+id = "TX069-only-the-worker-reaches-the-approver-operations"
+paths = ["crates", "runtime/src"]
+exempt_paths = [
+    # The registry, where the operations are.
+    "crates/dwkd-authority/src/state/approvals.rs",
+    # The authority's one worker: an authenticated approver's job.
+    "crates/dwkd-authority/src/server/worker.rs",
+    # The registry-level route tests, and M6.2.1's crash children, whose
+    # endpoint cases decide as the worker does.
+    "crates/dwkd-authority/src/state/approver_route_tests.rs",
+    "crates/dwkd-authority/src/state/approval_route_tests.rs",
+]
+suffixes = [".rs", ".py"]
+patterns = ['^(?!\s*(//|#)).*\bserve_approver\b']
+reason = """
+M6.3 (ADR-0081, Proposed): `Authority::serve_approver` answers the approver
+protocol's list, show and decide -- the first production path to the
+registry's decision. It is reached from the worker, for a connection the
+approver endpoint authenticated by the kernel's report, and from nowhere
+else: not the DWKP dispatch, not the CLI, not the broker, not the runtime. A
+second caller would be a door to the decision that no endpoint authenticated.
+"""
+
+[[text_rules]]
+id = "TX070-only-the-approver-endpoint-names-an-approver"
+paths = ["crates", "runtime/src"]
+exempt_paths = [
+    # The registry, where the type is.
+    "crates/dwkd-authority/src/state/approvals.rs",
+    # The endpoint: the kernel's uid, after its judgement.
+    "crates/dwkd-authority/src/server/approver.rs",
+    # The endpoint's and the registry's tests, the crash children among them.
+    "crates/dwkd-authority/src/server/approver_tests.rs",
+    "crates/dwkd-authority/src/state/approver_route_tests.rs",
+    "crates/dwkd-authority/src/state/approval_route_tests.rs",
+]
+suffixes = [".rs", ".py"]
+patterns = ['^(?!\s*(//|#)).*\b(kernel_reported|ApproverPrincipal\s*\{)']
+reason = """
+M6.3 (ADR-0081, Proposed): the approver a decision records is the uid the
+kernel reported for a connection on the approver socket, found in the
+operator's set before a byte was read. `ApproverPrincipal::kernel_reported`
+makes one, and only the endpoint spells it: an approver made anywhere else --
+from a message field, a configuration value, a runtime's subject -- would let
+whoever made it say who approved.
+"""
+
+[[text_rules]]
+id = "TX071-only-the-start-up-attaches-the-operators-approvers"
+paths = ["crates", "runtime/src"]
+exempt_paths = [
+    # The registry, where the attachment is.
+    "crates/dwkd-authority/src/state/approvals.rs",
+    # `serve`'s start-up, its one production caller.
+    "crates/dwkd-authority/src/server/mod.rs",
+]
+suffixes = [".rs", ".py"]
+patterns = ['^(?!\s*(//|#)).*\battach_approver_set\b']
+reason = """
+M6.3 (ADR-0081, Proposed): the operator's approvers -- `--approver-uid`,
+checked by the parser and the start -- are attached to the registry once, by
+`serve`'s start-up, before the approver endpoint accepts a connection; the
+endpoint admits the same set. Attached anywhere else, a set could name a
+runtime, the broker or the authority, or diverge from what the endpoint
+admits. The test-only `attach_approvers` stays test-only (TX068).
 """
 
 # ===========================================================================

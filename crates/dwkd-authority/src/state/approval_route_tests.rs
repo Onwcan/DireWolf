@@ -18,9 +18,11 @@ use std::sync::atomic::AtomicBool;
 use std::sync::mpsc;
 
 use super::*;
+use crate::state::ApproverPrincipal;
 use crate::state::DEFAULT_LEASE_TTL_MS;
 use crate::state::approvals::{ApproverDecision, Assurance, DecisionRefused};
 use crate::state::interleave::{Hold, Meantime, until};
+use dwk_proto::approverp;
 
 /// An operator's approver: never a runtime's uid (ADR-0067).
 const APPROVER: u32 = 2001;
@@ -1359,6 +1361,11 @@ enum Scenario {
     Expiry,
     /// A start migrates a schema-14 store.
     Migration,
+    /// M6.3 (ADR-0081): the approver endpoint's grant, as `serve_approver`
+    /// makes it -- the echoed binding checked, then the state machine.
+    EndpointGrant,
+    /// M6.3: the approver endpoint's denial, the same way.
+    EndpointDeny,
 }
 
 /// One real-process crash case.
@@ -1394,7 +1401,7 @@ const AT_REQUEST: Option<CrashPoint> = Some(CrashPoint::ApprovalBeforeRequest);
 
 /// Every real-process crash case. `scripts/dw.py`'s `APPROVAL_CRASH_CASES`
 /// names the same, in the same order, with the same windows.
-const CRASH_CASES: [CrashCase; 34] = [
+const CRASH_CASES: [CrashCase; 38] = [
     crash_case(
         "spend-before-transaction",
         Scenario::Spend,
@@ -1633,6 +1640,36 @@ const CRASH_CASES: [CrashCase; 34] = [
         CrashPoint::MigrationAfterCommit,
         true,
     ),
+    // M6.3 (ADR-0081): the approver endpoint's decision, committed or
+    // not; its answer is what a crash after the commit loses.
+    crash_case(
+        "endpoint-grant-before-commit",
+        Scenario::EndpointGrant,
+        None,
+        CrashPoint::BeforeCommit,
+        false,
+    ),
+    crash_case(
+        "endpoint-grant-after-commit",
+        Scenario::EndpointGrant,
+        None,
+        CrashPoint::AfterCommitBeforeAudit,
+        true,
+    ),
+    crash_case(
+        "endpoint-deny-before-commit",
+        Scenario::EndpointDeny,
+        None,
+        CrashPoint::BeforeCommit,
+        false,
+    ),
+    crash_case(
+        "endpoint-deny-after-commit",
+        Scenario::EndpointDeny,
+        None,
+        CrashPoint::AfterCommitBeforeAudit,
+        true,
+    ),
 ];
 
 fn crash_case_named(name: &str) -> CrashCase {
@@ -1658,8 +1695,8 @@ fn crash_left(case: CrashCase) -> (i64, i64, i64, i64) {
     match case.scenario {
         Scenario::Spend => (1, 1, d, d),
         Scenario::Request => (d, 0, 0, 0),
-        Scenario::Grant => (1, d, 0, 0),
-        Scenario::Deny | Scenario::EndedRunDecision => (1, 0, 0, 0),
+        Scenario::Grant | Scenario::EndpointGrant => (1, d, 0, 0),
+        Scenario::Deny | Scenario::EndpointDeny | Scenario::EndedRunDecision => (1, 0, 0, 0),
         Scenario::Revoke => (1, 1, 0, 0),
         Scenario::Expiry => (1 + d, 1, 0, 0),
         Scenario::Migration => (0, 0, 0, 0),
@@ -1790,6 +1827,27 @@ fn m6_2_1_crash_child() {
             };
             armed.store(true, Ordering::SeqCst);
             let _ = fx.authority().decide_approval(&request, decision);
+        }
+        Scenario::EndpointGrant | Scenario::EndpointDeny => {
+            // M6.3: the approver endpoint's decision, killed at its window.
+            denied(&fx.answered(&run, "k1", &launch()));
+            let request = fx.pending().remove(0);
+            let hash =
+                fx.one("SELECT binding_sha256 FROM approval_request WHERE state = 'PENDING'");
+            let decision = if case.scenario == Scenario::EndpointDeny {
+                approverp::Verdict::Deny
+            } else {
+                approverp::Verdict::Approve
+            };
+            armed.store(true, Ordering::SeqCst);
+            let _ = fx.authority().serve_approver(
+                ApproverPrincipal::kernel_reported(APPROVER),
+                &approverp::Request::Decide {
+                    request_id: approverp::RequestId::new(&request).unwrap(),
+                    binding_sha256: approverp::Digest::new(&hash).unwrap(),
+                    decision,
+                },
+            );
         }
         Scenario::Revoke => {
             let approval = fx.requested_and_granted(&run, "k0");
@@ -1962,12 +2020,16 @@ fn recovered(fx: &mut Fixture, case: CrashCase) -> &'static str {
                 "{name}: no implicit grant"
             );
         }
-        Scenario::Grant | Scenario::Deny | Scenario::EndedRunDecision => {
+        Scenario::Grant
+        | Scenario::Deny
+        | Scenario::EndedRunDecision
+        | Scenario::EndpointGrant
+        | Scenario::EndpointDeny => {
             let request = fx.one("SELECT request_id FROM approval_request");
             let state = match (case.scenario, case.durable) {
                 (_, false) => "PENDING",
-                (Scenario::Grant, true) => "GRANTED",
-                (Scenario::Deny, true) => "DENIED",
+                (Scenario::Grant | Scenario::EndpointGrant, true) => "GRANTED",
+                (Scenario::Deny | Scenario::EndpointDeny, true) => "DENIED",
                 (_, true) => "EXPIRED",
             };
             assert_eq!(
@@ -1984,19 +2046,46 @@ fn recovered(fx: &mut Fixture, case: CrashCase) -> &'static str {
                 "{name}: no grant without its approval"
             );
             let event = match case.scenario {
-                Scenario::Grant => "approval.granted",
-                Scenario::Deny => "approval.denied",
+                Scenario::Grant | Scenario::EndpointGrant => "approval.granted",
+                Scenario::Deny | Scenario::EndpointDeny => "approval.denied",
                 _ => "approval.expired",
             };
             assert_eq!(approval_events_of(fx, event), d, "{name}: audited once");
             // Decided again after the restart: once only, and never for the
-            // run the restart ended.
-            let again = fx
-                .authority()
-                .decide_approval(&request, grant(APPROVER))
-                .unwrap();
-            assert_eq!(again, Err(not_pending(case.durable)), "{name}");
-            let approvals = i64::from(case.durable && case.scenario == Scenario::Grant);
+            // run the restart ended -- through the endpoint's own path for
+            // its cases, as an approver whose answer was lost would retry.
+            if matches!(
+                case.scenario,
+                Scenario::EndpointGrant | Scenario::EndpointDeny
+            ) {
+                let hash = fx.one("SELECT binding_sha256 FROM approval_request");
+                let retried = fx
+                    .authority()
+                    .serve_approver(
+                        ApproverPrincipal::kernel_reported(APPROVER),
+                        &approverp::Request::Decide {
+                            request_id: approverp::RequestId::new(&request).unwrap(),
+                            binding_sha256: approverp::Digest::new(&hash).unwrap(),
+                            decision: approverp::Verdict::Approve,
+                        },
+                    )
+                    .unwrap();
+                let code = if case.durable {
+                    approverp::RefusalCode::NotPending
+                } else {
+                    approverp::RefusalCode::RunEnded
+                };
+                assert_eq!(retried, approverp::Response::Refused(code), "{name}");
+            } else {
+                let again = fx
+                    .authority()
+                    .decide_approval(&request, grant(APPROVER))
+                    .unwrap();
+                assert_eq!(again, Err(not_pending(case.durable)), "{name}");
+            }
+            let approvals = i64::from(
+                case.durable && matches!(case.scenario, Scenario::Grant | Scenario::EndpointGrant),
+            );
             assert_eq!(
                 fx.count("SELECT count(*) FROM approval"),
                 approvals,

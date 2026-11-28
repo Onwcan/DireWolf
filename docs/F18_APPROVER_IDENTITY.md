@@ -5,6 +5,14 @@ still has to build. The decision is
 [ADR-0067](adr/0067-f18-approver-endpoint-identity-boundary.md) (accepted 2026-11-24);
 this is its inventory, its adversarial matrix and its evidence.
 
+> **Since M6.3 (2026-11-28, [ADR-0081](adr/0081-the-approver-endpoints-operations-and-the-trusted-approver-client.md), Proposed; built locally, hosted evidence pending).**
+> The approval operations this report says the endpoint does not carry now
+> exist: an approver the endpoint authenticates sends one approver-protocol
+> request -- list, show, decide -- answered by the registry, and its
+> authenticated record says `admitted`. The identity boundary below is
+> unchanged and still decides first. This report is kept as it was written;
+> M6.3's is [M6_3_IMPLEMENTATION.md](M6_3_IMPLEMENTATION.md).
+
 | | Status |
 |---|---|
 | The approver endpoint's identity boundary | **IMPLEMENTATION PARTIAL**: built; the approval operations it will carry are not |

@@ -215,10 +215,23 @@ jobs:
       - uses: ./.github/actions/setup
       - name: A third operating-system identity, the approver (F-18 Phase 3.4)
         run: sudo useradd --system --no-create-home --shell /usr/sbin/nologin dwapprover
+      # M6.3 (ADR-0081, Proposed): a fourth, unrelated to every other role,
+      # which the approver endpoint must refuse as it refuses the runtime.
+      - name: A fourth operating-system identity, unrelated (M6.3)
+        run: sudo useradd --system --no-create-home --shell /usr/sbin/nologin dwother
       - run: make authority-transport-evidence
         env:
           DW_PEER_AS: nobody
           DW_APPROVER_AS: dwapprover
+      # M6.3: the approver protocol's, endpoint's and trusted client's suites,
+      # each registry route case once at its level, and the approver protocol
+      # across the four identities -- the released serve and trusted client;
+      # every case required.
+      - run: make approver-operations-evidence
+        env:
+          DW_PEER_AS: nobody
+          DW_APPROVER_AS: dwapprover
+          DW_OTHER_AS: dwother
       - run: make authority-write-probe
         env:
           DW_PROBE_AS: nobody
@@ -494,6 +507,15 @@ jobs:
           path: target/m5e-evidence/sandbox-workload-evidence/
           if-no-files-found: error
           retention-days: 7
+      # M6.3 (ADR-0081, Proposed): the first production A1 approval -- the
+      # released serve, broker and trusted client and a real OCI environment,
+      # the approver its own identity. After the M5 bundle, which seals the
+      # workload suite alone; every case required.
+      - name: The approver's own identity (M6.3)
+        run: sudo useradd --system --no-create-home --shell /usr/sbin/nologin dwapprover
+      - run: make approver-production-evidence
+        env:
+          DW_APPROVER_AS: dwapprover
 
   # M5d.3 (ADR-0052 §7): secret modes B and C INSIDE the sandbox -- the
   # authority's pipeline against a fake broker with real kernel-keyring

@@ -25,6 +25,7 @@ DW := $(PY) scripts/dw.py
         resolver-mutations namespace-evidence approval-binding-mutations \
         approval-registry-mutations approval-registry-evidence \
         approval-registry-crash-evidence approval-registry-separation \
+        approver-operations-evidence approver-production-evidence approver-operations-mutations \
         sandbox-workload-evidence \
         net-http-evidence net-http-mutations sandbox-workload-mutations sandbox-secret-evidence \
         sandbox-secret-mutations sandbox-workspace-evidence sandbox-workspace-mutations \
@@ -170,6 +171,15 @@ approval-registry-crash-evidence: ## M6.2.1 real-process crash evidence (ADR-008
 
 approval-registry-separation: ## M6.2.1: no release artifact holds the approval registry's test-only seams -- the approver set's attachment, the crash children's variables and entry points -- each first found in the unit-test build (Linux)
 	@$(DW) approval-registry-separation
+
+approver-operations-evidence: ## M6.3 (ADR-0081, Proposed): the approver protocol's, endpoint's and trusted client's suites, each registry route case once at its level, and -- hosted, four identities (DW_PEER_AS, DW_APPROVER_AS, DW_OTHER_AS) -- the approver protocol answering the approver alone (Linux)
+	@$(DW) approver-operations-evidence
+
+approver-production-evidence: ## M6.3: the first production A1 approval -- the released serve, broker and trusted client, a REAL OCI environment, the approver as DW_APPROVER_AS -- every case once (Linux, hosted)
+	@$(DW) approver-production-evidence
+
+approver-operations-mutations: ## M6.3 mutation review (ADR-0081, Proposed): each guard of the approver operations and the trusted client weakened in turn must fail a named test (Linux)
+	@$(DW) approver-operations-mutations
 
 sandbox-workload-evidence: ## M5d.1-M5d.2 workloads in real OCI environments: identity, bounds, wall clock, process trees ended, digests, drift, escapes, an agent-shaped workload, the authority's gates, ledger and crash windows; the public process.exec over real DWKP, serve --sandbox-config, the hygiene launcher with real git/Python/pytest; M5e.2 cross-run isolation
 	@$(DW) sandbox-workload-evidence

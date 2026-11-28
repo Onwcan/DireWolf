@@ -86,7 +86,7 @@ campaigns also need Linux and a Docker-compatible runtime.
 [CONTRIBUTING.md](CONTRIBUTING.md) has the detail; on Windows without WSL2, run
 `python scripts/dw.py <task>` instead of `make`.
 
-There is no agent to run yet — `direwolf` supports `--version`, `doctor` and `models`.
+There is no agent to run yet — `direwolf` supports `--version`, `doctor`, `models` and `approve`.
 What runs today is the authority plane and the evidence for it;
 [docs/OPERATIONS.md](docs/OPERATIONS.md) is how to run it.
 
@@ -146,7 +146,7 @@ profiles ([ADR-0054](docs/adr/0054-m5e-npm-hygiene-profile.md),
   the authority's model egress;
 - the **agent runtime** — the loop, tools an agent calls, context, memory, skills,
   subagents, MCP (M8–M16) — so the runtime's own confinement is not built either (M9);
-- the full **CLI** (M17): `direwolf` supports `--version`, `doctor` and `models`, and
+- the full **CLI** (M17): `direwolf` supports `--version`, `doctor`, `models` and `approve`, and
   nothing else;
 - model **downloads** (after M7, [ADR-0072](docs/adr/0072-the-operators-model-library-is-offline-and-a-download-is-egress-the-authority-decides.md) OM-2) and inference from the
   model library (M7);
@@ -249,7 +249,7 @@ three are design properties whose mechanisms arrive with model egress (M7), appr
 | I3 | The Cognition Plane never receives plaintext long-lived credentials | Secret Broker | IMPLEMENTED for secret handles (M4e); model keys M7 |
 | I4 | Every authority decision is explainable: rule id, file, line | Policy Engine | IMPLEMENTED (M3c) |
 | I5 | Untrusted provenance cannot be laundered into durable memory without a human | Kernel-held provenance + promotion gate; **backstopped by I9** | PLANNED (M13) |
-| I6 | Approvals bind to canonical actions and are single-use by default | Approval Registry | PARTIAL (M6.2, [ADR-0080](docs/adr/0080-the-approval-registry-durable-requests-and-atomic-consumption.md), accepted 2026-11-27): the registry and its single-use burn are built and hosted-verified; no approver operation exists before M6.3, so an approval-requiring action is still denied |
+| I6 | Approvals bind to canonical actions and are single-use by default | Approval Registry | PARTIAL (M6.2, [ADR-0080](docs/adr/0080-the-approval-registry-durable-requests-and-atomic-consumption.md), accepted 2026-11-27): the registry and its single-use burn are built and hosted-verified. M6.3 ([ADR-0081](docs/adr/0081-the-approver-endpoints-operations-and-the-trusted-approver-client.md), Proposed): the approver endpoint lists, shows and decides requests for the trusted client `direwolf approve`, so a sandboxed `process.exec` under an `exact_action` rule is approvable at A1; built locally, hosted evidence pending; every A2 class still denies |
 | I7 | Default-deny network, default-deny filesystem, default-deny execution | Kernel defaults | IMPLEMENTED for filesystem and execution (M4) and for the two network paths that exist: a `PROXY_ONLY` environment reaches only its run's granted HTTPS origins (M5b), and `net.http` only a granted host (M5c) |
 | I8 | Budgets are reservations debited from a parent, never per-agent grants | Budget Ledger | PLANNED (M6) |
 | I9 | Memory and context can never alter authority — they are not terms in any capability or policy expression | Structural: the mint formula and rule files do not read them | IMPLEMENTED structurally (M3); memory itself M13 |
@@ -327,7 +327,7 @@ three are design properties whose mechanisms arrive with model egress (M7), appr
 [M5E5_IMPLEMENTATION_HANDOFF](docs/M5E5_IMPLEMENTATION_HANDOFF.md) ·
 [M5E6_PREPARATION_HANDOFF](docs/M5E6_PREPARATION_HANDOFF.md)
 
-**Decisions**: [docs/adr/](docs/adr/) — 81 architecture decision records (0000–0080): 65 accepted, 4 superseded and kept as history (0001, 0002, 0007, 0057), and 12 Proposed (0051, 0060–0061, 0065–0066, 0068–0074). Start with [ADR-0000](docs/adr/0000-authority-plane-separation.md), then [ADR-0018](docs/adr/0018-authority-broker-split.md); everything else is downstream. The [index](docs/adr/README.md) says which are current.
+**Decisions**: [docs/adr/](docs/adr/) — 82 architecture decision records (0000–0081): 65 accepted, 4 superseded and kept as history (0001, 0002, 0007, 0057), and 13 Proposed (0051, 0060–0061, 0065–0066, 0068–0074, 0081). Start with [ADR-0000](docs/adr/0000-authority-plane-separation.md), then [ADR-0018](docs/adr/0018-authority-broker-split.md); everything else is downstream. The [index](docs/adr/README.md) says which are current.
 
 ---
 
